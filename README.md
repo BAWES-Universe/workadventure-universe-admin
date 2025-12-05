@@ -359,6 +359,98 @@ Save as `test-api.sh`, make it executable (`chmod +x test-api.sh`), and run it.
 - Ensure both WorkAdventure and Admin API use the same `ADMIN_API_TOKEN`
 - Restart both services after changing the token
 
+## Docker Setup
+
+This project includes two Dockerfiles for different use cases:
+
+### Development Dockerfile (`Dockerfile.dev`)
+
+Used by `docker-compose.yml` for local development. Features:
+- Hot reload with volume mounts
+- Development dependencies included
+- Runs Next.js dev server (`npm run dev`)
+- Accessible via Traefik at `admin.bawes.localhost`
+
+**Usage:**
+```bash
+# Build and start (via docker-compose)
+docker-compose up -d
+
+# Or build manually
+docker build -f Dockerfile.dev -t admin-api:dev .
+```
+
+**Key Features:**
+- Installs all dependencies (including dev dependencies)
+- Skips `postinstall` scripts during build to avoid Prisma generate issues
+- Generates Prisma Client by temporarily renaming `prisma.config.ts` (avoids DATABASE_URL requirement during build)
+- Volume mounts for live code changes
+- Exposes port 3333 for Traefik routing
+
+### Production Dockerfile (`Dockerfile`)
+
+Multi-stage build optimized for production deployment. Features:
+- Smaller final image (production dependencies only)
+- Code baked into image (no volume mounts)
+- Runs Next.js production server (`npm start`)
+- Optimized build layers for caching
+
+**Usage:**
+```bash
+# Build production image
+docker build -t admin-api:prod .
+
+# Run with environment variables
+docker run -p 3333:3333 \
+  --env-file .env \
+  -e DATABASE_URL="postgresql://user:pass@host:5432/db" \
+  admin-api:prod
+```
+
+**Build Stages:**
+1. **deps**: Installs production dependencies only
+2. **builder**: Installs all dependencies, generates Prisma Client, builds Next.js app
+3. **runner**: Minimal runtime image with only production files
+
+**Key Features:**
+- Uses `npm ci` for faster, reproducible builds
+- Multi-stage build reduces final image size
+- Prisma Client generated during build (bypasses config file requirement)
+- Production-optimized Next.js build
+- Only includes necessary runtime files
+
+**Note:** The production Dockerfile requires all code to compile successfully. If you encounter build errors, fix them before deploying.
+
+### Docker Compose
+
+The `docker-compose.yml` file orchestrates the development environment:
+
+**Services:**
+- `postgres`: PostgreSQL 15 database
+- `admin-api`: Admin API service (uses `Dockerfile.dev`)
+- `traefik`: Reverse proxy for routing
+
+**Configuration:**
+- Database credentials configurable via `.env` (`DB_USER`, `DB_PASSWORD`, `DB_NAME`)
+- Traefik dashboard at `traefik-admin.bawes.localhost:8321`
+- Admin API accessible at `admin.bawes.localhost`
+
+**Commands:**
+```bash
+# Start all services
+docker-compose up -d
+
+# View logs
+docker-compose logs -f admin-api
+
+# Stop services
+docker-compose down
+
+# Rebuild after changes
+docker-compose build admin-api
+docker-compose up -d
+```
+
 ## Documentation
 
 ### Core Documentation

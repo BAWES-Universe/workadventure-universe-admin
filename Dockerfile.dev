@@ -15,8 +15,11 @@ RUN npm install --ignore-scripts
 COPY . .
 
 # Generate Prisma Client (now that all files are in place)
-# DATABASE_URL is required by prisma.config.ts but not used during generate
-RUN DATABASE_URL="postgresql://dummy:dummy@dummy:5432/dummy" npx prisma generate
+# Temporarily rename prisma.config.ts since it requires DATABASE_URL during build
+# prisma generate doesn't need DATABASE_URL - it only reads the schema file
+RUN mv prisma.config.ts prisma.config.ts.bak && \
+    npx prisma generate --schema=prisma/schema.prisma && \
+    mv prisma.config.ts.bak prisma.config.ts
 
 # Expose port (used by Traefik)
 EXPOSE 3333
