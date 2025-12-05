@@ -204,16 +204,51 @@ Optional:
 
 ### Database Management
 
+All Prisma commands run inside the Docker container to ensure compatibility with Prisma 7 (requires Node.js 20.19+ or 22.12+).
+
 ```bash
 # Generate Prisma Client after schema changes
-npx prisma generate
+npm run db:generate
 
 # Create a new migration
-npx prisma migrate dev --name migration-name
+npm run db:migrate
+
+# Deploy migrations (production)
+npm run db:migrate:deploy
+
+# Push schema changes directly to database (dev only)
+npm run db:push
+
+# Reset database (drops all data and runs migrations)
+npm run db:reset
 
 # View database in Prisma Studio
-npx prisma studio
+npm run db:studio
 ```
+
+#### Prisma Studio
+
+Prisma Studio provides a visual database browser. It runs on-demand (not automatically with `docker-compose up`).
+
+**Usage:**
+1. Start your services:
+   ```bash
+   docker-compose up
+   ```
+
+2. In a separate terminal, start Prisma Studio:
+   ```bash
+   npm run db:studio
+   ```
+
+3. Open your browser and navigate to:
+   ```
+   http://localhost:5555
+   ```
+
+4. Stop Prisma Studio by pressing `Ctrl+C` in the terminal where it's running.
+
+**Note:** Port 5555 is exposed in `docker-compose.yml` to make Prisma Studio accessible from your host machine. The Studio runs inside the `admin-api-dev` container and connects to the PostgreSQL database using the `DATABASE_URL` environment variable configured in the container.
 
 ### Testing
 

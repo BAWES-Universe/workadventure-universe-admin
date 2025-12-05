@@ -2,13 +2,13 @@
 # Multi-stage build for smaller image size
 
 # Stage 1: Dependencies
-FROM node:20-alpine AS deps
+FROM node:20.19-alpine AS deps
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci --only=production --ignore-scripts
 
 # Stage 2: Build
-FROM node:20-alpine AS builder
+FROM node:20.19-alpine AS builder
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci --ignore-scripts
@@ -25,7 +25,7 @@ COPY . .
 RUN DATABASE_URL="postgresql://dummy:dummy@dummy:5432/dummy" npm run build
 
 # Stage 3: Runtime
-FROM node:20-alpine AS runner
+FROM node:20.19-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 

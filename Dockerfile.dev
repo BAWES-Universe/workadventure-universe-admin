@@ -1,7 +1,7 @@
 # Development Dockerfile for Admin API
 # Runs behind Traefik at admin.bawes.localhost
 
-FROM node:20-alpine
+FROM node:20.19-alpine
 
 WORKDIR /app
 

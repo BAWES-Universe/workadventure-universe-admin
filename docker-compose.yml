@@ -30,6 +30,8 @@ services:
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-authorization-code-client-secret}
       NODE_ENV: development
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://admin.bawes.localhost}
+    ports:
+      - "5555:5555" # Prisma Studio port
     volumes:
       - .:/app
       - /app/node_modules
