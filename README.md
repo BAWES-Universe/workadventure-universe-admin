@@ -515,6 +515,3 @@ docker-compose up -d
 
 See [docs/SETUP.md](./docs/SETUP.md#production-deployment) for deployment instructions.
 
-## License
-
-[Add your license here]
