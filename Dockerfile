@@ -20,7 +20,9 @@ RUN mv prisma.config.ts prisma.config.ts.bak && \
     npx prisma generate --schema=prisma/schema.prisma && \
     mv prisma.config.ts.bak prisma.config.ts
 COPY . .
-RUN npm run build
+# DATABASE_URL is required during build for Prisma Client initialization
+# Use a dummy value since we're not connecting to a database during build
+RUN DATABASE_URL="postgresql://dummy:dummy@dummy:5432/dummy" npm run build
 
 # Stage 3: Runtime
 FROM node:20-alpine AS runner

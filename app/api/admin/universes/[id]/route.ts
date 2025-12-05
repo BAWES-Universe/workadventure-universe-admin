@@ -16,13 +16,14 @@ const updateUniverseSchema = z.object({
 // GET /api/admin/universes/[id] - Get a single universe
 export async function GET(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     requireAuth(request);
     
+    const { id } = await params;
     const universe = await prisma.universe.findUnique({
-      where: { id: params.id },
+      where: { id },
       include: {
         owner: {
           select: {
@@ -72,17 +73,18 @@ export async function GET(
 // PATCH /api/admin/universes/[id] - Update a universe
 export async function PATCH(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     requireAuth(request);
     
+    const { id } = await params;
     const body = await request.json();
     const data = updateUniverseSchema.parse(body);
     
     // Check if universe exists
     const existing = await prisma.universe.findUnique({
-      where: { id: params.id },
+      where: { id },
     });
     
     if (!existing) {
@@ -132,7 +134,7 @@ export async function PATCH(
     }
     
     const universe = await prisma.universe.update({
-      where: { id: params.id },
+      where: { id },
       data: updateData,
       include: {
         owner: {
@@ -152,7 +154,7 @@ export async function PATCH(
     }
     if (error instanceof z.ZodError) {
       return NextResponse.json(
-        { error: 'Validation error', details: error.errors },
+        { error: 'Validation error', details: error.issues },
         { status: 400 }
       );
     }
@@ -167,13 +169,14 @@ export async function PATCH(
 // DELETE /api/admin/universes/[id] - Delete a universe
 export async function DELETE(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     requireAuth(request);
     
+    const { id } = await params;
     const universe = await prisma.universe.findUnique({
-      where: { id: params.id },
+      where: { id },
     });
     
     if (!universe) {
@@ -184,7 +187,7 @@ export async function DELETE(
     }
     
     await prisma.universe.delete({
-      where: { id: params.id },
+      where: { id },
     });
     
     return NextResponse.json({ success: true });

@@ -17,13 +17,14 @@ const updateWorldSchema = z.object({
 // GET /api/admin/worlds/[id]
 export async function GET(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     requireAuth(request);
     
+    const { id } = await params;
     const world = await prisma.world.findUnique({
-      where: { id: params.id },
+      where: { id },
       include: {
         universe: {
           select: {
@@ -72,16 +73,17 @@ export async function GET(
 // PATCH /api/admin/worlds/[id]
 export async function PATCH(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     requireAuth(request);
     
+    const { id } = await params;
     const body = await request.json();
     const data = updateWorldSchema.parse(body);
     
     const existing = await prisma.world.findUnique({
-      where: { id: params.id },
+      where: { id },
     });
     
     if (!existing) {
@@ -123,7 +125,7 @@ export async function PATCH(
     }
     
     const world = await prisma.world.update({
-      where: { id: params.id },
+      where: { id },
       data: updateData,
       include: {
         universe: {
@@ -143,7 +145,7 @@ export async function PATCH(
     }
     if (error instanceof z.ZodError) {
       return NextResponse.json(
-        { error: 'Validation error', details: error.errors },
+        { error: 'Validation error', details: error.issues },
         { status: 400 }
       );
     }
@@ -158,13 +160,14 @@ export async function PATCH(
 // DELETE /api/admin/worlds/[id]
 export async function DELETE(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     requireAuth(request);
     
+    const { id } = await params;
     const world = await prisma.world.findUnique({
-      where: { id: params.id },
+      where: { id },
     });
     
     if (!world) {
@@ -175,7 +178,7 @@ export async function DELETE(
     }
     
     await prisma.world.delete({
-      where: { id: params.id },
+      where: { id },
     });
     
     return NextResponse.json({ success: true });

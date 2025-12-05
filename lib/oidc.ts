@@ -1,7 +1,22 @@
-import { Issuer, Client, UserInfoResponse } from 'openid-client';
+// Use dynamic import for openid-client (ESM-only package)
+// This avoids build issues with Next.js/Turbopack
+type Client = any;
+type Issuer = any;
+type UserInfoResponse = any;
 
 let oidcClient: Client | null = null;
-let issuer: Issuer<unknown> | null = null;
+let issuer: Issuer | null = null;
+let openidClientModule: any = null;
+
+/**
+ * Dynamically imports openid-client module
+ */
+async function getOpenIdClientModule() {
+  if (!openidClientModule) {
+    openidClientModule = await import('openid-client');
+  }
+  return openidClientModule;
+}
 
 /**
  * Gets or creates the OIDC client instance
@@ -15,6 +30,9 @@ export async function getOidcClient(): Promise<Client> {
   if (!issuerUrl) {
     throw new Error('OIDC_ISSUER not configured');
   }
+  
+  // Dynamically import openid-client
+  const { Issuer } = await getOpenIdClientModule();
   
   // Discover issuer if not already discovered
   if (!issuer) {

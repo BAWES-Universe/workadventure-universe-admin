@@ -14,13 +14,14 @@ const updateRoomSchema = z.object({
 // GET /api/admin/rooms/[id]
 export async function GET(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     requireAuth(request);
     
+    const { id } = await params;
     const room = await prisma.room.findUnique({
-      where: { id: params.id },
+      where: { id },
       include: {
         world: {
           include: {
@@ -59,16 +60,17 @@ export async function GET(
 // PATCH /api/admin/rooms/[id]
 export async function PATCH(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     requireAuth(request);
     
+    const { id } = await params;
     const body = await request.json();
     const data = updateRoomSchema.parse(body);
     
     const existing = await prisma.room.findUnique({
-      where: { id: params.id },
+      where: { id },
     });
     
     if (!existing) {
@@ -105,7 +107,7 @@ export async function PATCH(
     if (data.isPublic !== undefined) updateData.isPublic = data.isPublic;
     
     const room = await prisma.room.update({
-      where: { id: params.id },
+      where: { id },
       data: updateData,
       include: {
         world: {
@@ -129,7 +131,7 @@ export async function PATCH(
     }
     if (error instanceof z.ZodError) {
       return NextResponse.json(
-        { error: 'Validation error', details: error.errors },
+        { error: 'Validation error', details: error.issues },
         { status: 400 }
       );
     }
@@ -144,13 +146,14 @@ export async function PATCH(
 // DELETE /api/admin/rooms/[id]
 export async function DELETE(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     requireAuth(request);
     
+    const { id } = await params;
     const room = await prisma.room.findUnique({
-      where: { id: params.id },
+      where: { id },
     });
     
     if (!room) {
@@ -161,7 +164,7 @@ export async function DELETE(
     }
     
     await prisma.room.delete({
-      where: { id: params.id },
+      where: { id },
     });
     
     return NextResponse.json({ success: true });
