@@ -43,7 +43,7 @@ OIDC_CLIENT_ID=authorization-code-client-id
 OIDC_CLIENT_SECRET=authorization-code-client-secret
 
 # Admin API URL (for tests)
-ADMIN_API_URL=http://localhost:3000
+ADMIN_API_URL=http://localhost:3333
 ```
 
 ## Running Integration Tests

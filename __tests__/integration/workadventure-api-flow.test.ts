@@ -39,7 +39,7 @@ describe('WorkAdventure API Flow', () => {
     });
 
     it('should return 401 without Bearer token', async () => {
-      const response = await fetch('http://localhost:3000/api/capabilities');
+      const response = await fetch('http://localhost:3333/api/capabilities');
       expect(response.status).toBe(401);
     });
   });

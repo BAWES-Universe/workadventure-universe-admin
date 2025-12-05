@@ -350,7 +350,7 @@ OIDC_CLIENT_SECRET=authorization-code-client-secret
 
 # Next.js
 NODE_ENV=development
-NEXT_PUBLIC_API_URL=http://localhost:3000
+NEXT_PUBLIC_API_URL=http://localhost:3333
 ```
 
 **Important**: The `ADMIN_API_TOKEN` must match what you set in WorkAdventure's environment variables.
@@ -360,7 +360,7 @@ NEXT_PUBLIC_API_URL=http://localhost:3000
 In WorkAdventure's `.env` or `docker-compose.yaml`, add:
 
 ```env
-ADMIN_API_URL=http://localhost:3000
+ADMIN_API_URL=http://localhost:3333
 ADMIN_API_TOKEN=dev-admin-api-token-change-in-production
 ```
 
@@ -370,7 +370,7 @@ If using docker-compose, you can add these to the `play` service environment:
 services:
   play:
     environment:
-      ADMIN_API_URL: http://host.docker.internal:3000
+      ADMIN_API_URL: http://host.docker.internal:3333
       ADMIN_API_TOKEN: dev-admin-api-token-change-in-production
 ```
 
@@ -396,14 +396,14 @@ npx prisma studio
 npm run dev
 ```
 
-The API will be available at `http://localhost:3000`.
+The API will be available at `http://localhost:3333`.
 
 ### Step 7: Verify Setup
 
 1. **Test Admin API capabilities endpoint**:
    ```bash
    curl -H "Authorization: Bearer dev-admin-api-token-change-in-production" \
-     http://localhost:3000/api/capabilities
+     http://localhost:3333/api/capabilities
    ```
 
 2. **Test OIDC connection**:
@@ -475,7 +475,7 @@ psql postgresql://workadventure:workadventure@localhost:5432/workadventure_admin
 **Solution**: Use your machine's IP address instead:
 ```env
 # In WorkAdventure docker-compose
-ADMIN_API_URL=http://192.168.1.100:3000  # Your local IP
+ADMIN_API_URL=http://192.168.1.100:3333  # Your local IP
 ```
 
 Or use Docker network (see alternative setup below).
@@ -497,7 +497,7 @@ services:
       context: .
       dockerfile: Dockerfile.dev
     ports:
-      - "3000:3000"
+      - "3333:3333"
     environment:
       DATABASE_URL: postgresql://workadventure:workadventure@postgres:5432/workadventure_admin
       ADMIN_API_TOKEN: dev-admin-api-token-change-in-production
@@ -523,7 +523,7 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm install
 COPY . .
-EXPOSE 3000
+EXPOSE 3333
 CMD ["npm", "run", "dev"]
 ```
 
@@ -672,7 +672,7 @@ export async function GET(request: NextRequest) {
 npm run dev
 ```
 
-Your API will be available at `http://localhost:3000/api/*`
+Your API will be available at `http://localhost:3333/api/*`
 
 ## Production Deployment
 
@@ -706,7 +706,7 @@ COPY package*.json ./
 RUN npm ci --only=production
 COPY . .
 RUN npm run build
-EXPOSE 3000
+EXPOSE 3333
 CMD ["npm", "start"]
 ```
 
@@ -733,11 +733,11 @@ Test endpoints using curl:
 ```bash
 # Test capabilities endpoint
 curl -H "Authorization: Bearer your-token" \
-  http://localhost:3000/api/capabilities
+  http://localhost:3333/api/capabilities
 
 # Test map endpoint
 curl -H "Authorization: Bearer your-token" \
-  "http://localhost:3000/api/map?playUri=http://play.workadventure.localhost/@/team/world/room"
+  "http://localhost:3333/api/map?playUri=http://play.workadventure.localhost/@/team/world/room"
 ```
 
 ### 2. Unit Tests

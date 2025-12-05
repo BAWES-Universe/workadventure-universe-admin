@@ -43,7 +43,7 @@ describe('/api/auth/login', () => {
     (prisma.user.findFirst as jest.Mock).mockResolvedValue(mockUser);
     (prisma.user.update as jest.Mock).mockResolvedValue(mockUser);
 
-    const request = new NextRequest('http://localhost:3000/api/auth/login', {
+    const request = new NextRequest('http://localhost:3333/api/auth/login', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -81,7 +81,7 @@ describe('/api/auth/login', () => {
     (prisma.user.findFirst as jest.Mock).mockResolvedValue(null);
     (prisma.user.create as jest.Mock).mockResolvedValue(mockUser);
 
-    const request = new NextRequest('http://localhost:3000/api/auth/login', {
+    const request = new NextRequest('http://localhost:3333/api/auth/login', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -100,7 +100,7 @@ describe('/api/auth/login', () => {
   it('should return 401 with invalid token', async () => {
     (validateAccessToken as jest.Mock).mockResolvedValue(null);
 
-    const request = new NextRequest('http://localhost:3000/api/auth/login', {
+    const request = new NextRequest('http://localhost:3333/api/auth/login', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -118,7 +118,7 @@ describe('/api/auth/login', () => {
   });
 
   it('should return 400 without access token', async () => {
-    const request = new NextRequest('http://localhost:3000/api/auth/login', {
+    const request = new NextRequest('http://localhost:3333/api/auth/login', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

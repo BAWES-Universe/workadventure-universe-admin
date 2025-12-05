@@ -14,7 +14,7 @@ describe('Auth', () => {
 
   describe('validateAdminToken', () => {
     it('should return true with valid token', () => {
-      const request = new NextRequest('http://localhost:3000/api/test', {
+      const request = new NextRequest('http://localhost:3333/api/test', {
         headers: {
           Authorization: 'Bearer test-token',
         },
@@ -24,7 +24,7 @@ describe('Auth', () => {
     });
 
     it('should return false with invalid token', () => {
-      const request = new NextRequest('http://localhost:3000/api/test', {
+      const request = new NextRequest('http://localhost:3333/api/test', {
         headers: {
           Authorization: 'Bearer wrong-token',
         },
@@ -34,13 +34,13 @@ describe('Auth', () => {
     });
 
     it('should return false without authorization header', () => {
-      const request = new NextRequest('http://localhost:3000/api/test');
+      const request = new NextRequest('http://localhost:3333/api/test');
 
       expect(validateAdminToken(request)).toBe(false);
     });
 
     it('should return false with malformed header', () => {
-      const request = new NextRequest('http://localhost:3000/api/test', {
+      const request = new NextRequest('http://localhost:3333/api/test', {
         headers: {
           Authorization: 'InvalidFormat test-token',
         },
@@ -52,7 +52,7 @@ describe('Auth', () => {
 
   describe('requireAuth', () => {
     it('should not throw with valid token', () => {
-      const request = new NextRequest('http://localhost:3000/api/test', {
+      const request = new NextRequest('http://localhost:3333/api/test', {
         headers: {
           Authorization: 'Bearer test-token',
         },
@@ -62,7 +62,7 @@ describe('Auth', () => {
     });
 
     it('should throw with invalid token', () => {
-      const request = new NextRequest('http://localhost:3000/api/test', {
+      const request = new NextRequest('http://localhost:3333/api/test', {
         headers: {
           Authorization: 'Bearer wrong-token',
         },

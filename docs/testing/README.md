@@ -140,7 +140,7 @@ import { NextRequest } from 'next/server';
 
 describe('/api/my-endpoint', () => {
   it('should return data', async () => {
-    const request = new NextRequest('http://localhost:3000/api/my-endpoint');
+    const request = new NextRequest('http://localhost:3333/api/my-endpoint');
     const response = await GET(request);
     const data = await response.json();
     

@@ -110,7 +110,7 @@ describe('OIDC Authentication Flow', () => {
     it('should create session cookie on login', async () => {
       try {
         const token = await getOidcToken('User1', 'pwd');
-        const response = await fetch('http://localhost:3000/api/auth/login', {
+        const response = await fetch('http://localhost:3333/api/auth/login', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -131,7 +131,7 @@ describe('OIDC Authentication Flow', () => {
         const token = await getOidcToken('User1', 'pwd');
         
         // Login to get session cookie
-        const loginResponse = await fetch('http://localhost:3000/api/auth/login', {
+        const loginResponse = await fetch('http://localhost:3333/api/auth/login', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',

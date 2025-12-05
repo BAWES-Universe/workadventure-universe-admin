@@ -233,7 +233,7 @@ SERVER_PID=$!
 sleep 5
 
 # Check if server is responding
-if curl -s http://localhost:3000/api/capabilities > /dev/null 2>&1; then
+if curl -s http://localhost:3333/api/capabilities > /dev/null 2>&1; then
   echo -e "  ${GREEN}✓${NC} Server is running and responding"
   ((PASSED++))
   
@@ -265,7 +265,7 @@ if [ $FAILED -eq 0 ]; then
   echo "  1. Review .env.local and update with your values"
   echo "  2. Run 'npm run dev' to start the server"
   echo "  3. Run 'npm run test:api' to test API endpoints"
-  echo "  4. Visit http://localhost:3000/admin to access the admin interface"
+  echo "  4. Visit http://localhost:3333/admin to access the admin interface"
   exit 0
 else
   echo -e "${RED}❌ Setup completed with errors${NC}"

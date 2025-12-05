@@ -31,7 +31,7 @@ Users log in using OIDC access tokens from WorkAdventure. This allows users to m
    - You can get tokens via OIDC authorization code flow
 
 3. **Login to Admin Interface**:
-   - Go to `http://localhost:3000/admin/login`
+   - Go to `http://localhost:3333/admin/login`
    - Paste your OIDC access token
    - Click "Sign in"
    - You'll be redirected to the dashboard
@@ -47,7 +47,7 @@ For API testing and admin operations, you can still use the `ADMIN_API_TOKEN`:
 
 ```bash
 curl -H "Authorization: Bearer your-admin-token" \
-  http://localhost:3000/api/admin/universes
+  http://localhost:3333/api/admin/universes
 ```
 
 **Note**: The web interface uses OIDC sessions, while API calls can use the admin token.

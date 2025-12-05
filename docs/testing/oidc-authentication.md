@@ -49,14 +49,14 @@ http://oidc.workadventure.localhost
 
 Visit:
 ```
-http://localhost:3000/api/test/get-token
+http://localhost:3333/api/test/get-token
 ```
 
 This shows instructions and available test users.
 
 ### 3. Login to Admin Interface
 
-1. Go to `http://localhost:3000/admin/login`
+1. Go to `http://localhost:3333/admin/login`
 2. Paste the access token you obtained
 3. Click "Sign in"
 4. You'll be redirected to `/admin` dashboard
@@ -122,7 +122,7 @@ The OIDC mock comes with these test users:
 **API with Admin Token** (sees all):
 ```bash
 curl -H "Authorization: Bearer $ADMIN_API_TOKEN" \
-  http://localhost:3000/api/admin/universes
+  http://localhost:3333/api/admin/universes
 ```
 
 **Web Interface with OIDC** (sees only yours):

@@ -54,7 +54,7 @@ This Admin API integrates with WorkAdventure to provide:
    npm run dev
    ```
 
-The API will be available at `http://localhost:3000`.
+The API will be available at `http://localhost:3333`.
 
 ## Admin Interface
 
@@ -68,7 +68,7 @@ This project includes a web-based admin interface for managing universes, worlds
    ```
 
 2. **Login with OIDC**:
-   - Go to `http://localhost:3000/admin/login`
+   - Go to `http://localhost:3333/admin/login`
    - Get an OIDC access token from WorkAdventure (see [OIDC Authentication Testing](./docs/testing/oidc-authentication.md))
    - Paste the token and sign in
 
@@ -207,7 +207,7 @@ Authorization: Bearer {ADMIN_API_TOKEN}
    - In WorkAdventure's environment variables, set:
      ```env
      ADMIN_API_TOKEN=your-secret-token-here-change-in-production
-     ADMIN_API_URL=http://localhost:3000
+     ADMIN_API_URL=http://localhost:3333
      ```
 
 #### Testing with cURL
@@ -218,24 +218,24 @@ export TOKEN="your-secret-token-here-change-in-production"
 
 # Test capabilities endpoint
 curl -H "Authorization: Bearer $TOKEN" \
-  http://localhost:3000/api/capabilities
+  http://localhost:3333/api/capabilities
 
 # Test map endpoint
 curl -H "Authorization: Bearer $TOKEN" \
-  "http://localhost:3000/api/map?playUri=http://play.workadventure.localhost/@/universe/world/room"
+  "http://localhost:3333/api/map?playUri=http://play.workadventure.localhost/@/universe/world/room"
 
 # Test room access endpoint
 curl -H "Authorization: Bearer $TOKEN" \
-  "http://localhost:3000/api/room/access?userIdentifier=test-user&playUri=http://play.workadventure.localhost/@/universe/world/room&ipAddress=127.0.0.1"
+  "http://localhost:3333/api/room/access?userIdentifier=test-user&playUri=http://play.workadventure.localhost/@/universe/world/room&ipAddress=127.0.0.1"
 
 # Test without token (should return 401)
-curl http://localhost:3000/api/capabilities
+curl http://localhost:3333/api/capabilities
 ```
 
 #### Testing with Postman
 
 1. **Create a new request**
-2. **Set the URL**: `http://localhost:3000/api/capabilities`
+2. **Set the URL**: `http://localhost:3333/api/capabilities`
 3. **Go to the "Authorization" tab**
 4. **Select "Bearer Token" type**
 5. **Enter your token**: `your-secret-token-here-change-in-production`
@@ -249,7 +249,7 @@ You can also set the token in the Headers tab:
 
 1. **Ensure WorkAdventure is configured**:
    ```env
-   ADMIN_API_URL=http://localhost:3000
+   ADMIN_API_URL=http://localhost:3333
    ADMIN_API_TOKEN=your-secret-token-here-change-in-production
    ```
 
@@ -275,7 +275,7 @@ Create a test script to verify all endpoints:
 # test-api.sh
 
 TOKEN="${ADMIN_API_TOKEN:-your-secret-token-here-change-in-production}"
-BASE_URL="http://localhost:3000"
+BASE_URL="http://localhost:3333"
 
 echo "Testing Admin API with token: $TOKEN"
 echo ""
@@ -311,7 +311,7 @@ Save as `test-api.sh`, make it executable (`chmod +x test-api.sh`), and run it.
 
 **Connection Refused**:
 - Make sure the dev server is running: `npm run dev`
-- Check the API is accessible at `http://localhost:3000`
+- Check the API is accessible at `http://localhost:3333`
 
 **Token Mismatch with WorkAdventure**:
 - Ensure both WorkAdventure and Admin API use the same `ADMIN_API_TOKEN`

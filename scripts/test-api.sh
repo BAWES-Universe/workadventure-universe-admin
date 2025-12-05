@@ -5,7 +5,7 @@
 
 set -e
 
-BASE_URL="${BASE_URL:-http://localhost:3000}"
+BASE_URL="${BASE_URL:-http://localhost:3333}"
 ADMIN_TOKEN="${ADMIN_API_TOKEN:-test-admin-token}"
 
 echo "🧪 Testing WorkAdventure Admin API"

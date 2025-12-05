@@ -46,7 +46,7 @@ describe('/api/admin/universes', () => {
       (prisma.universe.findMany as jest.Mock).mockResolvedValue(mockUniverses);
       (prisma.universe.count as jest.Mock).mockResolvedValue(1);
 
-      const request = new NextRequest('http://localhost:3000/api/admin/universes', {
+      const request = new NextRequest('http://localhost:3333/api/admin/universes', {
         headers: {
           Authorization: `Bearer ${process.env.ADMIN_API_TOKEN}`,
         },
@@ -61,7 +61,7 @@ describe('/api/admin/universes', () => {
     });
 
     it('should return 401 without authentication', async () => {
-      const request = new NextRequest('http://localhost:3000/api/admin/universes');
+      const request = new NextRequest('http://localhost:3333/api/admin/universes');
 
       const response = await GET(request);
 
@@ -94,7 +94,7 @@ describe('/api/admin/universes', () => {
         owner: mockUser,
       });
 
-      const request = new NextRequest('http://localhost:3000/api/admin/universes', {
+      const request = new NextRequest('http://localhost:3333/api/admin/universes', {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${process.env.ADMIN_API_TOKEN}`,
@@ -142,7 +142,7 @@ describe('/api/admin/universes', () => {
         slug: 'existing-universe',
       });
 
-      const request = new NextRequest('http://localhost:3000/api/admin/universes', {
+      const request = new NextRequest('http://localhost:3333/api/admin/universes', {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${process.env.ADMIN_API_TOKEN}`,

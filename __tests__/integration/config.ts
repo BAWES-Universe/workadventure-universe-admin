@@ -17,7 +17,7 @@ export interface TestConfig {
  * Get and validate test configuration
  */
 export function getTestConfig(): TestConfig {
-  const adminApiUrl = process.env.ADMIN_API_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
+  const adminApiUrl = process.env.ADMIN_API_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3333';
   const adminApiToken = process.env.ADMIN_API_TOKEN;
   const oidcIssuer = process.env.OIDC_ISSUER || 'http://oidc.workadventure.localhost';
   const oidcClientId = process.env.OIDC_CLIENT_ID || 'authorization-code-client-id';

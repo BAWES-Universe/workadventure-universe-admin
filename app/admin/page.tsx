@@ -2,7 +2,7 @@ import Link from 'next/link';
 
 async function getStats() {
   const token = process.env.ADMIN_API_TOKEN;
-  const baseUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
+  const baseUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3333';
   
   try {
     const [universes, worlds, rooms, users] = await Promise.all([

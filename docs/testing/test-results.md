@@ -70,7 +70,7 @@ This validates:
 2. Run `npm run dev` to start development
 3. Run `npm run test:api` to test API endpoints (requires server)
 4. Run `npm run test:integration` to test with WorkAdventure (requires WorkAdventure running)
-5. Access admin interface at `http://localhost:3000/admin`
+5. Access admin interface at `http://localhost:3333/admin`
 
 See [Development Workflow](../development/workflow.md) for complete workflow documentation.
 

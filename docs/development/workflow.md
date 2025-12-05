@@ -243,7 +243,7 @@ npm run dev
 npm run test:api
 
 # 5. Access admin interface
-# Open http://localhost:3000/admin
+# Open http://localhost:3333/admin
 # Login with OIDC token from WorkAdventure
 ```
 

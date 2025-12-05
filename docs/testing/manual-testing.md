@@ -34,7 +34,7 @@ export TOKEN="dev-admin-api-token-change-in-production"
 
 # Test capabilities endpoint
 curl -H "Authorization: Bearer $TOKEN" \
-  http://localhost:3000/api/capabilities
+  http://localhost:3333/api/capabilities
 
 # Expected response:
 # {
@@ -48,7 +48,7 @@ curl -H "Authorization: Bearer $TOKEN" \
 #### Using Postman
 
 1. Create a new GET request
-2. URL: `http://localhost:3000/api/capabilities`
+2. URL: `http://localhost:3333/api/capabilities`
 3. Authorization tab → Type: Bearer Token
 4. Token: `dev-admin-api-token-change-in-production`
 5. Send
@@ -56,7 +56,7 @@ curl -H "Authorization: Bearer $TOKEN" \
 #### Using HTTPie
 
 ```bash
-http GET http://localhost:3000/api/capabilities \
+http GET http://localhost:3333/api/capabilities \
   Authorization:"Bearer dev-admin-api-token-change-in-production"
 ```
 
@@ -66,7 +66,7 @@ http GET http://localhost:3000/api/capabilities \
 
 ```bash
 TOKEN="dev-admin-api-token-change-in-production"
-BASE="http://localhost:3000"
+BASE="http://localhost:3333"
 
 # 1. Capabilities
 curl -H "Authorization: Bearer $TOKEN" $BASE/api/capabilities
@@ -130,7 +130,7 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
 
 1. **Configure WorkAdventure** to use your Admin API:
    ```env
-   ADMIN_API_URL=http://localhost:3000
+   ADMIN_API_URL=http://localhost:3333
    ADMIN_API_TOKEN=dev-admin-api-token-change-in-production
    ```
 
@@ -174,12 +174,12 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
 
 ### Connection Refused
 
-**Problem**: Cannot connect to `http://localhost:3000`
+**Problem**: Cannot connect to `http://localhost:3333`
 
 **Solutions**:
 - Verify the dev server is running: `npm run dev`
-- Check the port (default is 3000)
-- Try accessing `http://localhost:3000/api/capabilities` in browser (will fail auth but confirms server is up)
+- Check the port (default is 3333)
+- Try accessing `http://localhost:3333/api/capabilities` in browser (will fail auth but confirms server is up)
 
 ### Token Mismatch with WorkAdventure
 
@@ -205,7 +205,7 @@ Save this as `test-api.sh`:
 #!/bin/bash
 
 TOKEN="${ADMIN_API_TOKEN:-dev-admin-api-token-change-in-production}"
-BASE_URL="http://localhost:3000"
+BASE_URL="http://localhost:3333"
 
 echo "🧪 Testing WorkAdventure Admin API"
 echo "Token: ${TOKEN:0:20}..."
