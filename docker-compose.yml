@@ -1,0 +1,28 @@
+# Docker Compose for Admin API Development
+# This file provides a PostgreSQL database for local development
+# The Admin API itself runs on the host machine (not in Docker)
+# to easily connect to WorkAdventure's OIDC mock
+
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: admin-api-postgres
+    environment:
+      POSTGRES_USER: workadventure
+      POSTGRES_PASSWORD: workadventure
+      POSTGRES_DB: workadventure_admin
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U workadventure"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+

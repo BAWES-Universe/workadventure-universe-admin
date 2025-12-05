@@ -8,6 +8,7 @@ Complete guide to setting up a Next.js Admin API for WorkAdventure.
 - [Project Setup](#project-setup)
 - [Project Structure](#project-structure)
 - [Configuration](#configuration)
+- [Development Workflow](#development-workflow) ⭐ **Start here for dev setup**
 - [Development Setup](#development-setup)
 - [Production Deployment](#production-deployment)
 - [Testing](#testing)
@@ -261,6 +262,280 @@ Update `tsconfig.json`:
 }
 ```
 
+## Development Workflow
+
+This section covers setting up the Admin API for local development with WorkAdventure.
+
+### Overview
+
+For development, we recommend:
+- **WorkAdventure**: Run in Docker (includes OIDC mock)
+- **Admin API**: Run on host machine (connects to WorkAdventure's OIDC mock)
+- **Database**: Run in Docker (via docker-compose)
+
+This setup:
+- ✅ Avoids Docker network complexity
+- ✅ Allows hot reload for Admin API
+- ✅ Uses WorkAdventure's OIDC mock (single source of truth)
+- ✅ Matches production architecture (both use same OIDC provider)
+
+### Step 1: Set Up WorkAdventure
+
+1. **Clone and start WorkAdventure**:
+   ```bash
+   # In WorkAdventure repo
+   docker-compose up
+   ```
+
+2. **Verify OIDC mock is running**:
+   ```bash
+   curl http://oidc.workadventure.localhost/.well-known/openid-configuration
+   ```
+
+3. **Note the OIDC configuration**:
+   - Issuer: `http://oidc.workadventure.localhost`
+   - Client ID: `authorization-code-client-id`
+   - Client Secret: `authorization-code-client-secret`
+
+### Step 2: Set Up Admin API Database
+
+Create `docker-compose.yml` in your Admin API repo:
+
+```yaml
+# docker-compose.yml
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: admin-api-postgres
+    environment:
+      POSTGRES_USER: workadventure
+      POSTGRES_PASSWORD: workadventure
+      POSTGRES_DB: workadventure_admin
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U workadventure"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+```
+
+Start the database:
+```bash
+docker-compose up -d postgres
+```
+
+### Step 3: Configure Environment Variables
+
+Create `.env.local` in your Admin API repo:
+
+```env
+# Database
+DATABASE_URL=postgresql://workadventure:workadventure@localhost:5432/workadventure_admin
+
+# Admin API Authentication (must match WorkAdventure's ADMIN_API_TOKEN)
+ADMIN_API_TOKEN=dev-admin-api-token-change-in-production
+
+# OIDC Configuration (connects to WorkAdventure's OIDC mock)
+OIDC_ISSUER=http://oidc.workadventure.localhost
+OIDC_CLIENT_ID=authorization-code-client-id
+OIDC_CLIENT_SECRET=authorization-code-client-secret
+
+# Next.js
+NODE_ENV=development
+NEXT_PUBLIC_API_URL=http://localhost:3000
+```
+
+**Important**: The `ADMIN_API_TOKEN` must match what you set in WorkAdventure's environment variables.
+
+### Step 4: Configure WorkAdventure to Use Admin API
+
+In WorkAdventure's `.env` or `docker-compose.yaml`, add:
+
+```env
+ADMIN_API_URL=http://localhost:3000
+ADMIN_API_TOKEN=dev-admin-api-token-change-in-production
+```
+
+If using docker-compose, you can add these to the `play` service environment:
+
+```yaml
+services:
+  play:
+    environment:
+      ADMIN_API_URL: http://host.docker.internal:3000
+      ADMIN_API_TOKEN: dev-admin-api-token-change-in-production
+```
+
+**Note**: `host.docker.internal` allows Docker containers to access services on the host machine.
+
+### Step 5: Initialize Database
+
+```bash
+# Generate Prisma Client
+npx prisma generate
+
+# Create and run migrations
+npx prisma migrate dev --name init
+
+# (Optional) Open Prisma Studio to view data
+npx prisma studio
+```
+
+### Step 6: Start Development Server
+
+```bash
+# Start Admin API (runs on host)
+npm run dev
+```
+
+The API will be available at `http://localhost:3000`.
+
+### Step 7: Verify Setup
+
+1. **Test Admin API capabilities endpoint**:
+   ```bash
+   curl -H "Authorization: Bearer dev-admin-api-token-change-in-production" \
+     http://localhost:3000/api/capabilities
+   ```
+
+2. **Test OIDC connection**:
+   ```bash
+   curl http://oidc.workadventure.localhost/.well-known/openid-configuration
+   ```
+
+3. **Start WorkAdventure and test integration**:
+   - Open `http://play.workadventure.localhost`
+   - Try accessing a room
+   - Check Admin API logs for incoming requests
+
+### Development Workflow Summary
+
+```bash
+# Terminal 1: WorkAdventure
+cd workadventure
+docker-compose up
+
+# Terminal 2: Admin API Database
+cd admin-api
+docker-compose up -d postgres
+
+# Terminal 3: Admin API (on host)
+cd admin-api
+npm run dev
+```
+
+### Troubleshooting
+
+#### Issue: Cannot connect to OIDC mock
+
+**Problem**: `http://oidc.workadventure.localhost` not resolving
+
+**Solution**: Ensure WorkAdventure is running and Traefik is routing correctly:
+```bash
+# Check if WorkAdventure is running
+docker ps | grep workadventure
+
+# Check Traefik routing
+curl -H "Host: oidc.workadventure.localhost" http://localhost/.well-known/openid-configuration
+```
+
+#### Issue: 401 Unauthorized from WorkAdventure
+
+**Problem**: Token mismatch
+
+**Solution**: Ensure `ADMIN_API_TOKEN` matches in both:
+- WorkAdventure's environment
+- Admin API's `.env.local`
+
+#### Issue: Database connection failed
+
+**Problem**: PostgreSQL not accessible
+
+**Solution**: 
+```bash
+# Check if database is running
+docker ps | grep postgres
+
+# Check connection
+psql postgresql://workadventure:workadventure@localhost:5432/workadventure_admin
+```
+
+#### Issue: WorkAdventure can't reach Admin API
+
+**Problem**: `host.docker.internal` not working
+
+**Solution**: Use your machine's IP address instead:
+```env
+# In WorkAdventure docker-compose
+ADMIN_API_URL=http://192.168.1.100:3000  # Your local IP
+```
+
+Or use Docker network (see alternative setup below).
+
+### Alternative: Admin API in Docker
+
+If you prefer to run Admin API in Docker:
+
+```yaml
+# docker-compose.yml
+version: '3.8'
+
+services:
+  postgres:
+    # ... same as above
+
+  admin-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://workadventure:workadventure@postgres:5432/workadventure_admin
+      ADMIN_API_TOKEN: dev-admin-api-token-change-in-production
+      OIDC_ISSUER: http://oidc.workadventure.localhost
+      OIDC_CLIENT_ID: authorization-code-client-id
+      OIDC_CLIENT_SECRET: authorization-code-client-secret
+      NODE_ENV: development
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/.next
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Use host network to access WorkAdventure's OIDC mock
+    network_mode: host
+```
+
+Create `Dockerfile.dev`:
+```dockerfile
+FROM node:20-alpine
+WORKDIR /app
+COPY package*.json ./
+RUN npm install
+COPY . .
+EXPOSE 3000
+CMD ["npm", "run", "dev"]
+```
+
+### Next Steps
+
+1. Implement core endpoints (see [ENDPOINTS.md](./ENDPOINTS.md))
+2. Test with WorkAdventure
+3. Add database queries (see [DATABASE.md](./DATABASE.md))
+4. Implement optional endpoints as needed
+
+---
+
 ## Development Setup
 
 ### 1. Create Core Library Files
@@ -338,7 +613,7 @@ export function parsePlayUri(playUri: string) {
   // Format: /@/teamSlug/worldSlug/roomSlug
   if (pathParts.length >= 4 && pathParts[0] === '@') {
     return {
-      team: pathParts[1],
+      universe: pathParts[1],
       world: pathParts[2],
       room: pathParts[3],
     };
