@@ -1,5 +1,5 @@
 # Development Dockerfile for Admin API
-# Runs behind Traefik at admin.workadventure.localhost
+# Runs behind Traefik at admin.bawes.localhost
 
 FROM node:20-alpine
 
@@ -8,11 +8,15 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies
-RUN npm install
+# Install dependencies (skip postinstall to avoid prisma generate during build)
+RUN npm install --ignore-scripts
 
-# Copy source code (will be overridden by volume mount, but needed for initial build)
+# Copy all source code (needed for prisma generate and initial build)
 COPY . .
+
+# Generate Prisma Client (now that all files are in place)
+# DATABASE_URL is required by prisma.config.ts but not used during generate
+RUN DATABASE_URL="postgresql://dummy:dummy@dummy:5432/dummy" npx prisma generate
 
 # Expose port (used by Traefik)
 EXPOSE 3333
