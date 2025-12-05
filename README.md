@@ -88,6 +88,10 @@ See [ADMIN-GUIDE.md](./ADMIN-GUIDE.md) for complete documentation on using the a
 
 See [TESTING-OIDC.md](./TESTING-OIDC.md) for detailed instructions on testing OIDC authentication.
 
+See [README-TESTING.md](./README-TESTING.md) for the automated test suite.
+
+See [TROUBLESHOOTING.md](./TROUBLESHOOTING.md) for common issues and solutions.
+
 ## Project Structure
 
 ```

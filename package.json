@@ -6,13 +6,18 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "test:api": "./scripts/test-api.sh",
+    "fix:prisma": "./scripts/fix-prisma.sh",
+    "postinstall": "prisma generate"
   },
   "dependencies": {
     "@prisma/client": "^7.1.0",
     "ioredis": "^5.8.2",
     "lru-cache": "^11.2.4",
-    "next": "16.0.7",
     "openid-client": "^6.8.1",
     "react": "19.2.0",
     "react-dom": "19.2.0",
@@ -21,14 +26,21 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.0",
+    "@types/jest": "^30.0.0",
     "@types/node": "^20.19.25",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "dotenv": "^17.2.3",
     "eslint": "^9",
     "eslint-config-next": "16.0.7",
+    "jest": "^30.2.0",
+    "jest-environment-node": "^30.2.0",
+    "next": "^16.0.7",
     "prisma": "^7.1.0",
     "tailwindcss": "^4",
+    "ts-jest": "^29.4.6",
     "typescript": "^5"
   }
 }
