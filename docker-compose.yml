@@ -6,6 +6,8 @@ services:
       POSTGRES_USER: ${DB_USER:-workadventure}
       POSTGRES_PASSWORD: ${DB_PASSWORD:-workadventure}
       POSTGRES_DB: ${DB_NAME:-workadventure_admin}
+    ports:
+      - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
