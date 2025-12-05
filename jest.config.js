@@ -13,14 +13,15 @@ const customJestConfig = {
     '^@/(.*)$': '<rootDir>/$1',
   },
   testMatch: [
-    '**/__tests__/**/*.[jt]s?(x)',
+    '**/__tests__/**/*.test.[jt]s?(x)',
     '**/?(*.)+(spec|test).[jt]s?(x)',
   ],
   testPathIgnorePatterns: [
     '/node_modules/',
     '/.next/',
-    // Integration tests are run separately
-    '/__tests__/integration/',
+  ],
+  transformIgnorePatterns: [
+    'node_modules/(?!(openid-client|oauth4webapi)/)',
   ],
   collectCoverageFrom: [
     'app/**/*.{js,jsx,ts,tsx}',
