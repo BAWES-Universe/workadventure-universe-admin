@@ -67,12 +67,14 @@ This project includes a web-based admin interface for managing universes, worlds
    npm run dev
    ```
 
-2. **Open your browser**:
-   ```
-   http://localhost:3000/admin
-   ```
+2. **Login with OIDC**:
+   - Go to `http://localhost:3000/admin/login`
+   - Get an OIDC access token from WorkAdventure (see [TESTING-OIDC.md](./TESTING-OIDC.md))
+   - Paste the token and sign in
 
-3. **Authentication**: When prompted, enter your `ADMIN_API_TOKEN` from `.env.local`
+3. **Alternative: Admin Token** (for API testing):
+   - API endpoints can use `ADMIN_API_TOKEN` for direct access
+   - Web interface uses OIDC sessions for user-specific content
 
 ### Admin Features
 
@@ -83,6 +85,8 @@ This project includes a web-based admin interface for managing universes, worlds
 - **Users**: View and manage users
 
 See [ADMIN-GUIDE.md](./ADMIN-GUIDE.md) for complete documentation on using the admin interface.
+
+See [TESTING-OIDC.md](./TESTING-OIDC.md) for detailed instructions on testing OIDC authentication.
 
 ## Project Structure
 

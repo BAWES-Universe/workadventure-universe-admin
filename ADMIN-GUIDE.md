@@ -4,33 +4,53 @@ This guide explains how to access and use the admin interface for managing unive
 
 ## Accessing the Admin Interface
 
-### Option 1: Direct Access (Development)
+### OIDC Authentication (Recommended)
+
+Users log in using OIDC access tokens from WorkAdventure. This allows users to manage their own universes, worlds, and rooms.
 
 1. **Start the development server**:
    ```bash
    npm run dev
    ```
 
-2. **Open your browser**:
-   ```
-   http://localhost:3000/admin
-   ```
+2. **Get an OIDC Access Token**:
 
-3. **Authentication**: The admin interface currently uses the same `ADMIN_API_TOKEN` for authentication. When prompted, enter the token from your `.env.local` file:
-   ```bash
-   grep ADMIN_API_TOKEN .env.local
-   ```
+   **Option A: From WorkAdventure (Real Flow)**
+   - Log into WorkAdventure at `http://play.workadventure.localhost`
+   - Open browser DevTools → Network tab
+   - Look for API calls to your admin API (e.g., `/api/map`, `/api/room/access`)
+   - Find the `accessToken` parameter in the request URL or headers
+   - Copy that token
 
-### Option 2: Using Browser Developer Tools
+   **Option B: From OIDC Mock (Testing)**
+   - The OIDC mock server runs with WorkAdventure
+   - Test users available:
+     - `User1` / `pwd` (admin)
+     - `User2` / `pwd` (member)
+     - `UserMatrix` / `pwd` (admin)
+   - You can get tokens via OIDC authorization code flow
 
-For a better experience, you can set the token in your browser's localStorage:
+3. **Login to Admin Interface**:
+   - Go to `http://localhost:3000/admin/login`
+   - Paste your OIDC access token
+   - Click "Sign in"
+   - You'll be redirected to the dashboard
 
-1. Open browser console (F12)
-2. Run:
-   ```javascript
-   localStorage.setItem('admin_token', 'your-admin-api-token-here');
-   ```
-3. Refresh the page
+4. **Session Management**:
+   - Sessions are stored in HTTP-only cookies
+   - Sessions last 7 days
+   - Click "Logout" to end your session
+
+### Admin Token Access (API Only)
+
+For API testing and admin operations, you can still use the `ADMIN_API_TOKEN`:
+
+```bash
+curl -H "Authorization: Bearer your-admin-token" \
+  http://localhost:3000/api/admin/universes
+```
+
+**Note**: The web interface uses OIDC sessions, while API calls can use the admin token.
 
 ## Features
 
@@ -43,9 +63,10 @@ For a better experience, you can set the token in your browser's localStorage:
 ### Universes (`/admin/universes`)
 
 **List View**:
-- View all universes
+- View **your own universes** (when logged in via OIDC)
+- View all universes (when using admin token)
 - See owner, world count, and status
-- Edit or delete universes
+- Edit or delete your universes
 
 **Create/Edit Universe**:
 - Slug (URL identifier, e.g., "my-universe")

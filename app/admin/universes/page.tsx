@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 
 interface Universe {
   id: string;
@@ -22,43 +23,44 @@ interface Universe {
 }
 
 export default function UniversesPage() {
+  const router = useRouter();
   const [universes, setUniverses] = useState<Universe[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [user, setUser] = useState<any>(null);
 
   useEffect(() => {
-    fetchUniverses();
+    checkAuth();
   }, []);
 
-  function getToken(): string {
-    if (typeof window === 'undefined') return '';
-    return localStorage.getItem('admin_token') || '';
+  async function checkAuth() {
+    try {
+      const response = await fetch('/api/auth/me');
+      if (!response.ok) {
+        router.push('/admin/login');
+        return;
+      }
+      const data = await response.json();
+      setUser(data.user);
+      fetchUniverses(data.user);
+    } catch (err) {
+      router.push('/admin/login');
+    }
   }
 
-  async function fetchUniverses() {
+  async function fetchUniverses(currentUser: any) {
     try {
       setLoading(true);
-      let token = getToken();
       
-      if (!token) {
-        token = prompt('Enter ADMIN_API_TOKEN (will be saved in localStorage):') || '';
-        if (token) {
-          localStorage.setItem('admin_token', token);
-        } else {
-          throw new Error('Token required');
-        }
-      }
-      
-      const response = await fetch('/api/admin/universes', {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
+      // Fetch only user's universes
+      const response = await fetch(`/api/admin/universes?ownerId=${currentUser.id}`, {
+        credentials: 'include',
       });
 
       if (!response.ok) {
         if (response.status === 401) {
-          localStorage.removeItem('admin_token');
-          throw new Error('Invalid token. Please refresh and try again.');
+          router.push('/admin/login');
+          return;
         }
         throw new Error('Failed to fetch universes');
       }
@@ -79,23 +81,15 @@ export default function UniversesPage() {
     }
 
     try {
-      const token = getToken();
-      if (!token) {
-        alert('Please set your admin token first');
-        return;
-      }
-      
       const response = await fetch(`/api/admin/universes/${id}`, {
         method: 'DELETE',
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
+        credentials: 'include',
       });
 
       if (!response.ok) {
         if (response.status === 401) {
-          localStorage.removeItem('admin_token');
-          throw new Error('Invalid token. Please refresh and try again.');
+          router.push('/admin/login');
+          return;
         }
         throw new Error('Failed to delete universe');
       }
