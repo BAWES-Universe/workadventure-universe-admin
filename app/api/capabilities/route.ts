@@ -1,11 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { requireAuth } from '@/lib/auth';
 import type { Capabilities } from '@/types/workadventure';
 
+/**
+ * GET /api/capabilities
+ * 
+ * Public endpoint (no authentication required).
+ * Called by WorkAdventure during startup to discover API capabilities.
+ * 
+ * This endpoint is intentionally public because:
+ * - It's called during WorkAdventure startup before authentication is established
+ * - It's used for API discovery to determine what features are supported
+ */
 export async function GET(request: NextRequest) {
   try {
-    requireAuth(request);
-    
     const capabilities: Capabilities = {
       "api/woka/list": "v1",
       "api/save-name": "v1",
@@ -15,13 +22,6 @@ export async function GET(request: NextRequest) {
     
     return NextResponse.json(capabilities);
   } catch (error) {
-    if (error instanceof Error && error.message === 'Unauthorized') {
-      return NextResponse.json(
-        { error: 'Unauthorized' },
-        { status: 401 }
-      );
-    }
-    
     console.error('Error in /api/capabilities:', error);
     return NextResponse.json(
       { error: 'Internal server error' },

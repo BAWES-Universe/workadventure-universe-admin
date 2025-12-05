@@ -35,7 +35,9 @@ Returns the capabilities/features supported by your Admin API.
 
 **Request:**
 - Method: `GET`
-- Headers: `Authorization: Bearer {token}`
+- Headers: No authentication required (public endpoint)
+
+**Note:** This endpoint is intentionally public. WorkAdventure calls it during startup without an Authorization header to discover API capabilities.
 
 **Response:** `200 OK`
 ```json

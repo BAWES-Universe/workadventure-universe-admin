@@ -14,7 +14,9 @@ Complete guide to authentication and security for the WorkAdventure Admin API.
 
 ### Overview
 
-All requests from WorkAdventure include a Bearer token in the `Authorization` header. This token is set via the `ADMIN_API_TOKEN` environment variable in WorkAdventure.
+Most requests from WorkAdventure include a Bearer token in the `Authorization` header. This token is set via the `ADMIN_API_TOKEN` environment variable in WorkAdventure.
+
+**Exception:** The `/api/capabilities` endpoint is public and does not require authentication. WorkAdventure calls it during startup without an Authorization header for API discovery.
 
 ### Implementation
 
