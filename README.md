@@ -69,7 +69,7 @@ This project includes a web-based admin interface for managing universes, worlds
 
 2. **Login with OIDC**:
    - Go to `http://localhost:3000/admin/login`
-   - Get an OIDC access token from WorkAdventure (see [TESTING-OIDC.md](./TESTING-OIDC.md))
+   - Get an OIDC access token from WorkAdventure (see [OIDC Authentication Testing](./docs/testing/oidc-authentication.md))
    - Paste the token and sign in
 
 3. **Alternative: Admin Token** (for API testing):
@@ -84,15 +84,7 @@ This project includes a web-based admin interface for managing universes, worlds
 - **Rooms**: Create and manage rooms within worlds
 - **Users**: View and manage users
 
-See [ADMIN-GUIDE.md](./ADMIN-GUIDE.md) for complete documentation on using the admin interface.
-
-See [TESTING-OIDC.md](./TESTING-OIDC.md) for detailed instructions on testing OIDC authentication.
-
-See [DEVELOPMENT-WORKFLOW.md](./DEVELOPMENT-WORKFLOW.md) for the complete automated development workflow.
-
-See [README-TESTING.md](./README-TESTING.md) for the automated test suite.
-
-See [TROUBLESHOOTING.md](./TROUBLESHOOTING.md) for common issues and solutions.
+See [Admin Interface Guide](./docs/admin/guide.md) for complete documentation on using the admin interface.
 
 ## Project Structure
 
@@ -327,11 +319,26 @@ Save as `test-api.sh`, make it executable (`chmod +x test-api.sh`), and run it.
 
 ## Documentation
 
-- [SETUP.md](./docs/SETUP.md) - Complete setup guide
-- [ENDPOINTS.md](./docs/ENDPOINTS.md) - API endpoint reference
-- [DATABASE.md](./docs/DATABASE.md) - Database schema documentation
-- [AUTHENTICATION.md](./docs/AUTHENTICATION.md) - Authentication guide
-- [DATA-TYPES.md](./docs/DATA-TYPES.md) - Type definitions
+### Core Documentation
+- [Setup Guide](./docs/SETUP.md) - Complete setup guide
+- [API Endpoints](./docs/ENDPOINTS.md) - API endpoint reference
+- [Database Schema](./docs/DATABASE.md) - Database schema documentation
+- [Authentication](./docs/AUTHENTICATION.md) - Authentication guide
+- [Data Types](./docs/DATA-TYPES.md) - Type definitions
+- [Examples](./docs/EXAMPLES.md) - Code examples
+
+### Development
+- [Development Workflow](./docs/development/workflow.md) - Complete automated development workflow
+- [Troubleshooting](./docs/development/troubleshooting.md) - Common issues and solutions
+
+### Testing
+- [Testing Guide](./docs/testing/README.md) - Complete testing documentation
+- [Manual Testing](./docs/testing/manual-testing.md) - Manual testing procedures
+- [OIDC Authentication Testing](./docs/testing/oidc-authentication.md) - OIDC-specific testing
+- [Integration Tests](./docs/testing/integration-tests.md) - Automated integration testing with WorkAdventure
+
+### Admin Interface
+- [Admin Interface Guide](./docs/admin/guide.md) - Complete admin interface documentation
 
 ## Deployment
 

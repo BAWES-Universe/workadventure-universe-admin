@@ -93,6 +93,9 @@ npm run test:coverage
 
 # API integration tests (requires server running)
 npm run test:api
+
+# Integration tests (requires WorkAdventure + OIDC mock)
+npm run test:integration
 ```
 
 ### Test Workflow
@@ -145,7 +148,7 @@ npm run test:api
 
 ### 6. Test OIDC Authentication
 
-See [TESTING-OIDC.md](./TESTING-OIDC.md) for detailed OIDC testing.
+See [OIDC Authentication Testing](../testing/oidc-authentication.md) for detailed OIDC testing.
 
 ## Automated Validation
 
@@ -218,7 +221,7 @@ npm test -- --clearCache
 npm test -- --verbose
 ```
 
-See [TROUBLESHOOTING.md](./TROUBLESHOOTING.md) for more solutions.
+See [Troubleshooting](./troubleshooting.md) for more solutions.
 
 ## Complete Workflow Example
 
@@ -252,6 +255,7 @@ npm run test:api
 | `npm test` | Run unit tests |
 | `npm run test:full` | Run all tests (unit, lint, type check) |
 | `npm run test:api` | Test API endpoints (requires server) |
+| `npm run test:integration` | Run integration tests (requires WorkAdventure) |
 | `npm run fix:prisma` | Fix Prisma client issues |
 | `npm run dev` | Start development server |
 | `npm run build` | Build for production |
@@ -264,5 +268,5 @@ npm run test:api
 - ✅ Server running
 - 🚀 Ready for development!
 
-See [ADMIN-GUIDE.md](./ADMIN-GUIDE.md) for using the admin interface.
+See [Admin Interface Guide](../admin/guide.md) for using the admin interface.
 

@@ -1,4 +1,4 @@
-# Testing Guide
+# Manual Testing Guide
 
 Quick reference for testing the WorkAdventure Admin API.
 
@@ -262,7 +262,8 @@ chmod +x test-api.sh
 
 ## Next Steps
 
-- Read [AUTHENTICATION.md](./docs/AUTHENTICATION.md) for detailed auth info
-- Check [ENDPOINTS.md](./docs/ENDPOINTS.md) for all available endpoints
-- Review [EXAMPLES.md](./docs/EXAMPLES.md) for implementation examples
+- Read [Authentication](../AUTHENTICATION.md) for detailed auth info
+- Check [Endpoints](../ENDPOINTS.md) for all available endpoints
+- Review [Examples](../EXAMPLES.md) for implementation examples
+- See [Integration Tests](./integration-tests.md) for automated testing
 

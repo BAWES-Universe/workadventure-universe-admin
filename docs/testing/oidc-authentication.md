@@ -190,4 +190,5 @@ ADMIN_API_TOKEN=your-secret-token-here
 - Implement role-based access control (RBAC)
 - Add user profile management
 - Add universe/world/room sharing and permissions
+- See [Integration Tests](./integration-tests.md) for automated OIDC testing
 

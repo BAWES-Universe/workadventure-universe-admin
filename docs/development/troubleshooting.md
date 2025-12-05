@@ -86,6 +86,14 @@ npm run dev
 npm run test:api
 ```
 
+### Integration Tests
+
+```bash
+# Ensure WorkAdventure + OIDC mock are running
+# Then run integration tests
+npm run test:integration
+```
+
 ### Fix Common Test Issues
 
 **Issue: Prisma client not found in tests**
@@ -131,6 +139,7 @@ echo "ADMIN_API_TOKEN=your-token-here" >> .env.local
 - Check `OIDC_ISSUER` is accessible
 - Verify OIDC mock is running (if using dev)
 - Check `OIDC_CLIENT_ID` and `OIDC_CLIENT_SECRET`
+- Ensure WorkAdventure is running: `curl http://oidc.workadventure.localhost/.well-known/openid-configuration`
 
 ### 4. Tests timeout
 
@@ -140,10 +149,22 @@ echo "ADMIN_API_TOKEN=your-token-here" >> .env.local
   testTimeout: 10000
   ```
 
+### 5. Integration tests fail - WorkAdventure not running
+
+**Solution:**
+```bash
+# Start WorkAdventure (includes OIDC mock)
+cd workadventure
+docker-compose up
+
+# Verify OIDC mock is accessible
+curl http://oidc.workadventure.localhost/.well-known/openid-configuration
+```
+
 ## Getting Help
 
 1. Check logs: Look at console output for detailed error messages
 2. Verify environment: Ensure all required env vars are set
 3. Check versions: Node.js, Prisma, Next.js compatibility
-4. Review documentation: See README.md and other docs
+4. Review documentation: See [README.md](../README.md) and other docs
 

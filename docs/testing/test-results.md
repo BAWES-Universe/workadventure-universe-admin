@@ -2,7 +2,7 @@
 
 ## ✅ All Tests Passing
 
-Last verified: $(date)
+Last verified: See latest test run
 
 ### Unit Tests
 
@@ -24,6 +24,12 @@ Tests:       14 passed, 14 total
 2. `__tests__/api/auth/login.test.ts` - Authentication endpoints
 3. `__tests__/lib/auth.test.ts` - Auth utilities
 
+### Integration Tests
+
+Integration tests require WorkAdventure + OIDC mock to be running.
+
+See [Integration Tests](./integration-tests.md) for details.
+
 ### Running Tests
 
 ```bash
@@ -35,6 +41,9 @@ npm run test:coverage
 
 # Run full test suite
 npm run test:full
+
+# Run integration tests
+npm run test:integration
 ```
 
 ## Automated Workflow
@@ -60,7 +69,8 @@ This validates:
 1. Run `npm run setup` to verify your environment
 2. Run `npm run dev` to start development
 3. Run `npm run test:api` to test API endpoints (requires server)
-4. Access admin interface at `http://localhost:3000/admin`
+4. Run `npm run test:integration` to test with WorkAdventure (requires WorkAdventure running)
+5. Access admin interface at `http://localhost:3000/admin`
 
-See [DEVELOPMENT-WORKFLOW.md](./DEVELOPMENT-WORKFLOW.md) for complete workflow documentation.
+See [Development Workflow](../development/workflow.md) for complete workflow documentation.
 

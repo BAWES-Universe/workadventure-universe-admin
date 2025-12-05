@@ -68,17 +68,42 @@ The Admin API is an **optional** component that allows you to:
    - Use the examples in [EXAMPLES.md](./docs/EXAMPLES.md)
    - Verify against the Swagger documentation at `https://play.workadventu.re/swagger-ui/`
 
-## Documentation Files
+## Documentation Structure
+
+### Core API Documentation
 
 | File | Description |
 |------|-------------|
-| [SETUP.md](./docs/SETUP.md) | Next.js setup guide, project structure, and configuration |
-| [ENDPOINTS.md](./docs/ENDPOINTS.md) | Complete list of all required and optional API endpoints |
-| [AUTHENTICATION.md](./docs/AUTHENTICATION.md) | Authentication, security, and token validation |
-| [DATA-TYPES.md](./docs/DATA-TYPES.md) | All TypeScript interfaces and data schemas |
-| [DATABASE.md](./docs/DATABASE.md) | Database schema and Prisma setup guide |
-| [EXAMPLES.md](./docs/EXAMPLES.md) | Example implementations and code snippets |
-| [OIDC-INTEGRATION.md](./docs/OIDC-INTEGRATION.md) | OIDC authentication integration guide |
+| [SETUP.md](./SETUP.md) | Next.js setup guide, project structure, and configuration |
+| [ENDPOINTS.md](./ENDPOINTS.md) | Complete list of all required and optional API endpoints |
+| [AUTHENTICATION.md](./AUTHENTICATION.md) | Authentication, security, and token validation |
+| [DATA-TYPES.md](./DATA-TYPES.md) | All TypeScript interfaces and data schemas |
+| [DATABASE.md](./DATABASE.md) | Database schema and Prisma setup guide |
+| [EXAMPLES.md](./EXAMPLES.md) | Example implementations and code snippets |
+| [OIDC-INTEGRATION.md](./OIDC-INTEGRATION.md) | OIDC authentication integration guide |
+
+### Development Documentation
+
+| File | Description |
+|------|-------------|
+| [Development Workflow](./development/workflow.md) | Complete automated development workflow |
+| [Troubleshooting](./development/troubleshooting.md) | Common issues and solutions |
+
+### Testing Documentation
+
+| File | Description |
+|------|-------------|
+| [Testing Guide](./testing/README.md) | Complete testing documentation and overview |
+| [Manual Testing](./testing/manual-testing.md) | Manual testing procedures |
+| [OIDC Authentication Testing](./testing/oidc-authentication.md) | OIDC-specific testing guide |
+| [Integration Tests](./testing/integration-tests.md) | Automated integration testing with WorkAdventure |
+| [Test Results](./testing/test-results.md) | Current test status and results |
+
+### Admin Interface Documentation
+
+| File | Description |
+|------|-------------|
+| [Admin Interface Guide](./admin/guide.md) | Complete admin interface documentation |
 
 ## Key Concepts
 
@@ -155,11 +180,12 @@ OIDC_CLIENT_SECRET=your-client-secret
 
 ## Next Steps
 
-1. Read [SETUP.md](./docs/SETUP.md) to set up your Next.js project
-2. Review [DATABASE.md](./docs/DATABASE.md) for the Prisma schema and set up your database
-3. Implement the core endpoints from [ENDPOINTS.md](./docs/ENDPOINTS.md)
-4. Test your implementation using [EXAMPLES.md](./docs/EXAMPLES.md)
-5. Deploy and configure WorkAdventure to use your API
+1. Read [SETUP.md](./SETUP.md) to set up your Next.js project
+2. Review [DATABASE.md](./DATABASE.md) for the Prisma schema and set up your database
+3. Implement the core endpoints from [ENDPOINTS.md](./ENDPOINTS.md)
+4. Test your implementation using [EXAMPLES.md](./EXAMPLES.md)
+5. Run integration tests: See [Integration Tests](./testing/integration-tests.md)
+6. Deploy and configure WorkAdventure to use your API
 
 ## Universe/World/Room Structure
 

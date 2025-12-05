@@ -160,7 +160,7 @@ All admin operations use REST API endpoints under `/api/admin/`:
 
 ## Authentication
 
-Currently, the admin interface uses the same `ADMIN_API_TOKEN` as the WorkAdventure API integration. This is a simple approach for development.
+Currently, the admin interface uses OIDC authentication for user sessions. The API endpoints support both OIDC sessions and admin tokens.
 
 **For production**, you should:
 
@@ -221,8 +221,8 @@ Currently, the admin interface uses the same `ADMIN_API_TOKEN` as the WorkAdvent
 
 ### "Unauthorized" Errors
 
-- Check that `ADMIN_API_TOKEN` is set in `.env.local`
-- Verify the token matches what you're entering
+- Check that you're logged in (OIDC session)
+- Verify the OIDC token is valid
 - Restart the dev server after changing `.env.local`
 
 ### "User not found" When Creating Universe
@@ -252,7 +252,7 @@ Currently, the admin interface uses the same `ADMIN_API_TOKEN` as the WorkAdvent
 
 ## Security Notes
 
-⚠️ **Important**: The current implementation uses the same token for both WorkAdventure API calls and admin operations. For production:
+⚠️ **Important**: For production:
 
 1. **Separate authentication systems**
 2. **Implement proper user sessions**
