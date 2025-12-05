@@ -249,7 +249,9 @@ You can also set the token in the Headers tab:
 
 1. **Ensure WorkAdventure is configured**:
    ```env
-   ADMIN_API_URL=http://localhost:3333
+   ADMIN_API_URL=http://localhost:3333 
+   // If WorkAdventure is running in Docker, use:
+   ADMIN_API_URL=http://host.docker.internal:3333
    ADMIN_API_TOKEN=your-secret-token-here-change-in-production
    ```
 
