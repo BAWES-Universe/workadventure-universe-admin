@@ -1,14 +1,237 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
 generator client {
-  provider = "prisma-client"
-  output   = "../lib/generated/prisma"
+  provider = "prisma-client-js"
 }
 
 datasource db {
   provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Users
+model User {
+  id           String   @id @default(uuid())
+  uuid         String   @unique // WorkAdventure user identifier
+  email        String?  @unique
+  name         String?
+  matrixChatId String?  @map("matrix_chat_id") // Matrix ID: "@user:matrix.org"
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  ownedUniverses    Universe[]        @relation("UniverseOwner")
+  worldMemberships  WorldMember[]
+  universeMembers   UniverseMember[]
+  bans              Ban[]             @relation("BannedUser")
+  bannedBy          Ban[]             @relation("BannedBy")
+  avatars           UserAvatar[]
+  favorites         Favorite[]
+  followers         Follow[]          @relation("Follower")
+  following         Follow[]          @relation("Following")
+  friendships1      Friendship[]      @relation("User1")
+  friendships2      Friendship[]      @relation("User2")
+  requestedFriendships Friendship[]   @relation("RequestedBy")
+
+  @@map("users")
+}
+
+// Universes
+model Universe {
+  id          String   @id @default(uuid())
+  slug        String   @unique // URL identifier: "my-universe"
+  name        String
+  description String?
+  ownerId     String   @map("owner_id")
+  isPublic    Boolean  @default(true) @map("is_public")
+  featured    Boolean  @default(false) // For discovery
+  thumbnailUrl String? @map("thumbnail_url")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  owner      User      @relation("UniverseOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  worlds     World[]
+  members    UniverseMember[]
+  bans       Ban[]
+  favorites  Favorite[]
+
+  @@map("universes")
+}
+
+// Worlds
+model World {
+  id          String   @id @default(uuid())
+  universeId  String   @map("universe_id")
+  slug        String   // URL identifier: "office-world"
+  name        String
+  description String?
+  mapUrl      String?  @map("map_url") // Tiled map JSON URL
+  wamUrl      String?  @map("wam_url") // WAM file URL
+  isPublic    Boolean  @default(true) @map("is_public")
+  featured    Boolean  @default(false) // For discovery
+  thumbnailUrl String? @map("thumbnail_url")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  universe   Universe     @relation(fields: [universeId], references: [id], onDelete: Cascade)
+  rooms      Room[]
+  members    WorldMember[]
+  bans       Ban[]
+  avatars    UserAvatar[]
+
+  @@unique([universeId, slug]) // Slug unique within universe
+  @@map("worlds")
+}
+
+// Rooms
+model Room {
+  id          String   @id @default(uuid())
+  worldId     String   @map("world_id")
+  slug        String   // URL identifier: "lobby"
+  name        String
+  description String?
+  mapUrl      String?  @map("map_url") // Override world map if needed
+  isPublic    Boolean  @default(true) @map("is_public")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  world      World      @relation(fields: [worldId], references: [id], onDelete: Cascade)
+  favorites  Favorite[]
+
+  @@unique([worldId, slug]) // Slug unique within world
+  @@map("rooms")
+}
+
+// World Memberships
+model WorldMember {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  worldId   String   @map("world_id")
+  tags      String[] // Array of tags: ["admin", "editor", "member"]
+  joinedAt  DateTime @default(now()) @map("joined_at")
+
+  // Relations
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  world World @relation(fields: [worldId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, worldId])
+  @@index([worldId])
+  @@index([userId])
+  @@map("world_members")
+}
+
+// Universe Memberships (Optional)
+model UniverseMember {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  universeId String  @map("universe_id")
+  role      String   @default("member") // owner, admin, member
+  joinedAt  DateTime @default(now()) @map("joined_at")
+
+  // Relations
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  universe Universe @relation(fields: [universeId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, universeId])
+  @@map("universe_members")
+}
+
+// Bans
+model Ban {
+  id        String    @id @default(uuid())
+  userId    String?   @map("user_id")
+  universeId String?  @map("universe_id")
+  worldId   String?   @map("world_id")
+  ipAddress String?   @map("ip_address") // IPv4 or IPv6
+  reason    String?
+  bannedById String?  @map("banned_by")
+  bannedAt  DateTime  @default(now()) @map("banned_at")
+  expiresAt DateTime? @map("expires_at") // NULL = permanent
+  isActive  Boolean   @default(true) @map("is_active")
+
+  // Relations
+  user      User?     @relation("BannedUser", fields: [userId], references: [id], onDelete: Cascade)
+  universe  Universe? @relation(fields: [universeId], references: [id], onDelete: SetNull)
+  world     World?    @relation(fields: [worldId], references: [id], onDelete: SetNull)
+  bannedBy  User?     @relation("BannedBy", fields: [bannedById], references: [id])
+
+  @@index([userId])
+  @@index([ipAddress])
+  @@index([worldId])
+  @@map("bans")
+}
+
+// User Avatars & Companions
+model UserAvatar {
+  id              String   @id @default(uuid())
+  userId          String   @map("user_id")
+  worldId         String   @map("world_id")
+  textureIds      String[] @map("texture_ids") // Array of texture IDs: ["male1", "hat1"]
+  companionTextureId String? @map("companion_texture_id")
+  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at")
+
+  // Relations
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  world World @relation(fields: [worldId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, worldId])
+  @@map("user_avatars")
+}
+
+// Favorites (for future social features)
+model Favorite {
+  id         String    @id @default(uuid())
+  userId     String    @map("user_id")
+  universeId String?   @map("universe_id")
+  worldId    String?   @map("world_id")
+  roomId     String?   @map("room_id")
+  favoritedAt DateTime @default(now()) @map("favorited_at")
+
+  // Relations
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  universe Universe? @relation(fields: [universeId], references: [id], onDelete: Cascade)
+  world    World?   @relation(fields: [worldId], references: [id], onDelete: Cascade)
+  room     Room?    @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("favorites")
+}
+
+// Follows (for future social features)
+model Follow {
+  id         String   @id @default(uuid())
+  followerId String   @map("follower_id")
+  followingId String @map("following_id")
+  followedAt DateTime @default(now()) @map("followed_at")
+
+  // Relations
+  follower  User @relation("Follower", fields: [followerId], references: [id], onDelete: Cascade)
+  following User @relation("Following", fields: [followingId], references: [id], onDelete: Cascade)
+
+  @@unique([followerId, followingId])
+  @@index([followerId])
+  @@index([followingId])
+  @@map("follows")
+}
+
+// Friendships (for future social features)
+model Friendship {
+  id         String    @id @default(uuid())
+  user1Id    String    @map("user1_id")
+  user2Id    String    @map("user2_id")
+  status     String    @default("pending") // pending, accepted, blocked
+  requestedById String? @map("requested_by")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  acceptedAt DateTime? @map("accepted_at")
+
+  // Relations
+  user1       User   @relation("User1", fields: [user1Id], references: [id], onDelete: Cascade)
+  user2       User   @relation("User2", fields: [user2Id], references: [id], onDelete: Cascade)
+  requestedBy User?  @relation("RequestedBy", fields: [requestedById], references: [id])
+
+  @@unique([user1Id, user2Id])
+  @@index([user1Id])
+  @@index([user2Id])
+  @@map("friendships")
 }
