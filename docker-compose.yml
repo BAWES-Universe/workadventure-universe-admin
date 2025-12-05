@@ -1,9 +1,3 @@
-# Docker Compose for Admin API Development
-# Runs behind Traefik at admin.bawes.localhost
-# Includes its own Traefik instance to discover services on this network
-
-version: '3.8'
-
 services:
   postgres:
     image: postgres:15-alpine
