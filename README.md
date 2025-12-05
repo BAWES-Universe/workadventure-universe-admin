@@ -77,15 +77,17 @@ This Admin API integrates with WorkAdventure to provide:
 5. **Initialize database:**
    ```bash
    # Run migrations (from inside the container or using npm scripts)
-   docker-compose exec admin-api npx prisma migrate dev --name init
+   docker compose exec admin-api npx prisma migrate dev --name init
    
    # Or use the npm script (from host)
    npm run db:migrate
    ```
 
 The Admin API will be available at:
-- **Admin Interface**: http://admin.bawes.localhost
-- **Traefik Dashboard**: http://traefik-admin.bawes.localhost
+- **Admin Interface**: http://admin.bawes.localhost:8321
+- **Traefik Dashboard**: http://traefik-admin.bawes.localhost:8321
+
+**Note**: Port `8321` is required as Traefik is configured to run on this port (configurable via `TRAEFIK_PORT` in `.env`).
 
 ## Admin Interface
 
@@ -99,7 +101,7 @@ This project includes a web-based admin interface for managing universes, worlds
    ```
 
 2. **Access the admin interface**:
-   - Go to http://admin.bawes.localhost/admin/login
+   - Go to http://admin.bawes.localhost:8321/admin/login
    - Get an OIDC access token from WorkAdventure (see [OIDC Authentication Testing](./docs/testing/oidc-authentication.md))
    - Paste the token and sign in
 
@@ -108,7 +110,7 @@ This project includes a web-based admin interface for managing universes, worlds
    - Web interface uses OIDC sessions for user-specific content
 
 4. **View Traefik dashboard** (optional):
-   - Go to http://traefik-admin.bawes.localhost to see routing information
+   - Go to http://traefik-admin.bawes.localhost:8321 to see routing information
 
 ### Admin Features
 
@@ -241,7 +243,7 @@ Authorization: Bearer {ADMIN_API_TOKEN}
    - In WorkAdventure's environment variables, set:
      ```env
      ADMIN_API_TOKEN=your-secret-token-here-change-in-production
-     ADMIN_API_URL=http://admin.bawes.localhost
+     ADMIN_API_URL=http://admin.bawes.localhost:8321
      ```
 
 #### Testing with cURL
@@ -249,7 +251,7 @@ Authorization: Bearer {ADMIN_API_TOKEN}
 ```bash
 # Set your token as a variable (replace with your actual token)
 export TOKEN="your-secret-token-here-change-in-production"
-BASE_URL="http://admin.bawes.localhost"
+BASE_URL="http://admin.bawes.localhost:8321"
 
 # Test capabilities endpoint
 curl -H "Authorization: Bearer $TOKEN" \
@@ -270,7 +272,7 @@ curl $BASE_URL/api/capabilities
 #### Testing with Postman
 
 1. **Create a new request**
-2. **Set the URL**: `http://admin.bawes.localhost/api/capabilities`
+2. **Set the URL**: `http://admin.bawes.localhost:8321/api/capabilities`
 3. **Go to the "Authorization" tab**
 4. **Select "Bearer Token" type**
 5. **Enter your token**: `your-secret-token-here-change-in-production`
@@ -315,7 +317,7 @@ Create a test script to verify all endpoints:
 # test-api.sh
 
 TOKEN="${ADMIN_API_TOKEN:-your-secret-token-here-change-in-production}"
-BASE_URL="http://admin.bawes.localhost"
+BASE_URL="http://admin.bawes.localhost:8321"
 
 echo "Testing Admin API with token: $TOKEN"
 echo ""
@@ -351,7 +353,7 @@ Save as `test-api.sh`, make it executable (`chmod +x test-api.sh`), and run it.
 
 **Connection Refused**:
 - Make sure services are running: `docker-compose ps`
-- Check the API is accessible at `http://admin.bawes.localhost`
+- Check the API is accessible at `http://admin.bawes.localhost:8321`
 - Verify hosts file is configured correctly (see Setup step 1)
 - Check Traefik is running: `docker-compose logs traefik`
 
@@ -369,7 +371,7 @@ Used by `docker-compose.yml` for local development. Features:
 - Hot reload with volume mounts
 - Development dependencies included
 - Runs Next.js dev server (`npm run dev`)
-- Accessible via Traefik at `admin.bawes.localhost`
+- Accessible via Traefik at `admin.bawes.localhost:8321`
 
 **Usage:**
 ```bash
@@ -433,7 +435,7 @@ The `docker-compose.yml` file orchestrates the development environment:
 **Configuration:**
 - Database credentials configurable via `.env` (`DB_USER`, `DB_PASSWORD`, `DB_NAME`)
 - Traefik dashboard at `traefik-admin.bawes.localhost:8321`
-- Admin API accessible at `admin.bawes.localhost`
+- Admin API accessible at `admin.bawes.localhost:8321`
 
 **Commands:**
 ```bash

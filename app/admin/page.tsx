@@ -2,26 +2,33 @@ import Link from 'next/link';
 
 async function getStats() {
   const token = process.env.ADMIN_API_TOKEN;
-  const baseUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3333';
+  // Use internal URL for server-side requests (avoid Traefik loop)
+  // In Docker, use localhost; on host, use localhost:3333
+  const baseUrl = process.env.NEXT_PUBLIC_API_URL?.replace('admin.bawes.localhost', 'localhost:3333') || 'http://localhost:3333';
   
   try {
     const [universes, worlds, rooms, users] = await Promise.all([
       fetch(`${baseUrl}/api/admin/universes?limit=1`, {
         headers: { Authorization: `Bearer ${token}` },
         cache: 'no-store',
-      }).then(r => r.json()),
+        // Add timeout to prevent hanging
+        signal: AbortSignal.timeout(5000),
+      }).then(r => r.json()).catch(() => ({ pagination: { total: 0 } })),
       fetch(`${baseUrl}/api/admin/worlds?limit=1`, {
         headers: { Authorization: `Bearer ${token}` },
         cache: 'no-store',
-      }).then(r => r.json()),
+        signal: AbortSignal.timeout(5000),
+      }).then(r => r.json()).catch(() => ({ pagination: { total: 0 } })),
       fetch(`${baseUrl}/api/admin/rooms?limit=1`, {
         headers: { Authorization: `Bearer ${token}` },
         cache: 'no-store',
-      }).then(r => r.json()),
+        signal: AbortSignal.timeout(5000),
+      }).then(r => r.json()).catch(() => ({ pagination: { total: 0 } })),
       fetch(`${baseUrl}/api/admin/users?limit=1`, {
         headers: { Authorization: `Bearer ${token}` },
         cache: 'no-store',
-      }).then(r => r.json()),
+        signal: AbortSignal.timeout(5000),
+      }).then(r => r.json()).catch(() => ({ pagination: { total: 0 } })),
     ]);
     
     return {
