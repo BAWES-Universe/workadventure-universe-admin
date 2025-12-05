@@ -1,5 +1,5 @@
 # Development Dockerfile for Admin API
-# Used if you want to run Admin API in Docker (alternative to running on host)
+# Runs behind Traefik at admin.workadventure.localhost
 
 FROM node:20-alpine
 
@@ -11,12 +11,13 @@ COPY package*.json ./
 # Install dependencies
 RUN npm install
 
-# Copy source code
+# Copy source code (will be overridden by volume mount, but needed for initial build)
 COPY . .
 
-# Expose port
+# Expose port (used by Traefik)
 EXPOSE 3333
 
 # Start development server
+# Next.js dev server binds to 0.0.0.0 by default in Docker
 CMD ["npm", "run", "dev"]
 

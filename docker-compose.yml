@@ -1,7 +1,6 @@
 # Docker Compose for Admin API Development
-# This file provides a PostgreSQL database for local development
-# The Admin API itself runs on the host machine (not in Docker)
-# to easily connect to WorkAdventure's OIDC mock
+# Runs behind Traefik at admin.workadventure.localhost
+# Uses default Docker Compose network (no explicit network config needed)
 
 version: '3.8'
 
@@ -10,18 +9,44 @@ services:
     image: postgres:15-alpine
     container_name: admin-api-postgres
     environment:
-      POSTGRES_USER: workadventure
-      POSTGRES_PASSWORD: workadventure
-      POSTGRES_DB: workadventure_admin
-    ports:
-      - "5432:5432"
+      POSTGRES_USER: ${DB_USER:-workadventure}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-workadventure}
+      POSTGRES_DB: ${DB_NAME:-workadventure_admin}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U workadventure"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-workadventure}"]
       interval: 5s
       timeout: 5s
       retries: 5
+
+  admin-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: admin-api-dev
+    environment:
+      # Database connection using service name (Docker Compose default network)
+      DATABASE_URL: postgresql://${DB_USER:-workadventure}:${DB_PASSWORD:-workadventure}@postgres:5432/${DB_NAME:-workadventure_admin}
+      ADMIN_API_TOKEN: ${ADMIN_API_TOKEN:-123}
+      OIDC_ISSUER: ${OIDC_ISSUER:-http://oidc.workadventure.localhost}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-authorization-code-client-id}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-authorization-code-client-secret}
+      NODE_ENV: development
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://admin.workadventure.localhost}
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/.next
+    depends_on:
+      postgres:
+        condition: service_healthy
+    labels:
+      # Traefik configuration
+      - "traefik.enable=true"
+      - "traefik.http.routers.admin-api.rule=Host(`admin.workadventure.localhost`)"
+      - "traefik.http.routers.admin-api.entrypoints=web"
+      - "traefik.http.services.admin-api.loadbalancer.server.port=3333"
 
 volumes:
   postgres_data:
