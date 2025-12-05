@@ -10,16 +10,19 @@
   },
   "dependencies": {
     "@prisma/client": "^7.1.0",
+    "ioredis": "^5.8.2",
+    "lru-cache": "^11.2.4",
     "next": "16.0.7",
     "openid-client": "^6.8.1",
     "prisma": "^7.1.0",
     "react": "19.2.0",
     "react-dom": "19.2.0",
+    "redis": "^5.10.0",
     "zod": "^4.1.13"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
-    "@types/node": "^20",
+    "@types/node": "^20.19.25",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
