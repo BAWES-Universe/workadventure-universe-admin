@@ -1,6 +1,6 @@
 # Docker Compose for Admin API Development
-# Runs behind Traefik at admin.workadventure.localhost
-# Uses default Docker Compose network (no explicit network config needed)
+# Runs behind Traefik at admin.bawes.localhost
+# Includes its own Traefik instance to discover services on this network
 
 version: '3.8'
 
@@ -33,7 +33,7 @@ services:
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-authorization-code-client-id}
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-authorization-code-client-secret}
       NODE_ENV: development
-      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://admin.workadventure.localhost}
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://admin.bawes.localhost}
     volumes:
       - .:/app
       - /app/node_modules
@@ -44,9 +44,29 @@ services:
     labels:
       # Traefik configuration
       - "traefik.enable=true"
-      - "traefik.http.routers.admin-api.rule=Host(`admin.workadventure.localhost`)"
+      - "traefik.http.routers.admin-api.rule=Host(`admin.bawes.localhost`)"
       - "traefik.http.routers.admin-api.entrypoints=web"
       - "traefik.http.services.admin-api.loadbalancer.server.port=3333"
+
+  traefik:
+    image: traefik:v3.6.1
+    command:
+      - --api.dashboard=true
+      - --api.insecure=true
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=workadventure-universe-admin_default
+      - --entrypoints.web.address=:80
+    ports:
+      - "${TRAEFIK_PORT:-8321}:80"
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.traefik-dashboard.rule=Host(`traefik-admin.bawes.localhost`)
+      - traefik.http.routers.traefik-dashboard.service=api@internal
+      - traefik.http.routers.traefik-dashboard.entrypoints=web
 
 volumes:
   postgres_data:

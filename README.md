@@ -17,44 +17,75 @@ This Admin API integrates with WorkAdventure to provide:
 ### Prerequisites
 
 - Node.js 18+ and npm/yarn/pnpm
-- PostgreSQL database
+- Docker and Docker Compose
 - WorkAdventure instance running (for OIDC mock in development)
 
 ### Setup
 
-1. **Install dependencies:**
+1. **Configure hosts file** (required for local development):
+   
+   Add the following entries to your hosts file to enable local domain routing:
+   
+   **Linux/macOS** (`/etc/hosts`):
+   ```bash
+   sudo nano /etc/hosts
+   ```
+   
+   **Windows** (`C:\Windows\System32\drivers\etc\hosts` - run as Administrator):
+   ```powershell
+   notepad C:\Windows\System32\drivers\etc\hosts
+   ```
+   
+   Add these lines:
+   ```
+   127.0.0.1    admin.bawes.localhost
+   127.0.0.1    traefik-admin.bawes.localhost
+   ```
+   
+   **Note**: If you're using WorkAdventure's OIDC mock, you may also need:
+   ```
+   127.0.0.1    oidc.workadventure.localhost
+   127.0.0.1    play.workadventure.localhost
+   ```
+
+2. **Install dependencies:**
    ```bash
    npm install
    ```
 
-2. **Set up environment variables:**
+3. **Set up environment variables:**
    ```bash
-   cp .env.example .env.local
+   cp .env.example .env
    ```
    
-   Edit `.env.local` with your configuration:
+   Edit `.env` with your configuration:
+   - `DB_USER`, `DB_PASSWORD`, `DB_NAME` - Database credentials
    - `ADMIN_API_TOKEN` - Must match WorkAdventure's ADMIN_API_TOKEN
    - `OIDC_ISSUER` - OIDC provider URL (use WorkAdventure's OIDC mock for dev)
-   - `DATABASE_URL` - PostgreSQL connection string
+   - `DATABASE_URL` - PostgreSQL connection string (auto-constructed from DB_* vars in Docker)
 
-3. **Set up database:**
+4. **Start services with Docker Compose:**
    ```bash
-   # Start PostgreSQL (using docker-compose)
-   docker-compose up -d postgres
+   docker-compose up
+   ```
    
-   # Generate Prisma Client
-   npx prisma generate
+   This will start:
+   - PostgreSQL database
+   - Admin API (Next.js) behind Traefik
+   - Traefik reverse proxy
+
+5. **Initialize database:**
+   ```bash
+   # Run migrations (from inside the container or using npm scripts)
+   docker-compose exec admin-api npx prisma migrate dev --name init
    
-   # Run migrations
-   npx prisma migrate dev --name init
+   # Or use the npm script (from host)
+   npm run db:migrate
    ```
 
-4. **Start development server:**
-   ```bash
-   npm run dev
-   ```
-
-The API will be available at `http://localhost:3333`.
+The Admin API will be available at:
+- **Admin Interface**: http://admin.bawes.localhost
+- **Traefik Dashboard**: http://traefik-admin.bawes.localhost
 
 ## Admin Interface
 
@@ -62,19 +93,22 @@ This project includes a web-based admin interface for managing universes, worlds
 
 ### Accessing the Admin Interface
 
-1. **Start the development server**:
+1. **Start services**:
    ```bash
-   npm run dev
+   docker-compose up
    ```
 
-2. **Login with OIDC**:
-   - Go to `http://localhost:3333/admin/login`
+2. **Access the admin interface**:
+   - Go to http://admin.bawes.localhost/admin/login
    - Get an OIDC access token from WorkAdventure (see [OIDC Authentication Testing](./docs/testing/oidc-authentication.md))
    - Paste the token and sign in
 
 3. **Alternative: Admin Token** (for API testing):
    - API endpoints can use `ADMIN_API_TOKEN` for direct access
    - Web interface uses OIDC sessions for user-specific content
+
+4. **View Traefik dashboard** (optional):
+   - Go to http://traefik-admin.bawes.localhost to see routing information
 
 ### Admin Features
 
@@ -207,7 +241,7 @@ Authorization: Bearer {ADMIN_API_TOKEN}
    - In WorkAdventure's environment variables, set:
      ```env
      ADMIN_API_TOKEN=your-secret-token-here-change-in-production
-     ADMIN_API_URL=http://localhost:3333
+     ADMIN_API_URL=http://admin.bawes.localhost
      ```
 
 #### Testing with cURL
@@ -215,27 +249,28 @@ Authorization: Bearer {ADMIN_API_TOKEN}
 ```bash
 # Set your token as a variable (replace with your actual token)
 export TOKEN="your-secret-token-here-change-in-production"
+BASE_URL="http://admin.bawes.localhost"
 
 # Test capabilities endpoint
 curl -H "Authorization: Bearer $TOKEN" \
-  http://localhost:3333/api/capabilities
+  $BASE_URL/api/capabilities
 
 # Test map endpoint
 curl -H "Authorization: Bearer $TOKEN" \
-  "http://localhost:3333/api/map?playUri=http://play.workadventure.localhost/@/universe/world/room"
+  "$BASE_URL/api/map?playUri=http://play.workadventure.localhost/@/universe/world/room"
 
 # Test room access endpoint
 curl -H "Authorization: Bearer $TOKEN" \
-  "http://localhost:3333/api/room/access?userIdentifier=test-user&playUri=http://play.workadventure.localhost/@/universe/world/room&ipAddress=127.0.0.1"
+  "$BASE_URL/api/room/access?userIdentifier=test-user&playUri=http://play.workadventure.localhost/@/universe/world/room&ipAddress=127.0.0.1"
 
 # Test without token (should return 401)
-curl http://localhost:3333/api/capabilities
+curl $BASE_URL/api/capabilities
 ```
 
 #### Testing with Postman
 
 1. **Create a new request**
-2. **Set the URL**: `http://localhost:3333/api/capabilities`
+2. **Set the URL**: `http://admin.bawes.localhost/api/capabilities`
 3. **Go to the "Authorization" tab**
 4. **Select "Bearer Token" type**
 5. **Enter your token**: `your-secret-token-here-change-in-production`
@@ -249,11 +284,11 @@ You can also set the token in the Headers tab:
 
 1. **Ensure WorkAdventure is configured**:
    ```env
-   ADMIN_API_URL=http://localhost:3333 
-   // If WorkAdventure is running in Docker, use:
-   ADMIN_API_URL=http://host.docker.internal:3333
+   ADMIN_API_URL=http://admin.bawes.localhost
    ADMIN_API_TOKEN=your-secret-token-here-change-in-production
    ```
+   
+   **Note**: Since both services run behind Traefik, WorkAdventure can access the Admin API via the domain name if both are on the same network, or via the Traefik port if needed.
 
 2. **Start WorkAdventure** (if not already running)
 
@@ -263,7 +298,10 @@ You can also set the token in the Headers tab:
 
 4. **Check your API logs** to see incoming requests:
    ```bash
-   # Your Next.js dev server will show logs like:
+   # View logs from Docker
+   docker-compose logs -f admin-api
+   
+   # Or if running on host, your Next.js dev server will show logs like:
    # GET /api/map 200 in 45ms
    # GET /api/room/access 200 in 23ms
    ```
@@ -277,7 +315,7 @@ Create a test script to verify all endpoints:
 # test-api.sh
 
 TOKEN="${ADMIN_API_TOKEN:-your-secret-token-here-change-in-production}"
-BASE_URL="http://localhost:3333"
+BASE_URL="http://admin.bawes.localhost"
 
 echo "Testing Admin API with token: $TOKEN"
 echo ""
@@ -312,8 +350,10 @@ Save as `test-api.sh`, make it executable (`chmod +x test-api.sh`), and run it.
 - Ensure there are no extra spaces in the token
 
 **Connection Refused**:
-- Make sure the dev server is running: `npm run dev`
-- Check the API is accessible at `http://localhost:3333`
+- Make sure services are running: `docker-compose ps`
+- Check the API is accessible at `http://admin.bawes.localhost`
+- Verify hosts file is configured correctly (see Setup step 1)
+- Check Traefik is running: `docker-compose logs traefik`
 
 **Token Mismatch with WorkAdventure**:
 - Ensure both WorkAdventure and Admin API use the same `ADMIN_API_TOKEN`

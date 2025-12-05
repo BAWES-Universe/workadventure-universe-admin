@@ -16,7 +16,14 @@
     "test:full": "./scripts/run-full-test.sh",
     "setup": "./scripts/setup-and-test.sh",
     "fix:prisma": "./scripts/fix-prisma.sh",
-    "postinstall": "prisma generate"
+    "postinstall": "prisma generate",
+    "db:generate-url": "bash -c 'source scripts/generate-database-url.sh && echo $DATABASE_URL'",
+    "db:migrate": "bash -c 'source scripts/generate-database-url.sh && npx prisma migrate dev'",
+    "db:migrate:deploy": "bash -c 'source scripts/generate-database-url.sh && npx prisma migrate deploy'",
+    "db:studio": "bash -c 'source scripts/generate-database-url.sh && npx prisma studio'",
+    "db:generate": "bash -c 'source scripts/generate-database-url.sh && npx prisma generate'",
+    "db:push": "bash -c 'source scripts/generate-database-url.sh && npx prisma db push'",
+    "db:reset": "bash -c 'source scripts/generate-database-url.sh && npx prisma migrate reset'"
   },
   "dependencies": {
     "@prisma/client": "^6.19.0",
