@@ -56,6 +56,34 @@ This Admin API integrates with WorkAdventure to provide:
 
 The API will be available at `http://localhost:3000`.
 
+## Admin Interface
+
+This project includes a web-based admin interface for managing universes, worlds, rooms, and users.
+
+### Accessing the Admin Interface
+
+1. **Start the development server**:
+   ```bash
+   npm run dev
+   ```
+
+2. **Open your browser**:
+   ```
+   http://localhost:3000/admin
+   ```
+
+3. **Authentication**: When prompted, enter your `ADMIN_API_TOKEN` from `.env.local`
+
+### Admin Features
+
+- **Dashboard**: Overview of all entities with statistics
+- **Universes**: Create and manage universes (top-level containers)
+- **Worlds**: Create and manage worlds within universes
+- **Rooms**: Create and manage rooms within worlds
+- **Users**: View and manage users
+
+See [ADMIN-GUIDE.md](./ADMIN-GUIDE.md) for complete documentation on using the admin interface.
+
 ## Project Structure
 
 ```
@@ -151,17 +179,141 @@ npx prisma studio
 
 ### Testing
 
-Test endpoints using curl:
+#### Authentication Overview
+
+This API uses **Bearer token authentication**. All requests must include the `ADMIN_API_TOKEN` in the Authorization header:
+
+```
+Authorization: Bearer {ADMIN_API_TOKEN}
+```
+
+**Important**: The `ADMIN_API_TOKEN` must match the token configured in your WorkAdventure instance. This is a shared secret between WorkAdventure and your Admin API.
+
+#### Getting Your Token
+
+1. **Check your `.env.local` file**:
+   ```bash
+   cat .env.local | grep ADMIN_API_TOKEN
+   ```
+
+2. **If not set, add it**:
+   ```env
+   ADMIN_API_TOKEN=your-secret-token-here-change-in-production
+   ```
+
+3. **Make sure WorkAdventure uses the same token**:
+   - In WorkAdventure's environment variables, set:
+     ```env
+     ADMIN_API_TOKEN=your-secret-token-here-change-in-production
+     ADMIN_API_URL=http://localhost:3000
+     ```
+
+#### Testing with cURL
 
 ```bash
+# Set your token as a variable (replace with your actual token)
+export TOKEN="your-secret-token-here-change-in-production"
+
 # Test capabilities endpoint
-curl -H "Authorization: Bearer your-token" \
+curl -H "Authorization: Bearer $TOKEN" \
   http://localhost:3000/api/capabilities
 
 # Test map endpoint
-curl -H "Authorization: Bearer your-token" \
+curl -H "Authorization: Bearer $TOKEN" \
   "http://localhost:3000/api/map?playUri=http://play.workadventure.localhost/@/universe/world/room"
+
+# Test room access endpoint
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:3000/api/room/access?userIdentifier=test-user&playUri=http://play.workadventure.localhost/@/universe/world/room&ipAddress=127.0.0.1"
+
+# Test without token (should return 401)
+curl http://localhost:3000/api/capabilities
 ```
+
+#### Testing with Postman
+
+1. **Create a new request**
+2. **Set the URL**: `http://localhost:3000/api/capabilities`
+3. **Go to the "Authorization" tab**
+4. **Select "Bearer Token" type**
+5. **Enter your token**: `your-secret-token-here-change-in-production`
+6. **Send the request**
+
+You can also set the token in the Headers tab:
+- Key: `Authorization`
+- Value: `Bearer your-secret-token-here-change-in-production`
+
+#### Testing with WorkAdventure Integration
+
+1. **Ensure WorkAdventure is configured**:
+   ```env
+   ADMIN_API_URL=http://localhost:3000
+   ADMIN_API_TOKEN=your-secret-token-here-change-in-production
+   ```
+
+2. **Start WorkAdventure** (if not already running)
+
+3. **Access a room** in WorkAdventure:
+   - Open `http://play.workadventure.localhost/@/universe/world/room`
+   - WorkAdventure will automatically call your Admin API endpoints
+
+4. **Check your API logs** to see incoming requests:
+   ```bash
+   # Your Next.js dev server will show logs like:
+   # GET /api/map 200 in 45ms
+   # GET /api/room/access 200 in 23ms
+   ```
+
+#### Quick Test Script
+
+Create a test script to verify all endpoints:
+
+```bash
+#!/bin/bash
+# test-api.sh
+
+TOKEN="${ADMIN_API_TOKEN:-your-secret-token-here-change-in-production}"
+BASE_URL="http://localhost:3000"
+
+echo "Testing Admin API with token: $TOKEN"
+echo ""
+
+# Test capabilities
+echo "1. Testing /api/capabilities..."
+curl -s -H "Authorization: Bearer $TOKEN" "$BASE_URL/api/capabilities" | jq .
+echo ""
+
+# Test map (adjust playUri as needed)
+echo "2. Testing /api/map..."
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "$BASE_URL/api/map?playUri=http://play.workadventure.localhost/@/universe/world/room" | jq .
+echo ""
+
+# Test room access
+echo "3. Testing /api/room/access..."
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "$BASE_URL/api/room/access?userIdentifier=test-user&playUri=http://play.workadventure.localhost/@/universe/world/room&ipAddress=127.0.0.1" | jq .
+echo ""
+
+echo "Done!"
+```
+
+Save as `test-api.sh`, make it executable (`chmod +x test-api.sh`), and run it.
+
+#### Common Issues
+
+**401 Unauthorized**:
+- Check that `ADMIN_API_TOKEN` is set in `.env.local`
+- Verify the token in the Authorization header matches exactly
+- Ensure there are no extra spaces in the token
+
+**Connection Refused**:
+- Make sure the dev server is running: `npm run dev`
+- Check the API is accessible at `http://localhost:3000`
+
+**Token Mismatch with WorkAdventure**:
+- Ensure both WorkAdventure and Admin API use the same `ADMIN_API_TOKEN`
+- Restart both services after changing the token
 
 ## Documentation
 

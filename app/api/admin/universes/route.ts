@@ -1,0 +1,155 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { requireAuth } from '@/lib/auth';
+import { prisma } from '@/lib/db';
+import { z } from 'zod';
+
+const createUniverseSchema = z.object({
+  slug: z.string().min(1).max(100),
+  name: z.string().min(1).max(200),
+  description: z.string().optional(),
+  ownerId: z.string().uuid(),
+  isPublic: z.boolean().default(true),
+  featured: z.boolean().default(false),
+  thumbnailUrl: z.string().url().optional().or(z.literal('')),
+});
+
+const updateUniverseSchema = createUniverseSchema.partial();
+
+// GET /api/admin/universes - List all universes
+export async function GET(request: NextRequest) {
+  try {
+    requireAuth(request);
+    
+    const { searchParams } = new URL(request.url);
+    const page = parseInt(searchParams.get('page') || '1');
+    const limit = parseInt(searchParams.get('limit') || '50');
+    const search = searchParams.get('search') || '';
+    
+    const where = search
+      ? {
+          OR: [
+            { name: { contains: search, mode: 'insensitive' as const } },
+            { slug: { contains: search, mode: 'insensitive' as const } },
+            { description: { contains: search, mode: 'insensitive' as const } },
+          ],
+        }
+      : {};
+    
+    const [universes, total] = await Promise.all([
+      prisma.universe.findMany({
+        where,
+        include: {
+          owner: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+            },
+          },
+          _count: {
+            select: {
+              worlds: true,
+              members: true,
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      prisma.universe.count({ where }),
+    ]);
+    
+    return NextResponse.json({
+      universes,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+      },
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Unauthorized') {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    console.error('Error fetching universes:', error);
+    return NextResponse.json(
+      { error: 'Internal server error' },
+      { status: 500 }
+    );
+  }
+}
+
+// POST /api/admin/universes - Create a new universe
+export async function POST(request: NextRequest) {
+  try {
+    requireAuth(request);
+    
+    const body = await request.json();
+    const data = createUniverseSchema.parse(body);
+    
+    // Check if slug already exists
+    const existing = await prisma.universe.findUnique({
+      where: { slug: data.slug },
+    });
+    
+    if (existing) {
+      return NextResponse.json(
+        { error: 'Universe with this slug already exists' },
+        { status: 409 }
+      );
+    }
+    
+    // Verify owner exists
+    const owner = await prisma.user.findUnique({
+      where: { id: data.ownerId },
+    });
+    
+    if (!owner) {
+      return NextResponse.json(
+        { error: 'Owner user not found' },
+        { status: 404 }
+      );
+    }
+    
+    const universe = await prisma.universe.create({
+      data: {
+        slug: data.slug,
+        name: data.name,
+        description: data.description || null,
+        ownerId: data.ownerId,
+        isPublic: data.isPublic,
+        featured: data.featured,
+        thumbnailUrl: data.thumbnailUrl || null,
+      },
+      include: {
+        owner: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+          },
+        },
+      },
+    });
+    
+    return NextResponse.json(universe, { status: 201 });
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Unauthorized') {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+    if (error instanceof z.ZodError) {
+      return NextResponse.json(
+        { error: 'Validation error', details: error.errors },
+        { status: 400 }
+      );
+    }
+    console.error('Error creating universe:', error);
+    return NextResponse.json(
+      { error: 'Internal server error' },
+      { status: 500 }
+    );
+  }
+}
+
