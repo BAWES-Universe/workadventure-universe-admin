@@ -11,7 +11,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-workadventure}"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-workadventure} -d ${DB_NAME:-workadventure_admin}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -42,8 +42,15 @@ services:
     labels:
       # Traefik configuration
       - "traefik.enable=true"
+      # Route for browser access (admin.bawes.localhost)
       - "traefik.http.routers.admin-api.rule=Host(`admin.bawes.localhost`)"
       - "traefik.http.routers.admin-api.entrypoints=web"
+      # Route for Docker internal access - path-based (works regardless of Host header)
+      - "traefik.http.routers.admin-api-internal.rule=PathPrefix(`/api`)"
+      - "traefik.http.routers.admin-api-internal.entrypoints=web"
+      - "traefik.http.routers.admin-api-internal.service=admin-api"
+      - "traefik.http.routers.admin-api-internal.priority=1"
+      # Shared service configuration
       - "traefik.http.services.admin-api.loadbalancer.server.port=3333"
 
   traefik:

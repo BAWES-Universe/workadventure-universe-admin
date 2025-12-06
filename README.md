@@ -86,6 +86,7 @@ This Admin API integrates with WorkAdventure to provide:
 The Admin API will be available at:
 - **Admin Interface**: http://admin.bawes.localhost:8321
 - **Traefik Dashboard**: http://traefik-admin.bawes.localhost:8321
+- **Workadventure Env ADMIN_API_URL**: http://host.docker.internal:8321
 
 **Note**: Port `8321` is required as Traefik is configured to run on this port (configurable via `TRAEFIK_PORT` in `.env`).
 
