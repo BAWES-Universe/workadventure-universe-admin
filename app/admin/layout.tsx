@@ -43,6 +43,7 @@ async function getSessionUser() {
 }
 
 export default async function AdminLayout({ children }: { children: ReactNode }) {
+  // Middleware handles authentication redirects, so we can safely get user here
   const user = await getSessionUser();
 
   return (
@@ -67,19 +68,7 @@ export default async function AdminLayout({ children }: { children: ReactNode })
                   href="/admin/universes"
                   className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
                 >
-                  My Universes
-                </Link>
-                <Link
-                  href="/admin/worlds"
-                  className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
-                >
-                  My Worlds
-                </Link>
-                <Link
-                  href="/admin/rooms"
-                  className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
-                >
-                  My Rooms
+                  Universes
                 </Link>
               </div>
             </div>
