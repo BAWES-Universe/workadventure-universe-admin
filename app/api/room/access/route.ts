@@ -62,36 +62,60 @@ export async function GET(request: NextRequest) {
     try {
       const { universe, world, room } = parsePlayUri(playUri);
       
-      // Authenticate user if access token provided
-      let authenticatedUser = null;
-      if (accessToken) {
-        authenticatedUser = await authenticateRequest(request);
-      }
+      // Authenticate user - always call authenticateRequest to get proper status
+      // It will return null (if Bearer token invalid) or an object with isAuthenticated flag
+      let authenticatedUser = await authenticateRequest(request);
+      
+      // Determine if this is a guest user (no authentication)
+      // Guest = no accessToken in query params OR authenticateRequest returned null OR isAuthenticated is false
+      // Note: authenticateRequest returns {isAuthenticated: false} when no accessToken is provided
+      const isGuest = !accessToken || !authenticatedUser || !authenticatedUser.isAuthenticated;
       
       // Find or create user
-      let user = await prisma.user.findFirst({
-        where: {
-          OR: [
-            { uuid: userIdentifier },
-            { email: userIdentifier },
-          ],
-        },
-      });
+      // First, try to find by authenticated user identifier (if authenticated)
+      let user = null;
+      if (authenticatedUser?.isAuthenticated && authenticatedUser.identifier) {
+        // For authenticated users, try to find by their OIDC identifier or email
+        user = await prisma.user.findFirst({
+          where: {
+            OR: [
+              { uuid: authenticatedUser.identifier },
+              { email: authenticatedUser.email || undefined },
+            ],
+          },
+        });
+      }
+      
+      // If not found and we have a userIdentifier, try that (for guest conversion)
+      if (!user) {
+        user = await prisma.user.findFirst({
+          where: {
+            OR: [
+              { uuid: userIdentifier },
+              { email: userIdentifier.includes('@') ? userIdentifier : undefined },
+            ],
+          },
+        });
+      }
       
       // Determine name: authenticated user name > query param name > existing name
       const userName = authenticatedUser?.name || name || null;
       // Determine email: authenticated user email > email from identifier > existing email
       const userEmail = authenticatedUser?.email || (userIdentifier.includes('@') ? userIdentifier : null);
       
+      // Determine final UUID: authenticated identifier > userIdentifier
+      const finalUuid = authenticatedUser?.identifier || userIdentifier;
+      
       if (!user) {
         // Create user if doesn't exist
         user = await prisma.user.create({
           data: {
-            uuid: userIdentifier,
+            uuid: finalUuid,
             email: userEmail,
             name: userName,
             matrixChatId: chatID || null,
             lastIpAddress: ipAddress || null,
+            isGuest: isGuest,
           },
         });
       } else {
@@ -101,7 +125,20 @@ export async function GET(request: NextRequest) {
           name?: string | null;
           matrixChatId?: string | null;
           lastIpAddress?: string | null;
+          isGuest?: boolean;
+          uuid?: string;
         } = {};
+        
+        // Always update isGuest status to reflect current authentication state
+        // This ensures the field is always accurate
+        if (user.isGuest !== isGuest) {
+          updateData.isGuest = isGuest;
+        }
+        
+        // If converting from guest to authenticated, update UUID if needed
+        if (user.isGuest && authenticatedUser?.isAuthenticated && authenticatedUser.identifier && authenticatedUser.identifier !== user.uuid) {
+          updateData.uuid = authenticatedUser.identifier;
+        }
         
         // Update email if we have a new one and current is null
         if (userEmail && !user.email) {
@@ -194,7 +231,7 @@ export async function GET(request: NextRequest) {
         return NextResponse.json(error, { status: 403 });
       }
       
-      // Get or create world membership
+      // Get or create world membership (only for authenticated users)
       let membership = await prisma.worldMember.findUnique({
         where: {
           userId_worldId: {
@@ -204,8 +241,10 @@ export async function GET(request: NextRequest) {
         },
       });
       
-      if (!membership) {
-        // Create membership with default tags
+      // Only create world membership for authenticated users
+      // Guest users can access rooms but don't get world memberships
+      if (!membership && authenticatedUser?.isAuthenticated) {
+        // Create membership with tags from authenticated user
         membership = await prisma.worldMember.create({
           data: {
             userId: user.id,
@@ -213,6 +252,18 @@ export async function GET(request: NextRequest) {
             tags: authenticatedUser?.tags || [],
           },
         });
+      }
+      
+      // For guests, create a temporary membership object for the response
+      // but don't store it in the database
+      if (!membership && isGuest) {
+        membership = {
+          id: '',
+          userId: user.id,
+          worldId: worldData.id,
+          tags: [],
+          joinedAt: new Date(),
+        } as any;
       }
       
       // Get play service URL for texture validation

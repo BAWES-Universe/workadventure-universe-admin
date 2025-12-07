@@ -41,7 +41,13 @@ export async function GET(request: NextRequest) {
     const [users, total] = await Promise.all([
       prisma.user.findMany({
         where,
-        include: {
+        select: {
+          id: true,
+          uuid: true,
+          email: true,
+          name: true,
+          isGuest: true,
+          createdAt: true,
           _count: {
             select: {
               ownedUniverses: true,

@@ -9,6 +9,7 @@ interface User {
   uuid: string;
   name: string | null;
   email: string | null;
+  isGuest: boolean;
   createdAt: string;
   _count: {
     ownedUniverses: number;
@@ -167,6 +168,9 @@ export default function UsersPage() {
                         UUID
                       </th>
                       <th className="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">
+                        Status
+                      </th>
+                      <th className="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">
                         Universes
                       </th>
                       <th className="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">
@@ -182,7 +186,7 @@ export default function UsersPage() {
                   </thead>
                   <tbody className="divide-y divide-gray-200 bg-white">
                     {users.map((user) => (
-                      <tr key={user.id}>
+                      <tr key={user.id} className={user.isGuest ? 'bg-gray-50' : ''}>
                         <td className="whitespace-nowrap py-4 pl-4 pr-3 text-sm font-medium text-gray-900 sm:pl-6">
                           {user.name || 'N/A'}
                         </td>
@@ -191,6 +195,17 @@ export default function UsersPage() {
                         </td>
                         <td className="whitespace-nowrap px-3 py-4 text-sm text-gray-500 font-mono text-xs">
                           {user.uuid}
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-4 text-sm">
+                          {user.isGuest ? (
+                            <span className="inline-flex items-center rounded-full bg-yellow-100 px-2.5 py-0.5 text-xs font-medium text-yellow-800">
+                              Guest
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-800">
+                              Authenticated
+                            </span>
+                          )}
                         </td>
                         <td className="whitespace-nowrap px-3 py-4 text-sm text-gray-500">
                           {user._count.ownedUniverses}

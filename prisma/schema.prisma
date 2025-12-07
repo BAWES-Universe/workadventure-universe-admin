@@ -14,6 +14,7 @@ model User {
   name         String?
   matrixChatId String?  @map("matrix_chat_id") // Matrix ID: "@user:matrix.org"
   lastIpAddress String? @map("last_ip_address") // Last known IP address
+  isGuest      Boolean  @default(false) @map("is_guest") // True for unauthenticated guest users
   createdAt    DateTime @default(now()) @map("created_at")
   updatedAt    DateTime @updatedAt @map("updated_at")
 
