@@ -1,11 +1,10 @@
 // Use dynamic import for openid-client (ESM-only package)
 // This avoids build issues with Next.js/Turbopack
-type Client = any;
-type Issuer = any;
+// openid-client v6+ uses a new API with discovery() and fetchUserInfo()
+type Configuration = any;
 type UserInfoResponse = any;
 
-let oidcClient: Client | null = null;
-let issuer: Issuer | null = null;
+let oidcConfig: Configuration | null = null;
 let openidClientModule: any = null;
 
 /**
@@ -19,24 +18,16 @@ async function getOpenIdClientModule() {
 }
 
 /**
- * Gets or creates the OIDC client instance
+ * Gets or creates the OIDC configuration
  */
-export async function getOidcClient(): Promise<Client> {
-  if (oidcClient) {
-    return oidcClient;
+export async function getOidcConfig(): Promise<Configuration> {
+  if (oidcConfig) {
+    return oidcConfig;
   }
   
   const issuerUrl = process.env.OIDC_ISSUER;
   if (!issuerUrl) {
     throw new Error('OIDC_ISSUER not configured');
-  }
-  
-  // Dynamically import openid-client
-  const { Issuer } = await getOpenIdClientModule();
-  
-  // Discover issuer if not already discovered
-  if (!issuer) {
-    issuer = await Issuer.discover(issuerUrl);
   }
   
   const clientId = process.env.OIDC_CLIENT_ID;
@@ -46,12 +37,25 @@ export async function getOidcClient(): Promise<Client> {
     throw new Error('OIDC_CLIENT_ID and OIDC_CLIENT_SECRET must be configured');
   }
   
-  oidcClient = new issuer.Client({
-    client_id: clientId,
-    client_secret: clientSecret,
-  });
+  // Dynamically import openid-client
+  const module = await getOpenIdClientModule();
   
-  return oidcClient;
+  // openid-client v6+ uses discovery() function instead of Issuer.discover()
+  const { discovery, ClientSecretPost } = module;
+  
+  if (!discovery) {
+    throw new Error('Failed to import discovery from openid-client. Available exports: ' + Object.keys(module).slice(0, 10).join(', '));
+  }
+  
+  // Discover and create configuration
+  oidcConfig = await discovery(
+    new URL(issuerUrl),
+    clientId,
+    undefined, // client metadata (optional)
+    ClientSecretPost(clientSecret), // client authentication
+  );
+  
+  return oidcConfig;
 }
 
 /**
@@ -59,8 +63,33 @@ export async function getOidcClient(): Promise<Client> {
  */
 export async function validateAccessToken(token: string): Promise<UserInfoResponse | null> {
   try {
-    const client = await getOidcClient();
-    const userInfo = await client.userinfo(token);
+    const config = await getOidcConfig();
+    const module = await getOpenIdClientModule();
+    const { fetchUserInfo, skipSubjectCheck } = module;
+    
+    if (!fetchUserInfo) {
+      throw new Error('Failed to import fetchUserInfo from openid-client');
+    }
+    
+    // Decode token to get subject for validation
+    let subject: string | typeof skipSubjectCheck = skipSubjectCheck;
+    try {
+      const parts = token.split('.');
+      if (parts.length === 3) {
+        const payload = parts[1];
+        const padded = payload + '='.repeat((4 - (payload.length % 4)) % 4);
+        const decoded = JSON.parse(Buffer.from(padded, 'base64url').toString());
+        if (decoded.sub) {
+          subject = decoded.sub;
+        }
+      }
+    } catch (e) {
+      // If we can't decode, use skipSubjectCheck
+      console.warn('Could not decode token to get subject, skipping subject check');
+    }
+    
+    // Fetch user info using the new v6 API
+    const userInfo = await fetchUserInfo(config, token, subject);
     return userInfo;
   } catch (error) {
     console.error('Token validation failed:', error);
