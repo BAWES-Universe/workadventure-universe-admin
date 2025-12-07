@@ -3,6 +3,7 @@ import { requireAuth, getClientIp } from '@/lib/auth';
 import { parsePlayUri } from '@/lib/utils';
 import { authenticateRequest } from '@/lib/oidc';
 import { prisma } from '@/lib/db';
+import { validateWokaTextures, validateCompanionTexture } from '@/lib/wokas';
 import type { FetchMemberDataByUuidSuccessResponse, ErrorApiData } from '@/types/workadventure';
 
 export async function GET(request: NextRequest) {
@@ -14,6 +15,14 @@ export async function GET(request: NextRequest) {
     const playUri = searchParams.get('playUri');
     const ipAddress = searchParams.get('ipAddress') || getClientIp(request);
     const accessToken = searchParams.get('accessToken');
+    const chatID = searchParams.get('chatID');
+    
+    // Extract characterTextureIds - can be array or single value
+    // Handle array query params (Next.js may send as multiple params)
+    const allTextureIds = searchParams.getAll('characterTextureIds');
+    const textureIds = allTextureIds.length > 0 ? allTextureIds : [];
+    
+    const companionTextureId = searchParams.get('companionTextureId');
     
     if (!userIdentifier || !playUri) {
       const error: ErrorApiData = {
@@ -140,7 +149,19 @@ export async function GET(request: NextRequest) {
         });
       }
       
-      // Get user avatar
+      // Get play service URL for texture validation
+      const playServiceUrl = process.env.PLAY_URL || 'http://play.workadventure.localhost';
+      
+      // Validate character textures against available Wokas
+      const textureValidation = await validateWokaTextures(textureIds, playServiceUrl);
+      
+      // Validate companion texture if provided
+      const companionValidation = await validateCompanionTexture(
+        companionTextureId,
+        playServiceUrl
+      );
+      
+      // Get user avatar (for fallback or additional data)
       const avatar = await prisma.userAvatar.findUnique({
         where: {
           userId_worldId: {
@@ -150,6 +171,34 @@ export async function GET(request: NextRequest) {
         },
       });
       
+      // If textures are invalid and we have stored avatar textures, use them as fallback
+      let finalTextures = textureValidation.textures;
+      let isTexturesValid = textureValidation.valid;
+      
+      if (!isTexturesValid && avatar?.textureIds && avatar.textureIds.length > 0) {
+        // Try to validate stored textures as fallback
+        const fallbackValidation = await validateWokaTextures(avatar.textureIds, playServiceUrl);
+        if (fallbackValidation.valid) {
+          finalTextures = fallbackValidation.textures;
+          isTexturesValid = true;
+        }
+      }
+      
+      // Handle companion texture - use stored one if provided one is invalid
+      let finalCompanionTexture = companionValidation.texture;
+      let isCompanionValid = companionValidation.valid;
+      
+      if (!isCompanionValid && avatar?.companionTextureId) {
+        const fallbackCompanion = await validateCompanionTexture(
+          avatar.companionTextureId,
+          playServiceUrl
+        );
+        if (fallbackCompanion.valid) {
+          finalCompanionTexture = fallbackCompanion.texture;
+          isCompanionValid = true;
+        }
+      }
+      
       // Build response
       const response: FetchMemberDataByUuidSuccessResponse = {
         status: "ok",
@@ -158,24 +207,17 @@ export async function GET(request: NextRequest) {
         userUuid: user.uuid,
         tags: membership.tags,
         visitCardUrl: null,
-        isCharacterTexturesValid: !!avatar && avatar.textureIds.length > 0,
-        characterTextures: avatar?.textureIds.map((id: string) => ({
-          id,
-          url: `https://example.com/wokas/${id}.png`, // TODO: Replace with actual URL
-          layer: [],
-        })) || [],
-        isCompanionTextureValid: !!avatar?.companionTextureId,
-        companionTexture: avatar?.companionTextureId ? {
-          id: avatar.companionTextureId,
-          url: `https://example.com/companions/${avatar.companionTextureId}.png`, // TODO: Replace with actual URL
-        } : null,
+        isCharacterTexturesValid: isTexturesValid,
+        characterTextures: finalTextures,
+        isCompanionTextureValid: isCompanionValid,
+        companionTexture: finalCompanionTexture,
         messages: [],
         userRoomToken: "",
         activatedInviteUser: true,
         applications: [],
         canEdit: membership.tags.includes('editor') || membership.tags.includes('admin'),
         world: world,
-        chatID: user.matrixChatId || undefined,
+        chatID: chatID || user.matrixChatId || undefined,
       };
       
       return NextResponse.json(response);
