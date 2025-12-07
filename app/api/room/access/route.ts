@@ -4,6 +4,7 @@ import { parsePlayUri } from '@/lib/utils';
 import { authenticateRequest } from '@/lib/oidc';
 import { prisma } from '@/lib/db';
 import { validateWokaTextures, validateCompanionTexture } from '@/lib/wokas';
+import { notifyRoomAccess } from '@/lib/discord';
 import type { FetchMemberDataByUuidSuccessResponse, ErrorApiData } from '@/types/workadventure';
 
 export async function GET(request: NextRequest) {
@@ -336,6 +337,22 @@ export async function GET(request: NextRequest) {
         world: world,
         chatID: chatID || user.matrixChatId || undefined,
       };
+      
+      // Send Discord webhook notification (non-blocking)
+      notifyRoomAccess({
+        userName: user.name,
+        userEmail: user.email,
+        userUuid: user.uuid,
+        isGuest: user.isGuest,
+        playUri: playUri,
+        universe: universe,
+        world: world,
+        room: room,
+        ipAddress: ipAddress,
+      }).catch((error) => {
+        // Log but don't fail the request if webhook fails
+        console.error('Failed to send Discord webhook:', error);
+      });
       
       return NextResponse.json(response);
     } catch (parseError) {
