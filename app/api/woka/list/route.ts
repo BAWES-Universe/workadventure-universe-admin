@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
+
 import { requireAuth } from '@/lib/auth';
+
 import { parsePlayUri } from '@/lib/utils';
+
 import { prisma } from '@/lib/db';
+
 import type { WokaList } from '@/types/workadventure';
 
 export async function GET(request: NextRequest) {
@@ -19,25 +23,61 @@ export async function GET(request: NextRequest) {
       );
     }
     
-    // Default Woka list - you can customize this based on your needs
+    // Get your play service URL (or use WorkAdventure CDN)
+    const playServiceUrl = process.env.PLAY_URL || 'http://play.workadventure.localhost';
+    
     const wokaList: WokaList = {
-      collections: [
-        {
-          name: "Default",
-          textures: [
-            {
-              id: "male1",
-              url: "https://example.com/wokas/male1.png",
-              layer: [],
-            },
-            {
-              id: "female1",
-              url: "https://example.com/wokas/female1.png",
-              layer: [],
-            },
-          ],
-        },
-      ],
+      woka: {
+        collections: [
+          {
+            name: "Default",
+            textures: [
+              {
+                id: "male1",
+                name: "Male 1",
+                url: `${playServiceUrl}/resources/characters/pipoya/Male 01-1.png`,
+                layer: [],
+              },
+              {
+                id: "male2",
+                name: "Male 2",
+                url: `${playServiceUrl}/resources/characters/pipoya/Male 02-2.png`,
+                layer: [],
+              },
+              {
+                id: "female1",
+                name: "Female 1",
+                url: `${playServiceUrl}/resources/characters/pipoya/Female 01-1.png`,
+                layer: [],
+              },
+              {
+                id: "female2",
+                name: "Female 2",
+                url: `${playServiceUrl}/resources/characters/pipoya/Female 02-2.png`,
+                layer: [],
+              },
+            ],
+          },
+        ],
+      },
+      body: {
+        collections: [],
+      },
+      eyes: {
+        collections: [],
+      },
+      hair: {
+        collections: [],
+      },
+      clothes: {
+        collections: [],
+      },
+      hat: {
+        collections: [],
+      },
+      accessory: {
+        collections: [],
+      },
     };
     
     return NextResponse.json(wokaList);

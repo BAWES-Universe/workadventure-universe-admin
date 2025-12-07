@@ -80,7 +80,27 @@ export type ShortMapDescriptionList = ShortMapDescription[];
 
 // Woka & Companion Types
 export interface WokaList {
-  collections: WokaCollection[];
+  woka: {
+    collections: WokaCollection[];
+  };
+  body: {
+    collections: WokaCollection[];
+  };
+  eyes: {
+    collections: WokaCollection[];
+  };
+  hair: {
+    collections: WokaCollection[];
+  };
+  clothes: {
+    collections: WokaCollection[];
+  };
+  hat: {
+    collections: WokaCollection[];
+  };
+  accessory: {
+    collections: WokaCollection[];
+  };
 }
 
 export interface WokaCollection {
@@ -90,6 +110,7 @@ export interface WokaCollection {
 
 export interface WokaDetail {
   id: string;
+  name?: string;
   url: string;
   layer: unknown[];
 }

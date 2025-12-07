@@ -3,6 +3,7 @@ import { z } from 'zod';
 // Woka & Companion Schemas
 export const WokaDetailSchema = z.object({
   id: z.string(),
+  name: z.string().optional(),
   url: z.string(),
   layer: z.array(z.unknown()),
 });
@@ -18,7 +19,27 @@ export const WokaCollectionSchema = z.object({
 });
 
 export const WokaListSchema = z.object({
-  collections: z.array(WokaCollectionSchema),
+  woka: z.object({
+    collections: z.array(WokaCollectionSchema),
+  }),
+  body: z.object({
+    collections: z.array(WokaCollectionSchema),
+  }),
+  eyes: z.object({
+    collections: z.array(WokaCollectionSchema),
+  }),
+  hair: z.object({
+    collections: z.array(WokaCollectionSchema),
+  }),
+  clothes: z.object({
+    collections: z.array(WokaCollectionSchema),
+  }),
+  hat: z.object({
+    collections: z.array(WokaCollectionSchema),
+  }),
+  accessory: z.object({
+    collections: z.array(WokaCollectionSchema),
+  }),
 });
 
 export const CompanionTextureCollectionSchema = z.object({

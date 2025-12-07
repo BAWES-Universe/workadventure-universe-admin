@@ -255,11 +255,31 @@ interface ShortMapDescription {
 
 ### WokaList
 
-Collection of Woka (avatar) textures.
+Collection of Woka (avatar) textures following WorkAdventure standard structure.
 
 ```typescript
 interface WokaList {
-  collections: WokaCollection[];
+  woka: {
+    collections: WokaCollection[];
+  };
+  body: {
+    collections: WokaCollection[];
+  };
+  eyes: {
+    collections: WokaCollection[];
+  };
+  hair: {
+    collections: WokaCollection[];
+  };
+  clothes: {
+    collections: WokaCollection[];
+  };
+  hat: {
+    collections: WokaCollection[];
+  };
+  accessory: {
+    collections: WokaCollection[];
+  };
 }
 
 interface WokaCollection {
@@ -271,23 +291,43 @@ interface WokaCollection {
 **Example:**
 ```json
 {
-  "collections": [
-    {
-      "name": "Default",
-      "textures": [
-        {
-          "id": "male1",
-          "url": "https://example.com/wokas/male1.png",
-          "layer": []
-        },
-        {
-          "id": "female1",
-          "url": "https://example.com/wokas/female1.png",
-          "layer": []
-        }
-      ]
-    }
-  ]
+  "woka": {
+    "collections": [
+      {
+        "name": "Default",
+        "textures": [
+          {
+            "id": "male1",
+            "name": "Male 1",
+            "url": "http://play.workadventure.localhost/resources/characters/pipoya/Male 01-1.png"
+          },
+          {
+            "id": "female1",
+            "name": "Female 1",
+            "url": "http://play.workadventure.localhost/resources/characters/pipoya/Female 01-1.png"
+          }
+        ]
+      }
+    ]
+  },
+  "body": {
+    "collections": []
+  },
+  "eyes": {
+    "collections": []
+  },
+  "hair": {
+    "collections": []
+  },
+  "clothes": {
+    "collections": []
+  },
+  "hat": {
+    "collections": []
+  },
+  "accessory": {
+    "collections": []
+  }
 }
 ```
 
@@ -298,6 +338,7 @@ Individual Woka texture.
 ```typescript
 interface WokaDetail {
   id: string;
+  name?: string;
   url: string;
   layer: unknown[];
 }
@@ -307,7 +348,8 @@ interface WokaDetail {
 ```json
 {
   "id": "male1",
-  "url": "https://example.com/wokas/male1.png",
+  "name": "Male 1",
+  "url": "http://play.workadventure.localhost/resources/characters/pipoya/Male 01-1.png",
   "layer": []
 }
 ```

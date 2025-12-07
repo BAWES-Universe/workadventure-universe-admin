@@ -598,20 +598,44 @@ export async function GET(request: NextRequest) {
     
     const { team, world } = parsePlayUri(roomUrl);
     
+    // Get your play service URL (or use WorkAdventure CDN)
+    const playServiceUrl = process.env.PLAY_URL || 'http://play.workadventure.localhost';
+    
     // Get user's available wokas
     const wokas = await getUserWokas(uuid, team, world);
     
     const result: WokaList = {
-      collections: [
-        {
-          name: "Default",
-          textures: wokas.map(woka => ({
-            id: woka.id,
-            url: woka.url,
-            layer: woka.layers || []
-          }))
-        }
-      ]
+      woka: {
+        collections: [
+          {
+            name: "Default",
+            textures: wokas.map(woka => ({
+              id: woka.id,
+              name: woka.name,
+              url: woka.url,
+              layer: woka.layers || []
+            }))
+          }
+        ]
+      },
+      body: {
+        collections: [],
+      },
+      eyes: {
+        collections: [],
+      },
+      hair: {
+        collections: [],
+      },
+      clothes: {
+        collections: [],
+      },
+      hat: {
+        collections: [],
+      },
+      accessory: {
+        collections: [],
+      },
     };
     
     return NextResponse.json(result);
