@@ -16,6 +16,8 @@ export async function GET(request: NextRequest) {
     const ipAddress = searchParams.get('ipAddress') || getClientIp(request);
     const accessToken = searchParams.get('accessToken');
     const chatID = searchParams.get('chatID');
+    // WorkAdventure may send name/username for guest users
+    const name = searchParams.get('name') || searchParams.get('username');
     
     // Extract characterTextureIds - handle both characterTextureIds and characterTextureIds[]
     // WorkAdventure may send as characterTextureIds[]=value1&characterTextureIds[]=value2
@@ -76,15 +78,58 @@ export async function GET(request: NextRequest) {
         },
       });
       
+      // Determine name: authenticated user name > query param name > existing name
+      const userName = authenticatedUser?.name || name || null;
+      // Determine email: authenticated user email > email from identifier > existing email
+      const userEmail = authenticatedUser?.email || (userIdentifier.includes('@') ? userIdentifier : null);
+      
       if (!user) {
         // Create user if doesn't exist
         user = await prisma.user.create({
           data: {
             uuid: userIdentifier,
-            email: authenticatedUser?.email || (userIdentifier.includes('@') ? userIdentifier : null),
-            name: authenticatedUser?.name || null,
+            email: userEmail,
+            name: userName,
+            matrixChatId: chatID || null,
+            lastIpAddress: ipAddress || null,
           },
         });
+      } else {
+        // Update existing user with new information if available
+        const updateData: {
+          email?: string | null;
+          name?: string | null;
+          matrixChatId?: string | null;
+          lastIpAddress?: string | null;
+        } = {};
+        
+        // Update email if we have a new one and current is null
+        if (userEmail && !user.email) {
+          updateData.email = userEmail;
+        }
+        
+        // Update name if we have a new one (prefer authenticated, then query param, keep existing if both null)
+        if (userName) {
+          updateData.name = userName;
+        }
+        
+        // Update matrix chat ID if provided (may change over time)
+        if (chatID) {
+          updateData.matrixChatId = chatID;
+        }
+        
+        // Always update IP address to track last known IP
+        if (ipAddress) {
+          updateData.lastIpAddress = ipAddress;
+        }
+        
+        // Only update if we have changes
+        if (Object.keys(updateData).length > 0) {
+          user = await prisma.user.update({
+            where: { id: user.id },
+            data: updateData,
+          });
+        }
       }
       
       // Find world
