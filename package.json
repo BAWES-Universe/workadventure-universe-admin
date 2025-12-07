@@ -23,7 +23,8 @@
     "db:studio": "docker exec -it admin-api-dev sh -c 'cd /app && HOST=0.0.0.0 npx prisma studio --port 5555 --browser none'",
     "db:generate": "docker exec admin-api-dev sh -c 'cd /app && npx prisma generate'",
     "db:push": "docker exec admin-api-dev sh -c 'cd /app && npx prisma db push'",
-    "db:reset": "docker exec admin-api-dev sh -c 'cd /app && npx prisma migrate reset'"
+    "db:reset": "docker exec admin-api-dev sh -c 'cd /app && npx prisma migrate reset'",
+    "db:seed": "docker exec admin-api-dev sh -c 'cd /app && npx prisma db seed'"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.1.0",
@@ -56,6 +57,10 @@
     "prisma": "^7.1.0",
     "tailwindcss": "^4",
     "ts-jest": "^29.4.6",
+    "tsx": "^4.19.2",
     "typescript": "^5"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
   }
 }

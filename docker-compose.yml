@@ -49,9 +49,11 @@ services:
       - "traefik.http.routers.admin-api-internal.rule=PathPrefix(`/api`)"
       - "traefik.http.routers.admin-api-internal.entrypoints=web"
       - "traefik.http.routers.admin-api-internal.service=admin-api"
-      - "traefik.http.routers.admin-api-internal.priority=1"
+      - "traefik.http.routers.admin-api-internal.priority=10"
       # Shared service configuration
       - "traefik.http.services.admin-api.loadbalancer.server.port=3333"
+      # Add timeout settings to prevent gateway timeouts
+      - "traefik.http.services.admin-api.loadbalancer.responseForwarding.flushInterval=100ms"
 
   traefik:
     image: traefik:v3.6.1

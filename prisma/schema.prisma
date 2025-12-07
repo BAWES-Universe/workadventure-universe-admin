@@ -63,8 +63,6 @@ model World {
   slug        String   // URL identifier: "office-world"
   name        String
   description String?
-  mapUrl      String?  @map("map_url") // Tiled map JSON URL
-  wamUrl      String?  @map("wam_url") // WAM file URL
   isPublic    Boolean  @default(true) @map("is_public")
   featured    Boolean  @default(false) // For discovery
   thumbnailUrl String? @map("thumbnail_url")
@@ -90,7 +88,9 @@ model Room {
   slug        String   // URL identifier: "lobby"
   name        String
   description String?
-  mapUrl      String?  @map("map_url") // Override world map if needed
+  mapUrl      String?  @map("map_url") // External TMJ URL (e.g., GitHub Pages)
+  wamUrl      String?  @map("wam_url") // WAM file URL in map-storage (created via PUT)
+  authenticationMandatory Boolean @default(false) @map("authentication_mandatory")
   isPublic    Boolean  @default(true) @map("is_public")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")

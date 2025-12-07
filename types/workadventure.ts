@@ -52,10 +52,13 @@ export interface AdminBannedData {
 
 // Map & Room Types
 export interface MapDetailsData {
-  mapUrl: string;
+  mapUrl?: string; // External TMJ URL (fallback)
+  wamUrl?: string; // WAM file URL in map-storage (direct field)
   wamSettings?: {
-    wamUrl?: string;
+    wamUrl?: string; // Keep for backward compatibility
   };
+  editable?: boolean; // true if wamUrl exists and points to map-storage
+  group: string | null; // Required: Universe/world grouping: "{universe.slug}/{world.slug}" or null
   policy?: "public" | "private";
   tags?: string[];
   authenticationMandatory?: boolean;

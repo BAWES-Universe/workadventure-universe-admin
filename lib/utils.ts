@@ -6,6 +6,7 @@ export function parsePlayUri(playUri: string): {
   universe: string;
   world: string;
   room: string;
+  domain: string;
 } {
   try {
     const url = new URL(playUri);
@@ -17,6 +18,7 @@ export function parsePlayUri(playUri: string): {
         universe: pathParts[1],
         world: pathParts[2],
         room: pathParts[3],
+        domain: url.hostname,
       };
     }
     
