@@ -21,6 +21,7 @@ export default function LoginPage() {
         headers: {
           'Content-Type': 'application/json',
         },
+        credentials: 'include',
         body: JSON.stringify({ accessToken }),
       });
 
@@ -30,9 +31,9 @@ export default function LoginPage() {
       }
 
       // Redirect to original destination or dashboard
+      // Use window.location for full page reload to ensure cookie is available
       const redirectTo = searchParams.get('redirect') || '/admin';
-      router.push(redirectTo);
-      router.refresh();
+      window.location.href = redirectTo;
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Login failed');
     } finally {

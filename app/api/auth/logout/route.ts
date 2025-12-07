@@ -7,8 +7,14 @@ import { NextResponse } from 'next/server';
 export async function POST() {
   const response = NextResponse.json({ success: true });
   
-  // Clear session cookie
-  response.cookies.delete('user_session');
+  // Clear session cookie (must match the path used when setting it)
+  response.cookies.set('user_session', '', {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+    path: '/',
+    maxAge: 0,
+  });
   
   return response;
 }
