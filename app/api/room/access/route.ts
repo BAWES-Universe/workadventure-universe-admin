@@ -17,12 +17,33 @@ export async function GET(request: NextRequest) {
     const accessToken = searchParams.get('accessToken');
     const chatID = searchParams.get('chatID');
     
-    // Extract characterTextureIds - can be array or single value
-    // Handle array query params (Next.js may send as multiple params)
-    const allTextureIds = searchParams.getAll('characterTextureIds');
-    const textureIds = allTextureIds.length > 0 ? allTextureIds : [];
+    // Extract characterTextureIds - handle both characterTextureIds and characterTextureIds[]
+    // WorkAdventure may send as characterTextureIds[]=value1&characterTextureIds[]=value2
+    // URLSearchParams decodes %5B%5D to [], so we need to check for both formats
+    let textureIds: string[] = [];
+    
+    // Collect all parameters that match characterTextureIds (with or without brackets)
+    // URLSearchParams automatically decodes, so characterTextureIds%5B%5D becomes characterTextureIds[]
+    for (const [key, value] of searchParams.entries()) {
+      if (key === 'characterTextureIds' || key === 'characterTextureIds[]') {
+        textureIds.push(value);
+      }
+    }
+    
+    // If no array params found, try single value
+    if (textureIds.length === 0) {
+      const singleValue = searchParams.get('characterTextureIds');
+      if (singleValue) {
+        textureIds = [singleValue];
+      }
+    }
     
     const companionTextureId = searchParams.get('companionTextureId');
+    
+    // Debug logging (remove in production)
+    // console.log('Received texture IDs:', textureIds);
+    // console.log('Received companion texture ID:', companionTextureId);
+    // console.log('All search params:', Array.from(searchParams.entries()));
     
     if (!userIdentifier || !playUri) {
       const error: ErrorApiData = {
