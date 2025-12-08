@@ -429,15 +429,43 @@ export default function RoomDetailPage() {
                   <div className="text-sm font-medium text-gray-500">Unique IPs</div>
                   <div className="mt-1 text-2xl font-semibold text-gray-900">{analytics.uniqueIPs}</div>
                 </div>
-                {analytics.peakTimes && analytics.peakTimes.length > 0 && (
-                  <div className="bg-gray-50 rounded-lg p-4">
-                    <div className="text-sm font-medium text-gray-500">Peak Hour</div>
-                    <div className="mt-1 text-lg font-semibold text-gray-900">
-                      {analytics.peakTimes[0].hour}:00
+                {(() => {
+                  // Calculate peak hour in user's local timezone from recent activity
+                  let peakHour = null;
+                  let peakCount = 0;
+                  
+                  if (analytics.recentActivity && analytics.recentActivity.length > 0) {
+                    const hourCounts = new Map<number, number>();
+                    analytics.recentActivity.forEach((access: any) => {
+                      const date = new Date(access.accessedAt);
+                      const hour = date.getHours(); // User's local timezone
+                      hourCounts.set(hour, (hourCounts.get(hour) || 0) + 1);
+                    });
+                    const localPeakTimes = Array.from(hourCounts.entries())
+                      .map(([hour, count]) => ({ hour, count }))
+                      .sort((a, b) => b.count - a.count);
+                    if (localPeakTimes.length > 0) {
+                      peakHour = localPeakTimes[0].hour;
+                      peakCount = localPeakTimes[0].count;
+                    }
+                  }
+                  
+                  // Fallback to server-calculated peak time if no recent activity
+                  if (peakHour === null && analytics.peakTimes && analytics.peakTimes.length > 0) {
+                    peakHour = analytics.peakTimes[0].hour;
+                    peakCount = analytics.peakTimes[0].count;
+                  }
+                  
+                  return peakHour !== null ? (
+                    <div className="bg-gray-50 rounded-lg p-4">
+                      <div className="text-sm font-medium text-gray-500">Peak Hour</div>
+                      <div className="mt-1 text-lg font-semibold text-gray-900">
+                        {String(peakHour).padStart(2, '0')}:00
+                      </div>
+                      <div className="text-xs text-gray-500">{peakCount} accesses</div>
                     </div>
-                    <div className="text-xs text-gray-500">{analytics.peakTimes[0].count} accesses</div>
-                  </div>
-                )}
+                  ) : null;
+                })()}
               </div>
 
               {analytics.recentActivity && analytics.recentActivity.length > 0 && (

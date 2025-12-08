@@ -62,7 +62,9 @@ export async function GET(
       distinct: ['ipAddress'],
     });
     
-    // Get peak times (group by hour)
+    // Get peak times (group by hour in UTC)
+    // Note: Frontend calculates peak hours in user's local timezone from recent activity
+    // This is kept for backwards compatibility/fallback
     const allAccesses = await prisma.roomAccess.findMany({
       where: { roomId: id },
       select: { accessedAt: true },
@@ -70,7 +72,8 @@ export async function GET(
     
     const hourCounts = new Map<number, number>();
     allAccesses.forEach(access => {
-      const hour = access.accessedAt.getHours();
+      // Calculate in UTC (frontend will use local timezone from recent activity)
+      const hour = access.accessedAt.getUTCHours();
       hourCounts.set(hour, (hourCounts.get(hour) || 0) + 1);
     });
     
