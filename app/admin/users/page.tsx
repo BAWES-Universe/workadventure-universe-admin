@@ -184,7 +184,12 @@ export default function UsersPage() {
                     {users.map((user) => (
                       <tr key={user.id} className={user.isGuest ? 'bg-gray-50' : ''}>
                         <td className="whitespace-nowrap py-4 pl-4 pr-3 text-sm font-medium text-gray-900 sm:pl-6">
-                          {user.name || 'N/A'}
+                          <Link
+                            href={`/admin/users/${user.id}`}
+                            className="text-indigo-600 hover:text-indigo-900"
+                          >
+                            {user.name || user.email || 'N/A'}
+                          </Link>
                         </td>
                         <td className="whitespace-nowrap px-3 py-4 text-sm text-gray-500">
                           {user.email || 'N/A'}
