@@ -99,7 +99,7 @@ export async function GET(request: NextRequest) {
             // Update room with wamUrl in database
             await prisma.room.update({
               where: { id: roomData.id },
-              data: { wamUrl: computedWamUrl },
+              data: { wamUrl: computedWamUrl } as any,
             });
             
             wamUrl = computedWamUrl;
@@ -113,13 +113,17 @@ export async function GET(request: NextRequest) {
         }
       }
       
-      // Step 7: Return MapDetailsData with wamUrl, mapUrl, editable flag
+      // Step 7: Return MapDetailsData with wamUrl prioritized over mapUrl
       const editable = wamUrl !== undefined && wamUrl.includes('map-storage');
       const group = `${roomData.world.universe.slug}/${roomData.world.slug}`;
       
+      // Prioritize wamUrl: if WAM exists, return it (WorkAdventure prefers wamUrl over mapUrl)
+      // Only include mapUrl as fallback if wamUrl is not available
       const mapDetails: MapDetailsData = {
-        mapUrl: roomData.mapUrl, // External TMJ URL (fallback)
-        wamUrl: wamUrl, // Map-storage WAM URL (if created/exists)
+        // Include wamUrl if available (takes precedence)
+        ...(wamUrl && { wamUrl: wamUrl }),
+        // Only include mapUrl if wamUrl is not available (as fallback)
+        ...(!wamUrl && { mapUrl: roomData.mapUrl }),
         editable: editable,
         authenticationMandatory: roomData.authenticationMandatory || false,
         roomName: roomData.name,
