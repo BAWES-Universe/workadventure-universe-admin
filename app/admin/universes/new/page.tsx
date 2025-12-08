@@ -15,7 +15,6 @@ export default function NewUniversePage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [user, setUser] = useState<User | null>(null);
-  const [users, setUsers] = useState<User[]>([]);
   
   const [formData, setFormData] = useState({
     slug: '',
@@ -29,7 +28,6 @@ export default function NewUniversePage() {
 
   useEffect(() => {
     checkAuth();
-    fetchUsers();
   }, []);
 
   async function checkAuth() {
@@ -44,20 +42,6 @@ export default function NewUniversePage() {
       setFormData(prev => ({ ...prev, ownerId: data.user.id }));
     } catch (err) {
       router.push('/admin/login');
-    }
-  }
-
-  async function fetchUsers() {
-    try {
-      const response = await fetch('/api/admin/users?limit=100', {
-        credentials: 'include',
-      });
-      if (response.ok) {
-        const data = await response.json();
-        setUsers(data.users || []);
-      }
-    } catch (err) {
-      // Ignore errors - users list is optional
     }
   }
 
@@ -179,25 +163,15 @@ export default function NewUniversePage() {
             />
           </div>
 
-          {users.length > 0 && (
+          {user && (
             <div>
-              <label htmlFor="ownerId" className="block text-sm font-medium text-gray-700">
-                Owner <span className="text-red-500">*</span>
+              <label htmlFor="owner" className="block text-sm font-medium text-gray-700">
+                Owner
               </label>
-              <select
-                id="ownerId"
-                required
-                value={formData.ownerId}
-                onChange={(e) => setFormData({ ...formData, ownerId: e.target.value })}
-                className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
-              >
-                <option value="">Select owner</option>
-                {users.map((u) => (
-                  <option key={u.id} value={u.id}>
-                    {u.name || u.email || u.id}
-                  </option>
-                ))}
-              </select>
+              <p className="mt-1 text-sm text-gray-600">
+                {user.name || user.email || user.id} (you)
+              </p>
+              <input type="hidden" name="ownerId" value={formData.ownerId} />
             </div>
           )}
 
