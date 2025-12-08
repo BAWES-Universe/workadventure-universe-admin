@@ -10,6 +10,7 @@ interface Room {
   name: string;
   description: string | null;
   mapUrl: string | null;
+  wamUrl: string | null;
   isPublic: boolean;
   world: {
     id: string;
@@ -357,6 +358,16 @@ export default function RoomDetailPage() {
                   <dd className="mt-1 text-sm text-gray-900 break-all">
                     <a href={room.mapUrl} target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:text-indigo-900">
                       {room.mapUrl}
+                    </a>
+                  </dd>
+                </div>
+              )}
+              {room.wamUrl && (
+                <div className="sm:col-span-2">
+                  <dt className="text-sm font-medium text-gray-500">WAM URL</dt>
+                  <dd className="mt-1 text-sm text-gray-900 break-all">
+                    <a href={room.wamUrl} target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:text-indigo-900">
+                      {room.wamUrl}
                     </a>
                   </dd>
                 </div>
