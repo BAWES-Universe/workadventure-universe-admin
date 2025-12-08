@@ -42,7 +42,10 @@ export async function GET(
       where: { id },
       include: {
         world: {
-          include: {
+          select: {
+            id: true,
+            name: true,
+            slug: true,
             universe: {
               select: {
                 id: true,
