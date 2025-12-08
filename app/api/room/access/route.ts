@@ -70,7 +70,9 @@ export async function GET(request: NextRequest) {
       // Determine if this is a guest user (no authentication)
       // Guest = no accessToken in query params OR authenticateRequest returned null OR isAuthenticated is false
       // Note: authenticateRequest returns {isAuthenticated: false} when no accessToken is provided
-      const isGuest = !accessToken || !authenticatedUser || !authenticatedUser.isAuthenticated;
+      const hasAccessToken = !!accessToken;
+      const isAuthenticatedFromToken = authenticatedUser?.isAuthenticated === true;
+      const isGuest = !hasAccessToken || !isAuthenticatedFromToken;
       const isAuthenticated = !isGuest;
       
       // Determine user data from request (will be updated from user record if authenticated)
@@ -79,21 +81,27 @@ export async function GET(request: NextRequest) {
       const finalUuid = authenticatedUser?.identifier || userIdentifier;
       
       // Only create/find User records for authenticated users
+      // But also try to find existing user by identifier even if not authenticated in this request
       let user: { id: string; name: string | null; email: string | null; uuid: string; matrixChatId: string | null; isGuest: boolean } | null = null;
       let membership = null;
       let avatar = null;
       
-      if (isAuthenticated && authenticatedUser?.identifier) {
-        // For authenticated users, find or create user record
+      // Try to find user by identifier (either from authenticated user or userIdentifier)
+      const lookupIdentifier = authenticatedUser?.identifier || userIdentifier;
+      if (lookupIdentifier) {
         user = await prisma.user.findFirst({
           where: {
             OR: [
-              { uuid: authenticatedUser.identifier },
-              { email: authenticatedUser.email || undefined },
+              { uuid: lookupIdentifier },
+              { email: lookupIdentifier.includes('@') ? lookupIdentifier : undefined },
             ],
           },
         });
-        
+      }
+      
+      // If user is authenticated (has valid accessToken), create/update user record
+      if (isAuthenticated && authenticatedUser?.identifier) {
+        // User already found above, but if not found, create new one
         if (!user) {
           // Create new authenticated user
           user = await prisma.user.create({
@@ -154,6 +162,10 @@ export async function GET(request: NextRequest) {
             userEmail = user.email || userEmail;
           }
         }
+      } else if (user) {
+        // User exists but not authenticated in this request - update name/email from user record
+        userName = user.name || userName;
+        userEmail = user.email || userEmail;
       }
       
       // Find world and room
@@ -245,7 +257,7 @@ export async function GET(request: NextRequest) {
         return NextResponse.json(error, { status: 403 });
       }
       
-      // Get world membership (only for authenticated users with User record)
+      // Get world membership (for any user with User record, not just authenticated)
       if (user) {
         membership = await prisma.worldMember.findUnique({
           where: {
@@ -256,7 +268,7 @@ export async function GET(request: NextRequest) {
           },
         });
         
-        // Get user avatar (only for authenticated users)
+        // Get user avatar
         avatar = await prisma.userAvatar.findUnique({
           where: {
             userId_worldId: {
@@ -324,14 +336,18 @@ export async function GET(request: NextRequest) {
         ? membership.tags 
         : [];
       
+      // Determine actual guest status for analytics: user is guest if they don't have a User record OR if they have one but isGuest is true
+      // But if user has membership tags, they're not really a guest
+      const actualIsGuestForAnalytics = !user || (user.isGuest && membershipTags.length === 0);
+      
       await (prisma as any).roomAccess.create({
         data: {
           userUuid: finalUuid,
           userId: user?.id || null,
           ipAddress: ipAddress,
-          userName: userName,
-          userEmail: userEmail,
-          isGuest: isGuest,
+          userName: user ? (user.name || userName) : userName,
+          userEmail: user ? (user.email || userEmail) : userEmail,
+          isGuest: actualIsGuestForAnalytics,
           isAuthenticated: isAuthenticated,
           hasMembership: membershipTags.length > 0,
           membershipTags: membershipTags,
@@ -375,6 +391,12 @@ export async function GET(request: NextRequest) {
       const webhookUserName = user ? (user.name || userName) : userName;
       const webhookUserEmail = user ? (user.email || userEmail) : userEmail;
       
+      // Determine actual guest status for webhook: 
+      // - If user has membership tags, they're not a guest
+      // - If user exists and isGuest is false, they're not a guest
+      // - Otherwise, they're a guest
+      const webhookIsGuest = !user || (user.isGuest && membershipTags.length === 0);
+      
       // Ensure membership tags are passed correctly
       const webhookTags = membershipTags;
       
@@ -382,7 +404,7 @@ export async function GET(request: NextRequest) {
         userName: webhookUserName,
         userEmail: webhookUserEmail,
         userUuid: finalUuid,
-        isGuest: isGuest,
+        isGuest: webhookIsGuest,
         tags: webhookTags,
         playUri: playUri,
         universe: universe,
