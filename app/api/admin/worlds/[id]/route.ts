@@ -7,8 +7,6 @@ const updateWorldSchema = z.object({
   slug: z.string().min(1).max(100).optional(),
   name: z.string().min(1).max(200).optional(),
   description: z.string().optional().nullable(),
-  mapUrl: z.string().url().optional().nullable().or(z.literal('')),
-  wamUrl: z.string().url().optional().nullable().or(z.literal('')),
   isPublic: z.boolean().optional(),
   featured: z.boolean().optional(),
   thumbnailUrl: z.string().url().optional().nullable().or(z.literal('')),
@@ -116,8 +114,6 @@ export async function PATCH(
     if (data.slug !== undefined) updateData.slug = data.slug;
     if (data.name !== undefined) updateData.name = data.name;
     if (data.description !== undefined) updateData.description = data.description;
-    if (data.mapUrl !== undefined) updateData.mapUrl = data.mapUrl || null;
-    if (data.wamUrl !== undefined) updateData.wamUrl = data.wamUrl || null;
     if (data.isPublic !== undefined) updateData.isPublic = data.isPublic;
     if (data.featured !== undefined) updateData.featured = data.featured;
     if (data.thumbnailUrl !== undefined) {

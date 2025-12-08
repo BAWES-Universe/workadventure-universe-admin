@@ -9,8 +9,6 @@ interface World {
   slug: string;
   name: string;
   description: string | null;
-  mapUrl: string | null;
-  wamUrl: string | null;
   isPublic: boolean;
   featured: boolean;
   thumbnailUrl: string | null;
@@ -44,8 +42,6 @@ export default function WorldDetailPage() {
     slug: '',
     name: '',
     description: '',
-    mapUrl: '',
-    wamUrl: '',
     isPublic: true,
     featured: false,
     thumbnailUrl: '',
@@ -88,8 +84,6 @@ export default function WorldDetailPage() {
         slug: data.slug,
         name: data.name,
         description: data.description || '',
-        mapUrl: data.mapUrl || '',
-        wamUrl: data.wamUrl || '',
         isPublic: data.isPublic,
         featured: data.featured,
         thumbnailUrl: data.thumbnailUrl || '',
@@ -115,8 +109,6 @@ export default function WorldDetailPage() {
         body: JSON.stringify({
           ...formData,
           description: formData.description || null,
-          mapUrl: formData.mapUrl || null,
-          wamUrl: formData.wamUrl || null,
           thumbnailUrl: formData.thumbnailUrl || null,
         }),
       });
@@ -299,32 +291,6 @@ export default function WorldDetailPage() {
             </div>
 
             <div>
-              <label htmlFor="mapUrl" className="block text-sm font-medium text-gray-700">
-                Map URL
-              </label>
-              <input
-                type="url"
-                id="mapUrl"
-                value={formData.mapUrl}
-                onChange={(e) => setFormData({ ...formData, mapUrl: e.target.value })}
-                className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
-              />
-            </div>
-
-            <div>
-              <label htmlFor="wamUrl" className="block text-sm font-medium text-gray-700">
-                WAM URL
-              </label>
-              <input
-                type="url"
-                id="wamUrl"
-                value={formData.wamUrl}
-                onChange={(e) => setFormData({ ...formData, wamUrl: e.target.value })}
-                className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
-              />
-            </div>
-
-            <div>
               <label htmlFor="thumbnailUrl" className="block text-sm font-medium text-gray-700">
                 Thumbnail URL
               </label>
@@ -408,26 +374,6 @@ export default function WorldDetailPage() {
                     )}
                   </dd>
                 </div>
-                {world.mapUrl && (
-                  <div>
-                    <dt className="text-sm font-medium text-gray-500">Map URL</dt>
-                    <dd className="mt-1 text-sm text-gray-900 break-all">
-                      <a href={world.mapUrl} target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:text-indigo-900">
-                        {world.mapUrl}
-                      </a>
-                    </dd>
-                  </div>
-                )}
-                {world.wamUrl && (
-                  <div>
-                    <dt className="text-sm font-medium text-gray-500">WAM URL</dt>
-                    <dd className="mt-1 text-sm text-gray-900 break-all">
-                      <a href={world.wamUrl} target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:text-indigo-900">
-                        {world.wamUrl}
-                      </a>
-                    </dd>
-                  </div>
-                )}
                 {world.thumbnailUrl && (
                   <div className="sm:col-span-2">
                     <dt className="text-sm font-medium text-gray-500">Thumbnail</dt>

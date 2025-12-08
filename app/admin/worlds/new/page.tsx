@@ -24,8 +24,6 @@ export default function NewWorldPage() {
     slug: '',
     name: '',
     description: '',
-    mapUrl: '',
-    wamUrl: '',
     isPublic: true,
     featured: false,
     thumbnailUrl: '',
@@ -58,7 +56,22 @@ export default function NewWorldPage() {
         setUniverses(data.universes || []);
       }
     } catch (err) {
-      setError('Failed to load universes');
+      // If universeIdParam is set, try to fetch just that universe
+      if (universeIdParam) {
+        try {
+          const universeResponse = await fetch(`/api/admin/universes/${universeIdParam}`, {
+            credentials: 'include',
+          });
+          if (universeResponse.ok) {
+            const universe = await universeResponse.json();
+            setUniverses([universe]);
+          }
+        } catch (universeErr) {
+          setError('Failed to load universe');
+        }
+      } else {
+        setError('Failed to load universes');
+      }
     }
   }
 
@@ -66,7 +79,7 @@ export default function NewWorldPage() {
     e.preventDefault();
     
     if (!formData.universeId) {
-      setError('Please select a universe');
+      setError('Universe ID is required. Please navigate to this page from a universe.');
       return;
     }
 
@@ -74,24 +87,28 @@ export default function NewWorldPage() {
     setError(null);
 
     try {
+      const payload = {
+        ...formData,
+        description: formData.description || null,
+        thumbnailUrl: formData.thumbnailUrl || null,
+      };
+      
+      console.log('Submitting world:', payload);
+      
       const response = await fetch('/api/admin/worlds', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         credentials: 'include',
-        body: JSON.stringify({
-          ...formData,
-          description: formData.description || null,
-          mapUrl: formData.mapUrl || null,
-          wamUrl: formData.wamUrl || null,
-          thumbnailUrl: formData.thumbnailUrl || null,
-        }),
+        body: JSON.stringify(payload),
       });
 
       if (!response.ok) {
         const data = await response.json();
-        throw new Error(data.error || 'Failed to create world');
+        // Show validation details if available
+        const errorMessage = data.message || data.error || 'Failed to create world';
+        throw new Error(errorMessage);
       }
 
       const world = await response.json();
@@ -142,51 +159,40 @@ export default function NewWorldPage() {
           </div>
         )}
 
-        {universes.length === 0 && (
+        {!universeIdParam && (
           <div className="mt-4 bg-yellow-50 border border-yellow-200 rounded-md p-4">
             <p className="text-sm text-yellow-800">
-              No universes found. You need to create a universe first.{' '}
-              <Link href="/admin/universes/new" className="text-yellow-900 underline">
-                Create Universe
+              Universe ID is required. Please navigate to this page from a universe.{' '}
+              <Link href="/admin/universes" className="text-yellow-900 underline">
+                Go to Universes
               </Link>
             </p>
           </div>
         )}
 
-        <form onSubmit={handleSubmit} className="mt-8 space-y-6 bg-white shadow rounded-lg p-6">
-          <div>
-            <label htmlFor="universeId" className="block text-sm font-medium text-gray-700">
-              Universe <span className="text-red-500">*</span>
-            </label>
-            <p className="mt-1 text-sm text-gray-500">
-              Select the universe this world belongs to.
+        {universeIdParam && !selectedUniverse && (
+          <div className="mt-4 bg-yellow-50 border border-yellow-200 rounded-md p-4">
+            <p className="text-sm text-yellow-800">
+              Loading universe information...
             </p>
-            <select
-              id="universeId"
-              required
-              value={formData.universeId}
-              onChange={(e) => setFormData({ ...formData, universeId: e.target.value })}
-              className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
-              disabled={!!universeIdParam}
-            >
-              <option value="">Select a universe</option>
-              {universes.map((universe) => (
-                <option key={universe.id} value={universe.id}>
-                  {universe.name} ({universe.slug})
-                </option>
-              ))}
-            </select>
-            {universeIdParam && selectedUniverse && (
-              <p className="mt-1 text-sm text-gray-500">
-                Pre-selected: <Link href={`/admin/universes/${selectedUniverse.id}`} className="text-indigo-600 hover:text-indigo-900">{selectedUniverse.name}</Link>
-              </p>
-            )}
-            {universes.length === 0 && (
-              <p className="mt-1 text-sm text-red-500">
-                No universes available. <Link href="/admin/universes/new" className="underline">Create one first</Link>.
-              </p>
-            )}
           </div>
+        )}
+
+        <form onSubmit={handleSubmit} className="mt-8 space-y-6 bg-white shadow rounded-lg p-6">
+          {selectedUniverse && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700">
+                Universe
+              </label>
+              <p className="mt-1 text-sm text-gray-600">
+                <Link href={`/admin/universes/${selectedUniverse.id}`} className="text-indigo-600 hover:text-indigo-900">
+                  {selectedUniverse.name}
+                </Link>
+                {' '}({selectedUniverse.slug})
+              </p>
+              <input type="hidden" name="universeId" value={formData.universeId} />
+            </div>
+          )}
 
           <div>
             <label htmlFor="slug" className="block text-sm font-medium text-gray-700">
@@ -194,6 +200,11 @@ export default function NewWorldPage() {
             </label>
             <p className="mt-1 text-sm text-gray-500">
               URL identifier (e.g., "office-world"). Must be unique within the universe.
+              {selectedUniverse && (
+                <span className="block mt-1 text-gray-600">
+                  Full path: <code className="bg-gray-100 px-1 rounded">/{selectedUniverse.slug}/[slug]</code>
+                </span>
+              )}
             </p>
             <input
               type="text"
@@ -232,40 +243,6 @@ export default function NewWorldPage() {
               onChange={(e) => setFormData({ ...formData, description: e.target.value })}
               className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
               placeholder="A brief description of this world"
-            />
-          </div>
-
-          <div>
-            <label htmlFor="mapUrl" className="block text-sm font-medium text-gray-700">
-              Map URL
-            </label>
-            <p className="mt-1 text-sm text-gray-500">
-              Tiled map JSON URL for this world.
-            </p>
-            <input
-              type="url"
-              id="mapUrl"
-              value={formData.mapUrl}
-              onChange={(e) => setFormData({ ...formData, mapUrl: e.target.value })}
-              className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
-              placeholder="https://example.com/map.json"
-            />
-          </div>
-
-          <div>
-            <label htmlFor="wamUrl" className="block text-sm font-medium text-gray-700">
-              WAM URL
-            </label>
-            <p className="mt-1 text-sm text-gray-500">
-              WAM file URL for this world.
-            </p>
-            <input
-              type="url"
-              id="wamUrl"
-              value={formData.wamUrl}
-              onChange={(e) => setFormData({ ...formData, wamUrl: e.target.value })}
-              className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
-              placeholder="https://example.com/world.wam"
             />
           </div>
 
@@ -319,7 +296,7 @@ export default function NewWorldPage() {
             </Link>
             <button
               type="submit"
-              disabled={loading || universes.length === 0}
+              disabled={loading || !universeIdParam || !selectedUniverse}
               className="px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50"
             >
               {loading ? 'Creating...' : 'Create World'}
