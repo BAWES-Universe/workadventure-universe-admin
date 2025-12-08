@@ -232,7 +232,9 @@ export async function GET(request: NextRequest) {
         return NextResponse.json(error, { status: 403 });
       }
       
-      // Get or create world membership (only for authenticated users)
+      // Get world membership (if user has been explicitly added as a member)
+      // Note: Memberships are NOT created automatically from OIDC tags
+      // World owners/admins must manually add users as members through the admin interface
       let membership = await prisma.worldMember.findUnique({
         where: {
           userId_worldId: {
@@ -242,27 +244,15 @@ export async function GET(request: NextRequest) {
         },
       });
       
-      // Only create world membership for authenticated users
-      // Guest users can access rooms but don't get world memberships
-      if (!membership && authenticatedUser?.isAuthenticated) {
-        // Create membership with tags from authenticated user
-        membership = await prisma.worldMember.create({
-          data: {
-            userId: user.id,
-            worldId: worldData.id,
-            tags: authenticatedUser?.tags || [],
-          },
-        });
-      }
-      
-      // For guests, create a temporary membership object for the response
-      // but don't store it in the database
-      if (!membership && isGuest) {
+      // If no membership exists, create a temporary membership object for the response
+      // This applies to both guests and authenticated users who haven't been added as members
+      // All users are treated as guests by default until explicitly added as members
+      if (!membership) {
         membership = {
           id: '',
           userId: user.id,
           worldId: worldData.id,
-          tags: [],
+          tags: [], // Empty tags for all non-members (guests)
           joinedAt: new Date(),
         } as any;
       }
