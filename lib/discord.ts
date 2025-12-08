@@ -69,14 +69,32 @@ export async function notifyRoomAccess(data: {
   userEmail: string | null;
   userUuid: string;
   isGuest: boolean;
+  tags?: string[];
   playUri: string;
   universe: string;
   world: string;
   room: string;
   ipAddress: string;
 }): Promise<void> {
-  const statusColor = data.isGuest ? 0xffaa00 : 0x00ff00; // Orange for guests, Green for authenticated
-  const statusText = data.isGuest ? 'Guest' : 'Authenticated';
+  // Determine status text based on tags or guest status
+  // Prioritize tags over guest status - if user has membership tags, show those
+  let statusText: string;
+  let statusColor: number;
+  
+  if (data.tags && data.tags.length > 0) {
+    // Show member tags (e.g., "admin", "admin, editor")
+    // User has membership, so show tags regardless of guest status
+    statusText = data.tags.join(', ');
+    statusColor = data.tags.includes('admin') ? 0x00ff00 : 0x0099ff; // Green for admin, Blue for others
+  } else if (data.isGuest) {
+    // No tags and is guest
+    statusText = 'Guest';
+    statusColor = 0xffaa00; // Orange for guests
+  } else {
+    // Authenticated but no tags
+    statusText = 'Authenticated';
+    statusColor = 0x00ff00; // Green for authenticated
+  }
   
   const embed: DiscordWebhookEmbed = {
     title: '🚪 Room Access',
@@ -126,7 +144,7 @@ export async function notifyRoomAccess(data: {
     ],
     timestamp: new Date().toISOString(),
     footer: {
-      text: 'WorkAdventure Admin API',
+      text: 'Universe Admin',
     },
   };
 

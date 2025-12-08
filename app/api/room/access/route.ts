@@ -344,6 +344,7 @@ export async function GET(request: NextRequest) {
         userEmail: user.email,
         userUuid: user.uuid,
         isGuest: user.isGuest,
+        tags: membership?.tags || [],
         playUri: playUri,
         universe: universe,
         world: world,
