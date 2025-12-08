@@ -52,7 +52,6 @@ export async function GET(request: NextRequest) {
             select: {
               ownedUniverses: true,
               worldMemberships: true,
-              universeMembers: true,
             },
           },
         },

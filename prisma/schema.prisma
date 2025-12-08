@@ -21,7 +21,6 @@ model User {
   // Relations
   ownedUniverses    Universe[]        @relation("UniverseOwner")
   worldMemberships  WorldMember[]
-  universeMembers   UniverseMember[]
   bans              Ban[]             @relation("BannedUser")
   bannedBy          Ban[]             @relation("BannedBy")
   avatars           UserAvatar[]
@@ -51,7 +50,6 @@ model Universe {
   // Relations
   owner      User      @relation("UniverseOwner", fields: [ownerId], references: [id], onDelete: Cascade)
   worlds     World[]
-  members    UniverseMember[]
   bans       Ban[]
   favorites  Favorite[]
 
@@ -121,22 +119,6 @@ model WorldMember {
   @@index([worldId])
   @@index([userId])
   @@map("world_members")
-}
-
-// Universe Memberships (Optional)
-model UniverseMember {
-  id        String   @id @default(uuid())
-  userId    String   @map("user_id")
-  universeId String  @map("universe_id")
-  role      String   @default("member") // owner, admin, member
-  joinedAt  DateTime @default(now()) @map("joined_at")
-
-  // Relations
-  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  universe Universe @relation(fields: [universeId], references: [id], onDelete: Cascade)
-
-  @@unique([userId, universeId])
-  @@map("universe_members")
 }
 
 // Bans

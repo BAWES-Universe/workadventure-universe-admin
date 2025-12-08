@@ -76,7 +76,6 @@ export async function GET(request: NextRequest) {
           _count: {
             select: {
               worlds: true,
-              members: true,
             },
           },
         },

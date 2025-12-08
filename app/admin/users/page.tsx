@@ -14,7 +14,6 @@ interface User {
   _count: {
     ownedUniverses: number;
     worldMemberships: number;
-    universeMembers: number;
   };
 }
 
@@ -177,9 +176,6 @@ export default function UsersPage() {
                         Worlds
                       </th>
                       <th className="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">
-                        Memberships
-                      </th>
-                      <th className="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">
                         Created
                       </th>
                     </tr>
@@ -212,9 +208,6 @@ export default function UsersPage() {
                         </td>
                         <td className="whitespace-nowrap px-3 py-4 text-sm text-gray-500">
                           {user._count.worldMemberships}
-                        </td>
-                        <td className="whitespace-nowrap px-3 py-4 text-sm text-gray-500">
-                          {user._count.universeMembers}
                         </td>
                         <td className="whitespace-nowrap px-3 py-4 text-sm text-gray-500">
                           {new Date(user.createdAt).toLocaleDateString()}

@@ -16,7 +16,6 @@ export async function cleanDatabase(): Promise<void> {
   await prisma.friendship.deleteMany();
   await prisma.userAvatar.deleteMany();
   await prisma.worldMember.deleteMany();
-  await prisma.universeMember.deleteMany();
   await prisma.room.deleteMany();
   await prisma.world.deleteMany();
   await prisma.universe.deleteMany();
