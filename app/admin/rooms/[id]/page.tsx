@@ -34,6 +34,8 @@ export default function RoomDetailPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isEditing, setIsEditing] = useState(false);
+  const [analytics, setAnalytics] = useState<any>(null);
+  const [analyticsLoading, setAnalyticsLoading] = useState(true);
   
   const [formData, setFormData] = useState({
     slug: '',
@@ -46,6 +48,7 @@ export default function RoomDetailPage() {
   useEffect(() => {
     checkAuth();
     fetchRoom();
+    fetchAnalytics();
   }, [id]);
 
   async function checkAuth() {
@@ -87,6 +90,23 @@ export default function RoomDetailPage() {
       setError(err instanceof Error ? err.message : 'Failed to load room');
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function fetchAnalytics() {
+    try {
+      setAnalyticsLoading(true);
+      const response = await fetch(`/api/admin/analytics/rooms/${id}`, {
+        credentials: 'include',
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setAnalytics(data);
+      }
+    } catch (err) {
+      console.error('Failed to fetch analytics:', err);
+    } finally {
+      setAnalyticsLoading(false);
     }
   }
 
@@ -385,6 +405,121 @@ export default function RoomDetailPage() {
             </dl>
           </div>
         )}
+
+        {/* Analytics Section */}
+        <div className="mt-6 bg-white shadow rounded-lg overflow-hidden">
+          <div className="px-6 py-4 border-b border-gray-200">
+            <h2 className="text-lg font-medium text-gray-900">Analytics</h2>
+          </div>
+
+          {analyticsLoading ? (
+            <div className="p-6 text-center text-gray-500">Loading analytics...</div>
+          ) : analytics ? (
+            <div className="p-6">
+              <div className="grid grid-cols-1 gap-5 sm:grid-cols-4 mb-6">
+                <div className="bg-gray-50 rounded-lg p-4">
+                  <div className="text-sm font-medium text-gray-500">Total Accesses</div>
+                  <div className="mt-1 text-2xl font-semibold text-gray-900">{analytics.totalAccesses}</div>
+                </div>
+                <div className="bg-gray-50 rounded-lg p-4">
+                  <div className="text-sm font-medium text-gray-500">Unique Users</div>
+                  <div className="mt-1 text-2xl font-semibold text-gray-900">{analytics.uniqueUsers}</div>
+                </div>
+                <div className="bg-gray-50 rounded-lg p-4">
+                  <div className="text-sm font-medium text-gray-500">Unique IPs</div>
+                  <div className="mt-1 text-2xl font-semibold text-gray-900">{analytics.uniqueIPs}</div>
+                </div>
+                {(() => {
+                  // Calculate peak hour in user's local timezone from recent activity
+                  let peakHour = null;
+                  let peakCount = 0;
+                  
+                  if (analytics.recentActivity && analytics.recentActivity.length > 0) {
+                    const hourCounts = new Map<number, number>();
+                    analytics.recentActivity.forEach((access: any) => {
+                      const date = new Date(access.accessedAt);
+                      const hour = date.getHours(); // User's local timezone
+                      hourCounts.set(hour, (hourCounts.get(hour) || 0) + 1);
+                    });
+                    const localPeakTimes = Array.from(hourCounts.entries())
+                      .map(([hour, count]) => ({ hour, count }))
+                      .sort((a, b) => b.count - a.count);
+                    if (localPeakTimes.length > 0) {
+                      peakHour = localPeakTimes[0].hour;
+                      peakCount = localPeakTimes[0].count;
+                    }
+                  }
+                  
+                  // Fallback to server-calculated peak time if no recent activity
+                  if (peakHour === null && analytics.peakTimes && analytics.peakTimes.length > 0) {
+                    peakHour = analytics.peakTimes[0].hour;
+                    peakCount = analytics.peakTimes[0].count;
+                  }
+                  
+                  return peakHour !== null ? (
+                    <div className="bg-gray-50 rounded-lg p-4">
+                      <div className="text-sm font-medium text-gray-500">Peak Hour</div>
+                      <div className="mt-1 text-lg font-semibold text-gray-900">
+                        {String(peakHour).padStart(2, '0')}:00
+                      </div>
+                      <div className="text-xs text-gray-500">{peakCount} accesses</div>
+                    </div>
+                  ) : null;
+                })()}
+              </div>
+
+              {analytics.recentActivity && analytics.recentActivity.length > 0 && (
+                <div>
+                  <h3 className="text-sm font-medium text-gray-900 mb-3">Recent Activity</h3>
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-gray-200">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
+                          <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">User</th>
+                          <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">IP Address</th>
+                          <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                        </tr>
+                      </thead>
+                      <tbody className="bg-white divide-y divide-gray-200">
+                        {analytics.recentActivity.slice(0, 10).map((access: any) => (
+                          <tr key={access.id}>
+                            <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">
+                              {new Date(access.accessedAt).toLocaleString()}
+                            </td>
+                            <td className="px-4 py-2 text-sm text-gray-900">
+                              {access.userName || access.userEmail || access.userUuid || 'Guest'}
+                            </td>
+                            <td className="px-4 py-2 text-sm font-mono text-gray-500">
+                              {access.ipAddress}
+                            </td>
+                            <td className="px-4 py-2 whitespace-nowrap text-sm">
+                              {access.hasMembership && access.membershipTags.length > 0 ? (
+                                <span className="inline-flex items-center rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-800">
+                                  {access.membershipTags.join(', ')}
+                                </span>
+                              ) : access.isAuthenticated ? (
+                                <span className="inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-800">
+                                  Authenticated
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center rounded-full bg-yellow-100 px-2 py-0.5 text-xs font-medium text-yellow-800">
+                                  Guest
+                                </span>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="p-6 text-center text-gray-500">No analytics data available.</div>
+          )}
+        </div>
       </div>
     </div>
   );

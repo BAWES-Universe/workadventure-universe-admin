@@ -57,11 +57,15 @@ export default function UserDetailPage() {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [accessHistory, setAccessHistory] = useState<any>(null);
+  const [accessHistoryLoading, setAccessHistoryLoading] = useState(true);
+  const [accessHistoryPage, setAccessHistoryPage] = useState(1);
 
   useEffect(() => {
     checkAuth();
     fetchUser();
-  }, [id]);
+    fetchAccessHistory();
+  }, [id, accessHistoryPage]);
 
   async function checkAuth() {
     try {
@@ -95,6 +99,26 @@ export default function UserDetailPage() {
       setError(err instanceof Error ? err.message : 'Failed to load user');
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function fetchAccessHistory() {
+    try {
+      setAccessHistoryLoading(true);
+      const response = await fetch(`/api/admin/analytics/users/${id}?page=${accessHistoryPage}&limit=20`, {
+        credentials: 'include',
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to fetch access history');
+      }
+
+      const data = await response.json();
+      setAccessHistory(data);
+    } catch (err) {
+      console.error('Failed to fetch access history:', err);
+    } finally {
+      setAccessHistoryLoading(false);
     }
   }
 
@@ -366,6 +390,125 @@ export default function UserDetailPage() {
             </p>
           </div>
         )}
+
+        {/* Access History */}
+        <div className="mt-6 bg-white shadow rounded-lg overflow-hidden">
+          <div className="px-6 py-4 border-b border-gray-200">
+            <h2 className="text-lg font-medium text-gray-900">Access History</h2>
+            {accessHistory && (
+              <p className="mt-1 text-sm text-gray-500">
+                {accessHistory.total} total accesses
+                {accessHistory.firstAccess && (
+                  <> • First: {new Date(accessHistory.firstAccess).toLocaleDateString()}</>
+                )}
+                {accessHistory.lastAccess && (
+                  <> • Last: {new Date(accessHistory.lastAccess).toLocaleDateString()}</>
+                )}
+              </p>
+            )}
+          </div>
+
+          {accessHistoryLoading ? (
+            <div className="p-6 text-center text-gray-500">Loading access history...</div>
+          ) : accessHistory && accessHistory.accesses.length > 0 ? (
+            <>
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-gray-200">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Date
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Universe / World / Room
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        IP Address
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Status
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-gray-200">
+                    {accessHistory.accesses.map((access: any) => (
+                      <tr key={access.id}>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                          {new Date(access.accessedAt).toLocaleString()}
+                        </td>
+                        <td className="px-6 py-4 text-sm text-gray-900">
+                          <div>
+                            <Link
+                              href={`/admin/universes/${access.universe.id}`}
+                              className="text-indigo-600 hover:text-indigo-900"
+                            >
+                              {access.universe.name}
+                            </Link>
+                            <span className="text-gray-400 mx-1">/</span>
+                            <Link
+                              href={`/admin/worlds/${access.world.id}`}
+                              className="text-indigo-600 hover:text-indigo-900"
+                            >
+                              {access.world.name}
+                            </Link>
+                            <span className="text-gray-400 mx-1">/</span>
+                            <Link
+                              href={`/admin/rooms/${access.room.id}`}
+                              className="text-indigo-600 hover:text-indigo-900"
+                            >
+                              {access.room.name}
+                            </Link>
+                          </div>
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm font-mono text-gray-500">
+                          {access.ipAddress}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm">
+                          {access.hasMembership && access.membershipTags.length > 0 ? (
+                            <span className="inline-flex items-center rounded-full bg-blue-100 px-2.5 py-0.5 text-xs font-medium text-blue-800">
+                              {access.membershipTags.join(', ')}
+                            </span>
+                          ) : access.isAuthenticated ? (
+                            <span className="inline-flex items-center rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-800">
+                              Authenticated
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center rounded-full bg-yellow-100 px-2.5 py-0.5 text-xs font-medium text-yellow-800">
+                              Guest
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {accessHistory.totalPages > 1 && (
+                <div className="px-6 py-4 border-t border-gray-200 flex items-center justify-between">
+                  <button
+                    onClick={() => setAccessHistoryPage(p => Math.max(1, p - 1))}
+                    disabled={accessHistoryPage === 1}
+                    className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Previous
+                  </button>
+                  <span className="text-sm text-gray-700">
+                    Page {accessHistoryPage} of {accessHistory.totalPages}
+                  </span>
+                  <button
+                    onClick={() => setAccessHistoryPage(p => Math.min(accessHistory.totalPages, p + 1))}
+                    disabled={accessHistoryPage >= accessHistory.totalPages}
+                    className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Next
+                  </button>
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="p-6 text-center text-gray-500">No access history found.</div>
+          )}
+        </div>
       </div>
     </div>
   );

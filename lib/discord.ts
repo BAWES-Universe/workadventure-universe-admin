@@ -96,14 +96,30 @@ export async function notifyRoomAccess(data: {
     statusColor = 0x00ff00; // Green for authenticated
   }
   
+  // Determine display name and description
+  // For guests: show "A guest has accessed a room"
+  // For authenticated users: show their name or email
+  let displayName: string;
+  let description: string;
+  
+  if (data.isGuest && (!data.userName && !data.userEmail)) {
+    // True guest (no name/email) - use generic message
+    displayName = 'Guest';
+    description = 'A guest has accessed a room';
+  } else {
+    // Authenticated user or guest with name/email
+    displayName = data.userName || data.userEmail || data.userUuid || 'Guest';
+    description = `${displayName} accessed a room`;
+  }
+  
   const embed: DiscordWebhookEmbed = {
     title: '🚪 Room Access',
-    description: `${data.userName || 'Unknown User'} accessed a room`,
+    description: description,
     color: statusColor,
     fields: [
       {
         name: 'User',
-        value: data.userName || data.userEmail || 'N/A',
+        value: displayName,
         inline: true,
       },
       {
