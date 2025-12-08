@@ -71,12 +71,20 @@ export async function GET(request: NextRequest) {
       // Guest = no accessToken in query params OR authenticateRequest returned null OR isAuthenticated is false
       // Note: authenticateRequest returns {isAuthenticated: false} when no accessToken is provided
       const isGuest = !accessToken || !authenticatedUser || !authenticatedUser.isAuthenticated;
+      const isAuthenticated = !isGuest;
       
-      // Find or create user
-      // First, try to find by authenticated user identifier (if authenticated)
-      let user = null;
-      if (authenticatedUser?.isAuthenticated && authenticatedUser.identifier) {
-        // For authenticated users, try to find by their OIDC identifier or email
+      // Determine user data from request (will be updated from user record if authenticated)
+      let userName = authenticatedUser?.name || name || null;
+      let userEmail = authenticatedUser?.email || (userIdentifier.includes('@') ? userIdentifier : null);
+      const finalUuid = authenticatedUser?.identifier || userIdentifier;
+      
+      // Only create/find User records for authenticated users
+      let user: { id: string; name: string | null; email: string | null; uuid: string; matrixChatId: string | null; isGuest: boolean } | null = null;
+      let membership = null;
+      let avatar = null;
+      
+      if (isAuthenticated && authenticatedUser?.identifier) {
+        // For authenticated users, find or create user record
         user = await prisma.user.findFirst({
           where: {
             OR: [
@@ -85,97 +93,79 @@ export async function GET(request: NextRequest) {
             ],
           },
         });
-      }
-      
-      // If not found and we have a userIdentifier, try that (for guest conversion)
-      if (!user) {
-        user = await prisma.user.findFirst({
-          where: {
-            OR: [
-              { uuid: userIdentifier },
-              { email: userIdentifier.includes('@') ? userIdentifier : undefined },
-            ],
-          },
-        });
-      }
-      
-      // Determine name: authenticated user name > query param name > existing name
-      const userName = authenticatedUser?.name || name || null;
-      // Determine email: authenticated user email > email from identifier > existing email
-      const userEmail = authenticatedUser?.email || (userIdentifier.includes('@') ? userIdentifier : null);
-      
-      // Determine final UUID: authenticated identifier > userIdentifier
-      const finalUuid = authenticatedUser?.identifier || userIdentifier;
-      
-      if (!user) {
-        // Create user if doesn't exist
-        user = await prisma.user.create({
-          data: {
-            uuid: finalUuid,
-            email: userEmail,
-            name: userName,
-            matrixChatId: chatID || null,
-            lastIpAddress: ipAddress || null,
-            isGuest: isGuest,
-          },
-        });
-      } else {
-        // Update existing user with new information if available
-        const updateData: {
-          email?: string | null;
-          name?: string | null;
-          matrixChatId?: string | null;
-          lastIpAddress?: string | null;
-          isGuest?: boolean;
-          uuid?: string;
-        } = {};
         
-        // Always update isGuest status to reflect current authentication state
-        // This ensures the field is always accurate
-        if (user.isGuest !== isGuest) {
-          updateData.isGuest = isGuest;
-        }
-        
-        // If converting from guest to authenticated, update UUID if needed
-        if (user.isGuest && authenticatedUser?.isAuthenticated && authenticatedUser.identifier && authenticatedUser.identifier !== user.uuid) {
-          updateData.uuid = authenticatedUser.identifier;
-        }
-        
-        // Update email if we have a new one and current is null
-        if (userEmail && !user.email) {
-          updateData.email = userEmail;
-        }
-        
-        // Update name if we have a new one (prefer authenticated, then query param, keep existing if both null)
-        if (userName) {
-          updateData.name = userName;
-        }
-        
-        // Update matrix chat ID if provided (may change over time)
-        if (chatID) {
-          updateData.matrixChatId = chatID;
-        }
-        
-        // Always update IP address to track last known IP
-        if (ipAddress) {
-          updateData.lastIpAddress = ipAddress;
-        }
-        
-        // Only update if we have changes
-        if (Object.keys(updateData).length > 0) {
-          user = await prisma.user.update({
-            where: { id: user.id },
-            data: updateData,
+        if (!user) {
+          // Create new authenticated user
+          user = await prisma.user.create({
+            data: {
+              uuid: authenticatedUser.identifier,
+              email: userEmail,
+              name: userName,
+              matrixChatId: chatID || null,
+              lastIpAddress: ipAddress || null,
+              isGuest: false,
+            } as any,
           });
+          // Update userName and userEmail from created user record
+          if (user && user.name) userName = user.name;
+          if (user && user.email) userEmail = user.email;
+        } else {
+          // Update existing user
+          const updateData: {
+            email?: string | null;
+            name?: string | null;
+            matrixChatId?: string | null;
+            lastIpAddress?: string | null;
+            isGuest?: boolean;
+            uuid?: string;
+          } = {};
+          
+          if (user.isGuest) {
+            updateData.isGuest = false; // User is now authenticated
+          }
+          
+          if (userEmail && !user.email) {
+            updateData.email = userEmail;
+          }
+          
+          if (userName) {
+            updateData.name = userName;
+          }
+          
+          if (chatID) {
+            updateData.matrixChatId = chatID;
+          }
+          
+          if (ipAddress) {
+            updateData.lastIpAddress = ipAddress;
+          }
+          
+          if (Object.keys(updateData).length > 0) {
+            user = await prisma.user.update({
+              where: { id: user.id },
+              data: updateData,
+            });
+          }
+          // Update userName and userEmail from user record
+          if (user && user.name) userName = user.name;
+          if (user && user.email) userEmail = user.email;
         }
       }
       
-      // Find world
+      // Find world and room
       const worldData = await prisma.world.findFirst({
         where: {
           slug: world,
           universe: {
             slug: universe,
+          },
+        },
+        include: {
+          universe: {
+            select: {
+              id: true,
+              slug: true,
+            },
           },
         },
       });
@@ -192,14 +182,33 @@ export async function GET(request: NextRequest) {
         return NextResponse.json(error, { status: 404 });
       }
       
-      // Check if user is banned
+      const roomData = await prisma.room.findFirst({
+        where: {
+          slug: room,
+          worldId: worldData.id,
+        },
+      });
+      
+      if (!roomData) {
+        const error: ErrorApiData = {
+          status: "error",
+          type: "error",
+          title: "Room not found",
+          subtitle: "The requested room does not exist",
+          code: "ROOM_NOT_FOUND",
+          details: `The room ${universe}/${world}/${room} could not be found.`,
+        };
+        return NextResponse.json(error, { status: 404 });
+      }
+      
+      // Check if user is banned (by userId if authenticated, or by IP)
       const ban = await prisma.ban.findFirst({
         where: {
           isActive: true,
           AND: [
             {
               OR: [
-                { userId: user.id },
+                ...(user ? [{ userId: user.id }] : []),
                 { ipAddress: ipAddress },
               ],
             },
@@ -232,25 +241,33 @@ export async function GET(request: NextRequest) {
         return NextResponse.json(error, { status: 403 });
       }
       
-      // Get world membership (if user has been explicitly added as a member)
-      // Note: Memberships are NOT created automatically from OIDC tags
-      // World owners/admins must manually add users as members through the admin interface
-      let membership = await prisma.worldMember.findUnique({
-        where: {
-          userId_worldId: {
-            userId: user.id,
-            worldId: worldData.id,
+      // Get world membership (only for authenticated users with User record)
+      if (user) {
+        membership = await prisma.worldMember.findUnique({
+          where: {
+            userId_worldId: {
+              userId: user.id,
+              worldId: worldData.id,
+            },
           },
-        },
-      });
+        });
+        
+        // Get user avatar (only for authenticated users)
+        avatar = await prisma.userAvatar.findUnique({
+          where: {
+            userId_worldId: {
+              userId: user.id,
+              worldId: worldData.id,
+            },
+          },
+        });
+      }
       
-      // If no membership exists, create a temporary membership object for the response
-      // This applies to both guests and authenticated users who haven't been added as members
-      // All users are treated as guests by default until explicitly added as members
+      // Create temporary membership object for response (if no real membership)
       if (!membership) {
         membership = {
           id: '',
-          userId: user.id,
+          userId: user?.id || '',
           worldId: worldData.id,
           tags: [], // Empty tags for all non-members (guests)
           joinedAt: new Date(),
@@ -268,16 +285,6 @@ export async function GET(request: NextRequest) {
         companionTextureId,
         playServiceUrl
       );
-      
-      // Get user avatar (for fallback or additional data)
-      const avatar = await prisma.userAvatar.findUnique({
-        where: {
-          userId_worldId: {
-            userId: user.id,
-            worldId: worldData.id,
-          },
-        },
-      });
       
       // If textures are invalid and we have stored avatar textures, use them as fallback
       let finalTextures = textureValidation.textures;
@@ -307,13 +314,39 @@ export async function GET(request: NextRequest) {
         }
       }
       
+      // Log room access to analytics (for all users, authenticated and unauthenticated)
+      const membershipTags = membership?.tags || [];
+      await (prisma as any).roomAccess.create({
+        data: {
+          userUuid: finalUuid,
+          userId: user?.id || null,
+          ipAddress: ipAddress,
+          userName: userName,
+          userEmail: userEmail,
+          isGuest: isGuest,
+          isAuthenticated: isAuthenticated,
+          hasMembership: membershipTags.length > 0,
+          membershipTags: membershipTags,
+          universeId: worldData.universeId,
+          worldId: worldData.id,
+          roomId: roomData.id,
+          universeSlug: universe,
+          worldSlug: world,
+          roomSlug: room,
+          playUri: playUri,
+        },
+      }).catch((error: unknown) => {
+        // Log but don't fail the request if analytics logging fails
+        console.error('Failed to log room access analytics:', error);
+      });
+      
       // Build response
       const response: FetchMemberDataByUuidSuccessResponse = {
         status: "ok",
-        email: user.email,
-        username: user.name || undefined,
-        userUuid: user.uuid,
-        tags: membership.tags,
+        email: user?.email || null,
+        username: user?.name || userName || undefined,
+        userUuid: finalUuid,
+        tags: membershipTags,
         visitCardUrl: null,
         isCharacterTexturesValid: isTexturesValid,
         characterTextures: finalTextures,
@@ -323,18 +356,18 @@ export async function GET(request: NextRequest) {
         userRoomToken: "",
         activatedInviteUser: true,
         applications: [],
-        canEdit: membership.tags.includes('editor') || membership.tags.includes('admin'),
+        canEdit: membershipTags.includes('editor') || membershipTags.includes('admin'),
         world: world,
-        chatID: chatID || user.matrixChatId || undefined,
+        chatID: chatID || user?.matrixChatId || undefined,
       };
       
       // Send Discord webhook notification (non-blocking)
       notifyRoomAccess({
-        userName: user.name,
-        userEmail: user.email,
-        userUuid: user.uuid,
-        isGuest: user.isGuest,
-        tags: membership?.tags || [],
+        userName: userName,
+        userEmail: userEmail,
+        userUuid: finalUuid,
+        isGuest: isGuest,
+        tags: membershipTags,
         playUri: playUri,
         universe: universe,
         world: world,

@@ -30,6 +30,7 @@ model User {
   friendships1      Friendship[]      @relation("User1")
   friendships2      Friendship[]      @relation("User2")
   requestedFriendships Friendship[]   @relation("RequestedBy")
+  roomAccesses      RoomAccess[]
 
   @@map("users")
 }
@@ -52,6 +53,7 @@ model Universe {
   worlds     World[]
   bans       Ban[]
   favorites  Favorite[]
+  roomAccesses RoomAccess[]
 
   @@map("universes")
 }
@@ -76,6 +78,7 @@ model World {
   bans       Ban[]
   avatars    UserAvatar[]
   favorites  Favorite[]
+  roomAccesses RoomAccess[]
 
   @@unique([universeId, slug]) // Slug unique within universe
   @@map("worlds")
@@ -98,9 +101,50 @@ model Room {
   // Relations
   world      World      @relation(fields: [worldId], references: [id], onDelete: Cascade)
   favorites  Favorite[]
+  roomAccesses RoomAccess[]
 
   @@unique([worldId, slug]) // Slug unique within world
   @@map("rooms")
+}
+
+// Room Access Analytics
+model RoomAccess {
+  id              String   @id @default(uuid())
+  userUuid        String?  @map("user_uuid") // UUID from WorkAdventure (ephemeral for guests)
+  userId          String?  @map("user_id") // Only set if authenticated user exists
+  ipAddress       String   @map("ip_address") // IP address for tracking
+  userName        String?  @map("user_name") // Name from request or user record
+  userEmail       String?  @map("user_email") // Email from request or user record
+  isGuest         Boolean  @default(true) @map("is_guest") // true if unauthenticated
+  isAuthenticated Boolean  @default(false) @map("is_authenticated") // true if has OIDC token
+  hasMembership   Boolean  @default(false) @map("has_membership") // true if has WorldMember record
+  membershipTags  String[] @map("membership_tags") // Tags from membership if exists
+
+  universeId      String   @map("universe_id")
+  worldId         String   @map("world_id")
+  roomId          String   @map("room_id")
+
+  universeSlug    String   @map("universe_slug")
+  worldSlug       String   @map("world_slug")
+  roomSlug        String   @map("room_slug")
+
+  playUri         String   @map("play_uri") // Full play URI
+
+  accessedAt      DateTime @default(now()) @map("accessed_at")
+
+  // Relations
+  user            User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  universe        Universe @relation(fields: [universeId], references: [id], onDelete: Cascade)
+  world           World    @relation(fields: [worldId], references: [id], onDelete: Cascade)
+  room            Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@index([universeId, accessedAt])
+  @@index([worldId, accessedAt])
+  @@index([roomId, accessedAt])
+  @@index([userId, accessedAt])
+  @@index([ipAddress, accessedAt])
+  @@index([accessedAt])
+  @@map("room_accesses")
 }
 
 // World Memberships

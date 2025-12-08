@@ -96,14 +96,17 @@ export async function notifyRoomAccess(data: {
     statusColor = 0x00ff00; // Green for authenticated
   }
   
+  // Use fallback chain: userName > userEmail > userUuid > 'Guest'
+  const displayName = data.userName || data.userEmail || data.userUuid || 'Guest';
+  
   const embed: DiscordWebhookEmbed = {
     title: '🚪 Room Access',
-    description: `${data.userName || 'Unknown User'} accessed a room`,
+    description: `${displayName} accessed a room`,
     color: statusColor,
     fields: [
       {
         name: 'User',
-        value: data.userName || data.userEmail || 'N/A',
+        value: displayName,
         inline: true,
       },
       {
