@@ -106,9 +106,11 @@ export async function GET(request: NextRequest) {
               isGuest: false,
             } as any,
           });
-          // Update userName and userEmail from created user record
-          if (user && user.name) userName = user.name;
-          if (user && user.email) userEmail = user.email;
+          // Update userName and userEmail from created user record (prefer user record)
+          if (user) {
+            userName = user.name || userName;
+            userEmail = user.email || userEmail;
+          }
         } else {
           // Update existing user
           const updateData: {
@@ -146,9 +148,11 @@ export async function GET(request: NextRequest) {
               data: updateData,
             });
           }
-          // Update userName and userEmail from user record
-          if (user && user.name) userName = user.name;
-          if (user && user.email) userEmail = user.email;
+          // Update userName and userEmail from user record (prefer user record)
+          if (user) {
+            userName = user.name || userName;
+            userEmail = user.email || userEmail;
+          }
         }
       }
       
@@ -315,7 +319,11 @@ export async function GET(request: NextRequest) {
       }
       
       // Log room access to analytics (for all users, authenticated and unauthenticated)
-      const membershipTags = membership?.tags || [];
+      // Extract membership tags - ensure we get them from the membership object
+      const membershipTags = (membership && 'tags' in membership && Array.isArray(membership.tags)) 
+        ? membership.tags 
+        : [];
+      
       await (prisma as any).roomAccess.create({
         data: {
           userUuid: finalUuid,
@@ -362,12 +370,20 @@ export async function GET(request: NextRequest) {
       };
       
       // Send Discord webhook notification (non-blocking)
+      // Ensure we use the user record's name/email if available (prefer user record over request params)
+      // Always prefer user record values if user exists
+      const webhookUserName = user ? (user.name || userName) : userName;
+      const webhookUserEmail = user ? (user.email || userEmail) : userEmail;
+      
+      // Ensure membership tags are passed correctly
+      const webhookTags = membershipTags;
+      
       notifyRoomAccess({
-        userName: userName,
-        userEmail: userEmail,
+        userName: webhookUserName,
+        userEmail: webhookUserEmail,
         userUuid: finalUuid,
         isGuest: isGuest,
-        tags: membershipTags,
+        tags: webhookTags,
         playUri: playUri,
         universe: universe,
         world: world,
