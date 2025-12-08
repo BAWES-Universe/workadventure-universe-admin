@@ -18,7 +18,25 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    requireAuth(request);
+    // Check if using admin token or session
+    const authHeader = request.headers.get('authorization');
+    const isAdminToken = authHeader?.startsWith('Bearer ') && 
+      authHeader.replace('Bearer ', '').trim() === process.env.ADMIN_API_TOKEN;
+    
+    let userId: string | null = null;
+    
+    if (!isAdminToken) {
+      // Try to get user from session
+      const { getSessionUser } = await import('@/lib/auth-session');
+      const sessionUser = await getSessionUser(request);
+      if (!sessionUser) {
+        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      }
+      userId = sessionUser.id;
+    } else {
+      // Admin token - require it
+      requireAuth(request);
+    }
     
     const { id } = await params;
     const world = await prisma.world.findUnique({
@@ -29,6 +47,7 @@ export async function GET(
             id: true,
             name: true,
             slug: true,
+            ownerId: true,
           },
         },
         rooms: {
@@ -55,6 +74,14 @@ export async function GET(
       );
     }
     
+    // If using session auth (not admin token), ensure user owns the universe
+    if (userId && !isAdminToken && world.universe.ownerId !== userId) {
+      return NextResponse.json(
+        { error: 'Forbidden' },
+        { status: 403 }
+      );
+    }
+    
     return NextResponse.json(world);
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized') {
@@ -74,20 +101,62 @@ export async function PATCH(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    requireAuth(request);
+    // Check if using admin token or session
+    const authHeader = request.headers.get('authorization');
+    const isAdminToken = authHeader?.startsWith('Bearer ') && 
+      authHeader.replace('Bearer ', '').trim() === process.env.ADMIN_API_TOKEN;
+    
+    let userId: string | null = null;
+    
+    if (!isAdminToken) {
+      // Try to get user from session
+      const { getSessionUser } = await import('@/lib/auth-session');
+      const sessionUser = await getSessionUser(request);
+      if (!sessionUser) {
+        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      }
+      userId = sessionUser.id;
+    } else {
+      // Admin token - require it
+      requireAuth(request);
+    }
     
     const { id } = await params;
     const body = await request.json();
+    
+    // Normalize empty strings to null for optional fields
+    if (body.thumbnailUrl === '') {
+      body.thumbnailUrl = null;
+    }
+    if (body.description === '') {
+      body.description = null;
+    }
+    
     const data = updateWorldSchema.parse(body);
     
     const existing = await prisma.world.findUnique({
       where: { id },
+      include: {
+        universe: {
+          select: {
+            ownerId: true,
+          },
+        },
+      },
     });
     
     if (!existing) {
       return NextResponse.json(
         { error: 'World not found' },
         { status: 404 }
+      );
+    }
+    
+    // If using session auth (not admin token), ensure user owns the universe
+    if (userId && !isAdminToken && existing.universe.ownerId !== userId) {
+      return NextResponse.json(
+        { error: 'Forbidden' },
+        { status: 403 }
       );
     }
     
@@ -140,8 +209,15 @@ export async function PATCH(
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
     if (error instanceof z.ZodError) {
+      const errorMessages = error.issues.map(issue => 
+        `${issue.path.join('.')}: ${issue.message}`
+      ).join(', ');
       return NextResponse.json(
-        { error: 'Validation error', details: error.issues },
+        { 
+          error: 'Validation error', 
+          message: errorMessages,
+          details: error.issues 
+        },
         { status: 400 }
       );
     }
@@ -159,17 +235,50 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    requireAuth(request);
+    // Check if using admin token or session
+    const authHeader = request.headers.get('authorization');
+    const isAdminToken = authHeader?.startsWith('Bearer ') && 
+      authHeader.replace('Bearer ', '').trim() === process.env.ADMIN_API_TOKEN;
+    
+    let userId: string | null = null;
+    
+    if (!isAdminToken) {
+      // Try to get user from session
+      const { getSessionUser } = await import('@/lib/auth-session');
+      const sessionUser = await getSessionUser(request);
+      if (!sessionUser) {
+        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      }
+      userId = sessionUser.id;
+    } else {
+      // Admin token - require it
+      requireAuth(request);
+    }
     
     const { id } = await params;
     const world = await prisma.world.findUnique({
       where: { id },
+      include: {
+        universe: {
+          select: {
+            ownerId: true,
+          },
+        },
+      },
     });
     
     if (!world) {
       return NextResponse.json(
         { error: 'World not found' },
         { status: 404 }
+      );
+    }
+    
+    // If using session auth (not admin token), ensure user owns the universe
+    if (userId && !isAdminToken && world.universe.ownerId !== userId) {
+      return NextResponse.json(
+        { error: 'Forbidden' },
+        { status: 403 }
       );
     }
     

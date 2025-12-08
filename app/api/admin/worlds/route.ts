@@ -16,7 +16,25 @@ const createWorldSchema = z.object({
 // GET /api/admin/worlds - List all worlds
 export async function GET(request: NextRequest) {
   try {
-    requireAuth(request);
+    // Check if using admin token or session
+    const authHeader = request.headers.get('authorization');
+    const isAdminToken = authHeader?.startsWith('Bearer ') && 
+      authHeader.replace('Bearer ', '').trim() === process.env.ADMIN_API_TOKEN;
+    
+    let userId: string | null = null;
+    
+    if (!isAdminToken) {
+      // Try to get user from session
+      const { getSessionUser } = await import('@/lib/auth-session');
+      const sessionUser = await getSessionUser(request);
+      if (!sessionUser) {
+        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      }
+      userId = sessionUser.id;
+    } else {
+      // Admin token - require it
+      requireAuth(request);
+    }
     
     const { searchParams } = new URL(request.url);
     const page = parseInt(searchParams.get('page') || '1');
@@ -34,7 +52,42 @@ export async function GET(request: NextRequest) {
       ];
     }
     
-    if (universeId) {
+    // If user session (not admin token), only show worlds in universes they own
+    if (userId && !isAdminToken) {
+      const userUniverses = await prisma.universe.findMany({
+        where: { ownerId: userId },
+        select: { id: true },
+      });
+      const userUniverseIds = userUniverses.map((u: { id: string }) => u.id);
+      
+      if (userUniverseIds.length === 0) {
+        // User owns no universes, return empty result
+        return NextResponse.json({
+          worlds: [],
+          pagination: {
+            page,
+            limit,
+            total: 0,
+            totalPages: 0,
+          },
+        });
+      }
+      
+      // If universeId is specified, verify user owns it
+      if (universeId) {
+        if (!userUniverseIds.includes(universeId)) {
+          return NextResponse.json(
+            { error: 'Forbidden' },
+            { status: 403 }
+          );
+        }
+        where.universeId = universeId;
+      } else {
+        // Filter worlds to only those in user's universes
+        where.universeId = { in: userUniverseIds };
+      }
+    } else if (universeId) {
+      // Admin token - can filter by any universe
       where.universeId = universeId;
     }
     
@@ -166,6 +219,15 @@ export async function POST(request: NextRequest) {
         isPublic: data.isPublic,
         featured: data.featured,
         thumbnailUrl: data.thumbnailUrl || null,
+        // Add the creator as an admin member if userId is available
+        ...(userId && {
+          members: {
+            create: {
+              userId: userId,
+              tags: ['admin'], // Creator should be an admin
+            },
+          },
+        }),
       },
       include: {
         universe: {
@@ -173,6 +235,12 @@ export async function POST(request: NextRequest) {
             id: true,
             name: true,
             slug: true,
+          },
+        },
+        _count: {
+          select: {
+            rooms: true,
+            members: true,
           },
         },
       },
