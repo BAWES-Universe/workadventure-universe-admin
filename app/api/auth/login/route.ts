@@ -58,21 +58,23 @@ export async function POST(request: NextRequest) {
     });
 
     if (!user) {
-      // Create new user
+      // Create new user (authenticated users are not guests)
       user = await prisma.user.create({
         data: {
           uuid: identifier,
           email: email,
           name: name,
+          isGuest: false, // Authenticated users are not guests
         },
       });
     } else {
-      // Update existing user
+      // Update existing user - mark as authenticated
       user = await prisma.user.update({
         where: { id: user.id },
         data: {
           email: email || user.email,
           name: name || user.name,
+          isGuest: false, // User is authenticating, so they're not a guest
         },
       });
     }
