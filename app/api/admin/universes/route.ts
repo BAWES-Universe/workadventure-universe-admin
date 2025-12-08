@@ -6,11 +6,11 @@ import { z } from 'zod';
 const createUniverseSchema = z.object({
   slug: z.string().min(1).max(100),
   name: z.string().min(1).max(200),
-  description: z.string().optional(),
+  description: z.string().nullable().optional(),
   ownerId: z.string().uuid(),
   isPublic: z.boolean().default(true),
   featured: z.boolean().default(false),
-  thumbnailUrl: z.string().url().optional().or(z.literal('')),
+  thumbnailUrl: z.string().url().nullable().optional(),
 });
 
 const updateUniverseSchema = createUniverseSchema.partial();
@@ -111,10 +111,48 @@ export async function GET(request: NextRequest) {
 // POST /api/admin/universes - Create a new universe
 export async function POST(request: NextRequest) {
   try {
-    requireAuth(request);
+    // Check if using admin token or session
+    const authHeader = request.headers.get('authorization');
+    const isAdminToken = authHeader?.startsWith('Bearer ') && 
+      authHeader.replace('Bearer ', '').trim() === process.env.ADMIN_API_TOKEN;
+    
+    let userId: string | null = null;
+    
+    if (!isAdminToken) {
+      // Try to get user from session
+      const { getSessionUser } = await import('@/lib/auth-session');
+      const sessionUser = await getSessionUser(request);
+      if (!sessionUser) {
+        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      }
+      userId = sessionUser.id;
+    } else {
+      // Admin token - require it
+      requireAuth(request);
+    }
     
     const body = await request.json();
+    
+    // Normalize empty strings to null for optional fields
+    if (body.thumbnailUrl === '') {
+      body.thumbnailUrl = null;
+    }
+    if (body.description === '') {
+      body.description = null;
+    }
+    
+    // Debug logging
+    console.log('Creating universe with data:', JSON.stringify(body, null, 2));
+    
     const data = createUniverseSchema.parse(body);
+    
+    // If using session auth (not admin token), ensure user can only create universes for themselves
+    if (userId && !isAdminToken && data.ownerId !== userId) {
+      return NextResponse.json(
+        { error: 'You can only create universes for yourself' },
+        { status: 403 }
+      );
+    }
     
     // Check if slug already exists
     const existing = await prisma.universe.findUnique({
@@ -167,8 +205,16 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
     if (error instanceof z.ZodError) {
+      console.error('Validation error:', error.issues);
+      const errorMessages = error.issues.map(issue => 
+        `${issue.path.join('.')}: ${issue.message}`
+      ).join(', ');
       return NextResponse.json(
-        { error: 'Validation error', details: error.issues },
+        { 
+          error: 'Validation error', 
+          message: errorMessages,
+          details: error.issues 
+        },
         { status: 400 }
       );
     }

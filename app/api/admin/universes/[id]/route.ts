@@ -6,11 +6,11 @@ import { z } from 'zod';
 const updateUniverseSchema = z.object({
   slug: z.string().min(1).max(100).optional(),
   name: z.string().min(1).max(200).optional(),
-  description: z.string().optional().nullable(),
+  description: z.string().nullable().optional(),
   ownerId: z.string().uuid().optional(),
   isPublic: z.boolean().optional(),
   featured: z.boolean().optional(),
-  thumbnailUrl: z.string().url().optional().nullable().or(z.literal('')),
+  thumbnailUrl: z.string().url().nullable().optional(),
 });
 
 // GET /api/admin/universes/[id] - Get a single universe
@@ -19,7 +19,25 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    requireAuth(request);
+    // Check if using admin token or session
+    const authHeader = request.headers.get('authorization');
+    const isAdminToken = authHeader?.startsWith('Bearer ') && 
+      authHeader.replace('Bearer ', '').trim() === process.env.ADMIN_API_TOKEN;
+    
+    let userId: string | null = null;
+    
+    if (!isAdminToken) {
+      // Try to get user from session
+      const { getSessionUser } = await import('@/lib/auth-session');
+      const sessionUser = await getSessionUser(request);
+      if (!sessionUser) {
+        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      }
+      userId = sessionUser.id;
+    } else {
+      // Admin token - require it
+      requireAuth(request);
+    }
     
     const { id } = await params;
     const universe = await prisma.universe.findUnique({
@@ -57,6 +75,14 @@ export async function GET(
       );
     }
     
+    // If using session auth (not admin token), ensure user owns the universe
+    if (userId && !isAdminToken && universe.ownerId !== userId) {
+      return NextResponse.json(
+        { error: 'Forbidden' },
+        { status: 403 }
+      );
+    }
+    
     return NextResponse.json(universe);
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized') {
@@ -76,10 +102,37 @@ export async function PATCH(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    requireAuth(request);
+    // Check if using admin token or session
+    const authHeader = request.headers.get('authorization');
+    const isAdminToken = authHeader?.startsWith('Bearer ') && 
+      authHeader.replace('Bearer ', '').trim() === process.env.ADMIN_API_TOKEN;
+    
+    let userId: string | null = null;
+    
+    if (!isAdminToken) {
+      // Try to get user from session
+      const { getSessionUser } = await import('@/lib/auth-session');
+      const sessionUser = await getSessionUser(request);
+      if (!sessionUser) {
+        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      }
+      userId = sessionUser.id;
+    } else {
+      // Admin token - require it
+      requireAuth(request);
+    }
     
     const { id } = await params;
     const body = await request.json();
+    
+    // Normalize empty strings to null for optional fields
+    if (body.thumbnailUrl === '') {
+      body.thumbnailUrl = null;
+    }
+    if (body.description === '') {
+      body.description = null;
+    }
+    
     const data = updateUniverseSchema.parse(body);
     
     // Check if universe exists
@@ -91,6 +144,22 @@ export async function PATCH(
       return NextResponse.json(
         { error: 'Universe not found' },
         { status: 404 }
+      );
+    }
+    
+    // If using session auth (not admin token), ensure user owns the universe
+    if (userId && !isAdminToken && existing.ownerId !== userId) {
+      return NextResponse.json(
+        { error: 'Forbidden' },
+        { status: 403 }
+      );
+    }
+    
+    // If using session auth, ensure user can only change owner to themselves
+    if (userId && !isAdminToken && data.ownerId && data.ownerId !== userId) {
+      return NextResponse.json(
+        { error: 'You can only transfer ownership to yourself' },
+        { status: 403 }
       );
     }
     
@@ -153,8 +222,15 @@ export async function PATCH(
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
     if (error instanceof z.ZodError) {
+      const errorMessages = error.issues.map(issue => 
+        `${issue.path.join('.')}: ${issue.message}`
+      ).join(', ');
       return NextResponse.json(
-        { error: 'Validation error', details: error.issues },
+        { 
+          error: 'Validation error', 
+          message: errorMessages,
+          details: error.issues 
+        },
         { status: 400 }
       );
     }
@@ -172,7 +248,25 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    requireAuth(request);
+    // Check if using admin token or session
+    const authHeader = request.headers.get('authorization');
+    const isAdminToken = authHeader?.startsWith('Bearer ') && 
+      authHeader.replace('Bearer ', '').trim() === process.env.ADMIN_API_TOKEN;
+    
+    let userId: string | null = null;
+    
+    if (!isAdminToken) {
+      // Try to get user from session
+      const { getSessionUser } = await import('@/lib/auth-session');
+      const sessionUser = await getSessionUser(request);
+      if (!sessionUser) {
+        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      }
+      userId = sessionUser.id;
+    } else {
+      // Admin token - require it
+      requireAuth(request);
+    }
     
     const { id } = await params;
     const universe = await prisma.universe.findUnique({
@@ -183,6 +277,14 @@ export async function DELETE(
       return NextResponse.json(
         { error: 'Universe not found' },
         { status: 404 }
+      );
+    }
+    
+    // If using session auth (not admin token), ensure user owns the universe
+    if (userId && !isAdminToken && universe.ownerId !== userId) {
+      return NextResponse.json(
+        { error: 'Forbidden' },
+        { status: 403 }
       );
     }
     

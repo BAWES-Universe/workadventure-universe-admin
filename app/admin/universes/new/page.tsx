@@ -50,23 +50,36 @@ export default function NewUniversePage() {
     setLoading(true);
     setError(null);
 
+    // Ensure ownerId is set
+    if (!formData.ownerId) {
+      setError('Owner ID is missing. Please refresh the page and try again.');
+      setLoading(false);
+      return;
+    }
+
     try {
+      const payload = {
+        ...formData,
+        description: formData.description || null,
+        thumbnailUrl: formData.thumbnailUrl || null,
+      };
+      
+      console.log('Submitting universe:', payload);
+      
       const response = await fetch('/api/admin/universes', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         credentials: 'include',
-        body: JSON.stringify({
-          ...formData,
-          description: formData.description || null,
-          thumbnailUrl: formData.thumbnailUrl || null,
-        }),
+        body: JSON.stringify(payload),
       });
 
       if (!response.ok) {
         const data = await response.json();
-        throw new Error(data.error || 'Failed to create universe');
+        // Show validation details if available
+        const errorMessage = data.message || data.error || 'Failed to create universe';
+        throw new Error(errorMessage);
       }
 
       const universe = await response.json();
