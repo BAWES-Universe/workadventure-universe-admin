@@ -7,7 +7,7 @@ const createRoomSchema = z.object({
   worldId: z.string().uuid(),
   slug: z.string().min(1).max(100),
   name: z.string().min(1).max(200),
-  description: z.string().optional(),
+  description: z.string().nullable().optional(),
   mapUrl: z.string().url(), // Required - each room must have its own map
   isPublic: z.boolean().default(true),
 });
@@ -192,6 +192,17 @@ export async function POST(request: NextRequest) {
       body.description = null;
     }
     
+    // Validate mapUrl is not empty (required field)
+    if (!body.mapUrl || body.mapUrl.trim() === '') {
+      return NextResponse.json(
+        { 
+          error: 'Validation error', 
+          message: 'mapUrl: Required',
+        },
+        { status: 400 }
+      );
+    }
+    
     const data = createRoomSchema.parse(body);
     
     // Verify world exists and get universe info
@@ -283,8 +294,15 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
     if (error instanceof z.ZodError) {
+      const errorMessages = error.issues.map(issue => 
+        `${issue.path.join('.')}: ${issue.message}`
+      ).join(', ');
       return NextResponse.json(
-        { error: 'Validation error', details: error.issues },
+        { 
+          error: 'Validation error', 
+          message: errorMessages,
+          details: error.issues 
+        },
         { status: 400 }
       );
     }

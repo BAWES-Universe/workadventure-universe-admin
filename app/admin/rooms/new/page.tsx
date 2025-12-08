@@ -69,6 +69,11 @@ export default function NewRoomPage() {
       setError('Please select a world');
       return;
     }
+    
+    if (!formData.mapUrl || formData.mapUrl.trim() === '') {
+      setError('Map URL is required');
+      return;
+    }
 
     setLoading(true);
     setError(null);
@@ -83,12 +88,13 @@ export default function NewRoomPage() {
         body: JSON.stringify({
           ...formData,
           description: formData.description || null,
+          mapUrl: formData.mapUrl.trim(),
         }),
       });
 
       if (!response.ok) {
         const data = await response.json();
-        throw new Error(data.error || 'Failed to create room');
+        throw new Error(data.message || data.error || 'Failed to create room');
       }
 
       const room = await response.json();

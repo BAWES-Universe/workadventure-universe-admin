@@ -17,7 +17,25 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    requireAuth(request);
+    // Check if using admin token or session
+    const authHeader = request.headers.get('authorization');
+    const isAdminToken = authHeader?.startsWith('Bearer ') && 
+      authHeader.replace('Bearer ', '').trim() === process.env.ADMIN_API_TOKEN;
+    
+    let userId: string | null = null;
+    
+    if (!isAdminToken) {
+      // Try to get user from session
+      const { getSessionUser } = await import('@/lib/auth-session');
+      const sessionUser = await getSessionUser(request);
+      if (!sessionUser) {
+        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      }
+      userId = sessionUser.id;
+    } else {
+      // Admin token - require it
+      requireAuth(request);
+    }
     
     const { id } = await params;
     const room = await prisma.room.findUnique({
@@ -30,6 +48,7 @@ export async function GET(
                 id: true,
                 name: true,
                 slug: true,
+                ownerId: true,
               },
             },
           },
@@ -42,6 +61,28 @@ export async function GET(
         { error: 'Room not found' },
         { status: 404 }
       );
+    }
+    
+    // If using session auth (not admin token), check permissions
+    if (userId && !isAdminToken) {
+      // Check if user owns the universe or is an admin member of the world
+      const isUniverseOwner = room.world.universe.ownerId === userId;
+      const isWorldAdmin = await prisma.worldMember.findFirst({
+        where: {
+          worldId: room.worldId,
+          userId: userId,
+          tags: {
+            has: 'admin',
+          },
+        },
+      });
+      
+      if (!isUniverseOwner && !isWorldAdmin) {
+        return NextResponse.json(
+          { error: 'Forbidden' },
+          { status: 403 }
+        );
+      }
     }
     
     return NextResponse.json(room);
@@ -63,14 +104,53 @@ export async function PATCH(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    requireAuth(request);
+    // Check if using admin token or session
+    const authHeader = request.headers.get('authorization');
+    const isAdminToken = authHeader?.startsWith('Bearer ') && 
+      authHeader.replace('Bearer ', '').trim() === process.env.ADMIN_API_TOKEN;
+    
+    let userId: string | null = null;
+    
+    if (!isAdminToken) {
+      // Try to get user from session
+      const { getSessionUser } = await import('@/lib/auth-session');
+      const sessionUser = await getSessionUser(request);
+      if (!sessionUser) {
+        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      }
+      userId = sessionUser.id;
+    } else {
+      // Admin token - require it
+      requireAuth(request);
+    }
     
     const { id } = await params;
     const body = await request.json();
+    
+    // Normalize empty strings to null for optional fields
+    if (body.description === '') {
+      body.description = null;
+    }
+    if (body.mapUrl === '') {
+      body.mapUrl = null;
+    }
+    
     const data = updateRoomSchema.parse(body);
     
     const existing = await prisma.room.findUnique({
       where: { id },
+      include: {
+        world: {
+          include: {
+            universe: {
+              select: {
+                id: true,
+                ownerId: true,
+              },
+            },
+          },
+        },
+      },
     });
     
     if (!existing) {
@@ -78,6 +158,28 @@ export async function PATCH(
         { error: 'Room not found' },
         { status: 404 }
       );
+    }
+    
+    // If using session auth (not admin token), check permissions
+    if (userId && !isAdminToken) {
+      // Check if user owns the universe or is an admin member of the world
+      const isUniverseOwner = existing.world.universe.ownerId === userId;
+      const isWorldAdmin = await prisma.worldMember.findFirst({
+        where: {
+          worldId: existing.worldId,
+          userId: userId,
+          tags: {
+            has: 'admin',
+          },
+        },
+      });
+      
+      if (!isUniverseOwner && !isWorldAdmin) {
+        return NextResponse.json(
+          { error: 'You can only update rooms in worlds where you are an admin or own the universe' },
+          { status: 403 }
+        );
+      }
     }
     
     // Check if slug is being changed and already exists
@@ -130,8 +232,15 @@ export async function PATCH(
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
     if (error instanceof z.ZodError) {
+      const errorMessages = error.issues.map(issue => 
+        `${issue.path.join('.')}: ${issue.message}`
+      ).join(', ');
       return NextResponse.json(
-        { error: 'Validation error', details: error.issues },
+        { 
+          error: 'Validation error', 
+          message: errorMessages,
+          details: error.issues 
+        },
         { status: 400 }
       );
     }
@@ -149,11 +258,41 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    requireAuth(request);
+    // Check if using admin token or session
+    const authHeader = request.headers.get('authorization');
+    const isAdminToken = authHeader?.startsWith('Bearer ') && 
+      authHeader.replace('Bearer ', '').trim() === process.env.ADMIN_API_TOKEN;
+    
+    let userId: string | null = null;
+    
+    if (!isAdminToken) {
+      // Try to get user from session
+      const { getSessionUser } = await import('@/lib/auth-session');
+      const sessionUser = await getSessionUser(request);
+      if (!sessionUser) {
+        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      }
+      userId = sessionUser.id;
+    } else {
+      // Admin token - require it
+      requireAuth(request);
+    }
     
     const { id } = await params;
     const room = await prisma.room.findUnique({
       where: { id },
+      include: {
+        world: {
+          include: {
+            universe: {
+              select: {
+                id: true,
+                ownerId: true,
+              },
+            },
+          },
+        },
+      },
     });
     
     if (!room) {
@@ -161,6 +300,28 @@ export async function DELETE(
         { error: 'Room not found' },
         { status: 404 }
       );
+    }
+    
+    // If using session auth (not admin token), check permissions
+    if (userId && !isAdminToken) {
+      // Check if user owns the universe or is an admin member of the world
+      const isUniverseOwner = room.world.universe.ownerId === userId;
+      const isWorldAdmin = await prisma.worldMember.findFirst({
+        where: {
+          worldId: room.worldId,
+          userId: userId,
+          tags: {
+            has: 'admin',
+          },
+        },
+      });
+      
+      if (!isUniverseOwner && !isWorldAdmin) {
+        return NextResponse.json(
+          { error: 'You can only delete rooms in worlds where you are an admin or own the universe' },
+          { status: 403 }
+        );
+      }
     }
     
     await prisma.room.delete({
