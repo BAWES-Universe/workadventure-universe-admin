@@ -83,7 +83,6 @@ export default function NewRoomPage() {
         body: JSON.stringify({
           ...formData,
           description: formData.description || null,
-          mapUrl: formData.mapUrl || null,
         }),
       });
 
@@ -235,18 +234,19 @@ export default function NewRoomPage() {
 
           <div>
             <label htmlFor="mapUrl" className="block text-sm font-medium text-gray-700">
-              Map URL (Optional)
+              Map URL <span className="text-red-500">*</span>
             </label>
             <p className="mt-1 text-sm text-gray-500">
-              Override the world's map URL for this room. Leave empty to use the world's map.
+              External TMJ map URL for this room (e.g., https://example.com/map.tmj). Each room must have its own map.
             </p>
             <input
               type="url"
               id="mapUrl"
+              required
               value={formData.mapUrl}
               onChange={(e) => setFormData({ ...formData, mapUrl: e.target.value })}
               className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
-              placeholder="https://example.com/room-map.json"
+              placeholder="https://example.com/room-map.tmj"
             />
           </div>
 
