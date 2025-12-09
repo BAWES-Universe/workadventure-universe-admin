@@ -79,15 +79,22 @@ export const FetchMemberDataByUuidSuccessResponseSchema = z.object({
 
 // Map & Room Schemas
 export const MapDetailsDataSchema = z.object({
-  mapUrl: z.string().url(),
+  mapUrl: z.string().url().optional(),
+  wamUrl: z.string().url().optional(),
   wamSettings: z.object({
     wamUrl: z.string().url().optional(),
   }).optional(),
+  editable: z.boolean().optional(),
+  group: z.string().nullable(),
   policy: z.enum(["public", "private"]).optional(),
   tags: z.array(z.string()).optional(),
   authenticationMandatory: z.boolean().optional(),
   roomName: z.string().optional(),
   contactPage: z.string().url().optional(),
+  modules: z.array(z.string()).optional(),
+  metadata: z.object({
+    modules: z.array(z.string()),
+  }).optional(),
 });
 
 export const RoomRedirectSchema = z.object({
