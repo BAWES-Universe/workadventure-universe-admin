@@ -9,35 +9,54 @@ async function getSessionUser() {
     const cookieStore = await cookies();
     const sessionCookie = cookieStore.get('user_session');
     
-    if (!sessionCookie) {
+    // Return null immediately if no cookie - don't query database
+    if (!sessionCookie || !sessionCookie.value || sessionCookie.value.trim() === '') {
       return null;
     }
 
-    const session = JSON.parse(sessionCookie.value);
-    
-    // Verify user still exists
-    const user = await prisma.user.findUnique({
-      where: { id: session.userId },
-      select: {
-        id: true,
-        uuid: true,
-        email: true,
-        name: true,
-      },
-    });
-
-    if (!user) {
+    let session;
+    try {
+      session = JSON.parse(sessionCookie.value);
+    } catch (e) {
+      // Invalid cookie format, return null immediately
       return null;
     }
 
-    return {
-      id: user.id,
-      uuid: user.uuid,
-      email: user.email,
-      name: user.name,
-      tags: session.tags || [],
-    };
+    // Return null immediately if no userId in session
+    if (!session || !session.userId) {
+      return null;
+    }
+
+    // Only query database if we have a valid session cookie with userId
+    try {
+      const user = await prisma.user.findUnique({
+        where: { id: session.userId },
+        select: {
+          id: true,
+          uuid: true,
+          email: true,
+          name: true,
+        },
+      });
+
+      if (!user) {
+        return null;
+      }
+
+      return {
+        id: user.id,
+        uuid: user.uuid,
+        email: user.email,
+        name: user.name,
+        tags: session.tags || [],
+      };
+    } catch (error) {
+      // Database query failed, return null to allow page to load
+      console.error('[Layout] Error fetching user from database:', error);
+      return null;
+    }
   } catch (error) {
+    // Any other error, return null to allow page to load
     return null;
   }
 }

@@ -64,6 +64,10 @@ services:
       - --providers.docker.exposedbydefault=false
       - --providers.docker.network=workadventure-universe-admin_default
       - --entrypoints.web.address=:80
+      # Increase timeout to 60 seconds for OIDC validation
+      - --entrypoints.web.transport.respondingTimeouts.readTimeout=60s
+      - --entrypoints.web.transport.respondingTimeouts.idleTimeout=60s
+      - --entrypoints.web.transport.respondingTimeouts.writeTimeout=60s
     ports:
       - "${TRAEFIK_PORT:-8321}:80"
     restart: unless-stopped

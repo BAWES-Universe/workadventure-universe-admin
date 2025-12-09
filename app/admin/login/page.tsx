@@ -9,6 +9,47 @@ export default function LoginPage() {
   const [accessToken, setAccessToken] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [autoLoginAttempted, setAutoLoginAttempted] = useState(false);
+
+  // Auto-login function - defined before useEffect
+  const handleAutoLogin = async (token: string) => {
+    setLoading(true);
+    setError(null);
+
+    try {
+      const response = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        credentials: 'include',
+        body: JSON.stringify({ accessToken: token }),
+      });
+
+      if (!response.ok) {
+        const data = await response.json();
+        throw new Error(data.error || 'Login failed');
+      }
+
+      // Redirect to original destination or dashboard
+      const redirectTo = searchParams.get('redirect') || '/admin';
+      window.location.href = redirectTo;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Login failed');
+      setLoading(false);
+    }
+  };
+
+  // Auto-detect accessToken from URL query params and attempt login
+  useEffect(() => {
+    const tokenFromUrl = searchParams.get('accessToken');
+    if (tokenFromUrl && !autoLoginAttempted) {
+      setAccessToken(tokenFromUrl);
+      setAutoLoginAttempted(true);
+      handleAutoLogin(tokenFromUrl);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault();

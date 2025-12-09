@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { validateAccessToken } from '@/lib/oidc';
 import { prisma } from '@/lib/db';
 
+
 /**
  * POST /api/auth/login
  * Login with OIDC access token
