@@ -78,13 +78,13 @@ export function middleware(request: NextRequest) {
         console.log('[Middleware] Parsed as JSON from cookie');
       }
       
-      // Check expiration
-      if (session.expiresAt && Date.now() > session.expiresAt) {
+      // Check expiration (session is not null after JSON.parse)
+      if (session && session.expiresAt && Date.now() > session.expiresAt) {
         if (process.env.NODE_ENV === 'development') {
           console.log('[Middleware] Session expired:', new Date(session.expiresAt).toISOString(), 'now:', new Date().toISOString());
         }
         session = null;
-      } else if (process.env.NODE_ENV === 'development') {
+      } else if (session && process.env.NODE_ENV === 'development') {
         console.log('[Middleware] Session valid, expires:', new Date(session.expiresAt).toISOString());
       }
     } catch {
@@ -97,13 +97,13 @@ export function middleware(request: NextRequest) {
           console.log('[Middleware] Parsed as base64 token from URL');
         }
         
-        // Check expiration
-        if (session.expiresAt && Date.now() > session.expiresAt) {
+        // Check expiration (session is not null after JSON.parse)
+        if (session && session.expiresAt && Date.now() > session.expiresAt) {
           if (process.env.NODE_ENV === 'development') {
             console.log('[Middleware] Token expired:', new Date(session.expiresAt).toISOString());
           }
           session = null;
-        } else if (process.env.NODE_ENV === 'development') {
+        } else if (session && process.env.NODE_ENV === 'development') {
           console.log('[Middleware] Token valid, expires:', new Date(session.expiresAt).toISOString());
         }
       } catch (parseError) {
