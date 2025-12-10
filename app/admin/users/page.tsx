@@ -39,9 +39,8 @@ export default function UsersPage() {
 
   async function checkAuth() {
     try {
-      const response = await fetch('/api/auth/me', {
-        credentials: 'include',
-      });
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch('/api/auth/me');
       if (!response.ok) {
         router.push('/admin/login');
         return;
@@ -56,9 +55,8 @@ export default function UsersPage() {
     try {
       setLoading(true);
       const searchParam = search ? `&search=${encodeURIComponent(search)}` : '';
-      const response = await fetch(`/api/admin/users?page=${page}&limit=50${searchParam}`, {
-        credentials: 'include',
-      });
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch(`/api/admin/users?page=${page}&limit=50${searchParam}`);
 
       if (!response.ok) {
         if (response.status === 401) {

@@ -38,7 +38,8 @@ export default function NewRoomPage() {
 
   async function checkAuth() {
     try {
-      const response = await fetch('/api/auth/me');
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch('/api/auth/me');
       if (!response.ok) {
         router.push('/admin/login');
         return;
@@ -50,9 +51,8 @@ export default function NewRoomPage() {
 
   async function fetchWorlds() {
     try {
-      const response = await fetch('/api/admin/worlds?limit=100', {
-        credentials: 'include',
-      });
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch('/api/admin/worlds?limit=100');
       if (response.ok) {
         const data = await response.json();
         setWorlds(data.worlds || []);
@@ -79,12 +79,12 @@ export default function NewRoomPage() {
     setError(null);
 
     try {
-      const response = await fetch('/api/admin/rooms', {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch('/api/admin/rooms', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        credentials: 'include',
         body: JSON.stringify({
           ...formData,
           description: formData.description || null,

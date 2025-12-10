@@ -5,6 +5,9 @@ import { prisma } from '@/lib/db';
 import { checkWamExists, createWamFile, getWamUrl, getWamPath } from '@/lib/map-storage';
 import type { MapDetailsData, ErrorApiData } from '@/types/workadventure';
 
+// Ensure this route runs in Node.js runtime (not Edge) to support Redis and Prisma
+export const runtime = 'nodejs';
+
 /**
  * Returns the base start map configuration
  * Used as fallback when no room is found or room has no mapUrl

@@ -68,7 +68,8 @@ export default function UniverseDetailPage() {
 
   async function checkAuth() {
     try {
-      const response = await fetch('/api/auth/me');
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch('/api/auth/me');
       if (!response.ok) {
         router.push('/admin/login');
       }
@@ -80,9 +81,8 @@ export default function UniverseDetailPage() {
   async function fetchUniverse() {
     try {
       setLoading(true);
-      const response = await fetch(`/api/admin/universes/${id}`, {
-        credentials: 'include',
-      });
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch(`/api/admin/universes/${id}`);
 
       if (!response.ok) {
         if (response.status === 404) {
@@ -112,9 +112,8 @@ export default function UniverseDetailPage() {
 
   async function fetchUsers() {
     try {
-      const response = await fetch('/api/admin/users?limit=100', {
-        credentials: 'include',
-      });
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch('/api/admin/users?limit=100');
       if (response.ok) {
         const data = await response.json();
         setUsers(data.users || []);
@@ -127,9 +126,8 @@ export default function UniverseDetailPage() {
   async function fetchAnalytics() {
     try {
       setAnalyticsLoading(true);
-      const response = await fetch(`/api/admin/analytics/universes/${id}`, {
-        credentials: 'include',
-      });
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch(`/api/admin/analytics/universes/${id}`);
       if (response.ok) {
         const data = await response.json();
         setAnalytics(data);
@@ -146,12 +144,12 @@ export default function UniverseDetailPage() {
     setError(null);
 
     try {
-      const response = await fetch(`/api/admin/universes/${id}`, {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch(`/api/admin/universes/${id}`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
         },
-        credentials: 'include',
         body: JSON.stringify({
           ...formData,
           description: formData.description || null,
@@ -181,9 +179,9 @@ export default function UniverseDetailPage() {
     }
 
     try {
-      const response = await fetch(`/api/admin/universes/${id}`, {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch(`/api/admin/universes/${id}`, {
         method: 'DELETE',
-        credentials: 'include',
       });
 
       if (!response.ok) {

@@ -1,8 +1,9 @@
-import Link from 'next/link';
 import { ReactNode } from 'react';
 import { cookies } from 'next/headers';
 import LogoutButton from './logout-button';
 import { prisma } from '@/lib/db';
+import TokenHandler from './token-handler';
+import AuthLink from './auth-link';
 
 async function getSessionUser() {
   try {
@@ -72,29 +73,29 @@ export default async function AdminLayout({ children }: { children: ReactNode })
           <div className="flex justify-between h-16">
             <div className="flex">
               <div className="flex-shrink-0 flex items-center">
-                <Link href="/admin" className="text-xl font-bold text-gray-900">
+                <AuthLink href="/admin" className="text-xl font-bold text-gray-900">
                   WorkAdventure Admin
-                </Link>
+                </AuthLink>
               </div>
               <div className="hidden sm:ml-6 sm:flex sm:space-x-8">
-                <Link
+                <AuthLink
                   href="/admin"
                   className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
                 >
                   Dashboard
-                </Link>
-                <Link
+                </AuthLink>
+                <AuthLink
                   href="/admin/universes"
                   className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
                 >
                   Universes
-                </Link>
-                <Link
+                </AuthLink>
+                <AuthLink
                   href="/admin/users"
                   className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
                 >
                   Users
-                </Link>
+                </AuthLink>
               </div>
             </div>
             <div className="flex items-center">
@@ -106,18 +107,19 @@ export default async function AdminLayout({ children }: { children: ReactNode })
                   <LogoutButton />
                 </div>
               ) : (
-                <Link
+                <AuthLink
                   href="/admin/login"
                   className="text-sm text-indigo-600 hover:text-indigo-900"
                 >
                   Login
-                </Link>
+                </AuthLink>
               )}
             </div>
           </div>
         </div>
       </nav>
       <main className="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
+        <TokenHandler />
         {children}
       </main>
     </div>

@@ -1,5 +1,6 @@
 import { NextRequest } from 'next/server';
 import { prisma } from './db';
+import { getSessionId, getSessionData } from './auth-token';
 
 export interface SessionUser {
   id: string;
@@ -10,17 +11,23 @@ export interface SessionUser {
 }
 
 /**
- * Get current user from session cookie
+ * Get current user from session token (checks Authorization header first, then cookie)
  */
 export async function getSessionUser(request: NextRequest): Promise<SessionUser | null> {
   try {
-    const sessionCookie = request.cookies.get('user_session');
+    // Check for session ID in cookie or URL
+    const sessionId = getSessionId(request);
     
-    if (!sessionCookie) {
+    if (!sessionId) {
       return null;
     }
 
-    const session = JSON.parse(sessionCookie.value);
+    // Get session data from store or parse legacy token
+    const session = await getSessionData(sessionId);
+    
+    if (!session) {
+      return null;
+    }
     
     // Verify user still exists
     const user = await prisma.user.findUnique({

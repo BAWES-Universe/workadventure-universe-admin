@@ -1,7 +1,28 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { validateAccessToken } from '@/lib/oidc';
 import { prisma } from '@/lib/db';
+import { sessionStore } from '@/lib/session-store';
 
+// Ensure this route runs in Node.js runtime (not Edge) to support Redis and Prisma
+export const runtime = 'nodejs';
+
+// CORS headers helper
+function corsHeaders() {
+  return {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Allow-Credentials': 'true',
+  };
+}
+
+/**
+ * OPTIONS /api/auth/login
+ * Handle CORS preflight
+ */
+export async function OPTIONS() {
+  return NextResponse.json({}, { headers: corsHeaders() });
+}
 
 /**
  * POST /api/auth/login
@@ -13,20 +34,28 @@ export async function POST(request: NextRequest) {
     const { accessToken } = body;
 
     if (!accessToken) {
-      return NextResponse.json(
+      const response = NextResponse.json(
         { error: 'Access token required' },
         { status: 400 }
       );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
     }
 
     // Validate OIDC token
     const userInfo = await validateAccessToken(accessToken);
     
     if (!userInfo) {
-      return NextResponse.json(
+      const response = NextResponse.json(
         { error: 'Invalid access token' },
         { status: 401 }
       );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
     }
 
     // Extract user identifier
@@ -80,8 +109,32 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // Create session (in production, use proper session management)
-    // For now, return user info that client can store
+    // Create session data with expiration
+    const now = Date.now();
+    const expiresAt = now + (7 * 24 * 60 * 60 * 1000); // 7 days
+    const sessionData = {
+      userId: user.id,
+      uuid: user.uuid,
+      email: user.email,
+      name: user.name,
+      tags,
+      createdAt: now,
+      expiresAt,
+    };
+
+    // Create session in server-side store (for server-side operations)
+    const sessionId = await sessionStore.createSession({
+      userId: user.id,
+      uuid: user.uuid,
+      email: user.email,
+      name: user.name,
+      tags,
+    });
+
+    // Encode session data as base64 for URL/cookie storage (fallback when store not available)
+    const sessionToken = Buffer.from(JSON.stringify(sessionData)).toString('base64');
+
+    // Return user info, session ID, and token (for iframe scenarios)
     const response = NextResponse.json({
       user: {
         id: user.id,
@@ -90,30 +143,55 @@ export async function POST(request: NextRequest) {
         name: user.name,
         tags,
       },
+      sessionId, // For server-side store lookup
+      sessionToken, // For cookie/URL fallback (base64 encoded session data)
+      expiresAt: sessionData.expiresAt,
     });
 
-    // Set secure cookie with user session (in production, use httpOnly, secure, sameSite)
-    response.cookies.set('user_session', JSON.stringify({
-      userId: user.id,
-      uuid: user.uuid,
-      email: user.email,
-      name: user.name,
-      tags,
-    }), {
+    // Set secure cookie with session data (middleware can parse this directly)
+    const isSecure = request.url.startsWith('https://') || process.env.NODE_ENV === 'production';
+    
+    // Store session data in cookie so middleware can validate without needing the store
+    // This works even if the in-memory store is not shared between processes
+    const sessionDataString = JSON.stringify(sessionData);
+    response.cookies.set('user_session', sessionDataString, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax',
+      secure: isSecure,
+      sameSite: isSecure ? 'none' : 'lax',
       path: '/',
       maxAge: 60 * 60 * 24 * 7, // 7 days
+    });
+    
+    // Also set session ID cookie (for server-side store lookup when available)
+    response.cookies.set('admin_session_id', sessionId, {
+      httpOnly: true,
+      secure: isSecure,
+      sameSite: isSecure ? 'none' : 'lax',
+      path: '/',
+      maxAge: 60 * 60 * 24 * 7,
+    });
+    
+    if (process.env.NODE_ENV === 'development') {
+      console.log('[Login] Session created with ID:', sessionId.substring(0, 8) + '...');
+      console.log('[Login] Cookie set with sameSite:', isSecure ? 'none' : 'lax', 'secure:', isSecure);
+    }
+
+    // Add CORS headers
+    Object.entries(corsHeaders()).forEach(([key, value]) => {
+      response.headers.set(key, value);
     });
 
     return response;
   } catch (error) {
     console.error('Login error:', error);
-    return NextResponse.json(
+    const response = NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }
     );
+    Object.entries(corsHeaders()).forEach(([key, value]) => {
+      response.headers.set(key, value);
+    });
+    return response;
   }
 }
 

@@ -16,6 +16,20 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    container_name: admin-api-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    command: redis-server --appendonly yes
+
   admin-api:
     build:
       context: .
@@ -30,6 +44,7 @@ services:
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-authorization-code-client-secret}
       NODE_ENV: development
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://admin.bawes.localhost}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
     ports:
       - "5555:5555" # Prisma Studio port
     volumes:
@@ -38,6 +53,8 @@ services:
       - /app/.next
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     labels:
       # Traefik configuration
@@ -81,4 +98,5 @@ services:
 
 volumes:
   postgres_data:
+  redis_data:
 

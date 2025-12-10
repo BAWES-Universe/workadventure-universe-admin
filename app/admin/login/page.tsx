@@ -11,12 +11,16 @@ export default function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [autoLoginAttempted, setAutoLoginAttempted] = useState(false);
 
-  // Auto-login function - defined before useEffect
+      // Auto-login function - defined before useEffect
   const handleAutoLogin = async (token: string) => {
     setLoading(true);
     setError(null);
 
     try {
+      // Add timeout to fetch
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+
       const response = await fetch('/api/auth/login', {
         method: 'POST',
         headers: {
@@ -24,30 +28,126 @@ export default function LoginPage() {
         },
         credentials: 'include',
         body: JSON.stringify({ accessToken: token }),
+        signal: controller.signal,
       });
 
+      clearTimeout(timeoutId);
+
+      let data;
+      try {
+        data = await response.json();
+      } catch (parseError) {
+        console.error('Failed to parse login response:', parseError);
+        throw new Error('Invalid response from server');
+      }
+
       if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.error || 'Login failed');
+        throw new Error(data.error || `Login failed: ${response.status}`);
+      }
+
+      // Store session token in localStorage (works in iframes)
+      // Prefer sessionToken (base64 encoded session data) over sessionId (just an ID)
+      if (data.sessionToken) {
+        try {
+          localStorage.setItem('admin_session_token', data.sessionToken);
+          if (data.expiresAt) {
+            localStorage.setItem('admin_session_expires', data.expiresAt.toString());
+          }
+          console.log('Session token stored successfully');
+        } catch (storageError) {
+          console.warn('Failed to store session token in localStorage:', storageError);
+          // Continue anyway - cookie might still work
+        }
+      } else if (data.sessionId) {
+        // Fallback to session ID if token not available
+        try {
+          localStorage.setItem('admin_session_id', data.sessionId);
+          console.log('Session ID stored successfully');
+        } catch (storageError) {
+          console.warn('Failed to store session ID in localStorage:', storageError);
+        }
+      } else {
+        console.error('No sessionToken or sessionId in login response:', data);
+        throw new Error('Server did not return session data');
       }
 
       // Redirect to original destination or dashboard
+      // Include session token in URL for first load (middleware can't read localStorage)
+      // Use sessionToken (encoded session data) which middleware can parse directly
       const redirectTo = searchParams.get('redirect') || '/admin';
-      window.location.href = redirectTo;
+      const redirectUrl = new URL(redirectTo, window.location.origin);
+      if (data.sessionToken) {
+        redirectUrl.searchParams.set('_token', data.sessionToken);
+      } else if (data.sessionId) {
+        redirectUrl.searchParams.set('_session', data.sessionId);
+      }
+      
+      console.log('[Login] Success! Redirecting to:', redirectUrl.toString());
+      
+      // Redirect immediately
+      window.location.href = redirectUrl.toString();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Login failed');
+      console.error('Login error:', err);
+      const errorMessage = err instanceof Error ? err.message : 'Login failed';
+      
+      // Handle specific error types
+      if (err instanceof Error && err.name === 'AbortError') {
+        setError('Request timed out. Please try again.');
+      } else {
+        setError(errorMessage);
+      }
+      
       setLoading(false);
     }
   };
 
-  // Auto-detect accessToken from URL query params and attempt login
+  // Check if already authenticated before attempting login
   useEffect(() => {
-    const tokenFromUrl = searchParams.get('accessToken');
-    if (tokenFromUrl && !autoLoginAttempted) {
-      setAccessToken(tokenFromUrl);
-      setAutoLoginAttempted(true);
-      handleAutoLogin(tokenFromUrl);
-    }
+    const checkExistingSession = async () => {
+      try {
+        // Check if we have a valid session by calling /api/auth/me
+        const { authenticatedFetch } = await import('@/lib/client-auth');
+        const response = await authenticatedFetch('/api/auth/me');
+
+        if (response.ok) {
+          // Already authenticated, redirect to dashboard
+          const redirectTo = searchParams.get('redirect') || '/admin';
+          console.log('[Login] Already authenticated, redirecting to:', redirectTo);
+          
+          // Get token from localStorage to preserve in URL
+          const storedToken = localStorage.getItem('admin_session_token');
+          const storedSessionId = localStorage.getItem('admin_session_id');
+          
+          const redirectUrl = new URL(redirectTo, window.location.origin);
+          if (storedToken) {
+            redirectUrl.searchParams.set('_token', storedToken);
+          } else if (storedSessionId) {
+            redirectUrl.searchParams.set('_session', storedSessionId);
+          }
+          
+          window.location.href = redirectUrl.toString();
+          return;
+        }
+      } catch (error) {
+        // Not authenticated or error checking, continue with normal login flow
+        console.log('[Login] No existing session found');
+      }
+
+      // If not authenticated, check for accessToken in URL
+      const tokenFromUrl = searchParams.get('accessToken');
+      if (tokenFromUrl && !autoLoginAttempted) {
+        console.log('Auto-login: Token found in URL, attempting login...');
+        setAccessToken(tokenFromUrl);
+        setAutoLoginAttempted(true);
+        handleAutoLogin(tokenFromUrl).catch((err) => {
+          console.error('Auto-login failed:', err);
+          setError(err instanceof Error ? err.message : 'Auto-login failed');
+          setLoading(false);
+        });
+      }
+    };
+
+    checkExistingSession();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams]);
 
@@ -57,6 +157,10 @@ export default function LoginPage() {
     setError(null);
 
     try {
+      // Add timeout to fetch
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+
       const response = await fetch('/api/auth/login', {
         method: 'POST',
         headers: {
@@ -64,19 +168,74 @@ export default function LoginPage() {
         },
         credentials: 'include',
         body: JSON.stringify({ accessToken }),
+        signal: controller.signal,
       });
 
+      clearTimeout(timeoutId);
+
+      let data;
+      try {
+        data = await response.json();
+      } catch (parseError) {
+        console.error('Failed to parse login response:', parseError);
+        throw new Error('Invalid response from server');
+      }
+
       if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.error || 'Login failed');
+        throw new Error(data.error || `Login failed: ${response.status}`);
+      }
+
+      // Store session token in localStorage (works in iframes)
+      // Prefer sessionToken (base64 encoded session data) over sessionId (just an ID)
+      if (data.sessionToken) {
+        try {
+          localStorage.setItem('admin_session_token', data.sessionToken);
+          if (data.expiresAt) {
+            localStorage.setItem('admin_session_expires', data.expiresAt.toString());
+          }
+          console.log('Session token stored successfully');
+        } catch (storageError) {
+          console.warn('Failed to store session token in localStorage:', storageError);
+          // Continue anyway - cookie might still work
+        }
+      } else if (data.sessionId) {
+        // Fallback to session ID if token not available
+        try {
+          localStorage.setItem('admin_session_id', data.sessionId);
+          console.log('Session ID stored successfully');
+        } catch (storageError) {
+          console.warn('Failed to store session ID in localStorage:', storageError);
+        }
+      } else {
+        console.error('No sessionToken or sessionId in login response:', data);
+        throw new Error('Server did not return session data');
       }
 
       // Redirect to original destination or dashboard
-      // Use window.location for full page reload to ensure cookie is available
+      // Include session token in URL for first load (middleware can't read localStorage)
+      // Use sessionToken (encoded session data) which middleware can parse directly
       const redirectTo = searchParams.get('redirect') || '/admin';
-      window.location.href = redirectTo;
+      const redirectUrl = new URL(redirectTo, window.location.origin);
+      if (data.sessionToken) {
+        redirectUrl.searchParams.set('_token', data.sessionToken);
+      } else if (data.sessionId) {
+        redirectUrl.searchParams.set('_session', data.sessionId);
+      }
+      
+      console.log('[Login] Success! Redirecting to:', redirectUrl.toString());
+      
+      // Redirect immediately
+      window.location.href = redirectUrl.toString();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Login failed');
+      console.error('Login error:', err);
+      const errorMessage = err instanceof Error ? err.message : 'Login failed';
+      
+      // Handle specific error types
+      if (err instanceof Error && err.name === 'AbortError') {
+        setError('Request timed out. Please try again.');
+      } else {
+        setError(errorMessage);
+      }
     } finally {
       setLoading(false);
     }

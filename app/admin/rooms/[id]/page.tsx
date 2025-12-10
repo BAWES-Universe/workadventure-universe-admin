@@ -53,7 +53,8 @@ export default function RoomDetailPage() {
 
   async function checkAuth() {
     try {
-      const response = await fetch('/api/auth/me');
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch('/api/auth/me');
       if (!response.ok) {
         router.push('/admin/login');
       }
@@ -65,9 +66,8 @@ export default function RoomDetailPage() {
   async function fetchRoom() {
     try {
       setLoading(true);
-      const response = await fetch(`/api/admin/rooms/${id}`, {
-        credentials: 'include',
-      });
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch(`/api/admin/rooms/${id}`);
 
       if (!response.ok) {
         if (response.status === 404) {
@@ -96,9 +96,8 @@ export default function RoomDetailPage() {
   async function fetchAnalytics() {
     try {
       setAnalyticsLoading(true);
-      const response = await fetch(`/api/admin/analytics/rooms/${id}`, {
-        credentials: 'include',
-      });
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch(`/api/admin/analytics/rooms/${id}`);
       if (response.ok) {
         const data = await response.json();
         setAnalytics(data);
@@ -115,12 +114,12 @@ export default function RoomDetailPage() {
     setError(null);
 
     try {
-      const response = await fetch(`/api/admin/rooms/${id}`, {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch(`/api/admin/rooms/${id}`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
         },
-        credentials: 'include',
         body: JSON.stringify({
           ...formData,
           description: formData.description || null,
@@ -150,9 +149,9 @@ export default function RoomDetailPage() {
     }
 
     try {
-      const response = await fetch(`/api/admin/rooms/${id}`, {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch(`/api/admin/rooms/${id}`, {
         method: 'DELETE',
-        credentials: 'include',
       });
 
       if (!response.ok) {
