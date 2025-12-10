@@ -3,13 +3,26 @@
 import { useState, useEffect } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 
+// Check if manual login form should be enabled (for developers)
+// Note: NEXT_PUBLIC_ variables are embedded at build time
+// If you change this, you MUST restart the dev server/container
+const ENABLE_MANUAL_LOGIN = process.env.NEXT_PUBLIC_ENABLE_MANUAL_LOGIN === 'true';
+
 export default function LoginPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [accessToken, setAccessToken] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true); // Start with loading state
   const [error, setError] = useState<string | null>(null);
   const [autoLoginAttempted, setAutoLoginAttempted] = useState(false);
+  const [showManualForm, setShowManualForm] = useState(false);
+
+  // Debug logging on mount
+  useEffect(() => {
+    console.log('[Login] Component mounted');
+    console.log('[Login] ENABLE_MANUAL_LOGIN constant:', ENABLE_MANUAL_LOGIN);
+    console.log('[Login] process.env.NEXT_PUBLIC_ENABLE_MANUAL_LOGIN:', process.env.NEXT_PUBLIC_ENABLE_MANUAL_LOGIN);
+  }, []);
 
       // Auto-login function - defined before useEffect
   const handleAutoLogin = async (token: string) => {
@@ -103,51 +116,99 @@ export default function LoginPage() {
 
   // Check if already authenticated before attempting login
   useEffect(() => {
+    let timeoutId: NodeJS.Timeout | null = null;
+    let isMounted = true; // Track if component is still mounted
+    
     const checkExistingSession = async () => {
+      // If manual login is enabled and no accessToken, skip session check and show form
+      // This prevents infinite redirect loops
+      const tokenFromUrl = searchParams.get('accessToken');
+      if (ENABLE_MANUAL_LOGIN && !tokenFromUrl) {
+        console.log('[Login] Manual login enabled, no accessToken - will show form after 2 seconds');
+        // Set timeout to show form immediately (no need to wait for session check)
+        timeoutId = setTimeout(() => {
+          if (isMounted) {
+            console.log('[Login] Timeout fired, showing manual form');
+            setLoading(false);
+            setShowManualForm(true);
+          }
+        }, 2000);
+        return; // Skip session check to avoid redirect loops
+      }
+
+      // Only check existing session if manual login is disabled or we have an accessToken
       try {
         // Check if we have a valid session by calling /api/auth/me
-        const { authenticatedFetch } = await import('@/lib/client-auth');
-        const response = await authenticatedFetch('/api/auth/me');
+        // Use plain fetch to avoid redirect loops (authenticatedFetch might redirect)
+        const storedToken = localStorage.getItem('admin_session_token') || localStorage.getItem('admin_session_id');
+        const url = new URL('/api/auth/me', window.location.origin);
+        if (storedToken) {
+          url.searchParams.set('_token', storedToken);
+        }
+        
+        const response = await fetch(url.toString(), {
+          credentials: 'include',
+        });
 
-        if (response.ok) {
-          // Already authenticated, redirect to dashboard
-          const redirectTo = searchParams.get('redirect') || '/admin';
-          console.log('[Login] Already authenticated, redirecting to:', redirectTo);
-          
-          // Get token from localStorage to preserve in URL
-          const storedToken = localStorage.getItem('admin_session_token');
-          const storedSessionId = localStorage.getItem('admin_session_id');
-          
-          const redirectUrl = new URL(redirectTo, window.location.origin);
-          if (storedToken) {
-            redirectUrl.searchParams.set('_token', storedToken);
-          } else if (storedSessionId) {
-            redirectUrl.searchParams.set('_session', storedSessionId);
+        if (response.ok && isMounted) {
+          const data = await response.json();
+          if (data.user) {
+            // Already authenticated, redirect to dashboard
+            const redirectTo = searchParams.get('redirect') || '/admin';
+            console.log('[Login] Already authenticated, redirecting to:', redirectTo);
+            
+            // Get token from localStorage to preserve in URL
+            const storedToken = localStorage.getItem('admin_session_token');
+            const storedSessionId = localStorage.getItem('admin_session_id');
+            
+            const redirectUrl = new URL(redirectTo, window.location.origin);
+            if (storedToken) {
+              redirectUrl.searchParams.set('_token', storedToken);
+            } else if (storedSessionId) {
+              redirectUrl.searchParams.set('_session', storedSessionId);
+            }
+            
+            window.location.href = redirectUrl.toString();
+            return;
           }
-          
-          window.location.href = redirectUrl.toString();
-          return;
         }
       } catch (error) {
         // Not authenticated or error checking, continue with normal login flow
-        console.log('[Login] No existing session found');
+        console.log('[Login] No existing session found or error:', error);
       }
 
       // If not authenticated, check for accessToken in URL
-      const tokenFromUrl = searchParams.get('accessToken');
-      if (tokenFromUrl && !autoLoginAttempted) {
+      if (tokenFromUrl && !autoLoginAttempted && isMounted) {
         console.log('Auto-login: Token found in URL, attempting login...');
         setAccessToken(tokenFromUrl);
         setAutoLoginAttempted(true);
         handleAutoLogin(tokenFromUrl).catch((err) => {
-          console.error('Auto-login failed:', err);
-          setError(err instanceof Error ? err.message : 'Auto-login failed');
-          setLoading(false);
+          if (isMounted) {
+            console.error('Auto-login failed:', err);
+            setError(err instanceof Error ? err.message : 'Auto-login failed');
+            setLoading(false);
+            // If manual login is enabled, show the form on error
+            if (ENABLE_MANUAL_LOGIN) {
+              setShowManualForm(true);
+            }
+          }
         });
+      } else if (isMounted && !ENABLE_MANUAL_LOGIN) {
+        // Manual login disabled - keep loading (waiting for WorkAdventure token)
+        console.log('[Login] Manual login disabled, waiting for WorkAdventure token');
+        // Don't set loading to false, keep the loading state
       }
     };
 
     checkExistingSession();
+    
+    // Cleanup timeout on unmount
+    return () => {
+      isMounted = false;
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams]);
 
@@ -239,6 +300,37 @@ export default function LoginPage() {
     } finally {
       setLoading(false);
     }
+  }
+
+  // Show loading state by default (waiting for WorkAdventure to provide token)
+  if (loading && !showManualForm) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+        <div className="text-center">
+          <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600 mb-4"></div>
+          <h2 className="text-xl font-semibold text-gray-900 mb-2">Loading universe...</h2>
+          <p className="text-sm text-gray-600">
+            Waiting for authentication from WorkAdventure
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  // Show manual login form only if enabled and requested
+  if (!showManualForm && !ENABLE_MANUAL_LOGIN) {
+    // Still show loading if manual form is disabled
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+        <div className="text-center">
+          <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600 mb-4"></div>
+          <h2 className="text-xl font-semibold text-gray-900 mb-2">Loading universe...</h2>
+          <p className="text-sm text-gray-600">
+            Waiting for authentication from WorkAdventure
+          </p>
+        </div>
+      </div>
+    );
   }
 
   return (

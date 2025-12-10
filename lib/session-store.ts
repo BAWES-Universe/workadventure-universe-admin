@@ -1,4 +1,12 @@
-import crypto from 'crypto';
+// Lazy-load crypto to avoid Edge runtime issues
+// DO NOT import at top level - middleware runs in Edge runtime
+let cryptoModule: typeof import('crypto') | null = null;
+async function getCryptoModule() {
+  if (!cryptoModule) {
+    cryptoModule = await import('crypto');
+  }
+  return cryptoModule;
+}
 
 // Lazy-load Redis client to avoid Edge runtime issues
 let redisClientModule: typeof import('redis') | null = null;
@@ -59,15 +67,20 @@ class SessionStore {
   private async initRedis() {
     // Check if we're in Edge runtime (no Node.js modules available)
     try {
-      // Try to detect Edge runtime - if crypto is not available as a module, we're in Edge
-      if (typeof crypto === 'undefined' || !crypto.randomBytes) {
+      // Try to load crypto module - if it fails, we're in Edge runtime
+      const crypto = await getCryptoModule();
+      if (!crypto || !crypto.randomBytes) {
         if (process.env.NODE_ENV === 'development') {
           console.log('[SessionStore] Edge runtime detected, using in-memory store only');
         }
         return;
       }
     } catch {
-      // If we can't check, assume we're in Node.js and continue
+      // If we can't load crypto, we're in Edge runtime
+      if (process.env.NODE_ENV === 'development') {
+        console.log('[SessionStore] Edge runtime detected (crypto not available), using in-memory store only');
+      }
+      return;
     }
 
     const redisUrl = process.env.REDIS_URL;
@@ -109,7 +122,13 @@ class SessionStore {
   /**
    * Generate a secure random session ID
    */
-  generateSessionId(): string {
+  async generateSessionId(): Promise<string> {
+    const crypto = await getCryptoModule();
+    if (!crypto) {
+      // Fallback for environments without crypto (e.g., Edge runtime where session creation shouldn't happen)
+      console.warn('[SessionStore] Using insecure fallback for session ID generation. This should only happen in Edge runtime where session creation is not expected.');
+      return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+    }
     return crypto.randomBytes(32).toString('hex');
   }
 
@@ -117,7 +136,7 @@ class SessionStore {
    * Create a new session
    */
   async createSession(data: Omit<SessionData, 'createdAt' | 'expiresAt'>): Promise<string> {
-    const sessionId = this.generateSessionId();
+    const sessionId = await this.generateSessionId();
     const now = Date.now();
     const expiresAt = now + (7 * 24 * 60 * 60 * 1000); // 7 days
 
