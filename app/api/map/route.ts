@@ -88,7 +88,8 @@ export async function GET(request: NextRequest) {
       const mapStorageApiToken = process.env.MAP_STORAGE_API_TOKEN;
       const playUrl = process.env.PLAY_URL;
       
-      let wamUrl: string | undefined = roomData.wamUrl;
+      // Convert null to undefined (Prisma returns null, but we use undefined)
+      let wamUrl: string | undefined = roomData.wamUrl ?? undefined;
       
       // Only proceed with WAM creation if map-storage is configured
       if (publicMapStorageUrl && mapStorageApiToken && playUrl) {
