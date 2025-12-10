@@ -64,6 +64,10 @@ export interface MapDetailsData {
   authenticationMandatory?: boolean;
   roomName?: string;
   contactPage?: string;
+  modules?: string[]; // Array of module names to load (e.g., ["admin-api"])
+  metadata?: {
+    modules: string[]; // Module metadata passed to extension module's init function
+  };
 }
 
 export interface RoomRedirect {

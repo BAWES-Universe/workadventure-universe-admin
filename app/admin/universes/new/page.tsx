@@ -32,7 +32,8 @@ export default function NewUniversePage() {
 
   async function checkAuth() {
     try {
-      const response = await fetch('/api/auth/me');
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch('/api/auth/me');
       if (!response.ok) {
         router.push('/admin/login');
         return;
@@ -66,12 +67,12 @@ export default function NewUniversePage() {
       
       console.log('Submitting universe:', payload);
       
-      const response = await fetch('/api/admin/universes', {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch('/api/admin/universes', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        credentials: 'include',
         body: JSON.stringify(payload),
       });
 

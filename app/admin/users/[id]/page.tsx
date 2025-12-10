@@ -69,7 +69,8 @@ export default function UserDetailPage() {
 
   async function checkAuth() {
     try {
-      const response = await fetch('/api/auth/me');
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch('/api/auth/me');
       if (!response.ok) {
         router.push('/admin/login');
       }
@@ -81,9 +82,8 @@ export default function UserDetailPage() {
   async function fetchUser() {
     try {
       setLoading(true);
-      const response = await fetch(`/api/admin/users/${id}`, {
-        credentials: 'include',
-      });
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch(`/api/admin/users/${id}`);
 
       if (!response.ok) {
         if (response.status === 404) {
@@ -105,9 +105,8 @@ export default function UserDetailPage() {
   async function fetchAccessHistory() {
     try {
       setAccessHistoryLoading(true);
-      const response = await fetch(`/api/admin/analytics/users/${id}?page=${accessHistoryPage}&limit=20`, {
-        credentials: 'include',
-      });
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch(`/api/admin/analytics/users/${id}?page=${accessHistoryPage}&limit=20`);
 
       if (!response.ok) {
         throw new Error('Failed to fetch access history');

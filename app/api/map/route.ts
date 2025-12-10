@@ -5,13 +5,17 @@ import { prisma } from '@/lib/db';
 import { checkWamExists, createWamFile, getWamUrl, getWamPath } from '@/lib/map-storage';
 import type { MapDetailsData, ErrorApiData } from '@/types/workadventure';
 
+// Ensure this route runs in Node.js runtime (not Edge) to support Redis and Prisma
+export const runtime = 'nodejs';
+
 /**
  * Returns the base start map configuration
  * Used as fallback when no room is found or room has no mapUrl
  * Note: group is required and can be null for base start map
  */
-function getBaseStartMap(): MapDetailsData {
+function getBaseStartMap(authToken?: string | null): MapDetailsData {
   const startRoomUrl = process.env.START_ROOM_URL || 'https://rveiio.github.io/BAWES-virtual/office.tmj';
+  const isAuthenticated = !!authToken;
   
   return {
     mapUrl: startRoomUrl,
@@ -19,6 +23,14 @@ function getBaseStartMap(): MapDetailsData {
     editable: false,
     authenticationMandatory: false,
     policy: "public",
+    // Include modules array to tell WorkAdventure which modules to load
+    modules: isAuthenticated ? ["admin-api"] : [],
+    // Include metadata (optional, gets passed to extension module's init function)
+    ...(isAuthenticated && {
+      metadata: {
+        modules: ["admin-api"],
+      },
+    }),
   };
 }
 
@@ -28,6 +40,7 @@ export async function GET(request: NextRequest) {
     
     const { searchParams } = new URL(request.url);
     const playUri = searchParams.get('playUri');
+    const authToken = searchParams.get('authToken') || searchParams.get('accessToken');
     
     if (!playUri) {
       const error: ErrorApiData = {
@@ -67,7 +80,7 @@ export async function GET(request: NextRequest) {
       
       // Step 3: If room not found or no mapUrl, return base start map
       if (!roomData || !roomData.mapUrl) {
-        return NextResponse.json(getBaseStartMap());
+        return NextResponse.json(getBaseStartMap(authToken));
       }
       
       // Step 4-6: Prepare map-storage paths and check/create WAM file
@@ -117,6 +130,9 @@ export async function GET(request: NextRequest) {
       const editable = wamUrl !== undefined && wamUrl.includes('map-storage');
       const group = `${roomData.world.universe.slug}/${roomData.world.slug}`;
       
+      // Check if user is authenticated (if authToken/accessToken is provided)
+      const isAuthenticated = !!authToken;
+      
       // Prioritize wamUrl: if WAM exists, return it (WorkAdventure prefers wamUrl over mapUrl)
       // Only include mapUrl as fallback if wamUrl is not available
       const mapDetails: MapDetailsData = {
@@ -129,6 +145,14 @@ export async function GET(request: NextRequest) {
         roomName: roomData.name,
         group: group,
         policy: roomData.isPublic ? "public" : "private",
+        // Include modules array to tell WorkAdventure which modules to load
+        modules: isAuthenticated ? ["admin-api"] : [],
+        // Include metadata (optional, gets passed to extension module's init function)
+        ...(isAuthenticated && {
+          metadata: {
+            modules: ["admin-api"],
+          },
+        }),
       };
       
       return NextResponse.json(mapDetails);
@@ -136,7 +160,9 @@ export async function GET(request: NextRequest) {
       // If playUri parsing fails, return base start map instead of error
       // This handles root URL access or invalid paths gracefully
       if (parseError instanceof Error && parseError.message.includes('Invalid playUri')) {
-        return NextResponse.json(getBaseStartMap());
+        const { searchParams } = new URL(request.url);
+        const authToken = searchParams.get('authToken') || searchParams.get('accessToken');
+        return NextResponse.json(getBaseStartMap(authToken));
       }
       
       const error: ErrorApiData = {
@@ -165,7 +191,9 @@ export async function GET(request: NextRequest) {
     console.error('Error in /api/map:', error);
     
     // On unexpected errors, return base start map as fallback
-    return NextResponse.json(getBaseStartMap());
+    const { searchParams } = new URL(request.url);
+    const authToken = searchParams.get('authToken') || searchParams.get('accessToken');
+    return NextResponse.json(getBaseStartMap(authToken));
   }
 }
 

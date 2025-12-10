@@ -16,6 +16,8 @@
     "test:full": "./scripts/run-full-test.sh",
     "setup": "./scripts/setup-and-test.sh",
     "fix:prisma": "./scripts/fix-prisma.sh",
+    "db:fix": "./scripts/fix-prisma-complete.sh",
+    "db:fix:quick": "docker exec admin-api-dev sh -c 'cd /app && npx prisma migrate deploy && npx prisma generate'",
     "postinstall": "prisma generate",
     "db:generate-url": "bash -c 'eval $(scripts/generate-database-url.sh) && echo $DATABASE_URL'",
     "db:migrate": "docker exec admin-api-dev sh -c 'cd /app && npx prisma migrate dev'",

@@ -57,7 +57,8 @@ export default function WorldDetailPage() {
 
   async function checkAuth() {
     try {
-      const response = await fetch('/api/auth/me');
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch('/api/auth/me');
       if (!response.ok) {
         router.push('/admin/login');
       }
@@ -69,9 +70,8 @@ export default function WorldDetailPage() {
   async function fetchWorld() {
     try {
       setLoading(true);
-      const response = await fetch(`/api/admin/worlds/${id}`, {
-        credentials: 'include',
-      });
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch(`/api/admin/worlds/${id}`);
 
       if (!response.ok) {
         if (response.status === 404) {
@@ -101,9 +101,8 @@ export default function WorldDetailPage() {
   async function fetchAnalytics() {
     try {
       setAnalyticsLoading(true);
-      const response = await fetch(`/api/admin/analytics/worlds/${id}`, {
-        credentials: 'include',
-      });
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch(`/api/admin/analytics/worlds/${id}`);
       if (response.ok) {
         const data = await response.json();
         setAnalytics(data);
@@ -120,12 +119,12 @@ export default function WorldDetailPage() {
     setError(null);
 
     try {
-      const response = await fetch(`/api/admin/worlds/${id}`, {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch(`/api/admin/worlds/${id}`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
         },
-        credentials: 'include',
         body: JSON.stringify({
           ...formData,
           description: formData.description || null,
@@ -155,9 +154,9 @@ export default function WorldDetailPage() {
     }
 
     try {
-      const response = await fetch(`/api/admin/worlds/${id}`, {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch(`/api/admin/worlds/${id}`, {
         method: 'DELETE',
-        credentials: 'include',
       });
 
       if (!response.ok) {

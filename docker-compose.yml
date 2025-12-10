@@ -16,6 +16,20 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    container_name: admin-api-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    command: redis-server --appendonly yes
+
   admin-api:
     build:
       context: .
@@ -30,6 +44,8 @@ services:
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-authorization-code-client-secret}
       NODE_ENV: development
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://admin.bawes.localhost}
+      NEXT_PUBLIC_ENABLE_MANUAL_LOGIN: ${NEXT_PUBLIC_ENABLE_MANUAL_LOGIN:-false}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
     ports:
       - "5555:5555" # Prisma Studio port
     volumes:
@@ -38,6 +54,8 @@ services:
       - /app/.next
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     labels:
       # Traefik configuration
@@ -64,6 +82,10 @@ services:
       - --providers.docker.exposedbydefault=false
       - --providers.docker.network=workadventure-universe-admin_default
       - --entrypoints.web.address=:80
+      # Increase timeout to 60 seconds for OIDC validation
+      - --entrypoints.web.transport.respondingTimeouts.readTimeout=60s
+      - --entrypoints.web.transport.respondingTimeouts.idleTimeout=60s
+      - --entrypoints.web.transport.respondingTimeouts.writeTimeout=60s
     ports:
       - "${TRAEFIK_PORT:-8321}:80"
     restart: unless-stopped
@@ -77,4 +99,5 @@ services:
 
 volumes:
   postgres_data:
+  redis_data:
 

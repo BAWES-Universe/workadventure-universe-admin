@@ -52,7 +52,8 @@ export default function WorldsPage() {
 
   async function checkAuth() {
     try {
-      const response = await fetch('/api/auth/me');
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch('/api/auth/me');
       if (!response.ok) {
         router.push('/admin/login');
         return;
@@ -93,9 +94,8 @@ export default function WorldsPage() {
 
   async function fetchUniverses() {
     try {
-      const response = await fetch('/api/admin/universes?limit=100', {
-        credentials: 'include',
-      });
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch('/api/admin/universes?limit=100');
       if (response.ok) {
         const data = await response.json();
         setUniverses(data.universes || []);
@@ -111,9 +111,9 @@ export default function WorldsPage() {
     }
 
     try {
-      const response = await fetch(`/api/admin/worlds/${id}`, {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch(`/api/admin/worlds/${id}`, {
         method: 'DELETE',
-        credentials: 'include',
       });
 
       if (!response.ok) {

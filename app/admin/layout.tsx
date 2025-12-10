@@ -1,43 +1,63 @@
-import Link from 'next/link';
 import { ReactNode } from 'react';
 import { cookies } from 'next/headers';
 import LogoutButton from './logout-button';
 import { prisma } from '@/lib/db';
+import TokenHandler from './token-handler';
+import AuthLink from './auth-link';
 
 async function getSessionUser() {
   try {
     const cookieStore = await cookies();
     const sessionCookie = cookieStore.get('user_session');
     
-    if (!sessionCookie) {
+    // Return null immediately if no cookie - don't query database
+    if (!sessionCookie || !sessionCookie.value || sessionCookie.value.trim() === '') {
       return null;
     }
 
-    const session = JSON.parse(sessionCookie.value);
-    
-    // Verify user still exists
-    const user = await prisma.user.findUnique({
-      where: { id: session.userId },
-      select: {
-        id: true,
-        uuid: true,
-        email: true,
-        name: true,
-      },
-    });
-
-    if (!user) {
+    let session;
+    try {
+      session = JSON.parse(sessionCookie.value);
+    } catch (e) {
+      // Invalid cookie format, return null immediately
       return null;
     }
 
-    return {
-      id: user.id,
-      uuid: user.uuid,
-      email: user.email,
-      name: user.name,
-      tags: session.tags || [],
-    };
+    // Return null immediately if no userId in session
+    if (!session || !session.userId) {
+      return null;
+    }
+
+    // Only query database if we have a valid session cookie with userId
+    try {
+      const user = await prisma.user.findUnique({
+        where: { id: session.userId },
+        select: {
+          id: true,
+          uuid: true,
+          email: true,
+          name: true,
+        },
+      });
+
+      if (!user) {
+        return null;
+      }
+
+      return {
+        id: user.id,
+        uuid: user.uuid,
+        email: user.email,
+        name: user.name,
+        tags: session.tags || [],
+      };
+    } catch (error) {
+      // Database query failed, return null to allow page to load
+      console.error('[Layout] Error fetching user from database:', error);
+      return null;
+    }
   } catch (error) {
+    // Any other error, return null to allow page to load
     return null;
   }
 }
@@ -53,29 +73,29 @@ export default async function AdminLayout({ children }: { children: ReactNode })
           <div className="flex justify-between h-16">
             <div className="flex">
               <div className="flex-shrink-0 flex items-center">
-                <Link href="/admin" className="text-xl font-bold text-gray-900">
+                <AuthLink href="/admin" className="text-xl font-bold text-gray-900">
                   WorkAdventure Admin
-                </Link>
+                </AuthLink>
               </div>
               <div className="hidden sm:ml-6 sm:flex sm:space-x-8">
-                <Link
+                <AuthLink
                   href="/admin"
                   className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
                 >
                   Dashboard
-                </Link>
-                <Link
+                </AuthLink>
+                <AuthLink
                   href="/admin/universes"
                   className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
                 >
                   Universes
-                </Link>
-                <Link
+                </AuthLink>
+                <AuthLink
                   href="/admin/users"
                   className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
                 >
                   Users
-                </Link>
+                </AuthLink>
               </div>
             </div>
             <div className="flex items-center">
@@ -87,18 +107,19 @@ export default async function AdminLayout({ children }: { children: ReactNode })
                   <LogoutButton />
                 </div>
               ) : (
-                <Link
+                <AuthLink
                   href="/admin/login"
                   className="text-sm text-indigo-600 hover:text-indigo-900"
                 >
                   Login
-                </Link>
+                </AuthLink>
               )}
             </div>
           </div>
         </div>
       </nav>
       <main className="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
+        <TokenHandler />
         {children}
       </main>
     </div>

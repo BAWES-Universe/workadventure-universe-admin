@@ -36,7 +36,8 @@ export default function NewWorldPage() {
 
   async function checkAuth() {
     try {
-      const response = await fetch('/api/auth/me');
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch('/api/auth/me');
       if (!response.ok) {
         router.push('/admin/login');
         return;
@@ -48,9 +49,8 @@ export default function NewWorldPage() {
 
   async function fetchUniverses() {
     try {
-      const response = await fetch('/api/admin/universes?limit=100', {
-        credentials: 'include',
-      });
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch('/api/admin/universes?limit=100');
       if (response.ok) {
         const data = await response.json();
         setUniverses(data.universes || []);
@@ -59,9 +59,8 @@ export default function NewWorldPage() {
       // If universeIdParam is set, try to fetch just that universe
       if (universeIdParam) {
         try {
-          const universeResponse = await fetch(`/api/admin/universes/${universeIdParam}`, {
-            credentials: 'include',
-          });
+          const { authenticatedFetch } = await import('@/lib/client-auth');
+          const universeResponse = await authenticatedFetch(`/api/admin/universes/${universeIdParam}`);
           if (universeResponse.ok) {
             const universe = await universeResponse.json();
             setUniverses([universe]);
@@ -95,12 +94,12 @@ export default function NewWorldPage() {
       
       console.log('Submitting world:', payload);
       
-      const response = await fetch('/api/admin/worlds', {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch('/api/admin/worlds', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        credentials: 'include',
         body: JSON.stringify(payload),
       });
 

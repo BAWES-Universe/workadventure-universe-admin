@@ -35,9 +35,9 @@ export default function UniversesPage() {
 
   async function checkAuth() {
     try {
-      const response = await fetch('/api/auth/me', {
-        credentials: 'include',
-      });
+      // Use authenticatedFetch helper to include token in URL
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch('/api/auth/me');
       if (!response.ok) {
         router.push('/admin/login');
         return;
@@ -55,9 +55,8 @@ export default function UniversesPage() {
       setLoading(true);
       
       // Fetch only user's universes
-      const response = await fetch(`/api/admin/universes?ownerId=${currentUser.id}`, {
-        credentials: 'include',
-      });
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch(`/api/admin/universes?ownerId=${currentUser.id}`);
 
       if (!response.ok) {
         if (response.status === 401) {
@@ -83,9 +82,9 @@ export default function UniversesPage() {
     }
 
     try {
-      const response = await fetch(`/api/admin/universes/${id}`, {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch(`/api/admin/universes/${id}`, {
         method: 'DELETE',
-        credentials: 'include',
       });
 
       if (!response.ok) {

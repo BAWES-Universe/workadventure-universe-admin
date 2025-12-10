@@ -56,7 +56,8 @@ export default function RoomsPage() {
 
   async function checkAuth() {
     try {
-      const response = await fetch('/api/auth/me');
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch('/api/auth/me');
       if (!response.ok) {
         router.push('/admin/login');
         return;
@@ -97,9 +98,8 @@ export default function RoomsPage() {
 
   async function fetchWorlds() {
     try {
-      const response = await fetch('/api/admin/worlds?limit=100', {
-        credentials: 'include',
-      });
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch('/api/admin/worlds?limit=100');
       if (response.ok) {
         const data = await response.json();
         setWorlds(data.worlds || []);
@@ -115,9 +115,9 @@ export default function RoomsPage() {
     }
 
     try {
-      const response = await fetch(`/api/admin/rooms/${id}`, {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch(`/api/admin/rooms/${id}`, {
         method: 'DELETE',
-        credentials: 'include',
       });
 
       if (!response.ok) {
