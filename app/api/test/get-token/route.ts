@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getOidcClient } from '@/lib/oidc';
 
 /**
  * GET /api/test/get-token
@@ -15,9 +14,6 @@ export async function GET(request: NextRequest) {
 
     // For testing, we'll create a mock token
     // In real usage, you'd get this from WorkAdventure's OIDC flow
-    const client = await getOidcClient();
-    
-    // Try to get token from OIDC provider
     // Note: This is a simplified version - real OIDC flow requires authorization code
     const issuerUrl = process.env.OIDC_ISSUER;
     

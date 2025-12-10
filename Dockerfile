@@ -40,8 +40,16 @@ COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
 COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/package.json ./package.json
+# Copy startup script (optional - for automatic migrations)
+COPY scripts/start.sh ./scripts/start.sh
+RUN chmod +x ./scripts/start.sh
 
 EXPOSE 3333
 
+# Default: start directly (migrations must be run manually or via post-deploy command)
 CMD ["npm", "start"]
+
+# Alternative: Use startup script to run migrations automatically before starting
+# Uncomment the line below and comment out the line above to enable automatic migrations
+# CMD ["sh", "scripts/start.sh"]
 
