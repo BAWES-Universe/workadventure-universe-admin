@@ -109,48 +109,47 @@ async function main() {
       }
     }
   } else {
+    // Create a system user for the default universe
+    // In a real system, you might want to use a specific system user UUID
+    // For now, we'll create a placeholder user or use an existing one
+    let systemUser = await prisma.user.findFirst({
+      where: { email: 'system@workadventure.local' },
+    });
 
-  // Create a system user for the default universe
-  // In a real system, you might want to use a specific system user UUID
-  // For now, we'll create a placeholder user or use an existing one
-  let systemUser = await prisma.user.findFirst({
-    where: { email: 'system@workadventure.local' },
-  });
+    if (!systemUser) {
+      systemUser = await prisma.user.create({
+        data: {
+          uuid: '00000000-0000-0000-0000-000000000000',
+          email: 'system@workadventure.local',
+          name: 'System',
+        },
+      });
+      console.log('✓ Created system user');
+    }
 
-  if (!systemUser) {
-    systemUser = await prisma.user.create({
+    // Create default universe
+    universe = await prisma.universe.create({
       data: {
-        uuid: '00000000-0000-0000-0000-000000000000',
-        email: 'system@workadventure.local',
-        name: 'System',
+        slug: 'default',
+        name: 'Default Universe',
+        description: 'Default universe for WorkAdventure',
+        ownerId: systemUser.id,
+        isPublic: true,
       },
     });
-    console.log('✓ Created system user');
-  }
+    console.log('✓ Created default universe');
 
-  // Create default universe
-  const universe = await prisma.universe.create({
-    data: {
-      slug: 'default',
-      name: 'Default Universe',
-      description: 'Default universe for WorkAdventure',
-      ownerId: systemUser.id,
-      isPublic: true,
-    },
-  });
-  console.log('✓ Created default universe');
-
-  // Create default world
-  const world = await prisma.world.create({
-    data: {
-      universeId: universe.id,
-      slug: 'default',
-      name: 'Default World',
-      description: 'Default world for WorkAdventure',
-      isPublic: true,
-    },
-  });
-  console.log('✓ Created default world');
+    // Create default world
+    world = await prisma.world.create({
+      data: {
+        universeId: universe.id,
+        slug: 'default',
+        name: 'Default World',
+        description: 'Default world for WorkAdventure',
+        isPublic: true,
+      },
+    });
+    console.log('✓ Created default world');
 
     // Create default room with the default map
     room = await prisma.room.create({
@@ -185,6 +184,11 @@ async function main() {
     }
   } else {
     domain = 'workadventure.localhost'; // Fallback if PLAY_URL is not set
+  }
+
+  // Ensure universe, world, and room are defined before using them
+  if (!universe || !world || !room) {
+    throw new Error('Failed to create or find universe, world, or room during seeding');
   }
 
   if (publicMapStorageUrl && mapStorageApiToken && playUrl) {
