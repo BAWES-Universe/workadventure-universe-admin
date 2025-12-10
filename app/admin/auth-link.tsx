@@ -26,24 +26,43 @@ export default function AuthLink({
     e.preventDefault();
     
     // Get token from URL or localStorage
+    // Always check URL first (most up-to-date)
     const sessionToken = searchParams.get('_token');
     const sessionId = searchParams.get('_session');
     const storedToken = typeof window !== 'undefined' ? localStorage.getItem('admin_session_token') : null;
     const storedSessionId = typeof window !== 'undefined' ? localStorage.getItem('admin_session_id') : null;
     
+    // Prefer token from URL, fallback to localStorage
     const tokenToUse = sessionToken || storedToken;
     const idToUse = sessionId || storedSessionId;
     
-    // Build URL with token
+    // Build URL with token - ALWAYS include it if available
     const url = new URL(href, window.location.origin);
-    if (tokenToUse) {
-      url.searchParams.set('_token', tokenToUse);
-    } else if (idToUse) {
-      url.searchParams.set('_session', idToUse);
+    
+    // Preserve existing query params from href if any
+    if (href.includes('?')) {
+      const hrefUrl = new URL(href, window.location.origin);
+      hrefUrl.searchParams.forEach((value, key) => {
+        url.searchParams.set(key, value);
+      });
     }
     
-    // Navigate with router.push to ensure token is included
-    router.push(url.pathname + url.search);
+    // Always add token if we have one (overwrites any existing _token/_session)
+    if (tokenToUse) {
+      url.searchParams.set('_token', tokenToUse);
+      // Remove _session if we're using _token
+      url.searchParams.delete('_session');
+    } else if (idToUse) {
+      url.searchParams.set('_session', idToUse);
+      // Remove _token if we're using _session
+      url.searchParams.delete('_token');
+    }
+    
+    // Use window.location.href instead of router.push to ensure token is in URL
+    // before middleware runs. This prevents the flash of login page.
+    // router.push does client-side navigation but middleware still runs server-side
+    // and doesn't see the token until after the redirect.
+    window.location.href = url.pathname + url.search;
   };
 
   return (

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useLayoutEffect } from 'react';
 import { useSearchParams, usePathname } from 'next/navigation';
 
 /**
@@ -8,19 +8,25 @@ import { useSearchParams, usePathname } from 'next/navigation';
  * This runs on admin pages to:
  * 1. Capture the session token from the redirect URL and store in localStorage
  * 2. Automatically add token to URL if missing (for middleware access on server-side navigation)
+ * 
+ * Uses useLayoutEffect to run synchronously before paint, ensuring token is in URL before any navigation
  */
 export default function TokenHandler() {
   const searchParams = useSearchParams();
   const pathname = usePathname();
 
-  useEffect(() => {
+  // Use useLayoutEffect to run synchronously before paint
+  // This ensures the token is added to URL before any navigation happens
+  useLayoutEffect(() => {
+    if (typeof window === 'undefined') return;
+    
     // Check for session token (preferred - contains full session data)
     const sessionToken = searchParams.get('_token');
     const sessionId = searchParams.get('_session');
     
     // Get token from localStorage if not in URL
-    const storedToken = typeof window !== 'undefined' ? localStorage.getItem('admin_session_token') : null;
-    const storedSessionId = typeof window !== 'undefined' ? localStorage.getItem('admin_session_id') : null;
+    const storedToken = localStorage.getItem('admin_session_token');
+    const storedSessionId = localStorage.getItem('admin_session_id');
 
     // If we have a token in URL, store it in localStorage
     if (sessionToken) {
@@ -39,28 +45,30 @@ export default function TokenHandler() {
       }
     }
 
-    // If we have a stored token but it's not in the URL, add it to preserve session
-    // This ensures middleware can always find it on server-side navigation
+    // If we have a stored token but it's not in the URL, add it IMMEDIATELY
+    // This ensures middleware can find it on server-side navigation
     // Only do this on admin pages (not login page)
     if (!sessionToken && !sessionId && pathname.startsWith('/admin') && pathname !== '/admin/login') {
       const tokenToUse = storedToken || storedSessionId;
-      const paramName = storedToken ? '_token' : '_session';
       
       if (tokenToUse) {
-        // Use replaceState to add token to URL without page reload
+        const paramName = storedToken ? '_token' : '_session';
+        // Use replaceState to add token to URL immediately (synchronously)
         const newUrl = new URL(window.location.href);
         newUrl.searchParams.set(paramName, tokenToUse);
         
         // Only update if URL actually changed
         if (newUrl.toString() !== window.location.href) {
           window.history.replaceState({}, '', newUrl.toString());
-          console.log('[TokenHandler] Added token to URL for middleware access');
+          console.log('[TokenHandler] Added token to URL synchronously for middleware access');
         }
       } else {
-        // Check if server sent a token in response header
-        // This happens when middleware adds token but it's not in URL yet
-        // Note: We can't read response headers in client components easily,
-        // so we rely on the cookie being set and working, or the URL token
+        // No token found at all - redirect to login
+        // This handles the case where middleware let us through but we're not actually authenticated
+        console.log('[TokenHandler] No token found, redirecting to login');
+        const loginUrl = new URL('/admin/login', window.location.origin);
+        loginUrl.searchParams.set('redirect', pathname);
+        window.location.href = loginUrl.toString();
       }
     }
   }, [searchParams, pathname]);

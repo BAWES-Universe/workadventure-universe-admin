@@ -12,22 +12,44 @@ export function middleware(request: NextRequest) {
   
   // If accessing admin routes, validate session
   if (pathname.startsWith('/admin')) {
+    // Check cookies directly first (they might not be sent in HTTP iframes, but we check anyway)
+    const userSessionCookie = request.cookies.get('user_session');
+    const adminSessionIdCookie = request.cookies.get('admin_session_id');
+    
     // Get session ID from cookie or URL
     const sessionId = getSessionId(request);
     
     if (process.env.NODE_ENV === 'development') {
       console.log('[Middleware] Checking session for path:', pathname);
+      console.log('[Middleware] Cookies present:', {
+        user_session: !!userSessionCookie,
+        admin_session_id: !!adminSessionIdCookie,
+      });
       console.log('[Middleware] Session ID found:', !!sessionId);
       if (sessionId) {
         console.log('[Middleware] Session ID type:', sessionId.length === 64 && /^[0-9a-f]+$/.test(sessionId) ? 'session ID (64 hex)' : sessionId.length > 100 ? 'likely token (base64)' : 'short string');
         console.log('[Middleware] Session ID preview:', sessionId.substring(0, 20) + '...');
       }
       console.log('[Middleware] URL params:', Array.from(request.nextUrl.searchParams.entries()));
-      const cookies = request.cookies.getAll();
-      console.log('[Middleware] Cookies:', cookies.map(c => `${c.name}=${c.value.substring(0, 20)}...`));
     }
     
+    // If no session found at all, check if we're coming from an admin page
+    // If so, let the client handle authentication (it might have the token in localStorage)
+    // This prevents the flash of login page when navigating between admin pages
     if (!sessionId) {
+      const referer = request.headers.get('referer');
+      const isFromAdminPage = referer && (referer.includes('/admin') && !referer.includes('/admin/login'));
+      
+      if (isFromAdminPage) {
+        // Coming from an admin page - let client handle it
+        // The client will check localStorage and redirect if needed
+        if (process.env.NODE_ENV === 'development') {
+          console.log('[Middleware] No session ID found, but coming from admin page - letting client handle auth');
+        }
+        return NextResponse.next();
+      }
+      
+      // Not from admin page - redirect to login
       if (process.env.NODE_ENV === 'development') {
         console.log('[Middleware] No session ID found, redirecting to login');
       }
@@ -111,36 +133,50 @@ export function middleware(request: NextRequest) {
 
     // ALWAYS set the cookie if we have a valid session
     // This ensures cookies work on subsequent navigations when possible
-    const response = NextResponse.next();
     const sessionDataString = JSON.stringify(session);
     const isSecure = request.url.startsWith('https://') || process.env.NODE_ENV === 'production';
     
-    // Always set cookie (works in HTTPS, may not work in HTTP iframes but we try)
+    // Check if token is already in URL
+    const isUrlToken = request.nextUrl.searchParams.has('_token') || request.nextUrl.searchParams.has('_session');
+    
+    // If no URL token but we have a valid session, add it to the response
+    // The client-side code will update the URL to include it
+    // We don't redirect here to avoid flash - instead we let the page load and client updates URL
+    if (!isUrlToken && request.method === 'GET') {
+      const token = Buffer.from(sessionDataString).toString('base64');
+      
+      // Set cookie and add token to response header for client to use
+      const response = NextResponse.next();
+      response.cookies.set('user_session', sessionDataString, {
+        httpOnly: true,
+        secure: isSecure,
+        sameSite: isSecure ? 'none' : 'lax',
+        path: '/',
+        maxAge: 60 * 60 * 24 * 7, // 7 days
+      });
+      
+      // Add token to response header so client can add it to URL
+      response.headers.set('x-session-token', token);
+      
+      if (process.env.NODE_ENV === 'development') {
+        console.log('[Middleware] Session validated, token added to header for client');
+      }
+      
+      return response;
+    }
+    
+    // Token already in URL, or non-GET request - just set cookie and continue
+    const response = NextResponse.next();
     response.cookies.set('user_session', sessionDataString, {
       httpOnly: true,
       secure: isSecure,
-      sameSite: isSecure ? 'none' : 'lax', // 'none' for HTTPS iframes, 'lax' for HTTP
+      sameSite: isSecure ? 'none' : 'lax',
       path: '/',
       maxAge: 60 * 60 * 24 * 7, // 7 days
     });
     
-    // If session came from URL token, preserve it in response headers
-    // The client-side code will use this to preserve token during navigation
-    const isUrlToken = request.nextUrl.searchParams.has('_token') || request.nextUrl.searchParams.has('_session');
-    if (isUrlToken) {
-      // Token is already in URL, client will preserve it
-      if (process.env.NODE_ENV === 'development') {
-        console.log('[Middleware] Session validated, cookie set, URL token preserved');
-      }
-    } else {
-      // No URL token - add it so client-side navigation works
-      // Encode session data as base64 token
-      const token = Buffer.from(sessionDataString).toString('base64');
-      response.headers.set('x-session-token', token);
-      
-      if (process.env.NODE_ENV === 'development') {
-        console.log('[Middleware] Session validated, cookie set, token added to header for client');
-      }
+    if (process.env.NODE_ENV === 'development') {
+      console.log('[Middleware] Session validated, cookie set, URL token already present');
     }
     
     return response;
