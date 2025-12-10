@@ -1,11 +1,8 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
-
-// Force dynamic rendering to prevent static generation issues with useSearchParams
-export const dynamic = 'force-dynamic';
 
 interface Universe {
   id: string;
@@ -13,7 +10,7 @@ interface Universe {
   slug: string;
 }
 
-export default function NewWorldPage() {
+function NewWorldPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const universeIdParam = searchParams.get('universeId');
@@ -307,6 +304,20 @@ export default function NewWorldPage() {
         </form>
       </div>
     </div>
+  );
+}
+
+export default function NewWorldPage() {
+  return (
+    <Suspense fallback={
+      <div className="px-4 sm:px-6 lg:px-8">
+        <div className="text-center py-12">
+          <p className="text-gray-500">Loading...</p>
+        </div>
+      </div>
+    }>
+      <NewWorldPageContent />
+    </Suspense>
   );
 }
 

@@ -1,17 +1,14 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-
-// Force dynamic rendering to prevent static generation issues with useSearchParams
-export const dynamic = 'force-dynamic';
 
 // Check if manual login form should be enabled (for developers)
 // Note: NEXT_PUBLIC_ variables are embedded at build time
 // If you change this, you MUST restart the dev server/container
 const ENABLE_MANUAL_LOGIN = process.env.NEXT_PUBLIC_ENABLE_MANUAL_LOGIN === 'true';
 
-export default function LoginPage() {
+function LoginPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [accessToken, setAccessToken] = useState('');
@@ -399,6 +396,21 @@ export default function LoginPage() {
         </form>
       </div>
     </div>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+        <div className="text-center">
+          <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600 mb-4"></div>
+          <h2 className="text-xl font-semibold text-gray-900 mb-2">Loading...</h2>
+        </div>
+      </div>
+    }>
+      <LoginPageContent />
+    </Suspense>
   );
 }
 

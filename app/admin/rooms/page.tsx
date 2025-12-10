@@ -1,11 +1,8 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, Suspense } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
-
-// Force dynamic rendering to prevent static generation issues with useSearchParams
-export const dynamic = 'force-dynamic';
 
 interface Room {
   id: string;
@@ -35,7 +32,7 @@ interface World {
   };
 }
 
-export default function RoomsPage() {
+function RoomsPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [rooms, setRooms] = useState<Room[]>([]);
@@ -319,6 +316,20 @@ export default function RoomsPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function RoomsPage() {
+  return (
+    <Suspense fallback={
+      <div className="px-4 sm:px-6 lg:px-8">
+        <div className="text-center py-12">
+          <p className="text-gray-500">Loading rooms...</p>
+        </div>
+      </div>
+    }>
+      <RoomsPageContent />
+    </Suspense>
   );
 }
 
