@@ -3,6 +3,9 @@
 import { useState, useEffect } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 
+// Force dynamic rendering to prevent static generation issues with useSearchParams
+export const dynamic = 'force-dynamic';
+
 // Check if manual login form should be enabled (for developers)
 // Note: NEXT_PUBLIC_ variables are embedded at build time
 // If you change this, you MUST restart the dev server/container
