@@ -28,6 +28,7 @@ RUN DATABASE_URL="postgresql://dummy:dummy@dummy:5432/dummy" npm run build
 FROM node:20.19-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
+ENV PORT=3333
 
 # Copy production dependencies
 COPY --from=deps /app/node_modules ./node_modules
