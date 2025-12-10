@@ -70,7 +70,19 @@ async function main() {
     }
     
     // Find or create default room
-    room = world.rooms?.[0];
+    // If world was fetched with rooms, use it; otherwise query separately
+    if ('rooms' in world && Array.isArray(world.rooms)) {
+      room = world.rooms[0];
+    } else {
+      // Query for rooms separately if not included in the world object
+      const existingRoom = await prisma.room.findFirst({
+        where: {
+          worldId: world.id,
+          slug: 'default',
+        },
+      });
+      room = existingRoom || undefined;
+    }
     if (!room) {
       room = await prisma.room.create({
         data: {
