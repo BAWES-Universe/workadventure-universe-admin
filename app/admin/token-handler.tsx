@@ -59,10 +59,14 @@ export default function TokenHandler() {
         
         // Only update if URL actually changed
         if (newUrl.toString() !== window.location.href) {
-          // Use relative path instead of full URL to avoid cross-origin issues
-          // This matches the pattern used in auth-link.tsx and client-auth.ts
-          window.history.replaceState({}, '', newUrl.pathname + newUrl.search);
-          // console.log('[TokenHandler] Added token to URL synchronously for middleware access');
+          // Ensure URL is same-origin before using replaceState
+          // Using toString() preserves the full URL which Next.js router expects
+          if (newUrl.origin === window.location.origin) {
+            window.history.replaceState({}, '', newUrl.toString());
+            // console.log('[TokenHandler] Added token to URL synchronously for middleware access');
+          } else {
+            console.warn('[TokenHandler] Cannot update URL - cross-origin mismatch:', newUrl.origin, 'vs', window.location.origin);
+          }
         }
       } else {
         // No token found at all - redirect to login
