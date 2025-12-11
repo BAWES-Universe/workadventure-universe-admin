@@ -24,6 +24,11 @@ RUN mv prisma.config.ts prisma.config.ts.bak && \
 COPY . .
 # Remove next-env.d.ts if it exists (auto-generated, may have permission issues)
 RUN rm -f next-env.d.ts || true
+
+# Accept NEXT_PUBLIC_PLAY_URL as build argument (with default fallback)
+ARG NEXT_PUBLIC_PLAY_URL=http://play.workadventure.localhost
+ENV NEXT_PUBLIC_PLAY_URL=$NEXT_PUBLIC_PLAY_URL
+
 # DATABASE_URL is required during build for Prisma Client initialization
 # Use a dummy value since we're not connecting to a database during build
 RUN DATABASE_URL="postgresql://dummy:dummy@dummy:5432/dummy" npm run build
