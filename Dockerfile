@@ -14,11 +14,10 @@ COPY package*.json ./
 RUN npm ci --ignore-scripts
 COPY prisma/ ./prisma/
 COPY prisma.config.ts ./
-# Generate Prisma Client (temporarily rename config file since it requires DATABASE_URL during build)
+# Generate Prisma Client
+# Prisma v7: schema.prisma no longer has url field, datasource URL is in prisma.config.ts
 # prisma generate doesn't need DATABASE_URL - it only reads the schema file
-RUN mv prisma.config.ts prisma.config.ts.bak && \
-    npx prisma generate --schema=prisma/schema.prisma && \
-    mv prisma.config.ts.bak prisma.config.ts
+RUN npx prisma generate --schema=prisma/schema.prisma
 COPY . .
 # DATABASE_URL is required during build for Prisma Client initialization
 # Use a dummy value since we're not connecting to a database during build
