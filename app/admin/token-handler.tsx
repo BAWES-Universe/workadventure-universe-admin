@@ -59,7 +59,9 @@ export default function TokenHandler() {
         
         // Only update if URL actually changed
         if (newUrl.toString() !== window.location.href) {
-          window.history.replaceState({}, '', newUrl.toString());
+          // Use relative path instead of full URL to avoid cross-origin issues
+          // This matches the pattern used in auth-link.tsx and client-auth.ts
+          window.history.replaceState({}, '', newUrl.pathname + newUrl.search);
           console.log('[TokenHandler] Added token to URL synchronously for middleware access');
         }
       } else {
