@@ -3,7 +3,7 @@ import { requireAuth } from '@/lib/auth';
 import { parsePlayUri } from '@/lib/utils';
 import { prisma } from '@/lib/db';
 import { checkWamExists, createWamFile, getWamUrl, getWamPath } from '@/lib/map-storage';
-import type { MapDetailsData, ErrorApiData } from '@/types/workadventure';
+import type { MapDetailsData, ErrorApiData, RoomRedirect } from '@/types/workadventure';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Redis and Prisma
 export const runtime = 'nodejs';
@@ -14,7 +14,7 @@ export const runtime = 'nodejs';
  * Note: group is required and can be null for base start map
  */
 function getBaseStartMap(authToken?: string | null): MapDetailsData {
-  const startRoomUrl = process.env.START_ROOM_URL || 'https://rveiio.github.io/BAWES-virtual/office.tmj';
+  const startRoomUrl = process.env.BASE_START_MAP_URL || process.env.START_ROOM_URL || 'https://rveiio.github.io/BAWES-virtual/office.tmj';
   const isAuthenticated = !!authToken;
   
   return {
@@ -52,6 +52,37 @@ export async function GET(request: NextRequest) {
         details: "The playUri query parameter is required.",
       };
       return NextResponse.json(error, { status: 400 });
+    }
+    
+    // Handle root path - redirect to START_ROOM_URL
+    try {
+      const roomUrl = new URL(playUri);
+      if (roomUrl.pathname === "/" || roomUrl.pathname === "") {
+        const startRoomPath = process.env.START_ROOM_URL || '@/default/default/default';
+        
+        // Construct redirect URL
+        let redirectUrl: string;
+        if (startRoomPath.startsWith('http://') || startRoomPath.startsWith('https://')) {
+          // If it's already a full URL, use it directly
+          redirectUrl = startRoomPath;
+        } else if (startRoomPath.startsWith('@/')) {
+          // If it's a playUri path, construct full URL from playUri's origin
+          roomUrl.pathname = `/${startRoomPath}`;
+          redirectUrl = roomUrl.toString();
+        } else {
+          // If it's a relative path, prepend with /
+          const path = startRoomPath.startsWith('/') ? startRoomPath : `/${startRoomPath}`;
+          roomUrl.pathname = path;
+          redirectUrl = roomUrl.toString();
+        }
+        
+        const redirect: RoomRedirect = {
+          redirectUrl: redirectUrl,
+        };
+        return NextResponse.json(redirect);
+      }
+    } catch (urlError) {
+      // If playUri is not a valid URL, continue to parsePlayUri which will handle the error
     }
     
     try {

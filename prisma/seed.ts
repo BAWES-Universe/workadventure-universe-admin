@@ -29,7 +29,7 @@ const prisma = new PrismaClient({
 async function main() {
   console.log('🌱 Starting database seed...');
 
-  const defaultMapUrl = process.env.START_ROOM_URL || 'https://rveiio.github.io/BAWES-virtual/office.tmj';
+  const defaultMapUrl = process.env.BASE_START_MAP_URL || process.env.START_ROOM_URL || 'https://rveiio.github.io/BAWES-virtual/office.tmj';
   
   // Check if default universe already exists
   const existingUniverse = await prisma.universe.findUnique({
