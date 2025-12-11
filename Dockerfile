@@ -34,11 +34,13 @@ ENV PORT=3333
 
 # Copy production dependencies
 COPY --from=deps /app/node_modules ./node_modules
-# Copy Prisma files and generated client
-COPY --from=builder /app/prisma ./prisma
-COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
+# Copy Next.js from builder (needed for next start - must match build version)
+COPY --from=builder /app/node_modules/next ./node_modules/next
+# Copy Prisma files and generated client from builder
+# Copy entire @prisma directory structure (includes @prisma/client with generated client)
 COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
-COPY --from=builder /app/node_modules/@prisma/client ./node_modules/@prisma/client
+COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
+COPY --from=builder /app/prisma ./prisma
 # Copy seed file and prisma.config.ts for seeding
 COPY --from=builder /app/prisma/seed.ts ./prisma/seed.ts
 COPY --from=builder /app/prisma.config.ts ./prisma.config.ts
