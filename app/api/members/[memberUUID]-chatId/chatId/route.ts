@@ -4,12 +4,12 @@ import { prisma } from '@/lib/db';
 
 export async function PUT(
   request: NextRequest,
-  { params }: { params: Promise<{ userIdentifier: string }> }
+  { params }: { params: Promise<{ memberUUID: string }> }
 ) {
   try {
     requireAuth(request);
     
-    const { userIdentifier } = await params;
+    const { memberUUID: userIdentifier } = await params;
     const body = await request.json();
     const { chatId } = body;
     
