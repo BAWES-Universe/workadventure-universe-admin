@@ -112,7 +112,7 @@ let cachedCompanions: CompanionDetail[] | null = null;
  */
 function loadWokaJson(): WokaJsonFile {
   try {
-    const wokaPath = join(process.cwd(), 'docs', 'wokas', 'woka.json');
+    const wokaPath = join(process.cwd(), 'config', 'woka.json');
     const fileContent = readFileSync(wokaPath, 'utf-8');
     return JSON.parse(fileContent) as WokaJsonFile;
   } catch (error) {
@@ -126,7 +126,7 @@ function loadWokaJson(): WokaJsonFile {
  */
 function loadCompanionsJson(): CompanionJsonFile[] {
   try {
-    const companionsPath = join(process.cwd(), 'docs', 'companions', 'companions.json');
+    const companionsPath = join(process.cwd(), 'config', 'companions.json');
     const fileContent = readFileSync(companionsPath, 'utf-8');
     return JSON.parse(fileContent) as CompanionJsonFile[];
   } catch (error) {

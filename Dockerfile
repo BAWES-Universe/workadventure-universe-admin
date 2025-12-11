@@ -57,6 +57,8 @@ COPY --from=builder /app/prisma/seed.ts ./prisma/seed.ts
 COPY --from=builder /app/prisma.config.ts ./prisma.config.ts
 # Copy lib directory (needed for seed script imports)
 COPY --from=builder /app/lib ./lib
+# Copy config directory (needed for woka.json and companions.json validation)
+COPY --from=builder /app/config ./config
 # Copy built application
 COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/public ./public
