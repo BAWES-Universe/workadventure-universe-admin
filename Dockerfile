@@ -41,10 +41,10 @@ COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
 # Copy seed file and prisma.config.ts for seeding
 COPY --from=builder /app/prisma/seed.ts ./prisma/seed.ts
 COPY --from=builder /app/prisma.config.ts ./prisma.config.ts
-# Install tsx and dotenv for running seed script and prisma config (needed for prisma db seed)
-# tsx is needed to run TypeScript seed files in production
+# Install dotenv and tsx for prisma config and seed script
 # dotenv is needed for prisma.config.ts to load environment variables
-RUN npm install --save-dev tsx@^4.19.2 dotenv@^17.2.3
+# tsx is needed to run TypeScript seed files in production
+RUN npm install dotenv@^17.2.3 tsx@^4.19.2
 # Copy built application
 COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/public ./public
