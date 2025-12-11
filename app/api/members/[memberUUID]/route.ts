@@ -10,7 +10,9 @@ export async function GET(
   try {
     requireAuth(request);
     
-    const { memberUUID } = await params;
+    const { memberUUID: memberUUIDRaw } = await params;
+    // Decode URL-encoded characters (e.g., %40 for @)
+    const memberUUID = decodeURIComponent(memberUUIDRaw);
     
     // Find user
     const user = await prisma.user.findFirst({
