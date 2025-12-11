@@ -47,7 +47,8 @@ RUN chmod +x ./scripts/start.sh
 EXPOSE 3333
 
 # Default: start directly (migrations must be run manually or via post-deploy command)
-CMD ["npm", "start"]
+# Use npx to ensure next is found even if PATH isn't set correctly
+CMD ["npx", "next", "start"]
 
 # Alternative: Use startup script to run migrations automatically before starting
 # Uncomment the line below and comment out the line above to enable automatic migrations

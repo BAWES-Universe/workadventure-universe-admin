@@ -19,5 +19,5 @@ else
 fi
 
 echo "✅ Starting Next.js application..."
-exec npm start
+exec npx next start
 
