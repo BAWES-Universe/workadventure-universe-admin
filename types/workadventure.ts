@@ -35,6 +35,7 @@ export interface MemberData {
   tags?: string[];
   texture?: string;
   visitCardUrl?: string | null;
+  chatID?: string | null; // Matrix chat ID (capital ID for WorkAdventure compatibility)
 }
 
 export interface AdminApiData {

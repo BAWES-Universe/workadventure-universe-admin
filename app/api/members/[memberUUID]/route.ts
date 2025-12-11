@@ -29,19 +29,14 @@ export async function GET(
       );
     }
     
-    // Get first world membership for tags (or empty array)
-    const membership = await prisma.worldMember.findFirst({
-      where: {
-        userId: user.id,
-      },
-    });
-    
-    const memberData: MemberData = {
-      uuid: user.uuid,
+    // Return format expected by WorkAdventure: id (not uuid), and chatID
+    // Tags are only in /api/room/access, not in /api/members/{uuid}
+    const memberData = {
+      id: user.uuid, // WorkAdventure expects 'id' not 'uuid'
       name: user.name || undefined,
       email: user.email || undefined,
-      tags: membership?.tags || [],
       visitCardUrl: null,
+      chatID: user.matrixChatId || null, // Matrix chat ID (capital ID)
     };
     
     return NextResponse.json(memberData);
