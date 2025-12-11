@@ -62,7 +62,7 @@ export default function TokenHandler() {
           // Use relative path instead of full URL to avoid cross-origin issues
           // This matches the pattern used in auth-link.tsx and client-auth.ts
           window.history.replaceState({}, '', newUrl.pathname + newUrl.search);
-          console.log('[TokenHandler] Added token to URL synchronously for middleware access');
+          // console.log('[TokenHandler] Added token to URL synchronously for middleware access');
         }
       } else {
         // No token found at all - redirect to login
