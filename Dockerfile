@@ -32,14 +32,13 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=3333
 
-# Copy production dependencies
+# Copy production dependencies (includes next and @prisma/client)
 COPY --from=deps /app/node_modules ./node_modules
-# Copy Next.js from builder (needed for next start - must match build version)
-COPY --from=builder /app/node_modules/next ./node_modules/next
-# Copy Prisma files and generated client from builder
-# Copy entire @prisma directory structure (includes @prisma/client with generated client)
-COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
+# Copy Prisma generated client files from builder (needed for @prisma/client to work)
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
+# Copy @prisma/client from builder (has generated client integrated)
+COPY --from=builder /app/node_modules/@prisma/client ./node_modules/@prisma/client
+# Copy Prisma schema and migrations
 COPY --from=builder /app/prisma ./prisma
 # Copy seed file and prisma.config.ts for seeding
 COPY --from=builder /app/prisma/seed.ts ./prisma/seed.ts
@@ -60,8 +59,8 @@ RUN chmod +x ./scripts/start.sh
 EXPOSE 3333
 
 # Default: start directly (migrations must be run manually or via post-deploy command)
-# Use npx to ensure next is found even if PATH isn't set correctly
-CMD ["npx", "next", "start"]
+# Use npm start to use local next from node_modules (not npx which downloads)
+CMD ["npm", "start"]
 
 # Alternative: Use startup script to run migrations automatically before starting
 # Uncomment the line below and comment out the line above to enable automatic migrations
