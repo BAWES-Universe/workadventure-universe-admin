@@ -36,6 +36,12 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
+# Copy seed file and prisma.config.ts for seeding
+COPY --from=builder /app/prisma/seed.ts ./prisma/seed.ts
+COPY --from=builder /app/prisma.config.ts ./prisma.config.ts
+# Install tsx for running seed script (needed for prisma db seed)
+# tsx is needed to run TypeScript seed files in production
+RUN npm install --save-dev tsx@^4.19.2
 # Copy built application
 COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/public ./public
