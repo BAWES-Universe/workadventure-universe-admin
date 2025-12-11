@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, ReactNode } from 'react';
 import Script from 'next/script';
 import { WorkAdventureContext, type WorkAdventureContextValue } from './workadventure-context';
-import type { WorkAdventure } from '@workadventure/iframe-api-typings';
+import type { WorkAdventureApi } from '@workadventure/iframe-api-typings';
 
 interface WorkAdventureProviderProps {
   children: ReactNode;
@@ -11,7 +11,7 @@ interface WorkAdventureProviderProps {
 
 export default function WorkAdventureProvider({ children }: WorkAdventureProviderProps) {
   const defaultPlayUrl = process.env.NEXT_PUBLIC_PLAY_URL || 'http://play.workadventure.localhost';
-  const [wa, setWa] = useState<WorkAdventure | null>(null);
+  const [wa, setWa] = useState<WorkAdventureApi | null>(null);
   const [isReady, setIsReady] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);

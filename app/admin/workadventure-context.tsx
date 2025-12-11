@@ -1,10 +1,10 @@
 'use client';
 
 import { createContext, useContext, ReactNode } from 'react';
-import type { WorkAdventure } from '@workadventure/iframe-api-typings';
+import type { WorkAdventureApi } from '@workadventure/iframe-api-typings';
 
 export interface WorkAdventureContextValue {
-  wa: WorkAdventure | null;
+  wa: WorkAdventureApi | null;
   isReady: boolean;
   isLoading: boolean;
   error: Error | null;
