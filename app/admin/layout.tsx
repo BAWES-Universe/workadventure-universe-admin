@@ -4,6 +4,7 @@ import LogoutButton from './logout-button';
 import { prisma } from '@/lib/db';
 import TokenHandler from './token-handler';
 import AuthLink from './auth-link';
+import WorkAdventureProvider from './workadventure-provider';
 
 async function getSessionUser() {
   try {
@@ -132,7 +133,9 @@ export default async function AdminLayout({ children }: { children: ReactNode })
         <Suspense fallback={null}>
           <TokenHandler />
         </Suspense>
-        {children}
+        <WorkAdventureProvider>
+          {children}
+        </WorkAdventureProvider>
       </main>
     </div>
   );

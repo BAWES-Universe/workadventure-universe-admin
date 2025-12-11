@@ -3,19 +3,7 @@
 import { useState, useEffect } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
-import Script from 'next/script';
-
-// WorkAdventure iframe API types
-declare global {
-  interface Window {
-    WA?: {
-      onInit: () => Promise<void>;
-      nav: {
-        goToRoom: (roomUrl: string) => void;
-      };
-    };
-  }
-}
+import { useWorkAdventure } from '@/app/admin/workadventure-context';
 
 interface Room {
   id: string;
@@ -49,9 +37,9 @@ export default function RoomDetailPage() {
   const [isEditing, setIsEditing] = useState(false);
   const [analytics, setAnalytics] = useState<any>(null);
   const [analyticsLoading, setAnalyticsLoading] = useState(true);
-  const [waReady, setWaReady] = useState(false);
   const [waNavigating, setWaNavigating] = useState(false);
-  const [scriptLoaded, setScriptLoaded] = useState(false);
+  
+  const { isReady: waReady, navigateToRoom } = useWorkAdventure();
   
   const [formData, setFormData] = useState({
     slug: '',
@@ -66,60 +54,6 @@ export default function RoomDetailPage() {
     fetchRoom();
     fetchAnalytics();
   }, [id]);
-
-  // Check for WorkAdventure iframe API after script loads
-  useEffect(() => {
-    if (!scriptLoaded) {
-      return; // Wait for script to load first
-    }
-
-    async function checkWorkAdventure() {
-      console.log('[RoomDetail] Checking for WorkAdventure API (after script load)...');
-      
-      // Give the script a moment to initialize WA on window
-      // Check multiple times with a small delay in case WA takes time to initialize
-      let attempts = 0;
-      const maxAttempts = 10;
-      const checkInterval = 100; // ms
-      
-      const checkForWA = async () => {
-        attempts++;
-        console.log(`[RoomDetail] Attempt ${attempts}: window.WA available:`, typeof window !== 'undefined' && !!window.WA);
-        
-        if (typeof window !== 'undefined' && window.WA) {
-          console.log('[RoomDetail] WA found, waiting for initialization...');
-          try {
-            // Wait for WA to be initialized
-            await window.WA.onInit();
-            console.log('[RoomDetail] WA initialized successfully');
-            setWaReady(true);
-            return true;
-          } catch (err) {
-            console.error('[RoomDetail] Failed to initialize WorkAdventure API:', err);
-            return false;
-          }
-        }
-        
-        if (attempts < maxAttempts) {
-          // Try again after a short delay
-          setTimeout(checkForWA, checkInterval);
-          return false;
-        } else {
-          console.log('[RoomDetail] WA not available after script load - page may not be loaded in WorkAdventure iframe');
-          console.log('[RoomDetail] window object:', typeof window !== 'undefined' ? 'exists' : 'undefined');
-          if (typeof window !== 'undefined') {
-            console.log('[RoomDetail] window.WA:', window.WA);
-            console.log('[RoomDetail] Available window properties:', Object.keys(window).filter(k => k.includes('WA') || k.includes('work') || k.includes('adventure')));
-          }
-          return false;
-        }
-      };
-      
-      checkForWA();
-    }
-
-    checkWorkAdventure();
-  }, [scriptLoaded]);
 
   async function checkAuth() {
     try {
@@ -235,38 +169,25 @@ export default function RoomDetailPage() {
   }
 
   async function handleVisitRoomInUniverse() {
-    console.log('[RoomDetail] handleVisitRoomInUniverse called');
-    console.log('[RoomDetail] room:', room);
-    console.log('[RoomDetail] window.WA:', window.WA);
-    console.log('[RoomDetail] waReady:', waReady);
-    
     if (!room) {
       alert('Room data not available');
       return;
     }
 
-    if (!window.WA) {
+    if (!waReady) {
       alert('WorkAdventure API is not available. This feature only works when the admin page is loaded in a WorkAdventure iframe modal.');
-      console.warn('[RoomDetail] WA not available when button clicked');
       return;
     }
 
     try {
       setWaNavigating(true);
-      console.log('[RoomDetail] Starting navigation...');
       
-      // Always wait for WA initialization before using the API
-      console.log('[RoomDetail] Waiting for WA initialization...');
-      await window.WA.onInit();
-      console.log('[RoomDetail] WA initialized');
-      setWaReady(true);
-
       // Format: /@/universe/world/room
       const roomUrl = `/@/${room.world.universe.slug}/${room.world.slug}/${room.slug}`;
       console.log('[RoomDetail] Navigating to room:', roomUrl);
       
-      // Navigate to the room using WorkAdventure iframe API
-      window.WA.nav.goToRoom(roomUrl);
+      // Navigate to the room using WorkAdventure context
+      await navigateToRoom(roomUrl);
       console.log('[RoomDetail] Navigation command sent');
     } catch (err) {
       console.error('[RoomDetail] Failed to navigate to room:', err);
@@ -296,23 +217,10 @@ export default function RoomDetailPage() {
     );
   }
 
-  const playUrl = process.env.NEXT_PUBLIC_PLAY_URL || 'http://play.workadventure.localhost';
+  const defaultPlayUrl = process.env.NEXT_PUBLIC_PLAY_URL || 'http://play.workadventure.localhost';
 
   return (
-    <>
-      <Script
-        src={`${playUrl}/iframe_api.js`}
-        strategy="afterInteractive"
-        onLoad={() => {
-          console.log('[RoomDetail] WorkAdventure iframe API script loaded');
-          setScriptLoaded(true);
-        }}
-        onError={(e) => {
-          console.error('[RoomDetail] Failed to load WorkAdventure iframe API script:', e);
-          setScriptLoaded(true); // Set to true even on error so we don't wait forever
-        }}
-      />
-      <div className="px-4 sm:px-6 lg:px-8">
+    <div className="px-4 sm:px-6 lg:px-8">
         {/* Breadcrumbs */}
       <nav className="flex mb-6" aria-label="Breadcrumb">
         <ol className="flex items-center space-x-4">
@@ -368,7 +276,7 @@ export default function RoomDetailPage() {
             {!isEditing && (
               <>
                 <a
-                  href={`${process.env.NEXT_PUBLIC_PLAY_URL || 'http://play.workadventure.localhost'}/@/${room.world.universe.slug}/${room.world.slug}/${room.slug}`}
+                  href={`${defaultPlayUrl}/@/${room.world.universe.slug}/${room.world.slug}/${room.slug}`}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700"
@@ -656,7 +564,6 @@ export default function RoomDetailPage() {
         </div>
       </div>
     </div>
-    </>
   );
 }
 
