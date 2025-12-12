@@ -279,6 +279,31 @@ export async function GET(request: NextRequest) {
         });
       }
       
+      // Get visit card to determine visitCardUrl
+      let visitCardUrl: string | null = null;
+      if (user) {
+        try {
+          const visitCard = await (prisma as any).visitCard.findUnique({
+            where: { userId: user.id },
+          });
+          
+          if (visitCard) {
+            // Use NEXT_PUBLIC_API_URL (admin URL) as base URL for visit card links
+            const baseUrl = process.env.NEXT_PUBLIC_API_URL || process.env.NEXT_PUBLIC_BASE_URL || process.env.BASE_URL || '';
+            if (baseUrl) {
+              // Encode UUID to handle special characters like @
+              const encodedUuid = encodeURIComponent(user.uuid);
+              visitCardUrl = `${baseUrl}/api/profile/${encodedUuid}?embed=true`;
+            } else {
+              console.warn('[VisitCard] No base URL configured - cannot generate visitCardUrl');
+            }
+          }
+        } catch (error) {
+          console.error('[VisitCard] Error fetching visit card:', error);
+          // Don't fail the request if visit card lookup fails
+        }
+      }
+      
       // Create temporary membership object for response (if no real membership)
       if (!membership) {
         membership = {
@@ -371,7 +396,7 @@ export async function GET(request: NextRequest) {
         username: user?.name || userName || undefined,
         userUuid: finalUuid,
         tags: membershipTags,
-        visitCardUrl: null,
+        visitCardUrl: visitCardUrl,
         isCharacterTexturesValid: isTexturesValid,
         characterTextures: finalTextures,
         isCompanionTextureValid: isCompanionValid,

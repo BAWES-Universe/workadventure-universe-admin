@@ -5,9 +5,29 @@ import { getSessionId, getSessionData } from '@/lib/auth-token';
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
   
-  // Allow login page and API routes
-  if (pathname === '/admin/login' || pathname.startsWith('/api/')) {
+  // Helper function to create response and remove X-Frame-Options for admin pages
+  const createAdminResponse = (response: NextResponse) => {
+    // Remove X-Frame-Options to allow iframe embedding
+    // We delete it multiple times to ensure it's removed even if set by Next.js config
+    response.headers.delete('X-Frame-Options');
+    return response;
+  };
+  
+  // Handle profile API routes first - they need to allow iframe embedding
+  // Note: We can't remove X-Frame-Options here because Next.js config headers are applied after route handlers
+  // The config rule /api/:path* will add DENY. We rely on CSP frame-ancestors in the route handler to override it.
+  if (pathname.startsWith('/api/profile/')) {
     return NextResponse.next();
+  }
+  
+  // Allow login page and other API routes
+  if (pathname === '/admin/login' || pathname.startsWith('/api/')) {
+    const response = NextResponse.next();
+    // Remove X-Frame-Options for admin login page to allow iframe embedding
+    if (pathname === '/admin/login') {
+      return createAdminResponse(response);
+    }
+    return response;
   }
   
   // If accessing admin routes, validate session
@@ -46,7 +66,7 @@ export function middleware(request: NextRequest) {
         if (process.env.NODE_ENV === 'development') {
           console.log('[Middleware] No session ID found, but coming from admin page - letting client handle auth');
         }
-        return NextResponse.next();
+        return createAdminResponse(NextResponse.next());
       }
       
       // Not from admin page - redirect to login
@@ -55,7 +75,7 @@ export function middleware(request: NextRequest) {
       }
       const loginUrl = new URL('/admin/login', request.url);
       loginUrl.searchParams.set('redirect', pathname);
-      return NextResponse.redirect(loginUrl);
+      return createAdminResponse(NextResponse.redirect(loginUrl));
     }
     
     // Parse session data synchronously (middleware can't be async)
@@ -124,7 +144,7 @@ export function middleware(request: NextRequest) {
       }
       const loginUrl = new URL('/admin/login', request.url);
       loginUrl.searchParams.set('redirect', pathname);
-      return NextResponse.redirect(loginUrl);
+      return createAdminResponse(NextResponse.redirect(loginUrl));
     }
     
     if (process.env.NODE_ENV === 'development') {
@@ -162,7 +182,7 @@ export function middleware(request: NextRequest) {
         console.log('[Middleware] Session validated, token added to header for client');
       }
       
-      return response;
+      return createAdminResponse(response);
     }
     
     // Token already in URL, or non-GET request - just set cookie and continue
@@ -179,7 +199,12 @@ export function middleware(request: NextRequest) {
       console.log('[Middleware] Session validated, cookie set, URL token already present');
     }
     
-    return response;
+    return createAdminResponse(response);
+  }
+  
+  // For any other admin pages (shouldn't reach here, but safety net)
+  if (pathname.startsWith('/admin')) {
+    return createAdminResponse(NextResponse.next());
   }
   
   return NextResponse.next();

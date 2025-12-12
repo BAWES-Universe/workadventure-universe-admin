@@ -31,6 +31,7 @@ model User {
   friendships2      Friendship[]      @relation("User2")
   requestedFriendships Friendship[]   @relation("RequestedBy")
   roomAccesses      RoomAccess[]
+  visitCard         VisitCard?
 
   @@map("users")
 }
@@ -262,4 +263,18 @@ model Friendship {
   @@index([user1Id])
   @@index([user2Id])
   @@map("friendships")
+}
+
+// Visit Cards
+model VisitCard {
+  id        String   @id @default(uuid())
+  userId    String   @unique @map("user_id")
+  bio       String?  // Optional bio/description
+  links     Json     // Array of { label: string, url: string } objects
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("visit_cards")
 }
