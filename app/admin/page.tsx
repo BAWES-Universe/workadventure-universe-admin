@@ -3,8 +3,8 @@ import Link from 'next/link';
 async function getStats() {
   const token = process.env.ADMIN_API_TOKEN;
   // Use internal URL for server-side requests (avoid Traefik loop)
-  // In Docker, use localhost; on host, use localhost:3333
-  const baseUrl = process.env.NEXT_PUBLIC_API_URL?.replace('admin.bawes.localhost', 'localhost:3333') || 'http://localhost:3333';
+  // In Docker, use localhost:3333 (Next.js dev server port, not Traefik port 8321)
+  const baseUrl = 'http://localhost:3333';
   
   try {
     const [universes, worlds, rooms, users] = await Promise.all([

@@ -5,7 +5,7 @@ import { getSessionId, getSessionData } from '@/lib/auth-token';
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
   
-  // Allow login page and API routes
+  // Allow login page and API routes (including public profile pages)
   if (pathname === '/admin/login' || pathname.startsWith('/api/')) {
     return NextResponse.next();
   }
