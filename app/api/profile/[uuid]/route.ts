@@ -69,13 +69,38 @@ function renderHTML(data: { name?: string; bio?: string; links: Array<{ label: s
   ${isEmbedded ? `
   <script>
     function notifySize() {
+      if (!document.body) return;
       const height = document.body.scrollHeight;
       const width = document.body.scrollWidth;
       window.parent.postMessage({ type: 'cvIframeSize', data: { h: height, w: width } }, '*');
     }
+    
+    function initResizeObserver() {
+      if (!document.body) {
+        // Wait for body to be available
+        setTimeout(initResizeObserver, 10);
+        return;
+      }
+      
+      try {
+        const observer = new ResizeObserver(notifySize);
+        observer.observe(document.body);
+        notifySize(); // Initial size notification
+      } catch (error) {
+        console.error('ResizeObserver error:', error);
+        // Fallback: just notify on load
+        window.addEventListener('load', notifySize);
+        setTimeout(notifySize, 100);
+      }
+    }
+    
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', initResizeObserver);
+    } else {
+      initResizeObserver();
+    }
+    
     window.addEventListener('load', notifySize);
-    new ResizeObserver(notifySize).observe(document.body);
-    setTimeout(notifySize, 100);
   </script>
   ` : ''}
 </head>
@@ -135,12 +160,18 @@ export async function GET(
   
   // Serve HTML if Accept header includes text/html or if it's a direct browser request
   if (accept.includes('text/html') || (!accept.includes('application/json') && !request.headers.get('x-requested-with'))) {
-    return new NextResponse(renderHTML(data, isEmbedded), {
+    // Create response with CSP for iframe embedding
+    // Note: We cannot remove X-Frame-Options here because Next.js config headers are applied AFTER route handlers
+    // The config rule /api/:path* sets DENY, which will override our deletion.
+    // Instead, we rely on the more specific /api/profile/:path* config rule to set SAMEORIGIN,
+    // and the CSP frame-ancestors directive for cross-origin support.
+    const response = new NextResponse(renderHTML(data, isEmbedded), {
       headers: { 
         'Content-Type': 'text/html; charset=utf-8',
-        'X-Frame-Options': 'SAMEORIGIN', // Allow embedding in iframes from same origin
+        'Content-Security-Policy': "frame-ancestors 'self' http://play.workadventure.localhost https://play.workadventure.localhost http://play.bawes.localhost https://play.bawes.localhost http://play.bawes.net https://play.bawes.net *;",
       },
     });
+    return response;
   }
   
   // Otherwise serve JSON
