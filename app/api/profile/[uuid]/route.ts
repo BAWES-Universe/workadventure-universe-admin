@@ -23,9 +23,9 @@ async function getProfileData(uuid: string) {
   }
   
   return {
-    name: user.name,
-    bio: visitCard.bio,
-    links: visitCard.links || [],
+    name: user.name ?? undefined,
+    bio: visitCard.bio ?? undefined,
+    links: (visitCard.links || []) as Array<{ label: string; url: string }>,
   };
 }
 
