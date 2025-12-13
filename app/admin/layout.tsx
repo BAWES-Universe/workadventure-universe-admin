@@ -74,20 +74,20 @@ export default async function AdminLayout({ children }: { children: ReactNode })
   return (
     <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
       <div className="min-h-screen bg-background">
-        <nav className="bg-card border-b shadow-sm">
+        <nav className="bg-card border-b shadow-sm sticky top-0 z-50 backdrop-blur-sm bg-card/95">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-            <div className="flex justify-between h-16">
-              <div className="flex">
+            <div className="flex justify-between items-center h-16">
+              <div className="flex items-center min-w-0 flex-1">
                 <div className="flex-shrink-0 flex items-center">
                   <Suspense fallback={<span className="text-xl font-bold">WorkAdventure Admin</span>}>
-                    <AuthLink href="/admin" className="text-xl font-bold">
+                    <AuthLink href="/admin" className="text-xl font-bold truncate">
                       WorkAdventure Admin
                     </AuthLink>
                   </Suspense>
                 </div>
                 <DesktopNav user={user} />
               </div>
-              <div className="flex items-center gap-4">
+              <div className="flex items-center gap-2 sm:gap-4 flex-shrink-0">
                 {/* Mobile Navigation */}
                 <MobileNav user={user} />
                 
@@ -102,7 +102,7 @@ export default async function AdminLayout({ children }: { children: ReactNode })
             </div>
           </div>
         </nav>
-        <main className="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
+        <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
           <Suspense fallback={null}>
             <TokenHandler />
           </Suspense>
