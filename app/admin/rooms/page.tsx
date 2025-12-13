@@ -67,7 +67,7 @@ function RoomsPageContent() {
   const [worlds, setWorlds] = useState<World[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [selectedWorldId, setSelectedWorldId] = useState<string>(searchParams.get('worldId') || '');
+  const [selectedWorldId, setSelectedWorldId] = useState<string>(searchParams.get('worldId') || 'all');
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [roomToDelete, setRoomToDelete] = useState<Room | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -77,10 +77,8 @@ function RoomsPageContent() {
   }, []);
 
   useEffect(() => {
-    if (selectedWorldId) {
-      fetchRooms();
-    } else {
-      fetchRooms();
+    fetchRooms();
+    if (selectedWorldId === 'all' || !selectedWorldId) {
       fetchWorlds();
     }
   }, [selectedWorldId]);
@@ -101,13 +99,13 @@ function RoomsPageContent() {
   async function fetchRooms() {
     try {
       setLoading(true);
-      const url = selectedWorldId
-        ? `/api/admin/rooms?worldId=${selectedWorldId}`
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const actualWorldId = selectedWorldId === 'all' ? '' : selectedWorldId;
+      const url = actualWorldId
+        ? `/api/admin/rooms?worldId=${actualWorldId}`
         : '/api/admin/rooms';
       
-      const response = await fetch(url, {
-        credentials: 'include',
-      });
+      const response = await authenticatedFetch(url);
 
       if (!response.ok) {
         if (response.status === 401) {
@@ -174,10 +172,11 @@ function RoomsPageContent() {
   }
 
   function handleWorldFilterChange(worldId: string) {
+    const actualId = worldId === 'all' ? '' : worldId;
     setSelectedWorldId(worldId);
     const url = new URL(window.location.href);
-    if (worldId) {
-      url.searchParams.set('worldId', worldId);
+    if (actualId) {
+      url.searchParams.set('worldId', actualId);
     } else {
       url.searchParams.delete('worldId');
     }
@@ -212,7 +211,7 @@ function RoomsPageContent() {
           </p>
         </div>
         <Button asChild>
-          <Link href={selectedWorldId ? `/admin/rooms/new?worldId=${selectedWorldId}` : '/admin/rooms/new'}>
+          <Link href={selectedWorldId && selectedWorldId !== 'all' ? `/admin/rooms/new?worldId=${selectedWorldId}` : '/admin/rooms/new'}>
             <Plus className="mr-2 h-4 w-4" />
             Create Room
           </Link>
@@ -225,12 +224,12 @@ function RoomsPageContent() {
             <CardTitle>Filter by World</CardTitle>
           </CardHeader>
           <CardContent>
-            <Select value={selectedWorldId} onValueChange={handleWorldFilterChange}>
+            <Select value={selectedWorldId || 'all'} onValueChange={handleWorldFilterChange}>
               <SelectTrigger className="w-full sm:w-64">
                 <SelectValue placeholder="All Worlds" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="">All Worlds</SelectItem>
+                <SelectItem value="all">All Worlds</SelectItem>
                 {worlds.map((world) => (
                   <SelectItem key={world.id} value={world.id}>
                     {world.universe.name} / {world.name}
@@ -265,12 +264,12 @@ function RoomsPageContent() {
           <CardHeader>
             <CardTitle>No rooms found</CardTitle>
             <CardDescription>
-              {selectedWorldId ? 'No rooms found in this world.' : 'Get started by creating your first room.'}
+              {selectedWorldId && selectedWorldId !== 'all' ? 'No rooms found in this world.' : 'Get started by creating your first room.'}
             </CardDescription>
           </CardHeader>
           <CardContent>
             <Button asChild>
-              <Link href={selectedWorldId ? `/admin/rooms/new?worldId=${selectedWorldId}` : '/admin/rooms/new'}>
+              <Link href={selectedWorldId && selectedWorldId !== 'all' ? `/admin/rooms/new?worldId=${selectedWorldId}` : '/admin/rooms/new'}>
                 <Plus className="mr-2 h-4 w-4" />
                 Create your first room
               </Link>

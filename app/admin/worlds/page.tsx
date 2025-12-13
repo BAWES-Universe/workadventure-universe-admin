@@ -63,7 +63,7 @@ function WorldsPageContent() {
   const [universes, setUniverses] = useState<Universe[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [selectedUniverseId, setSelectedUniverseId] = useState<string>(searchParams.get('universeId') || '');
+  const [selectedUniverseId, setSelectedUniverseId] = useState<string>(searchParams.get('universeId') || 'all');
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [worldToDelete, setWorldToDelete] = useState<World | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -73,10 +73,8 @@ function WorldsPageContent() {
   }, []);
 
   useEffect(() => {
-    if (selectedUniverseId) {
-      fetchWorlds();
-    } else {
-      fetchWorlds();
+    fetchWorlds();
+    if (selectedUniverseId === 'all' || !selectedUniverseId) {
       fetchUniverses();
     }
   }, [selectedUniverseId]);
@@ -97,13 +95,13 @@ function WorldsPageContent() {
   async function fetchWorlds() {
     try {
       setLoading(true);
-      const url = selectedUniverseId
-        ? `/api/admin/worlds?universeId=${selectedUniverseId}`
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const actualUniverseId = selectedUniverseId === 'all' ? '' : selectedUniverseId;
+      const url = actualUniverseId
+        ? `/api/admin/worlds?universeId=${actualUniverseId}`
         : '/api/admin/worlds';
       
-      const response = await fetch(url, {
-        credentials: 'include',
-      });
+      const response = await authenticatedFetch(url);
 
       if (!response.ok) {
         if (response.status === 401) {
@@ -170,10 +168,11 @@ function WorldsPageContent() {
   }
 
   function handleUniverseFilterChange(universeId: string) {
+    const actualId = universeId === 'all' ? '' : universeId;
     setSelectedUniverseId(universeId);
     const url = new URL(window.location.href);
-    if (universeId) {
-      url.searchParams.set('universeId', universeId);
+    if (actualId) {
+      url.searchParams.set('universeId', actualId);
     } else {
       url.searchParams.delete('universeId');
     }
@@ -208,7 +207,7 @@ function WorldsPageContent() {
           </p>
         </div>
         <Button asChild>
-          <Link href={selectedUniverseId ? `/admin/worlds/new?universeId=${selectedUniverseId}` : '/admin/worlds/new'}>
+          <Link href={selectedUniverseId && selectedUniverseId !== 'all' ? `/admin/worlds/new?universeId=${selectedUniverseId}` : '/admin/worlds/new'}>
             <Plus className="mr-2 h-4 w-4" />
             Create World
           </Link>
@@ -221,12 +220,12 @@ function WorldsPageContent() {
             <CardTitle>Filter by Universe</CardTitle>
           </CardHeader>
           <CardContent>
-            <Select value={selectedUniverseId} onValueChange={handleUniverseFilterChange}>
+            <Select value={selectedUniverseId || 'all'} onValueChange={handleUniverseFilterChange}>
               <SelectTrigger className="w-full sm:w-64">
                 <SelectValue placeholder="All Universes" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="">All Universes</SelectItem>
+                <SelectItem value="all">All Universes</SelectItem>
                 {universes.map((universe) => (
                   <SelectItem key={universe.id} value={universe.id}>
                     {universe.name}
@@ -261,12 +260,12 @@ function WorldsPageContent() {
           <CardHeader>
             <CardTitle>No worlds found</CardTitle>
             <CardDescription>
-              {selectedUniverseId ? 'No worlds found in this universe.' : 'Get started by creating your first world.'}
+              {selectedUniverseId && selectedUniverseId !== 'all' ? 'No worlds found in this universe.' : 'Get started by creating your first world.'}
             </CardDescription>
           </CardHeader>
           <CardContent>
             <Button asChild>
-              <Link href={selectedUniverseId ? `/admin/worlds/new?universeId=${selectedUniverseId}` : '/admin/worlds/new'}>
+              <Link href={selectedUniverseId && selectedUniverseId !== 'all' ? `/admin/worlds/new?universeId=${selectedUniverseId}` : '/admin/worlds/new'}>
                 <Plus className="mr-2 h-4 w-4" />
                 Create your first world
               </Link>
