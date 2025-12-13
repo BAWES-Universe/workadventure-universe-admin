@@ -1,27 +1,51 @@
 'use client';
 
-import { useState, useEffect, Suspense } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useState, useEffect, useRef, Suspense } from 'react';
+import { useRouter, useSearchParams, usePathname } from 'next/navigation';
 
 // Check if manual login form should be enabled (for developers)
 // Note: NEXT_PUBLIC_ variables are embedded at build time
 // If you change this, you MUST restart the dev server/container
 const ENABLE_MANUAL_LOGIN = process.env.NEXT_PUBLIC_ENABLE_MANUAL_LOGIN === 'true';
 
+// Helper to check if we're in development mode
+const isDev = process.env.NODE_ENV === 'development';
+
+// Helper function for conditional logging (only in dev)
+const devLog = (...args: any[]) => {
+  if (isDev) {
+    console.log(...args);
+  }
+};
+
+const devError = (...args: any[]) => {
+  if (isDev) {
+    console.error(...args);
+  }
+};
+
+const devWarn = (...args: any[]) => {
+  if (isDev) {
+    console.warn(...args);
+  }
+};
+
 function LoginPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const pathname = usePathname();
   const [accessToken, setAccessToken] = useState('');
   const [loading, setLoading] = useState(true); // Start with loading state
   const [error, setError] = useState<string | null>(null);
   const [autoLoginAttempted, setAutoLoginAttempted] = useState(false);
   const [showManualForm, setShowManualForm] = useState(false);
+  const redirectAttemptedRef = useRef(false); // Track if we've already attempted redirect
 
   // Debug logging on mount
   useEffect(() => {
-    console.log('[Login] Component mounted');
-    console.log('[Login] ENABLE_MANUAL_LOGIN constant:', ENABLE_MANUAL_LOGIN);
-    console.log('[Login] process.env.NEXT_PUBLIC_ENABLE_MANUAL_LOGIN:', process.env.NEXT_PUBLIC_ENABLE_MANUAL_LOGIN);
+    devLog('[Login] Component mounted');
+    devLog('[Login] ENABLE_MANUAL_LOGIN constant:', ENABLE_MANUAL_LOGIN);
+    devLog('[Login] process.env.NEXT_PUBLIC_ENABLE_MANUAL_LOGIN:', process.env.NEXT_PUBLIC_ENABLE_MANUAL_LOGIN);
   }, []);
 
       // Auto-login function - defined before useEffect
@@ -50,7 +74,7 @@ function LoginPageContent() {
       try {
         data = await response.json();
       } catch (parseError) {
-        console.error('Failed to parse login response:', parseError);
+        devError('Failed to parse login response:', parseError);
         throw new Error('Invalid response from server');
       }
 
@@ -66,21 +90,21 @@ function LoginPageContent() {
           if (data.expiresAt) {
             localStorage.setItem('admin_session_expires', data.expiresAt.toString());
           }
-          console.log('Session token stored successfully');
+          devLog('Session token stored successfully');
         } catch (storageError) {
-          console.warn('Failed to store session token in localStorage:', storageError);
+          devWarn('Failed to store session token in localStorage:', storageError);
           // Continue anyway - cookie might still work
         }
       } else if (data.sessionId) {
         // Fallback to session ID if token not available
         try {
           localStorage.setItem('admin_session_id', data.sessionId);
-          console.log('Session ID stored successfully');
+          devLog('Session ID stored successfully');
         } catch (storageError) {
-          console.warn('Failed to store session ID in localStorage:', storageError);
+          devWarn('Failed to store session ID in localStorage:', storageError);
         }
       } else {
-        console.error('No sessionToken or sessionId in login response:', data);
+        devError('No sessionToken or sessionId in login response:', data);
         throw new Error('Server did not return session data');
       }
 
@@ -95,12 +119,12 @@ function LoginPageContent() {
         redirectUrl.searchParams.set('_session', data.sessionId);
       }
       
-      console.log('[Login] Success! Redirecting to:', redirectUrl.toString());
+      devLog('[Login] Success! Redirecting to:', redirectUrl.toString());
       
       // Redirect immediately
       window.location.href = redirectUrl.toString();
     } catch (err) {
-      console.error('Login error:', err);
+      devError('Login error:', err);
       const errorMessage = err instanceof Error ? err.message : 'Login failed';
       
       // Handle specific error types
@@ -124,11 +148,11 @@ function LoginPageContent() {
       // This prevents infinite redirect loops
       const tokenFromUrl = searchParams.get('accessToken');
       if (ENABLE_MANUAL_LOGIN && !tokenFromUrl) {
-        console.log('[Login] Manual login enabled, no accessToken - will show form after 2 seconds');
+        devLog('[Login] Manual login enabled, no accessToken - will show form after 2 seconds');
         // Set timeout to show form immediately (no need to wait for session check)
         timeoutId = setTimeout(() => {
           if (isMounted) {
-            console.log('[Login] Timeout fired, showing manual form');
+            devLog('[Login] Timeout fired, showing manual form');
             setLoading(false);
             setShowManualForm(true);
           }
@@ -153,9 +177,29 @@ function LoginPageContent() {
         if (response.ok && isMounted) {
           const data = await response.json();
           if (data.user) {
-            // Already authenticated, redirect to dashboard
+            // Already authenticated, but check if we're already on an admin page
+            // This prevents infinite redirect loops (especially in Arc browser)
             const redirectTo = searchParams.get('redirect') || '/admin';
-            console.log('[Login] Already authenticated, redirecting to:', redirectTo);
+            const currentPath = pathname || window.location.pathname;
+            
+            // If we're already on the target admin page (not login), don't redirect
+            if (currentPath !== '/admin/login' && 
+                (currentPath === redirectTo || 
+                 (redirectTo === '/admin' && currentPath.startsWith('/admin')))) {
+              devLog('[Login] Already on target admin page, skipping redirect to prevent loop');
+              setLoading(false);
+              return;
+            }
+            
+            // Prevent multiple redirect attempts
+            if (redirectAttemptedRef.current) {
+              devLog('[Login] Redirect already attempted, skipping to prevent loop');
+              setLoading(false);
+              return;
+            }
+            
+            redirectAttemptedRef.current = true;
+            devLog('[Login] Already authenticated, redirecting to:', redirectTo);
             
             // Get token from localStorage to preserve in URL
             const storedToken = localStorage.getItem('admin_session_token');
@@ -168,23 +212,28 @@ function LoginPageContent() {
               redirectUrl.searchParams.set('_session', storedSessionId);
             }
             
-            window.location.href = redirectUrl.toString();
+            // Use a small delay to prevent rapid redirects in browsers like Arc
+            setTimeout(() => {
+              if (isMounted) {
+                window.location.href = redirectUrl.toString();
+              }
+            }, 50);
             return;
           }
         }
       } catch (error) {
         // Not authenticated or error checking, continue with normal login flow
-        console.log('[Login] No existing session found or error:', error);
+        devLog('[Login] No existing session found or error:', error);
       }
 
       // If not authenticated, check for accessToken in URL
       if (tokenFromUrl && !autoLoginAttempted && isMounted) {
-        console.log('Auto-login: Token found in URL, attempting login...');
+        devLog('Auto-login: Token found in URL, attempting login...');
         setAccessToken(tokenFromUrl);
         setAutoLoginAttempted(true);
         handleAutoLogin(tokenFromUrl).catch((err) => {
           if (isMounted) {
-            console.error('Auto-login failed:', err);
+            devError('Auto-login failed:', err);
             setError(err instanceof Error ? err.message : 'Auto-login failed');
             setLoading(false);
             // If manual login is enabled, show the form on error
@@ -195,7 +244,7 @@ function LoginPageContent() {
         });
       } else if (isMounted && !ENABLE_MANUAL_LOGIN) {
         // Manual login disabled - keep loading (waiting for WorkAdventure token)
-        console.log('[Login] Manual login disabled, waiting for WorkAdventure token');
+        devLog('[Login] Manual login disabled, waiting for WorkAdventure token');
         // Don't set loading to false, keep the loading state
       }
     };
@@ -210,7 +259,7 @@ function LoginPageContent() {
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchParams]);
+  }, [searchParams, pathname]);
 
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
@@ -238,7 +287,7 @@ function LoginPageContent() {
       try {
         data = await response.json();
       } catch (parseError) {
-        console.error('Failed to parse login response:', parseError);
+        devError('Failed to parse login response:', parseError);
         throw new Error('Invalid response from server');
       }
 
@@ -254,21 +303,21 @@ function LoginPageContent() {
           if (data.expiresAt) {
             localStorage.setItem('admin_session_expires', data.expiresAt.toString());
           }
-          console.log('Session token stored successfully');
+          devLog('Session token stored successfully');
         } catch (storageError) {
-          console.warn('Failed to store session token in localStorage:', storageError);
+          devWarn('Failed to store session token in localStorage:', storageError);
           // Continue anyway - cookie might still work
         }
       } else if (data.sessionId) {
         // Fallback to session ID if token not available
         try {
           localStorage.setItem('admin_session_id', data.sessionId);
-          console.log('Session ID stored successfully');
+          devLog('Session ID stored successfully');
         } catch (storageError) {
-          console.warn('Failed to store session ID in localStorage:', storageError);
+          devWarn('Failed to store session ID in localStorage:', storageError);
         }
       } else {
-        console.error('No sessionToken or sessionId in login response:', data);
+        devError('No sessionToken or sessionId in login response:', data);
         throw new Error('Server did not return session data');
       }
 
@@ -283,12 +332,12 @@ function LoginPageContent() {
         redirectUrl.searchParams.set('_session', data.sessionId);
       }
       
-      console.log('[Login] Success! Redirecting to:', redirectUrl.toString());
+      devLog('[Login] Success! Redirecting to:', redirectUrl.toString());
       
       // Redirect immediately
       window.location.href = redirectUrl.toString();
     } catch (err) {
-      console.error('Login error:', err);
+      devError('Login error:', err);
       const errorMessage = err instanceof Error ? err.message : 'Login failed';
       
       // Handle specific error types

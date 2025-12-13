@@ -3,6 +3,28 @@
 import { useEffect, useLayoutEffect } from 'react';
 import { useSearchParams, usePathname } from 'next/navigation';
 
+// Helper to check if we're in development mode
+const isDev = process.env.NODE_ENV === 'development';
+
+// Helper function for conditional logging (only in dev)
+const devLog = (...args: any[]) => {
+  if (isDev) {
+    console.log(...args);
+  }
+};
+
+const devError = (...args: any[]) => {
+  if (isDev) {
+    console.error(...args);
+  }
+};
+
+const devWarn = (...args: any[]) => {
+  if (isDev) {
+    console.warn(...args);
+  }
+};
+
 /**
  * Client component to handle session token from URL and ensure it's preserved
  * This runs on admin pages to:
@@ -32,16 +54,16 @@ export default function TokenHandler() {
     if (sessionToken) {
       try {
         localStorage.setItem('admin_session_token', sessionToken);
-        console.log('[TokenHandler] Session token stored from URL to localStorage');
+        devLog('[TokenHandler] Session token stored from URL to localStorage');
       } catch (error) {
-        console.error('[TokenHandler] Failed to store session token from URL:', error);
+        devError('[TokenHandler] Failed to store session token from URL:', error);
       }
     } else if (sessionId) {
       try {
         localStorage.setItem('admin_session_id', sessionId);
-        console.log('[TokenHandler] Session ID stored from URL to localStorage');
+        devLog('[TokenHandler] Session ID stored from URL to localStorage');
       } catch (error) {
-        console.error('[TokenHandler] Failed to store session ID from URL:', error);
+        devError('[TokenHandler] Failed to store session ID from URL:', error);
       }
     }
 
@@ -63,15 +85,15 @@ export default function TokenHandler() {
           // Using toString() preserves the full URL which Next.js router expects
           if (newUrl.origin === window.location.origin) {
             window.history.replaceState({}, '', newUrl.toString());
-            // console.log('[TokenHandler] Added token to URL synchronously for middleware access');
+            devLog('[TokenHandler] Added token to URL synchronously for middleware access');
           } else {
-            console.warn('[TokenHandler] Cannot update URL - cross-origin mismatch:', newUrl.origin, 'vs', window.location.origin);
+            devWarn('[TokenHandler] Cannot update URL - cross-origin mismatch:', newUrl.origin, 'vs', window.location.origin);
           }
         }
       } else {
         // No token found at all - redirect to login
         // This handles the case where middleware let us through but we're not actually authenticated
-        console.log('[TokenHandler] No token found, redirecting to login');
+        devLog('[TokenHandler] No token found, redirecting to login');
         const loginUrl = new URL('/admin/login', window.location.origin);
         loginUrl.searchParams.set('redirect', pathname);
         window.location.href = loginUrl.toString();
