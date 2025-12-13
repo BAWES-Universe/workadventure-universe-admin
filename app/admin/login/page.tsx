@@ -233,34 +233,25 @@ function LoginPageContent() {
         }
       }
       
-      // If manual login is enabled and no accessToken, skip session check and show form
-      // This prevents infinite redirect loops
+      // ALWAYS check for existing session first, even if manual login is enabled
+      // This ensures authenticated users are redirected properly
       const tokenFromUrl = searchParams.get('accessToken');
-      if (ENABLE_MANUAL_LOGIN && !tokenFromUrl) {
-        devLog('[Login] Manual login enabled, no accessToken - will show form after 2 seconds');
-        // Set timeout to show form immediately (no need to wait for session check)
-        timeoutId = setTimeout(() => {
-          if (isMounted) {
-            devLog('[Login] Timeout fired, showing manual form');
-            setLoading(false);
-            setShowManualForm(true);
-          }
-        }, 2000);
-        return; // Skip session check to avoid redirect loops
-      }
-
-      // Only check existing session if manual login is disabled or we have an accessToken
+      
       try {
         // Check if we have a valid session by calling /api/auth/me
         // Use plain fetch to avoid redirect loops (authenticatedFetch might redirect)
+        // Try both localStorage token and cookies (cookies work even if localStorage doesn't)
         const storedToken = localStorage.getItem('admin_session_token') || localStorage.getItem('admin_session_id');
         const url = new URL('/api/auth/me', window.location.origin);
         if (storedToken) {
           url.searchParams.set('_token', storedToken);
         }
         
+        // Always include credentials to send cookies (session might be in cookie)
         const response = await fetch(url.toString(), {
           credentials: 'include',
+          // Don't cache this request
+          cache: 'no-store',
         });
 
         if (response.ok && isMounted) {
@@ -337,27 +328,22 @@ function LoginPageContent() {
             }
           }
         });
-      } else if (isMounted && !ENABLE_MANUAL_LOGIN) {
-        // Manual login disabled - keep loading (waiting for WorkAdventure token)
-        // But set a timeout to prevent infinite loading
-        devLog('[Login] Manual login disabled, waiting for WorkAdventure token');
-        timeoutId = setTimeout(() => {
-          if (isMounted) {
-            devLog('[Login] Timeout waiting for WorkAdventure token - still loading');
-            // Keep loading state - don't set to false
-            // This allows the page to keep showing "Loading universe..."
-          }
-        }, 10000);
-        // Don't set loading to false, keep the loading state
       } else if (isMounted) {
-        // No token found and manual login not enabled - should not happen, but handle it
-        devLog('[Login] No token and manual login disabled - this should not happen');
-        // Set a timeout to eventually stop loading
-        timeoutId = setTimeout(() => {
-          if (isMounted) {
-            setLoading(false);
-          }
-        }, 5000);
+        // No accessToken in URL - show manual form if enabled, otherwise keep loading
+        if (ENABLE_MANUAL_LOGIN) {
+          devLog('[Login] Manual login enabled, no accessToken - will show form after 2 seconds');
+          timeoutId = setTimeout(() => {
+            if (isMounted) {
+              devLog('[Login] Timeout fired, showing manual form');
+              setLoading(false);
+              setShowManualForm(true);
+            }
+          }, 2000);
+        } else {
+          // Manual login disabled - keep loading (waiting for WorkAdventure token)
+          devLog('[Login] Manual login disabled, waiting for WorkAdventure token');
+          // Don't set loading to false, keep the loading state
+        }
       }
     };
 
