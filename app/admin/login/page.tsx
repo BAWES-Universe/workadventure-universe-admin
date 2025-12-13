@@ -72,6 +72,9 @@ function LoginPageContent() {
       window.location.replace(redirectUrl.toString());
       return;
     }
+    
+    // No token in URL - ensure loading state is handled by checkExistingSession
+    // Don't interfere with the normal flow
   }, [searchParams, pathname]);
 
   // Debug logging on mount
@@ -174,7 +177,20 @@ function LoginPageContent() {
   // Check if already authenticated before attempting login
   useEffect(() => {
     let timeoutId: NodeJS.Timeout | null = null;
+    let fallbackTimeoutId: NodeJS.Timeout | null = null;
     let isMounted = true; // Track if component is still mounted
+    
+    // Fallback timeout to ensure loading doesn't stay true forever
+    // This prevents the page from being stuck on "Loading universe..." indefinitely
+    fallbackTimeoutId = setTimeout(() => {
+      if (isMounted) {
+        devLog('[Login] Fallback timeout - ensuring loading state is cleared');
+        setLoading(false);
+        if (ENABLE_MANUAL_LOGIN) {
+          setShowManualForm(true);
+        }
+      }
+    }, 10000); // 10 second fallback
     
     const checkExistingSession = async () => {
       // CRITICAL: If we already have a token in the URL, we're authenticated and being redirected
@@ -182,16 +198,39 @@ function LoginPageContent() {
       const urlToken = searchParams.get('_token') || searchParams.get('_session');
       if (urlToken) {
         devLog('[Login] Token already in URL, skipping session check to prevent loop');
-        setLoading(false);
+        // Don't set loading to false here - let the early check handle redirect
         return;
       }
       
       // Check sessionStorage for redirect flag (prevents loops across page reloads)
+      // But if we're on the login page and there's a redirect flag, it might be stale
+      // Clear it and proceed with normal login flow
       const redirectFlag = sessionStorage.getItem('admin_redirect_in_progress');
       if (redirectFlag) {
-        devLog('[Login] Redirect already in progress, skipping check');
-        setLoading(false);
-        return;
+        const flagTimestamp = sessionStorage.getItem('admin_redirect_timestamp');
+        const now = Date.now();
+        // If flag is older than 5 seconds, it's probably stale - clear it
+        if (flagTimestamp && (now - parseInt(flagTimestamp)) > 5000) {
+          devLog('[Login] Stale redirect flag detected, clearing and proceeding');
+          sessionStorage.removeItem('admin_redirect_in_progress');
+          sessionStorage.removeItem('admin_redirect_timestamp');
+          // Continue with normal flow below
+        } else {
+          devLog('[Login] Redirect already in progress, skipping check');
+          // If redirect is in progress, we should wait - but set a timeout to prevent infinite loading
+          timeoutId = setTimeout(() => {
+            if (isMounted) {
+              devLog('[Login] Redirect timeout - clearing flag and proceeding');
+              sessionStorage.removeItem('admin_redirect_in_progress');
+              sessionStorage.removeItem('admin_redirect_timestamp');
+              setLoading(false);
+              if (ENABLE_MANUAL_LOGIN) {
+                setShowManualForm(true);
+              }
+            }
+          }, 3000);
+          return;
+        }
       }
       
       // If manual login is enabled and no accessToken, skip session check and show form
@@ -253,6 +292,7 @@ function LoginPageContent() {
             // Set flags to prevent multiple redirects
             redirectAttemptedRef.current = true;
             sessionStorage.setItem('admin_redirect_in_progress', 'true');
+            sessionStorage.setItem('admin_redirect_timestamp', Date.now().toString());
             
             devLog('[Login] Already authenticated, redirecting to:', redirectTo);
             
@@ -299,8 +339,25 @@ function LoginPageContent() {
         });
       } else if (isMounted && !ENABLE_MANUAL_LOGIN) {
         // Manual login disabled - keep loading (waiting for WorkAdventure token)
+        // But set a timeout to prevent infinite loading
         devLog('[Login] Manual login disabled, waiting for WorkAdventure token');
+        timeoutId = setTimeout(() => {
+          if (isMounted) {
+            devLog('[Login] Timeout waiting for WorkAdventure token - still loading');
+            // Keep loading state - don't set to false
+            // This allows the page to keep showing "Loading universe..."
+          }
+        }, 10000);
         // Don't set loading to false, keep the loading state
+      } else if (isMounted) {
+        // No token found and manual login not enabled - should not happen, but handle it
+        devLog('[Login] No token and manual login disabled - this should not happen');
+        // Set a timeout to eventually stop loading
+        timeoutId = setTimeout(() => {
+          if (isMounted) {
+            setLoading(false);
+          }
+        }, 5000);
       }
     };
 
@@ -311,6 +368,9 @@ function LoginPageContent() {
       isMounted = false;
       if (timeoutId) {
         clearTimeout(timeoutId);
+      }
+      if (fallbackTimeoutId) {
+        clearTimeout(fallbackTimeoutId);
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
