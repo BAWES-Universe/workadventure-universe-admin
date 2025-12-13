@@ -3,6 +3,27 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table';
+import { Badge } from '@/components/ui/badge';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Plus, AlertCircle, Loader2 } from 'lucide-react';
 
 interface Universe {
   id: string;
@@ -28,6 +49,9 @@ export default function UniversesPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [user, setUser] = useState<any>(null);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [universeToDelete, setUniverseToDelete] = useState<Universe | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     checkAuth();
@@ -35,7 +59,6 @@ export default function UniversesPage() {
 
   async function checkAuth() {
     try {
-      // Use authenticatedFetch helper to include token in URL
       const { authenticatedFetch } = await import('@/lib/client-auth');
       const response = await authenticatedFetch('/api/auth/me');
       if (!response.ok) {
@@ -53,8 +76,6 @@ export default function UniversesPage() {
   async function fetchUniverses(currentUser: any) {
     try {
       setLoading(true);
-      
-      // Fetch only user's universes
       const { authenticatedFetch } = await import('@/lib/client-auth');
       const response = await authenticatedFetch(`/api/admin/universes?ownerId=${currentUser.id}`);
 
@@ -76,14 +97,18 @@ export default function UniversesPage() {
     }
   }
 
-  async function handleDelete(id: string) {
-    if (!confirm('Are you sure you want to delete this universe?')) {
-      return;
-    }
+  function handleDeleteClick(universe: Universe) {
+    setUniverseToDelete(universe);
+    setDeleteDialogOpen(true);
+  }
+
+  async function handleDeleteConfirm() {
+    if (!universeToDelete) return;
 
     try {
+      setDeleting(true);
       const { authenticatedFetch } = await import('@/lib/client-auth');
-      const response = await authenticatedFetch(`/api/admin/universes/${id}`, {
+      const response = await authenticatedFetch(`/api/admin/universes/${universeToDelete.id}`, {
         method: 'DELETE',
       });
 
@@ -95,145 +120,174 @@ export default function UniversesPage() {
         throw new Error('Failed to delete universe');
       }
 
-      setUniverses(universes.filter(u => u.id !== id));
+      setUniverses(universes.filter(u => u.id !== universeToDelete.id));
+      setDeleteDialogOpen(false);
+      setUniverseToDelete(null);
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to delete universe');
+    } finally {
+      setDeleting(false);
     }
   }
 
   if (loading) {
     return (
-      <div className="px-4 sm:px-6 lg:px-8">
-        <div className="text-center py-12">
-          <p className="text-gray-500">Loading universes...</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="px-4 sm:px-6 lg:px-8">
-        <div className="bg-red-50 border border-red-200 rounded-md p-4">
-          <p className="text-red-800">Error: {error}</p>
-          <button
-            onClick={fetchUniverses}
-            className="mt-2 text-sm text-red-600 hover:text-red-800"
-          >
-            Retry
-          </button>
+      <div className="space-y-8">
+        <div className="flex items-center justify-center py-12">
+          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
         </div>
       </div>
     );
   }
 
   return (
-    <div className="px-4 sm:px-6 lg:px-8">
-      <div className="sm:flex sm:items-center">
-        <div className="sm:flex-auto">
-          <h1 className="text-3xl font-bold text-gray-900">Universes</h1>
-          <p className="mt-2 text-sm text-gray-700">
+    <div className="space-y-8">
+      <div className="flex items-center justify-between">
+        <div className="space-y-1">
+          <h1 className="text-4xl font-bold tracking-tight">Universes</h1>
+          <p className="text-muted-foreground text-lg">
             Manage universes, worlds, and rooms.
           </p>
         </div>
-        <div className="mt-4 sm:mt-0 sm:ml-16 sm:flex-none">
-          <Link
-            href="/admin/universes/new"
-            className="inline-flex items-center justify-center rounded-md border border-transparent bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-indigo-700"
-          >
+        <Button asChild>
+          <Link href="/admin/universes/new">
+            <Plus className="mr-2 h-4 w-4" />
             Create Universe
           </Link>
-        </div>
+        </Button>
       </div>
 
-      <div className="mt-8 flow-root">
-        <div className="-mx-4 -my-2 overflow-x-auto sm:-mx-6 lg:-mx-8">
-          <div className="inline-block min-w-full py-2 align-middle sm:px-6 lg:px-8">
-            <table className="min-w-full divide-y divide-gray-300">
-              <thead>
-                <tr>
-                  <th className="py-3.5 pl-4 pr-3 text-left text-sm font-semibold text-gray-900 sm:pl-0">
-                    Name
-                  </th>
-                  <th className="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">
-                    Slug
-                  </th>
-                  <th className="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">
-                    Owner
-                  </th>
-                  <th className="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">
-                    Worlds
-                  </th>
-                  <th className="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">
-                    Status
-                  </th>
-                  <th className="relative py-3.5 pl-3 pr-4 sm:pr-0">
-                    <span className="sr-only">Actions</span>
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-200 bg-white">
+      {error && (
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>Error</AlertTitle>
+          <AlertDescription>
+            {error}
+            <Button
+              variant="outline"
+              size="sm"
+              className="ml-4"
+              onClick={() => user && fetchUniverses(user)}
+            >
+              Retry
+            </Button>
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {universes.length === 0 ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>No universes found</CardTitle>
+            <CardDescription>
+              Get started by creating your first universe.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button asChild>
+              <Link href="/admin/universes/new">
+                <Plus className="mr-2 h-4 w-4" />
+                Create your first universe
+              </Link>
+            </Button>
+          </CardContent>
+        </Card>
+      ) : (
+        <Card>
+          <CardContent className="p-0">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Name</TableHead>
+                  <TableHead>Slug</TableHead>
+                  <TableHead>Owner</TableHead>
+                  <TableHead>Worlds</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead className="text-right">Actions</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
                 {universes.map((universe) => (
-                  <tr key={universe.id}>
-                    <td className="whitespace-nowrap py-4 pl-4 pr-3 text-sm font-medium text-gray-900 sm:pl-0">
-                      {universe.name}
-                    </td>
-                    <td className="whitespace-nowrap px-3 py-4 text-sm text-gray-500">
+                  <TableRow key={universe.id}>
+                    <TableCell className="font-medium">{universe.name}</TableCell>
+                    <TableCell className="text-muted-foreground font-mono text-sm">
                       {universe.slug}
-                    </td>
-                    <td className="whitespace-nowrap px-3 py-4 text-sm text-gray-500">
+                    </TableCell>
+                    <TableCell className="text-muted-foreground">
                       {universe.owner.name || universe.owner.email || 'Unknown'}
-                    </td>
-                    <td className="whitespace-nowrap px-3 py-4 text-sm text-gray-500">
+                    </TableCell>
+                    <TableCell className="text-muted-foreground">
                       {universe._count.worlds}
-                    </td>
-                    <td className="whitespace-nowrap px-3 py-4 text-sm text-gray-500">
-                      <span className={`inline-flex rounded-full px-2 text-xs font-semibold leading-5 ${
-                        universe.isPublic
-                          ? 'bg-green-100 text-green-800'
-                          : 'bg-gray-100 text-gray-800'
-                      }`}>
-                        {universe.isPublic ? 'Public' : 'Private'}
-                      </span>
-                      {universe.featured && (
-                        <span className="ml-2 inline-flex rounded-full px-2 text-xs font-semibold leading-5 bg-yellow-100 text-yellow-800">
-                          Featured
-                        </span>
-                      )}
-                    </td>
-                    <td className="relative whitespace-nowrap py-4 pl-3 pr-4 text-right text-sm font-medium sm:pr-0">
-                      <Link
-                        href={`/admin/universes/${universe.id}`}
-                        className="text-indigo-600 hover:text-indigo-900 mr-4"
-                      >
-                        Edit
-                      </Link>
-                      <button
-                        onClick={() => handleDelete(universe.id)}
-                        className="text-red-600 hover:text-red-900"
-                      >
-                        Delete
-                      </button>
-                    </td>
-                  </tr>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-2">
+                        <Badge variant={universe.isPublic ? 'default' : 'secondary'}>
+                          {universe.isPublic ? 'Public' : 'Private'}
+                        </Badge>
+                        {universe.featured && (
+                          <Badge variant="outline">Featured</Badge>
+                        )}
+                      </div>
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <div className="flex items-center justify-end gap-2">
+                        <Button variant="ghost" size="sm" asChild>
+                          <Link href={`/admin/universes/${universe.id}`}>Edit</Link>
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleDeleteClick(universe)}
+                          className="text-destructive hover:text-destructive"
+                        >
+                          Delete
+                        </Button>
+                      </div>
+                    </TableCell>
+                  </TableRow>
                 ))}
-              </tbody>
-            </table>
-            {universes.length === 0 && (
-              <div className="text-center py-12">
-                <p className="text-gray-500">No universes found.</p>
-                <Link
-                  href="/admin/universes/new"
-                  className="mt-4 inline-flex items-center text-indigo-600 hover:text-indigo-900"
-                >
-                  Create your first universe
-                </Link>
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+      )}
+
+      <Dialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete Universe</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete "{universeToDelete?.name}"? This action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setDeleteDialogOpen(false);
+                setUniverseToDelete(null);
+              }}
+              disabled={deleting}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleDeleteConfirm}
+              disabled={deleting}
+            >
+              {deleting ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Deleting...
+                </>
+              ) : (
+                'Delete'
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
-

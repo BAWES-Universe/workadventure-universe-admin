@@ -7,6 +7,8 @@ import WorkAdventureProvider from './workadventure-provider';
 import MobileNav from './components/mobile-nav';
 import DesktopNav from './components/desktop-nav';
 import UserMenu from './components/user-menu';
+import { ThemeProvider } from './components/theme-provider';
+import { ThemeToggle } from './components/theme-toggle';
 
 async function getSessionUser() {
   try {
@@ -70,41 +72,46 @@ export default async function AdminLayout({ children }: { children: ReactNode })
   const user = await getSessionUser();
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      <nav className="bg-white shadow-sm border-b">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex justify-between h-16">
-            <div className="flex">
-              <div className="flex-shrink-0 flex items-center">
-                <Suspense fallback={<span className="text-xl font-bold text-gray-900">WorkAdventure Admin</span>}>
-                  <AuthLink href="/admin" className="text-xl font-bold text-gray-900">
-                    WorkAdventure Admin
-                  </AuthLink>
-                </Suspense>
+    <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
+      <div className="min-h-screen bg-background">
+        <nav className="bg-card border-b shadow-sm">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div className="flex justify-between h-16">
+              <div className="flex">
+                <div className="flex-shrink-0 flex items-center">
+                  <Suspense fallback={<span className="text-xl font-bold">WorkAdventure Admin</span>}>
+                    <AuthLink href="/admin" className="text-xl font-bold">
+                      WorkAdventure Admin
+                    </AuthLink>
+                  </Suspense>
+                </div>
+                <DesktopNav user={user} />
               </div>
-              <DesktopNav user={user} />
-            </div>
-            <div className="flex items-center gap-4">
-              {/* Mobile Navigation */}
-              <MobileNav user={user} />
-              
-              {/* Desktop User Info / Login */}
-              <div className="hidden sm:flex items-center">
-                <UserMenu user={user} />
+              <div className="flex items-center gap-4">
+                {/* Mobile Navigation */}
+                <MobileNav user={user} />
+                
+                {/* Theme Toggle */}
+                <ThemeToggle />
+                
+                {/* Desktop User Info / Login */}
+                <div className="hidden sm:flex items-center">
+                  <UserMenu user={user} />
+                </div>
               </div>
             </div>
           </div>
-        </div>
-      </nav>
-      <main className="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
-        <Suspense fallback={null}>
-          <TokenHandler />
-        </Suspense>
-        <WorkAdventureProvider>
-          {children}
-        </WorkAdventureProvider>
-      </main>
-    </div>
+        </nav>
+        <main className="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
+          <Suspense fallback={null}>
+            <TokenHandler />
+          </Suspense>
+          <WorkAdventureProvider>
+            {children}
+          </WorkAdventureProvider>
+        </main>
+      </div>
+    </ThemeProvider>
   );
 }
 

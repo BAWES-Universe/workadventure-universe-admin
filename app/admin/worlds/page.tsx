@@ -3,6 +3,34 @@
 import { useEffect, useState, Suspense } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table';
+import { Badge } from '@/components/ui/badge';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Plus, AlertCircle, Loader2, ChevronRight } from 'lucide-react';
 
 interface World {
   id: string;
@@ -36,6 +64,9 @@ function WorldsPageContent() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedUniverseId, setSelectedUniverseId] = useState<string>(searchParams.get('universeId') || '');
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [worldToDelete, setWorldToDelete] = useState<World | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     checkAuth();
@@ -105,14 +136,18 @@ function WorldsPageContent() {
     }
   }
 
-  async function handleDelete(id: string) {
-    if (!confirm('Are you sure you want to delete this world? This will also delete all rooms in it.')) {
-      return;
-    }
+  function handleDeleteClick(world: World) {
+    setWorldToDelete(world);
+    setDeleteDialogOpen(true);
+  }
+
+  async function handleDeleteConfirm() {
+    if (!worldToDelete) return;
 
     try {
+      setDeleting(true);
       const { authenticatedFetch } = await import('@/lib/client-auth');
-      const response = await authenticatedFetch(`/api/admin/worlds/${id}`, {
+      const response = await authenticatedFetch(`/api/admin/worlds/${worldToDelete.id}`, {
         method: 'DELETE',
       });
 
@@ -124,9 +159,13 @@ function WorldsPageContent() {
         throw new Error('Failed to delete world');
       }
 
-      setWorlds(worlds.filter(w => w.id !== id));
+      setWorlds(worlds.filter(w => w.id !== worldToDelete.id));
+      setDeleteDialogOpen(false);
+      setWorldToDelete(null);
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to delete world');
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -143,174 +182,194 @@ function WorldsPageContent() {
 
   if (loading) {
     return (
-      <div className="px-4 sm:px-6 lg:px-8">
-        <div className="text-center py-12">
-          <p className="text-gray-500">Loading worlds...</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="px-4 sm:px-6 lg:px-8">
-        <div className="bg-red-50 border border-red-200 rounded-md p-4">
-          <p className="text-red-800">Error: {error}</p>
-          <button
-            onClick={fetchWorlds}
-            className="mt-2 text-sm text-red-600 hover:text-red-800"
-          >
-            Retry
-          </button>
+      <div className="space-y-8">
+        <div className="flex items-center justify-center py-12">
+          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
         </div>
       </div>
     );
   }
 
   return (
-    <div className="px-4 sm:px-6 lg:px-8">
-      {/* Breadcrumbs */}
-      <nav className="flex mb-6" aria-label="Breadcrumb">
-        <ol className="flex items-center space-x-4">
-          <li>
-            <Link href="/admin" className="text-gray-400 hover:text-gray-500">
-              Dashboard
-            </Link>
-          </li>
-          <li>
-            <span className="text-gray-500 mx-2">/</span>
-          </li>
-          <li className="text-gray-900">Worlds</li>
-        </ol>
+    <div className="space-y-8">
+      <nav className="flex items-center space-x-2 text-sm text-muted-foreground">
+        <Link href="/admin" className="hover:text-foreground">
+          Dashboard
+        </Link>
+        <ChevronRight className="h-4 w-4" />
+        <span className="text-foreground">Worlds</span>
       </nav>
 
-      <div className="sm:flex sm:items-center sm:justify-between">
-        <div className="sm:flex-auto">
-          <h1 className="text-3xl font-bold text-gray-900">Worlds</h1>
-          <p className="mt-2 text-sm text-gray-700">
+      <div className="flex items-center justify-between">
+        <div className="space-y-1">
+          <h1 className="text-4xl font-bold tracking-tight">Worlds</h1>
+          <p className="text-muted-foreground text-lg">
             Manage worlds. Worlds belong to universes and contain rooms.
           </p>
         </div>
-        <div className="mt-4 sm:mt-0 sm:ml-16 sm:flex-none">
-          <Link
-            href={selectedUniverseId ? `/admin/worlds/new?universeId=${selectedUniverseId}` : '/admin/worlds/new'}
-            className="inline-flex items-center justify-center rounded-md border border-transparent bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-indigo-700"
-          >
+        <Button asChild>
+          <Link href={selectedUniverseId ? `/admin/worlds/new?universeId=${selectedUniverseId}` : '/admin/worlds/new'}>
+            <Plus className="mr-2 h-4 w-4" />
             Create World
           </Link>
-        </div>
+        </Button>
       </div>
 
-      {/* Filter */}
       {universes.length > 0 && (
-        <div className="mt-6">
-          <label htmlFor="universe-filter" className="block text-sm font-medium text-gray-700 mb-2">
-            Filter by Universe
-          </label>
-          <select
-            id="universe-filter"
-            value={selectedUniverseId}
-            onChange={(e) => handleUniverseFilterChange(e.target.value)}
-            className="block w-full sm:w-64 rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
-          >
-            <option value="">All Universes</option>
-            {universes.map((universe) => (
-              <option key={universe.id} value={universe.id}>
-                {universe.name}
-              </option>
-            ))}
-          </select>
-        </div>
+        <Card>
+          <CardHeader>
+            <CardTitle>Filter by Universe</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <Select value={selectedUniverseId} onValueChange={handleUniverseFilterChange}>
+              <SelectTrigger className="w-full sm:w-64">
+                <SelectValue placeholder="All Universes" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="">All Universes</SelectItem>
+                {universes.map((universe) => (
+                  <SelectItem key={universe.id} value={universe.id}>
+                    {universe.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </CardContent>
+        </Card>
       )}
 
-      <div className="mt-8 flow-root">
-        <div className="-mx-4 -my-2 overflow-x-auto sm:-mx-6 lg:-mx-8">
-          <div className="inline-block min-w-full py-2 align-middle sm:px-6 lg:px-8">
-            <table className="min-w-full divide-y divide-gray-300">
-              <thead>
-                <tr>
-                  <th className="py-3.5 pl-4 pr-3 text-left text-sm font-semibold text-gray-900 sm:pl-0">
-                    Name
-                  </th>
-                  <th className="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">
-                    Universe
-                  </th>
-                  <th className="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">
-                    Rooms
-                  </th>
-                  <th className="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">
-                    Status
-                  </th>
-                  <th className="relative py-3.5 pl-3 pr-4 sm:pr-0">
-                    <span className="sr-only">Actions</span>
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-200 bg-white">
+      {error && (
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>Error</AlertTitle>
+          <AlertDescription>
+            {error}
+            <Button
+              variant="outline"
+              size="sm"
+              className="ml-4"
+              onClick={fetchWorlds}
+            >
+              Retry
+            </Button>
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {worlds.length === 0 ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>No worlds found</CardTitle>
+            <CardDescription>
+              {selectedUniverseId ? 'No worlds found in this universe.' : 'Get started by creating your first world.'}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button asChild>
+              <Link href={selectedUniverseId ? `/admin/worlds/new?universeId=${selectedUniverseId}` : '/admin/worlds/new'}>
+                <Plus className="mr-2 h-4 w-4" />
+                Create your first world
+              </Link>
+            </Button>
+          </CardContent>
+        </Card>
+      ) : (
+        <Card>
+          <CardContent className="p-0">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Name</TableHead>
+                  <TableHead>Universe</TableHead>
+                  <TableHead>Rooms</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead className="text-right">Actions</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
                 {worlds.map((world) => (
-                  <tr key={world.id}>
-                    <td className="whitespace-nowrap py-4 pl-4 pr-3 text-sm font-medium text-gray-900 sm:pl-0">
-                      {world.name}
-                    </td>
-                    <td className="whitespace-nowrap px-3 py-4 text-sm text-gray-500">
+                  <TableRow key={world.id}>
+                    <TableCell className="font-medium">{world.name}</TableCell>
+                    <TableCell>
                       <Link
                         href={`/admin/universes/${world.universe.id}`}
-                        className="text-indigo-600 hover:text-indigo-900"
+                        className="text-primary hover:underline"
                       >
                         {world.universe.name}
                       </Link>
-                    </td>
-                    <td className="whitespace-nowrap px-3 py-4 text-sm text-gray-500">
+                    </TableCell>
+                    <TableCell className="text-muted-foreground">
                       {world._count.rooms}
-                    </td>
-                    <td className="whitespace-nowrap px-3 py-4 text-sm text-gray-500">
-                      <span className={`inline-flex rounded-full px-2 text-xs font-semibold leading-5 ${
-                        world.isPublic
-                          ? 'bg-green-100 text-green-800'
-                          : 'bg-gray-100 text-gray-800'
-                      }`}>
-                        {world.isPublic ? 'Public' : 'Private'}
-                      </span>
-                      {world.featured && (
-                        <span className="ml-2 inline-flex rounded-full px-2 text-xs font-semibold leading-5 bg-yellow-100 text-yellow-800">
-                          Featured
-                        </span>
-                      )}
-                    </td>
-                    <td className="relative whitespace-nowrap py-4 pl-3 pr-4 text-right text-sm font-medium sm:pr-0">
-                      <Link
-                        href={`/admin/worlds/${world.id}`}
-                        className="text-indigo-600 hover:text-indigo-900 mr-4"
-                      >
-                        Edit
-                      </Link>
-                      <button
-                        onClick={() => handleDelete(world.id)}
-                        className="text-red-600 hover:text-red-900"
-                      >
-                        Delete
-                      </button>
-                    </td>
-                  </tr>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex items-center gap-2">
+                        <Badge variant={world.isPublic ? 'default' : 'secondary'}>
+                          {world.isPublic ? 'Public' : 'Private'}
+                        </Badge>
+                        {world.featured && (
+                          <Badge variant="outline">Featured</Badge>
+                        )}
+                      </div>
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <div className="flex items-center justify-end gap-2">
+                        <Button variant="ghost" size="sm" asChild>
+                          <Link href={`/admin/worlds/${world.id}`}>Edit</Link>
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleDeleteClick(world)}
+                          className="text-destructive hover:text-destructive"
+                        >
+                          Delete
+                        </Button>
+                      </div>
+                    </TableCell>
+                  </TableRow>
                 ))}
-              </tbody>
-            </table>
-            {worlds.length === 0 && (
-              <div className="text-center py-12">
-                <p className="text-gray-500">
-                  {selectedUniverseId ? 'No worlds found in this universe.' : 'No worlds found.'}
-                </p>
-                <Link
-                  href={selectedUniverseId ? `/admin/worlds/new?universeId=${selectedUniverseId}` : '/admin/worlds/new'}
-                  className="mt-4 inline-flex items-center text-indigo-600 hover:text-indigo-900"
-                >
-                  Create your first world
-                </Link>
-              </div>
-            )}
-          </div>
-        </div>
-      </div>
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+      )}
+
+      <Dialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete World</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete "{worldToDelete?.name}"? This will also delete all rooms in it. This action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setDeleteDialogOpen(false);
+                setWorldToDelete(null);
+              }}
+              disabled={deleting}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleDeleteConfirm}
+              disabled={deleting}
+            >
+              {deleting ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Deleting...
+                </>
+              ) : (
+                'Delete'
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -318,9 +377,9 @@ function WorldsPageContent() {
 export default function WorldsPage() {
   return (
     <Suspense fallback={
-      <div className="px-4 sm:px-6 lg:px-8">
-        <div className="text-center py-12">
-          <p className="text-gray-500">Loading worlds...</p>
+      <div className="space-y-8">
+        <div className="flex items-center justify-center py-12">
+          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
         </div>
       </div>
     }>
@@ -328,4 +387,3 @@ export default function WorldsPage() {
     </Suspense>
   );
 }
-

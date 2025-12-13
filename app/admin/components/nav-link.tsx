@@ -19,7 +19,7 @@ export default function NavLink({ href, children, className }: NavLinkProps) {
       href={href}
       className={cn(
         className,
-        isActive && "border-gray-900 text-gray-900"
+        isActive && "border-foreground text-foreground"
       )}
     >
       {children}

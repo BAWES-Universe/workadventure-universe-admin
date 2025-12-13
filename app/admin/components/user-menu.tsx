@@ -20,17 +20,17 @@ export default function UserMenu({ user: initialUser }: UserMenuProps) {
 
   if (user) {
     return (
-      <span className="text-sm text-gray-700">
+      <span className="text-sm text-muted-foreground">
         {user.name || user.email || 'User'}
       </span>
     );
   }
 
   return (
-    <Suspense fallback={<span className="text-sm text-indigo-600">Login</span>}>
+    <Suspense fallback={<span className="text-sm text-primary">Login</span>}>
       <AuthLink
         href="/admin/login"
-        className="text-sm text-indigo-600 hover:text-indigo-900"
+        className="text-sm text-primary hover:underline"
       >
         Login
       </AuthLink>
