@@ -3,13 +3,14 @@
 import { useState, useEffect } from 'react';
 import { Sheet, SheetContent, SheetTrigger, SheetClose, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { Button } from '@/components/ui/button';
-import { Separator } from '@/components/ui/separator';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import AuthLink from '../auth-link';
 import LogoutButton from '../logout-button';
-import { Menu, LayoutDashboard, Globe, Users, UserCircle, LogOut } from 'lucide-react';
+import { Menu, LogOut } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { usePathname } from 'next/navigation';
+import { useUser } from '../hooks/use-user';
+import { getNavItems } from '../config/navigation';
 
 interface MobileNavProps {
   user: {
@@ -20,48 +21,19 @@ interface MobileNavProps {
 
 export default function MobileNav({ user: initialUser }: MobileNavProps) {
   const [open, setOpen] = useState(false);
-  const [user, setUser] = useState(initialUser);
   const pathname = usePathname();
-
-  // Fetch current user state to ensure it's always up-to-date
-  useEffect(() => {
-    async function fetchUser() {
-      try {
-        const { authenticatedFetch } = await import('@/lib/client-auth');
-        const response = await authenticatedFetch('/api/auth/me');
-        if (response.ok) {
-          const data = await response.json();
-          if (data.user) {
-            setUser({
-              name: data.user.name,
-              email: data.user.email,
-            });
-          } else {
-            setUser(null);
-          }
-        } else {
-          setUser(null);
-        }
-      } catch (error) {
-        // If fetch fails, keep the initial user or set to null
-        setUser(initialUser);
-      }
-    }
-
-    fetchUser();
-  }, [pathname, initialUser]);
+  const { user } = useUser(initialUser ? {
+    id: '',
+    name: initialUser.name,
+    email: initialUser.email,
+  } : null);
 
   // Close sheet when pathname changes (navigation occurred)
   useEffect(() => {
     setOpen(false);
   }, [pathname]);
 
-  const navItems = [
-    { href: '/admin', label: 'Dashboard', icon: LayoutDashboard },
-    { href: '/admin/universes', label: 'Universes', icon: Globe },
-    { href: '/admin/users', label: 'Users', icon: Users },
-    ...(user ? [{ href: '/admin/profile', label: 'Visit Card', icon: UserCircle }] : []),
-  ];
+  const navItems = getNavItems(user);
 
   const isActive = (href: string) => {
     if (href === '/admin') {

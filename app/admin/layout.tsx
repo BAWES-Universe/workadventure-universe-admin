@@ -1,12 +1,13 @@
 import { ReactNode, Suspense } from 'react';
 import { cookies } from 'next/headers';
-import LogoutButton from './logout-button';
 import { prisma } from '@/lib/db';
 import TokenHandler from './token-handler';
 import AuthLink from './auth-link';
 import WorkAdventureProvider from './workadventure-provider';
 import MobileNav from './components/mobile-nav';
 import NavLink from './components/nav-link';
+import UserMenu from './components/user-menu';
+import { getNavItems } from './config/navigation';
 
 async function getSessionUser() {
   try {
@@ -83,28 +84,13 @@ export default async function AdminLayout({ children }: { children: ReactNode })
                 </Suspense>
               </div>
               <div className="hidden sm:ml-6 sm:flex sm:space-x-8">
-                <Suspense fallback={<span className="border-transparent text-gray-500 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium">Dashboard</span>}>
-                  <NavLink href="/admin" className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium">
-                    Dashboard
-                  </NavLink>
-                </Suspense>
-                <Suspense fallback={<span className="border-transparent text-gray-500 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium">Universes</span>}>
-                  <NavLink href="/admin/universes" className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium">
-                    Universes
-                  </NavLink>
-                </Suspense>
-                <Suspense fallback={<span className="border-transparent text-gray-500 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium">Users</span>}>
-                  <NavLink href="/admin/users" className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium">
-                    Users
-                  </NavLink>
-                </Suspense>
-                {user && (
-                  <Suspense fallback={<span className="border-transparent text-gray-500 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium">Visit Card</span>}>
-                    <NavLink href="/admin/profile" className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium">
-                      Visit Card
+                {getNavItems(user).map((item) => (
+                  <Suspense key={item.href} fallback={<span className="border-transparent text-gray-500 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium">{item.label}</span>}>
+                    <NavLink href={item.href} className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium">
+                      {item.label}
                     </NavLink>
                   </Suspense>
-                )}
+                ))}
               </div>
             </div>
             <div className="flex items-center gap-4">
@@ -113,23 +99,7 @@ export default async function AdminLayout({ children }: { children: ReactNode })
               
               {/* Desktop User Info / Login */}
               <div className="hidden sm:flex items-center">
-                {user ? (
-                  <div className="flex items-center space-x-4">
-                    <span className="text-sm text-gray-700">
-                      {user.name || user.email || 'User'}
-                    </span>
-                    <LogoutButton />
-                  </div>
-                ) : (
-                  <Suspense fallback={<span className="text-sm text-indigo-600">Login</span>}>
-                    <AuthLink
-                      href="/admin/login"
-                      className="text-sm text-indigo-600 hover:text-indigo-900"
-                    >
-                      Login
-                    </AuthLink>
-                  </Suspense>
-                )}
+                <UserMenu user={user} />
               </div>
             </div>
           </div>
