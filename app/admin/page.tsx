@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Globe, Users, FolderOpen, Home, Plus, TrendingUp } from 'lucide-react';
+import CurrentLocation from './components/current-location';
 
 async function getStats() {
   const token = process.env.ADMIN_API_TOKEN;
@@ -145,6 +146,8 @@ export default async function AdminDashboard() {
               </Card>
             </Link>
           </div>
+
+          <CurrentLocation />
         </>
       )}
     </div>
