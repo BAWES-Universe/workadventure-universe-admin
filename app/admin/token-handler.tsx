@@ -54,6 +54,8 @@ export default function TokenHandler() {
     if (sessionToken) {
       try {
         localStorage.setItem('admin_session_token', sessionToken);
+        // Clear redirect flag since we have a token (we're authenticated)
+        sessionStorage.removeItem('admin_redirect_in_progress');
         devLog('[TokenHandler] Session token stored from URL to localStorage');
       } catch (error) {
         devError('[TokenHandler] Failed to store session token from URL:', error);
@@ -61,6 +63,8 @@ export default function TokenHandler() {
     } else if (sessionId) {
       try {
         localStorage.setItem('admin_session_id', sessionId);
+        // Clear redirect flag since we have a token (we're authenticated)
+        sessionStorage.removeItem('admin_redirect_in_progress');
         devLog('[TokenHandler] Session ID stored from URL to localStorage');
       } catch (error) {
         devError('[TokenHandler] Failed to store session ID from URL:', error);
@@ -84,6 +88,11 @@ export default function TokenHandler() {
           // Ensure URL is same-origin before using replaceState
           // Using toString() preserves the full URL which Next.js router expects
           if (newUrl.origin === window.location.origin) {
+            // Use a flag to prevent this from triggering navigation events in Arc
+            // that might cause the login page to re-check
+            const updateKey = `token_update_${Date.now()}`;
+            sessionStorage.setItem('last_token_update', updateKey);
+            
             window.history.replaceState({}, '', newUrl.toString());
             devLog('[TokenHandler] Added token to URL synchronously for middleware access');
           } else {

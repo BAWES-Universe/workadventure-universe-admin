@@ -41,6 +41,39 @@ function LoginPageContent() {
   const [showManualForm, setShowManualForm] = useState(false);
   const redirectAttemptedRef = useRef(false); // Track if we've already attempted redirect
 
+  // Early check: If we have a token in URL, we're authenticated - redirect immediately
+  // This prevents the login page from even rendering in Arc browser
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    
+    const urlToken = searchParams.get('_token') || searchParams.get('_session');
+    if (urlToken) {
+      // We have a token, which means we're authenticated
+      // Check if we're already on the target page to prevent loops
+      const redirectTo = searchParams.get('redirect') || '/admin';
+      const currentPath = pathname || window.location.pathname;
+      
+      // If we're already on the target admin page, don't redirect
+      if (currentPath !== '/admin/login' && 
+          (currentPath === redirectTo || 
+           (redirectTo === '/admin' && currentPath.startsWith('/admin')))) {
+        devLog('[Login] Token in URL and already on target page, clearing redirect flag');
+        sessionStorage.removeItem('admin_redirect_in_progress');
+        setLoading(false);
+        return;
+      }
+      
+      // Redirect to admin dashboard immediately without showing login page
+      const redirectUrl = new URL(redirectTo, window.location.origin);
+      const paramName = searchParams.get('_token') ? '_token' : '_session';
+      redirectUrl.searchParams.set(paramName, urlToken);
+      
+      devLog('[Login] Token found in URL, redirecting immediately to prevent loop');
+      window.location.replace(redirectUrl.toString());
+      return;
+    }
+  }, [searchParams, pathname]);
+
   // Debug logging on mount
   useEffect(() => {
     devLog('[Login] Component mounted');
@@ -144,6 +177,23 @@ function LoginPageContent() {
     let isMounted = true; // Track if component is still mounted
     
     const checkExistingSession = async () => {
+      // CRITICAL: If we already have a token in the URL, we're authenticated and being redirected
+      // Don't run the check again - this prevents loops in Arc browser
+      const urlToken = searchParams.get('_token') || searchParams.get('_session');
+      if (urlToken) {
+        devLog('[Login] Token already in URL, skipping session check to prevent loop');
+        setLoading(false);
+        return;
+      }
+      
+      // Check sessionStorage for redirect flag (prevents loops across page reloads)
+      const redirectFlag = sessionStorage.getItem('admin_redirect_in_progress');
+      if (redirectFlag) {
+        devLog('[Login] Redirect already in progress, skipping check');
+        setLoading(false);
+        return;
+      }
+      
       // If manual login is enabled and no accessToken, skip session check and show form
       // This prevents infinite redirect loops
       const tokenFromUrl = searchParams.get('accessToken');
@@ -188,17 +238,22 @@ function LoginPageContent() {
                  (redirectTo === '/admin' && currentPath.startsWith('/admin')))) {
               devLog('[Login] Already on target admin page, skipping redirect to prevent loop');
               setLoading(false);
+              // Clear redirect flag if set
+              sessionStorage.removeItem('admin_redirect_in_progress');
               return;
             }
             
-            // Prevent multiple redirect attempts
-            if (redirectAttemptedRef.current) {
+            // Prevent multiple redirect attempts using both ref and sessionStorage
+            if (redirectAttemptedRef.current || redirectFlag) {
               devLog('[Login] Redirect already attempted, skipping to prevent loop');
               setLoading(false);
               return;
             }
             
+            // Set flags to prevent multiple redirects
             redirectAttemptedRef.current = true;
+            sessionStorage.setItem('admin_redirect_in_progress', 'true');
+            
             devLog('[Login] Already authenticated, redirecting to:', redirectTo);
             
             // Get token from localStorage to preserve in URL
