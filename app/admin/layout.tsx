@@ -6,6 +6,7 @@ import TokenHandler from './token-handler';
 import AuthLink from './auth-link';
 import WorkAdventureProvider from './workadventure-provider';
 import MobileNav from './components/mobile-nav';
+import NavLink from './components/nav-link';
 
 async function getSessionUser() {
   try {
@@ -83,37 +84,25 @@ export default async function AdminLayout({ children }: { children: ReactNode })
               </div>
               <div className="hidden sm:ml-6 sm:flex sm:space-x-8">
                 <Suspense fallback={<span className="border-transparent text-gray-500 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium">Dashboard</span>}>
-                  <AuthLink
-                    href="/admin"
-                    className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
-                  >
+                  <NavLink href="/admin" className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium">
                     Dashboard
-                  </AuthLink>
+                  </NavLink>
                 </Suspense>
                 <Suspense fallback={<span className="border-transparent text-gray-500 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium">Universes</span>}>
-                  <AuthLink
-                    href="/admin/universes"
-                    className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
-                  >
+                  <NavLink href="/admin/universes" className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium">
                     Universes
-                  </AuthLink>
+                  </NavLink>
                 </Suspense>
                 <Suspense fallback={<span className="border-transparent text-gray-500 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium">Users</span>}>
-                  <AuthLink
-                    href="/admin/users"
-                    className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
-                  >
+                  <NavLink href="/admin/users" className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium">
                     Users
-                  </AuthLink>
+                  </NavLink>
                 </Suspense>
                 {user && (
                   <Suspense fallback={<span className="border-transparent text-gray-500 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium">Visit Card</span>}>
-                    <AuthLink
-                      href="/admin/profile"
-                      className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
-                    >
+                    <NavLink href="/admin/profile" className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium">
                       Visit Card
-                    </AuthLink>
+                    </NavLink>
                   </Suspense>
                 )}
               </div>
