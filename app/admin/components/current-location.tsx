@@ -20,6 +20,11 @@ export default function CurrentLocation() {
     }
 
     async function getRoomInfo() {
+      if (!wa) {
+        setLoading(false);
+        return;
+      }
+
       try {
         setLoading(true);
         await wa.onInit();
