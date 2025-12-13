@@ -3,6 +3,13 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
+import { Label } from '@/components/ui/label';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Trash2, Plus, ExternalLink } from 'lucide-react';
 
 interface LinkItem {
   label: string;
@@ -150,157 +157,157 @@ export default function VisitCardPage() {
 
       <div className="max-w-4xl">
         <div className="mb-6">
-          <h1 className="text-3xl font-bold text-gray-900">Customize Visit Card</h1>
-          <p className="mt-2 text-sm text-gray-700">
+          <h1 className="text-3xl font-bold tracking-tight">Customize Visit Card</h1>
+          <p className="mt-2 text-muted-foreground">
             Customize your public visit card that appears when other users click on you in WorkAdventure.
           </p>
         </div>
 
         {error && (
-          <div className="mb-4 bg-red-50 border border-red-200 rounded-md p-4">
-            <p className="text-sm text-red-800">{error}</p>
-          </div>
+          <Alert variant="destructive" className="mb-4">
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
         )}
 
         {success && (
-          <div className="mb-4 bg-green-50 border border-green-200 rounded-md p-4">
-            <p className="text-sm text-green-800">Visit card saved successfully!</p>
-          </div>
+          <Alert className="mb-4 border-green-200 bg-green-50 text-green-800">
+            <AlertDescription>Visit card saved successfully!</AlertDescription>
+          </Alert>
         )}
 
-        <div className="bg-white shadow rounded-lg p-6">
-          {/* Bio */}
-          <div className="mb-6">
-            <label htmlFor="bio" className="block text-sm font-medium text-gray-700 mb-2">
-              Bio
-            </label>
-            <textarea
-              id="bio"
-              rows={4}
-              value={bio}
-              onChange={(e) => setBio(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
-              placeholder="Tell others about yourself..."
-            />
-            <p className="mt-1 text-xs text-gray-500">
-              Optional. A brief description about yourself.
-            </p>
-          </div>
-
-          {/* Links */}
-          <div className="mb-6">
-            <div className="flex items-center justify-between mb-2">
-              <label className="block text-sm font-medium text-gray-700">
-                Links
-              </label>
-              <button
-                type="button"
-                onClick={addLink}
-                className="text-sm text-indigo-600 hover:text-indigo-900 font-medium"
-              >
-                + Add Link
-              </button>
+        <Card>
+          <CardHeader>
+            <CardTitle>Visit Card Details</CardTitle>
+            <CardDescription>
+              Customize your public visit card that appears when other users click on you in WorkAdventure.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-6">
+            {/* Bio */}
+            <div className="space-y-2">
+              <Label htmlFor="bio">Bio</Label>
+              <Textarea
+                id="bio"
+                rows={4}
+                value={bio}
+                onChange={(e) => setBio(e.target.value)}
+                placeholder="Tell others about yourself..."
+              />
+              <p className="text-xs text-muted-foreground">
+                Optional. A brief description about yourself.
+              </p>
             </div>
 
-            {links.length === 0 ? (
-              <p className="text-sm text-gray-500 italic">No links added yet.</p>
-            ) : (
-              <div className="space-y-3">
-                {links.map((link, index) => (
-                  <div key={index} className="flex gap-3 items-start">
-                    <div className="flex-1">
-                      <input
-                        type="text"
-                        placeholder="Label (e.g., LinkedIn)"
-                        value={link.label}
-                        onChange={(e) => updateLink(index, 'label', e.target.value)}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 mb-2"
-                      />
-                      <input
-                        type="url"
-                        placeholder="https://..."
-                        value={link.url}
-                        onChange={(e) => updateLink(index, 'url', e.target.value)}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
-                      />
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => removeLink(index)}
-                      className="mt-2 px-3 py-2 text-sm text-red-600 hover:text-red-900"
-                    >
-                      Remove
-                    </button>
-                  </div>
-                ))}
+            {/* Links */}
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <Label>Links</Label>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={addLink}
+                  className="gap-2"
+                >
+                  <Plus className="h-4 w-4" />
+                  Add Link
+                </Button>
               </div>
-            )}
-            <p className="mt-2 text-xs text-gray-500">
-              Add links to your social media profiles, website, or other resources.
-            </p>
-          </div>
 
-          {/* Save Button */}
-          <div className="flex justify-end">
-            <button
-              type="button"
-              onClick={handleSave}
-              disabled={saving}
-              className="px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {saving ? 'Saving...' : 'Save Visit Card'}
-            </button>
-          </div>
-        </div>
+              {links.length === 0 ? (
+                <p className="text-sm text-muted-foreground italic">No links added yet.</p>
+              ) : (
+                <div className="space-y-3">
+                  {links.map((link, index) => (
+                    <div key={index} className="flex gap-3 items-start">
+                      <div className="flex-1 space-y-2">
+                        <Input
+                          type="text"
+                          placeholder="Label (e.g., LinkedIn)"
+                          value={link.label}
+                          onChange={(e) => updateLink(index, 'label', e.target.value)}
+                        />
+                        <Input
+                          type="url"
+                          placeholder="https://..."
+                          value={link.url}
+                          onChange={(e) => updateLink(index, 'url', e.target.value)}
+                        />
+                      </div>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => removeLink(index)}
+                        className="mt-2 text-destructive hover:text-destructive"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <p className="text-xs text-muted-foreground">
+                Add links to your social media profiles, website, or other resources.
+              </p>
+            </div>
+
+            {/* Save Button */}
+            <div className="flex justify-end pt-4">
+              <Button
+                type="button"
+                onClick={handleSave}
+                disabled={saving}
+              >
+                {saving ? 'Saving...' : 'Save Visit Card'}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
 
         {/* Preview Section */}
-        <div className="mt-6 bg-white shadow rounded-lg p-6">
-          <h2 className="text-lg font-medium text-gray-900 mb-4">Preview</h2>
-          <div className="bg-gray-900 rounded-lg p-6 text-white">
-            {bio || links.length > 0 ? (
-              <div>
-                {bio && (
-                  <div className="mb-4">
-                    <p className="text-gray-300 whitespace-pre-wrap">{bio}</p>
-                  </div>
-                )}
-                {links.length > 0 && (
-                  <div className="space-y-2">
-                    {links
-                      .filter(link => link.label.trim() && link.url.trim())
-                      .map((link, index) => (
-                        <div
-                          key={index}
-                          className="bg-gray-800 rounded-lg px-4 py-3"
-                        >
-                          <div className="flex items-center justify-between">
-                            <span className="font-medium">{link.label || 'Link'}</span>
-                            <svg
-                              className="w-4 h-4 text-gray-400"
-                              fill="none"
-                              stroke="currentColor"
-                              viewBox="0 0 24 24"
-                            >
-                              <path
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                                strokeWidth={2}
-                                d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"
-                              />
-                            </svg>
+        <Card className="mt-6">
+          <CardHeader>
+            <CardTitle>Preview</CardTitle>
+            <CardDescription>
+              This is how your visit card will appear to others.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="bg-gray-900 rounded-lg p-6 text-white">
+              {bio || links.length > 0 ? (
+                <div>
+                  {bio && (
+                    <div className="mb-4">
+                      <p className="text-gray-300 whitespace-pre-wrap">{bio}</p>
+                    </div>
+                  )}
+                  {links.length > 0 && (
+                    <div className="space-y-2">
+                      {links
+                        .filter(link => link.label.trim() && link.url.trim())
+                        .map((link, index) => (
+                          <div
+                            key={index}
+                            className="bg-gray-800 rounded-lg px-4 py-3"
+                          >
+                            <div className="flex items-center justify-between">
+                              <span className="font-medium">{link.label || 'Link'}</span>
+                              <ExternalLink className="w-4 h-4 text-gray-400" />
+                            </div>
                           </div>
-                        </div>
-                      ))}
-                  </div>
-                )}
-              </div>
-            ) : (
-              <p className="text-gray-500 text-center py-8">
-                Your visit card preview will appear here.
-              </p>
-            )}
-          </div>
-        </div>
+                        ))}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <p className="text-gray-500 text-center py-8">
+                  Your visit card preview will appear here.
+                </p>
+              )}
+            </div>
+          </CardContent>
+        </Card>
       </div>
     </div>
   );

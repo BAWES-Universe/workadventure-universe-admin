@@ -50,7 +50,6 @@ services:
       - "5555:5555" # Prisma Studio port
     volumes:
       - .:/app
-      - /app/node_modules
       - /app/.next
     depends_on:
       postgres:

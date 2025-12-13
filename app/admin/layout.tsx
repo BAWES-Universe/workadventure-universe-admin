@@ -5,6 +5,7 @@ import { prisma } from '@/lib/db';
 import TokenHandler from './token-handler';
 import AuthLink from './auth-link';
 import WorkAdventureProvider from './workadventure-provider';
+import MobileNav from './components/mobile-nav';
 
 async function getSessionUser() {
   try {
@@ -117,24 +118,30 @@ export default async function AdminLayout({ children }: { children: ReactNode })
                 )}
               </div>
             </div>
-            <div className="flex items-center">
-              {user ? (
-                <div className="flex items-center space-x-4">
-                  <span className="text-sm text-gray-700">
-                    {user.name || user.email || 'User'}
-                  </span>
-                  <LogoutButton />
-                </div>
-              ) : (
-                <Suspense fallback={<span className="text-sm text-indigo-600">Login</span>}>
-                  <AuthLink
-                    href="/admin/login"
-                    className="text-sm text-indigo-600 hover:text-indigo-900"
-                  >
-                    Login
-                  </AuthLink>
-                </Suspense>
-              )}
+            <div className="flex items-center gap-4">
+              {/* Mobile Navigation */}
+              <MobileNav user={user} />
+              
+              {/* Desktop User Info / Login */}
+              <div className="hidden sm:flex items-center">
+                {user ? (
+                  <div className="flex items-center space-x-4">
+                    <span className="text-sm text-gray-700">
+                      {user.name || user.email || 'User'}
+                    </span>
+                    <LogoutButton />
+                  </div>
+                ) : (
+                  <Suspense fallback={<span className="text-sm text-indigo-600">Login</span>}>
+                    <AuthLink
+                      href="/admin/login"
+                      className="text-sm text-indigo-600 hover:text-indigo-900"
+                    >
+                      Login
+                    </AuthLink>
+                  </Suspense>
+                )}
+              </div>
             </div>
           </div>
         </div>
