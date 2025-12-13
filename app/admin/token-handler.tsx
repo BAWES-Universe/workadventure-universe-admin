@@ -100,12 +100,34 @@ export default function TokenHandler() {
           }
         }
       } else {
-        // No token found at all - redirect to login
-        // This handles the case where middleware let us through but we're not actually authenticated
-        devLog('[TokenHandler] No token found, redirecting to login');
-        const loginUrl = new URL('/admin/login', window.location.origin);
-        loginUrl.searchParams.set('redirect', pathname);
-        window.location.href = loginUrl.toString();
+        // No token in localStorage, but middleware let us through
+        // This means we're authenticated via cookie (which works in most cases)
+        // Don't redirect to login - trust that middleware knows what it's doing
+        // Only redirect if we're absolutely sure we're not authenticated
+        // Check if we have a cookie by trying to fetch /api/auth/me
+        devLog('[TokenHandler] No token in localStorage, but middleware allowed access - checking session');
+        
+        // Check session asynchronously (don't block)
+        fetch('/api/auth/me', {
+          credentials: 'include',
+          cache: 'no-store',
+        })
+          .then(response => {
+            if (!response.ok) {
+              // Not authenticated - redirect to login
+              devLog('[TokenHandler] Session check failed, redirecting to login');
+              const loginUrl = new URL('/admin/login', window.location.origin);
+              loginUrl.searchParams.set('redirect', pathname);
+              window.location.href = loginUrl.toString();
+            } else {
+              // Authenticated via cookie - that's fine, don't redirect
+              devLog('[TokenHandler] Session valid via cookie, no redirect needed');
+            }
+          })
+          .catch(error => {
+            devError('[TokenHandler] Error checking session:', error);
+            // On error, don't redirect - trust middleware
+          });
       }
     }
   }, [searchParams, pathname]);

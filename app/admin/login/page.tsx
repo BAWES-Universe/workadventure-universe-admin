@@ -46,12 +46,20 @@ function LoginPageContent() {
   useEffect(() => {
     if (typeof window === 'undefined') return;
     
+    // If we're already on an admin page (not login), don't do anything
+    // This prevents redirects when navigating between admin pages
+    const currentPath = pathname || window.location.pathname;
+    if (currentPath !== '/admin/login' && currentPath.startsWith('/admin')) {
+      devLog('[Login] Already on admin page, skipping early check');
+      setLoading(false);
+      return;
+    }
+    
     const urlToken = searchParams.get('_token') || searchParams.get('_session');
     if (urlToken) {
       // We have a token, which means we're authenticated
       // Check if we're already on the target page to prevent loops
       const redirectTo = searchParams.get('redirect') || '/admin';
-      const currentPath = pathname || window.location.pathname;
       
       // If we're already on the target admin page, don't redirect
       if (currentPath !== '/admin/login' && 
