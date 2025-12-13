@@ -1,7 +1,6 @@
 'use client';
 
 import { useUser } from '../hooks/use-user';
-import LogoutButton from '../logout-button';
 import AuthLink from '../auth-link';
 import { Suspense } from 'react';
 
@@ -21,12 +20,9 @@ export default function UserMenu({ user: initialUser }: UserMenuProps) {
 
   if (user) {
     return (
-      <div className="flex items-center space-x-4">
-        <span className="text-sm text-gray-700">
-          {user.name || user.email || 'User'}
-        </span>
-        <LogoutButton />
-      </div>
+      <span className="text-sm text-gray-700">
+        {user.name || user.email || 'User'}
+      </span>
     );
   }
 

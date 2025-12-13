@@ -5,7 +5,6 @@ import { Sheet, SheetContent, SheetTrigger, SheetClose, SheetHeader, SheetTitle 
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import AuthLink from '../auth-link';
-import LogoutButton from '../logout-button';
 import { Menu, LogOut } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { usePathname } from 'next/navigation';
@@ -87,21 +86,16 @@ export default function MobileNav({ user: initialUser }: MobileNavProps) {
           </nav>
         </ScrollArea>
 
-        <div className="border-t p-4 space-y-3 mt-auto">
+        <div className="border-t p-4 mt-auto">
           {user ? (
-            <>
-              <div className="px-3 py-2 rounded-lg bg-muted/50">
-                <p className="text-sm font-semibold text-foreground">
-                  {user.name || user.email || 'User'}
-                </p>
-                {user.email && user.name && (
-                  <p className="text-xs text-muted-foreground mt-0.5 truncate">{user.email}</p>
-                )}
-              </div>
-              <div className="px-3">
-                <LogoutButton />
-              </div>
-            </>
+            <div className="px-3 py-2 rounded-lg bg-muted/50">
+              <p className="text-sm font-semibold text-foreground">
+                {user.name || user.email || 'User'}
+              </p>
+              {user.email && user.name && (
+                <p className="text-xs text-muted-foreground mt-0.5 truncate">{user.email}</p>
+              )}
+            </div>
           ) : (
             <SheetClose asChild>
               <AuthLink
