@@ -1,10 +1,14 @@
 import { ReactNode, Suspense } from 'react';
 import { cookies } from 'next/headers';
-import LogoutButton from './logout-button';
 import { prisma } from '@/lib/db';
 import TokenHandler from './token-handler';
 import AuthLink from './auth-link';
 import WorkAdventureProvider from './workadventure-provider';
+import MobileNav from './components/mobile-nav';
+import DesktopNav from './components/desktop-nav';
+import UserMenu from './components/user-menu';
+import { ThemeProvider } from './components/theme-provider';
+import { ThemeToggle } from './components/theme-toggle';
 
 async function getSessionUser() {
   try {
@@ -68,86 +72,48 @@ export default async function AdminLayout({ children }: { children: ReactNode })
   const user = await getSessionUser();
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      <nav className="bg-white shadow-sm border-b">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex justify-between h-16">
-            <div className="flex">
-              <div className="flex-shrink-0 flex items-center">
-                <Suspense fallback={<span className="text-xl font-bold text-gray-900">WorkAdventure Admin</span>}>
-                  <AuthLink href="/admin" className="text-xl font-bold text-gray-900">
-                    WorkAdventure Admin
-                  </AuthLink>
-                </Suspense>
-              </div>
-              <div className="hidden sm:ml-6 sm:flex sm:space-x-8">
-                <Suspense fallback={<span className="border-transparent text-gray-500 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium">Dashboard</span>}>
-                  <AuthLink
-                    href="/admin"
-                    className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
-                  >
-                    Dashboard
-                  </AuthLink>
-                </Suspense>
-                <Suspense fallback={<span className="border-transparent text-gray-500 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium">Universes</span>}>
-                  <AuthLink
-                    href="/admin/universes"
-                    className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
-                  >
-                    Universes
-                  </AuthLink>
-                </Suspense>
-                <Suspense fallback={<span className="border-transparent text-gray-500 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium">Users</span>}>
-                  <AuthLink
-                    href="/admin/users"
-                    className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
-                  >
-                    Users
-                  </AuthLink>
-                </Suspense>
-                {user && (
-                  <Suspense fallback={<span className="border-transparent text-gray-500 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium">Visit Card</span>}>
-                    <AuthLink
-                      href="/admin/profile"
-                      className="border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 inline-flex items-center px-1 pt-1 border-b-2 text-sm font-medium"
-                    >
-                      Visit Card
+    <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
+      <div className="min-h-screen bg-background">
+        <nav className="bg-card shadow-sm sticky top-0 z-50 backdrop-blur-sm bg-card/95">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 relative">
+            <div className="flex justify-between items-center h-16">
+              <div className="flex items-center min-w-0 flex-1">
+                {/* Mobile Navigation - replaces Orbit title on mobile */}
+                <div className="sm:hidden">
+                  <MobileNav user={user} />
+                </div>
+                {/* Desktop: Orbit title */}
+                <div className="hidden sm:flex items-center flex-shrink-0">
+                  <Suspense fallback={<span className="text-xl font-bold">Orbit</span>}>
+                    <AuthLink href="/admin" className="text-xl font-bold truncate">
+                      Orbit
                     </AuthLink>
                   </Suspense>
-                )}
+                </div>
+                <DesktopNav user={user} />
+              </div>
+              <div className="flex items-center gap-2 sm:gap-4 flex-shrink-0">
+                {/* Theme Toggle */}
+                <ThemeToggle />
+                
+                {/* Desktop User Info / Login */}
+                <div className="hidden sm:flex items-center">
+                  <UserMenu user={user} />
+                </div>
               </div>
             </div>
-            <div className="flex items-center">
-              {user ? (
-                <div className="flex items-center space-x-4">
-                  <span className="text-sm text-gray-700">
-                    {user.name || user.email || 'User'}
-                  </span>
-                  <LogoutButton />
-                </div>
-              ) : (
-                <Suspense fallback={<span className="text-sm text-indigo-600">Login</span>}>
-                  <AuthLink
-                    href="/admin/login"
-                    className="text-sm text-indigo-600 hover:text-indigo-900"
-                  >
-                    Login
-                  </AuthLink>
-                </Suspense>
-              )}
-            </div>
           </div>
-        </div>
-      </nav>
-      <main className="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
-        <Suspense fallback={null}>
-          <TokenHandler />
-        </Suspense>
-        <WorkAdventureProvider>
-          {children}
-        </WorkAdventureProvider>
-      </main>
-    </div>
+        </nav>
+        <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+          <Suspense fallback={null}>
+            <TokenHandler />
+          </Suspense>
+          <WorkAdventureProvider>
+            {children}
+          </WorkAdventureProvider>
+        </main>
+      </div>
+    </ThemeProvider>
   );
 }
 

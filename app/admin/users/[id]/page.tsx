@@ -3,6 +3,19 @@
 import { useState, useEffect } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
+import { Button } from '@/components/ui/button';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table';
+import { Badge } from '@/components/ui/badge';
+import { ChevronRight, AlertCircle, Loader2, Globe, Users, Star, Ban } from 'lucide-react';
 
 interface WorldMembership {
   id: string;
@@ -123,9 +136,9 @@ export default function UserDetailPage() {
 
   if (loading) {
     return (
-      <div className="px-4 sm:px-6 lg:px-8">
-        <div className="text-center py-12">
-          <p className="text-gray-500">Loading user...</p>
+      <div className="space-y-8">
+        <div className="flex items-center justify-center py-12">
+          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
         </div>
       </div>
     );
@@ -133,383 +146,342 @@ export default function UserDetailPage() {
 
   if (!user) {
     return (
-      <div className="px-4 sm:px-6 lg:px-8">
-        <div className="bg-red-50 border border-red-200 rounded-md p-4">
-          <p className="text-red-800">User not found</p>
-        </div>
+      <div className="space-y-8">
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>Not Found</AlertTitle>
+          <AlertDescription>User not found</AlertDescription>
+        </Alert>
       </div>
     );
   }
 
   return (
-    <div className="px-4 sm:px-6 lg:px-8">
-      {/* Breadcrumbs */}
-      <nav className="flex mb-6" aria-label="Breadcrumb">
-        <ol className="flex items-center space-x-4">
-          <li>
-            <Link href="/admin" className="text-gray-400 hover:text-gray-500">
-              Dashboard
-            </Link>
-          </li>
-          <li>
-            <span className="text-gray-500 mx-2">/</span>
-          </li>
-          <li>
-            <Link href="/admin/users" className="text-gray-400 hover:text-gray-500">
-              Users
-            </Link>
-          </li>
-          <li>
-            <span className="text-gray-500 mx-2">/</span>
-          </li>
-          <li className="text-gray-900">{user.name || user.email || 'User'}</li>
-        </ol>
+    <div className="space-y-8">
+      <nav className="flex items-center space-x-2 text-sm text-muted-foreground">
+        <Link href="/admin" className="hover:text-foreground">
+          Dashboard
+        </Link>
+        <ChevronRight className="h-4 w-4" />
+        <Link href="/admin/users" className="hover:text-foreground">
+          Users
+        </Link>
+        <ChevronRight className="h-4 w-4" />
+        <span className="text-foreground">{user.name || user.email || 'User'}</span>
       </nav>
 
-      <div className="max-w-4xl">
-        <div className="sm:flex sm:items-center sm:justify-between mb-6">
-          <div>
-            <h1 className="text-3xl font-bold text-gray-900">{user.name || user.email || 'Unknown User'}</h1>
-            <p className="mt-2 text-sm text-gray-700">
-              UUID: <code className="bg-gray-100 px-1 rounded font-mono text-xs">{user.uuid}</code>
-            </p>
-          </div>
-        </div>
+      <div className="space-y-1">
+        <h1 className="text-4xl font-bold tracking-tight">{user.name || user.email || 'Unknown User'}</h1>
+        <p className="text-muted-foreground">
+          UUID: <code className="bg-muted px-1.5 py-0.5 rounded font-mono text-xs">{user.uuid}</code>
+        </p>
+      </div>
 
-        {error && (
-          <div className="mb-4 bg-red-50 border border-red-200 rounded-md p-4">
-            <p className="text-sm text-red-800">{error}</p>
-          </div>
-        )}
+      {error && (
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>Error</AlertTitle>
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
 
-        <div className="bg-white shadow rounded-lg p-6">
+      <Card>
+        <CardHeader>
+          <CardTitle>User Information</CardTitle>
+        </CardHeader>
+        <CardContent>
           <dl className="grid grid-cols-1 gap-6 sm:grid-cols-2">
             <div>
-              <dt className="text-sm font-medium text-gray-500">Name</dt>
-              <dd className="mt-1 text-sm text-gray-900">{user.name || 'N/A'}</dd>
+              <dt className="text-sm font-medium text-muted-foreground">Name</dt>
+              <dd className="mt-1 text-sm">{user.name || 'N/A'}</dd>
             </div>
             <div>
-              <dt className="text-sm font-medium text-gray-500">Email</dt>
-              <dd className="mt-1 text-sm text-gray-900">{user.email || 'N/A'}</dd>
+              <dt className="text-sm font-medium text-muted-foreground">Email</dt>
+              <dd className="mt-1 text-sm">{user.email || 'N/A'}</dd>
             </div>
             <div>
-              <dt className="text-sm font-medium text-gray-500">Status</dt>
+              <dt className="text-sm font-medium text-muted-foreground">Status</dt>
               <dd className="mt-1">
                 {user.isGuest ? (
-                  <span className="inline-flex items-center rounded-full bg-yellow-100 px-2.5 py-0.5 text-xs font-medium text-yellow-800">
-                    Guest
-                  </span>
+                  <Badge variant="outline">Guest</Badge>
                 ) : (
-                  <span className="inline-flex items-center rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-800">
-                    Authenticated
-                  </span>
+                  <Badge>Authenticated</Badge>
                 )}
               </dd>
             </div>
             <div>
-              <dt className="text-sm font-medium text-gray-500">Matrix Chat ID</dt>
-              <dd className="mt-1 text-sm text-gray-900 font-mono text-xs">{user.matrixChatId || 'N/A'}</dd>
+              <dt className="text-sm font-medium text-muted-foreground">Matrix Chat ID</dt>
+              <dd className="mt-1 text-sm font-mono text-xs">{user.matrixChatId || 'N/A'}</dd>
             </div>
             <div>
-              <dt className="text-sm font-medium text-gray-500">Last IP Address</dt>
-              <dd className="mt-1 text-sm text-gray-900 font-mono text-xs">{user.lastIpAddress || 'N/A'}</dd>
+              <dt className="text-sm font-medium text-muted-foreground">Last IP Address</dt>
+              <dd className="mt-1 text-sm font-mono text-xs">{user.lastIpAddress || 'N/A'}</dd>
             </div>
             <div>
-              <dt className="text-sm font-medium text-gray-500">Created</dt>
-              <dd className="mt-1 text-sm text-gray-900">{new Date(user.createdAt).toLocaleString()}</dd>
+              <dt className="text-sm font-medium text-muted-foreground">Created</dt>
+              <dd className="mt-1 text-sm">{new Date(user.createdAt).toLocaleString()}</dd>
             </div>
             <div>
-              <dt className="text-sm font-medium text-gray-500">Last Updated</dt>
-              <dd className="mt-1 text-sm text-gray-900">{new Date(user.updatedAt).toLocaleString()}</dd>
+              <dt className="text-sm font-medium text-muted-foreground">Last Updated</dt>
+              <dd className="mt-1 text-sm">{new Date(user.updatedAt).toLocaleString()}</dd>
             </div>
           </dl>
-        </div>
+        </CardContent>
+      </Card>
 
-        {/* Statistics */}
-        <div className="mt-6 grid grid-cols-1 gap-5 sm:grid-cols-4">
-          <div className="bg-white overflow-hidden shadow rounded-lg">
-            <div className="p-5">
-              <div className="flex items-center">
-                <div className="flex-shrink-0">
-                  <span className="text-2xl">🌌</span>
-                </div>
-                <div className="ml-5 w-0 flex-1">
-                  <dl>
-                    <dt className="text-sm font-medium text-gray-500 truncate">Owned Universes</dt>
-                    <dd className="text-lg font-medium text-gray-900">{user._count.ownedUniverses}</dd>
-                  </dl>
-                </div>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <Card>
+          <CardContent className="pt-6">
+            <div className="flex items-center">
+              <div className="flex-shrink-0">
+                <Globe className="h-8 w-8 text-muted-foreground" />
+              </div>
+              <div className="ml-4 flex-1">
+                <p className="text-sm font-medium text-muted-foreground">Owned Universes</p>
+                <p className="text-2xl font-semibold">{user._count.ownedUniverses}</p>
               </div>
             </div>
-          </div>
-          <div className="bg-white overflow-hidden shadow rounded-lg">
-            <div className="p-5">
-              <div className="flex items-center">
-                <div className="flex-shrink-0">
-                  <span className="text-2xl">🌍</span>
-                </div>
-                <div className="ml-5 w-0 flex-1">
-                  <dl>
-                    <dt className="text-sm font-medium text-gray-500 truncate">World Memberships</dt>
-                    <dd className="text-lg font-medium text-gray-900">{user._count.worldMemberships}</dd>
-                  </dl>
-                </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="pt-6">
+            <div className="flex items-center">
+              <div className="flex-shrink-0">
+                <Users className="h-8 w-8 text-muted-foreground" />
+              </div>
+              <div className="ml-4 flex-1">
+                <p className="text-sm font-medium text-muted-foreground">World Memberships</p>
+                <p className="text-2xl font-semibold">{user._count.worldMemberships}</p>
               </div>
             </div>
-          </div>
-          <div className="bg-white overflow-hidden shadow rounded-lg">
-            <div className="p-5">
-              <div className="flex items-center">
-                <div className="flex-shrink-0">
-                  <span className="text-2xl">⭐</span>
-                </div>
-                <div className="ml-5 w-0 flex-1">
-                  <dl>
-                    <dt className="text-sm font-medium text-gray-500 truncate">Favorites</dt>
-                    <dd className="text-lg font-medium text-gray-900">{user._count.favorites}</dd>
-                  </dl>
-                </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="pt-6">
+            <div className="flex items-center">
+              <div className="flex-shrink-0">
+                <Star className="h-8 w-8 text-muted-foreground" />
+              </div>
+              <div className="ml-4 flex-1">
+                <p className="text-sm font-medium text-muted-foreground">Favorites</p>
+                <p className="text-2xl font-semibold">{user._count.favorites}</p>
               </div>
             </div>
-          </div>
-          <div className="bg-white overflow-hidden shadow rounded-lg">
-            <div className="p-5">
-              <div className="flex items-center">
-                <div className="flex-shrink-0">
-                  <span className="text-2xl">🚫</span>
-                </div>
-                <div className="ml-5 w-0 flex-1">
-                  <dl>
-                    <dt className="text-sm font-medium text-gray-500 truncate">Bans</dt>
-                    <dd className="text-lg font-medium text-gray-900">{user._count.bans}</dd>
-                  </dl>
-                </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="pt-6">
+            <div className="flex items-center">
+              <div className="flex-shrink-0">
+                <Ban className="h-8 w-8 text-muted-foreground" />
+              </div>
+              <div className="ml-4 flex-1">
+                <p className="text-sm font-medium text-muted-foreground">Bans</p>
+                <p className="text-2xl font-semibold">{user._count.bans}</p>
               </div>
             </div>
-          </div>
-        </div>
+          </CardContent>
+        </Card>
+      </div>
 
-        {/* Owned Universes */}
-        {user.ownedUniverses.length > 0 && (
-          <div className="mt-6 bg-white shadow rounded-lg overflow-hidden">
-            <div className="px-6 py-4 border-b border-gray-200">
-              <h2 className="text-lg font-medium text-gray-900">Owned Universes</h2>
-            </div>
-            <ul className="divide-y divide-gray-200">
+      {user.ownedUniverses.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Owned Universes</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-3">
               {user.ownedUniverses.map((universe) => (
-                <li key={universe.id}>
-                  <Link
-                    href={`/admin/universes/${universe.id}`}
-                    className="block hover:bg-gray-50 px-6 py-4"
-                  >
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <p className="text-sm font-medium text-gray-900">{universe.name}</p>
-                        <p className="text-sm text-gray-500">
-                          Slug: <code className="bg-gray-100 px-1 rounded">{universe.slug}</code>
-                        </p>
-                      </div>
-                      <div className="flex items-center space-x-2">
-                        <span className={`inline-flex rounded-full px-2 text-xs font-semibold leading-5 ${
-                          universe.isPublic
-                            ? 'bg-green-100 text-green-800'
-                            : 'bg-gray-100 text-gray-800'
-                        }`}>
-                          {universe.isPublic ? 'Public' : 'Private'}
-                        </span>
-                        <span className="text-gray-400">→</span>
-                      </div>
+                <Link
+                  key={universe.id}
+                  href={`/admin/universes/${universe.id}`}
+                  className="block p-3 border rounded-lg hover:bg-accent transition-colors"
+                >
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-sm font-medium">{universe.name}</p>
+                      <p className="text-sm text-muted-foreground">
+                        Slug: <code className="bg-muted px-1 rounded">{universe.slug}</code>
+                      </p>
                     </div>
-                  </Link>
-                </li>
+                    <div className="flex items-center gap-2">
+                      <Badge variant={universe.isPublic ? 'default' : 'secondary'}>
+                        {universe.isPublic ? 'Public' : 'Private'}
+                      </Badge>
+                      <ChevronRight className="h-4 w-4 text-muted-foreground" />
+                    </div>
+                  </div>
+                </Link>
               ))}
-            </ul>
-          </div>
-        )}
-
-        {/* World Memberships */}
-        {user.worldMemberships.length > 0 && (
-          <div className="mt-6 bg-white shadow rounded-lg overflow-hidden">
-            <div className="px-6 py-4 border-b border-gray-200">
-              <h2 className="text-lg font-medium text-gray-900">World Memberships</h2>
             </div>
-            <ul className="divide-y divide-gray-200">
-              {user.worldMemberships.map((membership) => (
-                <li key={membership.id}>
-                  <Link
-                    href={`/admin/worlds/${membership.world.id}`}
-                    className="block hover:bg-gray-50 px-6 py-4"
-                  >
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <p className="text-sm font-medium text-gray-900">{membership.world.name}</p>
-                        <p className="text-sm text-gray-500">
-                          {membership.world.universe.name} / {membership.world.name}
-                        </p>
-                        <p className="text-xs text-gray-400 mt-1">
-                          Joined: {new Date(membership.joinedAt).toLocaleDateString()}
-                        </p>
-                      </div>
-                      <div className="flex items-center space-x-2">
-                        {membership.tags.length > 0 ? (
-                          <div className="flex flex-wrap gap-1">
-                            {membership.tags.map((tag) => (
-                              <span
-                                key={tag}
-                                className={`inline-flex rounded-full px-2 text-xs font-semibold leading-5 ${
-                                  tag === 'admin'
-                                    ? 'bg-red-100 text-red-800'
-                                    : tag === 'editor'
-                                    ? 'bg-blue-100 text-blue-800'
-                                    : 'bg-gray-100 text-gray-800'
-                                }`}
-                              >
-                                {tag}
-                              </span>
-                            ))}
-                          </div>
-                        ) : (
-                          <span className="text-xs text-gray-400">No tags</span>
-                        )}
-                        <span className="text-gray-400">→</span>
-                      </div>
-                    </div>
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
+          </CardContent>
+        </Card>
+      )}
 
-        {/* Empty States */}
-        {user.ownedUniverses.length === 0 && user.worldMemberships.length === 0 && (
-          <div className="mt-6 bg-white shadow rounded-lg p-6">
-            <p className="text-sm text-gray-500 text-center">
+      {user.worldMemberships.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>World Memberships</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-3">
+              {user.worldMemberships.map((membership) => (
+                <Link
+                  key={membership.id}
+                  href={`/admin/worlds/${membership.world.id}`}
+                  className="block p-3 border rounded-lg hover:bg-accent transition-colors"
+                >
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-sm font-medium">{membership.world.name}</p>
+                      <p className="text-sm text-muted-foreground">
+                        {membership.world.universe.name} / {membership.world.name}
+                      </p>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        Joined: {new Date(membership.joinedAt).toLocaleDateString()}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {membership.tags.length > 0 ? (
+                        <div className="flex flex-wrap gap-1">
+                          {membership.tags.map((tag) => (
+                            <Badge
+                              key={tag}
+                              variant={tag === 'admin' ? 'destructive' : tag === 'editor' ? 'default' : 'secondary'}
+                            >
+                              {tag}
+                            </Badge>
+                          ))}
+                        </div>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">No tags</span>
+                      )}
+                      <ChevronRight className="h-4 w-4 text-muted-foreground" />
+                    </div>
+                  </div>
+                </Link>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {user.ownedUniverses.length === 0 && user.worldMemberships.length === 0 && (
+        <Card>
+          <CardContent className="pt-6">
+            <p className="text-sm text-muted-foreground text-center">
               This user doesn't own any universes or have any world memberships.
             </p>
-          </div>
-        )}
+          </CardContent>
+        </Card>
+      )}
 
-        {/* Access History */}
-        <div className="mt-6 bg-white shadow rounded-lg overflow-hidden">
-          <div className="px-6 py-4 border-b border-gray-200">
-            <h2 className="text-lg font-medium text-gray-900">Access History</h2>
-            {accessHistory && (
-              <p className="mt-1 text-sm text-gray-500">
-                {accessHistory.total} total accesses
-                {accessHistory.firstAccess && (
-                  <> • First: {new Date(accessHistory.firstAccess).toLocaleDateString()}</>
-                )}
-                {accessHistory.lastAccess && (
-                  <> • Last: {new Date(accessHistory.lastAccess).toLocaleDateString()}</>
-                )}
-              </p>
-            )}
-          </div>
-
+      <Card>
+        <CardHeader>
+          <CardTitle>Access History</CardTitle>
+          {accessHistory && (
+            <CardDescription>
+              {accessHistory.total} total accesses
+              {accessHistory.firstAccess && (
+                <> • First: {new Date(accessHistory.firstAccess).toLocaleDateString()}</>
+              )}
+              {accessHistory.lastAccess && (
+                <> • Last: {new Date(accessHistory.lastAccess).toLocaleDateString()}</>
+              )}
+            </CardDescription>
+          )}
+        </CardHeader>
+        <CardContent>
           {accessHistoryLoading ? (
-            <div className="p-6 text-center text-gray-500">Loading access history...</div>
+            <div className="flex items-center justify-center py-12">
+              <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+            </div>
           ) : accessHistory && accessHistory.accesses.length > 0 ? (
-            <>
-              <div className="overflow-x-auto">
-                <table className="min-w-full divide-y divide-gray-200">
-                  <thead className="bg-gray-50">
-                    <tr>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Date
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Universe / World / Room
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        IP Address
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Status
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody className="bg-white divide-y divide-gray-200">
+            <div className="space-y-4">
+              <div className="rounded-md border">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Date</TableHead>
+                      <TableHead>Universe / World / Room</TableHead>
+                      <TableHead>IP Address</TableHead>
+                      <TableHead>Status</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
                     {accessHistory.accesses.map((access: any) => (
-                      <tr key={access.id}>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                      <TableRow key={access.id}>
+                        <TableCell className="text-sm">
                           {new Date(access.accessedAt).toLocaleString()}
-                        </td>
-                        <td className="px-6 py-4 text-sm text-gray-900">
-                          <div>
+                        </TableCell>
+                        <TableCell className="text-sm">
+                          <div className="flex flex-wrap items-center gap-1">
                             <Link
                               href={`/admin/universes/${access.universe.id}`}
-                              className="text-indigo-600 hover:text-indigo-900"
+                              className="text-primary hover:underline"
                             >
                               {access.universe.name}
                             </Link>
-                            <span className="text-gray-400 mx-1">/</span>
+                            <span className="text-muted-foreground">/</span>
                             <Link
                               href={`/admin/worlds/${access.world.id}`}
-                              className="text-indigo-600 hover:text-indigo-900"
+                              className="text-primary hover:underline"
                             >
                               {access.world.name}
                             </Link>
-                            <span className="text-gray-400 mx-1">/</span>
+                            <span className="text-muted-foreground">/</span>
                             <Link
                               href={`/admin/rooms/${access.room.id}`}
-                              className="text-indigo-600 hover:text-indigo-900"
+                              className="text-primary hover:underline"
                             >
                               {access.room.name}
                             </Link>
                           </div>
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm font-mono text-gray-500">
+                        </TableCell>
+                        <TableCell className="text-sm font-mono text-muted-foreground">
                           {access.ipAddress}
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm">
+                        </TableCell>
+                        <TableCell>
                           {access.hasMembership && access.membershipTags.length > 0 ? (
-                            <span className="inline-flex items-center rounded-full bg-blue-100 px-2.5 py-0.5 text-xs font-medium text-blue-800">
-                              {access.membershipTags.join(', ')}
-                            </span>
+                            <Badge variant="outline">{access.membershipTags.join(', ')}</Badge>
                           ) : access.isAuthenticated ? (
-                            <span className="inline-flex items-center rounded-full bg-green-100 px-2.5 py-0.5 text-xs font-medium text-green-800">
-                              Authenticated
-                            </span>
+                            <Badge>Authenticated</Badge>
                           ) : (
-                            <span className="inline-flex items-center rounded-full bg-yellow-100 px-2.5 py-0.5 text-xs font-medium text-yellow-800">
-                              Guest
-                            </span>
+                            <Badge variant="secondary">Guest</Badge>
                           )}
-                        </td>
-                      </tr>
+                        </TableCell>
+                      </TableRow>
                     ))}
-                  </tbody>
-                </table>
+                  </TableBody>
+                </Table>
               </div>
               {accessHistory.totalPages > 1 && (
-                <div className="px-6 py-4 border-t border-gray-200 flex items-center justify-between">
-                  <button
+                <div className="flex items-center justify-between">
+                  <Button
+                    variant="outline"
                     onClick={() => setAccessHistoryPage(p => Math.max(1, p - 1))}
                     disabled={accessHistoryPage === 1}
-                    className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     Previous
-                  </button>
-                  <span className="text-sm text-gray-700">
+                  </Button>
+                  <span className="text-sm text-muted-foreground">
                     Page {accessHistoryPage} of {accessHistory.totalPages}
                   </span>
-                  <button
+                  <Button
+                    variant="outline"
                     onClick={() => setAccessHistoryPage(p => Math.min(accessHistory.totalPages, p + 1))}
                     disabled={accessHistoryPage >= accessHistory.totalPages}
-                    className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     Next
-                  </button>
+                  </Button>
                 </div>
               )}
-            </>
+            </div>
           ) : (
-            <div className="p-6 text-center text-gray-500">No access history found.</div>
+            <p className="text-sm text-muted-foreground text-center py-12">No access history found.</p>
           )}
-        </div>
-      </div>
+        </CardContent>
+      </Card>
     </div>
   );
 }
-

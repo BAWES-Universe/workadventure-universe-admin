@@ -1,4 +1,8 @@
 import Link from 'next/link';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Globe, Users, FolderOpen, Home, Plus, TrendingUp } from 'lucide-react';
+import CurrentLocation from './components/current-location';
 
 async function getStats() {
   const token = process.env.ADMIN_API_TOKEN;
@@ -47,118 +51,105 @@ export default async function AdminDashboard() {
   const stats = await getStats();
   
   return (
-    <div>
-      <div className="px-4 sm:px-6 lg:px-8">
-        <h1 className="text-3xl font-bold text-gray-900">Dashboard</h1>
-        <p className="mt-2 text-sm text-gray-700">
-          Manage your WorkAdventure universes, worlds, rooms, and users.
+    <div className="space-y-8">
+      <div className="space-y-2">
+        <h1 className="text-4xl font-bold tracking-tight">Dashboard</h1>
+        <p className="text-muted-foreground text-lg">
+          Overview of your WorkAdventure universe, worlds, rooms, and users.
         </p>
       </div>
       
       {stats.universes === 0 ? (
-        <div className="mt-8 px-4 sm:px-6 lg:px-8">
-          <div className="bg-white shadow rounded-lg p-8 text-center">
-            <svg className="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
-            </svg>
-            <h3 className="mt-4 text-lg font-medium text-gray-900">Get Started</h3>
-            <p className="mt-2 text-sm text-gray-500">
+        <Card className="border-dashed">
+          <CardHeader className="text-center pb-4">
+            <div className="mx-auto mb-4 flex h-20 w-20 items-center justify-center rounded-full bg-muted">
+              <Globe className="h-10 w-10 text-muted-foreground" />
+            </div>
+            <CardTitle className="text-2xl">Get Started</CardTitle>
+            <CardDescription className="text-base mt-2">
               Create your first universe to begin organizing your WorkAdventure worlds and rooms.
-            </p>
-            <div className="mt-6">
-              <Link
-                href="/admin/universes/new"
-                className="inline-flex items-center justify-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700"
-              >
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex justify-center pt-2">
+            <Button asChild size="lg" className="gap-2">
+              <Link href="/admin/universes/new">
+                <Plus className="h-5 w-5" />
                 Create Your First Universe
               </Link>
-            </div>
-          </div>
-        </div>
+            </Button>
+          </CardContent>
+        </Card>
       ) : (
-        <div className="mt-8 px-4 sm:px-6 lg:px-8">
-          <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
-            <Link
-              href="/admin/universes"
-              className="bg-white overflow-hidden shadow rounded-lg hover:shadow-md transition-shadow"
-            >
-              <div className="p-5">
-                <div className="flex items-center">
-                  <div className="flex-shrink-0">
-                    <svg className="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
-                    </svg>
+        <>
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+            <Link href="/admin/universes" className="group">
+              <Card className="transition-all hover:shadow-lg hover:border-primary/50 h-full">
+                <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                  <CardTitle className="text-sm font-medium">Universes</CardTitle>
+                  <div className="h-9 w-9 rounded-full bg-primary/10 flex items-center justify-center group-hover:bg-primary/20 transition-colors">
+                    <Globe className="h-5 w-5 text-primary" />
                   </div>
-                  <div className="ml-5 w-0 flex-1">
-                    <dl>
-                      <dt className="text-sm font-medium text-gray-500 truncate">Universes</dt>
-                      <dd className="text-lg font-medium text-gray-900">{stats.universes}</dd>
-                    </dl>
-                  </div>
-                </div>
-              </div>
+                </CardHeader>
+                <CardContent>
+                  <div className="text-3xl font-bold">{stats.universes}</div>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Total universes
+                  </p>
+                </CardContent>
+              </Card>
             </Link>
             
-            <div className="bg-white overflow-hidden shadow rounded-lg">
-              <div className="p-5">
-                <div className="flex items-center">
-                  <div className="flex-shrink-0">
-                    <svg className="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" />
-                    </svg>
-                  </div>
-                  <div className="ml-5 w-0 flex-1">
-                    <dl>
-                      <dt className="text-sm font-medium text-gray-500 truncate">Worlds</dt>
-                      <dd className="text-lg font-medium text-gray-900">{stats.worlds}</dd>
-                    </dl>
-                  </div>
+            <Card className="h-full">
+              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                <CardTitle className="text-sm font-medium">Worlds</CardTitle>
+                <div className="h-9 w-9 rounded-full bg-blue-500/10 flex items-center justify-center">
+                  <Home className="h-5 w-5 text-blue-500" />
                 </div>
-              </div>
-            </div>
+              </CardHeader>
+              <CardContent>
+                <div className="text-3xl font-bold">{stats.worlds}</div>
+                <p className="text-xs text-muted-foreground mt-1">
+                  Total worlds
+                </p>
+              </CardContent>
+            </Card>
             
-            <div className="bg-white overflow-hidden shadow rounded-lg">
-              <div className="p-5">
-                <div className="flex items-center">
-                  <div className="flex-shrink-0">
-                    <svg className="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-                    </svg>
-                  </div>
-                  <div className="ml-5 w-0 flex-1">
-                    <dl>
-                      <dt className="text-sm font-medium text-gray-500 truncate">Rooms</dt>
-                      <dd className="text-lg font-medium text-gray-900">{stats.rooms}</dd>
-                    </dl>
-                  </div>
+            <Card className="h-full">
+              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                <CardTitle className="text-sm font-medium">Rooms</CardTitle>
+                <div className="h-9 w-9 rounded-full bg-green-500/10 flex items-center justify-center">
+                  <FolderOpen className="h-5 w-5 text-green-500" />
                 </div>
-              </div>
-            </div>
+              </CardHeader>
+              <CardContent>
+                <div className="text-3xl font-bold">{stats.rooms}</div>
+                <p className="text-xs text-muted-foreground mt-1">
+                  Total rooms
+                </p>
+              </CardContent>
+            </Card>
             
-            <Link
-              href="/admin/users"
-              className="bg-white overflow-hidden shadow rounded-lg hover:shadow-md transition-shadow"
-            >
-              <div className="p-5">
-                <div className="flex items-center">
-                  <div className="flex-shrink-0">
-                    <svg className="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
-                    </svg>
+            <Link href="/admin/users" className="group">
+              <Card className="transition-all hover:shadow-lg hover:border-primary/50 h-full">
+                <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                  <CardTitle className="text-sm font-medium">Users</CardTitle>
+                  <div className="h-9 w-9 rounded-full bg-purple-500/10 flex items-center justify-center group-hover:bg-purple-500/20 transition-colors">
+                    <Users className="h-5 w-5 text-purple-500" />
                   </div>
-                  <div className="ml-5 w-0 flex-1">
-                    <dl>
-                      <dt className="text-sm font-medium text-gray-500 truncate">Users</dt>
-                      <dd className="text-lg font-medium text-gray-900">{stats.users}</dd>
-                    </dl>
-                  </div>
-                </div>
-              </div>
+                </CardHeader>
+                <CardContent>
+                  <div className="text-3xl font-bold">{stats.users}</div>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Total users
+                  </p>
+                </CardContent>
+              </Card>
             </Link>
           </div>
-        </div>
+
+          <CurrentLocation />
+        </>
       )}
     </div>
   );
 }
-

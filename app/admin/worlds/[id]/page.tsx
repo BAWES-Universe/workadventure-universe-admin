@@ -3,6 +3,31 @@
 import { useState, useEffect } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Textarea } from '@/components/ui/textarea';
+import { Checkbox } from '@/components/ui/checkbox';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table';
+import { Badge } from '@/components/ui/badge';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { ChevronRight, AlertCircle, Loader2, Plus, Edit, Trash2 } from 'lucide-react';
 
 interface World {
   id: string;
@@ -39,6 +64,8 @@ export default function WorldDetailPage() {
   const [isEditing, setIsEditing] = useState(false);
   const [analytics, setAnalytics] = useState<any>(null);
   const [analyticsLoading, setAnalyticsLoading] = useState(true);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   
   const [formData, setFormData] = useState({
     slug: '',
@@ -148,11 +175,8 @@ export default function WorldDetailPage() {
     }
   }
 
-  async function handleDelete() {
-    if (!confirm('Are you sure you want to delete this world? This will also delete all rooms in it.')) {
-      return;
-    }
-
+  async function handleDeleteConfirm() {
+    setDeleting(true);
     try {
       const { authenticatedFetch } = await import('@/lib/client-auth');
       const response = await authenticatedFetch(`/api/admin/worlds/${id}`, {
@@ -166,14 +190,16 @@ export default function WorldDetailPage() {
       router.push(`/admin/universes/${world?.universe.id}`);
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to delete world');
+      setDeleting(false);
+      setDeleteDialogOpen(false);
     }
   }
 
   if (loading) {
     return (
-      <div className="px-4 sm:px-6 lg:px-8">
-        <div className="text-center py-12">
-          <p className="text-gray-500">Loading world...</p>
+      <div className="space-y-8">
+        <div className="flex items-center justify-center py-12">
+          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
         </div>
       </div>
     );
@@ -181,355 +207,358 @@ export default function WorldDetailPage() {
 
   if (!world) {
     return (
-      <div className="px-4 sm:px-6 lg:px-8">
-        <div className="bg-red-50 border border-red-200 rounded-md p-4">
-          <p className="text-red-800">World not found</p>
-        </div>
+      <div className="space-y-8">
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>Not Found</AlertTitle>
+          <AlertDescription>World not found</AlertDescription>
+        </Alert>
       </div>
     );
   }
 
   return (
-    <div className="px-4 sm:px-6 lg:px-8">
-      {/* Breadcrumbs */}
-      <nav className="flex mb-6" aria-label="Breadcrumb">
-        <ol className="flex items-center space-x-4">
-          <li>
-            <Link href="/admin" className="text-gray-400 hover:text-gray-500">
-              Dashboard
-            </Link>
-          </li>
-          <li>
-            <span className="text-gray-500 mx-2">/</span>
-          </li>
-          <li>
-            <Link href="/admin/universes" className="text-gray-400 hover:text-gray-500">
-              Universes
-            </Link>
-          </li>
-          <li>
-            <span className="text-gray-500 mx-2">/</span>
-          </li>
-          <li>
-            <Link href={`/admin/universes/${world.universe.id}`} className="text-gray-400 hover:text-gray-500">
-              {world.universe.name}
-            </Link>
-          </li>
-          <li>
-            <span className="text-gray-500 mx-2">/</span>
-          </li>
-          <li className="text-gray-900">Worlds</li>
-          <li>
-            <span className="text-gray-500 mx-2">/</span>
-          </li>
-          <li className="text-gray-900">{world.name}</li>
-        </ol>
+    <div className="space-y-8">
+      <nav className="flex items-center space-x-2 text-sm text-muted-foreground">
+        <Link href="/admin" className="hover:text-foreground">
+          Dashboard
+        </Link>
+        <ChevronRight className="h-4 w-4" />
+        <Link href="/admin/universes" className="hover:text-foreground">
+          Universes
+        </Link>
+        <ChevronRight className="h-4 w-4" />
+        <Link href={`/admin/universes/${world.universe.id}`} className="hover:text-foreground">
+          {world.universe.name}
+        </Link>
+        <ChevronRight className="h-4 w-4" />
+        <span className="text-foreground">{world.name}</span>
       </nav>
 
-      <div className="max-w-4xl">
-        <div className="sm:flex sm:items-center sm:justify-between mb-6">
-          <div>
-            <h1 className="text-3xl font-bold text-gray-900">{world.name}</h1>
-            <p className="mt-2 text-sm text-gray-700">
-              In <Link href={`/admin/universes/${world.universe.id}`} className="text-indigo-600 hover:text-indigo-900">{world.universe.name}</Link> • Slug: <code className="bg-gray-100 px-1 rounded">{world.slug}</code>
-            </p>
-          </div>
-          <div className="mt-4 sm:mt-0 flex space-x-3">
-            {!isEditing && (
-              <>
-                <Link
-                  href={`/admin/rooms/new?worldId=${id}`}
-                  className="inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700"
-                >
-                  Create Room
-                </Link>
-                <button
-                  onClick={() => setIsEditing(true)}
-                  className="inline-flex items-center px-4 py-2 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50"
-                >
-                  Edit
-                </button>
-                <button
-                  onClick={handleDelete}
-                  className="inline-flex items-center px-4 py-2 border border-red-300 rounded-md shadow-sm text-sm font-medium text-red-700 bg-white hover:bg-red-50"
-                >
-                  Delete
-                </button>
-              </>
-            )}
-          </div>
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div className="space-y-1">
+          <h1 className="text-4xl font-bold tracking-tight">{world.name}</h1>
+          <p className="text-muted-foreground">
+            In <Link href={`/admin/universes/${world.universe.id}`} className="text-primary hover:underline">{world.universe.name}</Link> • Slug: <code className="bg-muted px-1.5 py-0.5 rounded text-sm">{world.slug}</code>
+          </p>
         </div>
-
-        {error && (
-          <div className="mb-4 bg-red-50 border border-red-200 rounded-md p-4">
-            <p className="text-sm text-red-800">{error}</p>
+        {!isEditing && (
+          <div className="flex flex-wrap gap-2">
+            <Button asChild>
+              <Link href={`/admin/rooms/new?worldId=${id}`}>
+                <Plus className="mr-2 h-4 w-4" />
+                Create Room
+              </Link>
+            </Button>
+            <Button variant="outline" onClick={() => setIsEditing(true)}>
+              <Edit className="mr-2 h-4 w-4" />
+              Edit
+            </Button>
+            <Button variant="destructive" onClick={() => setDeleteDialogOpen(true)}>
+              <Trash2 className="mr-2 h-4 w-4" />
+              Delete
+            </Button>
           </div>
         )}
+      </div>
 
-        {isEditing ? (
-          <div className="bg-white shadow rounded-lg p-6 space-y-6">
-            <div>
-              <label htmlFor="slug" className="block text-sm font-medium text-gray-700">
-                Slug <span className="text-red-500">*</span>
-              </label>
-              <input
-                type="text"
+      {error && (
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>Error</AlertTitle>
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
+
+      {isEditing ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Edit World</CardTitle>
+            <CardDescription>Update the world details below.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-6">
+            <div className="space-y-2">
+              <Label htmlFor="slug">
+                Slug <span className="text-destructive">*</span>
+              </Label>
+              <Input
                 id="slug"
                 required
                 value={formData.slug}
                 onChange={(e) => setFormData({ ...formData, slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') })}
-                className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
               />
             </div>
 
-            <div>
-              <label htmlFor="name" className="block text-sm font-medium text-gray-700">
-                Name <span className="text-red-500">*</span>
-              </label>
-              <input
-                type="text"
+            <div className="space-y-2">
+              <Label htmlFor="name">
+                Name <span className="text-destructive">*</span>
+              </Label>
+              <Input
                 id="name"
                 required
                 value={formData.name}
                 onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
               />
             </div>
 
-            <div>
-              <label htmlFor="description" className="block text-sm font-medium text-gray-700">
-                Description
-              </label>
-              <textarea
+            <div className="space-y-2">
+              <Label htmlFor="description">Description</Label>
+              <Textarea
                 id="description"
                 rows={3}
                 value={formData.description}
                 onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-                className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
               />
             </div>
 
-            <div>
-              <label htmlFor="thumbnailUrl" className="block text-sm font-medium text-gray-700">
-                Thumbnail URL
-              </label>
-              <input
-                type="url"
+            <div className="space-y-2">
+              <Label htmlFor="thumbnailUrl">Thumbnail URL</Label>
+              <Input
                 id="thumbnailUrl"
+                type="url"
                 value={formData.thumbnailUrl}
                 onChange={(e) => setFormData({ ...formData, thumbnailUrl: e.target.value })}
-                className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm"
               />
             </div>
 
-            <div className="flex items-center space-x-6">
-              <div className="flex items-center">
-                <input
-                  type="checkbox"
+            <div className="flex flex-col sm:flex-row gap-6">
+              <div className="flex items-center space-x-2">
+                <Checkbox
                   id="isPublic"
                   checked={formData.isPublic}
-                  onChange={(e) => setFormData({ ...formData, isPublic: e.target.checked })}
-                  className="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-gray-300 rounded"
+                  onCheckedChange={(checked) => setFormData({ ...formData, isPublic: checked === true })}
                 />
-                <label htmlFor="isPublic" className="ml-2 block text-sm text-gray-900">
+                <Label htmlFor="isPublic" className="font-normal cursor-pointer">
                   Public
-                </label>
+                </Label>
               </div>
-              <div className="flex items-center">
-                <input
-                  type="checkbox"
+              <div className="flex items-center space-x-2">
+                <Checkbox
                   id="featured"
                   checked={formData.featured}
-                  onChange={(e) => setFormData({ ...formData, featured: e.target.checked })}
-                  className="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-gray-300 rounded"
+                  onCheckedChange={(checked) => setFormData({ ...formData, featured: checked === true })}
                 />
-                <label htmlFor="featured" className="ml-2 block text-sm text-gray-900">
+                <Label htmlFor="featured" className="font-normal cursor-pointer">
                   Featured
-                </label>
+                </Label>
               </div>
             </div>
 
-            <div className="flex justify-end space-x-3 pt-4">
-              <button
+            <div className="flex flex-col-reverse sm:flex-row justify-end gap-3 pt-4">
+              <Button
+                variant="outline"
                 onClick={() => {
                   setIsEditing(false);
                   fetchWorld();
                 }}
-                className="px-4 py-2 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50"
               >
                 Cancel
-              </button>
-              <button
-                onClick={handleSave}
-                disabled={saving}
-                className="px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50"
-              >
-                {saving ? 'Saving...' : 'Save Changes'}
-              </button>
+              </Button>
+              <Button onClick={handleSave} disabled={saving}>
+                {saving ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    Saving...
+                  </>
+                ) : (
+                  'Save Changes'
+                )}
+              </Button>
             </div>
-          </div>
-        ) : (
-          <div className="bg-white shadow rounded-lg overflow-hidden">
-            <div className="p-6">
+          </CardContent>
+        </Card>
+      ) : (
+        <>
+          <Card>
+            <CardHeader>
+              <CardTitle>Details</CardTitle>
+            </CardHeader>
+            <CardContent>
               <dl className="grid grid-cols-1 gap-6 sm:grid-cols-2">
                 <div>
-                  <dt className="text-sm font-medium text-gray-500">Description</dt>
-                  <dd className="mt-1 text-sm text-gray-900">{world.description || 'No description'}</dd>
+                  <dt className="text-sm font-medium text-muted-foreground">Description</dt>
+                  <dd className="mt-1 text-sm">{world.description || 'No description'}</dd>
                 </div>
                 <div>
-                  <dt className="text-sm font-medium text-gray-500">Status</dt>
+                  <dt className="text-sm font-medium text-muted-foreground">Status</dt>
                   <dd className="mt-1">
-                    <span className={`inline-flex rounded-full px-2 text-xs font-semibold leading-5 ${
-                      world.isPublic
-                        ? 'bg-green-100 text-green-800'
-                        : 'bg-gray-100 text-gray-800'
-                    }`}>
-                      {world.isPublic ? 'Public' : 'Private'}
-                    </span>
-                    {world.featured && (
-                      <span className="ml-2 inline-flex rounded-full px-2 text-xs font-semibold leading-5 bg-yellow-100 text-yellow-800">
-                        Featured
-                      </span>
-                    )}
+                    <div className="flex items-center gap-2">
+                      <Badge variant={world.isPublic ? 'default' : 'secondary'}>
+                        {world.isPublic ? 'Public' : 'Private'}
+                      </Badge>
+                      {world.featured && <Badge variant="outline">Featured</Badge>}
+                    </div>
                   </dd>
                 </div>
                 {world.thumbnailUrl && (
                   <div className="sm:col-span-2">
-                    <dt className="text-sm font-medium text-gray-500">Thumbnail</dt>
+                    <dt className="text-sm font-medium text-muted-foreground">Thumbnail</dt>
                     <dd className="mt-1">
                       <img src={world.thumbnailUrl} alt={world.name} className="h-20 w-20 object-cover rounded" />
                     </dd>
                   </div>
                 )}
               </dl>
-            </div>
+            </CardContent>
+          </Card>
 
-            {/* Rooms Section */}
-            <div className="border-t border-gray-200 px-6 py-4">
-              <div className="flex items-center justify-between mb-4">
-                <h2 className="text-lg font-medium text-gray-900">Rooms ({world.rooms.length})</h2>
-                <Link
-                  href={`/admin/rooms/new?worldId=${id}`}
-                  className="text-sm text-indigo-600 hover:text-indigo-900"
-                >
-                  + Add Room
-                </Link>
+          <Card>
+            <CardHeader>
+              <div className="flex items-center justify-between">
+                <CardTitle>Rooms ({world.rooms.length})</CardTitle>
+                <Button variant="outline" size="sm" asChild>
+                  <Link href={`/admin/rooms/new?worldId=${id}`}>
+                    <Plus className="mr-2 h-4 w-4" />
+                    Add Room
+                  </Link>
+                </Button>
               </div>
+            </CardHeader>
+            <CardContent>
               {world.rooms.length === 0 ? (
-                <p className="text-sm text-gray-500">No rooms yet. Create one to get started.</p>
+                <p className="text-sm text-muted-foreground">No rooms yet. Create one to get started.</p>
               ) : (
                 <div className="space-y-3">
                   {world.rooms.map((room) => (
                     <Link
                       key={room.id}
                       href={`/admin/rooms/${room.id}`}
-                      className="block p-3 border border-gray-200 rounded-lg hover:bg-gray-50"
+                      className="block p-3 border rounded-lg hover:bg-accent transition-colors"
                     >
                       <div className="flex items-center justify-between">
                         <div>
-                          <h3 className="text-sm font-medium text-gray-900">{room.name}</h3>
-                          <p className="text-sm text-gray-500">
+                          <h3 className="text-sm font-medium">{room.name}</h3>
+                          <p className="text-sm text-muted-foreground">
                             {room._count.favorites} favorites
                           </p>
                         </div>
-                        <span className="text-sm text-gray-400">→</span>
+                        <ChevronRight className="h-4 w-4 text-muted-foreground" />
                       </div>
                     </Link>
                   ))}
                 </div>
               )}
-            </div>
-          </div>
-        )}
+            </CardContent>
+          </Card>
 
-        {/* Analytics Section */}
-        <div className="mt-6 bg-white shadow rounded-lg overflow-hidden">
-          <div className="px-6 py-4 border-b border-gray-200">
-            <h2 className="text-lg font-medium text-gray-900">Analytics</h2>
-          </div>
-
-          {analyticsLoading ? (
-            <div className="p-6 text-center text-gray-500">Loading analytics...</div>
-          ) : analytics ? (
-            <div className="p-6">
-              <div className="grid grid-cols-1 gap-5 sm:grid-cols-4 mb-6">
-                <div className="bg-gray-50 rounded-lg p-4">
-                  <div className="text-sm font-medium text-gray-500">Total Accesses</div>
-                  <div className="mt-1 text-2xl font-semibold text-gray-900">{analytics.totalAccesses}</div>
+          <Card>
+            <CardHeader>
+              <CardTitle>Analytics</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {analyticsLoading ? (
+                <div className="flex items-center justify-center py-12">
+                  <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
                 </div>
-                <div className="bg-gray-50 rounded-lg p-4">
-                  <div className="text-sm font-medium text-gray-500">Unique Users</div>
-                  <div className="mt-1 text-2xl font-semibold text-gray-900">{analytics.uniqueUsers}</div>
-                </div>
-                <div className="bg-gray-50 rounded-lg p-4">
-                  <div className="text-sm font-medium text-gray-500">Unique IPs</div>
-                  <div className="mt-1 text-2xl font-semibold text-gray-900">{analytics.uniqueIPs}</div>
-                </div>
-                {analytics.mostActiveRoom && (
-                  <div className="bg-gray-50 rounded-lg p-4">
-                    <div className="text-sm font-medium text-gray-500">Most Active Room</div>
-                    <div className="mt-1 text-lg font-semibold text-gray-900">{analytics.mostActiveRoom.name}</div>
-                    <div className="text-xs text-gray-500">{analytics.mostActiveRoom.accessCount} accesses</div>
+              ) : analytics ? (
+                <div className="space-y-6">
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                    <div className="rounded-lg border p-4">
+                      <div className="text-sm font-medium text-muted-foreground">Total Accesses</div>
+                      <div className="mt-1 text-2xl font-semibold">{analytics.totalAccesses || 0}</div>
+                    </div>
+                    <div className="rounded-lg border p-4">
+                      <div className="text-sm font-medium text-muted-foreground">Unique Users</div>
+                      <div className="mt-1 text-2xl font-semibold">{analytics.uniqueUsers || 0}</div>
+                    </div>
+                    <div className="rounded-lg border p-4">
+                      <div className="text-sm font-medium text-muted-foreground">Unique IPs</div>
+                      <div className="mt-1 text-2xl font-semibold">{analytics.uniqueIPs || 0}</div>
+                    </div>
+                    {analytics.mostActiveRoom && (
+                      <div className="rounded-lg border p-4">
+                        <div className="text-sm font-medium text-muted-foreground">Most Active Room</div>
+                        <div className="mt-1 text-lg font-semibold">{analytics.mostActiveRoom.name}</div>
+                        <div className="text-xs text-muted-foreground">{analytics.mostActiveRoom.accessCount} accesses</div>
+                      </div>
+                    )}
                   </div>
-                )}
-              </div>
 
-              {analytics.recentActivity && analytics.recentActivity.length > 0 && (
-                <div>
-                  <h3 className="text-sm font-medium text-gray-900 mb-3">Recent Activity</h3>
-                  <div className="overflow-x-auto">
-                    <table className="min-w-full divide-y divide-gray-200">
-                      <thead className="bg-gray-50">
-                        <tr>
-                          <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
-                          <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">User</th>
-                          <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Room</th>
-                          <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-                        </tr>
-                      </thead>
-                      <tbody className="bg-white divide-y divide-gray-200">
-                        {analytics.recentActivity.slice(0, 10).map((access: any) => (
-                          <tr key={access.id}>
-                            <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">
-                              {new Date(access.accessedAt).toLocaleString()}
-                            </td>
-                            <td className="px-4 py-2 text-sm text-gray-900">
-                              {access.userName || access.userEmail || access.userUuid || 'Guest'}
-                            </td>
-                            <td className="px-4 py-2 text-sm text-gray-900">
-                              <Link href={`/admin/rooms/${access.room.id}`} className="text-indigo-600 hover:text-indigo-900">
-                                {access.room.name}
-                              </Link>
-                            </td>
-                            <td className="px-4 py-2 whitespace-nowrap text-sm">
-                              {access.hasMembership && access.membershipTags.length > 0 ? (
-                                <span className="inline-flex items-center rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-800">
-                                  {access.membershipTags.join(', ')}
-                                </span>
-                              ) : access.isAuthenticated ? (
-                                <span className="inline-flex items-center rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-800">
-                                  Authenticated
-                                </span>
-                              ) : (
-                                <span className="inline-flex items-center rounded-full bg-yellow-100 px-2 py-0.5 text-xs font-medium text-yellow-800">
-                                  Guest
-                                </span>
-                              )}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
+                  {analytics.recentActivity && analytics.recentActivity.length > 0 && (
+                    <div>
+                      <h3 className="text-sm font-medium mb-3">Recent Activity</h3>
+                      <div className="rounded-md border">
+                        <Table>
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead>Date</TableHead>
+                              <TableHead>User</TableHead>
+                              <TableHead>Room</TableHead>
+                              <TableHead>Status</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {analytics.recentActivity.slice(0, 10).map((access: any) => (
+                              <TableRow key={access.id}>
+                                <TableCell className="text-sm">
+                                  {new Date(access.accessedAt).toLocaleString()}
+                                </TableCell>
+                                <TableCell className="text-sm">
+                                  {access.userName || access.userEmail || access.userUuid || 'Guest'}
+                                </TableCell>
+                                <TableCell className="text-sm">
+                                  <Link href={`/admin/rooms/${access.room.id}`} className="text-primary hover:underline">
+                                    {access.room.name}
+                                  </Link>
+                                </TableCell>
+                                <TableCell>
+                                  {access.hasMembership && access.membershipTags.length > 0 ? (
+                                    <Badge variant="outline">{access.membershipTags.join(', ')}</Badge>
+                                  ) : access.isAuthenticated ? (
+                                    <Badge>Authenticated</Badge>
+                                  ) : (
+                                    <Badge variant="secondary">Guest</Badge>
+                                  )}
+                                </TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    </div>
+                  )}
                 </div>
+              ) : (
+                <p className="text-sm text-muted-foreground text-center py-12">No analytics data available.</p>
               )}
-            </div>
-          ) : (
-            <div className="p-6 text-center text-gray-500">No analytics data available.</div>
-          )}
-        </div>
-      </div>
+            </CardContent>
+          </Card>
+        </>
+      )}
+
+      <Dialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete World</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete "{world.name}"? This will also delete all rooms in it. This action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setDeleteDialogOpen(false)}
+              disabled={deleting}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleDeleteConfirm}
+              disabled={deleting}
+            >
+              {deleting ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Deleting...
+                </>
+              ) : (
+                'Delete'
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
-
