@@ -122,18 +122,18 @@ export default function MobileNav({ user: initialUser }: MobileNavProps) {
         onMouseUp={() => setPressed(false)}
         onMouseLeave={() => setPressed(false)}
       >
-        <div className="flex flex-col gap-1.5 w-4 relative">
+        <div className="flex flex-col gap-1.5 w-4 h-4 relative items-center justify-center">
           <span 
             className={cn(
-              "h-0.5 w-full bg-current transition-all duration-300 origin-center",
-              open ? "rotate-45 translate-y-[6px]" : "rotate-0 translate-y-0"
+              "h-0.5 w-full bg-current transition-all duration-300 origin-center absolute",
+              open ? "rotate-45 top-1/2 -translate-y-1/2" : "rotate-0 top-[4px] -translate-y-1/2"
             )}
             style={{ color: pressed ? 'hsl(var(--muted-foreground))' : 'currentColor' }}
           />
           <span 
             className={cn(
-              "h-0.5 w-full bg-current transition-all duration-300 origin-center",
-              open ? "-rotate-45 -translate-y-[6px]" : "rotate-0 translate-y-0"
+              "h-0.5 w-full bg-current transition-all duration-300 origin-center absolute",
+              open ? "-rotate-45 top-1/2 -translate-y-1/2" : "rotate-0 bottom-[4px] translate-y-1/2"
             )}
             style={{ color: pressed ? 'hsl(var(--muted-foreground))' : 'currentColor' }}
           />
