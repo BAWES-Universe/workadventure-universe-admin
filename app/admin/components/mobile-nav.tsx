@@ -20,6 +20,7 @@ interface MobileNavProps {
 export default function MobileNav({ user: initialUser }: MobileNavProps) {
   const [open, setOpen] = useState(false);
   const [mounted, setMounted] = useState(false);
+  const [pressed, setPressed] = useState(false);
   const pathname = usePathname();
   const { user } = useUser(initialUser ? {
     id: '',
@@ -110,27 +111,40 @@ export default function MobileNav({ user: initialUser }: MobileNavProps) {
 
   return (
     <>
-      <Button
-        variant="ghost"
-        className="gap-2 px-3 h-auto -ml-3"
+      <button
+        className={cn(
+          "gap-2 px-3 h-auto -ml-3 transition-colors inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 hover:bg-accent hover:text-accent-foreground",
+          open && "bg-accent text-accent-foreground"
+        )}
         aria-label="Toggle menu"
         onClick={() => setOpen(!open)}
+        onMouseDown={() => setPressed(true)}
+        onMouseUp={() => setPressed(false)}
+        onMouseLeave={() => setPressed(false)}
       >
-        {open ? (
-          <>
-            <X className="h-5 w-5" />
-            <span className="font-medium text-lg">Menu</span>
-          </>
-        ) : (
-          <>
-            <div className="flex flex-col gap-1.5 w-4">
-              <span className="h-0.5 w-full bg-current transition-all duration-300" />
-              <span className="h-0.5 w-full bg-current transition-all duration-300" />
-            </div>
-            <span className="font-medium text-lg">Orbit Menu</span>
-          </>
-        )}
-      </Button>
+        <div className="flex flex-col gap-1.5 w-4 relative">
+          <span 
+            className={cn(
+              "h-0.5 w-full bg-current transition-all duration-300 origin-center",
+              open ? "rotate-45 translate-y-[6px]" : "rotate-0 translate-y-0"
+            )}
+            style={{ color: pressed ? 'hsl(var(--muted-foreground))' : 'currentColor' }}
+          />
+          <span 
+            className={cn(
+              "h-0.5 w-full bg-current transition-all duration-300 origin-center",
+              open ? "-rotate-45 -translate-y-[6px]" : "rotate-0 translate-y-0"
+            )}
+            style={{ color: pressed ? 'hsl(var(--muted-foreground))' : 'currentColor' }}
+          />
+        </div>
+        <span 
+          className="font-medium text-lg transition-colors"
+          style={{ color: pressed ? 'hsl(var(--muted-foreground))' : 'currentColor' }}
+        >
+          Orbit Menu
+        </span>
+      </button>
       {menuContent}
     </>
   );
