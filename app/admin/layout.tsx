@@ -1,14 +1,9 @@
-import { ReactNode, Suspense } from 'react';
+import { ReactNode } from 'react';
 import { cookies } from 'next/headers';
 import { prisma } from '@/lib/db';
-import TokenHandler from './token-handler';
-import AuthLink from './auth-link';
-import WorkAdventureProvider from './workadventure-provider';
-import MobileNav from './components/mobile-nav';
-import DesktopNav from './components/desktop-nav';
-import UserMenu from './components/user-menu';
+import ConditionalNav from './components/conditional-nav';
+import ConditionalContent from './components/conditional-content';
 import { ThemeProvider } from './components/theme-provider';
-import { ThemeToggle } from './components/theme-toggle';
 
 async function getSessionUser() {
   try {
@@ -74,44 +69,10 @@ export default async function AdminLayout({ children }: { children: ReactNode })
   return (
     <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
       <div className="min-h-screen bg-background">
-        <nav className="bg-card shadow-sm sticky top-0 z-50 backdrop-blur-sm bg-card/95">
-          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 relative">
-            <div className="flex justify-between items-center h-16">
-              <div className="flex items-center min-w-0 flex-1">
-                {/* Mobile Navigation - replaces Orbit title on mobile */}
-                <div className="sm:hidden">
-                  <MobileNav user={user} />
-                </div>
-                {/* Desktop: Orbit title */}
-                <div className="hidden sm:flex items-center flex-shrink-0">
-                  <Suspense fallback={<span className="text-xl font-bold">Orbit</span>}>
-                    <AuthLink href="/admin" className="text-xl font-bold truncate">
-                      Orbit
-                    </AuthLink>
-                  </Suspense>
-                </div>
-                <DesktopNav user={user} />
-              </div>
-              <div className="flex items-center gap-2 sm:gap-4 flex-shrink-0">
-                {/* Theme Toggle */}
-                <ThemeToggle />
-                
-                {/* Desktop User Info / Login */}
-                <div className="hidden sm:flex items-center">
-                  <UserMenu user={user} />
-                </div>
-              </div>
-            </div>
-          </div>
-        </nav>
-        <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
-          <Suspense fallback={null}>
-            <TokenHandler />
-          </Suspense>
-          <WorkAdventureProvider>
-            {children}
-          </WorkAdventureProvider>
-        </main>
+        <ConditionalNav user={user} />
+        <ConditionalContent>
+          {children}
+        </ConditionalContent>
       </div>
     </ThemeProvider>
   );

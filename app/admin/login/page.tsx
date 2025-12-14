@@ -2,6 +2,12 @@
 
 import { useState, useEffect, useRef, Suspense } from 'react';
 import { useRouter, useSearchParams, usePathname } from 'next/navigation';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Loader2, AlertCircle } from 'lucide-react';
 
 // Check if manual login form should be enabled (for developers)
 // Note: NEXT_PUBLIC_ variables are embedded at build time
@@ -329,13 +335,10 @@ function LoginPageContent() {
   // Show loading state by default (waiting for WorkAdventure to provide token)
   if (loading && !showManualForm) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+      <div className="min-h-screen flex items-center justify-center bg-background">
         <div className="text-center">
-          <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600 mb-4"></div>
-          <h2 className="text-xl font-semibold text-gray-900 mb-2">Loading universe...</h2>
-          <p className="text-sm text-gray-600">
-            Waiting for authentication from WorkAdventure
-          </p>
+          <Loader2 className="h-12 w-12 animate-spin text-primary mx-auto mb-4" />
+          <h2 className="text-xl font-semibold text-foreground mb-2">Loading Universe Orbit</h2>
         </div>
       </div>
     );
@@ -345,80 +348,79 @@ function LoginPageContent() {
   if (!showManualForm && !ENABLE_MANUAL_LOGIN) {
     // Still show loading if manual form is disabled
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+      <div className="min-h-screen flex items-center justify-center bg-background">
         <div className="text-center">
-          <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600 mb-4"></div>
-          <h2 className="text-xl font-semibold text-gray-900 mb-2">Loading universe...</h2>
-          <p className="text-sm text-gray-600">
-            Waiting for authentication from WorkAdventure
-          </p>
+          <Loader2 className="h-12 w-12 animate-spin text-primary mx-auto mb-4" />
+          <h2 className="text-xl font-semibold text-foreground mb-2">Loading Universe Orbit</h2>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">
-      <div className="max-w-md w-full space-y-8">
-        <div>
-          <h2 className="mt-6 text-center text-3xl font-extrabold text-gray-900">
-            Sign in to Admin
-          </h2>
-          <p className="mt-2 text-center text-sm text-gray-600">
+    <div className="min-h-screen flex items-center justify-center bg-background py-12 px-4 sm:px-6 lg:px-8">
+      <Card className="w-full max-w-md">
+        <CardHeader>
+          <CardTitle className="text-center text-3xl">Sign in to Admin</CardTitle>
+          <CardDescription className="text-center">
             Use your OIDC access token to login
-          </p>
-        </div>
-        <form className="mt-8 space-y-6" onSubmit={handleLogin}>
-          {error && (
-            <div className="bg-red-50 border border-red-200 rounded-md p-4">
-              <p className="text-sm text-red-800">{error}</p>
-            </div>
-          )}
-          
-          <div>
-            <label htmlFor="accessToken" className="block text-sm font-medium text-gray-700">
-              OIDC Access Token
-            </label>
-            <div className="mt-1">
-              <input
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form className="space-y-6" onSubmit={handleLogin}>
+            {error && (
+              <Alert variant="destructive">
+                <AlertCircle className="h-4 w-4" />
+                <AlertTitle>Error</AlertTitle>
+                <AlertDescription>{error}</AlertDescription>
+              </Alert>
+            )}
+            
+            <div className="space-y-2">
+              <Label htmlFor="accessToken">OIDC Access Token</Label>
+              <Input
                 id="accessToken"
                 name="accessToken"
                 type="text"
                 required
                 value={accessToken}
                 onChange={(e) => setAccessToken(e.target.value)}
-                className="appearance-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-md focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 focus:z-10 sm:text-sm"
                 placeholder="Enter your OIDC access token"
               />
+              <p className="text-sm text-muted-foreground">
+                Get your access token from WorkAdventure after logging in, or use the OIDC mock test token.
+              </p>
             </div>
-            <p className="mt-2 text-sm text-gray-500">
-              Get your access token from WorkAdventure after logging in, or use the OIDC mock test token.
-            </p>
-          </div>
 
-          <div>
-            <button
+            <Button
               type="submit"
               disabled={loading}
-              className="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
+              className="w-full"
             >
-              {loading ? 'Signing in...' : 'Sign in'}
-            </button>
-          </div>
+              {loading ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Signing in...
+                </>
+              ) : (
+                'Sign in'
+              )}
+            </Button>
 
-          <div className="text-sm text-gray-600">
-            <p className="font-medium">For Testing:</p>
-            <p className="mt-1">
-              If using OIDC mock, you can get a token by:
-            </p>
-            <ol className="list-decimal list-inside mt-2 space-y-1">
-              <li>Logging into WorkAdventure at <code className="bg-gray-100 px-1 rounded">http://play.workadventure.localhost</code></li>
-              <li>Check browser DevTools → Network → Look for API calls with <code className="bg-gray-100 px-1 rounded">accessToken</code> parameter</li>
-              <li>Or use the OIDC mock directly to get a token</li>
-            </ol>
-          </div>
-        </form>
-      </div>
+            <div className="text-sm text-muted-foreground">
+              <p className="font-medium text-foreground">For Testing:</p>
+              <p className="mt-1">
+                If using OIDC mock, you can get a token by:
+              </p>
+              <ol className="list-decimal list-inside mt-2 space-y-1">
+                <li>Logging into WorkAdventure at <code className="bg-muted px-1 rounded">http://play.workadventure.localhost</code></li>
+                <li>Check browser DevTools → Network → Look for API calls with <code className="bg-muted px-1 rounded">accessToken</code> parameter</li>
+                <li>Or use the OIDC mock directly to get a token</li>
+              </ol>
+            </div>
+          </form>
+        </CardContent>
+      </Card>
     </div>
   );
 }
@@ -426,10 +428,10 @@ function LoginPageContent() {
 export default function LoginPage() {
   return (
     <Suspense fallback={
-      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+      <div className="min-h-screen flex items-center justify-center bg-background">
         <div className="text-center">
-          <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600 mb-4"></div>
-          <h2 className="text-xl font-semibold text-gray-900 mb-2">Loading...</h2>
+          <Loader2 className="h-12 w-12 animate-spin text-primary mx-auto mb-4" />
+          <h2 className="text-xl font-semibold text-foreground mb-2">Loading Universe Orbit</h2>
         </div>
       </div>
     }>
