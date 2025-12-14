@@ -110,7 +110,9 @@ export default function TokenHandler() {
         // Check session asynchronously (don't block)
         fetch('/api/auth/me', {
           credentials: 'include',
-          cache: 'no-store',
+          // Use no-cache to allow browser caching but revalidate with server
+          // This improves performance when reopening iframes while maintaining security
+          cache: 'no-cache',
         })
           .then(response => {
             if (!response.ok) {

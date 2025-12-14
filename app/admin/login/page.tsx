@@ -258,8 +258,9 @@ function LoginPageContent() {
         // Always include credentials to send cookies (session might be in cookie)
         const response = await fetch(url.toString(), {
           credentials: 'include',
-          // Don't cache this request
-          cache: 'no-store',
+          // Use no-cache to allow browser caching but revalidate with server
+          // This improves performance when reopening iframes while maintaining security
+          cache: 'no-cache',
         });
 
         if (response.ok && isMounted) {
