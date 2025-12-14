@@ -7,7 +7,8 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { Loader2, AlertCircle } from 'lucide-react';
+import { AlertCircle } from 'lucide-react';
+import { Spinner } from '@/components/ui/spinner';
 
 // Check if manual login form should be enabled (for developers)
 // Note: NEXT_PUBLIC_ variables are embedded at build time
@@ -337,8 +338,8 @@ function LoginPageContent() {
     return (
       <div className="min-h-screen flex items-center justify-center bg-background">
         <div className="text-center">
-          <Loader2 className="h-12 w-12 animate-spin text-primary mx-auto mb-4" />
-          <h2 className="text-xl font-semibold text-foreground mb-2">Loading Universe Orbit</h2>
+          <Spinner className="size-8 mx-auto mb-4" />
+          <p className="text-base text-foreground">Loading your orbit..</p>
         </div>
       </div>
     );
@@ -350,8 +351,8 @@ function LoginPageContent() {
     return (
       <div className="min-h-screen flex items-center justify-center bg-background">
         <div className="text-center">
-          <Loader2 className="h-12 w-12 animate-spin text-primary mx-auto mb-4" />
-          <h2 className="text-xl font-semibold text-foreground mb-2">Loading Universe Orbit</h2>
+          <Spinner className="size-8 mx-auto mb-4" />
+          <p className="text-base text-foreground">Loading your orbit..</p>
         </div>
       </div>
     );
@@ -399,7 +400,7 @@ function LoginPageContent() {
             >
               {loading ? (
                 <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  <Spinner className="mr-2 h-4 w-4" />
                   Signing in...
                 </>
               ) : (
@@ -430,8 +431,8 @@ export default function LoginPage() {
     <Suspense fallback={
       <div className="min-h-screen flex items-center justify-center bg-background">
         <div className="text-center">
-          <Loader2 className="h-12 w-12 animate-spin text-primary mx-auto mb-4" />
-          <h2 className="text-xl font-semibold text-foreground mb-2">Loading Universe Orbit</h2>
+          <Spinner className="size-8 mx-auto mb-4" />
+          <p className="text-base text-foreground">Loading your orbit..</p>
         </div>
       </div>
     }>
