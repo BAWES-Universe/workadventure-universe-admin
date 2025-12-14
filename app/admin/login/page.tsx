@@ -255,13 +255,23 @@ function LoginPageContent() {
           url.searchParams.set('_token', storedToken);
         }
         
+        // Add timeout to prevent hanging on slow/intermittent networks (mobile, etc.)
+        const controller = new AbortController();
+        const fetchTimeout = setTimeout(() => {
+          controller.abort();
+          devLog('[Login] Session check timed out after 5 seconds');
+        }, 5000);
+        
         // Always include credentials to send cookies (session might be in cookie)
         const response = await fetch(url.toString(), {
           credentials: 'include',
+          signal: controller.signal,
           // Use no-cache to allow browser caching but revalidate with server
           // This improves performance when reopening iframes while maintaining security
           cache: 'no-cache',
         });
+
+        clearTimeout(fetchTimeout);
 
         if (response.ok && isMounted) {
           const data = await response.json();
@@ -315,10 +325,27 @@ function LoginPageContent() {
             }, 50);
             return;
           }
+        } else if (isMounted && response.status !== 401) {
+          // Response not OK and not 401 (unauthorized) - might be network error
+          devLog('[Login] Session check returned non-OK status:', response.status);
+          // Don't set loading to false here - let it fall through to show form or continue waiting
+        } else if (isMounted && response.status === 401) {
+          // 401 Unauthorized - definitely not authenticated
+          devLog('[Login] Session check returned 401 - not authenticated');
+          // Continue to normal login flow below
         }
       } catch (error) {
         // Not authenticated or error checking, continue with normal login flow
         devLog('[Login] No existing session found or error:', error);
+        
+        // If it's an abort error (timeout), ensure loading state is cleared
+        if (error instanceof Error && error.name === 'AbortError' && isMounted) {
+          devLog('[Login] Session check was aborted (timeout), clearing loading state');
+          setLoading(false);
+          if (ENABLE_MANUAL_LOGIN) {
+            setShowManualForm(true);
+          }
+        }
       }
 
       // If not authenticated, check for accessToken in URL
