@@ -210,7 +210,7 @@ function RoomsPageContent() {
             Manage rooms. Rooms belong to worlds.
           </p>
         </div>
-        <Button asChild>
+        <Button variant="default" asChild>
           <Link href={selectedWorldId && selectedWorldId !== 'all' ? `/admin/rooms/new?worldId=${selectedWorldId}` : '/admin/rooms/new'}>
             <Plus className="mr-2 h-4 w-4" />
             Create Room
@@ -316,7 +316,7 @@ function RoomsPageContent() {
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="flex items-center justify-end gap-2">
-                        <Button variant="ghost" size="sm" asChild>
+                        <Button variant="default" size="sm" asChild>
                           <Link href={`/admin/rooms/${room.id}`}>Edit</Link>
                         </Button>
                         <Button
@@ -347,7 +347,7 @@ function RoomsPageContent() {
           </DialogHeader>
           <DialogFooter>
             <Button
-              variant="outline"
+              variant="secondary"
               onClick={() => {
                 setDeleteDialogOpen(false);
                 setRoomToDelete(null);

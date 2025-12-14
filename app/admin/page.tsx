@@ -71,7 +71,7 @@ export default async function AdminDashboard() {
             </CardDescription>
           </CardHeader>
           <CardContent className="flex justify-center pt-2">
-            <Button asChild size="lg" className="gap-2">
+            <Button variant="default" asChild size="lg" className="gap-2">
               <Link href="/admin/universes/new">
                 <Plus className="h-5 w-5" />
                 Create Your First Universe

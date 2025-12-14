@@ -279,7 +279,7 @@ function NewWorldPageContent() {
             </div>
 
             <div className="flex flex-col-reverse sm:flex-row justify-end gap-3 pt-4">
-              <Button type="button" variant="outline" asChild>
+              <Button type="button" variant="secondary" asChild>
                 <Link href={formData.universeId ? `/admin/universes/${formData.universeId}` : '/admin/worlds'}>
                   Cancel
                 </Link>

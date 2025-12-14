@@ -407,7 +407,7 @@ export default function RoomDetailPage() {
 
             <div className="flex flex-col-reverse sm:flex-row justify-end gap-3 pt-4">
               <Button
-                variant="outline"
+                variant="secondary"
                 onClick={() => {
                   setIsEditing(false);
                   fetchRoom();
@@ -567,7 +567,7 @@ export default function RoomDetailPage() {
           </DialogHeader>
           <DialogFooter>
             <Button
-              variant="outline"
+              variant="secondary"
               onClick={() => setDeleteDialogOpen(false)}
               disabled={deleting}
             >

@@ -149,7 +149,7 @@ export default function UniversesPage() {
             Manage universes, worlds, and rooms.
           </p>
         </div>
-        <Button asChild>
+        <Button variant="default" asChild>
           <Link href="/admin/universes/new">
             <Plus className="mr-2 h-4 w-4" />
             Create Universe
@@ -184,7 +184,7 @@ export default function UniversesPage() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <Button asChild>
+            <Button variant="default" asChild>
               <Link href="/admin/universes/new">
                 <Plus className="mr-2 h-4 w-4" />
                 Create your first universe
@@ -231,7 +231,7 @@ export default function UniversesPage() {
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="flex items-center justify-end gap-2">
-                        <Button variant="ghost" size="sm" asChild>
+                        <Button variant="default" size="sm" asChild>
                           <Link href={`/admin/universes/${universe.id}`}>Edit</Link>
                         </Button>
                         <Button
@@ -262,7 +262,7 @@ export default function UniversesPage() {
           </DialogHeader>
           <DialogFooter>
             <Button
-              variant="outline"
+              variant="secondary"
               onClick={() => {
                 setDeleteDialogOpen(false);
                 setUniverseToDelete(null);

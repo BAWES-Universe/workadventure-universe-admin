@@ -206,7 +206,7 @@ function WorldsPageContent() {
             Manage worlds. Worlds belong to universes and contain rooms.
           </p>
         </div>
-        <Button asChild>
+        <Button variant="default" asChild>
           <Link href={selectedUniverseId && selectedUniverseId !== 'all' ? `/admin/worlds/new?universeId=${selectedUniverseId}` : '/admin/worlds/new'}>
             <Plus className="mr-2 h-4 w-4" />
             Create World
@@ -312,7 +312,7 @@ function WorldsPageContent() {
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="flex items-center justify-end gap-2">
-                        <Button variant="ghost" size="sm" asChild>
+                        <Button variant="default" size="sm" asChild>
                           <Link href={`/admin/worlds/${world.id}`}>Edit</Link>
                         </Button>
                         <Button
@@ -343,7 +343,7 @@ function WorldsPageContent() {
           </DialogHeader>
           <DialogFooter>
             <Button
-              variant="outline"
+              variant="secondary"
               onClick={() => {
                 setDeleteDialogOpen(false);
                 setWorldToDelete(null);

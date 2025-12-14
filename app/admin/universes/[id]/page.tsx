@@ -272,7 +272,7 @@ export default function UniverseDetailPage() {
         </div>
         {!isEditing && (
           <div className="flex flex-wrap gap-2">
-            <Button asChild>
+            <Button variant="default" asChild>
               <Link href={`/admin/worlds/new?universeId=${id}`}>
                 <Plus className="mr-2 h-4 w-4" />
                 Create World
@@ -397,7 +397,7 @@ export default function UniverseDetailPage() {
 
             <div className="flex flex-col-reverse sm:flex-row justify-end gap-3 pt-4">
               <Button
-                variant="outline"
+                variant="secondary"
                 onClick={() => {
                   setIsEditing(false);
                   fetchUniverse();
@@ -597,7 +597,7 @@ export default function UniverseDetailPage() {
           </DialogHeader>
           <DialogFooter>
             <Button
-              variant="outline"
+              variant="secondary"
               onClick={() => setDeleteDialogOpen(false)}
               disabled={deleting}
             >
