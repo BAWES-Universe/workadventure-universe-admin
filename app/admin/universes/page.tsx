@@ -16,13 +16,15 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { Plus, AlertCircle, Loader2 } from 'lucide-react';
 
 interface Universe {
@@ -235,10 +237,9 @@ export default function UniversesPage() {
                           <Link href={`/admin/universes/${universe.id}`}>Edit</Link>
                         </Button>
                         <Button
-                          variant="ghost"
+                          variant="destructive"
                           size="sm"
                           onClick={() => handleDeleteClick(universe)}
-                          className="text-destructive hover:text-destructive"
                         >
                           Delete
                         </Button>
@@ -252,26 +253,24 @@ export default function UniversesPage() {
         </Card>
       )}
 
-      <Dialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Delete Universe</DialogTitle>
-            <DialogDescription>
+      <AlertDialog open={deleteDialogOpen} onOpenChange={(open: boolean) => {
+        setDeleteDialogOpen(open);
+        if (!open) {
+          setUniverseToDelete(null);
+        }
+      }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Universe</AlertDialogTitle>
+            <AlertDialogDescription>
               Are you sure you want to delete "{universeToDelete?.name}"? This action cannot be undone.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button
-              variant="secondary"
-              onClick={() => {
-                setDeleteDialogOpen(false);
-                setUniverseToDelete(null);
-              }}
-              disabled={deleting}
-            >
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleting}>
               Cancel
-            </Button>
-            <Button
+            </AlertDialogCancel>
+            <AlertDialogAction
               variant="destructive"
               onClick={handleDeleteConfirm}
               disabled={deleting}
@@ -284,10 +283,10 @@ export default function UniversesPage() {
               ) : (
                 'Delete'
               )}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
