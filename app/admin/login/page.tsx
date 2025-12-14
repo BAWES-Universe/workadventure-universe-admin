@@ -39,51 +39,7 @@ function LoginPageContent() {
   const [error, setError] = useState<string | null>(null);
   const [autoLoginAttempted, setAutoLoginAttempted] = useState(false);
   const [showManualForm, setShowManualForm] = useState(false);
-  const redirectAttemptedRef = useRef(false); // Track if we've already attempted redirect
 
-  // Early check: If we have a token in URL, we're authenticated - redirect immediately
-  // This prevents the login page from even rendering in Arc browser
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    
-    // If we're already on an admin page (not login), don't do anything
-    // This prevents redirects when navigating between admin pages
-    const currentPath = pathname || window.location.pathname;
-    if (currentPath !== '/admin/login' && currentPath.startsWith('/admin')) {
-      devLog('[Login] Already on admin page, skipping early check');
-      setLoading(false);
-      return;
-    }
-    
-    const urlToken = searchParams.get('_token') || searchParams.get('_session');
-    if (urlToken) {
-      // We have a token, which means we're authenticated
-      // Check if we're already on the target page to prevent loops
-      const redirectTo = searchParams.get('redirect') || '/admin';
-      
-      // If we're already on the target admin page, don't redirect
-      if (currentPath !== '/admin/login' && 
-          (currentPath === redirectTo || 
-           (redirectTo === '/admin' && currentPath.startsWith('/admin')))) {
-        devLog('[Login] Token in URL and already on target page, clearing redirect flag');
-        sessionStorage.removeItem('admin_redirect_in_progress');
-        setLoading(false);
-        return;
-      }
-      
-      // Redirect to admin dashboard immediately without showing login page
-      const redirectUrl = new URL(redirectTo, window.location.origin);
-      const paramName = searchParams.get('_token') ? '_token' : '_session';
-      redirectUrl.searchParams.set(paramName, urlToken);
-      
-      devLog('[Login] Token found in URL, redirecting immediately to prevent loop');
-      window.location.replace(redirectUrl.toString());
-      return;
-    }
-    
-    // No token in URL - ensure loading state is handled by checkExistingSession
-    // Don't interfere with the normal flow
-  }, [searchParams, pathname]);
 
   // Debug logging on mount
   useEffect(() => {
@@ -185,125 +141,44 @@ function LoginPageContent() {
   // Check if already authenticated before attempting login
   useEffect(() => {
     let timeoutId: NodeJS.Timeout | null = null;
-    let fallbackTimeoutId: NodeJS.Timeout | null = null;
     let isMounted = true; // Track if component is still mounted
     
-    // Fallback timeout to ensure loading doesn't stay true forever
-    // This prevents the page from being stuck on "Loading universe..." indefinitely
-    fallbackTimeoutId = setTimeout(() => {
-      if (isMounted) {
-        devLog('[Login] Fallback timeout - ensuring loading state is cleared');
-        setLoading(false);
-        if (ENABLE_MANUAL_LOGIN) {
-          setShowManualForm(true);
-        }
-      }
-    }, 10000); // 10 second fallback
-    
     const checkExistingSession = async () => {
-      // CRITICAL: If we already have a token in the URL, we're authenticated and being redirected
-      // Don't run the check again - this prevents loops in Arc browser
-      const urlToken = searchParams.get('_token') || searchParams.get('_session');
-      if (urlToken) {
-        devLog('[Login] Token already in URL, skipping session check to prevent loop');
-        // Don't set loading to false here - let the early check handle redirect
-        return;
-      }
-      
-      // Check sessionStorage for redirect flag (prevents loops across page reloads)
-      // But if we're on the login page and there's a redirect flag, it might be stale
-      // Clear it and proceed with normal login flow
-      const redirectFlag = sessionStorage.getItem('admin_redirect_in_progress');
-      if (redirectFlag) {
-        const flagTimestamp = sessionStorage.getItem('admin_redirect_timestamp');
-        const now = Date.now();
-        // If flag is older than 5 seconds, it's probably stale - clear it
-        if (flagTimestamp && (now - parseInt(flagTimestamp)) > 5000) {
-          devLog('[Login] Stale redirect flag detected, clearing and proceeding');
-          sessionStorage.removeItem('admin_redirect_in_progress');
-          sessionStorage.removeItem('admin_redirect_timestamp');
-          // Continue with normal flow below
-        } else {
-          devLog('[Login] Redirect already in progress, skipping check');
-          // If redirect is in progress, we should wait - but set a timeout to prevent infinite loading
-          timeoutId = setTimeout(() => {
-            if (isMounted) {
-              devLog('[Login] Redirect timeout - clearing flag and proceeding');
-              sessionStorage.removeItem('admin_redirect_in_progress');
-              sessionStorage.removeItem('admin_redirect_timestamp');
-              setLoading(false);
-              if (ENABLE_MANUAL_LOGIN) {
-                setShowManualForm(true);
-              }
-            }
-          }, 3000);
-          return;
-        }
-      }
-      
-      // ALWAYS check for existing session first, even if manual login is enabled
-      // This ensures authenticated users are redirected properly
+      // If manual login is enabled and no accessToken, skip session check and show form
+      // This prevents infinite redirect loops
       const tokenFromUrl = searchParams.get('accessToken');
-      
+      if (ENABLE_MANUAL_LOGIN && !tokenFromUrl) {
+        devLog('[Login] Manual login enabled, no accessToken - will show form after 2 seconds');
+        // Set timeout to show form immediately (no need to wait for session check)
+        timeoutId = setTimeout(() => {
+          if (isMounted) {
+            devLog('[Login] Timeout fired, showing manual form');
+            setLoading(false);
+            setShowManualForm(true);
+          }
+        }, 2000);
+        return; // Skip session check to avoid redirect loops
+      }
+
+      // Only check existing session if manual login is disabled or we have an accessToken
       try {
         // Check if we have a valid session by calling /api/auth/me
         // Use plain fetch to avoid redirect loops (authenticatedFetch might redirect)
-        // Try both localStorage token and cookies (cookies work even if localStorage doesn't)
         const storedToken = localStorage.getItem('admin_session_token') || localStorage.getItem('admin_session_id');
         const url = new URL('/api/auth/me', window.location.origin);
         if (storedToken) {
           url.searchParams.set('_token', storedToken);
         }
         
-        // Add timeout to prevent hanging on slow/intermittent networks (mobile, etc.)
-        const controller = new AbortController();
-        const fetchTimeout = setTimeout(() => {
-          controller.abort();
-          devLog('[Login] Session check timed out after 5 seconds');
-        }, 5000);
-        
-        // Always include credentials to send cookies (session might be in cookie)
         const response = await fetch(url.toString(), {
           credentials: 'include',
-          signal: controller.signal,
-          // Use no-cache to allow browser caching but revalidate with server
-          // This improves performance when reopening iframes while maintaining security
-          cache: 'no-cache',
         });
-
-        clearTimeout(fetchTimeout);
 
         if (response.ok && isMounted) {
           const data = await response.json();
           if (data.user) {
-            // Already authenticated, but check if we're already on an admin page
-            // This prevents infinite redirect loops (especially in Arc browser)
+            // Already authenticated, redirect to dashboard
             const redirectTo = searchParams.get('redirect') || '/admin';
-            const currentPath = pathname || window.location.pathname;
-            
-            // If we're already on the target admin page (not login), don't redirect
-            if (currentPath !== '/admin/login' && 
-                (currentPath === redirectTo || 
-                 (redirectTo === '/admin' && currentPath.startsWith('/admin')))) {
-              devLog('[Login] Already on target admin page, skipping redirect to prevent loop');
-              setLoading(false);
-              // Clear redirect flag if set
-              sessionStorage.removeItem('admin_redirect_in_progress');
-              return;
-            }
-            
-            // Prevent multiple redirect attempts using both ref and sessionStorage
-            if (redirectAttemptedRef.current || redirectFlag) {
-              devLog('[Login] Redirect already attempted, skipping to prevent loop');
-              setLoading(false);
-              return;
-            }
-            
-            // Set flags to prevent multiple redirects
-            redirectAttemptedRef.current = true;
-            sessionStorage.setItem('admin_redirect_in_progress', 'true');
-            sessionStorage.setItem('admin_redirect_timestamp', Date.now().toString());
-            
             devLog('[Login] Already authenticated, redirecting to:', redirectTo);
             
             // Get token from localStorage to preserve in URL
@@ -317,35 +192,13 @@ function LoginPageContent() {
               redirectUrl.searchParams.set('_session', storedSessionId);
             }
             
-            // Use a small delay to prevent rapid redirects in browsers like Arc
-            setTimeout(() => {
-              if (isMounted) {
-                window.location.href = redirectUrl.toString();
-              }
-            }, 50);
+            window.location.href = redirectUrl.toString();
             return;
           }
-        } else if (isMounted && response.status !== 401) {
-          // Response not OK and not 401 (unauthorized) - might be network error
-          devLog('[Login] Session check returned non-OK status:', response.status);
-          // Don't set loading to false here - let it fall through to show form or continue waiting
-        } else if (isMounted && response.status === 401) {
-          // 401 Unauthorized - definitely not authenticated
-          devLog('[Login] Session check returned 401 - not authenticated');
-          // Continue to normal login flow below
         }
       } catch (error) {
         // Not authenticated or error checking, continue with normal login flow
         devLog('[Login] No existing session found or error:', error);
-        
-        // If it's an abort error (timeout), ensure loading state is cleared
-        if (error instanceof Error && error.name === 'AbortError' && isMounted) {
-          devLog('[Login] Session check was aborted (timeout), clearing loading state');
-          setLoading(false);
-          if (ENABLE_MANUAL_LOGIN) {
-            setShowManualForm(true);
-          }
-        }
       }
 
       // If not authenticated, check for accessToken in URL
@@ -364,22 +217,10 @@ function LoginPageContent() {
             }
           }
         });
-      } else if (isMounted) {
-        // No accessToken in URL - show manual form if enabled, otherwise keep loading
-        if (ENABLE_MANUAL_LOGIN) {
-          devLog('[Login] Manual login enabled, no accessToken - will show form after 2 seconds');
-          timeoutId = setTimeout(() => {
-            if (isMounted) {
-              devLog('[Login] Timeout fired, showing manual form');
-              setLoading(false);
-              setShowManualForm(true);
-            }
-          }, 2000);
-        } else {
-          // Manual login disabled - keep loading (waiting for WorkAdventure token)
-          devLog('[Login] Manual login disabled, waiting for WorkAdventure token');
-          // Don't set loading to false, keep the loading state
-        }
+      } else if (isMounted && !ENABLE_MANUAL_LOGIN) {
+        // Manual login disabled - keep loading (waiting for WorkAdventure token)
+        devLog('[Login] Manual login disabled, waiting for WorkAdventure token');
+        // Don't set loading to false, keep the loading state
       }
     };
 
@@ -391,12 +232,9 @@ function LoginPageContent() {
       if (timeoutId) {
         clearTimeout(timeoutId);
       }
-      if (fallbackTimeoutId) {
-        clearTimeout(fallbackTimeoutId);
-      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchParams, pathname]);
+  }, [searchParams]);
 
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
