@@ -46,11 +46,18 @@ export async function GET(
     // Check permissions for management (but allow viewing for anyone)
     const canManage = await canManageWorldMembers(id, sessionUser.id);
 
+    // If user can't manage, only show invitations sent to them
+    const whereClause: any = {
+      worldId: id,
+      status: 'pending',
+    };
+    
+    if (!canManage) {
+      whereClause.invitedUserId = sessionUser.id;
+    }
+
     const invitations = await prisma.membershipInvitation.findMany({
-      where: {
-        worldId: id,
-        status: 'pending',
-      },
+      where: whereClause,
       include: {
         invitedUser: {
           select: {

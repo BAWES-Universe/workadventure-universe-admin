@@ -317,11 +317,14 @@ export default function MemberList({ worldId, onRefresh }: MemberListProps) {
       </div>
 
       {/* Pending Invitations */}
-      <div>
-        <h3 className="text-lg font-semibold mb-4">Pending Invitations</h3>
-        {invitations.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No pending invitations.</p>
-        ) : (
+      {(canManage || invitations.length > 0) && (
+        <div>
+          <h3 className="text-lg font-semibold mb-4">
+            {canManage ? 'Pending Invitations' : 'Your Pending Invitations'}
+          </h3>
+          {invitations.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No pending invitations.</p>
+          ) : (
           <div className="rounded-md border">
             <Table>
               <TableHeader>
@@ -379,8 +382,9 @@ export default function MemberList({ worldId, onRefresh }: MemberListProps) {
               </TableBody>
             </Table>
           </div>
-        )}
-      </div>
+          )}
+        </div>
+      )}
 
       {/* Edit Member Dialog */}
       <Dialog open={!!editingMember} onOpenChange={(open) => !open && setEditingMember(null)}>
