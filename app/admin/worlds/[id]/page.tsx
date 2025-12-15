@@ -41,6 +41,7 @@ interface World {
   isPublic: boolean;
   featured: boolean;
   thumbnailUrl: string | null;
+  canEdit?: boolean;
   universe: {
     id: string;
     name: string;
@@ -248,7 +249,7 @@ export default function WorldDetailPage() {
             In <Link href={`/admin/universes/${world.universe.id}`} className="text-primary hover:underline">{world.universe.name}</Link> • Slug: <code className="bg-muted px-1.5 py-0.5 rounded text-sm">{world.slug}</code>
           </p>
         </div>
-        {!isEditing && (
+        {!isEditing && world.canEdit !== false && (
           <div className="flex flex-wrap gap-2">
             <Button variant="default" asChild>
               <Link href={`/admin/rooms/new?worldId=${id}`}>
@@ -589,10 +590,12 @@ export default function WorldDetailPage() {
               <CardHeader>
                 <div className="flex items-center justify-between">
                   <CardTitle>Members</CardTitle>
-                  <Button onClick={() => setInviteDialogOpen(true)}>
-                    <Plus className="mr-2 h-4 w-4" />
-                    Invite Member
-                  </Button>
+                  {world.canEdit !== false && (
+                    <Button onClick={() => setInviteDialogOpen(true)}>
+                      <Plus className="mr-2 h-4 w-4" />
+                      Invite Member
+                    </Button>
+                  )}
                 </div>
               </CardHeader>
               <CardContent>

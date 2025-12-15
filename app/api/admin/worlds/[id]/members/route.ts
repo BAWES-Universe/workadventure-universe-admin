@@ -54,11 +54,8 @@ export async function GET(
 
     const { id } = await params;
 
-    // Check permissions
+    // Check permissions for management (but allow viewing for anyone)
     const canManage = await canManageWorldMembers(id, sessionUser.id);
-    if (!canManage) {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
-    }
 
     const members = await prisma.worldMember.findMany({
       where: { worldId: id },
@@ -115,7 +112,10 @@ export async function GET(
       isUniverseOwner: world?.universe.ownerId === member.userId,
     }));
 
-    return NextResponse.json({ members: membersWithLastVisit });
+    return NextResponse.json({ 
+      members: membersWithLastVisit,
+      canManage,
+    });
   } catch (error) {
     console.error('Error fetching world members:', error);
     return NextResponse.json(

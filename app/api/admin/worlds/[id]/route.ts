@@ -74,15 +74,32 @@ export async function GET(
       );
     }
     
-    // If using session auth (not admin token), ensure user owns the universe
-    if (userId && !isAdminToken && world.universe.ownerId !== userId) {
-      return NextResponse.json(
-        { error: 'Forbidden' },
-        { status: 403 }
-      );
+    // Allow viewing for anyone, but include ownership info
+    // Also check if user is a world admin
+    let canEdit = false;
+    if (userId && !isAdminToken) {
+      canEdit = world.universe.ownerId === userId;
+      if (!canEdit) {
+        // Check if user is a world admin
+        const member = await prisma.worldMember.findFirst({
+          where: {
+            worldId: world.id,
+            userId: userId,
+            tags: { has: 'admin' },
+          },
+        });
+        canEdit = !!member;
+      }
+    } else if (isAdminToken) {
+      canEdit = true;
     }
     
-    return NextResponse.json(world);
+    const responseData = {
+      ...world,
+      canEdit,
+    };
+    
+    return NextResponse.json(responseData);
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized') {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });

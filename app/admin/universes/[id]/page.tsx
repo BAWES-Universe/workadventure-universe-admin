@@ -47,6 +47,7 @@ interface Universe {
   isPublic: boolean;
   featured: boolean;
   thumbnailUrl: string | null;
+  canEdit?: boolean;
   owner: {
     id: string;
     name: string | null;
@@ -272,7 +273,7 @@ export default function UniverseDetailPage() {
             Slug: <code className="bg-muted px-1.5 py-0.5 rounded text-sm">{universe.slug}</code>
           </p>
         </div>
-        {!isEditing && (
+        {!isEditing && universe.canEdit !== false && (
           <div className="flex flex-wrap gap-2">
             <Button variant="default" asChild>
               <Link href={`/admin/worlds/new?universeId=${id}`}>

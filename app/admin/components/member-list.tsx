@@ -81,6 +81,7 @@ export default function MemberList({ worldId, onRefresh }: MemberListProps) {
   const [invitations, setInvitations] = useState<Invitation[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [canManage, setCanManage] = useState(false);
   const [editingMember, setEditingMember] = useState<Member | null>(null);
   const [editingTag, setEditingTag] = useState<string>('member');
   const [saving, setSaving] = useState(false);
@@ -114,6 +115,8 @@ export default function MemberList({ worldId, onRefresh }: MemberListProps) {
 
       setMembers(membersData.members || []);
       setInvitations(invitationsData.invitations || []);
+      // Use canManage from either response (they should both have it)
+      setCanManage(membersData.canManage ?? invitationsData.canManage ?? false);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load data');
     } finally {
@@ -246,7 +249,7 @@ export default function MemberList({ worldId, onRefresh }: MemberListProps) {
                   <TableHead>Tags</TableHead>
                   <TableHead>Joined</TableHead>
                   <TableHead>Last Visited</TableHead>
-                  <TableHead className="text-right">Actions</TableHead>
+                  {canManage && <TableHead className="text-right">Actions</TableHead>}
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -279,30 +282,32 @@ export default function MemberList({ worldId, onRefresh }: MemberListProps) {
                         ? new Date(member.lastVisited).toLocaleDateString()
                         : 'Never'}
                     </TableCell>
-                    <TableCell className="text-right">
-                      <div className="flex justify-end gap-2">
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() => {
-                            setEditingMember(member);
-                            // Use first tag or default to 'member'
-                            setEditingTag(member.tags.length > 0 ? member.tags[0] : 'member');
-                          }}
-                          disabled={member.isUniverseOwner}
-                        >
-                          <Edit className="h-4 w-4" />
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="destructive"
-                          onClick={() => setDeletingMember(member)}
-                          disabled={member.isUniverseOwner}
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      </div>
-                    </TableCell>
+                    {canManage && (
+                      <TableCell className="text-right">
+                        <div className="flex justify-end gap-2">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => {
+                              setEditingMember(member);
+                              // Use first tag or default to 'member'
+                              setEditingTag(member.tags.length > 0 ? member.tags[0] : 'member');
+                            }}
+                            disabled={member.isUniverseOwner}
+                          >
+                            <Edit className="h-4 w-4" />
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            onClick={() => setDeletingMember(member)}
+                            disabled={member.isUniverseOwner}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      </TableCell>
+                    )}
                   </TableRow>
                 ))}
               </TableBody>
@@ -325,7 +330,7 @@ export default function MemberList({ worldId, onRefresh }: MemberListProps) {
                   <TableHead>Tags</TableHead>
                   <TableHead>Invited By</TableHead>
                   <TableHead>Invited</TableHead>
-                  <TableHead className="text-right">Actions</TableHead>
+                  {canManage && <TableHead className="text-right">Actions</TableHead>}
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -353,20 +358,22 @@ export default function MemberList({ worldId, onRefresh }: MemberListProps) {
                     <TableCell className="text-muted-foreground">
                       {new Date(invitation.invitedAt).toLocaleDateString()}
                     </TableCell>
-                    <TableCell className="text-right">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => handleCancelInvitation(invitation.id)}
-                        disabled={cancellingInvitation === invitation.id}
-                      >
-                        {cancellingInvitation === invitation.id ? (
-                          <Loader2 className="h-4 w-4 animate-spin" />
-                        ) : (
-                          <X className="h-4 w-4" />
-                        )}
-                      </Button>
-                    </TableCell>
+                    {canManage && (
+                      <TableCell className="text-right">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => handleCancelInvitation(invitation.id)}
+                          disabled={cancellingInvitation === invitation.id}
+                        >
+                          {cancellingInvitation === invitation.id ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <X className="h-4 w-4" />
+                          )}
+                        </Button>
+                      </TableCell>
+                    )}
                   </TableRow>
                 ))}
               </TableBody>

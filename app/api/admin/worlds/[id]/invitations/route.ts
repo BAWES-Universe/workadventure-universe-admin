@@ -43,11 +43,8 @@ export async function GET(
 
     const { id } = await params;
 
-    // Check permissions
+    // Check permissions for management (but allow viewing for anyone)
     const canManage = await canManageWorldMembers(id, sessionUser.id);
-    if (!canManage) {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
-    }
 
     const invitations = await prisma.membershipInvitation.findMany({
       where: {
@@ -73,7 +70,10 @@ export async function GET(
       orderBy: { invitedAt: 'desc' },
     });
 
-    return NextResponse.json({ invitations });
+    return NextResponse.json({ 
+      invitations,
+      canManage,
+    });
   } catch (error) {
     console.error('Error fetching world invitations:', error);
     return NextResponse.json(
