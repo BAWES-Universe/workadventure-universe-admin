@@ -30,7 +30,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { ChevronRight, AlertCircle, Loader2, Edit, Trash2, ExternalLink, Navigation } from 'lucide-react';
+import { ChevronRight, AlertCircle, Loader2, Edit, Trash2, Navigation } from 'lucide-react';
 
 interface Room {
   id: string;
@@ -247,9 +247,6 @@ export default function RoomDetailPage() {
     );
   }
 
-  const defaultPlayUrl = process.env.NEXT_PUBLIC_PLAY_URL || 'http://play.workadventure.localhost';
-  const roomPlayUrl = `${defaultPlayUrl}/@/${room.world.universe.slug}/${room.world.slug}/${room.slug}`;
-
   // Calculate peak hour
   let peakHour = null;
   let peakCount = 0;
@@ -304,12 +301,6 @@ export default function RoomDetailPage() {
         </div>
         {!isEditing && (
           <div className="flex flex-wrap gap-2">
-            <Button asChild>
-              <a href={roomPlayUrl} target="_blank" rel="noopener noreferrer">
-                <ExternalLink className="mr-2 h-4 w-4" />
-                Visit Room
-              </a>
-            </Button>
             <Button
               variant="default"
               onClick={handleVisitRoomInUniverse}
@@ -324,7 +315,7 @@ export default function RoomDetailPage() {
               ) : (
                 <>
                   <Navigation className="mr-2 h-4 w-4" />
-                  Visit (in Universe)
+                  Visit
                 </>
               )}
             </Button>
