@@ -29,7 +29,9 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { ChevronRight, AlertCircle, Loader2, Plus, Edit, Trash2 } from 'lucide-react';
+import { ChevronRight, AlertCircle, Loader2, Plus, Edit, Trash2, Users } from 'lucide-react';
+import InviteMemberDialog from '../../components/invite-member-dialog';
+import MemberList from '../../components/member-list';
 
 interface World {
   id: string;
@@ -39,6 +41,7 @@ interface World {
   isPublic: boolean;
   featured: boolean;
   thumbnailUrl: string | null;
+  canEdit?: boolean;
   universe: {
     id: string;
     name: string;
@@ -68,6 +71,8 @@ export default function WorldDetailPage() {
   const [analyticsLoading, setAnalyticsLoading] = useState(true);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [activeTab, setActiveTab] = useState<'details' | 'analytics' | 'members'>('details');
+  const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
   
   const [formData, setFormData] = useState({
     slug: '',
@@ -244,7 +249,7 @@ export default function WorldDetailPage() {
             In <Link href={`/admin/universes/${world.universe.id}`} className="text-primary hover:underline">{world.universe.name}</Link> • Slug: <code className="bg-muted px-1.5 py-0.5 rounded text-sm">{world.slug}</code>
           </p>
         </div>
-        {!isEditing && (
+        {!isEditing && world.canEdit === true && (
           <div className="flex flex-wrap gap-2">
             <Button variant="default" asChild>
               <Link href={`/admin/rooms/new?worldId=${id}`}>
@@ -371,82 +376,127 @@ export default function WorldDetailPage() {
         </Card>
       ) : (
         <>
-          <Card>
-            <CardHeader>
-              <CardTitle>Details</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <dl className="grid grid-cols-1 gap-6 sm:grid-cols-2">
-                <div>
-                  <dt className="text-sm font-medium text-muted-foreground">Description</dt>
-                  <dd className="mt-1 text-sm">{world.description || 'No description'}</dd>
-                </div>
-                <div>
-                  <dt className="text-sm font-medium text-muted-foreground">Status</dt>
-                  <dd className="mt-1">
-                    <div className="flex items-center gap-2">
-                      <Badge variant={world.isPublic ? 'default' : 'secondary'}>
-                        {world.isPublic ? 'Public' : 'Private'}
-                      </Badge>
-                      {world.featured && <Badge variant="outline">Featured</Badge>}
+          {/* Tabs */}
+          <div className="border-b">
+            <nav className="flex space-x-8">
+              <button
+                onClick={() => setActiveTab('details')}
+                className={`py-4 px-1 border-b-2 font-medium text-sm ${
+                  activeTab === 'details'
+                    ? 'border-primary text-primary'
+                    : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
+                }`}
+              >
+                Details
+              </button>
+              <button
+                onClick={() => setActiveTab('analytics')}
+                className={`py-4 px-1 border-b-2 font-medium text-sm ${
+                  activeTab === 'analytics'
+                    ? 'border-primary text-primary'
+                    : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
+                }`}
+              >
+                Analytics
+              </button>
+              <button
+                onClick={() => setActiveTab('members')}
+                className={`py-4 px-1 border-b-2 font-medium text-sm flex items-center gap-2 ${
+                  activeTab === 'members'
+                    ? 'border-primary text-primary'
+                    : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
+                }`}
+              >
+                <Users className="h-4 w-4" />
+                Members
+              </button>
+            </nav>
+          </div>
+
+          {/* Tab Content */}
+          {activeTab === 'details' && (
+            <>
+              <Card>
+                <CardHeader>
+                  <CardTitle>Details</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <dl className="grid grid-cols-1 gap-6 sm:grid-cols-2">
+                    <div>
+                      <dt className="text-sm font-medium text-muted-foreground">Description</dt>
+                      <dd className="mt-1 text-sm">{world.description || 'No description'}</dd>
                     </div>
-                  </dd>
-                </div>
-                {world.thumbnailUrl && (
-                  <div className="sm:col-span-2">
-                    <dt className="text-sm font-medium text-muted-foreground">Thumbnail</dt>
-                    <dd className="mt-1">
-                      <img src={world.thumbnailUrl} alt={world.name} className="h-20 w-20 object-cover rounded" />
-                    </dd>
-                  </div>
-                )}
-              </dl>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <div className="flex items-center justify-between">
-                <CardTitle>Rooms ({world.rooms.length})</CardTitle>
-                <Button variant="outline" size="sm" asChild>
-                  <Link href={`/admin/rooms/new?worldId=${id}`}>
-                    <Plus className="mr-2 h-4 w-4" />
-                    Add Room
-                  </Link>
-                </Button>
-              </div>
-            </CardHeader>
-            <CardContent>
-              {world.rooms.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No rooms yet. Create one to get started.</p>
-              ) : (
-                <div className="space-y-3">
-                  {world.rooms.map((room) => (
-                    <Link
-                      key={room.id}
-                      href={`/admin/rooms/${room.id}`}
-                      className="block p-3 border rounded-lg hover:bg-accent transition-colors"
-                    >
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <h3 className="text-sm font-medium">{room.name}</h3>
-                          <p className="text-sm text-muted-foreground">
-                            {room._count.favorites} favorites
-                          </p>
+                    <div>
+                      <dt className="text-sm font-medium text-muted-foreground">Status</dt>
+                      <dd className="mt-1">
+                        <div className="flex items-center gap-2">
+                          <Badge variant={world.isPublic ? 'default' : 'secondary'}>
+                            {world.isPublic ? 'Public' : 'Private'}
+                          </Badge>
+                          {world.featured && <Badge variant="outline">Featured</Badge>}
                         </div>
-                        <ChevronRight className="h-4 w-4 text-muted-foreground" />
+                      </dd>
+                    </div>
+                    {world.thumbnailUrl && (
+                      <div className="sm:col-span-2">
+                        <dt className="text-sm font-medium text-muted-foreground">Thumbnail</dt>
+                        <dd className="mt-1">
+                          <img src={world.thumbnailUrl} alt={world.name} className="h-20 w-20 object-cover rounded" />
+                        </dd>
                       </div>
-                    </Link>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
+                    )}
+                  </dl>
+                </CardContent>
+              </Card>
 
-          <Card>
-            <CardHeader>
-              <CardTitle>Analytics</CardTitle>
-            </CardHeader>
+              <Card>
+                <CardHeader>
+                  <div className="flex items-center justify-between">
+                    <CardTitle>Rooms ({world.rooms.length})</CardTitle>
+                    {world.canEdit === true && (
+                      <Button variant="outline" size="sm" asChild>
+                        <Link href={`/admin/rooms/new?worldId=${id}`}>
+                          <Plus className="mr-2 h-4 w-4" />
+                          Add Room
+                        </Link>
+                      </Button>
+                    )}
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  {world.rooms.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">No rooms yet. Create one to get started.</p>
+                  ) : (
+                    <div className="space-y-3">
+                      {world.rooms.map((room) => (
+                        <Link
+                          key={room.id}
+                          href={`/admin/rooms/${room.id}`}
+                          className="block p-3 border rounded-lg hover:bg-accent transition-colors"
+                        >
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <h3 className="text-sm font-medium">{room.name}</h3>
+                              <p className="text-sm text-muted-foreground">
+                                {room._count.favorites} favorites
+                              </p>
+                            </div>
+                            <ChevronRight className="h-4 w-4 text-muted-foreground" />
+                          </div>
+                        </Link>
+                      ))}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            </>
+          )}
+
+          {activeTab === 'analytics' && (
+            <Card>
+              <CardHeader>
+                <CardTitle>Analytics</CardTitle>
+              </CardHeader>
             <CardContent>
               {analyticsLoading ? (
                 <div className="flex items-center justify-center py-12">
@@ -496,7 +546,16 @@ export default function WorldDetailPage() {
                                   {new Date(access.accessedAt).toLocaleString()}
                                 </TableCell>
                                 <TableCell className="text-sm">
-                                  {access.userName || access.userEmail || access.userUuid || 'Guest'}
+                                  {access.userId ? (
+                                    <Link
+                                      href={`/admin/users/${access.userId}`}
+                                      className="text-primary hover:underline"
+                                    >
+                                      {access.userName || access.userEmail || access.userUuid || 'Guest'}
+                                    </Link>
+                                  ) : (
+                                    access.userName || access.userEmail || access.userUuid || 'Guest'
+                                  )}
                                 </TableCell>
                                 <TableCell className="text-sm">
                                   <Link href={`/admin/rooms/${access.room.id}`} className="text-primary hover:underline">
@@ -525,6 +584,35 @@ export default function WorldDetailPage() {
               )}
             </CardContent>
           </Card>
+          )}
+
+          {activeTab === 'members' && (
+            <Card>
+              <CardHeader>
+                <div className="flex items-center justify-between">
+                  <CardTitle>Members</CardTitle>
+                  {world.canEdit !== false && (
+                    <Button onClick={() => setInviteDialogOpen(true)}>
+                      <Plus className="mr-2 h-4 w-4" />
+                      Invite Member
+                    </Button>
+                  )}
+                </div>
+              </CardHeader>
+              <CardContent>
+                <MemberList worldId={id} onRefresh={fetchWorld} />
+              </CardContent>
+            </Card>
+          )}
+
+          <InviteMemberDialog
+            open={inviteDialogOpen}
+            onOpenChange={setInviteDialogOpen}
+            worldId={id}
+            onInviteSent={() => {
+              fetchWorld();
+            }}
+          />
         </>
       )}
 

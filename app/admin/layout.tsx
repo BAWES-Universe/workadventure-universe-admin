@@ -4,6 +4,7 @@ import { prisma } from '@/lib/db';
 import ConditionalNav from './components/conditional-nav';
 import ConditionalContent from './components/conditional-content';
 import { ThemeProvider } from './components/theme-provider';
+import ToastWrapper from './components/toast-wrapper';
 
 async function getSessionUser() {
   try {
@@ -68,12 +69,14 @@ export default async function AdminLayout({ children }: { children: ReactNode })
 
   return (
     <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
-      <div className="min-h-screen bg-background">
-        <ConditionalNav user={user} />
-        <ConditionalContent>
-          {children}
-        </ConditionalContent>
-      </div>
+      <ToastWrapper>
+        <div className="min-h-screen bg-background">
+          <ConditionalNav user={user} />
+          <ConditionalContent>
+            {children}
+          </ConditionalContent>
+        </div>
+      </ToastWrapper>
     </ThemeProvider>
   );
 }

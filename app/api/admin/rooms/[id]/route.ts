@@ -67,7 +67,8 @@ export async function GET(
       );
     }
     
-    // If using session auth (not admin token), check permissions
+    // Check permissions for editing (but allow viewing for anyone)
+    let canEdit = false;
     if (userId && !isAdminToken) {
       // Check if user owns the universe or is an admin member of the world
       const isUniverseOwner = room.world.universe.ownerId === userId;
@@ -81,12 +82,9 @@ export async function GET(
         },
       });
       
-      if (!isUniverseOwner && !isWorldAdmin) {
-        return NextResponse.json(
-          { error: 'Forbidden' },
-          { status: 403 }
-        );
-      }
+      canEdit = isUniverseOwner || !!isWorldAdmin;
+    } else if (isAdminToken) {
+      canEdit = true;
     }
     
     // Sync WAM URL if map-storage is configured and room has a mapUrl
@@ -206,7 +204,13 @@ export async function GET(
       }
     }
     
-    return NextResponse.json(room);
+    // Return room with canEdit flag
+    const responseData = {
+      ...room,
+      canEdit,
+    };
+    
+    return NextResponse.json(responseData);
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized') {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });

@@ -3,6 +3,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Button } from '@/components/ui/button';
 import { Globe, Users, FolderOpen, Home, Plus, TrendingUp } from 'lucide-react';
 import CurrentLocation from './components/current-location';
+import PendingInvitationsAlert from './components/pending-invitations-alert';
 
 async function getStats() {
   const token = process.env.ADMIN_API_TOKEN;
@@ -58,6 +59,8 @@ export default async function AdminDashboard() {
           Overview of your WorkAdventure universe, worlds, rooms, and users.
         </p>
       </div>
+
+      <PendingInvitationsAlert />
       
       {stats.universes === 0 ? (
         <Card className="border-dashed">

@@ -113,6 +113,7 @@ export async function GET(
       recentActivity: recentActivity.map(access => ({
         id: access.id,
         accessedAt: access.accessedAt,
+        userId: access.userId,
         userName: access.userName,
         userEmail: access.userEmail,
         userUuid: access.userUuid,

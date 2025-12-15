@@ -40,6 +40,7 @@ interface Room {
   mapUrl: string | null;
   wamUrl: string | null;
   isPublic: boolean;
+  canEdit?: boolean;
   world: {
     id: string;
     name: string;
@@ -384,14 +385,18 @@ export default function RoomDetailPage() {
                 )}
               </Button>
             )}
-            <Button variant="outline" onClick={() => setIsEditing(true)}>
-              <Edit className="mr-2 h-4 w-4" />
-              Edit
-            </Button>
-            <Button variant="destructive" onClick={() => setDeleteDialogOpen(true)}>
-              <Trash2 className="mr-2 h-4 w-4" />
-              Delete
-            </Button>
+            {room.canEdit !== false && (
+              <>
+                <Button variant="outline" onClick={() => setIsEditing(true)}>
+                  <Edit className="mr-2 h-4 w-4" />
+                  Edit
+                </Button>
+                <Button variant="destructive" onClick={() => setDeleteDialogOpen(true)}>
+                  <Trash2 className="mr-2 h-4 w-4" />
+                  Delete
+                </Button>
+              </>
+            )}
           </div>
         )}
       </div>
@@ -591,7 +596,16 @@ export default function RoomDetailPage() {
                                   {new Date(access.accessedAt).toLocaleString()}
                                 </TableCell>
                                 <TableCell className="text-sm">
-                                  {access.userName || access.userEmail || access.userUuid || 'Guest'}
+                                  {access.userId ? (
+                                    <Link
+                                      href={`/admin/users/${access.userId}`}
+                                      className="text-primary hover:underline"
+                                    >
+                                      {access.userName || access.userEmail || access.userUuid || 'Guest'}
+                                    </Link>
+                                  ) : (
+                                    access.userName || access.userEmail || access.userUuid || 'Guest'
+                                  )}
                                 </TableCell>
                                 {isSuperAdmin && (
                                   <TableCell className="text-sm font-mono text-muted-foreground">

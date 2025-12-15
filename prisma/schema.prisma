@@ -32,6 +32,8 @@ model User {
   requestedFriendships Friendship[]   @relation("RequestedBy")
   roomAccesses      RoomAccess[]
   visitCard         VisitCard?
+  membershipInvitationsSent MembershipInvitation[] @relation("InvitedBy")
+  membershipInvitationsReceived MembershipInvitation[] @relation("InvitedUser")
 
   @@map("users")
 }
@@ -80,6 +82,7 @@ model World {
   avatars    UserAvatar[]
   favorites  Favorite[]
   roomAccesses RoomAccess[]
+  membershipInvitations MembershipInvitation[]
 
   @@unique([universeId, slug]) // Slug unique within universe
   @@map("worlds")
@@ -277,4 +280,29 @@ model VisitCard {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("visit_cards")
+}
+
+// Membership Invitations
+model MembershipInvitation {
+  id            String   @id @default(uuid())
+  worldId       String   @map("world_id")
+  invitedUserId String   @map("invited_user_id")
+  invitedByUserId String  @map("invited_by_user_id")
+  status        String   @default("pending") // pending, accepted, rejected, cancelled
+  tags          String[] // Tags that will be assigned when accepted
+  message       String?
+  invitedAt     DateTime @default(now()) @map("invited_at")
+  respondedAt   DateTime? @map("responded_at")
+
+  // Relations
+  world       World @relation(fields: [worldId], references: [id], onDelete: Cascade)
+  invitedUser User  @relation("InvitedUser", fields: [invitedUserId], references: [id], onDelete: Cascade)
+  invitedBy   User  @relation("InvitedBy", fields: [invitedByUserId], references: [id], onDelete: Cascade)
+
+  @@unique([worldId, invitedUserId, status], name: "UniquePendingInvitation")
+  @@index([worldId])
+  @@index([invitedUserId])
+  @@index([invitedByUserId])
+  @@index([status])
+  @@map("membership_invitations")
 }
