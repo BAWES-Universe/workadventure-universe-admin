@@ -12,7 +12,13 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import { Checkbox } from '@/components/ui/checkbox';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import {
   Table,
@@ -52,7 +58,7 @@ export default function InviteMemberDialog({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
-  const [selectedTags, setSelectedTags] = useState<string[]>(['member']);
+  const [selectedTag, setSelectedTag] = useState<string>('member');
   const [message, setMessage] = useState('');
   const [sending, setSending] = useState(false);
 
@@ -92,7 +98,7 @@ export default function InviteMemberDialog({
         },
         body: JSON.stringify({
           userId,
-          tags: selectedTags,
+          tags: [selectedTag],
           message: message || undefined,
         }),
       });
@@ -104,7 +110,7 @@ export default function InviteMemberDialog({
 
       // Reset form
       setSelectedUserId(null);
-      setSelectedTags(['member']);
+      setSelectedTag('member');
       setMessage('');
       onInviteSent();
       onOpenChange(false);
@@ -115,13 +121,6 @@ export default function InviteMemberDialog({
     }
   }
 
-  function toggleTag(tag: string) {
-    if (selectedTags.includes(tag)) {
-      setSelectedTags(selectedTags.filter(t => t !== tag));
-    } else {
-      setSelectedTags([...selectedTags, tag]);
-    }
-  }
 
   const selectedVisitor = selectedUserId
     ? visitors.find(v => v.id === selectedUserId)
@@ -161,27 +160,19 @@ export default function InviteMemberDialog({
             </div>
 
             <div>
-              <Label>Tags</Label>
-              <div className="mt-2 space-y-2">
-                {AVAILABLE_TAGS.map(tag => (
-                  <div key={tag} className="flex items-center space-x-2">
-                    <Checkbox
-                      id={`tag-${tag}`}
-                      checked={selectedTags.includes(tag)}
-                      onCheckedChange={() => toggleTag(tag)}
-                    />
-                    <Label
-                      htmlFor={`tag-${tag}`}
-                      className="font-normal cursor-pointer capitalize"
-                    >
-                      {tag}
-                    </Label>
-                  </div>
-                ))}
-              </div>
-              {selectedTags.length === 0 && (
-                <p className="text-sm text-destructive mt-1">At least one tag is required</p>
-              )}
+              <Label htmlFor="role">Role</Label>
+              <Select value={selectedTag} onValueChange={setSelectedTag}>
+                <SelectTrigger id="role" className="mt-1">
+                  <SelectValue placeholder="Select a role" />
+                </SelectTrigger>
+                <SelectContent>
+                  {AVAILABLE_TAGS.map(tag => (
+                    <SelectItem key={tag} value={tag}>
+                      <span className="capitalize">{tag}</span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
 
             <div>
@@ -201,7 +192,7 @@ export default function InviteMemberDialog({
                 variant="outline"
                 onClick={() => {
                   setSelectedUserId(null);
-                  setSelectedTags(['member']);
+                  setSelectedTag('member');
                   setMessage('');
                 }}
               >
@@ -209,7 +200,7 @@ export default function InviteMemberDialog({
               </Button>
               <Button
                 onClick={() => handleInvite(selectedUserId)}
-                disabled={sending || selectedTags.length === 0}
+                disabled={sending || !selectedTag}
               >
                 {sending ? (
                   <>

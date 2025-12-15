@@ -19,7 +19,13 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Label } from '@/components/ui/label';
-import { Checkbox } from '@/components/ui/checkbox';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -76,7 +82,7 @@ export default function MemberList({ worldId, onRefresh }: MemberListProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [editingMember, setEditingMember] = useState<Member | null>(null);
-  const [editingTags, setEditingTags] = useState<string[]>([]);
+  const [editingTag, setEditingTag] = useState<string>('member');
   const [saving, setSaving] = useState(false);
   const [deletingMember, setDeletingMember] = useState<Member | null>(null);
   const [cancellingInvitation, setCancellingInvitation] = useState<string | null>(null);
@@ -130,7 +136,7 @@ export default function MemberList({ worldId, onRefresh }: MemberListProps) {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            tags: editingTags,
+            tags: [editingTag],
           }),
         }
       );
@@ -141,7 +147,7 @@ export default function MemberList({ worldId, onRefresh }: MemberListProps) {
       }
 
       setEditingMember(null);
-      setEditingTags([]);
+      setEditingTag('member');
       fetchData();
       onRefresh();
     } catch (err) {
@@ -208,13 +214,6 @@ export default function MemberList({ worldId, onRefresh }: MemberListProps) {
     }
   }
 
-  function toggleTag(tag: string) {
-    if (editingTags.includes(tag)) {
-      setEditingTags(editingTags.filter(t => t !== tag));
-    } else {
-      setEditingTags([...editingTags, tag]);
-    }
-  }
 
   if (loading) {
     return (
@@ -287,7 +286,8 @@ export default function MemberList({ worldId, onRefresh }: MemberListProps) {
                           variant="outline"
                           onClick={() => {
                             setEditingMember(member);
-                            setEditingTags([...member.tags]);
+                            // Use first tag or default to 'member'
+                            setEditingTag(member.tags.length > 0 ? member.tags[0] : 'member');
                           }}
                           disabled={member.isUniverseOwner}
                         >
@@ -386,41 +386,33 @@ export default function MemberList({ worldId, onRefresh }: MemberListProps) {
           </DialogHeader>
           <div className="space-y-4">
             <div>
-              <Label>Tags</Label>
-              <div className="mt-2 space-y-2">
-                {AVAILABLE_TAGS.map(tag => (
-                  <div key={tag} className="flex items-center space-x-2">
-                    <Checkbox
-                      id={`edit-tag-${tag}`}
-                      checked={editingTags.includes(tag)}
-                      onCheckedChange={() => toggleTag(tag)}
-                    />
-                    <Label
-                      htmlFor={`edit-tag-${tag}`}
-                      className="font-normal cursor-pointer capitalize"
-                    >
-                      {tag}
-                    </Label>
-                  </div>
-                ))}
-              </div>
-              {editingTags.length === 0 && (
-                <p className="text-sm text-destructive mt-1">At least one tag is required</p>
-              )}
+              <Label htmlFor="edit-role">Role</Label>
+              <Select value={editingTag} onValueChange={setEditingTag}>
+                <SelectTrigger id="edit-role" className="mt-1">
+                  <SelectValue placeholder="Select a role" />
+                </SelectTrigger>
+                <SelectContent>
+                  {AVAILABLE_TAGS.map(tag => (
+                    <SelectItem key={tag} value={tag}>
+                      <span className="capitalize">{tag}</span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
             <div className="flex justify-end gap-2">
               <Button
                 variant="outline"
                 onClick={() => {
                   setEditingMember(null);
-                  setEditingTags([]);
+                  setEditingTag('member');
                 }}
               >
                 Cancel
               </Button>
               <Button
                 onClick={handleUpdateMember}
-                disabled={saving || editingTags.length === 0}
+                disabled={saving || !editingTag}
               >
                 {saving ? (
                   <>
