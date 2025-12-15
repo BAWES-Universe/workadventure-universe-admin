@@ -51,12 +51,19 @@ export async function GET(
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
     }
 
-    // Get recent visitors (authenticated users only) from RoomAccess
+    // Get recent visitors (users with User records) from RoomAccess
+    // We include any user with a userId, regardless of isAuthenticated flag
+    // because isAuthenticated only indicates if they had OIDC token at access time
+    // Exclude the current user (can't invite yourself)
     const visitors = await prisma.roomAccess.findMany({
       where: {
         worldId: worldId,
-        userId: { not: null }, // Only authenticated users
-        isAuthenticated: true,
+        userId: { 
+          not: null, // Only users with User records (can be invited)
+        },
+        NOT: {
+          userId: sessionUser.id, // Exclude current user
+        },
       },
       select: {
         userId: true,
@@ -72,14 +79,14 @@ export async function GET(
         },
       },
       orderBy: { accessedAt: 'desc' },
-      distinct: ['userId'],
-      take: limit,
+      take: limit * 2, // Get more to account for duplicates before grouping
     });
 
     // Group by userId and get most recent visit
+    // Also filter out current user as a safety check
     const visitorMap = new Map<string, typeof visitors[0]>();
     for (const visitor of visitors) {
-      if (visitor.userId) {
+      if (visitor.userId && visitor.userId !== sessionUser.id) {
         const existing = visitorMap.get(visitor.userId);
         if (!existing || visitor.accessedAt > existing.accessedAt) {
           visitorMap.set(visitor.userId, visitor);
