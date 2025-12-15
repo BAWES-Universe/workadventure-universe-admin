@@ -68,21 +68,22 @@ export async function GET(
     }
     
     // Check permissions for editing (but allow viewing for anyone)
+    // canEdit is true only if user is universe owner OR has editor/admin tags
     let canEdit = false;
     if (userId && !isAdminToken) {
-      // Check if user owns the universe or is an admin member of the world
+      // Check if user owns the universe or has editor/admin tags in the world
       const isUniverseOwner = room.world.universe.ownerId === userId;
-      const isWorldAdmin = await prisma.worldMember.findFirst({
+      const hasEditPermission = await prisma.worldMember.findFirst({
         where: {
           worldId: room.worldId,
           userId: userId,
           tags: {
-            has: 'admin',
+            hasSome: ['admin', 'editor'],
           },
         },
       });
       
-      canEdit = isUniverseOwner || !!isWorldAdmin;
+      canEdit = isUniverseOwner || !!hasEditPermission;
     } else if (isAdminToken) {
       canEdit = true;
     }
@@ -287,21 +288,21 @@ export async function PATCH(
     
     // If using session auth (not admin token), check permissions
     if (userId && !isAdminToken) {
-      // Check if user owns the universe or is an admin member of the world
+      // Check if user owns the universe or has editor/admin tags in the world
       const isUniverseOwner = existing.world.universe.ownerId === userId;
-      const isWorldAdmin = await prisma.worldMember.findFirst({
+      const hasEditPermission = await prisma.worldMember.findFirst({
         where: {
           worldId: existing.worldId,
           userId: userId,
           tags: {
-            has: 'admin',
+            hasSome: ['admin', 'editor'],
           },
         },
       });
       
-      if (!isUniverseOwner && !isWorldAdmin) {
+      if (!isUniverseOwner && !hasEditPermission) {
         return NextResponse.json(
-          { error: 'You can only update rooms in worlds where you are an admin or own the universe' },
+          { error: 'You can only update rooms in worlds where you are an editor/admin or own the universe' },
           { status: 403 }
         );
       }
@@ -429,21 +430,21 @@ export async function DELETE(
     
     // If using session auth (not admin token), check permissions
     if (userId && !isAdminToken) {
-      // Check if user owns the universe or is an admin member of the world
+      // Check if user owns the universe or has editor/admin tags in the world
       const isUniverseOwner = room.world.universe.ownerId === userId;
-      const isWorldAdmin = await prisma.worldMember.findFirst({
+      const hasEditPermission = await prisma.worldMember.findFirst({
         where: {
           worldId: room.worldId,
           userId: userId,
           tags: {
-            has: 'admin',
+            hasSome: ['admin', 'editor'],
           },
         },
       });
       
-      if (!isUniverseOwner && !isWorldAdmin) {
+      if (!isUniverseOwner && !hasEditPermission) {
         return NextResponse.json(
-          { error: 'You can only delete rooms in worlds where you are an admin or own the universe' },
+          { error: 'You can only delete rooms in worlds where you are an editor/admin or own the universe' },
           { status: 403 }
         );
       }

@@ -75,17 +75,19 @@ export async function GET(
     }
     
     // Allow viewing for anyone, but include ownership info
-    // Also check if user is a world admin
+    // canEdit is true only if user is universe owner OR has editor/admin tags
     let canEdit = false;
     if (userId && !isAdminToken) {
       canEdit = world.universe.ownerId === userId;
       if (!canEdit) {
-        // Check if user is a world admin
+        // Check if user has editor or admin tags
         const member = await prisma.worldMember.findFirst({
           where: {
             worldId: world.id,
             userId: userId,
-            tags: { has: 'admin' },
+            tags: {
+              hasSome: ['admin', 'editor'],
+            },
           },
         });
         canEdit = !!member;
