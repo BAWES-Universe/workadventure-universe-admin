@@ -156,9 +156,9 @@ export default function InviteToWorldDialog({
                 </SelectTrigger>
                 <SelectContent>
                   {worlds.length === 0 ? (
-                    <SelectItem value="" disabled>
+                    <div className="px-2 py-1.5 text-sm text-muted-foreground">
                       No worlds available
-                    </SelectItem>
+                    </div>
                   ) : (
                     worlds.map((world) => (
                       <SelectItem key={world.id} value={world.id}>
