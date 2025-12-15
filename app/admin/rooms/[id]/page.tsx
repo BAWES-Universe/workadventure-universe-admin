@@ -30,7 +30,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { ChevronRight, AlertCircle, Loader2, Edit, Trash2, Navigation } from 'lucide-react';
+import { ChevronRight, AlertCircle, Loader2, Edit, Trash2, Navigation, CheckCircle2 } from 'lucide-react';
 
 interface Room {
   id: string;
@@ -69,8 +69,9 @@ export default function RoomDetailPage() {
   const [deleting, setDeleting] = useState(false);
   const [currentUser, setCurrentUser] = useState<any>(null);
   const [isSuperAdmin, setIsSuperAdmin] = useState(false);
+  const [currentRoomPath, setCurrentRoomPath] = useState<string | null>(null);
   
-  const { isReady: waReady, navigateToRoom } = useWorkAdventure();
+  const { wa, isReady: waReady, navigateToRoom } = useWorkAdventure();
   
   const [formData, setFormData] = useState({
     slug: '',
@@ -85,6 +86,12 @@ export default function RoomDetailPage() {
     fetchRoom();
     fetchAnalytics();
   }, [id]);
+
+  useEffect(() => {
+    if (room && wa && waReady) {
+      checkCurrentRoom();
+    }
+  }, [room?.id, wa, waReady]); // Only depend on room.id to avoid unnecessary re-runs
 
   async function checkAuth() {
     try {
@@ -202,6 +209,53 @@ export default function RoomDetailPage() {
     }
   }
 
+  async function checkCurrentRoom() {
+    if (!waReady || !wa || !room) {
+      setCurrentRoomPath(null);
+      return;
+    }
+
+    try {
+      await wa.onInit();
+      
+      // Construct the expected room path for this room
+      const expectedRoomPath = `/@/${room.world.universe.slug}/${room.world.slug}/${room.slug}`;
+      
+      // Get current room info from WorkAdventure
+      const currentRoomId = wa.room.id;
+      
+      // Extract the path from the full URL if it's a URL
+      // WorkAdventure returns: http://play.workadventure.localhost/@/universe/world/room
+      // We need: /@/universe/world/room
+      let currentRoomPath = currentRoomId;
+      if (currentRoomId && typeof currentRoomId === 'string') {
+        if (currentRoomId.startsWith('http')) {
+          try {
+            const url = new URL(currentRoomId);
+            currentRoomPath = url.pathname;
+          } catch {
+            // If URL parsing fails, try to extract path manually
+            const pathMatch = currentRoomId.match(/\/@\/[^?#]+/);
+            if (pathMatch) {
+              currentRoomPath = pathMatch[0];
+            }
+          }
+        }
+      }
+      
+      // Compare the paths
+      if (currentRoomPath === expectedRoomPath) {
+        setCurrentRoomPath('match');
+        return;
+      }
+      
+      setCurrentRoomPath(null);
+    } catch (err) {
+      console.error('[RoomDetail] Failed to get current room:', err);
+      setCurrentRoomPath(null);
+    }
+  }
+
   async function handleVisitRoomInUniverse() {
     if (!room) {
       alert('Room data not available');
@@ -224,6 +278,10 @@ export default function RoomDetailPage() {
       setWaNavigating(false);
     }
   }
+
+  // Check if user is currently in this room
+  // Compare by room ID (WorkAdventure might store the database room ID)
+  const isInCurrentRoom = waReady && currentRoomPath === 'match' && room;
 
   if (loading) {
     return (
@@ -301,24 +359,31 @@ export default function RoomDetailPage() {
         </div>
         {!isEditing && (
           <div className="flex flex-wrap gap-2">
-            <Button
-              variant="default"
-              onClick={handleVisitRoomInUniverse}
-              disabled={waNavigating || !waReady}
-              title={!waReady ? 'WorkAdventure API not available (only works in iframe)' : undefined}
-            >
-              {waNavigating ? (
-                <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  Navigating...
-                </>
-              ) : (
-                <>
-                  <Navigation className="mr-2 h-4 w-4" />
-                  Visit
-                </>
-              )}
-            </Button>
+            {isInCurrentRoom ? (
+              <Alert className="border-green-200 bg-green-50 dark:bg-green-950 dark:border-green-800">
+                <CheckCircle2 className="h-4 w-4 text-green-600 dark:text-green-400" />
+                <AlertTitle className="text-green-800 dark:text-green-200">You are currently in this room</AlertTitle>
+              </Alert>
+            ) : (
+              <Button
+                variant="default"
+                onClick={handleVisitRoomInUniverse}
+                disabled={waNavigating || !waReady}
+                title={!waReady ? 'WorkAdventure API not available (only works in iframe)' : undefined}
+              >
+                {waNavigating ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    Navigating...
+                  </>
+                ) : (
+                  <>
+                    <Navigation className="mr-2 h-4 w-4" />
+                    Visit
+                  </>
+                )}
+              </Button>
+            )}
             <Button variant="outline" onClick={() => setIsEditing(true)}>
               <Edit className="mr-2 h-4 w-4" />
               Edit
