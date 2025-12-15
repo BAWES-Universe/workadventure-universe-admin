@@ -15,7 +15,8 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
-import { ChevronRight, AlertCircle, Loader2, Globe, Users, Star, Ban } from 'lucide-react';
+import { ChevronRight, AlertCircle, Loader2, Globe, Users, Star, Ban, UserPlus } from 'lucide-react';
+import InviteToWorldDialog from '../components/invite-to-world-dialog';
 
 interface WorldMembership {
   id: string;
@@ -75,6 +76,7 @@ export default function UserDetailPage() {
   const [accessHistoryPage, setAccessHistoryPage] = useState(1);
   const [currentUser, setCurrentUser] = useState<any>(null);
   const [isSuperAdmin, setIsSuperAdmin] = useState(false);
+  const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
 
   useEffect(() => {
     checkAuth();
@@ -176,11 +178,17 @@ export default function UserDetailPage() {
         <span className="text-foreground">{user.name || user.email || 'User'}</span>
       </nav>
 
-      <div className="space-y-1">
-        <h1 className="text-4xl font-bold tracking-tight">{user.name || user.email || 'Unknown User'}</h1>
-        <p className="text-muted-foreground">
-          UUID: <code className="bg-muted px-1.5 py-0.5 rounded font-mono text-xs">{user.uuid}</code>
-        </p>
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div className="space-y-1">
+          <h1 className="text-4xl font-bold tracking-tight">{user.name || user.email || 'Unknown User'}</h1>
+          <p className="text-muted-foreground">
+            UUID: <code className="bg-muted px-1.5 py-0.5 rounded font-mono text-xs">{user.uuid}</code>
+          </p>
+        </div>
+        <Button onClick={() => setInviteDialogOpen(true)}>
+          <UserPlus className="mr-2 h-4 w-4" />
+          Invite to World
+        </Button>
       </div>
 
       {error && (
@@ -492,6 +500,15 @@ export default function UserDetailPage() {
           )}
         </CardContent>
       </Card>
+
+      <InviteToWorldDialog
+        open={inviteDialogOpen}
+        onOpenChange={setInviteDialogOpen}
+        userId={id}
+        onInviteSent={() => {
+          fetchUser();
+        }}
+      />
     </div>
   );
 }

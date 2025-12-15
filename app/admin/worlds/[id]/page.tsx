@@ -29,7 +29,9 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { ChevronRight, AlertCircle, Loader2, Plus, Edit, Trash2 } from 'lucide-react';
+import { ChevronRight, AlertCircle, Loader2, Plus, Edit, Trash2, Users } from 'lucide-react';
+import InviteMemberDialog from '../components/invite-member-dialog';
+import MemberList from '../components/member-list';
 
 interface World {
   id: string;
@@ -68,6 +70,8 @@ export default function WorldDetailPage() {
   const [analyticsLoading, setAnalyticsLoading] = useState(true);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [activeTab, setActiveTab] = useState<'details' | 'rooms' | 'analytics' | 'members'>('details');
+  const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
   
   const [formData, setFormData] = useState({
     slug: '',
@@ -371,10 +375,59 @@ export default function WorldDetailPage() {
         </Card>
       ) : (
         <>
-          <Card>
-            <CardHeader>
-              <CardTitle>Details</CardTitle>
-            </CardHeader>
+          {/* Tabs */}
+          <div className="border-b">
+            <nav className="flex space-x-8">
+              <button
+                onClick={() => setActiveTab('details')}
+                className={`py-4 px-1 border-b-2 font-medium text-sm ${
+                  activeTab === 'details'
+                    ? 'border-primary text-primary'
+                    : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
+                }`}
+              >
+                Details
+              </button>
+              <button
+                onClick={() => setActiveTab('rooms')}
+                className={`py-4 px-1 border-b-2 font-medium text-sm ${
+                  activeTab === 'rooms'
+                    ? 'border-primary text-primary'
+                    : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
+                }`}
+              >
+                Rooms ({world.rooms.length})
+              </button>
+              <button
+                onClick={() => setActiveTab('analytics')}
+                className={`py-4 px-1 border-b-2 font-medium text-sm ${
+                  activeTab === 'analytics'
+                    ? 'border-primary text-primary'
+                    : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
+                }`}
+              >
+                Analytics
+              </button>
+              <button
+                onClick={() => setActiveTab('members')}
+                className={`py-4 px-1 border-b-2 font-medium text-sm flex items-center gap-2 ${
+                  activeTab === 'members'
+                    ? 'border-primary text-primary'
+                    : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
+                }`}
+              >
+                <Users className="h-4 w-4" />
+                Members
+              </button>
+            </nav>
+          </div>
+
+          {/* Tab Content */}
+          {activeTab === 'details' && (
+            <Card>
+              <CardHeader>
+                <CardTitle>Details</CardTitle>
+              </CardHeader>
             <CardContent>
               <dl className="grid grid-cols-1 gap-6 sm:grid-cols-2">
                 <div>
@@ -403,11 +456,13 @@ export default function WorldDetailPage() {
               </dl>
             </CardContent>
           </Card>
+          )}
 
-          <Card>
-            <CardHeader>
-              <div className="flex items-center justify-between">
-                <CardTitle>Rooms ({world.rooms.length})</CardTitle>
+          {activeTab === 'rooms' && (
+            <Card>
+              <CardHeader>
+                <div className="flex items-center justify-between">
+                  <CardTitle>Rooms ({world.rooms.length})</CardTitle>
                 <Button variant="outline" size="sm" asChild>
                   <Link href={`/admin/rooms/new?worldId=${id}`}>
                     <Plus className="mr-2 h-4 w-4" />
@@ -442,11 +497,13 @@ export default function WorldDetailPage() {
               )}
             </CardContent>
           </Card>
+          )}
 
-          <Card>
-            <CardHeader>
-              <CardTitle>Analytics</CardTitle>
-            </CardHeader>
+          {activeTab === 'analytics' && (
+            <Card>
+              <CardHeader>
+                <CardTitle>Analytics</CardTitle>
+              </CardHeader>
             <CardContent>
               {analyticsLoading ? (
                 <div className="flex items-center justify-center py-12">
@@ -525,6 +582,33 @@ export default function WorldDetailPage() {
               )}
             </CardContent>
           </Card>
+          )}
+
+          {activeTab === 'members' && (
+            <Card>
+              <CardHeader>
+                <div className="flex items-center justify-between">
+                  <CardTitle>Members</CardTitle>
+                  <Button onClick={() => setInviteDialogOpen(true)}>
+                    <Plus className="mr-2 h-4 w-4" />
+                    Invite Member
+                  </Button>
+                </div>
+              </CardHeader>
+              <CardContent>
+                <MemberList worldId={id} onRefresh={fetchWorld} />
+              </CardContent>
+            </Card>
+          )}
+
+          <InviteMemberDialog
+            open={inviteDialogOpen}
+            onOpenChange={setInviteDialogOpen}
+            worldId={id}
+            onInviteSent={() => {
+              fetchWorld();
+            }}
+          />
         </>
       )}
 
