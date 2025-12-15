@@ -273,7 +273,7 @@ export default function UniverseDetailPage() {
             Slug: <code className="bg-muted px-1.5 py-0.5 rounded text-sm">{universe.slug}</code>
           </p>
         </div>
-        {!isEditing && universe.canEdit !== false && (
+        {!isEditing && universe.canEdit === true && (
           <div className="flex flex-wrap gap-2">
             <Button variant="default" asChild>
               <Link href={`/admin/worlds/new?universeId=${id}`}>
@@ -466,12 +466,14 @@ export default function UniverseDetailPage() {
             <CardHeader>
               <div className="flex items-center justify-between">
                 <CardTitle>Worlds ({universe.worlds.length})</CardTitle>
-                <Button variant="outline" size="sm" asChild>
-                  <Link href={`/admin/worlds/new?universeId=${id}`}>
-                    <Plus className="mr-2 h-4 w-4" />
-                    Add World
-                  </Link>
-                </Button>
+                {universe.canEdit === true && (
+                  <Button variant="outline" size="sm" asChild>
+                    <Link href={`/admin/worlds/new?universeId=${id}`}>
+                      <Plus className="mr-2 h-4 w-4" />
+                      Add World
+                    </Link>
+                  </Button>
+                )}
               </div>
             </CardHeader>
             <CardContent>
@@ -554,7 +556,16 @@ export default function UniverseDetailPage() {
                                   {new Date(access.accessedAt).toLocaleString()}
                                 </TableCell>
                                 <TableCell className="text-sm">
-                                  {access.userName || access.userEmail || access.userUuid || 'Guest'}
+                                  {access.userId ? (
+                                    <Link
+                                      href={`/admin/users/${access.userId}`}
+                                      className="text-primary hover:underline"
+                                    >
+                                      {access.userName || access.userEmail || access.userUuid || 'Guest'}
+                                    </Link>
+                                  ) : (
+                                    access.userName || access.userEmail || access.userUuid || 'Guest'
+                                  )}
                                 </TableCell>
                                 <TableCell className="text-sm">
                                   <Link href={`/admin/worlds/${access.world.id}`} className="text-primary hover:underline">

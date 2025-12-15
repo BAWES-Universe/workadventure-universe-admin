@@ -39,6 +39,7 @@ import {
 import { Edit, Trash2, Loader2, X } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { AlertCircle } from 'lucide-react';
+import Link from 'next/link';
 
 interface Member {
   id: string;
@@ -256,7 +257,12 @@ export default function MemberList({ worldId, onRefresh }: MemberListProps) {
                 {members.map((member) => (
                   <TableRow key={member.id}>
                     <TableCell className="font-medium">
-                      {member.user.name || member.user.email || 'Unknown'}
+                      <Link
+                        href={`/admin/users/${member.user.id}`}
+                        className="text-primary hover:underline"
+                      >
+                        {member.user.name || member.user.email || 'Unknown'}
+                      </Link>
                       {member.isUniverseOwner && (
                         <Badge variant="outline" className="ml-2">Owner</Badge>
                       )}
@@ -340,9 +346,14 @@ export default function MemberList({ worldId, onRefresh }: MemberListProps) {
                 {invitations.map((invitation) => (
                   <TableRow key={invitation.id}>
                     <TableCell className="font-medium">
-                      {invitation.invitedUser.name ||
-                        invitation.invitedUser.email ||
-                        'Unknown'}
+                      <Link
+                        href={`/admin/users/${invitation.invitedUser.id}`}
+                        className="text-primary hover:underline"
+                      >
+                        {invitation.invitedUser.name ||
+                          invitation.invitedUser.email ||
+                          'Unknown'}
+                      </Link>
                     </TableCell>
                     <TableCell>
                       <div className="flex flex-wrap gap-1">

@@ -249,7 +249,7 @@ export default function WorldDetailPage() {
             In <Link href={`/admin/universes/${world.universe.id}`} className="text-primary hover:underline">{world.universe.name}</Link> • Slug: <code className="bg-muted px-1.5 py-0.5 rounded text-sm">{world.slug}</code>
           </p>
         </div>
-        {!isEditing && world.canEdit !== false && (
+        {!isEditing && world.canEdit === true && (
           <div className="flex flex-wrap gap-2">
             <Button variant="default" asChild>
               <Link href={`/admin/rooms/new?worldId=${id}`}>
@@ -461,15 +461,17 @@ export default function WorldDetailPage() {
 
           {activeTab === 'rooms' && (
             <Card>
-              <CardHeader>
-                <div className="flex items-center justify-between">
+            <CardHeader>
+              <div className="flex items-center justify-between">
                   <CardTitle>Rooms ({world.rooms.length})</CardTitle>
-                <Button variant="outline" size="sm" asChild>
-                  <Link href={`/admin/rooms/new?worldId=${id}`}>
-                    <Plus className="mr-2 h-4 w-4" />
-                    Add Room
-                  </Link>
-                </Button>
+                {world.canEdit === true && (
+                  <Button variant="outline" size="sm" asChild>
+                    <Link href={`/admin/rooms/new?worldId=${id}`}>
+                      <Plus className="mr-2 h-4 w-4" />
+                      Add Room
+                    </Link>
+                  </Button>
+                )}
               </div>
             </CardHeader>
             <CardContent>
@@ -554,7 +556,16 @@ export default function WorldDetailPage() {
                                   {new Date(access.accessedAt).toLocaleString()}
                                 </TableCell>
                                 <TableCell className="text-sm">
-                                  {access.userName || access.userEmail || access.userUuid || 'Guest'}
+                                  {access.userId ? (
+                                    <Link
+                                      href={`/admin/users/${access.userId}`}
+                                      className="text-primary hover:underline"
+                                    >
+                                      {access.userName || access.userEmail || access.userUuid || 'Guest'}
+                                    </Link>
+                                  ) : (
+                                    access.userName || access.userEmail || access.userUuid || 'Guest'
+                                  )}
                                 </TableCell>
                                 <TableCell className="text-sm">
                                   <Link href={`/admin/rooms/${access.room.id}`} className="text-primary hover:underline">

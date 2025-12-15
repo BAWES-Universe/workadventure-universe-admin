@@ -596,7 +596,16 @@ export default function RoomDetailPage() {
                                   {new Date(access.accessedAt).toLocaleString()}
                                 </TableCell>
                                 <TableCell className="text-sm">
-                                  {access.userName || access.userEmail || access.userUuid || 'Guest'}
+                                  {access.userId ? (
+                                    <Link
+                                      href={`/admin/users/${access.userId}`}
+                                      className="text-primary hover:underline"
+                                    >
+                                      {access.userName || access.userEmail || access.userUuid || 'Guest'}
+                                    </Link>
+                                  ) : (
+                                    access.userName || access.userEmail || access.userUuid || 'Guest'
+                                  )}
                                 </TableCell>
                                 {isSuperAdmin && (
                                   <TableCell className="text-sm font-mono text-muted-foreground">
