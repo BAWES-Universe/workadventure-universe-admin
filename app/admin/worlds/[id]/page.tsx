@@ -30,8 +30,8 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { ChevronRight, AlertCircle, Loader2, Plus, Edit, Trash2, Users } from 'lucide-react';
-import InviteMemberDialog from '../components/invite-member-dialog';
-import MemberList from '../components/member-list';
+import InviteMemberDialog from '../../components/invite-member-dialog';
+import MemberList from '../../components/member-list';
 
 interface World {
   id: string;

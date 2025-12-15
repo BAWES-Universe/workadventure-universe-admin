@@ -16,7 +16,7 @@ import {
 } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
 import { ChevronRight, AlertCircle, Loader2, Globe, Users, Star, Ban, UserPlus } from 'lucide-react';
-import InviteToWorldDialog from '../components/invite-to-world-dialog';
+import InviteToWorldDialog from '../../components/invite-to-world-dialog';
 
 interface WorldMembership {
   id: string;
