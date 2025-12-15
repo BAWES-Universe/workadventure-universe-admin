@@ -213,20 +213,18 @@ export default function MyMembershipsPage() {
       )}
 
       {/* Pending Invitations */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Mail className="h-5 w-5" />
-            Pending Invitations
-          </CardTitle>
-          <CardDescription>
-            You have {invitations.length} pending invitation{invitations.length !== 1 ? 's' : ''}
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          {invitations.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No pending invitations.</p>
-          ) : (
+      {invitations.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Mail className="h-5 w-5" />
+              Pending Invitations
+            </CardTitle>
+            <CardDescription>
+              You have {invitations.length} pending invitation{invitations.length !== 1 ? 's' : ''}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
             <div className="space-y-4">
               {invitations.map((invitation) => (
                 <Card key={invitation.id} className="border">
@@ -295,9 +293,9 @@ export default function MyMembershipsPage() {
                 </Card>
               ))}
             </div>
-          )}
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
+      )}
 
       {/* My Memberships */}
       <Card>

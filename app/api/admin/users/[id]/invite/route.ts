@@ -109,46 +109,104 @@ export async function POST(
       );
     }
 
-    // Create invitation
-    const invitation = await prisma.membershipInvitation.create({
-      data: {
+    // Check if there's a cancelled/rejected invitation that we should reactivate
+    const existingNonPendingInvitation = await prisma.membershipInvitation.findFirst({
+      where: {
         worldId: data.worldId,
         invitedUserId: invitedUserId,
-        invitedByUserId: sessionUser.id,
-        status: 'pending',
-        tags: data.tags,
-        message: data.message || null,
+        status: { in: ['cancelled', 'rejected'] },
       },
-      include: {
-        world: {
-          select: {
-            id: true,
-            name: true,
-            slug: true,
-            universe: {
-              select: {
-                id: true,
-                name: true,
-                slug: true,
+      orderBy: {
+        invitedAt: 'desc',
+      },
+    });
+
+    let invitation;
+    if (existingNonPendingInvitation) {
+      // Reactivate the invitation
+      invitation = await prisma.membershipInvitation.update({
+        where: { id: existingNonPendingInvitation.id },
+        data: {
+          status: 'pending',
+          invitedByUserId: sessionUser.id,
+          tags: data.tags,
+          message: data.message || null,
+          invitedAt: new Date(),
+          respondedAt: null,
+        },
+        include: {
+          world: {
+            select: {
+              id: true,
+              name: true,
+              slug: true,
+              universe: {
+                select: {
+                  id: true,
+                  name: true,
+                  slug: true,
+                },
               },
             },
           },
-        },
-        invitedBy: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
+          invitedBy: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+            },
           },
         },
-      },
-    });
+      });
+    } else {
+      // Create new invitation
+      invitation = await prisma.membershipInvitation.create({
+        data: {
+          worldId: data.worldId,
+          invitedUserId: invitedUserId,
+          invitedByUserId: sessionUser.id,
+          status: 'pending',
+          tags: data.tags,
+          message: data.message || null,
+        },
+        include: {
+          world: {
+            select: {
+              id: true,
+              name: true,
+              slug: true,
+              universe: {
+                select: {
+                  id: true,
+                  name: true,
+                  slug: true,
+                },
+              },
+            },
+          },
+          invitedBy: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+            },
+          },
+        },
+      });
+    }
 
     return NextResponse.json({ invitation }, { status: 201 });
   } catch (error) {
     if (error instanceof z.ZodError) {
       return NextResponse.json(
         { error: 'Invalid request data', details: error.issues },
+        { status: 400 }
+      );
+    }
+    // Handle Prisma unique constraint errors
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'P2002') {
+      return NextResponse.json(
+        { error: 'User already has a pending invitation to this world' },
         { status: 400 }
       );
     }

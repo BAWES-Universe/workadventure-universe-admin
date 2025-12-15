@@ -299,7 +299,7 @@ model MembershipInvitation {
   invitedUser User  @relation("InvitedUser", fields: [invitedUserId], references: [id], onDelete: Cascade)
   invitedBy   User  @relation("InvitedBy", fields: [invitedByUserId], references: [id], onDelete: Cascade)
 
-  @@unique([worldId, invitedUserId])
+  @@unique([worldId, invitedUserId, status], name: "UniquePendingInvitation")
   @@index([worldId])
   @@index([invitedUserId])
   @@index([invitedByUserId])

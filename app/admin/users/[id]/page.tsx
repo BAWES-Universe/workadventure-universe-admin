@@ -77,12 +77,20 @@ export default function UserDetailPage() {
   const [currentUser, setCurrentUser] = useState<any>(null);
   const [isSuperAdmin, setIsSuperAdmin] = useState(false);
   const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
+  const [availableWorlds, setAvailableWorlds] = useState<any[]>([]);
+  const [worldsLoading, setWorldsLoading] = useState(false);
 
   useEffect(() => {
     checkAuth();
     fetchUser();
     fetchAccessHistory();
   }, [id, accessHistoryPage]);
+
+  useEffect(() => {
+    if (currentUser && user && currentUser.id !== user.id) {
+      fetchAvailableWorlds();
+    }
+  }, [currentUser, user]);
 
   async function checkAuth() {
     try {
@@ -142,6 +150,31 @@ export default function UserDetailPage() {
     }
   }
 
+  async function fetchAvailableWorlds() {
+    if (!currentUser || !user || currentUser.id === user.id) {
+      setAvailableWorlds([]);
+      return;
+    }
+
+    try {
+      setWorldsLoading(true);
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch(`/api/admin/users/${id}/worlds`);
+
+      if (!response.ok) {
+        throw new Error('Failed to fetch available worlds');
+      }
+
+      const data = await response.json();
+      setAvailableWorlds(data.worlds || []);
+    } catch (err) {
+      console.error('Failed to fetch available worlds:', err);
+      setAvailableWorlds([]);
+    } finally {
+      setWorldsLoading(false);
+    }
+  }
+
   if (loading) {
     return (
       <div className="space-y-8">
@@ -185,10 +218,12 @@ export default function UserDetailPage() {
             UUID: <code className="bg-muted px-1.5 py-0.5 rounded font-mono text-xs">{user.uuid}</code>
           </p>
         </div>
-        <Button onClick={() => setInviteDialogOpen(true)}>
-          <UserPlus className="mr-2 h-4 w-4" />
-          Invite to World
-        </Button>
+        {currentUser && currentUser.id !== user.id && availableWorlds.length > 0 && (
+          <Button onClick={() => setInviteDialogOpen(true)}>
+            <UserPlus className="mr-2 h-4 w-4" />
+            Invite to World
+          </Button>
+        )}
       </div>
 
       {error && (

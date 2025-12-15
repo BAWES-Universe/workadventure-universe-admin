@@ -183,7 +183,7 @@ export async function POST(
     }
 
     // Check if there's already a pending invitation
-    const existingInvitation = await prisma.membershipInvitation.findFirst({
+    const existingPendingInvitation = await prisma.membershipInvitation.findFirst({
       where: {
         worldId: id,
         invitedUserId: data.userId,
@@ -191,60 +191,125 @@ export async function POST(
       },
     });
 
-    if (existingInvitation) {
+    if (existingPendingInvitation) {
       return NextResponse.json(
         { error: 'User already has a pending invitation' },
         { status: 400 }
       );
     }
 
-    // Create invitation
-    const invitation = await prisma.membershipInvitation.create({
-      data: {
+    // Check if there's a cancelled/rejected invitation that we should reactivate
+    const existingNonPendingInvitation = await prisma.membershipInvitation.findFirst({
+      where: {
         worldId: id,
         invitedUserId: data.userId,
-        invitedByUserId: sessionUser.id,
-        status: 'pending',
-        tags: data.tags,
-        message: data.message || null,
+        status: { in: ['cancelled', 'rejected'] },
       },
-      include: {
-        invitedUser: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
-          },
+      orderBy: {
+        invitedAt: 'desc',
+      },
+    });
+
+    let invitation;
+    if (existingNonPendingInvitation) {
+      // Reactivate the invitation
+      invitation = await prisma.membershipInvitation.update({
+        where: { id: existingNonPendingInvitation.id },
+        data: {
+          status: 'pending',
+          invitedByUserId: sessionUser.id,
+          tags: data.tags,
+          message: data.message || null,
+          invitedAt: new Date(),
+          respondedAt: null,
         },
-        invitedBy: {
-          select: {
-            id: true,
-            name: true,
-            email: true,
+        include: {
+          invitedUser: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+            },
           },
-        },
-        world: {
-          select: {
-            id: true,
-            name: true,
-            slug: true,
-            universe: {
-              select: {
-                id: true,
-                name: true,
-                slug: true,
+          invitedBy: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+            },
+          },
+          world: {
+            select: {
+              id: true,
+              name: true,
+              slug: true,
+              universe: {
+                select: {
+                  id: true,
+                  name: true,
+                  slug: true,
+                },
               },
             },
           },
         },
-      },
-    });
+      });
+    } else {
+      // Create new invitation
+      invitation = await prisma.membershipInvitation.create({
+        data: {
+          worldId: id,
+          invitedUserId: data.userId,
+          invitedByUserId: sessionUser.id,
+          status: 'pending',
+          tags: data.tags,
+          message: data.message || null,
+        },
+        include: {
+          invitedUser: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+            },
+          },
+          invitedBy: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+            },
+          },
+          world: {
+            select: {
+              id: true,
+              name: true,
+              slug: true,
+              universe: {
+                select: {
+                  id: true,
+                  name: true,
+                  slug: true,
+                },
+              },
+            },
+          },
+        },
+      });
+    }
 
     return NextResponse.json({ invitation }, { status: 201 });
   } catch (error) {
     if (error instanceof z.ZodError) {
       return NextResponse.json(
         { error: 'Invalid request data', details: error.issues },
+        { status: 400 }
+      );
+    }
+    // Handle Prisma unique constraint errors
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'P2002') {
+      return NextResponse.json(
+        { error: 'User already has a pending invitation to this world' },
         { status: 400 }
       );
     }

@@ -20,6 +20,7 @@ import {
 } from '@/components/ui/select';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Loader2, AlertCircle, UserPlus } from 'lucide-react';
+import { useToast } from '@/components/ui/toast';
 
 interface World {
   id: string;
@@ -54,10 +55,12 @@ export default function InviteToWorldDialog({
   const [selectedTag, setSelectedTag] = useState<string>('member');
   const [message, setMessage] = useState('');
   const [sending, setSending] = useState(false);
+  const { addToast } = useToast();
 
   useEffect(() => {
     if (open && userId) {
       fetchWorlds();
+      setError(null);
     }
   }, [open, userId]);
 
@@ -103,15 +106,22 @@ export default function InviteToWorldDialog({
         throw new Error(data.error || 'Failed to send invitation');
       }
 
-      // Reset form
+      // Show toast and close immediately
+      addToast({
+        description: 'Invitation sent successfully!',
+        variant: 'success',
+      });
+      
+      // Reset form and close immediately
       setSelectedWorldId('');
       setSelectedTag('member');
       setMessage('');
+      setError(null);
+      setSending(false);
       onInviteSent();
       onOpenChange(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to send invitation');
-    } finally {
       setSending(false);
     }
   }
@@ -134,7 +144,7 @@ export default function InviteToWorldDialog({
           </Alert>
         )}
 
-        {loading ? (
+        {loading || sending ? (
           <div className="flex items-center justify-center py-12">
             <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
           </div>

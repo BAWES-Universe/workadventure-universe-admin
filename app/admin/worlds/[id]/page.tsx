@@ -71,7 +71,7 @@ export default function WorldDetailPage() {
   const [analyticsLoading, setAnalyticsLoading] = useState(true);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const [activeTab, setActiveTab] = useState<'details' | 'rooms' | 'analytics' | 'members'>('details');
+  const [activeTab, setActiveTab] = useState<'details' | 'analytics' | 'members'>('details');
   const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
   
   const [formData, setFormData] = useState({
@@ -390,16 +390,6 @@ export default function WorldDetailPage() {
                 Details
               </button>
               <button
-                onClick={() => setActiveTab('rooms')}
-                className={`py-4 px-1 border-b-2 font-medium text-sm ${
-                  activeTab === 'rooms'
-                    ? 'border-primary text-primary'
-                    : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
-                }`}
-              >
-                Rooms ({world.rooms.length})
-              </button>
-              <button
                 onClick={() => setActiveTab('analytics')}
                 className={`py-4 px-1 border-b-2 font-medium text-sm ${
                   activeTab === 'analytics'
@@ -425,81 +415,81 @@ export default function WorldDetailPage() {
 
           {/* Tab Content */}
           {activeTab === 'details' && (
-            <Card>
-              <CardHeader>
-                <CardTitle>Details</CardTitle>
-              </CardHeader>
-            <CardContent>
-              <dl className="grid grid-cols-1 gap-6 sm:grid-cols-2">
-                <div>
-                  <dt className="text-sm font-medium text-muted-foreground">Description</dt>
-                  <dd className="mt-1 text-sm">{world.description || 'No description'}</dd>
-                </div>
-                <div>
-                  <dt className="text-sm font-medium text-muted-foreground">Status</dt>
-                  <dd className="mt-1">
-                    <div className="flex items-center gap-2">
-                      <Badge variant={world.isPublic ? 'default' : 'secondary'}>
-                        {world.isPublic ? 'Public' : 'Private'}
-                      </Badge>
-                      {world.featured && <Badge variant="outline">Featured</Badge>}
+            <>
+              <Card>
+                <CardHeader>
+                  <CardTitle>Details</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <dl className="grid grid-cols-1 gap-6 sm:grid-cols-2">
+                    <div>
+                      <dt className="text-sm font-medium text-muted-foreground">Description</dt>
+                      <dd className="mt-1 text-sm">{world.description || 'No description'}</dd>
                     </div>
-                  </dd>
-                </div>
-                {world.thumbnailUrl && (
-                  <div className="sm:col-span-2">
-                    <dt className="text-sm font-medium text-muted-foreground">Thumbnail</dt>
-                    <dd className="mt-1">
-                      <img src={world.thumbnailUrl} alt={world.name} className="h-20 w-20 object-cover rounded" />
-                    </dd>
-                  </div>
-                )}
-              </dl>
-            </CardContent>
-          </Card>
-          )}
-
-          {activeTab === 'rooms' && (
-            <Card>
-            <CardHeader>
-              <div className="flex items-center justify-between">
-                  <CardTitle>Rooms ({world.rooms.length})</CardTitle>
-                {world.canEdit === true && (
-                  <Button variant="outline" size="sm" asChild>
-                    <Link href={`/admin/rooms/new?worldId=${id}`}>
-                      <Plus className="mr-2 h-4 w-4" />
-                      Add Room
-                    </Link>
-                  </Button>
-                )}
-              </div>
-            </CardHeader>
-            <CardContent>
-              {world.rooms.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No rooms yet. Create one to get started.</p>
-              ) : (
-                <div className="space-y-3">
-                  {world.rooms.map((room) => (
-                    <Link
-                      key={room.id}
-                      href={`/admin/rooms/${room.id}`}
-                      className="block p-3 border rounded-lg hover:bg-accent transition-colors"
-                    >
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <h3 className="text-sm font-medium">{room.name}</h3>
-                          <p className="text-sm text-muted-foreground">
-                            {room._count.favorites} favorites
-                          </p>
+                    <div>
+                      <dt className="text-sm font-medium text-muted-foreground">Status</dt>
+                      <dd className="mt-1">
+                        <div className="flex items-center gap-2">
+                          <Badge variant={world.isPublic ? 'default' : 'secondary'}>
+                            {world.isPublic ? 'Public' : 'Private'}
+                          </Badge>
+                          {world.featured && <Badge variant="outline">Featured</Badge>}
                         </div>
-                        <ChevronRight className="h-4 w-4 text-muted-foreground" />
+                      </dd>
+                    </div>
+                    {world.thumbnailUrl && (
+                      <div className="sm:col-span-2">
+                        <dt className="text-sm font-medium text-muted-foreground">Thumbnail</dt>
+                        <dd className="mt-1">
+                          <img src={world.thumbnailUrl} alt={world.name} className="h-20 w-20 object-cover rounded" />
+                        </dd>
                       </div>
-                    </Link>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
+                    )}
+                  </dl>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader>
+                  <div className="flex items-center justify-between">
+                    <CardTitle>Rooms ({world.rooms.length})</CardTitle>
+                    {world.canEdit === true && (
+                      <Button variant="outline" size="sm" asChild>
+                        <Link href={`/admin/rooms/new?worldId=${id}`}>
+                          <Plus className="mr-2 h-4 w-4" />
+                          Add Room
+                        </Link>
+                      </Button>
+                    )}
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  {world.rooms.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">No rooms yet. Create one to get started.</p>
+                  ) : (
+                    <div className="space-y-3">
+                      {world.rooms.map((room) => (
+                        <Link
+                          key={room.id}
+                          href={`/admin/rooms/${room.id}`}
+                          className="block p-3 border rounded-lg hover:bg-accent transition-colors"
+                        >
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <h3 className="text-sm font-medium">{room.name}</h3>
+                              <p className="text-sm text-muted-foreground">
+                                {room._count.favorites} favorites
+                              </p>
+                            </div>
+                            <ChevronRight className="h-4 w-4 text-muted-foreground" />
+                          </div>
+                        </Link>
+                      ))}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            </>
           )}
 
           {activeTab === 'analytics' && (
