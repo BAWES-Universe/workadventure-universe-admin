@@ -119,7 +119,7 @@ export default function InviteToWorldDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent className="rounded-lg">
         <DialogHeader>
           <DialogTitle>Invite to World</DialogTitle>
           <DialogDescription>
