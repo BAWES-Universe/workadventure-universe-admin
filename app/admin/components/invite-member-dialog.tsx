@@ -29,6 +29,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { Loader2, AlertCircle, UserPlus } from 'lucide-react';
+import { useToast } from '@/components/ui/toast';
 
 interface Visitor {
   id: string;

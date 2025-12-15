@@ -227,13 +227,24 @@ export default function MyMembershipsPage() {
           <CardContent>
             <div className="space-y-4">
               {invitations.map((invitation) => (
-                <Card key={invitation.id} className="border">
+                <Card key={invitation.id} className="border hover:bg-accent/50 transition-colors">
                   <CardContent className="pt-6">
                     <div className="flex items-start justify-between">
                       <div className="space-y-2 flex-1">
-                        <div className="flex items-center gap-2">
-                          <h3 className="font-semibold">{invitation.world.name}</h3>
-                          <Badge variant="outline">{invitation.world.universe.name}</Badge>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <Link 
+                            href={`/admin/worlds/${invitation.world.id}`}
+                            className="font-semibold text-primary hover:underline"
+                          >
+                            {invitation.world.name}
+                          </Link>
+                          <span className="text-muted-foreground">/</span>
+                          <Link 
+                            href={`/admin/universes/${invitation.world.universe.id}`}
+                            className="text-sm text-primary hover:underline"
+                          >
+                            {invitation.world.universe.name}
+                          </Link>
                         </div>
                         <p className="text-sm text-muted-foreground">
                           Invited by{' '}
@@ -314,13 +325,24 @@ export default function MyMembershipsPage() {
           ) : (
             <div className="space-y-4">
               {memberships.map((membership) => (
-                <Card key={membership.id} className="border">
+                <Card key={membership.id} className="border hover:bg-accent/50 transition-colors">
                   <CardContent className="pt-6">
                     <div className="flex items-start justify-between">
                       <div className="space-y-2 flex-1">
-                        <div className="flex items-center gap-2">
-                          <h3 className="font-semibold">{membership.world.name}</h3>
-                          <Badge variant="outline">{membership.world.universe.name}</Badge>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <Link 
+                            href={`/admin/worlds/${membership.world.id}`}
+                            className="font-semibold text-primary hover:underline"
+                          >
+                            {membership.world.name}
+                          </Link>
+                          <span className="text-muted-foreground">/</span>
+                          <Link 
+                            href={`/admin/universes/${membership.world.universe.id}`}
+                            className="text-sm text-primary hover:underline"
+                          >
+                            {membership.world.universe.name}
+                          </Link>
                           {membership.isUniverseOwner && (
                             <Badge variant="default">Owner</Badge>
                           )}
