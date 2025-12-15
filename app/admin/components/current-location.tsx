@@ -12,6 +12,25 @@ export default function CurrentLocation() {
   const [roomId, setRoomId] = useState<string | null>(null);
   const [mapURL, setMapURL] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [isSuperAdmin, setIsSuperAdmin] = useState(false);
+
+  useEffect(() => {
+    // Check super admin status
+    async function checkSuperAdmin() {
+      try {
+        const { authenticatedFetch } = await import('@/lib/client-auth');
+        const response = await authenticatedFetch('/api/auth/me');
+        if (response.ok) {
+          const data = await response.json();
+          setIsSuperAdmin(data.user?.isSuperAdmin || false);
+        }
+      } catch (err) {
+        // Silently fail - not critical for this component
+      }
+    }
+
+    checkSuperAdmin();
+  }, []);
 
   useEffect(() => {
     if (!isReady || !wa) {
@@ -108,7 +127,7 @@ export default function CurrentLocation() {
             <dd className="text-sm font-mono bg-muted px-2 py-1 rounded break-all">{roomId}</dd>
           </div>
         )}
-        {mapURL && (
+        {isSuperAdmin && mapURL && (
           <div>
             <dt className="text-sm font-medium text-muted-foreground mb-1">Map URL</dt>
             <dd className="text-sm break-all">

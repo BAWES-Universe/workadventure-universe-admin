@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { getSessionId, getSessionData } from '@/lib/auth-token';
+import { isSuperAdmin } from '@/lib/super-admin';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Redis and Prisma
 export const runtime = 'nodejs';
@@ -79,10 +80,14 @@ export async function GET(request: NextRequest) {
       return response;
     }
 
+    // Check if user is super admin
+    const superAdminStatus = isSuperAdmin(user.email);
+
     const response = NextResponse.json({
       user: {
         ...user,
         tags: session.tags || [],
+        isSuperAdmin: superAdminStatus,
       },
     });
     Object.entries(corsHeaders()).forEach(([key, value]) => {

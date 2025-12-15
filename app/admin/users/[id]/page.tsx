@@ -73,6 +73,8 @@ export default function UserDetailPage() {
   const [accessHistory, setAccessHistory] = useState<any>(null);
   const [accessHistoryLoading, setAccessHistoryLoading] = useState(true);
   const [accessHistoryPage, setAccessHistoryPage] = useState(1);
+  const [currentUser, setCurrentUser] = useState<any>(null);
+  const [isSuperAdmin, setIsSuperAdmin] = useState(false);
 
   useEffect(() => {
     checkAuth();
@@ -86,7 +88,11 @@ export default function UserDetailPage() {
       const response = await authenticatedFetch('/api/auth/me');
       if (!response.ok) {
         router.push('/admin/login');
+        return;
       }
+      const data = await response.json();
+      setCurrentUser(data.user);
+      setIsSuperAdmin(data.user?.isSuperAdmin || false);
     } catch (err) {
       router.push('/admin/login');
     }
@@ -213,10 +219,12 @@ export default function UserDetailPage() {
               <dt className="text-sm font-medium text-muted-foreground">Matrix Chat ID</dt>
               <dd className="mt-1 text-sm font-mono text-xs">{user.matrixChatId || 'N/A'}</dd>
             </div>
-            <div>
-              <dt className="text-sm font-medium text-muted-foreground">Last IP Address</dt>
-              <dd className="mt-1 text-sm font-mono text-xs">{user.lastIpAddress || 'N/A'}</dd>
-            </div>
+            {isSuperAdmin && (
+              <div>
+                <dt className="text-sm font-medium text-muted-foreground">Last IP Address</dt>
+                <dd className="mt-1 text-sm font-mono text-xs">{user.lastIpAddress || 'N/A'}</dd>
+              </div>
+            )}
             <div>
               <dt className="text-sm font-medium text-muted-foreground">Created</dt>
               <dd className="mt-1 text-sm">{new Date(user.createdAt).toLocaleString()}</dd>
@@ -404,7 +412,7 @@ export default function UserDetailPage() {
                     <TableRow>
                       <TableHead>Date</TableHead>
                       <TableHead>Universe / World / Room</TableHead>
-                      <TableHead>IP Address</TableHead>
+                      {isSuperAdmin && <TableHead>IP Address</TableHead>}
                       <TableHead>Status</TableHead>
                     </TableRow>
                   </TableHeader>
@@ -438,9 +446,11 @@ export default function UserDetailPage() {
                             </Link>
                           </div>
                         </TableCell>
-                        <TableCell className="text-sm font-mono text-muted-foreground">
-                          {access.ipAddress}
-                        </TableCell>
+                        {isSuperAdmin && (
+                          <TableCell className="text-sm font-mono text-muted-foreground">
+                            {access.ipAddress}
+                          </TableCell>
+                        )}
                         <TableCell>
                           {access.hasMembership && access.membershipTags.length > 0 ? (
                             <Badge variant="outline">{access.membershipTags.join(', ')}</Badge>

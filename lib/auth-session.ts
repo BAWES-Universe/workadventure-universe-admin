@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import { prisma } from './db';
 import { getSessionId, getSessionData } from './auth-token';
+import { isSuperAdmin } from './super-admin';
 
 export interface SessionUser {
   id: string;
@@ -8,6 +9,7 @@ export interface SessionUser {
   email: string | null;
   name: string | null;
   tags: string[];
+  isSuperAdmin: boolean;
 }
 
 /**
@@ -50,6 +52,7 @@ export async function getSessionUser(request: NextRequest): Promise<SessionUser 
       email: user.email,
       name: user.name,
       tags: session.tags || [],
+      isSuperAdmin: isSuperAdmin(user.email),
     };
   } catch (error) {
     console.error('Get session user error:', error);

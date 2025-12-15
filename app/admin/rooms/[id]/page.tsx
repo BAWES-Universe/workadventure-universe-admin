@@ -67,6 +67,8 @@ export default function RoomDetailPage() {
   const [waNavigating, setWaNavigating] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [currentUser, setCurrentUser] = useState<any>(null);
+  const [isSuperAdmin, setIsSuperAdmin] = useState(false);
   
   const { isReady: waReady, navigateToRoom } = useWorkAdventure();
   
@@ -90,7 +92,11 @@ export default function RoomDetailPage() {
       const response = await authenticatedFetch('/api/auth/me');
       if (!response.ok) {
         router.push('/admin/login');
+        return;
       }
+      const data = await response.json();
+      setCurrentUser(data.user);
+      setIsSuperAdmin(data.user?.isSuperAdmin || false);
     } catch (err) {
       router.push('/admin/login');
     }
@@ -450,7 +456,7 @@ export default function RoomDetailPage() {
                     </Badge>
                   </dd>
                 </div>
-                {room.mapUrl && (
+                {isSuperAdmin && room.mapUrl && (
                   <div className="sm:col-span-2">
                     <dt className="text-sm font-medium text-muted-foreground">Map URL</dt>
                     <dd className="mt-1 text-sm break-all">
@@ -460,7 +466,7 @@ export default function RoomDetailPage() {
                     </dd>
                   </div>
                 )}
-                {room.wamUrl && (
+                {isSuperAdmin && room.wamUrl && (
                   <div className="sm:col-span-2">
                     <dt className="text-sm font-medium text-muted-foreground">WAM URL</dt>
                     <dd className="mt-1 text-sm break-all">
@@ -518,7 +524,7 @@ export default function RoomDetailPage() {
                             <TableRow>
                               <TableHead>Date</TableHead>
                               <TableHead>User</TableHead>
-                              <TableHead>IP Address</TableHead>
+                              {isSuperAdmin && <TableHead>IP Address</TableHead>}
                               <TableHead>Status</TableHead>
                             </TableRow>
                           </TableHeader>
@@ -531,9 +537,11 @@ export default function RoomDetailPage() {
                                 <TableCell className="text-sm">
                                   {access.userName || access.userEmail || access.userUuid || 'Guest'}
                                 </TableCell>
-                                <TableCell className="text-sm font-mono text-muted-foreground">
-                                  {access.ipAddress}
-                                </TableCell>
+                                {isSuperAdmin && (
+                                  <TableCell className="text-sm font-mono text-muted-foreground">
+                                    {access.ipAddress}
+                                  </TableCell>
+                                )}
                                 <TableCell>
                                   {access.hasMembership && access.membershipTags.length > 0 ? (
                                     <Badge variant="outline">{access.membershipTags.join(', ')}</Badge>
