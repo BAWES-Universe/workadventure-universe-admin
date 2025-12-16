@@ -58,6 +58,15 @@ export interface MapDetailsData {
   wamSettings?: {
     wamUrl?: string; // Keep for backward compatibility
   };
+  
+  showPoweredBy?: boolean; // Hide "Powered by WorkAdventure" logo (set to false)
+  backgroundColor?: string; // Background color for configuration scenes
+  primaryColor?: string; // Primary color for configuration scenes
+  backgroundSceneImage?: string; // Background image for configuration scenes
+  errorSceneLogo?: string; // Error logo for configuration scenes
+  loadingLogo?: string; // Loading logo for configuration scenes
+  loginSceneLogo?: string; // Login logo for configuration scenes
+  
   editable?: boolean; // true if wamUrl exists and points to map-storage
   group: string | null; // Required: Universe/world grouping: "{universe.slug}/{world.slug}" or null
   policy?: "public" | "private";

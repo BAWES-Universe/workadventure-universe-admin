@@ -177,6 +177,14 @@ export async function GET(request: NextRequest) {
         roomName: roomData.name,
         group: group,
         policy: roomData.isPublic ? "public" : "private",
+        showPoweredBy: false,
+        backgroundColor: "#000000",
+        primaryColor: "#4056F6",
+        backgroundSceneImage: "https://wa-admin-storage-prod.s3.gra.io.cloud.ovh.net/login_background/FeCAFOZgvS4FgpjDaY0Hg0wsSDWuRUShqpQBIHiy.png",
+        errorSceneLogo: "https://wa-admin-storage-prod.s3.gra.io.cloud.ovh.net/error_logo/UWMbTWQichBXUKl0whLfWPo54jpgEPTl9gRPLfiD.png",
+        loadingLogo: "https://wa-admin-storage-prod.s3.gra.io.cloud.ovh.net/loading_logo/e6ry01wem9z3IIXbTorCUXPZXfKFgWd8mUKN9cIk.png",
+        loginSceneLogo: "https://wa-admin-storage-prod.s3.gra.io.cloud.ovh.net/logo/4Tl3v0bTo6PBWtXbXUvWFiGvkPJWagUdsKXTmOBi.png",
+        
         // Include modules array to tell WorkAdventure which modules to load
         modules: isAuthenticated ? ["admin-api"] : [],
         // Include metadata (optional, gets passed to extension module's init function)
