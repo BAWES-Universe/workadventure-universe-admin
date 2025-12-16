@@ -103,7 +103,17 @@ export async function GET(request: NextRequest) {
         include: {
           world: {
             include: {
-              universe: true,
+              universe: {
+                include: {
+                  owner: {
+                    select: {
+                      id: true,
+                      name: true,
+                      email: true,
+                    },
+                  },
+                },
+              },
             },
           },
         },
@@ -165,6 +175,26 @@ export async function GET(request: NextRequest) {
       // Check if user is authenticated (if authToken/accessToken is provided)
       const isAuthenticated = !!authToken;
       
+      // Get universe owner name for author field
+      const universeOwner = roomData.world.universe.owner;
+      const authorName = universeOwner?.name || universeOwner?.email || "Universe";
+      
+      // Construct base URL for assets (assets are served from this admin API project)
+      let baseUrl: string;
+      // First try NEXT_PUBLIC_API_URL if set
+      if (process.env.NEXT_PUBLIC_API_URL) {
+        baseUrl = process.env.NEXT_PUBLIC_API_URL.replace(/\/$/, ''); // Remove trailing slash
+      } else {
+        // Otherwise, construct from the request URL (this API endpoint's origin)
+        try {
+          const requestUrl = new URL(request.url);
+          baseUrl = `${requestUrl.protocol}//${requestUrl.host}`;
+        } catch {
+          // Final fallback for local development
+          baseUrl = "http://admin.bawes.localhost:8321";
+        }
+      }
+      
       // Prioritize wamUrl: if WAM exists, return it (WorkAdventure prefers wamUrl over mapUrl)
       // Only include mapUrl as fallback if wamUrl is not available
       const mapDetails: MapDetailsData = {
@@ -177,16 +207,62 @@ export async function GET(request: NextRequest) {
         roomName: roomData.name,
         metatags: {
           title: "Universe | " + roomData.world.universe.name + " > " + roomData.world.name + " > " + roomData.name,
+          description: "Join the " + roomData.name + " room in the " + roomData.world.name + " world of the " + roomData.world.universe.name + " universe. Collaborate, connect, and work together in an immersive environment.",
+          author: authorName,
+          provider: "Universe",
+          cardImage: `${baseUrl}/assets/cardimage-1500x500.png`,
+          favIcons: [
+            {
+              rel: "icon",
+              sizes: "512x512",
+              src: `${baseUrl}/assets/favicon-512x512.png`,
+            },
+            {
+              rel: "apple-touch-icon",
+              sizes: "180x180",
+              src: `${baseUrl}/assets/logo-ios-180x180.png`,
+            }
+          ],
+          manifestIcons: [
+            {
+              src: `${baseUrl}/assets/favicon-512x512.png`,
+              sizes: "512x512",
+              type: "image/png",
+              purpose: "any",
+            },
+            {
+              src: `${baseUrl}/assets/favicon-512x512.png`,
+              sizes: "512x512",
+              type: "image/png",
+              purpose: "any",
+            },
+            {
+              src: `${baseUrl}/assets/favicon-512x512.png`,
+              sizes: "192x192",
+              type: "image/png",
+              purpose: "maskable",
+            },
+            {
+              src: `${baseUrl}/assets/favicon-512x512.png`,
+              sizes: "512x512",
+              type: "image/png",
+              purpose: "maskable",
+            }
+          ],
+          appName: "Universe",
+          shortAppName: "Universe",
+          themeColor: "#000000"
         },
         group: group,
         policy: roomData.isPublic ? "public" : "private",
+
         showPoweredBy: false,
         backgroundColor: "#000000",
         primaryColor: "#4056F6",
-        backgroundSceneImage: "https://wa-admin-storage-prod.s3.gra.io.cloud.ovh.net/login_background/FeCAFOZgvS4FgpjDaY0Hg0wsSDWuRUShqpQBIHiy.png",
-        errorSceneLogo: "https://wa-admin-storage-prod.s3.gra.io.cloud.ovh.net/error_logo/UWMbTWQichBXUKl0whLfWPo54jpgEPTl9gRPLfiD.png",
-        loadingLogo: "https://wa-admin-storage-prod.s3.gra.io.cloud.ovh.net/loading_logo/e6ry01wem9z3IIXbTorCUXPZXfKFgWd8mUKN9cIk.png",
-        loginSceneLogo: "https://wa-admin-storage-prod.s3.gra.io.cloud.ovh.net/logo/4Tl3v0bTo6PBWtXbXUvWFiGvkPJWagUdsKXTmOBi.png",
+        backgroundSceneImage: `${baseUrl}/assets/background-1920x1080.png`,
+        errorSceneLogo: `${baseUrl}/assets/logo-300x250.png`,
+        loadingLogo: `${baseUrl}/assets/logo-300x150.png`,
+        loginSceneLogo: `${baseUrl}/assets/logo-300x150.png`,
         
         // Include modules array to tell WorkAdventure which modules to load
         modules: isAuthenticated ? ["admin-api"] : [],

@@ -60,6 +60,24 @@ export interface MapDetailsData {
   };
   metatags?: {
     title?: string;
+    description?: string;
+    author?: string;
+    provider?: string;
+    cardImage?: string;
+    favIcons?: {
+      rel: string;
+      sizes: string;
+      src: string;
+    }[];
+    manifestIcons?: {
+      src: string;
+      sizes: string;
+      type: string;
+      purpose: string;
+    }[];
+    appName?: string;
+    shortAppName?: string;
+    themeColor?: string;
   };
   showPoweredBy?: boolean; // Hide "Powered by WorkAdventure" logo (set to false)
   backgroundColor?: string; // Background color for configuration scenes
