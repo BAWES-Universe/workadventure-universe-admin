@@ -58,7 +58,9 @@ export interface MapDetailsData {
   wamSettings?: {
     wamUrl?: string; // Keep for backward compatibility
   };
-  
+  metatags?: {
+    title?: string;
+  };
   showPoweredBy?: boolean; // Hide "Powered by WorkAdventure" logo (set to false)
   backgroundColor?: string; // Background color for configuration scenes
   primaryColor?: string; // Primary color for configuration scenes

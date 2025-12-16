@@ -175,6 +175,9 @@ export async function GET(request: NextRequest) {
         editable: editable,
         authenticationMandatory: roomData.authenticationMandatory || false,
         roomName: roomData.name,
+        metatags: {
+          title: "Universe | " + roomData.world.universe.name + " > " + roomData.world.name + " > " + roomData.name,
+        },
         group: group,
         policy: roomData.isPublic ? "public" : "private",
         showPoweredBy: false,
