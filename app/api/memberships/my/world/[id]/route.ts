@@ -54,6 +54,19 @@ export async function DELETE(
       );
     }
 
+    // Cancel any pending invitations for this user to this world
+    await prisma.membershipInvitation.updateMany({
+      where: {
+        worldId: worldId,
+        invitedUserId: sessionUser.id,
+        status: 'pending',
+      },
+      data: {
+        status: 'cancelled',
+        respondedAt: new Date(),
+      },
+    });
+
     // Remove membership
     await prisma.worldMember.delete({
       where: { id: membership.id },
