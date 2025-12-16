@@ -261,7 +261,7 @@ export async function GET(request: NextRequest) {
         primaryColor: "#4056F6",
         backgroundSceneImage: `${baseUrl}/assets/background-1920x1080.png`,
         errorSceneLogo: `${baseUrl}/assets/logo-300x250.png`,
-        loadingLogo: `${baseUrl}/assets/logo-300x150.png`,
+        loadingLogo: `${baseUrl}/assets/loading-logo.png`,
         loginSceneLogo: `${baseUrl}/assets/logo-300x150.png`,
         
         // Include modules array to tell WorkAdventure which modules to load
