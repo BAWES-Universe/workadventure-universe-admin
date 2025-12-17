@@ -34,7 +34,7 @@ export default function WorkAdventureProvider({ children }: WorkAdventureProvide
     const currentOrigin = window.location.origin;
 
     try {
-      // Check if we're in an iframe
+      // Check if we're in an iframe.
       if (window.self !== window.top) {
         // We're in an iframe - try to get parent origin
         try {
