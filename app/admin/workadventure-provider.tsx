@@ -18,9 +18,15 @@ export default function WorkAdventureProvider({ children }: WorkAdventureProvide
   const [scriptLoaded, setScriptLoaded] = useState(false);
   const [playUrl, setPlayUrl] = useState<string>(defaultPlayUrl);
 
-  // Detect the play URL from iframe context
+  // Detect the play URL from iframe context (when NEXT_PUBLIC_PLAY_URL is not explicitly set)
   useEffect(() => {
     if (typeof window === 'undefined') {
+      return;
+    }
+
+    // If an explicit NEXT_PUBLIC_PLAY_URL is provided, do not override it with auto-detection.
+    if (process.env.NEXT_PUBLIC_PLAY_URL) {
+      // console.log('[WorkAdventureProvider] Using NEXT_PUBLIC_PLAY_URL, skipping auto-detect of play URL');
       return;
     }
 
