@@ -215,7 +215,7 @@ export async function GET(request: NextRequest) {
             {
               rel: "icon",
               sizes: "512x512",
-              src: `${baseUrl}/assets/favicon-512x512.png`,
+              src: `${baseUrl}/assets/favicon-trans-512x512.png`,
             },
             {
               rel: "apple-touch-icon",
