@@ -237,7 +237,7 @@ export default async function AdminDashboard() {
           <div className="space-y-1">
             <h2 className="text-xl font-semibold tracking-tight">Discover</h2>
             <p className="text-sm text-muted-foreground">
-              Explore universes, worlds, rooms, and users across your Universe.
+              Explore universes, worlds, rooms, and users across the Universe.
             </p>
           </div>
           <div className="grid gap-4 grid-cols-2 md:grid-cols-4">
@@ -252,7 +252,7 @@ export default async function AdminDashboard() {
                 <CardContent>
                   <div className="text-3xl font-bold">{stats.universes}</div>
                   <p className="text-xs text-muted-foreground mt-1">
-                    Public & private universes
+                    Public universes you can explore
                   </p>
                 </CardContent>
               </Card>
@@ -303,7 +303,7 @@ export default async function AdminDashboard() {
                 <CardContent>
                   <div className="text-3xl font-bold">{stats.users}</div>
                   <p className="text-xs text-muted-foreground mt-1">
-                    People exploring your Universe
+                    People exploring the Universe
                   </p>
                 </CardContent>
               </Card>
