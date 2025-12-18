@@ -1,14 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table';
+import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -36,10 +29,11 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { Edit, Trash2, Loader2, X } from 'lucide-react';
+import { Edit, Trash2, Loader2, X, UserCircle, Calendar, Clock, ChevronRight } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { AlertCircle } from 'lucide-react';
 import Link from 'next/link';
+import { cn } from '@/lib/utils';
 
 interface Member {
   id: string;
@@ -237,162 +231,287 @@ export default function MemberList({ worldId, onRefresh }: MemberListProps) {
       )}
 
       {/* Active Members */}
-      <div>
-        <h3 className="text-lg font-semibold mb-4">Active Members</h3>
+      <div className="space-y-3">
+        <div className="space-y-1">
+          <h3 className="text-xl font-semibold tracking-tight">Active Members</h3>
+          <p className="text-sm text-muted-foreground">
+            People who have access to this world
+          </p>
+        </div>
         {members.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No members yet.</p>
+          <Card>
+            <CardContent className="py-12 text-center text-sm text-muted-foreground">
+              No members yet.
+            </CardContent>
+          </Card>
         ) : (
-          <div className="rounded-md border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Tags</TableHead>
-                  <TableHead>Joined</TableHead>
-                  <TableHead>Last Visited</TableHead>
-                  {canManage && <TableHead className="text-right">Actions</TableHead>}
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {members.map((member) => (
-                  <TableRow key={member.id}>
-                    <TableCell className="font-medium">
-                      <Link
-                        href={`/admin/users/${member.user.id}`}
-                        className="text-primary hover:underline"
-                      >
-                        {member.user.name || member.user.email || 'Unknown'}
-                      </Link>
-                      {member.isUniverseOwner && (
-                        <Badge variant="outline" className="ml-2">Owner</Badge>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {members.map((member) => {
+              const nameOrEmail = member.user.name || member.user.email || 'Unknown';
+              const initial = (member.user.name || member.user.email || '?').charAt(0).toUpperCase();
+              const joinedDate = new Date(member.joinedAt).toLocaleDateString();
+              const lastVisitedDate = member.lastVisited
+                ? new Date(member.lastVisited).toLocaleDateString()
+                : null;
+
+              return (
+                <div key={member.id} className="relative">
+                  <Link
+                    href={`/admin/users/${member.user.id}`}
+                    className="block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+                  >
+                    <Card
+                      className={cn(
+                        'group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
+                        'hover:-translate-y-1 hover:shadow-lg',
                       )}
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex flex-wrap gap-1">
-                        {member.tags.length > 0 ? (
-                          member.tags.map((tag) => (
-                            <Badge key={tag} variant="secondary" className="capitalize">
-                              {tag}
-                            </Badge>
-                          ))
-                        ) : (
-                          <span className="text-sm text-muted-foreground">No tags</span>
-                        )}
-                      </div>
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {new Date(member.joinedAt).toLocaleDateString()}
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {member.lastVisited
-                        ? new Date(member.lastVisited).toLocaleDateString()
-                        : 'Never'}
-                    </TableCell>
-                    {canManage && (
-                      <TableCell className="text-right">
-                        <div className="flex justify-end gap-2">
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => {
-                              setEditingMember(member);
-                              // Use first tag or default to 'member'
-                              setEditingTag(member.tags.length > 0 ? member.tags[0] : 'member');
-                            }}
-                            disabled={member.isUniverseOwner}
-                          >
-                            <Edit className="h-4 w-4" />
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="destructive"
-                            onClick={() => setDeletingMember(member)}
-                            disabled={member.isUniverseOwner}
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </Button>
+                    >
+                      <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-primary/10 via-transparent to-secondary/20 opacity-0 transition-opacity group-hover:opacity-100" />
+
+                      <div className="relative flex h-full flex-col p-5">
+                        <div className="mb-3 flex items-start gap-3">
+                          <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full border bg-muted text-sm font-semibold">
+                            {initial}
+                          </div>
+
+                          <div className="min-w-0 flex-1 space-y-1">
+                            <div className="flex items-start justify-between gap-2">
+                              <h3 className="truncate text-base font-semibold leading-tight">
+                                {nameOrEmail}
+                              </h3>
+                            </div>
+                            <p className="truncate text-xs text-muted-foreground">
+                              {member.user.email || 'No email'}
+                            </p>
+
+                            <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+                              {member.isUniverseOwner && (
+                                <Badge variant="default">Owner</Badge>
+                              )}
+                              {member.tags.length > 0
+                                ? member.tags.map((tag) => (
+                                    <Badge
+                                      key={tag}
+                                      variant={
+                                        tag === 'admin'
+                                          ? 'destructive'
+                                          : tag === 'editor'
+                                            ? 'default'
+                                            : 'secondary'
+                                      }
+                                      className="capitalize"
+                                    >
+                                      {tag}
+                                    </Badge>
+                                  ))
+                                : !member.isUniverseOwner && (
+                                    <Badge variant="secondary">Member</Badge>
+                                  )}
+                            </div>
+                          </div>
                         </div>
-                      </TableCell>
-                    )}
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+
+                        <div className="mt-auto flex items-center justify-between pt-3 text-xs text-muted-foreground">
+                          <div className="flex flex-col gap-1.5">
+                            <div className="flex items-center gap-1.5">
+                              <Calendar className="h-3.5 w-3.5 text-muted-foreground" />
+                              <span className="text-muted-foreground">
+                                Joined {joinedDate}
+                              </span>
+                            </div>
+                            {lastVisitedDate && (
+                              <div className="flex items-center gap-1.5">
+                                <Clock className="h-3.5 w-3.5 text-muted-foreground" />
+                                <span className="text-muted-foreground">
+                                  Last visited {lastVisitedDate}
+                                </span>
+                              </div>
+                            )}
+                            {!lastVisitedDate && (
+                              <div className="flex items-center gap-1.5">
+                                <Clock className="h-3.5 w-3.5 text-muted-foreground" />
+                                <span className="text-muted-foreground">Never visited</span>
+                              </div>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-1 text-primary transition-transform group-hover:translate-x-0.5">
+                            <span className="hidden text-xs font-medium sm:inline">View</span>
+                            <ChevronRight className="h-4 w-4" aria-hidden="true" />
+                          </div>
+                        </div>
+                      </div>
+                    </Card>
+                  </Link>
+                  {canManage && !member.isUniverseOwner && (
+                    <div className="absolute top-2 right-2 z-10 flex gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-8 w-8 p-0"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setEditingMember(member);
+                          setEditingTag(member.tags.length > 0 ? member.tags[0] : 'member');
+                        }}
+                      >
+                        <Edit className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="destructive"
+                        className="h-8 w-8 p-0"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setDeletingMember(member);
+                        }}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
 
       {/* Pending Invitations */}
       {(canManage || invitations.length > 0) && (
-        <div>
-          <h3 className="text-lg font-semibold mb-4">
-            {canManage ? 'Pending Invitations' : 'Your Pending Invitations'}
-          </h3>
-          {invitations.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No pending invitations.</p>
-          ) : (
-          <div className="rounded-md border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Invited User</TableHead>
-                  <TableHead>Tags</TableHead>
-                  <TableHead>Invited By</TableHead>
-                  <TableHead>Invited</TableHead>
-                  {canManage && <TableHead className="text-right">Actions</TableHead>}
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {invitations.map((invitation) => (
-                  <TableRow key={invitation.id}>
-                    <TableCell className="font-medium">
-                      <Link
-                        href={`/admin/users/${invitation.invitedUser.id}`}
-                        className="text-primary hover:underline"
-                      >
-                        {invitation.invitedUser.name ||
-                          invitation.invitedUser.email ||
-                          'Unknown'}
-                      </Link>
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex flex-wrap gap-1">
-                        {invitation.tags.map((tag) => (
-                          <Badge key={tag} variant="secondary" className="capitalize">
-                            {tag}
-                          </Badge>
-                        ))}
-                      </div>
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {invitation.invitedBy.name ||
-                        invitation.invitedBy.email ||
-                        'Unknown'}
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {new Date(invitation.invitedAt).toLocaleDateString()}
-                    </TableCell>
-                    {canManage && (
-                      <TableCell className="text-right">
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() => handleCancelInvitation(invitation.id)}
-                          disabled={cancellingInvitation === invitation.id}
-                        >
-                          {cancellingInvitation === invitation.id ? (
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                          ) : (
-                            <X className="h-4 w-4" />
-                          )}
-                        </Button>
-                      </TableCell>
-                    )}
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+        <div className="space-y-3">
+          <div className="space-y-1">
+            <h3 className="text-xl font-semibold tracking-tight">
+              {canManage ? 'Pending Invitations' : 'Your Pending Invitations'}
+            </h3>
+            <p className="text-sm text-muted-foreground">
+              Invitations waiting to be accepted
+            </p>
           </div>
+          {invitations.length === 0 ? (
+            <Card>
+              <CardContent className="py-12 text-center text-sm text-muted-foreground">
+                No pending invitations.
+              </CardContent>
+            </Card>
+          ) : (
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+              {invitations.map((invitation) => {
+                const invitedUserName =
+                  invitation.invitedUser.name ||
+                  invitation.invitedUser.email ||
+                  'Unknown';
+                const invitedUserInitial = (
+                  invitation.invitedUser.name ||
+                  invitation.invitedUser.email ||
+                  '?'
+                )
+                  .charAt(0)
+                  .toUpperCase();
+                const invitedBy =
+                  invitation.invitedBy.name ||
+                  invitation.invitedBy.email ||
+                  'Unknown';
+                const invitedDate = new Date(invitation.invitedAt).toLocaleDateString();
+
+                return (
+                  <div key={invitation.id} className="relative">
+                    <Link
+                      href={`/admin/users/${invitation.invitedUser.id}`}
+                      className="block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+                    >
+                      <Card
+                        className={cn(
+                          'group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
+                          'hover:-translate-y-1 hover:shadow-lg',
+                          'border-dashed',
+                        )}
+                      >
+                        <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-yellow-500/10 via-transparent to-orange-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
+
+                        <div className="relative flex h-full flex-col p-5">
+                          <div className="mb-3 flex items-start gap-3">
+                            <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full border bg-muted text-sm font-semibold">
+                              {invitedUserInitial}
+                            </div>
+
+                            <div className="min-w-0 flex-1 space-y-1">
+                              <div className="flex items-start justify-between gap-2">
+                                <h3 className="truncate text-base font-semibold leading-tight">
+                                  {invitedUserName}
+                                </h3>
+                              </div>
+                              <p className="truncate text-xs text-muted-foreground">
+                                {invitation.invitedUser.email || 'No email'}
+                              </p>
+
+                              <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+                                {invitation.tags.map((tag) => (
+                                  <Badge
+                                    key={tag}
+                                    variant={
+                                      tag === 'admin'
+                                        ? 'destructive'
+                                        : tag === 'editor'
+                                          ? 'default'
+                                          : 'secondary'
+                                    }
+                                    className="capitalize"
+                                  >
+                                    {tag}
+                                  </Badge>
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="mt-auto flex items-center justify-between pt-3 text-xs text-muted-foreground">
+                            <div className="flex flex-col gap-1.5">
+                              <div className="flex items-center gap-1.5">
+                                <UserCircle className="h-3.5 w-3.5 text-muted-foreground" />
+                                <span className="text-muted-foreground">
+                                  Invited by {invitedBy}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-1.5">
+                                <Calendar className="h-3.5 w-3.5 text-muted-foreground" />
+                                <span className="text-muted-foreground">
+                                  Invited {invitedDate}
+                                </span>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-1 text-primary transition-transform group-hover:translate-x-0.5">
+                              <span className="hidden text-xs font-medium sm:inline">View</span>
+                              <ChevronRight className="h-4 w-4" aria-hidden="true" />
+                            </div>
+                          </div>
+                        </div>
+                      </Card>
+                    </Link>
+                    {canManage && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="absolute top-2 right-2 z-10 h-8 w-8 p-0"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          handleCancelInvitation(invitation.id);
+                        }}
+                        disabled={cancellingInvitation === invitation.id}
+                      >
+                        {cancellingInvitation === invitation.id ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <X className="h-4 w-4" />
+                        )}
+                      </Button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
           )}
         </div>
       )}
