@@ -20,12 +20,20 @@ export async function GET(request: NextRequest) {
             id: true,
             name: true,
             slug: true,
+            description: true,
+            thumbnailUrl: true,
             universe: {
               select: {
                 id: true,
                 name: true,
                 slug: true,
                 ownerId: true,
+              },
+            },
+            _count: {
+              select: {
+                rooms: true,
+                members: true,
               },
             },
           },
