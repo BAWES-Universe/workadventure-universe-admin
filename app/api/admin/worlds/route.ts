@@ -41,6 +41,7 @@ export async function GET(request: NextRequest) {
     const limit = parseInt(searchParams.get('limit') || '50');
     const search = searchParams.get('search') || '';
     const universeId = searchParams.get('universeId');
+    const scope = searchParams.get('scope') || 'my';
     
     const where: any = {};
     
@@ -52,39 +53,45 @@ export async function GET(request: NextRequest) {
       ];
     }
     
-    // If user session (not admin token), only show worlds in universes they own
+    // If user session (not admin token), support scopes
+    // - scope=my (default): worlds in universes the user owns (existing behavior)
+    // - scope=discover: public worlds across all universes
     if (userId && !isAdminToken) {
-      const userUniverses = await prisma.universe.findMany({
-        where: { ownerId: userId },
-        select: { id: true },
-      });
-      const userUniverseIds = userUniverses.map((u: { id: string }) => u.id);
-      
-      if (userUniverseIds.length === 0) {
-        // User owns no universes, return empty result
-        return NextResponse.json({
-          worlds: [],
-          pagination: {
-            page,
-            limit,
-            total: 0,
-            totalPages: 0,
-          },
-        });
-      }
-      
-      // If universeId is specified, verify user owns it
-      if (universeId) {
-        if (!userUniverseIds.includes(universeId)) {
-          return NextResponse.json(
-            { error: 'Forbidden' },
-            { status: 403 }
-          );
-        }
-        where.universeId = universeId;
+      if (scope === 'discover') {
+        where.isPublic = true;
       } else {
-        // Filter worlds to only those in user's universes
-        where.universeId = { in: userUniverseIds };
+        const userUniverses = await prisma.universe.findMany({
+          where: { ownerId: userId },
+          select: { id: true },
+        });
+        const userUniverseIds = userUniverses.map((u: { id: string }) => u.id);
+        
+        if (userUniverseIds.length === 0) {
+          // User owns no universes, return empty result
+          return NextResponse.json({
+            worlds: [],
+            pagination: {
+              page,
+              limit,
+              total: 0,
+              totalPages: 0,
+            },
+          });
+        }
+        
+        // If universeId is specified, verify user owns it
+        if (universeId) {
+          if (!userUniverseIds.includes(universeId)) {
+            return NextResponse.json(
+              { error: 'Forbidden' },
+              { status: 403 }
+            );
+          }
+          where.universeId = universeId;
+        } else {
+          // Filter worlds to only those in user's universes
+          where.universeId = { in: userUniverseIds };
+        }
       }
     } else if (universeId) {
       // Admin token - can filter by any universe

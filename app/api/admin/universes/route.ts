@@ -65,10 +65,11 @@ export async function GET(request: NextRequest) {
     } else if (userId) {
       // Session-based callers: support scopes
       // - scope=my (default): universes owned by the current user
-      // - scope=discover: public universes owned by other users
+      // - scope=discover: public universes (including your own), excluding the default universe
       if (scope === 'discover') {
-        where.ownerId = { not: userId };
         where.isPublic = true;
+        // Hide the built-in default universe (default/default/default)
+        where.slug = { not: 'default' };
       } else {
         // Fallback to \"my\" semantics for unknown scope values
         where.ownerId = userId;
