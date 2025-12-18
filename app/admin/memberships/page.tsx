@@ -328,14 +328,7 @@ export default function MyMembershipsPage() {
       )}
 
       {/* My Memberships */}
-      <section className="space-y-3">
-        <div className="space-y-1">
-          <h2 className="text-xl font-semibold tracking-tight">My Memberships</h2>
-          <p className="text-sm text-muted-foreground">
-            Worlds you are a member of
-          </p>
-        </div>
-        {memberships.length === 0 ? (
+      {memberships.length === 0 ? (
           <Card>
             <CardContent className="py-12 text-center text-sm text-muted-foreground">
               You are not a member of any worlds.
@@ -473,7 +466,6 @@ export default function MyMembershipsPage() {
             })}
           </div>
         )}
-      </section>
 
       {/* Leave World Dialog */}
       <AlertDialog open={!!leavingWorld} onOpenChange={(open) => !open && setLeavingWorld(null)}>
