@@ -34,8 +34,15 @@ export async function GET(
             id: true,
             slug: true,
             name: true,
+            description: true,
+            thumbnailUrl: true,
             isPublic: true,
             createdAt: true,
+            _count: {
+              select: {
+                worlds: true,
+              },
+            },
           },
           orderBy: { createdAt: 'desc' },
         },
@@ -46,11 +53,19 @@ export async function GET(
                 id: true,
                 slug: true,
                 name: true,
+                description: true,
+                thumbnailUrl: true,
                 universe: {
                   select: {
                     id: true,
                     slug: true,
                     name: true,
+                  },
+                },
+                _count: {
+                  select: {
+                    rooms: true,
+                    members: true,
                   },
                 },
               },

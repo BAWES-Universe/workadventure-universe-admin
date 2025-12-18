@@ -15,7 +15,8 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
-import { ChevronRight, AlertCircle, Loader2, Globe, Users, Star, Ban, UserPlus } from 'lucide-react';
+import { ChevronRight, AlertCircle, Loader2, Globe, Users, Star, Ban, UserPlus, Home, Calendar, Clock } from 'lucide-react';
+import { cn } from '@/lib/utils';
 import InviteToWorldDialog from '../../components/invite-to-world-dialog';
 
 interface WorldMembership {
@@ -26,10 +27,16 @@ interface WorldMembership {
     id: string;
     slug: string;
     name: string;
+    description: string | null;
+    thumbnailUrl: string | null;
     universe: {
       id: string;
       slug: string;
       name: string;
+    };
+    _count?: {
+      rooms?: number;
+      members?: number;
     };
   };
 }
@@ -38,8 +45,13 @@ interface Universe {
   id: string;
   slug: string;
   name: string;
+  description: string | null;
+  thumbnailUrl: string | null;
   isPublic: boolean;
   createdAt: string;
+  _count?: {
+    worlds?: number;
+  };
 }
 
 interface User {
@@ -267,7 +279,7 @@ export default function UserDetailPage() {
         </CardContent>
       </Card>
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid grid-cols-2 gap-2 md:grid-cols-4 md:gap-4">
         <Card>
           <CardContent className="pt-6">
             <div className="flex items-center">
@@ -323,93 +335,213 @@ export default function UserDetailPage() {
       </div>
 
       {user.ownedUniverses.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Owned Universes</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-3">
-              {user.ownedUniverses.map((universe) => (
+        <section className="space-y-3">
+          <div className="space-y-1">
+            <h2 className="text-xl font-semibold tracking-tight">Owned Universes</h2>
+            <p className="text-sm text-muted-foreground">
+              Universes owned by this user
+            </p>
+          </div>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {user.ownedUniverses.map((universe) => {
+              const worldsCount = universe._count?.worlds ?? 0;
+              const createdDate = new Date(universe.createdAt).toLocaleDateString();
+              return (
                 <Link
                   key={universe.id}
                   href={`/admin/universes/${universe.id}`}
-                  className="block p-3 border rounded-lg hover:bg-accent transition-colors"
+                  className="block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
                 >
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-medium">{universe.name}</p>
-                      <p className="text-sm text-muted-foreground">
-                        Slug: <code className="bg-muted px-1 rounded">{universe.slug}</code>
-                      </p>
+                  <Card
+                    className={cn(
+                      'group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
+                      'hover:-translate-y-1 hover:shadow-lg',
+                    )}
+                  >
+                    <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-primary/10 via-transparent to-secondary/20 opacity-0 transition-opacity group-hover:opacity-100" />
+
+                    <div className="relative flex h-full flex-col p-5">
+                      <div className="mb-4 flex items-start gap-3">
+                        {universe.thumbnailUrl ? (
+                          <div className="relative h-16 w-16 flex-shrink-0 overflow-hidden rounded-lg border bg-muted">
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img
+                              src={universe.thumbnailUrl}
+                              alt={universe.name}
+                              className="h-full w-full object-cover"
+                            />
+                          </div>
+                        ) : (
+                          <div className="flex h-16 w-16 flex-shrink-0 items-center justify-center rounded-lg border bg-muted text-lg font-semibold">
+                            {universe.name?.charAt(0)?.toUpperCase() || '?'}
+                          </div>
+                        )}
+
+                        <div className="min-w-0 flex-1 space-y-1">
+                          <div className="flex items-start justify-between gap-2">
+                            <h3 className="truncate text-base font-semibold leading-tight">
+                              {universe.name}
+                            </h3>
+                          </div>
+                          <p className="truncate text-xs font-mono text-muted-foreground">
+                            {universe.slug}
+                          </p>
+                        </div>
+                      </div>
+
+                      {universe.description && (
+                        <p className="mb-3 line-clamp-2 text-sm text-muted-foreground">
+                          {universe.description}
+                        </p>
+                      )}
+
+                      <div className="mt-auto flex items-center justify-between pt-3 text-xs text-muted-foreground">
+                        <div className="flex flex-col gap-1.5">
+                          <div className="flex items-center gap-1.5">
+                            <Home className="h-3.5 w-3.5 text-muted-foreground" />
+                            <span className="font-medium text-foreground/80">
+                              {worldsCount} {worldsCount === 1 ? 'world' : 'worlds'}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <Calendar className="h-3.5 w-3.5 text-muted-foreground" />
+                            <span className="text-muted-foreground">
+                              Created {createdDate}
+                            </span>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1 text-primary transition-transform group-hover:translate-x-0.5">
+                          <span className="hidden text-xs font-medium sm:inline">View</span>
+                          <ChevronRight className="h-4 w-4" aria-hidden="true" />
+                        </div>
+                      </div>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <Badge variant={universe.isPublic ? 'default' : 'secondary'}>
-                        {universe.isPublic ? 'Public' : 'Private'}
-                      </Badge>
-                      <ChevronRight className="h-4 w-4 text-muted-foreground" />
-                    </div>
-                  </div>
+                  </Card>
                 </Link>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
+              );
+            })}
+          </div>
+        </section>
       )}
 
       {user.worldMemberships.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle>World Memberships</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-3">
-              {user.worldMemberships.map((membership) => (
+        <section className="space-y-3">
+          <div className="space-y-1">
+            <h2 className="text-xl font-semibold tracking-tight">World Memberships</h2>
+            <p className="text-sm text-muted-foreground">
+              Worlds this user is a member of
+            </p>
+          </div>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {user.worldMemberships.map((membership) => {
+              const roomsCount = membership.world._count?.rooms ?? 0;
+              const membersCount = membership.world._count?.members ?? 0;
+              const joinedDate = new Date(membership.joinedAt).toLocaleDateString();
+              return (
                 <Link
                   key={membership.id}
                   href={`/admin/worlds/${membership.world.id}`}
-                  className="block p-3 border rounded-lg hover:bg-accent transition-colors"
+                  className="block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
                 >
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-medium">{membership.world.name}</p>
-                      <p className="text-sm text-muted-foreground">
-                        {membership.world.universe.name} / {membership.world.name}
-                      </p>
-                      <p className="text-xs text-muted-foreground mt-1">
-                        Joined: {new Date(membership.joinedAt).toLocaleDateString()}
-                      </p>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      {membership.tags.length > 0 ? (
-                        <div className="flex flex-wrap gap-1">
-                          {membership.tags.map((tag) => (
-                            <Badge
-                              key={tag}
-                              variant={tag === 'admin' ? 'destructive' : tag === 'editor' ? 'default' : 'secondary'}
-                            >
-                              {tag}
-                            </Badge>
-                          ))}
+                  <Card
+                    className={cn(
+                      'group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
+                      'hover:-translate-y-1 hover:shadow-lg',
+                    )}
+                  >
+                    <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-blue-500/10 via-transparent to-purple-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
+
+                    <div className="relative flex h-full flex-col p-5">
+                      <div className="mb-4 flex items-start gap-3">
+                        {membership.world.thumbnailUrl ? (
+                          <div className="relative h-16 w-16 flex-shrink-0 overflow-hidden rounded-lg border bg-muted">
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img
+                              src={membership.world.thumbnailUrl}
+                              alt={membership.world.name}
+                              className="h-full w-full object-cover"
+                            />
+                          </div>
+                        ) : (
+                          <div className="flex h-16 w-16 flex-shrink-0 items-center justify-center rounded-lg border bg-muted text-lg font-semibold">
+                            {membership.world.name?.charAt(0)?.toUpperCase() || '?'}
+                          </div>
+                        )}
+
+                        <div className="min-w-0 flex-1 space-y-1">
+                          <div className="flex items-start justify-between gap-2">
+                            <h3 className="truncate text-base font-semibold leading-tight">
+                              {membership.world.name}
+                            </h3>
+                          </div>
+                          <p className="truncate text-xs text-muted-foreground">
+                            {membership.world.universe.name} · {membership.world.slug}
+                          </p>
+
+                          <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+                            {membership.tags.length > 0
+                              ? membership.tags.map((tag) => (
+                                  <Badge
+                                    key={tag}
+                                    variant={
+                                      tag === 'admin'
+                                        ? 'destructive'
+                                        : tag === 'editor'
+                                          ? 'default'
+                                          : 'secondary'
+                                    }
+                                    className="capitalize"
+                                  >
+                                    {tag}
+                                  </Badge>
+                                ))
+                              : (
+                                  <Badge variant="secondary">Member</Badge>
+                                )}
+                          </div>
                         </div>
-                      ) : (
-                        <span className="text-xs text-muted-foreground">No tags</span>
+                      </div>
+
+                      {membership.world.description && (
+                        <p className="mb-3 line-clamp-2 text-sm text-muted-foreground">
+                          {membership.world.description}
+                        </p>
                       )}
-                      <ChevronRight className="h-4 w-4 text-muted-foreground" />
+
+                      <div className="mt-auto flex items-center justify-between pt-3 text-xs text-muted-foreground">
+                        <div className="flex flex-col gap-1.5">
+                          <div className="flex items-center gap-1.5">
+                            <Home className="h-3.5 w-3.5 text-muted-foreground" />
+                            <span className="font-medium text-foreground/80">
+                              {roomsCount} {roomsCount === 1 ? 'room' : 'rooms'} · {membersCount}{' '}
+                              {membersCount === 1 ? 'member' : 'members'}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <Calendar className="h-3.5 w-3.5 text-muted-foreground" />
+                            <span className="text-muted-foreground">
+                              Joined {joinedDate}
+                            </span>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1 text-primary transition-transform group-hover:translate-x-0.5">
+                          <span className="hidden text-xs font-medium sm:inline">View</span>
+                          <ChevronRight className="h-4 w-4" aria-hidden="true" />
+                        </div>
+                      </div>
                     </div>
-                  </div>
+                  </Card>
                 </Link>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
+              );
+            })}
+          </div>
+        </section>
       )}
 
       {user.ownedUniverses.length === 0 && user.worldMemberships.length === 0 && (
         <Card>
-          <CardContent className="pt-6">
-            <p className="text-sm text-muted-foreground text-center">
-              This user doesn't own any universes or have any world memberships.
-            </p>
+          <CardContent className="py-12 text-center text-sm text-muted-foreground">
+            This user doesn't own any universes or have any world memberships.
           </CardContent>
         </Card>
       )}
