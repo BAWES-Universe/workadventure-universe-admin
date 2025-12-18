@@ -5,6 +5,7 @@ import { Globe, Users, FolderOpen, Home, Plus, MapPin } from 'lucide-react';
 import { prisma } from '@/lib/db';
 import CurrentLocation from './components/current-location';
 import PendingInvitationsAlert from './components/pending-invitations-alert';
+import RecentRoomCard from './components/recent-room-card';
 
 async function getStats() {
   const token = process.env.ADMIN_API_TOKEN;
@@ -148,7 +149,15 @@ export default async function AdminDashboard() {
       <PendingInvitationsAlert />
 
       {/* Current location at the top */}
-      <CurrentLocation />
+      <section className="space-y-3">
+        <div className="space-y-1">
+          <h2 className="text-xl font-semibold tracking-tight">Current Location</h2>
+          <p className="text-sm text-muted-foreground">
+            Your current location in the Universe
+          </p>
+        </div>
+        <CurrentLocation />
+      </section>
 
       {/* Recently visited rooms */}
       {recentRooms.length > 0 && (
@@ -160,53 +169,9 @@ export default async function AdminDashboard() {
             </p>
           </div>
           <div className="grid gap-4 md:grid-cols-2">
-            {recentRooms.map((item) => {
-              const visitedLabel = item.accessedAt
-                ? new Date(item.accessedAt).toLocaleString()
-                : '';
-              return (
-                <Link
-                  key={item.roomId}
-                  href={`/admin/rooms/${item.roomId}`}
-                  className="block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-                >
-                  <Card className="group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all hover:-translate-y-1 hover:shadow-lg">
-                    <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-primary/10 via-transparent to-secondary/20 opacity-0 transition-opacity group-hover:opacity-100" />
-                    <CardContent className="relative flex h-full flex-col p-5">
-                      <div className="mb-3 flex items-start gap-3">
-                        <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full border bg-muted">
-                          <MapPin className="h-5 w-5 text-muted-foreground" />
-                        </div>
-                        <div className="min-w-0 flex-1 space-y-1">
-                          <h3 className="truncate text-base font-semibold leading-tight">
-                            {item.roomName}
-                          </h3>
-                          <p className="truncate text-xs text-muted-foreground">
-                            {item.universeName} · {item.worldName}
-                          </p>
-                          <p className="truncate font-mono text-[11px] text-muted-foreground/80">
-                            {item.roomSlug}
-                          </p>
-                        </div>
-                      </div>
-                      <div className="mt-auto flex items-center justify-between pt-2 text-xs text-muted-foreground">
-                        <div>
-                          <span className="text-[11px] uppercase tracking-wide">
-                            Last visited
-                          </span>
-                          <div className="text-xs font-medium text-foreground/80">
-                            {visitedLabel}
-                          </div>
-                        </div>
-                        <span className="text-xs font-medium text-primary">
-                          View room
-                        </span>
-                      </div>
-                    </CardContent>
-                  </Card>
-                </Link>
-              );
-            })}
+            {recentRooms.map((item) => (
+              <RecentRoomCard key={item.roomId} room={item} />
+            ))}
           </div>
         </section>
       )}

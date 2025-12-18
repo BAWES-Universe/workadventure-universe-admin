@@ -4,13 +4,15 @@ import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { useWorkAdventure } from '../workadventure-context';
-import { MapPin, Loader2, AlertCircle } from 'lucide-react';
+import { MapPin, Loader2, AlertCircle, Activity, Clock, Star } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { cn } from '@/lib/utils';
 
 interface CurrentRoom {
   id: string;
   slug: string;
   name: string;
+  description: string | null;
   mapUrl: string | null;
   world: {
     id: string;
@@ -27,6 +29,18 @@ interface CurrentRoom {
   };
 }
 
+interface RoomAnalytics {
+  totalAccesses: number;
+  peakHour: number | null;
+}
+
+function formatHourTo12Hour(hour: number): string {
+  if (hour === 0) return '12:00 AM';
+  if (hour < 12) return `${hour}:00 AM`;
+  if (hour === 12) return '12:00 PM';
+  return `${hour - 12}:00 PM`;
+}
+
 export default function CurrentLocation() {
   const { wa, isReady, isLoading, error } = useWorkAdventure();
   const [playUri, setPlayUri] = useState<string | null>(null);
@@ -35,6 +49,7 @@ export default function CurrentLocation() {
   const [isSuperAdmin, setIsSuperAdmin] = useState(false);
   const [room, setRoom] = useState<CurrentRoom | null>(null);
   const [roomError, setRoomError] = useState<string | null>(null);
+  const [analytics, setAnalytics] = useState<RoomAnalytics | null>(null);
 
   useEffect(() => {
     // Check super admin status
@@ -86,6 +101,27 @@ export default function CurrentLocation() {
               const data = await response.json();
               setRoom(data as CurrentRoom);
               setRoomError(null);
+              
+              // Fetch analytics for the room
+              try {
+                const analyticsResponse = await authenticatedFetch(
+                  `/api/admin/analytics/rooms/${data.id}`,
+                );
+                if (analyticsResponse.ok) {
+                  const analyticsData = await analyticsResponse.json();
+                  const peakHour =
+                    Array.isArray(analyticsData.peakTimes) && analyticsData.peakTimes.length > 0
+                      ? analyticsData.peakTimes[0].hour ?? null
+                      : null;
+                  setAnalytics({
+                    totalAccesses: analyticsData.totalAccesses || 0,
+                    peakHour,
+                  });
+                }
+              } catch (analyticsErr) {
+                // Silently fail - analytics are optional
+                console.error('[CurrentLocation] Failed to fetch analytics:', analyticsErr);
+              }
             } else {
               setRoom(null);
               setRoomError('Unable to resolve current room from play URL.');
@@ -111,16 +147,7 @@ export default function CurrentLocation() {
   if (error || (!isReady && !isLoading)) {
     return (
       <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <MapPin className="h-5 w-5" />
-            Current Location
-          </CardTitle>
-          <CardDescription>
-            Your current location in the Universe
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
+        <CardContent className="flex items-center justify-center py-12">
           <Alert>
             <AlertCircle className="h-4 w-4" />
             <AlertTitle>Not Available</AlertTitle>
@@ -136,27 +163,21 @@ export default function CurrentLocation() {
   if (loading || isLoading) {
     return (
       <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <MapPin className="h-5 w-5" />
-            Current Location
-          </CardTitle>
-          <CardDescription>
-            Your current location in the Universe
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="flex items-center justify-center py-8">
-            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-          </div>
+        <CardContent className="flex items-center justify-center py-12">
+          <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
         </CardContent>
       </Card>
     );
   }
 
+  const favorites = room?._count?.favorites ?? 0;
+
   const content = (
-    <Card className="group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all hover:-translate-y-1 hover:shadow-lg">
-      <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-primary/10 via-transparent to-secondary/20 opacity-0 transition-opacity group-hover:opacity-100" />
+    <Card className={cn(
+      'group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
+      'hover:-translate-y-1 hover:shadow-lg',
+    )}>
+      <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-emerald-500/10 via-transparent to-sky-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
       <CardContent className="relative flex h-full flex-col p-5">
         <div className="mb-3 flex items-start gap-3">
           <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full border bg-muted">
@@ -164,21 +185,13 @@ export default function CurrentLocation() {
           </div>
           <div className="min-w-0 flex-1 space-y-1">
             <h3 className="truncate text-base font-semibold leading-tight">
-              Current room
+              {room?.name || 'Current room'}
             </h3>
             {room ? (
               <>
                 <p className="truncate text-xs text-muted-foreground">
                   {room.world.universe.name} · {room.world.name}
                 </p>
-                <p className="truncate font-mono text-[11px] text-muted-foreground/80">
-                  {room.slug}
-                </p>
-                {isSuperAdmin && (room.mapUrl || mapURL) && (
-                  <p className="truncate font-mono text-[11px] text-muted-foreground/80">
-                    Map: {room.mapUrl || mapURL}
-                  </p>
-                )}
               </>
             ) : roomError ? (
               <p className="truncate text-xs text-muted-foreground">
@@ -195,10 +208,42 @@ export default function CurrentLocation() {
             )}
           </div>
         </div>
-        <div className="mt-auto pt-2 text-xs text-muted-foreground">
-          <span className="text-[11px] uppercase tracking-wide">
-            Your current location in the Universe
-          </span>
+
+        {room?.description && (
+          <p className="mb-3 line-clamp-2 text-sm text-muted-foreground">
+            {room.description}
+          </p>
+        )}
+
+        <div className="mt-auto flex items-center justify-between pt-3 text-xs text-muted-foreground">
+          <div className="flex flex-col gap-1.5">
+            {analytics ? (
+              <>
+                <div className="flex items-center gap-1.5">
+                  <Activity className="h-3.5 w-3.5 text-muted-foreground" />
+                  <span className="font-medium text-foreground/80">
+                    {analytics.totalAccesses.toLocaleString()} accesses
+                  </span>
+                </div>
+                {analytics.peakHour !== null && (
+                  <div className="flex items-center gap-1.5">
+                    <Clock className="h-3.5 w-3.5 text-muted-foreground" />
+                    <span className="text-muted-foreground">
+                      Peak: {formatHourTo12Hour(analytics.peakHour)}
+                    </span>
+                  </div>
+                )}
+              </>
+            ) : room ? (
+              <span className="text-muted-foreground">Access data loading...</span>
+            ) : null}
+          </div>
+          {room && (
+            <div className="flex items-center gap-1 text-primary">
+              <Star className="h-4 w-4" aria-hidden="true" />
+              <span className="text-xs font-medium">{favorites}</span>
+            </div>
+          )}
         </div>
       </CardContent>
     </Card>
