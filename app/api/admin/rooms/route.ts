@@ -40,6 +40,7 @@ export async function GET(request: NextRequest) {
     const limit = parseInt(searchParams.get('limit') || '50');
     const search = searchParams.get('search') || '';
     const worldId = searchParams.get('worldId');
+    const scope = searchParams.get('scope') || 'my';
     
     const where: any = {};
     
@@ -51,62 +52,68 @@ export async function GET(request: NextRequest) {
       ];
     }
     
-    // If user session (not admin token), filter to rooms in worlds they can access
+    // If user session (not admin token), support scopes
+    // - scope=my (default): rooms in worlds they can administer (existing behavior)
+    // - scope=discover: public rooms across all worlds
     if (userId && !isAdminToken) {
-      // Get worlds where user is admin member or owns the universe
-      const userUniverses = await prisma.universe.findMany({
-        where: { ownerId: userId },
-        select: { id: true },
-      });
-      const userUniverseIds = userUniverses.map((u: { id: string }) => u.id);
-      
-      const adminWorlds = await prisma.worldMember.findMany({
-        where: {
-          userId: userId,
-          tags: {
-            has: 'admin',
-          },
-        },
-        select: { worldId: true },
-      });
-      const adminWorldIds = adminWorlds.map((w: { worldId: string }) => w.worldId);
-      
-      const accessibleWorlds = await prisma.world.findMany({
-        where: {
-          OR: [
-            { universeId: { in: userUniverseIds } },
-            { id: { in: adminWorldIds } },
-          ],
-        },
-        select: { id: true },
-      });
-      const accessibleWorldIds = accessibleWorlds.map((w: { id: string }) => w.id);
-      
-      if (accessibleWorldIds.length === 0) {
-        // User has no accessible worlds, return empty result
-        return NextResponse.json({
-          rooms: [],
-          pagination: {
-            page,
-            limit,
-            total: 0,
-            totalPages: 0,
-          },
-        });
-      }
-      
-      // If worldId is specified, verify user can access it
-      if (worldId) {
-        if (!accessibleWorldIds.includes(worldId)) {
-          return NextResponse.json(
-            { error: 'Forbidden' },
-            { status: 403 }
-          );
-        }
-        where.worldId = worldId;
+      if (scope === 'discover') {
+        where.isPublic = true;
       } else {
-        // Filter rooms to only those in accessible worlds
-        where.worldId = { in: accessibleWorldIds };
+        // Get worlds where user is admin member or owns the universe
+        const userUniverses = await prisma.universe.findMany({
+          where: { ownerId: userId },
+          select: { id: true },
+        });
+        const userUniverseIds = userUniverses.map((u: { id: string }) => u.id);
+        
+        const adminWorlds = await prisma.worldMember.findMany({
+          where: {
+            userId: userId,
+            tags: {
+              has: 'admin',
+            },
+          },
+          select: { worldId: true },
+        });
+        const adminWorldIds = adminWorlds.map((w: { worldId: string }) => w.worldId);
+        
+        const accessibleWorlds = await prisma.world.findMany({
+          where: {
+            OR: [
+              { universeId: { in: userUniverseIds } },
+              { id: { in: adminWorldIds } },
+            ],
+          },
+          select: { id: true },
+        });
+        const accessibleWorldIds = accessibleWorlds.map((w: { id: string }) => w.id);
+        
+        if (accessibleWorldIds.length === 0) {
+          // User has no accessible worlds, return empty result
+          return NextResponse.json({
+            rooms: [],
+            pagination: {
+              page,
+              limit,
+              total: 0,
+              totalPages: 0,
+            },
+          });
+        }
+        
+        // If worldId is specified, verify user can access it
+        if (worldId) {
+          if (!accessibleWorldIds.includes(worldId)) {
+            return NextResponse.json(
+              { error: 'Forbidden' },
+              { status: 403 }
+            );
+          }
+          where.worldId = worldId;
+        } else {
+          // Filter rooms to only those in accessible worlds
+          where.worldId = { in: accessibleWorldIds };
+        }
       }
     } else if (worldId) {
       // Admin token - can filter by any world

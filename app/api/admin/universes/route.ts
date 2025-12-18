@@ -15,7 +15,7 @@ const createUniverseSchema = z.object({
 
 const updateUniverseSchema = createUniverseSchema.partial();
 
-// GET /api/admin/universes - List all universes
+// GET /api/admin/universes - List universes
 export async function GET(request: NextRequest) {
   try {
     // Check if using admin token or session
@@ -43,6 +43,7 @@ export async function GET(request: NextRequest) {
     const limit = parseInt(searchParams.get('limit') || '50');
     const search = searchParams.get('search') || '';
     const ownerId = searchParams.get('ownerId');
+    const scope = searchParams.get('scope') || 'my';
     
     const where: any = {};
     
@@ -54,12 +55,25 @@ export async function GET(request: NextRequest) {
       ];
     }
     
-    // If user session (not admin token), only show their universes
-    if (userId && !isAdminToken) {
-      where.ownerId = userId;
-    } else if (ownerId) {
-      // Admin can filter by owner
-      where.ownerId = ownerId;
+    if (isAdminToken) {
+      // Admin token callers keep existing behavior:
+      // - When ownerId is provided, filter by it
+      // - Otherwise, return all universes (subject to search filters)
+      if (ownerId) {
+        where.ownerId = ownerId;
+      }
+    } else if (userId) {
+      // Session-based callers: support scopes
+      // - scope=my (default): universes owned by the current user
+      // - scope=discover: public universes (including your own), excluding the default universe
+      if (scope === 'discover') {
+        where.isPublic = true;
+        // Hide the built-in default universe (default/default/default)
+        where.slug = { not: 'default' };
+      } else {
+        // Fallback to \"my\" semantics for unknown scope values
+        where.ownerId = userId;
+      }
     }
     
     const [universes, total] = await Promise.all([

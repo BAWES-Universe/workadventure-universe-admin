@@ -50,6 +50,9 @@ export default function MobileNav({ user: initialUser }: MobileNavProps) {
   }, [open]);
 
   const navItems = getNavItems(user);
+  const dashboardItem = navItems.find((item) => item.href === '/admin');
+  const discoverItems = navItems.filter((item) => item.group === 'discover');
+  const myItems = navItems.filter((item) => item.group === 'my');
 
   const isActive = (href: string) => {
     if (href === '/admin') {
@@ -68,27 +71,86 @@ export default function MobileNav({ user: initialUser }: MobileNavProps) {
     >
       <div className="h-full overflow-y-auto" onClick={(e) => e.stopPropagation()}>
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-          <nav className="space-y-1">
-            {navItems.map((item) => {
-              const Icon = item.icon;
-              const active = isActive(item.href);
-              return (
-                <AuthLink
-                  key={item.href}
-                  href={item.href}
-                  onClick={() => setOpen(false)}
-                  className={cn(
-                    "flex items-center gap-4 px-4 py-4 rounded-lg text-2xl font-bold transition-all",
-                    active
-                      ? "bg-primary text-primary-foreground"
-                      : "text-foreground hover:bg-accent hover:text-accent-foreground"
-                  )}
-                >
-                  <Icon className={cn("h-7 w-7", active && "text-primary-foreground")} />
-                  {item.label}
-                </AuthLink>
-              );
-            })}
+          {dashboardItem && (
+            <div className="mb-8">
+              {(() => {
+                const Icon = dashboardItem.icon;
+                const active = isActive(dashboardItem.href);
+                return (
+                  <AuthLink
+                    href={dashboardItem.href}
+                    onClick={() => setOpen(false)}
+                    className={cn(
+                      "flex items-center gap-4 px-4 py-4 rounded-lg text-2xl font-bold transition-all",
+                      active
+                        ? "bg-primary text-primary-foreground"
+                        : "text-foreground hover:bg-accent hover:text-accent-foreground"
+                    )}
+                  >
+                    <Icon className={cn("h-7 w-7", active && "text-primary-foreground")} />
+                    {dashboardItem.label}
+                  </AuthLink>
+                );
+              })()}
+            </div>
+          )}
+
+          <nav className="flex flex-col gap-8">
+            {discoverItems.length > 0 && (
+              <div className="flex flex-col gap-4">
+                <div className="text-muted-foreground text-sm font-medium">Discover</div>
+                <div className="flex flex-col gap-3">
+                  {discoverItems.map((item) => {
+                    const Icon = item.icon;
+                    const active = isActive(item.href);
+                    return (
+                      <AuthLink
+                        key={item.href}
+                        href={item.href}
+                        onClick={() => setOpen(false)}
+                        className={cn(
+                          "flex items-center gap-4 px-4 py-4 rounded-lg text-2xl font-bold transition-all",
+                          active
+                            ? "bg-primary text-primary-foreground"
+                            : "text-foreground hover:bg-accent hover:text-accent-foreground"
+                        )}
+                      >
+                        <Icon className={cn("h-7 w-7", active && "text-primary-foreground")} />
+                        {item.label}
+                      </AuthLink>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {myItems.length > 0 && (
+              <div className="flex flex-col gap-4">
+                <div className="text-muted-foreground text-sm font-medium">My</div>
+                <div className="flex flex-col gap-3">
+                  {myItems.map((item) => {
+                    const Icon = item.icon;
+                    const active = isActive(item.href);
+                    return (
+                      <AuthLink
+                        key={item.href}
+                        href={item.href}
+                        onClick={() => setOpen(false)}
+                        className={cn(
+                          "flex items-center gap-4 px-4 py-4 rounded-lg text-2xl font-bold transition-all",
+                          active
+                            ? "bg-primary text-primary-foreground"
+                            : "text-foreground hover:bg-accent hover:text-accent-foreground"
+                        )}
+                      >
+                        <Icon className={cn("h-7 w-7", active && "text-primary-foreground")} />
+                        {item.label}
+                      </AuthLink>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </nav>
           
           {user && (

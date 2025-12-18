@@ -1,9 +1,11 @@
 import Link from 'next/link';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Globe, Users, FolderOpen, Home, Plus, TrendingUp } from 'lucide-react';
+import { Globe, Users, FolderOpen, Home, Plus, MapPin } from 'lucide-react';
+import { prisma } from '@/lib/db';
 import CurrentLocation from './components/current-location';
 import PendingInvitationsAlert from './components/pending-invitations-alert';
+import RecentRoomCard from './components/recent-room-card';
 
 async function getStats() {
   const token = process.env.ADMIN_API_TOKEN;
@@ -48,8 +50,92 @@ async function getStats() {
   }
 }
 
+async function getRecentRooms(limit = 2) {
+  try {
+    const accesses = await prisma.roomAccess.findMany({
+      where: {},
+      include: {
+        room: {
+          select: {
+            id: true,
+            name: true,
+            slug: true,
+            world: {
+              select: {
+                id: true,
+                name: true,
+                slug: true,
+                universe: {
+                  select: {
+                    id: true,
+                    name: true,
+                    slug: true,
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      orderBy: { accessedAt: 'desc' },
+      take: 50,
+    });
+
+    const seen = new Set<string>();
+    const recent: {
+      roomId: string;
+      roomName: string;
+      roomSlug: string;
+      worldId: string;
+      worldName: string;
+      worldSlug: string;
+      universeId: string;
+      universeName: string;
+      universeSlug: string;
+      accessedAt: Date;
+    }[] = [];
+
+    let skippedCurrent = false;
+
+    for (const access of accesses) {
+      const room = access.room;
+      const world = room?.world;
+      const universe = world?.universe;
+      if (!room || !world || !universe) continue;
+      if (seen.has(room.id)) continue;
+      seen.add(room.id);
+
+      // Treat the first unique room as the current room and skip it
+      if (!skippedCurrent) {
+        skippedCurrent = true;
+        continue;
+      }
+
+      recent.push({
+        roomId: room.id,
+        roomName: room.name,
+        roomSlug: room.slug,
+        worldId: world.id,
+        worldName: world.name,
+        worldSlug: world.slug,
+        universeId: universe.id,
+        universeName: universe.name,
+        universeSlug: universe.slug,
+        accessedAt: access.accessedAt,
+      });
+
+      if (recent.length >= limit) break;
+    }
+
+    return recent;
+  } catch (error) {
+    console.error('Error fetching recent rooms for dashboard:', error);
+    return [];
+  }
+}
+
 export default async function AdminDashboard() {
-  const stats = await getStats();
+  const [stats, recentRooms] = await Promise.all([getStats(), getRecentRooms(2)]);
   
   return (
     <div className="space-y-8">
@@ -61,7 +147,36 @@ export default async function AdminDashboard() {
       </div>
 
       <PendingInvitationsAlert />
-      
+
+      {/* Current location at the top */}
+      <section className="space-y-3">
+        <div className="space-y-1">
+          <h2 className="text-xl font-semibold tracking-tight">Current Location</h2>
+          <p className="text-sm text-muted-foreground">
+            Your current location in the Universe
+          </p>
+        </div>
+        <CurrentLocation />
+      </section>
+
+      {/* Recently visited rooms */}
+      {recentRooms.length > 0 && (
+        <section className="space-y-3">
+          <div className="space-y-1">
+            <h2 className="text-xl font-semibold tracking-tight">Recently visited</h2>
+            <p className="text-sm text-muted-foreground">
+              Jump back into rooms that have been active most recently.
+            </p>
+          </div>
+          <div className="grid gap-4 md:grid-cols-2">
+            {recentRooms.map((item) => (
+              <RecentRoomCard key={item.roomId} room={item} />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {/* Discover / onboarding section */}
       {stats.universes === 0 ? (
         <Card className="border-dashed">
           <CardHeader className="text-center pb-4">
@@ -83,9 +198,15 @@ export default async function AdminDashboard() {
           </CardContent>
         </Card>
       ) : (
-        <>
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-            <Link href="/admin/universes" className="group">
+        <section className="space-y-3">
+          <div className="space-y-1">
+            <h2 className="text-xl font-semibold tracking-tight">Discover</h2>
+            <p className="text-sm text-muted-foreground">
+              Explore universes, worlds, rooms, and users across the Universe.
+            </p>
+          </div>
+          <div className="grid gap-4 grid-cols-2 md:grid-cols-4">
+            <Link href="/admin/discover/universes" className="group">
               <Card className="transition-all hover:shadow-lg hover:border-primary/50 h-full">
                 <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
                   <CardTitle className="text-sm font-medium">Universes</CardTitle>
@@ -96,42 +217,46 @@ export default async function AdminDashboard() {
                 <CardContent>
                   <div className="text-3xl font-bold">{stats.universes}</div>
                   <p className="text-xs text-muted-foreground mt-1">
-                    Total universes
+                    Public universes you can explore
                   </p>
                 </CardContent>
               </Card>
             </Link>
-            
-            <Card className="h-full">
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium">Worlds</CardTitle>
-                <div className="h-9 w-9 rounded-full bg-blue-500/10 flex items-center justify-center">
-                  <Home className="h-5 w-5 text-blue-500" />
-                </div>
-              </CardHeader>
-              <CardContent>
-                <div className="text-3xl font-bold">{stats.worlds}</div>
-                <p className="text-xs text-muted-foreground mt-1">
-                  Total worlds
-                </p>
-              </CardContent>
-            </Card>
-            
-            <Card className="h-full">
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium">Rooms</CardTitle>
-                <div className="h-9 w-9 rounded-full bg-green-500/10 flex items-center justify-center">
-                  <FolderOpen className="h-5 w-5 text-green-500" />
-                </div>
-              </CardHeader>
-              <CardContent>
-                <div className="text-3xl font-bold">{stats.rooms}</div>
-                <p className="text-xs text-muted-foreground mt-1">
-                  Total rooms
-                </p>
-              </CardContent>
-            </Card>
-            
+
+            <Link href="/admin/discover/worlds" className="group">
+              <Card className="transition-all hover:shadow-lg hover:border-primary/50 h-full">
+                <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                  <CardTitle className="text-sm font-medium">Worlds</CardTitle>
+                  <div className="h-9 w-9 rounded-full bg-blue-500/10 flex items-center justify-center group-hover:bg-blue-500/20 transition-colors">
+                    <Home className="h-5 w-5 text-blue-500" />
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  <div className="text-3xl font-bold">{stats.worlds}</div>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Worlds across universes
+                  </p>
+                </CardContent>
+              </Card>
+            </Link>
+
+            <Link href="/admin/discover/rooms" className="group">
+              <Card className="transition-all hover:shadow-lg hover:border-primary/50 h-full">
+                <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                  <CardTitle className="text-sm font-medium">Rooms</CardTitle>
+                  <div className="h-9 w-9 rounded-full bg-green-500/10 flex items-center justify-center group-hover:bg-green-500/20 transition-colors">
+                    <FolderOpen className="h-5 w-5 text-green-500" />
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  <div className="text-3xl font-bold">{stats.rooms}</div>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Individual spaces & maps
+                  </p>
+                </CardContent>
+              </Card>
+            </Link>
+
             <Link href="/admin/users" className="group">
               <Card className="transition-all hover:shadow-lg hover:border-primary/50 h-full">
                 <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
@@ -143,15 +268,13 @@ export default async function AdminDashboard() {
                 <CardContent>
                   <div className="text-3xl font-bold">{stats.users}</div>
                   <p className="text-xs text-muted-foreground mt-1">
-                    Total users
+                    People exploring the Universe
                   </p>
                 </CardContent>
               </Card>
             </Link>
           </div>
-
-          <CurrentLocation />
-        </>
+        </section>
       )}
     </div>
   );

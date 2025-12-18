@@ -5,27 +5,9 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table';
-import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from '@/components/ui/alert-dialog';
 import { Plus, AlertCircle, Loader2 } from 'lucide-react';
+import { UniverseCard } from './universe-card';
 
 interface Universe {
   id: string;
@@ -34,32 +16,32 @@ interface Universe {
   description: string | null;
   isPublic: boolean;
   featured: boolean;
+  thumbnailUrl: string | null;
   owner: {
     id: string;
     name: string | null;
     email: string | null;
   };
-  _count: {
-    worlds: number;
-    members: number;
+  _count?: {
+    worlds?: number;
   };
 }
 
 export default function UniversesPage() {
   const router = useRouter();
-  const [universes, setUniverses] = useState<Universe[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [user, setUser] = useState<any>(null);
-  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
-  const [universeToDelete, setUniverseToDelete] = useState<Universe | null>(null);
-  const [deleting, setDeleting] = useState(false);
+
+  const [checkingAuth, setCheckingAuth] = useState(true);
+
+  const [myUniverses, setMyUniverses] = useState<Universe[]>([]);
+  const [myLoading, setMyLoading] = useState(true);
+  const [myError, setMyError] = useState<string | null>(null);
 
   useEffect(() => {
-    checkAuth();
+    checkAuthAndLoad();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function checkAuth() {
+  async function checkAuthAndLoad() {
     try {
       const { authenticatedFetch } = await import('@/lib/client-auth');
       const response = await authenticatedFetch('/api/auth/me');
@@ -67,19 +49,20 @@ export default function UniversesPage() {
         router.push('/admin/login');
         return;
       }
-      const data = await response.json();
-      setUser(data.user);
-      fetchUniverses(data.user);
+      
+      await fetchMyUniverses();
     } catch (err) {
       router.push('/admin/login');
+    } finally {
+      setCheckingAuth(false);
     }
   }
 
-  async function fetchUniverses(currentUser: any) {
+  async function fetchMyUniverses() {
     try {
-      setLoading(true);
+      setMyLoading(true);
       const { authenticatedFetch } = await import('@/lib/client-auth');
-      const response = await authenticatedFetch(`/api/admin/universes?ownerId=${currentUser.id}`);
+      const response = await authenticatedFetch('/api/admin/universes?scope=my&limit=50');
 
       if (!response.ok) {
         if (response.status === 401) {
@@ -90,49 +73,16 @@ export default function UniversesPage() {
       }
 
       const data = await response.json();
-      setUniverses(data.universes || []);
-      setError(null);
+      setMyUniverses(data.universes || []);
+      setMyError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'An error occurred');
+      setMyError(err instanceof Error ? err.message : 'An error occurred');
     } finally {
-      setLoading(false);
+      setMyLoading(false);
     }
   }
 
-  function handleDeleteClick(universe: Universe) {
-    setUniverseToDelete(universe);
-    setDeleteDialogOpen(true);
-  }
-
-  async function handleDeleteConfirm() {
-    if (!universeToDelete) return;
-
-    try {
-      setDeleting(true);
-      const { authenticatedFetch } = await import('@/lib/client-auth');
-      const response = await authenticatedFetch(`/api/admin/universes/${universeToDelete.id}`, {
-        method: 'DELETE',
-      });
-
-      if (!response.ok) {
-        if (response.status === 401) {
-          router.push('/admin/login');
-          return;
-        }
-        throw new Error('Failed to delete universe');
-      }
-
-      setUniverses(universes.filter(u => u.id !== universeToDelete.id));
-      setDeleteDialogOpen(false);
-      setUniverseToDelete(null);
-    } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed to delete universe');
-    } finally {
-      setDeleting(false);
-    }
-  }
-
-  if (loading) {
+  if (checkingAuth) {
     return (
       <div className="space-y-8">
         <div className="flex items-center justify-center py-12">
@@ -146,9 +96,9 @@ export default function UniversesPage() {
     <div className="space-y-8">
       <div className="flex items-center justify-between">
         <div className="space-y-1">
-          <h1 className="text-4xl font-bold tracking-tight">Universes</h1>
+          <h1 className="text-4xl font-bold tracking-tight">My Universes</h1>
           <p className="text-muted-foreground text-lg">
-            Manage universes, worlds, and rooms.
+            Manage universes you own and control.
           </p>
         </div>
         <Button variant="default" asChild>
@@ -159,134 +109,76 @@ export default function UniversesPage() {
         </Button>
       </div>
 
-      {error && (
-        <Alert variant="destructive">
-          <AlertCircle className="h-4 w-4" />
-          <AlertTitle>Error</AlertTitle>
-          <AlertDescription>
-            {error}
-            <Button
-              variant="outline"
-              size="sm"
-              className="ml-4"
-              onClick={() => user && fetchUniverses(user)}
-            >
-              Retry
-            </Button>
-          </AlertDescription>
-        </Alert>
-      )}
+      {/* My Universes */}
+      <section className="space-y-4">
+        <div className="flex items-center justify-between gap-2">
+          <div className="space-y-1">
+            <h2 className="text-xl font-semibold tracking-tight">My Universes</h2>
+            <p className="text-sm text-muted-foreground">
+              Universes you own and manage.
+            </p>
+          </div>
+          {!myLoading && (
+            <div className="text-xs text-muted-foreground">
+              {myUniverses.length} {myUniverses.length === 1 ? 'universe' : 'universes'}
+            </div>
+          )}
+        </div>
 
-      {universes.length === 0 ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>No universes found</CardTitle>
-            <CardDescription>
-              Get started by creating your first universe.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Button variant="default" asChild>
-              <Link href="/admin/universes/new">
-                <Plus className="mr-2 h-4 w-4" />
-                Create your first universe
-              </Link>
-            </Button>
-          </CardContent>
-        </Card>
-      ) : (
-        <Card>
-          <CardContent className="p-0">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Slug</TableHead>
-                  <TableHead>Owner</TableHead>
-                  <TableHead>Worlds</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead className="text-right">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {universes.map((universe) => (
-                  <TableRow key={universe.id}>
-                    <TableCell className="font-medium">{universe.name}</TableCell>
-                    <TableCell className="text-muted-foreground font-mono text-sm">
-                      {universe.slug}
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {universe.owner.name || universe.owner.email || 'Unknown'}
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {universe._count.worlds}
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex items-center gap-2">
-                        <Badge variant={universe.isPublic ? 'default' : 'secondary'}>
-                          {universe.isPublic ? 'Public' : 'Private'}
-                        </Badge>
-                        {universe.featured && (
-                          <Badge variant="outline">Featured</Badge>
-                        )}
-                      </div>
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <div className="flex items-center justify-end gap-2">
-                        <Button variant="default" size="sm" asChild>
-                          <Link href={`/admin/universes/${universe.id}`}>Edit</Link>
-                        </Button>
-                        <Button
-                          variant="destructive"
-                          size="sm"
-                          onClick={() => handleDeleteClick(universe)}
-                        >
-                          Delete
-                        </Button>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
-      )}
+        {myError && (
+          <Alert variant="destructive">
+            <AlertCircle className="h-4 w-4" />
+            <AlertTitle>Error</AlertTitle>
+            <AlertDescription>
+              {myError}
+              <Button
+                variant="outline"
+                size="sm"
+                className="ml-4"
+                onClick={fetchMyUniverses}
+              >
+                Retry
+              </Button>
+            </AlertDescription>
+          </Alert>
+        )}
 
-      <AlertDialog open={deleteDialogOpen} onOpenChange={(open: boolean) => {
-        setDeleteDialogOpen(open);
-        if (!open) {
-          setUniverseToDelete(null);
-        }
-      }}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete Universe</AlertDialogTitle>
-            <AlertDialogDescription>
-              Are you sure you want to delete "{universeToDelete?.name}"? This action cannot be undone.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={deleting}>
-              Cancel
-            </AlertDialogCancel>
-            <AlertDialogAction
-              variant="destructive"
-              onClick={handleDeleteConfirm}
-              disabled={deleting}
-            >
-              {deleting ? (
-                <>
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  Deleting...
-                </>
-              ) : (
-                'Delete'
-              )}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+        {myLoading && myUniverses.length === 0 ? (
+          <Card>
+            <CardContent className="flex items-center justify-center py-12">
+              <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+            </CardContent>
+          </Card>
+        ) : myUniverses.length === 0 ? (
+          <Card>
+            <CardHeader>
+              <CardTitle>No universes yet</CardTitle>
+              <CardDescription>
+                Create your first universe to start building your worlds.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Button variant="default" asChild>
+                <Link href="/admin/universes/new">
+                  <Plus className="mr-2 h-4 w-4" />
+                  Create your first universe
+                </Link>
+              </Button>
+            </CardContent>
+          </Card>
+        ) : (
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {myUniverses.map((universe) => (
+              <UniverseCard
+                key={universe.id}
+                universe={universe}
+                ownedByCurrentUser
+              />
+            ))}
+          </div>
+        )}
+      </section>
     </div>
   );
 }
+
