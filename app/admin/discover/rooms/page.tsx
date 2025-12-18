@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { AlertCircle, Loader2, Search, X, MapPin, Star } from 'lucide-react';
+import { AlertCircle, Loader2, Search, X, MapPin, Star, Activity, Clock } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 
@@ -33,7 +33,19 @@ interface Room {
   };
 }
 
-function RoomCard({ room }: { room: Room }) {
+interface RoomAnalytics {
+  totalAccesses: number;
+  peakHour: number | null;
+}
+
+function formatHourTo12Hour(hour: number): string {
+  if (hour === 0) return '12:00 AM';
+  if (hour < 12) return `${hour}:00 AM`;
+  if (hour === 12) return '12:00 PM';
+  return `${hour - 12}:00 PM`;
+}
+
+function RoomCard({ room, analytics }: { room: Room; analytics?: RoomAnalytics }) {
   const favorites = room._count?.favorites ?? 0;
 
   return (
@@ -61,7 +73,7 @@ function RoomCard({ room }: { room: Room }) {
                 {room.name}
               </h3>
               <p className="truncate text-xs font-mono text-muted-foreground">
-                {room.world.universe.name} · {room.world.name} · {room.slug}
+                {room.world.universe.name} · {room.world.name}
               </p>
             </div>
           </div>
@@ -73,17 +85,27 @@ function RoomCard({ room }: { room: Room }) {
           )}
 
           <div className="mt-auto flex items-center justify-between pt-3 text-xs text-muted-foreground">
-            <div className="flex flex-col gap-0.5">
-              <span className="line-clamp-1">
-                Map URL:{' '}
-                {room.mapUrl ? (
-                  <span className="truncate font-mono text-[11px]">
-                    {room.mapUrl}
-                  </span>
-                ) : (
-                  'Not set'
-                )}
-              </span>
+            <div className="flex flex-col gap-1.5">
+              {analytics ? (
+                <>
+                  <div className="flex items-center gap-1.5">
+                    <Activity className="h-3.5 w-3.5 text-muted-foreground" />
+                    <span className="font-medium text-foreground/80">
+                      {analytics.totalAccesses.toLocaleString()} accesses
+                    </span>
+                  </div>
+                  {analytics.peakHour !== null && (
+                    <div className="flex items-center gap-1.5">
+                      <Clock className="h-3.5 w-3.5 text-muted-foreground" />
+                      <span className="text-muted-foreground">
+                        Peak: {formatHourTo12Hour(analytics.peakHour)}
+                      </span>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <span className="text-muted-foreground">Access data loading...</span>
+              )}
             </div>
             <div className="flex items-center gap-1 text-primary">
               <Star className="h-4 w-4" aria-hidden="true" />
@@ -108,6 +130,7 @@ export default function DiscoverRoomsPage() {
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [total, setTotal] = useState(0);
+  const [analyticsByRoom, setAnalyticsByRoom] = useState<Record<string, RoomAnalytics>>({});
 
   useEffect(() => {
     checkAuthAndLoad();
@@ -177,6 +200,67 @@ export default function DiscoverRoomsPage() {
       setLoading(false);
     }
   }
+
+  useEffect(() => {
+    async function fetchAnalyticsForRooms() {
+      const missing = rooms.filter((room) => !analyticsByRoom[room.id]);
+      if (missing.length === 0) return;
+
+      try {
+        const { authenticatedFetch } = await import('@/lib/client-auth');
+        const results = await Promise.all(
+          missing.map(async (room) => {
+            try {
+              const response = await authenticatedFetch(
+                `/api/admin/analytics/rooms/${room.id}`,
+              );
+              if (!response.ok) {
+                return null;
+              }
+              const data = await response.json();
+              const peakHour =
+                Array.isArray(data.peakTimes) && data.peakTimes.length > 0
+                  ? data.peakTimes[0].hour ?? null
+                  : null;
+              return {
+                roomId: room.id,
+                totalAccesses: data.totalAccesses || 0,
+                peakHour,
+              };
+            } catch {
+              return null;
+            }
+          }),
+        );
+
+        setAnalyticsByRoom((prev) => {
+          const updated: Record<string, RoomAnalytics> = { ...prev };
+          for (const result of results) {
+            if (result) {
+              updated[result.roomId] = {
+                totalAccesses: result.totalAccesses,
+                peakHour: result.peakHour,
+              };
+            }
+          }
+          return updated;
+        });
+      } catch {
+        // Ignore analytics fetch errors; cards will show a placeholder
+      }
+    }
+
+    if (rooms.length > 0) {
+      fetchAnalyticsForRooms();
+    }
+  }, [rooms, analyticsByRoom]);
+
+  // Sort rooms by total accesses (descending) once analytics are loaded
+  const sortedRooms = [...rooms].sort((a, b) => {
+    const aAccesses = analyticsByRoom[a.id]?.totalAccesses ?? 0;
+    const bAccesses = analyticsByRoom[b.id]?.totalAccesses ?? 0;
+    return bAccesses - aAccesses;
+  });
 
   function handleSearchSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -288,8 +372,12 @@ export default function DiscoverRoomsPage() {
       ) : (
         <>
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-            {rooms.map((room) => (
-              <RoomCard key={room.id} room={room} />
+            {sortedRooms.map((room) => (
+              <RoomCard
+                key={room.id}
+                room={room}
+                analytics={analyticsByRoom[room.id]}
+              />
             ))}
           </div>
 
