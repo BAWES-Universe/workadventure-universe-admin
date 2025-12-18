@@ -56,7 +56,7 @@ export default async function AdminDashboard() {
       <div className="space-y-2">
         <h1 className="text-4xl font-bold tracking-tight">Dashboard</h1>
         <p className="text-muted-foreground text-lg">
-          Overview of your WorkAdventure universe, worlds, rooms, and users.
+          Overview of your Universe, worlds, rooms, and users.
         </p>
       </div>
 
@@ -70,7 +70,7 @@ export default async function AdminDashboard() {
             </div>
             <CardTitle className="text-2xl">Get Started</CardTitle>
             <CardDescription className="text-base mt-2">
-              Create your first universe to begin organizing your WorkAdventure worlds and rooms.
+              Create your first universe to begin organizing your Universe worlds and rooms.
             </CardDescription>
           </CardHeader>
           <CardContent className="flex justify-center pt-2">

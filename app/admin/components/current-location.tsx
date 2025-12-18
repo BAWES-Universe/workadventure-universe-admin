@@ -72,7 +72,7 @@ export default function CurrentLocation() {
             Current Location
           </CardTitle>
           <CardDescription>
-            Your current location in WorkAdventure
+            Your current location in the Universe
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -80,7 +80,7 @@ export default function CurrentLocation() {
             <AlertCircle className="h-4 w-4" />
             <AlertTitle>Not Available</AlertTitle>
             <AlertDescription>
-              WorkAdventure API is not available. This feature only works when the admin page is loaded in a WorkAdventure iframe.
+              Universe API is not available. This feature only works when the admin page is loaded in a Universe iframe.
             </AlertDescription>
           </Alert>
         </CardContent>
@@ -97,7 +97,7 @@ export default function CurrentLocation() {
             Current Location
           </CardTitle>
           <CardDescription>
-            Your current location in WorkAdventure
+            Your current location in the Universe
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -117,7 +117,7 @@ export default function CurrentLocation() {
           Current Location
         </CardTitle>
         <CardDescription>
-          Your current location in WorkAdventure
+          Your current location in the Universe
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
