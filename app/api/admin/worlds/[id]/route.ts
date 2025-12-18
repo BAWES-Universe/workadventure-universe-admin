@@ -51,7 +51,12 @@ export async function GET(
           },
         },
         rooms: {
-          include: {
+          select: {
+            id: true,
+            slug: true,
+            name: true,
+            description: true,
+            mapUrl: true,
             _count: {
               select: {
                 favorites: true,

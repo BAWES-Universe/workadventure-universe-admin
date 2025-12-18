@@ -29,7 +29,8 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { ChevronRight, AlertCircle, Loader2, Plus, Edit, Trash2, Users } from 'lucide-react';
+import { ChevronRight, AlertCircle, Loader2, Plus, Edit, Trash2, Users, MapPin, Star, Globe, Home, Activity, Clock } from 'lucide-react';
+import { cn } from '@/lib/utils';
 import InviteMemberDialog from '../../components/invite-member-dialog';
 import MemberList from '../../components/member-list';
 
@@ -51,10 +52,19 @@ interface World {
     id: string;
     slug: string;
     name: string;
+    description: string | null;
+    mapUrl: string | null;
     _count: {
       favorites: number;
     };
   }>;
+}
+
+function formatHourTo12Hour(hour: number): string {
+  if (hour === 0) return '12:00 AM';
+  if (hour < 12) return `${hour}:00 AM`;
+  if (hour === 12) return '12:00 PM';
+  return `${hour - 12}:00 PM`;
 }
 
 export default function WorldDetailPage() {
@@ -73,6 +83,7 @@ export default function WorldDetailPage() {
   const [deleting, setDeleting] = useState(false);
   const [activeTab, setActiveTab] = useState<'details' | 'analytics' | 'members'>('details');
   const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
+  const [roomAnalytics, setRoomAnalytics] = useState<Record<string, { totalAccesses: number; peakHour: number | null }>>({});
   
   const [formData, setFormData] = useState({
     slug: '',
@@ -88,6 +99,55 @@ export default function WorldDetailPage() {
     fetchWorld();
     fetchAnalytics();
   }, [id]);
+
+  useEffect(() => {
+    async function fetchRoomAnalytics() {
+      if (!world?.rooms || world.rooms.length === 0) return;
+
+      try {
+        const { authenticatedFetch } = await import('@/lib/client-auth');
+        const results = await Promise.all(
+          world.rooms.map(async (room) => {
+            try {
+              const response = await authenticatedFetch(`/api/admin/analytics/rooms/${room.id}`);
+              if (!response.ok) {
+                return null;
+              }
+              const data = await response.json();
+              const peakHour =
+                Array.isArray(data.peakTimes) && data.peakTimes.length > 0
+                  ? data.peakTimes[0].hour ?? null
+                  : null;
+              return {
+                roomId: room.id,
+                totalAccesses: data.totalAccesses || 0,
+                peakHour,
+              };
+            } catch {
+              return null;
+            }
+          }),
+        );
+
+        const analyticsMap: Record<string, { totalAccesses: number; peakHour: number | null }> = {};
+        for (const result of results) {
+          if (result) {
+            analyticsMap[result.roomId] = {
+              totalAccesses: result.totalAccesses,
+              peakHour: result.peakHour,
+            };
+          }
+        }
+        setRoomAnalytics(analyticsMap);
+      } catch {
+        // Silently fail - analytics are optional
+      }
+    }
+
+    if (world) {
+      fetchRoomAnalytics();
+    }
+  }, [world]);
 
   async function checkAuth() {
     try {
@@ -467,24 +527,79 @@ export default function WorldDetailPage() {
                   {world.rooms.length === 0 ? (
                     <p className="text-sm text-muted-foreground">No rooms yet. Create one to get started.</p>
                   ) : (
-                    <div className="space-y-3">
-                      {world.rooms.map((room) => (
-                        <Link
-                          key={room.id}
-                          href={`/admin/rooms/${room.id}`}
-                          className="block p-3 border rounded-lg hover:bg-accent transition-colors"
-                        >
-                          <div className="flex items-center justify-between">
-                            <div>
-                              <h3 className="text-sm font-medium">{room.name}</h3>
-                              <p className="text-sm text-muted-foreground">
-                                {room._count.favorites} favorites
-                              </p>
-                            </div>
-                            <ChevronRight className="h-4 w-4 text-muted-foreground" />
-                          </div>
-                        </Link>
-                      ))}
+                    <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+                      {world.rooms.map((room) => {
+                        const favorites = room._count.favorites ?? 0;
+                        const analytics = roomAnalytics[room.id];
+                        return (
+                          <Link
+                            key={room.id}
+                            href={`/admin/rooms/${room.id}`}
+                            className="block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+                          >
+                            <Card
+                              className={cn(
+                                'group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
+                                'hover:-translate-y-1 hover:shadow-lg',
+                              )}
+                            >
+                              <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-emerald-500/10 via-transparent to-sky-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
+
+                              <div className="relative flex h-full flex-col p-5">
+                                <div className="mb-3 flex items-start gap-3">
+                                  <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full border bg-muted">
+                                    <MapPin className="h-5 w-5 text-muted-foreground" />
+                                  </div>
+
+                                  <div className="min-w-0 flex-1 space-y-1">
+                                    <h3 className="truncate text-base font-semibold leading-tight">
+                                      {room.name}
+                                    </h3>
+                                    <p className="truncate text-xs text-muted-foreground">
+                                      {world.universe.name} · {world.name}
+                                    </p>
+                                  </div>
+                                </div>
+
+                                {room.description && (
+                                  <p className="mb-3 line-clamp-2 text-sm text-muted-foreground">
+                                    {room.description}
+                                  </p>
+                                )}
+
+                                <div className="mt-auto flex items-center justify-between pt-3 text-xs text-muted-foreground">
+                                  <div className="flex flex-col gap-1.5">
+                                    {analytics ? (
+                                      <>
+                                        <div className="flex items-center gap-1.5">
+                                          <Activity className="h-3.5 w-3.5 text-muted-foreground" />
+                                          <span className="font-medium text-foreground/80">
+                                            {analytics.totalAccesses.toLocaleString()} accesses
+                                          </span>
+                                        </div>
+                                        {analytics.peakHour !== null && (
+                                          <div className="flex items-center gap-1.5">
+                                            <Clock className="h-3.5 w-3.5 text-muted-foreground" />
+                                            <span className="text-muted-foreground">
+                                              Peak: {formatHourTo12Hour(analytics.peakHour)}
+                                            </span>
+                                          </div>
+                                        )}
+                                      </>
+                                    ) : (
+                                      <span className="text-muted-foreground">Access data loading...</span>
+                                    )}
+                                  </div>
+                                  <div className="flex items-center gap-1 text-primary">
+                                    <Star className="h-4 w-4" aria-hidden="true" />
+                                    <span className="text-xs font-medium">{favorites}</span>
+                                  </div>
+                                </div>
+                              </div>
+                            </Card>
+                          </Link>
+                        );
+                      })}
                     </div>
                   )}
                 </CardContent>

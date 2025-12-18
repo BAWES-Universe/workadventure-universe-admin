@@ -36,7 +36,8 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { ChevronRight, AlertCircle, Loader2, Plus, Edit, Trash2 } from 'lucide-react';
+import { ChevronRight, AlertCircle, Loader2, Plus, Edit, Trash2, Globe, Home, Users as UsersIcon } from 'lucide-react';
+import { cn } from '@/lib/utils';
 
 interface Universe {
   id: string;
@@ -57,6 +58,8 @@ interface Universe {
     id: string;
     slug: string;
     name: string;
+    description: string | null;
+    thumbnailUrl: string | null;
     _count: {
       rooms: number;
       members: number;
@@ -480,24 +483,80 @@ export default function UniverseDetailPage() {
               {universe.worlds.length === 0 ? (
                 <p className="text-sm text-muted-foreground">No worlds yet. Create one to get started.</p>
               ) : (
-                <div className="space-y-3">
-                  {universe.worlds.map((world) => (
-                    <Link
-                      key={world.id}
-                      href={`/admin/worlds/${world.id}`}
-                      className="block p-3 border rounded-lg hover:bg-accent transition-colors"
-                    >
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <h3 className="text-sm font-medium">{world.name}</h3>
-                          <p className="text-sm text-muted-foreground">
-                            {world._count.rooms} rooms • {world._count.members} members
-                          </p>
-                        </div>
-                        <ChevronRight className="h-4 w-4 text-muted-foreground" />
-                      </div>
-                    </Link>
-                  ))}
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+                  {universe.worlds.map((world) => {
+                    const roomsCount = world._count.rooms ?? 0;
+                    const membersCount = world._count.members ?? 0;
+                    return (
+                      <Link
+                        key={world.id}
+                        href={`/admin/worlds/${world.id}`}
+                        className="block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+                      >
+                        <Card
+                          className={cn(
+                            'group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
+                            'hover:-translate-y-1 hover:shadow-lg',
+                          )}
+                        >
+                          <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-blue-500/10 via-transparent to-purple-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
+
+                          <div className="relative flex h-full flex-col p-5">
+                            <div className="mb-4 flex items-start gap-3">
+                              {world.thumbnailUrl ? (
+                                <div className="relative h-16 w-16 flex-shrink-0 overflow-hidden rounded-lg border bg-muted">
+                                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                                  <img
+                                    src={world.thumbnailUrl}
+                                    alt={world.name}
+                                    className="h-full w-full object-cover"
+                                  />
+                                </div>
+                              ) : (
+                                <div className="flex h-16 w-16 flex-shrink-0 items-center justify-center rounded-lg border bg-muted text-lg font-semibold">
+                                  {world.name?.charAt(0)?.toUpperCase() || '?'}
+                                </div>
+                              )}
+
+                              <div className="min-w-0 flex-1 space-y-1">
+                                <div className="flex items-start justify-between gap-2">
+                                  <h3 className="truncate text-base font-semibold leading-tight">
+                                    {world.name}
+                                  </h3>
+                                </div>
+                                <p className="truncate text-xs font-mono text-muted-foreground">
+                                  {world.slug}
+                                </p>
+                              </div>
+                            </div>
+
+                            {world.description && (
+                              <p className="mb-3 line-clamp-2 text-sm text-muted-foreground">
+                                {world.description}
+                              </p>
+                            )}
+
+                            <div className="mt-auto flex items-center justify-between pt-3 text-xs text-muted-foreground">
+                              <div className="flex flex-col gap-0.5">
+                                <span className="flex items-center gap-1 font-medium text-foreground/80">
+                                  <Globe className="h-3 w-3" />
+                                  {universe.name}
+                                </span>
+                                <span className="line-clamp-1">
+                                  {roomsCount} {roomsCount === 1 ? 'room' : 'rooms'} · {membersCount}{' '}
+                                  {membersCount === 1 ? 'member' : 'members'}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-1 text-primary transition-transform group-hover:translate-x-0.5">
+                                <span className="hidden text-xs font-medium sm:inline">View</span>
+                                <ChevronRight className="h-4 w-4" aria-hidden="true" />
+                              </div>
+                            </div>
+                          </div>
+                        </Card>
+                      </Link>
+                    );
+                  })}
                 </div>
               )}
             </CardContent>

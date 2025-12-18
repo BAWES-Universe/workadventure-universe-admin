@@ -51,7 +51,12 @@ export async function GET(
           },
         },
         worlds: {
-          include: {
+          select: {
+            id: true,
+            slug: true,
+            name: true,
+            description: true,
+            thumbnailUrl: true,
             _count: {
               select: {
                 rooms: true,
