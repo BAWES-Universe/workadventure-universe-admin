@@ -14,7 +14,7 @@ async function getStats() {
   const baseUrl = 'http://localhost:3333';
   
   try {
-    const [universes, worlds, rooms, users] = await Promise.all([
+    const [universes, worlds, rooms, users, defaultUniverse, defaultWorld, defaultRoom, systemUser] = await Promise.all([
       fetch(`${baseUrl}/api/admin/universes?limit=1`, {
         headers: { Authorization: `Bearer ${token}` },
         cache: 'no-store',
@@ -36,13 +36,37 @@ async function getStats() {
         cache: 'no-store',
         signal: AbortSignal.timeout(5000),
       }).then(r => r.json()).catch(() => ({ pagination: { total: 0 } })),
+      // Check if default/default/default items exist
+      prisma.universe.findUnique({ where: { slug: 'default' } }).catch(() => null),
+      prisma.world.findFirst({
+        where: {
+          slug: 'default',
+          universe: { slug: 'default' },
+        },
+      }).catch(() => null),
+      prisma.room.findFirst({
+        where: {
+          slug: 'default',
+          world: {
+            slug: 'default',
+            universe: { slug: 'default' },
+          },
+        },
+      }).catch(() => null),
+      prisma.user.findUnique({ where: { email: 'system@workadventure.local' } }).catch(() => null),
     ]);
     
+    const universeTotal = universes.pagination?.total || 0;
+    const worldTotal = worlds.pagination?.total || 0;
+    const roomTotal = rooms.pagination?.total || 0;
+    const userTotal = users.pagination?.total || 0;
+    
+    // Subtract 1 from each count if the default items exist
     return {
-      universes: universes.pagination?.total || 0,
-      worlds: worlds.pagination?.total || 0,
-      rooms: rooms.pagination?.total || 0,
-      users: users.pagination?.total || 0,
+      universes: Math.max(0, universeTotal - (defaultUniverse ? 1 : 0)),
+      worlds: Math.max(0, worldTotal - (defaultWorld ? 1 : 0)),
+      rooms: Math.max(0, roomTotal - (defaultRoom ? 1 : 0)),
+      users: Math.max(0, userTotal - (systemUser ? 1 : 0)),
     };
   } catch (error) {
     console.error('Error fetching stats:', error);
