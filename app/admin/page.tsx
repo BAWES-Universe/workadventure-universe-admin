@@ -102,6 +102,12 @@ async function getRecentRooms(limit = 2) {
       const world = room?.world;
       const universe = world?.universe;
       if (!room || !world || !universe) continue;
+      
+      // Skip default/default/default room
+      if (universe.slug === 'default' && world.slug === 'default' && room.slug === 'default') {
+        continue;
+      }
+      
       if (seen.has(room.id)) continue;
       seen.add(room.id);
 
