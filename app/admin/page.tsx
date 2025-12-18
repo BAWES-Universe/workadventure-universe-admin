@@ -169,13 +169,6 @@ export default async function AdminDashboard() {
   
   return (
     <div className="space-y-8">
-      <div className="space-y-2">
-        <h1 className="text-4xl font-bold tracking-tight">Dashboard</h1>
-        <p className="text-muted-foreground text-lg">
-          Overview of your Universe, worlds, rooms, and users.
-        </p>
-      </div>
-
       <PendingInvitationsAlert />
 
       {/* Current location at the top */}
