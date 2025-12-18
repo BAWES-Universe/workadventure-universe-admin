@@ -28,10 +28,20 @@ export interface UniverseCardProps {
    * Used to adjust the byline copy.
    */
   ownedByCurrentUser?: boolean;
+  /**
+   * Whether to show the public/private visibility badge.
+   * In discovery views we only surface public universes, so this can be hidden.
+   */
+  showVisibility?: boolean;
   className?: string;
 }
 
-export function UniverseCard({ universe, ownedByCurrentUser = false, className }: UniverseCardProps) {
+export function UniverseCard({
+  universe,
+  ownedByCurrentUser = false,
+  showVisibility = true,
+  className,
+}: UniverseCardProps) {
   const ownerLabel =
     ownedByCurrentUser
       ? 'Owned by you'
@@ -85,9 +95,11 @@ export function UniverseCard({ universe, ownedByCurrentUser = false, className }
               </p>
 
               <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
-                <Badge variant={universe.isPublic ? 'default' : 'secondary'}>
-                  {universe.isPublic ? 'Public' : 'Private'}
-                </Badge>
+                {showVisibility && (
+                  <Badge variant={universe.isPublic ? 'default' : 'secondary'}>
+                    {universe.isPublic ? 'Public' : 'Private'}
+                  </Badge>
+                )}
                 {universe.featured && (
                   <Badge variant="outline">
                     Featured

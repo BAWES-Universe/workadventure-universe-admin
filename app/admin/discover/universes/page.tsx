@@ -226,6 +226,7 @@ export default function DiscoverUniversesPage() {
                 key={universe.id}
                 universe={universe}
                 ownedByCurrentUser={false}
+                showVisibility={false}
               />
             ))}
           </div>

@@ -75,12 +75,9 @@ function WorldCard({ world }: { world: World }) {
                 {world.universe.name} · {world.slug}
               </p>
 
-              <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
-                <Badge variant={world.isPublic ? 'default' : 'secondary'}>
-                  {world.isPublic ? 'Public' : 'Private'}
-                </Badge>
-                {world.featured && <Badge variant="outline">Featured</Badge>}
-              </div>
+            <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+              {world.featured && <Badge variant="outline">Featured</Badge>}
+            </div>
             </div>
           </div>
 

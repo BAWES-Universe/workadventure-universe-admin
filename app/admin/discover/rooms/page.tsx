@@ -63,12 +63,6 @@ function RoomCard({ room }: { room: Room }) {
               <p className="truncate text-xs font-mono text-muted-foreground">
                 {room.world.universe.name} · {room.world.name} · {room.slug}
               </p>
-
-              <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
-                <Badge variant={room.isPublic ? 'default' : 'secondary'}>
-                  {room.isPublic ? 'Public' : 'Private'}
-                </Badge>
-              </div>
             </div>
           </div>
 
