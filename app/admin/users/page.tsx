@@ -6,15 +6,6 @@ import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent } from '@/components/ui/card';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table';
-import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { AlertCircle, Loader2, Search, X } from 'lucide-react';
 
@@ -81,9 +72,18 @@ export default function UsersPage() {
       }
 
       const data = await response.json();
-      setUsers(data.users || []);
+      const rawUsers: User[] = data.users || [];
+      // Hide system user from list
+      const visibleUsers = rawUsers.filter(
+        (user) => user.email !== 'system@workadventure.local',
+      );
+
+      setUsers(visibleUsers);
       setTotalPages(data.pagination?.totalPages || 1);
-      setTotal(data.pagination?.total || 0);
+      const totalFromApi = data.pagination?.total ?? visibleUsers.length;
+      const systemUsersOnPage = rawUsers.length - visibleUsers.length;
+      const adjustedTotal = Math.max(0, totalFromApi - systemUsersOnPage);
+      setTotal(adjustedTotal);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
@@ -180,67 +180,67 @@ export default function UsersPage() {
         </Alert>
       )}
 
-      <Card>
-        <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Name</TableHead>
-                <TableHead>Email</TableHead>
-                <TableHead>UUID</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead>Universes</TableHead>
-                <TableHead>Worlds</TableHead>
-                <TableHead>Created</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {users.length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={7} className="text-center py-12 text-muted-foreground">
-                    No users found.
-                  </TableCell>
-                </TableRow>
-              ) : (
-                users.map((user) => (
-                  <TableRow key={user.id} className={user.isGuest ? 'bg-muted/50' : ''}>
-                    <TableCell className="font-medium">
-                      <Link
-                        href={`/admin/users/${user.id}`}
-                        className="text-primary hover:underline"
-                      >
-                        {user.name || user.email || 'N/A'}
-                      </Link>
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {user.email || 'N/A'}
-                    </TableCell>
-                    <TableCell className="text-muted-foreground font-mono text-xs">
-                      {user.uuid}
-                    </TableCell>
-                    <TableCell>
-                      {user.isGuest ? (
-                        <Badge variant="outline">Guest</Badge>
-                      ) : (
-                        <Badge>Authenticated</Badge>
-                      )}
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {user._count.ownedUniverses}
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {user._count.worldMemberships}
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {new Date(user.createdAt).toLocaleDateString()}
-                    </TableCell>
-                  </TableRow>
-                ))
-              )}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
+      {users.length === 0 ? (
+        <Card>
+          <CardContent className="py-12 text-center text-sm text-muted-foreground">
+            No users found.
+          </CardContent>
+        </Card>
+      ) : (
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {users.map((user) => {
+            const nameOrEmail = user.name || user.email || 'N/A';
+            const initial = (user.name || user.email || '?').charAt(0).toUpperCase();
+            const created = new Date(user.createdAt).toLocaleDateString();
+
+            return (
+              <Link
+                key={user.id}
+                href={`/admin/users/${user.id}`}
+                className="block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+              >
+                <Card className="group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all hover:-translate-y-1 hover:shadow-lg">
+                  <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-primary/10 via-transparent to-secondary/20 opacity-0 transition-opacity group-hover:opacity-100" />
+                  <CardContent className="relative flex h-full flex-col p-5">
+                    <div className="mb-4 flex items-start gap-3">
+                      <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full border bg-muted text-sm font-semibold">
+                        {initial}
+                      </div>
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <h3 className="truncate text-base font-semibold leading-tight">
+                          {nameOrEmail}
+                        </h3>
+                        <p className="truncate text-xs text-muted-foreground">
+                          {user.email || 'No email'}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="mt-auto flex items-center justify-between pt-3 text-xs text-muted-foreground">
+                      <div className="flex flex-col gap-0.5">
+                        <span>
+                          {user._count.ownedUniverses}{' '}
+                          {user._count.ownedUniverses === 1 ? 'universe' : 'universes'}
+                        </span>
+                        <span>
+                          {user._count.worldMemberships}{' '}
+                          {user._count.worldMemberships === 1 ? 'world membership' : 'world memberships'}
+                        </span>
+                      </div>
+                      <div className="text-right">
+                        <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                          Joined
+                        </div>
+                        <div className="text-xs font-medium text-foreground/80">{created}</div>
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              </Link>
+            );
+          })}
+        </div>
+      )}
 
       {totalPages > 1 && (
         <div className="flex items-center justify-between">

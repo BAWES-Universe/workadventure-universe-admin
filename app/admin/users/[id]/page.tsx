@@ -214,9 +214,6 @@ export default function UserDetailPage() {
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div className="space-y-1">
           <h1 className="text-4xl font-bold tracking-tight">{user.name || user.email || 'Unknown User'}</h1>
-          <p className="text-muted-foreground">
-            UUID: <code className="bg-muted px-1.5 py-0.5 rounded font-mono text-xs">{user.uuid}</code>
-          </p>
         </div>
         {currentUser && currentUser.id !== user.id && availableWorlds.length > 0 && (
           <Button onClick={() => setInviteDialogOpen(true)}>
@@ -247,16 +244,6 @@ export default function UserDetailPage() {
             <div>
               <dt className="text-sm font-medium text-muted-foreground">Email</dt>
               <dd className="mt-1 text-sm">{user.email || 'N/A'}</dd>
-            </div>
-            <div>
-              <dt className="text-sm font-medium text-muted-foreground">Status</dt>
-              <dd className="mt-1">
-                {user.isGuest ? (
-                  <Badge variant="outline">Guest</Badge>
-                ) : (
-                  <Badge>Authenticated</Badge>
-                )}
-              </dd>
             </div>
             <div>
               <dt className="text-sm font-medium text-muted-foreground">Matrix Chat ID</dt>
