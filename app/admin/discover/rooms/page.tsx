@@ -131,6 +131,7 @@ export default function DiscoverRoomsPage() {
   const [totalPages, setTotalPages] = useState(1);
   const [total, setTotal] = useState(0);
   const [analyticsByRoom, setAnalyticsByRoom] = useState<Record<string, RoomAnalytics>>({});
+  const [hasAdjustedForDefault, setHasAdjustedForDefault] = useState(false);
 
   useEffect(() => {
     checkAuthAndLoad();
@@ -190,9 +191,24 @@ export default function DiscoverRoomsPage() {
           ),
       );
 
+      const defaultRoomFiltered = all.length > filtered.length;
+      
       setRooms(filtered);
       setTotalPages(data.pagination?.totalPages || 1);
-      setTotal((data.pagination?.total || filtered.length) - (all.length - filtered.length));
+      
+      // Adjust total only once if we detect the default room was filtered
+      // The API total includes the default room, so we need to subtract 1
+      const apiTotal = data.pagination?.total || 0;
+      if (defaultRoomFiltered && !hasAdjustedForDefault) {
+        setTotal(Math.max(0, apiTotal - 1));
+        setHasAdjustedForDefault(true);
+      } else if (!hasAdjustedForDefault) {
+        // If we haven't seen the default room yet, use the API total as-is
+        // (it might not exist, or it might be on a different page)
+        setTotal(apiTotal);
+      }
+      // If we've already adjusted, keep the current total
+      
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
@@ -274,6 +290,7 @@ export default function DiscoverRoomsPage() {
     setSearchInput('');
     setSearch('');
     setPage(1);
+    setHasAdjustedForDefault(false); // Reset adjustment when clearing search
     fetchRooms(1, '');
   }
 
