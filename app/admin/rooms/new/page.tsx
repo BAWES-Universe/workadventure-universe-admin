@@ -36,6 +36,7 @@ function NewRoomPageContent() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [worlds, setWorlds] = useState<World[]>([]);
+  const [worldDetails, setWorldDetails] = useState<World | null>(null);
   
   const [formData, setFormData] = useState({
     worldId: worldIdParam || '',
@@ -48,8 +49,29 @@ function NewRoomPageContent() {
 
   useEffect(() => {
     checkAuth();
-    fetchWorlds();
+    if (!worldIdParam) {
+      fetchWorlds();
+    }
   }, []);
+
+  useEffect(() => {
+    async function fetchWorldDetails() {
+      if (worldIdParam) {
+        try {
+          const { authenticatedFetch } = await import('@/lib/client-auth');
+          const response = await authenticatedFetch(`/api/admin/worlds/${worldIdParam}`);
+          if (response.ok) {
+            const data = await response.json();
+            setWorldDetails(data);
+            setFormData(prev => ({ ...prev, worldId: data.id }));
+          }
+        } catch (err) {
+          setError('Failed to load world details');
+        }
+      }
+    }
+    fetchWorldDetails();
+  }, [worldIdParam]);
 
   async function checkAuth() {
     try {
@@ -80,8 +102,8 @@ function NewRoomPageContent() {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     
-    if (!formData.worldId) {
-      setError('Please select a world');
+    if (!formData.worldId || !worldIdParam) {
+      setError('World is required. Please create a room from a world detail page.');
       return;
     }
     
@@ -122,6 +144,7 @@ function NewRoomPageContent() {
   }
 
   const selectedWorld = worlds.find(w => w.id === formData.worldId);
+  const displayWorld = worldDetails || selectedWorld;
 
   return (
     <div className="space-y-8">
@@ -129,11 +152,15 @@ function NewRoomPageContent() {
         <Link href="/admin" className="hover:text-foreground">
           Dashboard
         </Link>
-        {worldIdParam && selectedWorld && (
+        {worldIdParam && displayWorld && (
           <>
             <ChevronRight className="h-4 w-4" />
+            <Link href={`/admin/universes/${displayWorld.universe.id}`} className="hover:text-foreground">
+              {displayWorld.universe.name}
+            </Link>
+            <ChevronRight className="h-4 w-4" />
             <Link href={`/admin/worlds/${worldIdParam}`} className="hover:text-foreground">
-              {selectedWorld.name}
+              {displayWorld.name}
             </Link>
           </>
         )}
@@ -156,15 +183,12 @@ function NewRoomPageContent() {
         </Alert>
       )}
 
-      {worlds.length === 0 && (
-        <Alert>
+      {!worldIdParam && (
+        <Alert variant="destructive">
           <AlertTriangle className="h-4 w-4" />
-          <AlertTitle>No Worlds Found</AlertTitle>
+          <AlertTitle>World Required</AlertTitle>
           <AlertDescription>
-            No worlds found. You need to create a world first.{' '}
-            <Link href="/admin/worlds/new" className="underline font-medium">
-              Create World
-            </Link>
+            Rooms must be created from a world detail page. Please navigate to a world and click "Create Room" from there.
           </AlertDescription>
         </Alert>
       )}
@@ -178,40 +202,6 @@ function NewRoomPageContent() {
         </CardHeader>
         <CardContent>
           <form onSubmit={handleSubmit} className="space-y-6">
-            {!worldIdParam && (
-              <div className="space-y-2">
-                <Label htmlFor="worldId">
-                  World <span className="text-destructive">*</span>
-                </Label>
-                <p className="text-sm text-muted-foreground">
-                  Select the world this room belongs to.
-                </p>
-                <Select
-                  value={formData.worldId}
-                  onValueChange={(value) => setFormData({ ...formData, worldId: value })}
-                >
-                  <SelectTrigger id="worldId">
-                    <SelectValue placeholder="Select a world" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {worlds.map((world) => (
-                      <SelectItem key={world.id} value={world.id}>
-                        {world.universe.name} / {world.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            )}
-            {worldIdParam && selectedWorld && (
-              <div className="space-y-2">
-                <Label>World</Label>
-                <p className="text-sm text-muted-foreground">
-                  Creating room for: <Link href={`/admin/worlds/${selectedWorld.id}`} className="text-primary hover:underline font-medium">{selectedWorld.universe.name} / {selectedWorld.name}</Link>
-                </p>
-              </div>
-            )}
-
             <div className="space-y-2">
               <Label htmlFor="slug">
                 Slug <span className="text-destructive">*</span>
@@ -282,11 +272,11 @@ function NewRoomPageContent() {
 
             <div className="flex flex-col-reverse sm:flex-row justify-end gap-3 pt-4">
               <Button type="button" variant="secondary" asChild>
-                <Link href={formData.worldId ? `/admin/worlds/${formData.worldId}` : '/admin/rooms'}>
+                <Link href={formData.worldId ? `/admin/worlds/${formData.worldId}` : '/admin'}>
                   Cancel
                 </Link>
               </Button>
-              <Button type="submit" disabled={loading || worlds.length === 0}>
+              <Button type="submit" disabled={loading || !worldIdParam}>
                 {loading ? (
                   <>
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
