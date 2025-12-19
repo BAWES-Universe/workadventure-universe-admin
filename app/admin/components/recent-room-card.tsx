@@ -70,10 +70,27 @@ export default function RecentRoomCard({ room }: { room: RecentRoom }) {
           const analyticsData = await analyticsResponse.json();
           const roomData = await roomResponse.json();
           
-          const peakHour =
-            Array.isArray(analyticsData.peakTimes) && analyticsData.peakTimes.length > 0
-              ? analyticsData.peakTimes[0].hour ?? null
-              : null;
+          // Calculate peak hour from recent activity in local timezone (like detail page)
+          let peakHour = null;
+          if (analyticsData.recentActivity && analyticsData.recentActivity.length > 0) {
+            const hourCounts = new Map<number, number>();
+            analyticsData.recentActivity.forEach((access: any) => {
+              const date = new Date(access.accessedAt);
+              const hour = date.getHours(); // Local timezone
+              hourCounts.set(hour, (hourCounts.get(hour) || 0) + 1);
+            });
+            const localPeakTimes = Array.from(hourCounts.entries())
+              .map(([hour, count]) => ({ hour, count }))
+              .sort((a, b) => b.count - a.count);
+            if (localPeakTimes.length > 0) {
+              peakHour = localPeakTimes[0].hour;
+            }
+          }
+          
+          // Fallback to UTC peakTimes if no recent activity
+          if (peakHour === null && Array.isArray(analyticsData.peakTimes) && analyticsData.peakTimes.length > 0) {
+            peakHour = analyticsData.peakTimes[0].hour;
+          }
 
           setAnalytics({
             totalAccesses: analyticsData.totalAccesses || 0,

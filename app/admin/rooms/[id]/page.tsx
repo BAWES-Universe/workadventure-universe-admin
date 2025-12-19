@@ -569,7 +569,7 @@ export default function RoomDetailPage() {
                       <div className="rounded-lg border p-4">
                         <div className="text-sm font-medium text-muted-foreground">Peak Hour</div>
                         <div className="mt-1 text-lg font-semibold">
-                          {String(peakHour).padStart(2, '0')}:00
+                          {peakHour === 0 ? '12:00 AM' : peakHour < 12 ? `${peakHour}:00 AM` : peakHour === 12 ? '12:00 PM' : `${peakHour - 12}:00 PM`}
                         </div>
                         <div className="text-xs text-muted-foreground">{peakCount} accesses</div>
                       </div>

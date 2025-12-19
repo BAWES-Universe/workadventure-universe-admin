@@ -234,10 +234,29 @@ export default function DiscoverRoomsPage() {
                 return null;
               }
               const data = await response.json();
-              const peakHour =
-                Array.isArray(data.peakTimes) && data.peakTimes.length > 0
-                  ? data.peakTimes[0].hour ?? null
-                  : null;
+              
+              // Calculate peak hour from recent activity in local timezone (like detail page)
+              let peakHour = null;
+              if (data.recentActivity && data.recentActivity.length > 0) {
+                const hourCounts = new Map<number, number>();
+                data.recentActivity.forEach((access: any) => {
+                  const date = new Date(access.accessedAt);
+                  const hour = date.getHours(); // Local timezone
+                  hourCounts.set(hour, (hourCounts.get(hour) || 0) + 1);
+                });
+                const localPeakTimes = Array.from(hourCounts.entries())
+                  .map(([hour, count]) => ({ hour, count }))
+                  .sort((a, b) => b.count - a.count);
+                if (localPeakTimes.length > 0) {
+                  peakHour = localPeakTimes[0].hour;
+                }
+              }
+              
+              // Fallback to UTC peakTimes if no recent activity
+              if (peakHour === null && Array.isArray(data.peakTimes) && data.peakTimes.length > 0) {
+                peakHour = data.peakTimes[0].hour;
+              }
+              
               return {
                 roomId: room.id,
                 totalAccesses: data.totalAccesses || 0,
