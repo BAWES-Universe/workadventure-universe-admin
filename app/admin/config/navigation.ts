@@ -19,7 +19,7 @@ export const NAV_ITEMS: NavItem[] = [
   { href: '/admin/discover/rooms', label: 'Rooms', icon: FolderOpen, group: 'discover' },
   { href: '/admin/users', label: 'Users', icon: Users, group: 'discover' },
 
-  // My section
+  // Personalize section
   { href: '/admin/universes', label: 'Universes', icon: Globe, group: 'my' },
   { href: '/admin/memberships', label: 'Memberships', icon: Mail, requiresAuth: true, group: 'my' },
   { href: '/admin/profile', label: 'Visit Card', icon: UserCircle, requiresAuth: true, group: 'my' },

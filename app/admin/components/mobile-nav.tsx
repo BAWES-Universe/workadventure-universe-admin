@@ -126,28 +126,28 @@ export default function MobileNav({ user: initialUser }: MobileNavProps) {
 
             {myItems.length > 0 && (
               <div className="flex flex-col gap-4">
-                <div className="text-muted-foreground text-sm font-medium">My</div>
+                <div className="text-muted-foreground text-sm font-medium">Personalize</div>
                 <div className="flex flex-col gap-3">
                   {myItems.map((item) => {
-                    const Icon = item.icon;
-                    const active = isActive(item.href);
-                    return (
-                      <AuthLink
-                        key={item.href}
-                        href={item.href}
-                        onClick={() => setOpen(false)}
-                        className={cn(
-                          "flex items-center gap-4 px-4 py-4 rounded-lg text-2xl font-bold transition-all",
-                          active
-                            ? "bg-primary text-primary-foreground"
-                            : "text-foreground hover:bg-accent hover:text-accent-foreground"
-                        )}
-                      >
-                        <Icon className={cn("h-7 w-7", active && "text-primary-foreground")} />
-                        {item.label}
-                      </AuthLink>
-                    );
-                  })}
+              const Icon = item.icon;
+              const active = isActive(item.href);
+              return (
+                <AuthLink
+                  key={item.href}
+                  href={item.href}
+                  onClick={() => setOpen(false)}
+                  className={cn(
+                    "flex items-center gap-4 px-4 py-4 rounded-lg text-2xl font-bold transition-all",
+                    active
+                      ? "bg-primary text-primary-foreground"
+                      : "text-foreground hover:bg-accent hover:text-accent-foreground"
+                  )}
+                >
+                  <Icon className={cn("h-7 w-7", active && "text-primary-foreground")} />
+                  {item.label}
+                </AuthLink>
+              );
+            })}
                 </div>
               </div>
             )}
