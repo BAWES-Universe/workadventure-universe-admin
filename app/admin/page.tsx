@@ -5,7 +5,7 @@ import { Globe, Users, FolderOpen, Home, Plus, MapPin } from 'lucide-react';
 import { prisma } from '@/lib/db';
 import CurrentLocation from './components/current-location';
 import PendingInvitationsAlert from './components/pending-invitations-alert';
-import RecentRoomCard from './components/recent-room-card';
+import RecentlyVisited from './components/recently-visited';
 
 async function getStats() {
   const token = process.env.ADMIN_API_TOKEN;
@@ -74,98 +74,9 @@ async function getStats() {
   }
 }
 
-async function getRecentRooms(limit = 2) {
-  try {
-    const accesses = await prisma.roomAccess.findMany({
-      where: {},
-      include: {
-        room: {
-          select: {
-            id: true,
-            name: true,
-            slug: true,
-            world: {
-              select: {
-                id: true,
-                name: true,
-                slug: true,
-                universe: {
-                  select: {
-                    id: true,
-                    name: true,
-                    slug: true,
-                  },
-                },
-              },
-            },
-          },
-        },
-      },
-      orderBy: { accessedAt: 'desc' },
-      take: 50,
-    });
-
-    const seen = new Set<string>();
-    const recent: {
-      roomId: string;
-      roomName: string;
-      roomSlug: string;
-      worldId: string;
-      worldName: string;
-      worldSlug: string;
-      universeId: string;
-      universeName: string;
-      universeSlug: string;
-      accessedAt: Date;
-    }[] = [];
-
-    let skippedCurrent = false;
-
-    for (const access of accesses) {
-      const room = access.room;
-      const world = room?.world;
-      const universe = world?.universe;
-      if (!room || !world || !universe) continue;
-      
-      // Skip default/default/default room
-      if (universe.slug === 'default' && world.slug === 'default' && room.slug === 'default') {
-        continue;
-      }
-      
-      if (seen.has(room.id)) continue;
-      seen.add(room.id);
-
-      // Treat the first unique room as the current room and skip it
-      if (!skippedCurrent) {
-        skippedCurrent = true;
-        continue;
-      }
-
-      recent.push({
-        roomId: room.id,
-        roomName: room.name,
-        roomSlug: room.slug,
-        worldId: world.id,
-        worldName: world.name,
-        worldSlug: world.slug,
-        universeId: universe.id,
-        universeName: universe.name,
-        universeSlug: universe.slug,
-        accessedAt: access.accessedAt,
-      });
-
-      if (recent.length >= limit) break;
-    }
-
-    return recent;
-  } catch (error) {
-    console.error('Error fetching recent rooms for dashboard:', error);
-    return [];
-  }
-}
 
 export default async function AdminDashboard() {
-  const [stats, recentRooms] = await Promise.all([getStats(), getRecentRooms(2)]);
+  const stats = await getStats();
   
   return (
     <div className="space-y-8">
@@ -183,21 +94,7 @@ export default async function AdminDashboard() {
       </section>
 
       {/* Recently visited rooms */}
-      {recentRooms.length > 0 && (
-        <section className="space-y-3">
-          <div className="space-y-1">
-            <h2 className="text-xl font-semibold tracking-tight">Recently visited</h2>
-            <p className="text-sm text-muted-foreground">
-              Jump back into rooms that have been active most recently.
-            </p>
-          </div>
-          <div className="grid gap-4 md:grid-cols-2">
-            {recentRooms.map((item) => (
-              <RecentRoomCard key={item.roomId} room={item} />
-            ))}
-          </div>
-        </section>
-      )}
+      <RecentlyVisited />
 
       {/* Discover / onboarding section */}
       {stats.universes === 0 ? (
