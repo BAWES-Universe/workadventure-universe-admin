@@ -190,18 +190,7 @@ function NewWorldPageContent() {
         </CardHeader>
         <CardContent>
           <form onSubmit={handleSubmit} className="space-y-6">
-            {selectedUniverse && (
-              <div className="space-y-2">
-                <Label>Universe</Label>
-                <p className="text-sm text-muted-foreground">
-                  <Link href={`/admin/universes/${selectedUniverse.id}`} className="text-primary hover:underline">
-                    {selectedUniverse.name}
-                  </Link>
-                  {' '}({selectedUniverse.slug})
-                </p>
-                <input type="hidden" name="universeId" value={formData.universeId} />
-              </div>
-            )}
+            <input type="hidden" name="universeId" value={formData.universeId} />
 
             <div className="space-y-2">
               <Label htmlFor="slug">
