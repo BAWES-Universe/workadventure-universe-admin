@@ -24,6 +24,8 @@ interface RoomAnalytics {
   peakHour: number | null;
   favorites: number;
   description: string | null;
+  lastVisitedByUser: { accessedAt: string } | null;
+  lastVisitedOverall: { accessedAt: string; userId?: string | null; userUuid?: string | null } | null;
 }
 
 function formatHourTo12Hour(hour: number): string {
@@ -97,6 +99,8 @@ export default function RecentRoomCard({ room }: { room: RecentRoom }) {
             peakHour,
             favorites: roomData._count?.favorites ?? 0,
             description: roomData.description ?? null,
+            lastVisitedByUser: analyticsData.lastVisitedByUser || null,
+            lastVisitedOverall: analyticsData.lastVisitedOverall || null,
           });
         }
       } catch (err) {
@@ -148,7 +152,7 @@ export default function RecentRoomCard({ room }: { room: RecentRoom }) {
           )}
 
           <div className="mt-auto flex items-center justify-between pt-3 text-xs text-muted-foreground">
-            <div className="flex flex-col gap-1.5">
+            <div className="flex flex-col gap-1.5 min-h-[3rem]">
               {loading ? (
                 <span className="text-muted-foreground">Loading analytics...</span>
               ) : analytics ? (
@@ -167,22 +171,54 @@ export default function RecentRoomCard({ room }: { room: RecentRoom }) {
                       </span>
                     </div>
                   )}
-                  <div className="mt-0.5">
-                    <span className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                      Last visited
-                    </span>
-                    <div className="text-xs font-medium text-foreground/80">
-                      {lastVisited} ({timeAgo})
-                    </div>
+                  {/* Last visited information */}
+                  <div className="flex flex-col gap-0.5 mt-0.5">
+                    {analytics.lastVisitedByUser ? (
+                      <div className="text-[11px]">
+                        <span className="text-muted-foreground/70">Last visited by you: </span>
+                        <span className="font-medium text-foreground/80">
+                          {formatTimeAgo(new Date(analytics.lastVisitedByUser.accessedAt))}
+                        </span>
+                      </div>
+                    ) : (
+                      <div className="text-[11px]">
+                        <span className="text-muted-foreground/70">Last visited by you: </span>
+                        <span className="font-medium text-foreground/80 italic">
+                          Never
+                        </span>
+                      </div>
+                    )}
+                    {analytics.lastVisitedOverall && (
+                      <div className="text-[11px]">
+                        {analytics.lastVisitedByUser && 
+                         Math.abs(new Date(analytics.lastVisitedByUser.accessedAt).getTime() - new Date(analytics.lastVisitedOverall.accessedAt).getTime()) < 1000 &&
+                         (analytics.lastVisitedOverall.userId === analytics.lastVisitedByUser.userId || 
+                          analytics.lastVisitedOverall.userUuid === analytics.lastVisitedByUser.userUuid) ? (
+                          <span className="text-muted-foreground/70 italic">
+                            You were the last visitor
+                          </span>
+                        ) : (
+                          <>
+                            <span className="text-muted-foreground/70">Last activity: </span>
+                            <span className="font-medium text-foreground/80">
+                              {formatTimeAgo(new Date(analytics.lastVisitedOverall.accessedAt))}
+                            </span>
+                          </>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </>
               ) : (
-                <div className="mt-0.5">
-                  <span className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                    Last visited
-                  </span>
-                  <div className="text-xs font-medium text-foreground/80">
-                    {lastVisited} ({timeAgo})
+                <div className="flex flex-col gap-0.5 mt-0.5">
+                  <div className="text-[11px]">
+                    <span className="text-muted-foreground/70">Last visited by you: </span>
+                    <span className="font-medium text-foreground/80">
+                      {timeAgo}
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-muted-foreground/70">
+                    No activity data
                   </div>
                 </div>
               )}

@@ -89,11 +89,58 @@ export async function GET(
       take: 20,
     });
     
+    // Get last visited by current user (if session user exists)
+    let lastVisitedByUser = null;
+    if (!isAdminToken) {
+      const { getSessionUser } = await import('@/lib/auth-session');
+      const sessionUser = await getSessionUser(request);
+      if (sessionUser) {
+        const userAccess = await prisma.roomAccess.findFirst({
+          where: {
+            roomId: id,
+            OR: [
+              { userId: sessionUser.id },
+              { userUuid: sessionUser.uuid },
+            ],
+          },
+          orderBy: { accessedAt: 'desc' },
+        });
+        if (userAccess) {
+          lastVisitedByUser = {
+            accessedAt: userAccess.accessedAt,
+            userId: userAccess.userId,
+            userUuid: userAccess.userUuid,
+          };
+        }
+      }
+    }
+    
+    // Get last visited overall (most recent access by anyone)
+    const lastVisitedOverall = await prisma.roomAccess.findFirst({
+      where: { roomId: id },
+      orderBy: { accessedAt: 'desc' },
+      select: {
+        accessedAt: true,
+        userId: true,
+        userUuid: true,
+        userName: true,
+        userEmail: true,
+      },
+    });
+    
     return NextResponse.json({
       totalAccesses,
       uniqueUsers,
       uniqueIPs: uniqueIps.length,
       peakTimes,
+      lastVisitedByUser,
+      lastVisitedOverall: lastVisitedOverall ? {
+        accessedAt: lastVisitedOverall.accessedAt,
+        userId: lastVisitedOverall.userId,
+        userUuid: lastVisitedOverall.userUuid,
+        userName: lastVisitedOverall.userName,
+        userEmail: lastVisitedOverall.userEmail,
+      } : null,
       recentActivity: recentActivity.map(access => ({
         id: access.id,
         accessedAt: access.accessedAt,

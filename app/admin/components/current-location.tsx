@@ -36,6 +36,8 @@ interface PreviousRoom extends CurrentRoom {
 interface RoomAnalytics {
   totalAccesses: number;
   peakHour: number | null;
+  lastVisitedByUser: { accessedAt: string } | null;
+  lastVisitedOverall: { accessedAt: string; userId?: string | null; userUuid?: string | null } | null;
 }
 
 function formatHourTo12Hour(hour: number): string {
@@ -43,6 +45,26 @@ function formatHourTo12Hour(hour: number): string {
   if (hour < 12) return `${hour}:00 AM`;
   if (hour === 12) return '12:00 PM';
   return `${hour - 12}:00 PM`;
+}
+
+function formatTimeAgo(date: Date): string {
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const diffSecs = Math.floor(diffMs / 1000);
+  const diffMins = Math.floor(diffSecs / 60);
+  const diffHours = Math.floor(diffMins / 60);
+  const diffDays = Math.floor(diffHours / 24);
+  const diffWeeks = Math.floor(diffDays / 7);
+  const diffMonths = Math.floor(diffDays / 30);
+  const diffYears = Math.floor(diffDays / 365);
+
+  if (diffSecs < 60) return 'just now';
+  if (diffMins < 60) return `${diffMins} ${diffMins === 1 ? 'minute' : 'minutes'} ago`;
+  if (diffHours < 24) return `${diffHours} ${diffHours === 1 ? 'hour' : 'hours'} ago`;
+  if (diffDays < 7) return `${diffDays} ${diffDays === 1 ? 'day' : 'days'} ago`;
+  if (diffWeeks < 4) return `${diffWeeks} ${diffWeeks === 1 ? 'week' : 'weeks'} ago`;
+  if (diffMonths < 12) return `${diffMonths} ${diffMonths === 1 ? 'month' : 'months'} ago`;
+  return `${diffYears} ${diffYears === 1 ? 'year' : 'years'} ago`;
 }
 
 export default function CurrentLocation() {
@@ -141,6 +163,8 @@ export default function CurrentLocation() {
                   setAnalytics({
                     totalAccesses: analyticsData.totalAccesses || 0,
                     peakHour,
+                    lastVisitedByUser: analyticsData.lastVisitedByUser || null,
+                    lastVisitedOverall: analyticsData.lastVisitedOverall || null,
                   });
                 }
               } catch (analyticsErr) {
@@ -217,6 +241,8 @@ export default function CurrentLocation() {
                 setPreviousAnalytics({
                   totalAccesses: analyticsData.totalAccesses || 0,
                   peakHour,
+                  lastVisitedByUser: analyticsData.lastVisitedByUser || null,
+                  lastVisitedOverall: analyticsData.lastVisitedOverall || null,
                 });
               }
             } catch {
@@ -317,7 +343,7 @@ export default function CurrentLocation() {
           )}
 
           <div className="mt-auto flex items-center justify-between pt-3 text-xs text-muted-foreground">
-            <div className="flex flex-col gap-1.5">
+            <div className="flex flex-col gap-1.5 min-h-[3rem]">
               {roomAnalytics ? (
                 <>
                   <div className="flex items-center gap-1.5">
@@ -332,6 +358,40 @@ export default function CurrentLocation() {
                       <span className="text-muted-foreground">
                         Peak: {formatHourTo12Hour(roomAnalytics.peakHour)}
                       </span>
+                    </div>
+                  )}
+                  {/* Last visited information */}
+                  {roomAnalytics.lastVisitedByUser || roomAnalytics.lastVisitedOverall ? (
+                    <div className="flex flex-col gap-0.5 mt-0.5">
+                      {roomAnalytics.lastVisitedByUser && (
+                        <div className="text-[11px]">
+                          <span className="text-muted-foreground/70">Last visited by you: </span>
+                          <span className="font-medium text-foreground/80">
+                            {formatTimeAgo(new Date(roomAnalytics.lastVisitedByUser.accessedAt))}
+                          </span>
+                        </div>
+                      )}
+                      {roomAnalytics.lastVisitedOverall && (
+                        <div className="text-[11px]">
+                          {roomAnalytics.lastVisitedByUser && 
+                           roomAnalytics.lastVisitedByUser.accessedAt === roomAnalytics.lastVisitedOverall.accessedAt ? (
+                            <span className="text-muted-foreground/70 italic">
+                              You were the last visitor
+                            </span>
+                          ) : (
+                            <>
+                              <span className="text-muted-foreground/70">Last activity: </span>
+                              <span className="font-medium text-foreground/80">
+                                {formatTimeAgo(new Date(roomAnalytics.lastVisitedOverall.accessedAt))}
+                              </span>
+                            </>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="text-[11px] text-muted-foreground/70 mt-0.5">
+                      No visits recorded
                     </div>
                   )}
                 </>
