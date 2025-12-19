@@ -20,9 +20,9 @@ export const NAV_ITEMS: NavItem[] = [
   { href: '/admin/users', label: 'Users', icon: Users, group: 'discover' },
 
   // Personalize section
-  { href: '/admin/universes', label: 'Universes', icon: Globe, group: 'my' },
-  { href: '/admin/memberships', label: 'Memberships', icon: Mail, requiresAuth: true, group: 'my' },
-  { href: '/admin/profile', label: 'Visit Card', icon: UserCircle, requiresAuth: true, group: 'my' },
+  { href: '/admin/universes', label: 'My Universes', icon: Globe, group: 'my' },
+  { href: '/admin/memberships', label: 'My Memberships', icon: Mail, requiresAuth: true, group: 'my' },
+  { href: '/admin/profile', label: 'My Visit Card', icon: UserCircle, requiresAuth: true, group: 'my' },
 ];
 
 export function getNavItems(user: { name: string | null; email: string | null } | null): NavItem[] {
