@@ -547,7 +547,11 @@ export default function WorldDetailPage() {
                     <p className="text-sm text-muted-foreground">No rooms yet. Create one to get started.</p>
                   ) : (
                     <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-                      {world.rooms.map((room) => {
+                      {[...world.rooms].sort((a, b) => {
+                        const aAccesses = roomAnalytics[a.id]?.totalAccesses ?? 0;
+                        const bAccesses = roomAnalytics[b.id]?.totalAccesses ?? 0;
+                        return bAccesses - aAccesses;
+                      }).map((room) => {
                         const favorites = room._count.favorites ?? 0;
                         const analytics = roomAnalytics[room.id];
                         return (
