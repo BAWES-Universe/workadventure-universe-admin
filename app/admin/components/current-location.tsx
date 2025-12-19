@@ -29,6 +29,10 @@ interface CurrentRoom {
   };
 }
 
+interface PreviousRoom extends CurrentRoom {
+  accessedAt: string;
+}
+
 interface RoomAnalytics {
   totalAccesses: number;
   peakHour: number | null;
@@ -50,6 +54,8 @@ export default function CurrentLocation() {
   const [room, setRoom] = useState<CurrentRoom | null>(null);
   const [roomError, setRoomError] = useState<string | null>(null);
   const [analytics, setAnalytics] = useState<RoomAnalytics | null>(null);
+  const [previousRoom, setPreviousRoom] = useState<PreviousRoom | null>(null);
+  const [previousAnalytics, setPreviousAnalytics] = useState<RoomAnalytics | null>(null);
 
   useEffect(() => {
     // Check super admin status
@@ -163,121 +169,300 @@ export default function CurrentLocation() {
     getRoomInfo();
   }, [wa, isReady, isLoading]);
 
+  // Fetch previous location when we have current room
+  useEffect(() => {
+    async function fetchPreviousLocation() {
+      if (!room) return;
+
+      try {
+        const { authenticatedFetch } = await import('@/lib/client-auth');
+        const response = await authenticatedFetch(
+          `/api/admin/rooms/previous?currentRoomId=${encodeURIComponent(room.id)}`,
+        );
+
+        if (response.ok) {
+          const data = await response.json();
+          if (data.room) {
+            setPreviousRoom(data.room);
+            
+            // Fetch analytics for previous room
+            try {
+              const analyticsResponse = await authenticatedFetch(
+                `/api/admin/analytics/rooms/${data.room.id}`,
+              );
+              if (analyticsResponse.ok) {
+                const analyticsData = await analyticsResponse.json();
+                
+                // Calculate peak hour from recent activity in local timezone
+                let peakHour = null;
+                if (analyticsData.recentActivity && analyticsData.recentActivity.length > 0) {
+                  const hourCounts = new Map<number, number>();
+                  analyticsData.recentActivity.forEach((access: any) => {
+                    const date = new Date(access.accessedAt);
+                    const hour = date.getHours();
+                    hourCounts.set(hour, (hourCounts.get(hour) || 0) + 1);
+                  });
+                  const localPeakTimes = Array.from(hourCounts.entries())
+                    .map(([hour, count]) => ({ hour, count }))
+                    .sort((a, b) => b.count - a.count);
+                  if (localPeakTimes.length > 0) {
+                    peakHour = localPeakTimes[0].hour;
+                  }
+                }
+                
+                if (peakHour === null && Array.isArray(analyticsData.peakTimes) && analyticsData.peakTimes.length > 0) {
+                  peakHour = analyticsData.peakTimes[0].hour;
+                }
+                
+                setPreviousAnalytics({
+                  totalAccesses: analyticsData.totalAccesses || 0,
+                  peakHour,
+                });
+              }
+            } catch {
+              // Silently fail - analytics are optional
+            }
+          } else {
+            setPreviousRoom(null);
+            setPreviousAnalytics(null);
+          }
+        }
+      } catch (err) {
+        console.error('[CurrentLocation] Failed to fetch previous location:', err);
+        setPreviousRoom(null);
+        setPreviousAnalytics(null);
+      }
+    }
+
+    fetchPreviousLocation();
+  }, [room]);
+
   if (error || (!isReady && !isLoading)) {
     return (
-      <Card>
-        <CardContent className="flex items-center justify-center py-12">
-          <Alert>
-            <AlertCircle className="h-4 w-4" />
-            <AlertTitle>Not Available</AlertTitle>
-            <AlertDescription>
-              Universe API is not available. This feature only works when the admin page is loaded in a Universe iframe.
-            </AlertDescription>
-          </Alert>
-        </CardContent>
-      </Card>
+      <section className="space-y-3">
+        <div className="space-y-1">
+          <h2 className="text-xl font-semibold tracking-tight">Current Location</h2>
+          <p className="text-sm text-muted-foreground">
+            Your current location in the Universe
+          </p>
+        </div>
+        <Card>
+          <CardContent className="flex items-center justify-center py-12">
+            <Alert>
+              <AlertCircle className="h-4 w-4" />
+              <AlertTitle>Not Available</AlertTitle>
+              <AlertDescription>
+                Universe API is not available. This feature only works when the admin page is loaded in a Universe iframe.
+              </AlertDescription>
+            </Alert>
+          </CardContent>
+        </Card>
+      </section>
     );
   }
 
   if (loading || isLoading) {
     return (
-      <Card>
-        <CardContent className="flex items-center justify-center py-12">
-          <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-        </CardContent>
-      </Card>
+      <section className="space-y-3">
+        <div className="space-y-1">
+          <h2 className="text-xl font-semibold tracking-tight">Current Location</h2>
+          <p className="text-sm text-muted-foreground">
+            Your current location in the Universe
+          </p>
+        </div>
+        <Card>
+          <CardContent className="flex items-center justify-center py-12">
+            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+          </CardContent>
+        </Card>
+      </section>
     );
   }
 
-  const favorites = room?._count?.favorites ?? 0;
+  function renderRoomCard(
+    roomData: CurrentRoom | PreviousRoom | null,
+    roomAnalytics: RoomAnalytics | null,
+    title: string,
+    isClickable: boolean = true
+  ) {
+    if (!roomData) return null;
 
-  const content = (
-    <Card className={cn(
-      'group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
-      'hover:-translate-y-1 hover:shadow-lg',
-    )}>
-      <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-emerald-500/10 via-transparent to-sky-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
-      <CardContent className="relative flex h-full flex-col p-5">
-        <div className="mb-3 flex items-start gap-3">
-          <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full border bg-muted">
-            <MapPin className="h-5 w-5 text-muted-foreground" />
-          </div>
-          <div className="min-w-0 flex-1 space-y-1">
-            <h3 className="truncate text-base font-semibold leading-tight">
-              {room?.name || 'Current room'}
-            </h3>
-            {room ? (
-              <>
-                <p className="truncate text-xs text-muted-foreground">
-                  {room.world.universe.name} · {room.world.name}
-                </p>
-              </>
-            ) : roomError ? (
+    const favorites = roomData._count?.favorites ?? 0;
+
+    const cardContent = (
+      <Card className={cn(
+        'group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
+        'hover:-translate-y-1 hover:shadow-lg',
+      )}>
+        <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-emerald-500/10 via-transparent to-sky-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
+        <CardContent className="relative flex h-full flex-col p-5">
+          <div className="mb-3 flex items-start gap-3">
+            <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full border bg-muted">
+              <MapPin className="h-5 w-5 text-muted-foreground" />
+            </div>
+            <div className="min-w-0 flex-1 space-y-1">
+              <h3 className="truncate text-base font-semibold leading-tight">
+                {roomData.name}
+              </h3>
               <p className="truncate text-xs text-muted-foreground">
-                {roomError}
+                {roomData.world.universe.name} · {roomData.world.name}
               </p>
-            ) : playUri ? (
-              <p className="truncate font-mono text-[11px] text-muted-foreground/80">
-                {playUri}
-              </p>
-            ) : (
-              <p className="truncate text-xs text-muted-foreground">
-                No room information available.
-              </p>
-            )}
+            </div>
           </div>
-        </div>
 
-        {room?.description && (
-          <p className="mb-3 line-clamp-2 text-sm text-muted-foreground">
-            {room.description}
-          </p>
-        )}
+          {roomData.description && (
+            <p className="mb-3 line-clamp-2 text-sm text-muted-foreground">
+              {roomData.description}
+            </p>
+          )}
 
-        <div className="mt-auto flex items-center justify-between pt-3 text-xs text-muted-foreground">
-          <div className="flex flex-col gap-1.5">
-            {analytics ? (
-              <>
-                <div className="flex items-center gap-1.5">
-                  <Activity className="h-3.5 w-3.5 text-muted-foreground" />
-                  <span className="font-medium text-foreground/80">
-                    {analytics.totalAccesses.toLocaleString()} accesses
-                  </span>
-                </div>
-                {analytics.peakHour !== null && (
+          <div className="mt-auto flex items-center justify-between pt-3 text-xs text-muted-foreground">
+            <div className="flex flex-col gap-1.5">
+              {roomAnalytics ? (
+                <>
                   <div className="flex items-center gap-1.5">
-                    <Clock className="h-3.5 w-3.5 text-muted-foreground" />
-                    <span className="text-muted-foreground">
-                      Peak: {formatHourTo12Hour(analytics.peakHour)}
+                    <Activity className="h-3.5 w-3.5 text-muted-foreground" />
+                    <span className="font-medium text-foreground/80">
+                      {roomAnalytics.totalAccesses.toLocaleString()} accesses
                     </span>
                   </div>
-                )}
-              </>
-            ) : room ? (
-              <span className="text-muted-foreground">Access data loading...</span>
-            ) : null}
-          </div>
-          {room && (
+                  {roomAnalytics.peakHour !== null && (
+                    <div className="flex items-center gap-1.5">
+                      <Clock className="h-3.5 w-3.5 text-muted-foreground" />
+                      <span className="text-muted-foreground">
+                        Peak: {formatHourTo12Hour(roomAnalytics.peakHour)}
+                      </span>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <span className="text-muted-foreground">Access data loading...</span>
+              )}
+            </div>
             <div className="flex items-center gap-1 text-primary">
               <Star className="h-4 w-4" aria-hidden="true" />
               <span className="text-xs font-medium">{favorites}</span>
             </div>
-          )}
-        </div>
-      </CardContent>
-    </Card>
-  );
+          </div>
+        </CardContent>
+      </Card>
+    );
 
-  if (room) {
+    if (isClickable) {
+      return (
+        <Link
+          href={`/admin/rooms/${roomData.id}`}
+          className="block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+        >
+          {cardContent}
+        </Link>
+      );
+    }
+    return cardContent;
+  }
+
+  // If we have a previous room, show 2 columns with headers
+  if (previousRoom) {
     return (
-      <Link
-        href={`/admin/rooms/${room.id}`}
-        className="block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-      >
-        {content}
-      </Link>
+      <section className="space-y-3">
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <div className="flex flex-col space-y-3">
+            <div className="space-y-1">
+              <h3 className="text-lg font-semibold tracking-tight">Current Location</h3>
+              <p className="text-sm text-muted-foreground">
+                Your current location in the Universe
+              </p>
+            </div>
+            <div className="flex-1">
+              {renderRoomCard(room, analytics, 'Current Location', !!room)}
+            </div>
+          </div>
+          <div className="flex flex-col space-y-3">
+            <div className="space-y-1">
+              <h3 className="text-lg font-semibold tracking-tight">Previous Location</h3>
+              <p className="text-sm text-muted-foreground">
+                Where you were before this location
+              </p>
+            </div>
+            <div className="flex-1">
+              {renderRoomCard(previousRoom, previousAnalytics, 'Previous Location', true)}
+            </div>
+          </div>
+        </div>
+      </section>
     );
   }
-  return content;
+
+  // Otherwise show single column with header
+  if (room) {
+    return (
+      <section className="space-y-3">
+        <div className="space-y-1">
+          <h2 className="text-xl font-semibold tracking-tight">Current Location</h2>
+          <p className="text-sm text-muted-foreground">
+            Your current location in the Universe
+          </p>
+        </div>
+        {renderRoomCard(room, analytics, 'Current Location', true)}
+      </section>
+    );
+  }
+
+  // Fallback for when room is not available
+  if (roomError) {
+    return (
+      <section className="space-y-3">
+        <div className="space-y-1">
+          <h2 className="text-xl font-semibold tracking-tight">Current Location</h2>
+          <p className="text-sm text-muted-foreground">
+            Your current location in the Universe
+          </p>
+        </div>
+        <Card>
+          <CardContent className="flex items-center justify-center py-12">
+            <p className="text-sm text-muted-foreground">{roomError}</p>
+          </CardContent>
+        </Card>
+      </section>
+    );
+  }
+
+  if (playUri) {
+    return (
+      <section className="space-y-3">
+        <div className="space-y-1">
+          <h2 className="text-xl font-semibold tracking-tight">Current Location</h2>
+          <p className="text-sm text-muted-foreground">
+            Your current location in the Universe
+          </p>
+        </div>
+        <Card>
+          <CardContent className="flex items-center justify-center py-12">
+            <p className="truncate font-mono text-[11px] text-muted-foreground/80">
+              {playUri}
+            </p>
+          </CardContent>
+        </Card>
+      </section>
+    );
+  }
+
+  return (
+    <section className="space-y-3">
+      <div className="space-y-1">
+        <h2 className="text-xl font-semibold tracking-tight">Current Location</h2>
+        <p className="text-sm text-muted-foreground">
+          Your current location in the Universe
+        </p>
+      </div>
+      <Card>
+        <CardContent className="flex items-center justify-center py-12">
+          <p className="text-sm text-muted-foreground">
+            No room information available.
+          </p>
+        </CardContent>
+      </Card>
+    </section>
+  );
 }
 

@@ -83,18 +83,18 @@ export default async function AdminDashboard() {
       <PendingInvitationsAlert />
 
       {/* Current location at the top */}
-      <section className="space-y-3">
-        <div className="space-y-1">
-          <h2 className="text-xl font-semibold tracking-tight">Current Location</h2>
-          <p className="text-sm text-muted-foreground">
-            Your current location in the Universe
-          </p>
-        </div>
-        <CurrentLocation />
-      </section>
+      <CurrentLocation />
 
       {/* Recently visited rooms */}
-      <RecentlyVisited />
+      <section className="space-y-3">
+        <div className="space-y-1">
+          <h2 className="text-xl font-semibold tracking-tight">Recently visited</h2>
+          <p className="text-sm text-muted-foreground">
+            Jump back into rooms that have been active most recently.
+          </p>
+        </div>
+        <RecentlyVisited />
+      </section>
 
       {/* Discover / onboarding section */}
       {stats.universes === 0 ? (
