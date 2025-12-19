@@ -336,10 +336,6 @@ export default function RoomDetailPage() {
           Dashboard
         </Link>
         <ChevronRight className="h-4 w-4" />
-        <Link href="/admin/universes" className="hover:text-foreground">
-          Universes
-        </Link>
-        <ChevronRight className="h-4 w-4" />
         <Link href={`/admin/universes/${room.world.universe.id}`} className="hover:text-foreground">
           {room.world.universe.name}
         </Link>

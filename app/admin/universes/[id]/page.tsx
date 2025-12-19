@@ -262,10 +262,6 @@ export default function UniverseDetailPage() {
           Dashboard
         </Link>
         <ChevronRight className="h-4 w-4" />
-        <Link href="/admin/universes" className="hover:text-foreground">
-          Universes
-        </Link>
-        <ChevronRight className="h-4 w-4" />
         <span className="text-foreground">{universe.name}</span>
       </nav>
 
