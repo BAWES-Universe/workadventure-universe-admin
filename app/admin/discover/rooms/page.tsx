@@ -144,7 +144,7 @@ function RoomCard({ room, analytics }: { room: Room; analytics?: RoomAnalytics }
                             </span>
                           ) : (
                             <>
-                              <span className="text-muted-foreground/70">Last activity: </span>
+                              <span className="text-muted-foreground/70">Most recent visitor: </span>
                               <span className="font-medium text-foreground/80">
                                 {formatTimeAgo(new Date(analytics.lastVisitedOverall.accessedAt))}
                               </span>
