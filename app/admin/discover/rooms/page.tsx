@@ -106,7 +106,7 @@ function RoomCard({ room, analytics }: { room: Room; analytics?: RoomAnalytics }
             </p>
           )}
 
-          <div className="mt-auto flex items-center justify-between pt-3 text-xs text-muted-foreground">
+          <div className="mt-auto flex items-start justify-between pt-3 text-xs text-muted-foreground">
             <div className="flex flex-col gap-1.5 min-h-[3rem]">
               {analytics ? (
                 <>
@@ -163,7 +163,7 @@ function RoomCard({ room, analytics }: { room: Room; analytics?: RoomAnalytics }
                 <span className="text-muted-foreground">Access data loading...</span>
               )}
             </div>
-            <div className="flex items-center gap-1 text-primary">
+            <div className="flex items-center gap-1 text-primary self-end">
               <Star className="h-4 w-4" aria-hidden="true" />
               <span className="text-xs font-medium">{favorites}</span>
             </div>
