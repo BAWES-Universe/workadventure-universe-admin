@@ -36,7 +36,7 @@ interface PreviousRoom extends CurrentRoom {
 interface RoomAnalytics {
   totalAccesses: number;
   peakHour: number | null;
-  lastVisitedByUser: { accessedAt: string } | null;
+  lastVisitedByUser: { accessedAt: string; userId?: string | null; userUuid?: string | null } | null;
   lastVisitedOverall: { accessedAt: string; userId?: string | null; userUuid?: string | null } | null;
 }
 

@@ -24,7 +24,7 @@ interface RoomAnalytics {
   peakHour: number | null;
   favorites: number;
   description: string | null;
-  lastVisitedByUser: { accessedAt: string } | null;
+  lastVisitedByUser: { accessedAt: string; userId?: string | null; userUuid?: string | null } | null;
   lastVisitedOverall: { accessedAt: string; userId?: string | null; userUuid?: string | null } | null;
 }
 

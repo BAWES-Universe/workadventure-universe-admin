@@ -103,7 +103,7 @@ export default function WorldDetailPage() {
   const [deleting, setDeleting] = useState(false);
   const [activeTab, setActiveTab] = useState<'details' | 'analytics' | 'members'>('details');
   const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
-  const [roomAnalytics, setRoomAnalytics] = useState<Record<string, { totalAccesses: number; peakHour: number | null; lastVisitedByUser: { accessedAt: string } | null; lastVisitedOverall: { accessedAt: string; userId?: string | null; userUuid?: string | null } | null }>>({});
+  const [roomAnalytics, setRoomAnalytics] = useState<Record<string, { totalAccesses: number; peakHour: number | null; lastVisitedByUser: { accessedAt: string; userId?: string | null; userUuid?: string | null } | null; lastVisitedOverall: { accessedAt: string; userId?: string | null; userUuid?: string | null } | null }>>({});
   
   const [formData, setFormData] = useState({
     slug: '',
@@ -170,7 +170,7 @@ export default function WorldDetailPage() {
           }),
         );
 
-        const analyticsMap: Record<string, { totalAccesses: number; peakHour: number | null; lastVisitedByUser: { accessedAt: string } | null; lastVisitedOverall: { accessedAt: string; userId?: string | null; userUuid?: string | null } | null }> = {};
+        const analyticsMap: Record<string, { totalAccesses: number; peakHour: number | null; lastVisitedByUser: { accessedAt: string; userId?: string | null; userUuid?: string | null } | null; lastVisitedOverall: { accessedAt: string; userId?: string | null; userUuid?: string | null } | null }> = {};
         for (const result of results) {
           if (result) {
             analyticsMap[result.roomId] = {

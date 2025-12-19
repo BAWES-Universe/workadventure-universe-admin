@@ -129,10 +129,14 @@ function NewRoomPageContent() {
         <Link href="/admin" className="hover:text-foreground">
           Dashboard
         </Link>
-        <ChevronRight className="h-4 w-4" />
-        <Link href="/admin/rooms" className="hover:text-foreground">
-          Rooms
-        </Link>
+        {worldIdParam && selectedWorld && (
+          <>
+            <ChevronRight className="h-4 w-4" />
+            <Link href={`/admin/worlds/${worldIdParam}`} className="hover:text-foreground">
+              {selectedWorld.name}
+            </Link>
+          </>
+        )}
         <ChevronRight className="h-4 w-4" />
         <span className="text-foreground">New Room</span>
       </nav>
@@ -174,35 +178,39 @@ function NewRoomPageContent() {
         </CardHeader>
         <CardContent>
           <form onSubmit={handleSubmit} className="space-y-6">
-            <div className="space-y-2">
-              <Label htmlFor="worldId">
-                World <span className="text-destructive">*</span>
-              </Label>
-              <p className="text-sm text-muted-foreground">
-                Select the world this room belongs to.
-              </p>
-              <Select
-                value={formData.worldId}
-                onValueChange={(value) => setFormData({ ...formData, worldId: value })}
-                disabled={!!worldIdParam}
-              >
-                <SelectTrigger id="worldId">
-                  <SelectValue placeholder="Select a world" />
-                </SelectTrigger>
-                <SelectContent>
-                  {worlds.map((world) => (
-                    <SelectItem key={world.id} value={world.id}>
-                      {world.universe.name} / {world.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              {worldIdParam && selectedWorld && (
+            {!worldIdParam && (
+              <div className="space-y-2">
+                <Label htmlFor="worldId">
+                  World <span className="text-destructive">*</span>
+                </Label>
                 <p className="text-sm text-muted-foreground">
-                  Pre-selected: <Link href={`/admin/worlds/${selectedWorld.id}`} className="text-primary hover:underline">{selectedWorld.universe.name} / {selectedWorld.name}</Link>
+                  Select the world this room belongs to.
                 </p>
-              )}
-            </div>
+                <Select
+                  value={formData.worldId}
+                  onValueChange={(value) => setFormData({ ...formData, worldId: value })}
+                >
+                  <SelectTrigger id="worldId">
+                    <SelectValue placeholder="Select a world" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {worlds.map((world) => (
+                      <SelectItem key={world.id} value={world.id}>
+                        {world.universe.name} / {world.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+            {worldIdParam && selectedWorld && (
+              <div className="space-y-2">
+                <Label>World</Label>
+                <p className="text-sm text-muted-foreground">
+                  Creating room for: <Link href={`/admin/worlds/${selectedWorld.id}`} className="text-primary hover:underline font-medium">{selectedWorld.universe.name} / {selectedWorld.name}</Link>
+                </p>
+              </div>
+            )}
 
             <div className="space-y-2">
               <Label htmlFor="slug">
