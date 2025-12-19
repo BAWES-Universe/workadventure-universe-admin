@@ -131,10 +131,14 @@ function NewWorldPageContent() {
         <Link href="/admin" className="hover:text-foreground">
           Dashboard
         </Link>
-        <ChevronRight className="h-4 w-4" />
-        <Link href="/admin/worlds" className="hover:text-foreground">
-          Worlds
-        </Link>
+        {universeIdParam && selectedUniverse && (
+          <>
+            <ChevronRight className="h-4 w-4" />
+            <Link href={`/admin/universes/${universeIdParam}`} className="hover:text-foreground">
+              {selectedUniverse.name}
+            </Link>
+          </>
+        )}
         <ChevronRight className="h-4 w-4" />
         <span className="text-foreground">New World</span>
       </nav>
@@ -280,7 +284,7 @@ function NewWorldPageContent() {
 
             <div className="flex flex-col-reverse sm:flex-row justify-end gap-3 pt-4">
               <Button type="button" variant="secondary" asChild>
-                <Link href={formData.universeId ? `/admin/universes/${formData.universeId}` : '/admin/worlds'}>
+                <Link href={formData.universeId ? `/admin/universes/${formData.universeId}` : '/admin'}>
                   Cancel
                 </Link>
               </Button>
