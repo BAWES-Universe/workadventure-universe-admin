@@ -65,10 +65,34 @@ export async function GET(request: NextRequest) {
       }
     }
 
+    // Calculate favorites counts for all worlds
+    const favoritesByWorld = worldIds.length > 0
+      ? await prisma.favorite.groupBy({
+          by: ['worldId'],
+          where: {
+            worldId: { in: worldIds },
+          },
+          _count: {
+            id: true,
+          },
+        })
+      : [];
+    
+    const favoritesCountMap = new Map(
+      favoritesByWorld.map((fb) => [fb.worldId!, fb._count.id])
+    );
+
     const membershipsWithLastVisit = memberships.map(membership => ({
       ...membership,
       lastVisited: lastVisitMap.get(membership.worldId) || null,
       isUniverseOwner: membership.world.universe.ownerId === sessionUser.id,
+      world: {
+        ...membership.world,
+        _count: {
+          ...membership.world._count,
+          favorites: favoritesCountMap.get(membership.worldId) || 0,
+        },
+      },
     }));
 
     return NextResponse.json({ memberships: membershipsWithLastVisit });
