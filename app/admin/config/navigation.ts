@@ -13,17 +13,17 @@ export const NAV_ITEMS: NavItem[] = [
   // Primary dashboard entry (no group, always at top)
   { href: '/admin', label: 'Dashboard', icon: LayoutDashboard },
 
-  // Discover section
-  { href: '/admin/discover/universes', label: 'Universes', icon: Compass, group: 'discover' },
-  { href: '/admin/discover/worlds', label: 'Worlds', icon: Home, group: 'discover' },
-  { href: '/admin/discover/rooms', label: 'Rooms', icon: FolderOpen, group: 'discover' },
-  { href: '/admin/users', label: 'Users', icon: Users, group: 'discover' },
-
   // Personalize section
   { href: '/admin/universes', label: 'My Universes', icon: Globe, group: 'my' },
   { href: '/admin/stars', label: 'My Stars', icon: Star, group: 'my' },
   { href: '/admin/memberships', label: 'My Memberships', icon: Mail, requiresAuth: true, group: 'my' },
   { href: '/admin/profile', label: 'My Visit Card', icon: UserCircle, requiresAuth: true, group: 'my' },
+
+  // Discover section
+  { href: '/admin/discover/universes', label: 'Universes', icon: Compass, group: 'discover' },
+  { href: '/admin/discover/worlds', label: 'Worlds', icon: Home, group: 'discover' },
+  { href: '/admin/discover/rooms', label: 'Rooms', icon: FolderOpen, group: 'discover' },
+  { href: '/admin/users', label: 'Users', icon: Users, group: 'discover' },
 ];
 
 export function getNavItems(user: { name: string | null; email: string | null } | null): NavItem[] {
