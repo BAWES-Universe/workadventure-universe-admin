@@ -3,8 +3,34 @@
 import Link from 'next/link';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { ChevronRight } from 'lucide-react';
+import { ChevronRight, Activity } from 'lucide-react';
 import { cn } from '@/lib/utils';
+
+export interface UniverseAnalytics {
+  totalAccesses: number;
+  lastVisitedByUser: { accessedAt: string; userId?: string | null; userUuid?: string | null } | null;
+  lastVisitedOverall: { accessedAt: string; userId?: string | null; userUuid?: string | null; userName?: string | null; userEmail?: string | null } | null;
+}
+
+function formatTimeAgo(date: Date): string {
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const diffSecs = Math.floor(diffMs / 1000);
+  const diffMins = Math.floor(diffSecs / 60);
+  const diffHours = Math.floor(diffMins / 60);
+  const diffDays = Math.floor(diffHours / 24);
+  const diffWeeks = Math.floor(diffDays / 7);
+  const diffMonths = Math.floor(diffDays / 30);
+  const diffYears = Math.floor(diffDays / 365);
+
+  if (diffSecs < 60) return 'just now';
+  if (diffMins < 60) return `${diffMins} ${diffMins === 1 ? 'minute' : 'minutes'} ago`;
+  if (diffHours < 24) return `${diffHours} ${diffHours === 1 ? 'hour' : 'hours'} ago`;
+  if (diffDays < 7) return `${diffDays} ${diffDays === 1 ? 'day' : 'days'} ago`;
+  if (diffWeeks < 4) return `${diffWeeks} ${diffWeeks === 1 ? 'week' : 'weeks'} ago`;
+  if (diffMonths < 12) return `${diffMonths} ${diffMonths === 1 ? 'month' : 'months'} ago`;
+  return `${diffYears} ${diffYears === 1 ? 'year' : 'years'} ago`;
+}
 
 export interface UniverseCardProps {
   universe: {
@@ -33,6 +59,10 @@ export interface UniverseCardProps {
    * In discovery views we only surface public universes, so this can be hidden.
    */
   showVisibility?: boolean;
+  /**
+   * Analytics data for the universe (accesses, last visited, etc.)
+   */
+  analytics?: UniverseAnalytics;
   className?: string;
 }
 
@@ -40,6 +70,7 @@ export function UniverseCard({
   universe,
   ownedByCurrentUser = false,
   showVisibility = true,
+  analytics,
   className,
 }: UniverseCardProps) {
   const ownerLabel =
@@ -117,16 +148,66 @@ export function UniverseCard({
           )}
 
           {/* Footer */}
-          <div className="mt-auto flex items-center justify-between pt-3 text-xs text-muted-foreground">
-            <div className="flex flex-col gap-0.5">
-              <span className="font-medium text-foreground/80">
-                {worldsCount} {worldsCount === 1 ? 'world' : 'worlds'}
-              </span>
-              <span className="line-clamp-1">
-                {ownerLabel}
-              </span>
+          <div className="mt-auto flex items-start justify-between pt-3 text-xs text-muted-foreground">
+            <div className="flex flex-col gap-1.5 min-h-[3rem]">
+              {analytics ? (
+                <>
+                  <div className="flex items-center gap-1.5">
+                    <Activity className="h-3.5 w-3.5 text-muted-foreground" />
+                    <span className="font-medium text-foreground/80">
+                      {analytics.totalAccesses.toLocaleString()} accesses
+                    </span>
+                  </div>
+                  <div className="text-muted-foreground">
+                    {worldsCount} {worldsCount === 1 ? 'world' : 'worlds'} · {ownerLabel}
+                  </div>
+                  {/* Last visited information */}
+                  {analytics.lastVisitedByUser || analytics.lastVisitedOverall ? (
+                    <div className="flex flex-col gap-0.5 mt-0.5">
+                      {analytics.lastVisitedByUser && (
+                        <div className="text-[11px]">
+                          <span className="text-muted-foreground/70">Last visited by you: </span>
+                          <span className="font-medium text-foreground/80">
+                            {formatTimeAgo(new Date(analytics.lastVisitedByUser.accessedAt))}
+                          </span>
+                        </div>
+                      )}
+                      {analytics.lastVisitedOverall && (
+                        <div className="text-[11px]">
+                          {analytics.lastVisitedByUser && 
+                           analytics.lastVisitedByUser.accessedAt === analytics.lastVisitedOverall.accessedAt ? (
+                            <span className="text-muted-foreground/70 italic">
+                              You were the last visitor
+                            </span>
+                          ) : (
+                            <>
+                              <span className="text-muted-foreground/70">Most recent visitor: </span>
+                              <span className="font-medium text-foreground/80">
+                                {formatTimeAgo(new Date(analytics.lastVisitedOverall.accessedAt))}
+                              </span>
+                            </>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="text-[11px] text-muted-foreground/70 mt-0.5">
+                      No visits recorded
+                    </div>
+                  )}
+                </>
+              ) : (
+                <>
+                  <span className="font-medium text-foreground/80">
+                    {worldsCount} {worldsCount === 1 ? 'world' : 'worlds'}
+                  </span>
+                  <span className="line-clamp-1">
+                    {ownerLabel}
+                  </span>
+                </>
+              )}
             </div>
-            <div className="flex items-center gap-1 text-primary transition-transform group-hover:translate-x-0.5">
+            <div className="flex items-center gap-1 text-primary transition-transform group-hover:translate-x-0.5 self-end">
               <span className="hidden text-xs font-medium sm:inline">
                 View
               </span>

@@ -76,29 +76,121 @@ export async function GET(request: NextRequest) {
       }
     }
     
-    const [universes, total] = await Promise.all([
-      prisma.universe.findMany({
-        where,
-        include: {
-          owner: {
-            select: {
-              id: true,
-              name: true,
-              email: true,
+    // For discover scope, sort by total accesses (descending)
+    // Otherwise, sort by createdAt (descending)
+    let universes: any[];
+    let total: number;
+    
+    if (scope === 'discover' && userId && !isAdminToken) {
+      // Use raw SQL to join with roomAccess via worlds and rooms, count accesses, and sort by count
+      // This ensures proper sorting before pagination
+      const query = search
+        ? prisma.$queryRaw<Array<{ universe_id: string; access_count: bigint }>>`
+            SELECT 
+              u.id as universe_id,
+              COALESCE(COUNT(ra.id), 0)::bigint as access_count
+            FROM universes u
+            LEFT JOIN worlds w ON u.id = w.universe_id
+            LEFT JOIN rooms r ON w.id = r.world_id
+            LEFT JOIN room_accesses ra ON r.id = ra.room_id
+            WHERE u.is_public = true
+            AND u.slug != 'default'
+            AND (u.name ILIKE ${`%${search}%`} OR u.slug ILIKE ${`%${search}%`} OR u.description ILIKE ${`%${search}%`})
+            GROUP BY u.id
+            ORDER BY access_count DESC, u.created_at DESC
+            LIMIT ${limit} OFFSET ${(page - 1) * limit}
+          `
+        : prisma.$queryRaw<Array<{ universe_id: string; access_count: bigint }>>`
+            SELECT 
+              u.id as universe_id,
+              COALESCE(COUNT(ra.id), 0)::bigint as access_count
+            FROM universes u
+            LEFT JOIN worlds w ON u.id = w.universe_id
+            LEFT JOIN rooms r ON w.id = r.world_id
+            LEFT JOIN room_accesses ra ON r.id = ra.room_id
+            WHERE u.is_public = true
+            AND u.slug != 'default'
+            GROUP BY u.id
+            ORDER BY access_count DESC, u.created_at DESC
+            LIMIT ${limit} OFFSET ${(page - 1) * limit}
+          `;
+      
+      const universeIdsWithCounts = await query;
+      const universeIds = universeIdsWithCounts.map((u: any) => u.universe_id);
+      
+      // Get total count
+      const totalQuery = search
+        ? prisma.$queryRaw<Array<{ count: bigint }>>`
+            SELECT COUNT(DISTINCT u.id)::bigint as count
+            FROM universes u
+            WHERE u.is_public = true
+            AND u.slug != 'default'
+            AND (u.name ILIKE ${`%${search}%`} OR u.slug ILIKE ${`%${search}%`} OR u.description ILIKE ${`%${search}%`})
+          `
+        : prisma.$queryRaw<Array<{ count: bigint }>>`
+            SELECT COUNT(DISTINCT u.id)::bigint as count
+            FROM universes u
+            WHERE u.is_public = true
+            AND u.slug != 'default'
+          `;
+      const totalResult = await totalQuery;
+      total = Number(totalResult[0]?.count || 0);
+      
+      // Fetch full universe data for the sorted IDs
+      if (universeIds.length > 0) {
+        universes = await prisma.universe.findMany({
+          where: {
+            ...where,
+            id: { in: universeIds },
+          },
+          include: {
+            owner: {
+              select: {
+                id: true,
+                name: true,
+                email: true,
+              },
+            },
+            _count: {
+              select: {
+                worlds: true,
+              },
             },
           },
-          _count: {
-            select: {
-              worlds: true,
+        });
+        
+        // Maintain the order from the sorted query
+        const universeMap = new Map(universes.map(u => [u.id, u]));
+        universes = universeIds.map(id => universeMap.get(id)).filter(Boolean) as any[];
+      } else {
+        universes = [];
+      }
+    } else {
+      // Default sorting by createdAt
+      [universes, total] = await Promise.all([
+        prisma.universe.findMany({
+          where,
+          include: {
+            owner: {
+              select: {
+                id: true,
+                name: true,
+                email: true,
+              },
+            },
+            _count: {
+              select: {
+                worlds: true,
+              },
             },
           },
-        },
-        orderBy: { createdAt: 'desc' },
-        skip: (page - 1) * limit,
-        take: limit,
-      }),
-      prisma.universe.count({ where }),
-    ]);
+          orderBy: { createdAt: 'desc' },
+          skip: (page - 1) * limit,
+          take: limit,
+        }),
+        prisma.universe.count({ where }),
+      ]);
+    }
     
     return NextResponse.json({
       universes,

@@ -8,7 +8,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Plus, AlertCircle, Loader2, Search, X } from 'lucide-react';
-import { UniverseCard } from '../../universes/universe-card';
+import { UniverseCard, UniverseAnalytics } from '../../universes/universe-card';
 
 interface Universe {
   id: string;
@@ -40,6 +40,7 @@ export default function DiscoverUniversesPage() {
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [total, setTotal] = useState(0);
+  const [analyticsByUniverse, setAnalyticsByUniverse] = useState<Record<string, UniverseAnalytics>>({});
 
   useEffect(() => {
     checkAuthAndLoad();
@@ -117,6 +118,59 @@ export default function DiscoverUniversesPage() {
     setPage(1);
     fetchUniverses(1, '');
   }
+
+  useEffect(() => {
+    async function fetchAnalyticsForUniverses() {
+      const missing = universes.filter((universe) => !analyticsByUniverse[universe.id]);
+      if (missing.length === 0) return;
+
+      try {
+        const { authenticatedFetch } = await import('@/lib/client-auth');
+        const results = await Promise.all(
+          missing.map(async (universe) => {
+            try {
+              const response = await authenticatedFetch(
+                `/api/admin/analytics/universes/${universe.id}`,
+              );
+              if (!response.ok) {
+                return null;
+              }
+              const data = await response.json();
+              
+              return {
+                universeId: universe.id,
+                totalAccesses: data.totalAccesses || 0,
+                lastVisitedByUser: data.lastVisitedByUser || null,
+                lastVisitedOverall: data.lastVisitedOverall || null,
+              };
+            } catch {
+              return null;
+            }
+          }),
+        );
+
+        setAnalyticsByUniverse((prev) => {
+          const updated: Record<string, UniverseAnalytics> = { ...prev };
+          for (const result of results) {
+            if (result) {
+              updated[result.universeId] = {
+                totalAccesses: result.totalAccesses,
+                lastVisitedByUser: result.lastVisitedByUser || null,
+                lastVisitedOverall: result.lastVisitedOverall || null,
+              };
+            }
+          }
+          return updated;
+        });
+      } catch {
+        // Ignore analytics fetch errors; cards will show a placeholder
+      }
+    }
+
+    if (universes.length > 0) {
+      fetchAnalyticsForUniverses();
+    }
+  }, [universes, analyticsByUniverse]);
 
   function handlePageChange(nextPage: number) {
     const safePage = Math.max(1, Math.min(totalPages || 1, nextPage));
@@ -227,6 +281,7 @@ export default function DiscoverUniversesPage() {
                 universe={universe}
                 ownedByCurrentUser={false}
                 showVisibility={false}
+                analytics={analyticsByUniverse[universe.id]}
               />
             ))}
           </div>

@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { AlertCircle, Loader2, Search, X, Globe, Users as UsersIcon } from 'lucide-react';
+import { AlertCircle, Loader2, Search, X, Globe, Users as UsersIcon, Activity, Clock } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 
@@ -30,7 +30,33 @@ interface World {
   };
 }
 
-function WorldCard({ world }: { world: World }) {
+interface WorldAnalytics {
+  totalAccesses: number;
+  lastVisitedByUser: { accessedAt: string; userId?: string | null; userUuid?: string | null } | null;
+  lastVisitedOverall: { accessedAt: string; userId?: string | null; userUuid?: string | null; userName?: string | null; userEmail?: string | null } | null;
+}
+
+function formatTimeAgo(date: Date): string {
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const diffSecs = Math.floor(diffMs / 1000);
+  const diffMins = Math.floor(diffSecs / 60);
+  const diffHours = Math.floor(diffMins / 60);
+  const diffDays = Math.floor(diffHours / 24);
+  const diffWeeks = Math.floor(diffDays / 7);
+  const diffMonths = Math.floor(diffDays / 30);
+  const diffYears = Math.floor(diffDays / 365);
+
+  if (diffSecs < 60) return 'just now';
+  if (diffMins < 60) return `${diffMins} ${diffMins === 1 ? 'minute' : 'minutes'} ago`;
+  if (diffHours < 24) return `${diffHours} ${diffHours === 1 ? 'hour' : 'hours'} ago`;
+  if (diffDays < 7) return `${diffDays} ${diffDays === 1 ? 'day' : 'days'} ago`;
+  if (diffWeeks < 4) return `${diffWeeks} ${diffWeeks === 1 ? 'week' : 'weeks'} ago`;
+  if (diffMonths < 12) return `${diffMonths} ${diffMonths === 1 ? 'month' : 'months'} ago`;
+  return `${diffYears} ${diffYears === 1 ? 'year' : 'years'} ago`;
+}
+
+function WorldCard({ world, analytics }: { world: World; analytics?: WorldAnalytics }) {
   const roomsCount = world._count?.rooms ?? 0;
   const membersCount = world._count?.members ?? 0;
 
@@ -87,18 +113,63 @@ function WorldCard({ world }: { world: World }) {
             </p>
           )}
 
-          <div className="mt-auto flex items-center justify-between pt-3 text-xs text-muted-foreground">
-            <div className="flex flex-col gap-0.5">
-              <span className="flex items-center gap-1 font-medium text-foreground/80">
-                <Globe className="h-3 w-3" />
-                {world.universe.name}
-              </span>
-              <span className="line-clamp-1">
-                {roomsCount} {roomsCount === 1 ? 'room' : 'rooms'} · {membersCount}{' '}
-                {membersCount === 1 ? 'member' : 'members'}
-              </span>
+          <div className="mt-auto flex items-start justify-between pt-3 text-xs text-muted-foreground">
+            <div className="flex flex-col gap-1.5 min-h-[3rem]">
+              {analytics ? (
+                <>
+                  <div className="flex items-center gap-1.5">
+                    <Activity className="h-3.5 w-3.5 text-muted-foreground" />
+                    <span className="font-medium text-foreground/80">
+                      {analytics.totalAccesses.toLocaleString()} accesses
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <Globe className="h-3.5 w-3.5 text-muted-foreground" />
+                    <span className="text-muted-foreground">
+                      {roomsCount} {roomsCount === 1 ? 'room' : 'rooms'} · {membersCount}{' '}
+                      {membersCount === 1 ? 'member' : 'members'}
+                    </span>
+                  </div>
+                  {/* Last visited information */}
+                  {analytics.lastVisitedByUser || analytics.lastVisitedOverall ? (
+                    <div className="flex flex-col gap-0.5 mt-0.5">
+                      {analytics.lastVisitedByUser && (
+                        <div className="text-[11px]">
+                          <span className="text-muted-foreground/70">Last visited by you: </span>
+                          <span className="font-medium text-foreground/80">
+                            {formatTimeAgo(new Date(analytics.lastVisitedByUser.accessedAt))}
+                          </span>
+                        </div>
+                      )}
+                      {analytics.lastVisitedOverall && (
+                        <div className="text-[11px]">
+                          {analytics.lastVisitedByUser && 
+                           analytics.lastVisitedByUser.accessedAt === analytics.lastVisitedOverall.accessedAt ? (
+                            <span className="text-muted-foreground/70 italic">
+                              You were the last visitor
+                            </span>
+                          ) : (
+                            <>
+                              <span className="text-muted-foreground/70">Most recent visitor: </span>
+                              <span className="font-medium text-foreground/80">
+                                {formatTimeAgo(new Date(analytics.lastVisitedOverall.accessedAt))}
+                              </span>
+                            </>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="text-[11px] text-muted-foreground/70 mt-0.5">
+                      No visits recorded
+                    </div>
+                  )}
+                </>
+              ) : (
+                <span className="text-muted-foreground">Access data loading...</span>
+              )}
             </div>
-            <div className="flex items-center gap-1 text-primary">
+            <div className="flex items-center gap-1 text-primary self-end">
               <UsersIcon className="h-4 w-4" aria-hidden="true" />
             </div>
           </div>
@@ -120,6 +191,7 @@ export default function DiscoverWorldsPage() {
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [total, setTotal] = useState(0);
+  const [analyticsByWorld, setAnalyticsByWorld] = useState<Record<string, WorldAnalytics>>({});
 
   useEffect(() => {
     checkAuthAndLoad();
@@ -199,6 +271,59 @@ export default function DiscoverWorldsPage() {
     setPage(1);
     fetchWorlds(1, '');
   }
+
+  useEffect(() => {
+    async function fetchAnalyticsForWorlds() {
+      const missing = worlds.filter((world) => !analyticsByWorld[world.id]);
+      if (missing.length === 0) return;
+
+      try {
+        const { authenticatedFetch } = await import('@/lib/client-auth');
+        const results = await Promise.all(
+          missing.map(async (world) => {
+            try {
+              const response = await authenticatedFetch(
+                `/api/admin/analytics/worlds/${world.id}`,
+              );
+              if (!response.ok) {
+                return null;
+              }
+              const data = await response.json();
+              
+              return {
+                worldId: world.id,
+                totalAccesses: data.totalAccesses || 0,
+                lastVisitedByUser: data.lastVisitedByUser || null,
+                lastVisitedOverall: data.lastVisitedOverall || null,
+              };
+            } catch {
+              return null;
+            }
+          }),
+        );
+
+        setAnalyticsByWorld((prev) => {
+          const updated: Record<string, WorldAnalytics> = { ...prev };
+          for (const result of results) {
+            if (result) {
+              updated[result.worldId] = {
+                totalAccesses: result.totalAccesses,
+                lastVisitedByUser: result.lastVisitedByUser || null,
+                lastVisitedOverall: result.lastVisitedOverall || null,
+              };
+            }
+          }
+          return updated;
+        });
+      } catch {
+        // Ignore analytics fetch errors; cards will show a placeholder
+      }
+    }
+
+    if (worlds.length > 0) {
+      fetchAnalyticsForWorlds();
+    }
+  }, [worlds, analyticsByWorld]);
 
   function handlePageChange(nextPage: number) {
     const safePage = Math.max(1, Math.min(totalPages || 1, nextPage));
@@ -296,7 +421,7 @@ export default function DiscoverWorldsPage() {
         <>
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
             {worlds.map((world) => (
-              <WorldCard key={world.id} world={world} />
+              <WorldCard key={world.id} world={world} analytics={analyticsByWorld[world.id]} />
             ))}
           </div>
 
