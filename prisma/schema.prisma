@@ -227,6 +227,9 @@ model Favorite {
   room     Room?    @relation(fields: [roomId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  @@index([roomId])
+  @@index([worldId])
+  @@index([universeId])
   @@map("favorites")
 }
 

@@ -36,7 +36,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { ChevronRight, AlertCircle, Loader2, Plus, Edit, Trash2, Globe, Home, Users as UsersIcon, Activity } from 'lucide-react';
+import { ChevronRight, AlertCircle, Loader2, Plus, Edit, Trash2, Globe, Home, Users as UsersIcon, Activity, Star } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface Universe {
@@ -64,6 +64,7 @@ interface Universe {
     _count: {
       rooms: number;
       members: number;
+      favorites?: number;
     };
   }>;
 }
@@ -667,9 +668,9 @@ export default function UniverseDetailPage() {
                                   </>
                                 )}
                               </div>
-                              <div className="flex items-center gap-1 text-primary transition-transform group-hover:translate-x-0.5">
-                                <span className="hidden text-xs font-medium sm:inline">View</span>
-                                <ChevronRight className="h-4 w-4" aria-hidden="true" />
+                              <div className="flex items-center gap-1 text-primary self-end">
+                                <Star className="h-4 w-4" aria-hidden="true" />
+                                <span className="text-xs font-medium">{world._count?.favorites ?? 0}</span>
                               </div>
                             </div>
                           </div>

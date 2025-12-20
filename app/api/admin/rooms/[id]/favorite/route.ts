@@ -12,9 +12,17 @@ export async function POST(
     const user = await requireSession(request);
     const { id } = await params;
 
-    // Verify room exists
+    // Verify room exists and get world/universe info
     const room = await prisma.room.findUnique({
       where: { id },
+      include: {
+        world: {
+          select: {
+            id: true,
+            universeId: true,
+          },
+        },
+      },
     });
 
     if (!room) {
@@ -41,11 +49,13 @@ export async function POST(
       });
       isStarred = false;
     } else {
-      // Star: create the favorite
+      // Star: create the favorite with universeId and worldId populated
       await prisma.favorite.create({
         data: {
           userId: user.id,
           roomId: id,
+          worldId: room.worldId,
+          universeId: room.world.universeId,
         },
       });
       isStarred = true;

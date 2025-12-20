@@ -75,9 +75,37 @@ export async function GET(
       );
     }
     
+    // Calculate favorites counts for all worlds in this universe
+    const worldIds = universe.worlds.map((w: any) => w.id);
+    const favoritesByWorld = worldIds.length > 0
+      ? await prisma.favorite.groupBy({
+          by: ['worldId'],
+          where: {
+            worldId: { in: worldIds },
+          },
+          _count: {
+            id: true,
+          },
+        })
+      : [];
+    
+    const favoritesCountMap = new Map(
+      favoritesByWorld.map((fb) => [fb.worldId!, fb._count.id])
+    );
+
+    // Add favorites count to each world
+    const worldsWithFavorites = universe.worlds.map((world: any) => ({
+      ...world,
+      _count: {
+        ...world._count,
+        favorites: favoritesCountMap.get(world.id) || 0,
+      },
+    }));
+
     // Allow viewing for anyone, but include ownership info
     const responseData = {
       ...universe,
+      worlds: worldsWithFavorites,
       canEdit: userId ? (isAdminToken || universe.ownerId === userId) : false,
     };
     

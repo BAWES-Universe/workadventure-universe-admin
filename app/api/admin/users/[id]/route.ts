@@ -102,21 +102,68 @@ export async function GET(
       );
     }
     
-    // Calculate total rooms and members counts for each universe
+    // Calculate total rooms, members, and favorites counts for each universe
+    const universeIds = user.ownedUniverses.map((u: any) => u.id);
+    const favoritesByUniverse = universeIds.length > 0
+      ? await prisma.favorite.groupBy({
+          by: ['universeId'],
+          where: {
+            universeId: { in: universeIds },
+          },
+          _count: {
+            id: true,
+          },
+        })
+      : [];
+    
+    const favoritesCountMap = new Map(
+      favoritesByUniverse.map((fb) => [fb.universeId!, fb._count.id])
+    );
+
+    // Calculate favorites counts for all worlds in worldMemberships
+    const worldIds = user.worldMemberships.map((wm: any) => wm.world.id);
+    const favoritesByWorld = worldIds.length > 0
+      ? await prisma.favorite.groupBy({
+          by: ['worldId'],
+          where: {
+            worldId: { in: worldIds },
+          },
+          _count: {
+            id: true,
+          },
+        })
+      : [];
+    
+    const worldFavoritesCountMap = new Map(
+      favoritesByWorld.map((fb) => [fb.worldId!, fb._count.id])
+    );
+
     const userWithCounts = {
       ...user,
       ownedUniverses: user.ownedUniverses.map((universe: any) => {
         const totalRooms = universe.worlds?.reduce((sum: number, world: any) => sum + (world._count?.rooms || 0), 0) || 0;
         const totalMembers = universe.worlds?.reduce((sum: number, world: any) => sum + (world._count?.members || 0), 0) || 0;
+        const totalFavorites = favoritesCountMap.get(universe.id) || 0;
         return {
           ...universe,
           _count: {
             ...universe._count,
             rooms: totalRooms,
             members: totalMembers,
+            favorites: totalFavorites,
           },
         };
       }),
+      worldMemberships: user.worldMemberships.map((membership: any) => ({
+        ...membership,
+        world: {
+          ...membership.world,
+          _count: {
+            ...membership.world._count,
+            favorites: worldFavoritesCountMap.get(membership.world.id) || 0,
+          },
+        },
+      })),
     };
     
     return NextResponse.json(userWithCounts);

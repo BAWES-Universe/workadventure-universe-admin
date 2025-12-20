@@ -218,8 +218,36 @@ export async function GET(request: NextRequest) {
       ]);
     }
     
+    // Calculate aggregated favorites counts for all worlds
+    // Count favorites directly by worldId (much more efficient)
+    const worldIds = worlds.map((w: any) => w.id);
+    const favoritesByWorld = worldIds.length > 0
+      ? await prisma.favorite.groupBy({
+          by: ['worldId'],
+          where: {
+            worldId: { in: worldIds },
+          },
+          _count: {
+            id: true,
+          },
+        })
+      : [];
+    
+    const favoritesCountMap = new Map(
+      favoritesByWorld.map((fb) => [fb.worldId!, fb._count.id])
+    );
+
+    // Add favorites count to each world
+    const worldsWithFavorites = worlds.map((world: any) => ({
+      ...world,
+      _count: {
+        ...world._count,
+        favorites: favoritesCountMap.get(world.id) || 0,
+      },
+    }));
+    
     return NextResponse.json({
-      worlds,
+      worlds: worldsWithFavorites,
       pagination: {
         page,
         limit,

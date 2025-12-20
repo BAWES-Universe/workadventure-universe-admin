@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { ChevronRight, Activity, Globe, Users } from 'lucide-react';
+import { ChevronRight, Activity, Globe, Users, Star } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 export interface UniverseAnalytics {
@@ -49,6 +49,7 @@ export interface UniverseCardProps {
       worlds?: number;
       rooms?: number;
       members?: number;
+      favorites?: number;
     };
   };
   /**
@@ -238,11 +239,9 @@ export function UniverseCard({
                 </>
               )}
             </div>
-            <div className="flex items-center gap-1 text-primary transition-transform group-hover:translate-x-0.5 self-end">
-              <span className="hidden text-xs font-medium sm:inline">
-                View
-              </span>
-              <ChevronRight className="h-4 w-4" aria-hidden="true" />
+            <div className="flex items-center gap-1 text-primary self-end">
+              <Star className="h-4 w-4" aria-hidden="true" />
+              <span className="text-xs font-medium">{universe._count?.favorites ?? 0}</span>
             </div>
           </div>
         </div>

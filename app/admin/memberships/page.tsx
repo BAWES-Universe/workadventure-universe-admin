@@ -17,7 +17,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { Loader2, AlertCircle, CheckCircle2, XCircle, Users, Mail, Home, Globe, Calendar, Clock, ChevronRight, Activity } from 'lucide-react';
+import { Loader2, AlertCircle, CheckCircle2, XCircle, Users, Mail, Home, Globe, Calendar, Clock, ChevronRight, Activity, Star } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface Invitation {
@@ -63,6 +63,7 @@ interface Membership {
     _count?: {
       rooms?: number;
       members?: number;
+      favorites?: number;
     };
   };
 }
@@ -558,9 +559,9 @@ export default function MyMembershipsPage() {
                               </>
                             )}
                           </div>
-                          <div className="flex items-center gap-1 text-primary transition-transform group-hover:translate-x-0.5">
-                            <span className="hidden text-xs font-medium sm:inline">View</span>
-                            <ChevronRight className="h-4 w-4" aria-hidden="true" />
+                          <div className="flex items-center gap-1 text-primary self-end">
+                            <Star className="h-4 w-4" aria-hidden="true" />
+                            <span className="text-xs font-medium">{membership.world._count?.favorites ?? 0}</span>
                           </div>
                         </div>
                       </div>
