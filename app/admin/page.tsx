@@ -3,6 +3,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Button } from '@/components/ui/button';
 import { Globe, Users, FolderOpen, Home, Plus, MapPin } from 'lucide-react';
 import { prisma } from '@/lib/db';
+import { cn } from '@/lib/utils';
 import CurrentLocation from './components/current-location';
 import PendingInvitationsAlert from './components/pending-invitations-alert';
 import RecentlyVisited from './components/recently-visited';
@@ -126,15 +127,19 @@ export default async function AdminDashboard() {
             </p>
           </div>
           <div className="grid gap-4 grid-cols-2 md:grid-cols-4">
-            <Link href="/admin/discover/universes" className="group">
-              <Card className="transition-all hover:shadow-lg hover:border-primary/50 h-full">
-                <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <Link href="/admin/discover/universes" className="group block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background">
+              <Card className={cn(
+                'relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
+                'hover:-translate-y-1 hover:shadow-lg',
+              )}>
+                <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-primary/10 via-transparent to-secondary/20 opacity-0 transition-opacity group-hover:opacity-100" />
+                <CardHeader className="relative flex flex-row items-center justify-between space-y-0 pb-2">
                   <CardTitle className="text-sm font-medium">Universes</CardTitle>
                   <div className="h-9 w-9 rounded-full bg-primary/10 flex items-center justify-center group-hover:bg-primary/20 transition-colors">
                     <Globe className="h-5 w-5 text-primary" />
                   </div>
                 </CardHeader>
-                <CardContent>
+                <CardContent className="relative">
                   <div className="text-3xl font-bold">{stats.universes}</div>
                   <p className="text-xs text-muted-foreground mt-1">
                     Public universes you can explore
@@ -143,15 +148,19 @@ export default async function AdminDashboard() {
               </Card>
             </Link>
 
-            <Link href="/admin/discover/worlds" className="group">
-              <Card className="transition-all hover:shadow-lg hover:border-primary/50 h-full">
-                <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <Link href="/admin/discover/worlds" className="group block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background">
+              <Card className={cn(
+                'relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
+                'hover:-translate-y-1 hover:shadow-lg',
+              )}>
+                <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-blue-500/10 via-transparent to-purple-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
+                <CardHeader className="relative flex flex-row items-center justify-between space-y-0 pb-2">
                   <CardTitle className="text-sm font-medium">Worlds</CardTitle>
                   <div className="h-9 w-9 rounded-full bg-blue-500/10 flex items-center justify-center group-hover:bg-blue-500/20 transition-colors">
                     <Home className="h-5 w-5 text-blue-500" />
                   </div>
                 </CardHeader>
-                <CardContent>
+                <CardContent className="relative">
                   <div className="text-3xl font-bold">{stats.worlds}</div>
                   <p className="text-xs text-muted-foreground mt-1">
                     Worlds across universes
@@ -160,15 +169,19 @@ export default async function AdminDashboard() {
               </Card>
             </Link>
 
-            <Link href="/admin/discover/rooms" className="group">
-              <Card className="transition-all hover:shadow-lg hover:border-primary/50 h-full">
-                <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <Link href="/admin/discover/rooms" className="group block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background">
+              <Card className={cn(
+                'relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
+                'hover:-translate-y-1 hover:shadow-lg',
+              )}>
+                <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-green-500/10 via-transparent to-emerald-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
+                <CardHeader className="relative flex flex-row items-center justify-between space-y-0 pb-2">
                   <CardTitle className="text-sm font-medium">Rooms</CardTitle>
                   <div className="h-9 w-9 rounded-full bg-green-500/10 flex items-center justify-center group-hover:bg-green-500/20 transition-colors">
                     <FolderOpen className="h-5 w-5 text-green-500" />
                   </div>
                 </CardHeader>
-                <CardContent>
+                <CardContent className="relative">
                   <div className="text-3xl font-bold">{stats.rooms}</div>
                   <p className="text-xs text-muted-foreground mt-1">
                     Individual spaces & maps
@@ -177,15 +190,19 @@ export default async function AdminDashboard() {
               </Card>
             </Link>
 
-            <Link href="/admin/users" className="group">
-              <Card className="transition-all hover:shadow-lg hover:border-primary/50 h-full">
-                <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <Link href="/admin/users" className="group block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background">
+              <Card className={cn(
+                'relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
+                'hover:-translate-y-1 hover:shadow-lg',
+              )}>
+                <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-purple-500/10 via-transparent to-pink-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
+                <CardHeader className="relative flex flex-row items-center justify-between space-y-0 pb-2">
                   <CardTitle className="text-sm font-medium">Users</CardTitle>
                   <div className="h-9 w-9 rounded-full bg-purple-500/10 flex items-center justify-center group-hover:bg-purple-500/20 transition-colors">
                     <Users className="h-5 w-5 text-purple-500" />
                   </div>
                 </CardHeader>
-                <CardContent>
+                <CardContent className="relative">
                   <div className="text-3xl font-bold">{stats.users}</div>
                   <p className="text-xs text-muted-foreground mt-1">
                     People exploring the Universe
