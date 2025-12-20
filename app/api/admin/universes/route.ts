@@ -173,16 +173,33 @@ export async function GET(request: NextRequest) {
         const universeMap = new Map(universes.map(u => [u.id, u]));
         universes = universeIds.map(id => universeMap.get(id)).filter(Boolean) as any[];
         
-        // Calculate total rooms and members counts for each universe
+        // Calculate total rooms, members, and aggregated favorites counts for each universe
+        // Count favorites for all rooms in all worlds in each universe using a single efficient query
+        const universeIdsForFavorites = universes.map((u: any) => u.id);
+        const favoritesByUniverse = await prisma.$queryRaw<Array<{ universe_id: string; count: bigint }>>`
+          SELECT w.universe_id, COUNT(f.id)::bigint as count
+          FROM favorites f
+          INNER JOIN rooms r ON f.room_id = r.id
+          INNER JOIN worlds w ON r.world_id = w.id
+          WHERE w.universe_id = ANY(${universeIdsForFavorites})
+          GROUP BY w.universe_id
+        `;
+        
+        const favoritesCountMapForDiscover = new Map(
+          favoritesByUniverse.map((fb) => [fb.universe_id, Number(fb.count)])
+        );
+
         universes = universes.map((universe: any) => {
           const totalRooms = universe.worlds?.reduce((sum: number, world: any) => sum + (world._count?.rooms || 0), 0) || 0;
           const totalMembers = universe.worlds?.reduce((sum: number, world: any) => sum + (world._count?.members || 0), 0) || 0;
+          const totalFavorites = favoritesCountMapForDiscover.get(universe.id) || 0;
           return {
             ...universe,
             _count: {
               ...universe._count,
               rooms: totalRooms,
               members: totalMembers,
+              favorites: totalFavorites,
             },
           };
         });
@@ -226,16 +243,35 @@ export async function GET(request: NextRequest) {
       ]);
     }
     
-    // Calculate total rooms and members counts for each universe
+    // Calculate total rooms, members, and aggregated favorites counts for each universe
+    // Count favorites for all rooms in all worlds in each universe using a single efficient query
+    const universeIds = universes.map((u: any) => u.id);
+    const favoritesByUniverse = universeIds.length > 0
+      ? await prisma.$queryRaw<Array<{ universe_id: string; count: bigint }>>`
+          SELECT w.universe_id, COUNT(f.id)::bigint as count
+          FROM favorites f
+          INNER JOIN rooms r ON f.room_id = r.id
+          INNER JOIN worlds w ON r.world_id = w.id
+          WHERE w.universe_id = ANY(${universeIds})
+          GROUP BY w.universe_id
+        `
+      : [];
+    
+    const favoritesCountMap = new Map(
+      favoritesByUniverse.map((fb) => [fb.universe_id, Number(fb.count)])
+    );
+
     const universesWithCounts = universes.map((universe: any) => {
       const totalRooms = universe.worlds?.reduce((sum: number, world: any) => sum + (world._count?.rooms || 0), 0) || 0;
       const totalMembers = universe.worlds?.reduce((sum: number, world: any) => sum + (world._count?.members || 0), 0) || 0;
+      const totalFavorites = favoritesCountMap.get(universe.id) || 0;
       return {
         ...universe,
         _count: {
           ...universe._count,
           rooms: totalRooms,
           members: totalMembers,
+          favorites: totalFavorites,
         },
       };
     });
