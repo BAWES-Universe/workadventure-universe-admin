@@ -404,14 +404,14 @@ export default function RoomDetailPage() {
           <div className="flex flex-wrap gap-2">
             {currentUser && (
               <Button
-                variant={room.isStarred ? "default" : "outline"}
+                variant="outline"
                 onClick={handleToggleStar}
                 disabled={togglingStar}
               >
                 {togglingStar ? (
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                 ) : (
-                  <Star className={`mr-2 h-4 w-4 ${room.isStarred ? 'fill-current' : ''}`} />
+                  <Star className={`mr-2 h-4 w-4 ${room.isStarred ? 'fill-yellow-400 text-yellow-400' : ''}`} />
                 )}
                 {room.starCount !== undefined ? room.starCount : 0}
               </Button>
