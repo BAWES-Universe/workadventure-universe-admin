@@ -267,6 +267,12 @@ export default function UsersPage() {
                           </div>
                         )}
                       </div>
+                      <div className="text-right">
+                        <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                          Joined
+                        </div>
+                        <div className="text-xs font-medium text-foreground/80">{created}</div>
+                      </div>
                     </div>
                   </CardContent>
                 </Card>
