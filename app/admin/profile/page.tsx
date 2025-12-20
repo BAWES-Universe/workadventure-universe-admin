@@ -140,21 +140,6 @@ export default function VisitCardPage() {
 
   return (
     <div className="px-4 sm:px-6 lg:px-8">
-      {/* Breadcrumbs */}
-      <nav className="flex mb-6" aria-label="Breadcrumb">
-        <ol className="flex items-center space-x-4">
-          <li>
-            <Link href="/admin" className="text-gray-400 hover:text-gray-500">
-              Dashboard
-            </Link>
-          </li>
-          <li>
-            <span className="text-gray-500 mx-2">/</span>
-          </li>
-          <li className="text-gray-900">Visit Card</li>
-        </ol>
-      </nav>
-
       <div className="max-w-4xl">
         <div className="mb-6">
           <h1 className="text-3xl font-bold tracking-tight">Customize Visit Card</h1>
