@@ -240,7 +240,7 @@ function StarredRoomCard({
           </div>
           <div className="absolute bottom-5 right-5">
             <Button
-              variant={room.isStarred ? "default" : "outline"}
+              variant="outline"
               size="sm"
               onClick={handleToggle}
               disabled={toggling}
@@ -249,7 +249,10 @@ function StarredRoomCard({
               {toggling ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
               ) : (
-                <Star className={`h-3.5 w-3.5 ${room.isStarred ? 'fill-current' : ''}`} />
+                <Star className={cn(
+                  "h-3.5 w-3.5",
+                  room.isStarred && "fill-yellow-400 text-yellow-400"
+                )} />
               )}
               {room.starCount || 0}
             </Button>
@@ -322,9 +325,19 @@ export default function MyStarsPage() {
     const previousIsStarred = room.isStarred;
     const previousStarCount = room.starCount;
 
-    // Optimistic update - in My Stars page, all rooms are starred, so toggling will unstar
-    // Remove from list optimistically when unstarring
-    setStarredRooms((prev) => prev.filter((r) => r.id !== roomId));
+    // Optimistic update - update the room's starred state but keep it in the list
+    // This allows users to revert if they made a mistake
+    setStarredRooms((prev) =>
+      prev.map((r) =>
+        r.id === roomId
+          ? {
+              ...r,
+              isStarred: !previousIsStarred,
+              starCount: previousIsStarred ? previousStarCount - 1 : previousStarCount + 1,
+            }
+          : r
+      )
+    );
 
     try {
       const { authenticatedFetch } = await import('@/lib/client-auth');
@@ -338,21 +351,23 @@ export default function MyStarsPage() {
 
       const data = await response.json();
 
-      // If unstarred (which is expected when toggling from starred list), it's already removed
-      // If somehow starred again, re-add it (shouldn't happen but handle it)
-      if (data.isStarred) {
-        setStarredRooms((prev) => [
-          ...prev,
-          { ...room, isStarred: data.isStarred, starCount: data.starCount },
-        ]);
-      }
-      // Otherwise, room stays removed (which is correct for unstarred state)
+      // Update with server data
+      setStarredRooms((prev) =>
+        prev.map((r) =>
+          r.id === roomId
+            ? { ...r, isStarred: data.isStarred, starCount: data.starCount }
+            : r
+        )
+      );
     } catch (err) {
-      // Revert on error - re-add the room
-      setStarredRooms((prev) => [
-        ...prev,
-        { ...room, isStarred: previousIsStarred, starCount: previousStarCount },
-      ]);
+      // Revert on error
+      setStarredRooms((prev) =>
+        prev.map((r) =>
+          r.id === roomId
+            ? { ...r, isStarred: previousIsStarred, starCount: previousStarCount }
+            : r
+        )
+      );
       alert(err instanceof Error ? err.message : 'Failed to toggle star');
     }
   }
