@@ -205,10 +205,30 @@ export async function GET(
       }
     }
     
-    // Return room with canEdit flag
+    // Get star count and check if current user has starred
+    const starCount = await prisma.favorite.count({
+      where: {
+        roomId: id,
+      },
+    });
+
+    let isStarred = false;
+    if (userId && !isAdminToken) {
+      const userFavorite = await prisma.favorite.findFirst({
+        where: {
+          userId: userId,
+          roomId: id,
+        },
+      });
+      isStarred = !!userFavorite;
+    }
+
+    // Return room with canEdit flag and star information
     const responseData = {
       ...room,
       canEdit,
+      isStarred,
+      starCount,
     };
     
     return NextResponse.json(responseData);

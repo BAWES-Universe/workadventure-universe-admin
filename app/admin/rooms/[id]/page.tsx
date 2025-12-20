@@ -30,7 +30,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { ChevronRight, AlertCircle, Loader2, Edit, Trash2, Navigation, CheckCircle2 } from 'lucide-react';
+import { ChevronRight, AlertCircle, Loader2, Edit, Trash2, Navigation, CheckCircle2, Star } from 'lucide-react';
 
 interface Room {
   id: string;
@@ -41,6 +41,8 @@ interface Room {
   wamUrl: string | null;
   isPublic: boolean;
   canEdit?: boolean;
+  isStarred?: boolean;
+  starCount?: number;
   world: {
     id: string;
     name: string;
@@ -71,6 +73,7 @@ export default function RoomDetailPage() {
   const [currentUser, setCurrentUser] = useState<any>(null);
   const [isSuperAdmin, setIsSuperAdmin] = useState(false);
   const [currentRoomPath, setCurrentRoomPath] = useState<string | null>(null);
+  const [togglingStar, setTogglingStar] = useState(false);
   
   const { wa, isReady: waReady, navigateToRoom } = useWorkAdventure();
   
@@ -280,6 +283,49 @@ export default function RoomDetailPage() {
     }
   }
 
+  async function handleToggleStar() {
+    if (!room || !currentUser) return;
+
+    const previousIsStarred = room.isStarred;
+    const previousStarCount = room.starCount || 0;
+
+    // Optimistic update
+    setRoom({
+      ...room,
+      isStarred: !previousIsStarred,
+      starCount: previousIsStarred ? previousStarCount - 1 : previousStarCount + 1,
+    });
+
+    try {
+      setTogglingStar(true);
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch(`/api/admin/rooms/${id}/favorite`, {
+        method: 'POST',
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to toggle star');
+      }
+
+      const data = await response.json();
+      setRoom({
+        ...room,
+        isStarred: data.isStarred,
+        starCount: data.starCount,
+      });
+    } catch (err) {
+      // Revert on error
+      setRoom({
+        ...room,
+        isStarred: previousIsStarred,
+        starCount: previousStarCount,
+      });
+      alert(err instanceof Error ? err.message : 'Failed to toggle star');
+    } finally {
+      setTogglingStar(false);
+    }
+  }
+
   // Check if user is currently in this room
   // Compare by room ID (WorkAdventure might store the database room ID)
   const isInCurrentRoom = waReady && currentRoomPath === 'match' && room;
@@ -356,6 +402,20 @@ export default function RoomDetailPage() {
         </div>
         {!isEditing && (
           <div className="flex flex-wrap gap-2">
+            {currentUser && (
+              <Button
+                variant="outline"
+                onClick={handleToggleStar}
+                disabled={togglingStar}
+              >
+                {togglingStar ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                ) : (
+                  <Star className={`mr-2 h-4 w-4 ${room.isStarred ? 'fill-yellow-400 text-yellow-400' : ''}`} />
+                )}
+                {room.starCount !== undefined ? room.starCount : 0}
+              </Button>
+            )}
             {isInCurrentRoom ? (
               <Alert className="border-green-200 bg-green-50 dark:bg-green-950 dark:border-green-800">
                 <CheckCircle2 className="h-4 w-4 text-green-600 dark:text-green-400" />
