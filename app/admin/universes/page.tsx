@@ -167,19 +167,6 @@ export default function UniversesPage() {
 
       {/* My Universes */}
       <section className="space-y-4">
-        <div className="flex items-center justify-between gap-2">
-          <div className="space-y-1">
-            <h2 className="text-xl font-semibold tracking-tight">My Universes</h2>
-            <p className="text-sm text-muted-foreground">
-              Universes you own and manage.
-            </p>
-          </div>
-          {!myLoading && (
-            <div className="text-xs text-muted-foreground">
-              {myUniverses.length} {myUniverses.length === 1 ? 'universe' : 'universes'}
-            </div>
-          )}
-        </div>
 
         {myError && (
           <Alert variant="destructive">
