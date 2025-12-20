@@ -401,32 +401,6 @@ export default function UserDetailPage() {
           <CardContent className="pt-6">
             <div className="flex items-center">
               <div className="flex-shrink-0">
-                <Globe className="h-8 w-8 text-muted-foreground" />
-              </div>
-              <div className="ml-4 flex-1">
-                <p className="text-sm font-medium text-muted-foreground">Owned Universes</p>
-                <p className="text-2xl font-semibold">{user._count.ownedUniverses}</p>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="pt-6">
-            <div className="flex items-center">
-              <div className="flex-shrink-0">
-                <Users className="h-8 w-8 text-muted-foreground" />
-              </div>
-              <div className="ml-4 flex-1">
-                <p className="text-sm font-medium text-muted-foreground">World Memberships</p>
-                <p className="text-2xl font-semibold">{user._count.worldMemberships}</p>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="pt-6">
-            <div className="flex items-center">
-              <div className="flex-shrink-0">
                 <Star className="h-8 w-8 text-muted-foreground" />
               </div>
               <div className="ml-4 flex-1">
