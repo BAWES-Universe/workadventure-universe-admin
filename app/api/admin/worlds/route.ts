@@ -219,20 +219,22 @@ export async function GET(request: NextRequest) {
     }
     
     // Calculate aggregated favorites counts for all worlds
-    // Count favorites for all rooms in each world using a single efficient query
+    // Count favorites directly by worldId (much more efficient)
     const worldIds = worlds.map((w: any) => w.id);
     const favoritesByWorld = worldIds.length > 0
-      ? await prisma.$queryRaw<Array<{ world_id: string; count: bigint }>>`
-          SELECT r.world_id, COUNT(f.id)::bigint as count
-          FROM favorites f
-          INNER JOIN rooms r ON f.room_id = r.id
-          WHERE r.world_id = ANY(${worldIds})
-          GROUP BY r.world_id
-        `
+      ? await prisma.favorite.groupBy({
+          by: ['worldId'],
+          where: {
+            worldId: { in: worldIds },
+          },
+          _count: {
+            id: true,
+          },
+        })
       : [];
     
     const favoritesCountMap = new Map(
-      favoritesByWorld.map((fb) => [fb.world_id, Number(fb.count)])
+      favoritesByWorld.map((fb) => [fb.worldId!, fb._count.id])
     );
 
     // Add favorites count to each world
