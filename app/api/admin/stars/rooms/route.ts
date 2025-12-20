@@ -41,6 +41,27 @@ export async function GET(request: NextRequest) {
       },
     });
 
+    // Get star counts for all rooms in one query
+    const roomIds = favorites
+      .filter((f) => f.room !== null)
+      .map((f) => f.room!.id);
+
+    const starCounts = await prisma.favorite.groupBy({
+      by: ['roomId'],
+      where: {
+        roomId: {
+          in: roomIds,
+        },
+      },
+      _count: {
+        id: true,
+      },
+    });
+
+    const starCountMap = new Map(
+      starCounts.map((sc) => [sc.roomId!, sc._count.id])
+    );
+
     // Transform to room format with star information
     const starredRooms = favorites
       .filter((f) => f.room !== null)
@@ -58,7 +79,7 @@ export async function GET(request: NextRequest) {
           updatedAt: room.updatedAt,
           world: room.world,
           isStarred: true,
-          starCount: 0, // Will be populated if needed, but not critical for list view
+          starCount: starCountMap.get(room.id) || 0,
           favoritedAt: favorite.favoritedAt,
         };
       });
