@@ -206,8 +206,8 @@ export default function DiscoverUniversesPage() {
         </Button>
       </div>
 
-      <Card>
-        <CardContent className="pt-6">
+      <div className="border border-border/70 rounded-lg bg-card">
+        <div className="p-6">
           <form onSubmit={handleSearchSubmit} className="space-y-4">
             <div className="flex gap-2">
               <div className="relative flex-1">
@@ -220,7 +220,7 @@ export default function DiscoverUniversesPage() {
                   className="pl-9"
                 />
               </div>
-              <Button type="submit" disabled={loading}>
+              <Button type="submit" variant="outline" disabled={loading}>
                 {loading ? (
                   <>
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -241,8 +241,8 @@ export default function DiscoverUniversesPage() {
               )}
             </div>
           </form>
-        </CardContent>
-      </Card>
+        </div>
+      </div>
 
       {error && (
         <Alert variant="destructive">
