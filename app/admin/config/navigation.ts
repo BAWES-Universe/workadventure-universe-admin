@@ -1,4 +1,4 @@
-import { LayoutDashboard, Globe, Users, UserCircle, Mail, Compass, Home, FolderOpen } from 'lucide-react';
+import { LayoutDashboard, Globe, Users, UserCircle, Mail, Compass, Home, FolderOpen, Star } from 'lucide-react';
 import { LucideIcon } from 'lucide-react';
 
 export interface NavItem {
@@ -21,6 +21,7 @@ export const NAV_ITEMS: NavItem[] = [
 
   // Personalize section
   { href: '/admin/universes', label: 'My Universes', icon: Globe, group: 'my' },
+  { href: '/admin/stars', label: 'My Stars', icon: Star, group: 'my' },
   { href: '/admin/memberships', label: 'My Memberships', icon: Mail, requiresAuth: true, group: 'my' },
   { href: '/admin/profile', label: 'My Visit Card', icon: UserCircle, requiresAuth: true, group: 'my' },
 ];
