@@ -195,7 +195,7 @@ export default function DiscoverUniversesPage() {
         <div className="space-y-1">
           <h1 className="text-4xl font-bold tracking-tight">Discover Universes</h1>
           <p className="text-muted-foreground text-lg">
-            Explore public universes created by other admins.
+            Explore public universes created by users across the Universe.
           </p>
         </div>
         <Button variant="default" asChild>

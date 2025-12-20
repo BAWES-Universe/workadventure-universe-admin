@@ -135,7 +135,7 @@ export default function UsersPage() {
       <div className="space-y-1">
         <h1 className="text-4xl font-bold tracking-tight">Users</h1>
         <p className="text-muted-foreground text-lg">
-          Manage users and their access to universes and worlds.
+          Browse users across the Universe.
         </p>
       </div>
 
