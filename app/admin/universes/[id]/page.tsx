@@ -36,7 +36,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { ChevronRight, AlertCircle, Loader2, Plus, Edit, Trash2, Globe, Home, Users as UsersIcon } from 'lucide-react';
+import { ChevronRight, AlertCircle, Loader2, Plus, Edit, Trash2, Globe, Home, Users as UsersIcon, Activity } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface Universe {
@@ -88,6 +88,7 @@ export default function UniverseDetailPage() {
   const [analyticsLoading, setAnalyticsLoading] = useState(true);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [worldAnalytics, setWorldAnalytics] = useState<Record<string, { totalAccesses: number; lastVisitedByUser: any; lastVisitedOverall: any }>>({});
   
   const [formData, setFormData] = useState({
     slug: '',
@@ -105,6 +106,12 @@ export default function UniverseDetailPage() {
     fetchUsers();
     fetchAnalytics();
   }, [id]);
+
+  useEffect(() => {
+    if (universe && universe.worlds.length > 0) {
+      fetchWorldAnalytics();
+    }
+  }, [universe]);
 
   async function checkAuth() {
     try {
@@ -177,6 +184,69 @@ export default function UniverseDetailPage() {
     } finally {
       setAnalyticsLoading(false);
     }
+  }
+
+  async function fetchWorldAnalytics() {
+    if (!universe || !universe.worlds.length) return;
+
+    try {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const results = await Promise.all(
+        universe.worlds.map(async (world) => {
+          try {
+            const response = await authenticatedFetch(
+              `/api/admin/analytics/worlds/${world.id}`,
+            );
+            if (!response.ok) return null;
+            const data = await response.json();
+            return {
+              worldId: world.id,
+              totalAccesses: data.totalAccesses || 0,
+              lastVisitedByUser: data.lastVisitedByUser || null,
+              lastVisitedOverall: data.lastVisitedOverall || null,
+            };
+          } catch {
+            return null;
+          }
+        }),
+      );
+
+      setWorldAnalytics((prev) => {
+        const updated = { ...prev };
+        for (const result of results) {
+          if (result) {
+            updated[result.worldId] = {
+              totalAccesses: result.totalAccesses,
+              lastVisitedByUser: result.lastVisitedByUser,
+              lastVisitedOverall: result.lastVisitedOverall,
+            };
+          }
+        }
+        return updated;
+      });
+    } catch {
+      // Ignore errors
+    }
+  }
+
+  function formatTimeAgo(date: Date): string {
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffSecs = Math.floor(diffMs / 1000);
+    const diffMins = Math.floor(diffSecs / 60);
+    const diffHours = Math.floor(diffMins / 60);
+    const diffDays = Math.floor(diffHours / 24);
+    const diffWeeks = Math.floor(diffDays / 7);
+    const diffMonths = Math.floor(diffDays / 30);
+    const diffYears = Math.floor(diffDays / 365);
+
+    if (diffSecs < 60) return 'just now';
+    if (diffMins < 60) return `${diffMins} ${diffMins === 1 ? 'minute' : 'minutes'} ago`;
+    if (diffHours < 24) return `${diffHours} ${diffHours === 1 ? 'hour' : 'hours'} ago`;
+    if (diffDays < 7) return `${diffDays} ${diffDays === 1 ? 'day' : 'days'} ago`;
+    if (diffWeeks < 4) return `${diffWeeks} ${diffWeeks === 1 ? 'week' : 'weeks'} ago`;
+    if (diffMonths < 12) return `${diffMonths} ${diffMonths === 1 ? 'month' : 'months'} ago`;
+    return `${diffYears} ${diffYears === 1 ? 'year' : 'years'} ago`;
   }
 
   async function handleSave() {
@@ -533,15 +603,64 @@ export default function UniverseDetailPage() {
                             )}
 
                             <div className="mt-auto flex items-center justify-between pt-3 text-xs text-muted-foreground">
-                              <div className="flex flex-col gap-0.5">
-                                <span className="flex items-center gap-1 font-medium text-foreground/80">
-                                  <Globe className="h-3 w-3" />
-                                  {universe.name}
-                                </span>
-                                <span className="line-clamp-1">
-                                  {roomsCount} {roomsCount === 1 ? 'room' : 'rooms'} · {membersCount}{' '}
-                                  {membersCount === 1 ? 'member' : 'members'}
-                                </span>
+                              <div className="flex flex-col gap-1.5 min-h-[3rem]">
+                                {worldAnalytics[world.id] ? (
+                                  <>
+                                    <div className="flex items-center gap-1.5">
+                                      <Activity className="h-3.5 w-3.5 text-muted-foreground" />
+                                      <span className="font-medium text-foreground/80">
+                                        {worldAnalytics[world.id].totalAccesses.toLocaleString()} accesses
+                                      </span>
+                                    </div>
+                                    <div className="flex items-center gap-1.5">
+                                      <Globe className="h-3.5 w-3.5 text-muted-foreground" />
+                                      <span className="text-muted-foreground">
+                                        {roomsCount} {roomsCount === 1 ? 'room' : 'rooms'} · {membersCount}{' '}
+                                        {membersCount === 1 ? 'member' : 'members'}
+                                      </span>
+                                    </div>
+                                    {(worldAnalytics[world.id].lastVisitedByUser || worldAnalytics[world.id].lastVisitedOverall) && (
+                                      <div className="flex flex-col gap-0.5 mt-0.5">
+                                        {worldAnalytics[world.id].lastVisitedByUser && (
+                                          <div className="text-[11px]">
+                                            <span className="text-muted-foreground/70">Last visited by you: </span>
+                                            <span className="font-medium text-foreground/80">
+                                              {formatTimeAgo(new Date(worldAnalytics[world.id].lastVisitedByUser.accessedAt))}
+                                            </span>
+                                          </div>
+                                        )}
+                                        {worldAnalytics[world.id].lastVisitedOverall && (
+                                          <div className="text-[11px]">
+                                            {worldAnalytics[world.id].lastVisitedByUser && 
+                                             worldAnalytics[world.id].lastVisitedByUser.accessedAt === worldAnalytics[world.id].lastVisitedOverall.accessedAt ? (
+                                              <span className="text-muted-foreground/70 italic">
+                                                You were the last visitor
+                                              </span>
+                                            ) : (
+                                              <>
+                                                <span className="text-muted-foreground/70">Most recent visitor: </span>
+                                                <span className="font-medium text-foreground/80">
+                                                  {formatTimeAgo(new Date(worldAnalytics[world.id].lastVisitedOverall.accessedAt))}
+                                                </span>
+                                              </>
+                                            )}
+                                          </div>
+                                        )}
+                                      </div>
+                                    )}
+                                  </>
+                                ) : (
+                                  <>
+                                    <span className="flex items-center gap-1 font-medium text-foreground/80">
+                                      <Globe className="h-3 w-3" />
+                                      {universe.name}
+                                    </span>
+                                    <span className="line-clamp-1">
+                                      {roomsCount} {roomsCount === 1 ? 'room' : 'rooms'} · {membersCount}{' '}
+                                      {membersCount === 1 ? 'member' : 'members'}
+                                    </span>
+                                  </>
+                                )}
                               </div>
                               <div className="flex items-center gap-1 text-primary transition-transform group-hover:translate-x-0.5">
                                 <span className="hidden text-xs font-medium sm:inline">View</span>

@@ -17,7 +17,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { Loader2, AlertCircle, CheckCircle2, XCircle, Users, Mail, Home, Globe, Calendar, Clock, ChevronRight } from 'lucide-react';
+import { Loader2, AlertCircle, CheckCircle2, XCircle, Users, Mail, Home, Globe, Calendar, Clock, ChevronRight, Activity } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface Invitation {
@@ -75,10 +75,17 @@ export default function MyMembershipsPage() {
   const [error, setError] = useState<string | null>(null);
   const [processingInvitation, setProcessingInvitation] = useState<string | null>(null);
   const [leavingWorld, setLeavingWorld] = useState<string | null>(null);
+  const [worldAnalytics, setWorldAnalytics] = useState<Record<string, { totalAccesses: number; lastVisitedByUser: any; lastVisitedOverall: any }>>({});
 
   useEffect(() => {
     checkAuth();
   }, []);
+
+  useEffect(() => {
+    if (memberships.length > 0) {
+      fetchWorldAnalytics();
+    }
+  }, [memberships]);
 
   async function checkAuth() {
     try {
@@ -202,6 +209,69 @@ export default function MyMembershipsPage() {
       setError(err instanceof Error ? err.message : 'Failed to leave world');
       setLeavingWorld(null);
     }
+  }
+
+  async function fetchWorldAnalytics() {
+    if (!memberships.length) return;
+
+    try {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const results = await Promise.all(
+        memberships.map(async (membership) => {
+          try {
+            const response = await authenticatedFetch(
+              `/api/admin/analytics/worlds/${membership.world.id}`,
+            );
+            if (!response.ok) return null;
+            const data = await response.json();
+            return {
+              worldId: membership.world.id,
+              totalAccesses: data.totalAccesses || 0,
+              lastVisitedByUser: data.lastVisitedByUser || null,
+              lastVisitedOverall: data.lastVisitedOverall || null,
+            };
+          } catch {
+            return null;
+          }
+        }),
+      );
+
+      setWorldAnalytics((prev) => {
+        const updated = { ...prev };
+        for (const result of results) {
+          if (result) {
+            updated[result.worldId] = {
+              totalAccesses: result.totalAccesses,
+              lastVisitedByUser: result.lastVisitedByUser,
+              lastVisitedOverall: result.lastVisitedOverall,
+            };
+          }
+        }
+        return updated;
+      });
+    } catch {
+      // Ignore errors
+    }
+  }
+
+  function formatTimeAgo(date: Date): string {
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffSecs = Math.floor(diffMs / 1000);
+    const diffMins = Math.floor(diffSecs / 60);
+    const diffHours = Math.floor(diffMins / 60);
+    const diffDays = Math.floor(diffHours / 24);
+    const diffWeeks = Math.floor(diffDays / 7);
+    const diffMonths = Math.floor(diffDays / 30);
+    const diffYears = Math.floor(diffDays / 365);
+
+    if (diffSecs < 60) return 'just now';
+    if (diffMins < 60) return `${diffMins} ${diffMins === 1 ? 'minute' : 'minutes'} ago`;
+    if (diffHours < 24) return `${diffHours} ${diffHours === 1 ? 'hour' : 'hours'} ago`;
+    if (diffDays < 7) return `${diffDays} ${diffDays === 1 ? 'day' : 'days'} ago`;
+    if (diffWeeks < 4) return `${diffWeeks} ${diffWeeks === 1 ? 'week' : 'weeks'} ago`;
+    if (diffMonths < 12) return `${diffMonths} ${diffMonths === 1 ? 'month' : 'months'} ago`;
+    return `${diffYears} ${diffYears === 1 ? 'year' : 'years'} ago`;
   }
 
   if (loading) {
@@ -416,27 +486,76 @@ export default function MyMembershipsPage() {
                         )}
 
                         <div className="mt-auto flex items-center justify-between pt-3 text-xs text-muted-foreground">
-                          <div className="flex flex-col gap-1.5">
-                            <div className="flex items-center gap-1.5">
-                              <Home className="h-3.5 w-3.5 text-muted-foreground" />
-                              <span className="font-medium text-foreground/80">
-                                {roomsCount} {roomsCount === 1 ? 'room' : 'rooms'} · {membersCount}{' '}
-                                {membersCount === 1 ? 'member' : 'members'}
-                              </span>
-                            </div>
-                            <div className="flex items-center gap-1.5">
-                              <Calendar className="h-3.5 w-3.5 text-muted-foreground" />
-                              <span className="text-muted-foreground">
-                                Joined {joinedDate}
-                              </span>
-                            </div>
-                            {lastVisitedDate && (
-                              <div className="flex items-center gap-1.5">
-                                <Clock className="h-3.5 w-3.5 text-muted-foreground" />
-                                <span className="text-muted-foreground">
-                                  Last visited {lastVisitedDate}
-                                </span>
-                              </div>
+                          <div className="flex flex-col gap-1.5 min-h-[3rem]">
+                            {worldAnalytics[membership.world.id] ? (
+                              <>
+                                <div className="flex items-center gap-1.5">
+                                  <Activity className="h-3.5 w-3.5 text-muted-foreground" />
+                                  <span className="font-medium text-foreground/80">
+                                    {worldAnalytics[membership.world.id].totalAccesses.toLocaleString()} accesses
+                                  </span>
+                                </div>
+                                <div className="flex items-center gap-1.5">
+                                  <Globe className="h-3.5 w-3.5 text-muted-foreground" />
+                                  <span className="text-muted-foreground">
+                                    {roomsCount} {roomsCount === 1 ? 'room' : 'rooms'} · {membersCount}{' '}
+                                    {membersCount === 1 ? 'member' : 'members'}
+                                  </span>
+                                </div>
+                                {(worldAnalytics[membership.world.id].lastVisitedByUser || worldAnalytics[membership.world.id].lastVisitedOverall) && (
+                                  <div className="flex flex-col gap-0.5 mt-0.5">
+                                    {worldAnalytics[membership.world.id].lastVisitedByUser && (
+                                      <div className="text-[11px]">
+                                        <span className="text-muted-foreground/70">Last visited by you: </span>
+                                        <span className="font-medium text-foreground/80">
+                                          {formatTimeAgo(new Date(worldAnalytics[membership.world.id].lastVisitedByUser.accessedAt))}
+                                        </span>
+                                      </div>
+                                    )}
+                                    {worldAnalytics[membership.world.id].lastVisitedOverall && (
+                                      <div className="text-[11px]">
+                                        {worldAnalytics[membership.world.id].lastVisitedByUser && 
+                                         worldAnalytics[membership.world.id].lastVisitedByUser.accessedAt === worldAnalytics[membership.world.id].lastVisitedOverall.accessedAt ? (
+                                          <span className="text-muted-foreground/70 italic">
+                                            You were the last visitor
+                                          </span>
+                                        ) : (
+                                          <>
+                                            <span className="text-muted-foreground/70">Most recent visitor: </span>
+                                            <span className="font-medium text-foreground/80">
+                                              {formatTimeAgo(new Date(worldAnalytics[membership.world.id].lastVisitedOverall.accessedAt))}
+                                            </span>
+                                          </>
+                                        )}
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+                              </>
+                            ) : (
+                              <>
+                                <div className="flex items-center gap-1.5">
+                                  <Home className="h-3.5 w-3.5 text-muted-foreground" />
+                                  <span className="font-medium text-foreground/80">
+                                    {roomsCount} {roomsCount === 1 ? 'room' : 'rooms'} · {membersCount}{' '}
+                                    {membersCount === 1 ? 'member' : 'members'}
+                                  </span>
+                                </div>
+                                <div className="flex items-center gap-1.5">
+                                  <Calendar className="h-3.5 w-3.5 text-muted-foreground" />
+                                  <span className="text-muted-foreground">
+                                    Joined {joinedDate}
+                                  </span>
+                                </div>
+                                {lastVisitedDate && (
+                                  <div className="flex items-center gap-1.5">
+                                    <Clock className="h-3.5 w-3.5 text-muted-foreground" />
+                                    <span className="text-muted-foreground">
+                                      Last visited {lastVisitedDate}
+                                    </span>
+                                  </div>
+                                )}
+                              </>
                             )}
                           </div>
                           <div className="flex items-center gap-1 text-primary transition-transform group-hover:translate-x-0.5">
