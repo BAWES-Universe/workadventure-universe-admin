@@ -4,8 +4,16 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from '@/components/ui/empty';
 import { AlertCircle, Loader2, Star, MapPin } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -225,7 +233,7 @@ export default function MyStarsPage() {
         <div className="space-y-1">
           <h1 className="text-4xl font-bold tracking-tight">My Stars</h1>
           <p className="text-muted-foreground text-lg">
-            Rooms you've starred for quick access.
+            Your curated collection of favorite rooms.
           </p>
         </div>
       </div>
@@ -256,21 +264,24 @@ export default function MyStarsPage() {
             </CardContent>
           </Card>
         ) : starredRooms.length === 0 ? (
-          <Card>
-            <CardHeader>
-              <CardTitle>No starred rooms yet</CardTitle>
-              <CardDescription>
+          <Empty className="border border-border/70">
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                <Star className="h-6 w-6 text-muted-foreground" />
+              </EmptyMedia>
+              <EmptyTitle>No starred rooms yet</EmptyTitle>
+              <EmptyDescription>
                 Star rooms you like to find them quickly here.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
+              </EmptyDescription>
+            </EmptyHeader>
+            <EmptyContent>
               <Button variant="default" asChild>
                 <Link href="/admin/discover/rooms">
                   Discover Rooms
                 </Link>
               </Button>
-            </CardContent>
-          </Card>
+            </EmptyContent>
+          </Empty>
         ) : (
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
             {starredRooms.map((room) => (
