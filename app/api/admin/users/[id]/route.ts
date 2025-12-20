@@ -120,6 +120,24 @@ export async function GET(
       favoritesByUniverse.map((fb) => [fb.universeId!, fb._count.id])
     );
 
+    // Calculate favorites counts for all worlds in worldMemberships
+    const worldIds = user.worldMemberships.map((wm: any) => wm.world.id);
+    const favoritesByWorld = worldIds.length > 0
+      ? await prisma.favorite.groupBy({
+          by: ['worldId'],
+          where: {
+            worldId: { in: worldIds },
+          },
+          _count: {
+            id: true,
+          },
+        })
+      : [];
+    
+    const worldFavoritesCountMap = new Map(
+      favoritesByWorld.map((fb) => [fb.worldId!, fb._count.id])
+    );
+
     const userWithCounts = {
       ...user,
       ownedUniverses: user.ownedUniverses.map((universe: any) => {
@@ -136,6 +154,16 @@ export async function GET(
           },
         };
       }),
+      worldMemberships: user.worldMemberships.map((membership: any) => ({
+        ...membership,
+        world: {
+          ...membership.world,
+          _count: {
+            ...membership.world._count,
+            favorites: worldFavoritesCountMap.get(membership.world.id) || 0,
+          },
+        },
+      })),
     };
     
     return NextResponse.json(userWithCounts);
