@@ -473,7 +473,7 @@ export default function UserDetailPage() {
                       'hover:-translate-y-1 hover:shadow-lg',
                     )}
                   >
-                    <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-primary/10 via-transparent to-secondary/20 opacity-0 transition-opacity group-hover:opacity-100" />
+                    <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-blue-500/10 via-transparent to-indigo-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
 
                     <div className="relative flex h-full flex-col p-5">
                       <div className="mb-4 flex items-start gap-3">

@@ -104,7 +104,7 @@ export function UniverseCard({
         )}
       >
         {/* Accent gradient overlay */}
-        <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-primary/10 via-transparent to-secondary/20 opacity-0 transition-opacity group-hover:opacity-100" />
+        <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-blue-500/10 via-transparent to-indigo-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
 
         <div className="relative flex flex-col h-full p-5">
           {/* Thumbnail / initial */}
