@@ -120,33 +120,127 @@ export async function GET(request: NextRequest) {
       where.worldId = worldId;
     }
     
-    const [rooms, total] = await Promise.all([
-      prisma.room.findMany({
-        where,
-        include: {
-          world: {
-            include: {
-              universe: {
-                select: {
-                  id: true,
-                  name: true,
-                  slug: true,
+    // For discover scope, sort by total accesses (descending)
+    // Otherwise, sort by createdAt (descending)
+    let rooms: any[];
+    let total: number;
+    
+    if (scope === 'discover' && userId && !isAdminToken) {
+      // Build search condition for SQL
+      const searchCondition = search
+        ? `AND (r.name ILIKE $1 OR r.slug ILIKE $1 OR r.description ILIKE $1)`
+        : '';
+      const searchParam = search ? `%${search}%` : null;
+      
+      // Use raw SQL to join with roomAccess, count accesses, and sort by count
+      // This ensures proper sorting before pagination
+      const query = search
+        ? prisma.$queryRaw<Array<{ room_id: string; access_count: bigint }>>`
+            SELECT 
+              r.id as room_id,
+              COALESCE(COUNT(ra.id), 0)::bigint as access_count
+            FROM rooms r
+            LEFT JOIN room_accesses ra ON r.id = ra.room_id
+            WHERE r.is_public = true
+            AND (r.name ILIKE ${`%${search}%`} OR r.slug ILIKE ${`%${search}%`} OR r.description ILIKE ${`%${search}%`})
+            GROUP BY r.id
+            ORDER BY access_count DESC, r.created_at DESC
+            LIMIT ${limit} OFFSET ${(page - 1) * limit}
+          `
+        : prisma.$queryRaw<Array<{ room_id: string; access_count: bigint }>>`
+            SELECT 
+              r.id as room_id,
+              COALESCE(COUNT(ra.id), 0)::bigint as access_count
+            FROM rooms r
+            LEFT JOIN room_accesses ra ON r.id = ra.room_id
+            WHERE r.is_public = true
+            GROUP BY r.id
+            ORDER BY access_count DESC, r.created_at DESC
+            LIMIT ${limit} OFFSET ${(page - 1) * limit}
+          `;
+      
+      const roomIdsWithCounts = await query;
+      const roomIds = roomIdsWithCounts.map((r: any) => r.room_id);
+      
+      // Get total count
+      const totalQuery = search
+        ? prisma.$queryRaw<Array<{ count: bigint }>>`
+            SELECT COUNT(DISTINCT r.id)::bigint as count
+            FROM rooms r
+            WHERE r.is_public = true
+            AND (r.name ILIKE ${`%${search}%`} OR r.slug ILIKE ${`%${search}%`} OR r.description ILIKE ${`%${search}%`})
+          `
+        : prisma.$queryRaw<Array<{ count: bigint }>>`
+            SELECT COUNT(DISTINCT r.id)::bigint as count
+            FROM rooms r
+            WHERE r.is_public = true
+          `;
+      const totalResult = await totalQuery;
+      total = Number(totalResult[0]?.count || 0);
+      
+      // Fetch full room data for the sorted IDs
+      if (roomIds.length > 0) {
+        rooms = await prisma.room.findMany({
+          where: {
+            ...where,
+            id: { in: roomIds },
+          },
+          include: {
+            world: {
+              include: {
+                universe: {
+                  select: {
+                    id: true,
+                    name: true,
+                    slug: true,
+                  },
                 },
               },
             },
-          },
-          _count: {
-            select: {
-              favorites: true,
+            _count: {
+              select: {
+                favorites: true,
+              },
             },
           },
-        },
-        orderBy: { createdAt: 'desc' },
-        skip: (page - 1) * limit,
-        take: limit,
-      }),
-      prisma.room.count({ where }),
-    ]);
+        });
+        
+        // Maintain the order from the sorted query
+        const roomMap = new Map(rooms.map(r => [r.id, r]));
+        rooms = roomIds.map(id => roomMap.get(id)).filter(Boolean) as any[];
+      } else {
+        rooms = [];
+      }
+    } else {
+      // Default sorting by createdAt
+      [rooms, total] = await Promise.all([
+        prisma.room.findMany({
+          where,
+          include: {
+            world: {
+              include: {
+                universe: {
+                  select: {
+                    id: true,
+                    name: true,
+                    slug: true,
+                  },
+                },
+              },
+            },
+            _count: {
+              select: {
+                favorites: true,
+              },
+            },
+          },
+          orderBy: { createdAt: 'desc' },
+          skip: (page - 1) * limit,
+          take: limit,
+        }),
+        prisma.room.count({ where }),
+      ]);
+    }
     
     return NextResponse.json({
       rooms,

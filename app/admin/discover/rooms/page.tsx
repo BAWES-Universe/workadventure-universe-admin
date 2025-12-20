@@ -350,12 +350,9 @@ export default function DiscoverRoomsPage() {
     }
   }, [rooms, analyticsByRoom]);
 
-  // Sort rooms by total accesses (descending) once analytics are loaded
-  const sortedRooms = [...rooms].sort((a, b) => {
-    const aAccesses = analyticsByRoom[a.id]?.totalAccesses ?? 0;
-    const bAccesses = analyticsByRoom[b.id]?.totalAccesses ?? 0;
-    return bAccesses - aAccesses;
-  });
+  // Rooms are already sorted by accesses from the API (server-side sorting)
+  // No need to sort client-side
+  const sortedRooms = rooms;
 
   function handleSearchSubmit(e: React.FormEvent) {
     e.preventDefault();
