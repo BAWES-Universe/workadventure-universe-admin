@@ -156,12 +156,36 @@ export async function GET(request: NextRequest) {
                 worlds: true,
               },
             },
+            worlds: {
+              select: {
+                _count: {
+                  select: {
+                    rooms: true,
+                    members: true,
+                  },
+                },
+              },
+            },
           },
         });
         
         // Maintain the order from the sorted query
         const universeMap = new Map(universes.map(u => [u.id, u]));
         universes = universeIds.map(id => universeMap.get(id)).filter(Boolean) as any[];
+        
+        // Calculate total rooms and members counts for each universe
+        universes = universes.map((universe: any) => {
+          const totalRooms = universe.worlds?.reduce((sum: number, world: any) => sum + (world._count?.rooms || 0), 0) || 0;
+          const totalMembers = universe.worlds?.reduce((sum: number, world: any) => sum + (world._count?.members || 0), 0) || 0;
+          return {
+            ...universe,
+            _count: {
+              ...universe._count,
+              rooms: totalRooms,
+              members: totalMembers,
+            },
+          };
+        });
       } else {
         universes = [];
       }
@@ -183,6 +207,16 @@ export async function GET(request: NextRequest) {
                 worlds: true,
               },
             },
+            worlds: {
+              select: {
+                _count: {
+                  select: {
+                    rooms: true,
+                    members: true,
+                  },
+                },
+              },
+            },
           },
           orderBy: { createdAt: 'desc' },
           skip: (page - 1) * limit,
@@ -192,8 +226,22 @@ export async function GET(request: NextRequest) {
       ]);
     }
     
+    // Calculate total rooms and members counts for each universe
+    const universesWithCounts = universes.map((universe: any) => {
+      const totalRooms = universe.worlds?.reduce((sum: number, world: any) => sum + (world._count?.rooms || 0), 0) || 0;
+      const totalMembers = universe.worlds?.reduce((sum: number, world: any) => sum + (world._count?.members || 0), 0) || 0;
+      return {
+        ...universe,
+        _count: {
+          ...universe._count,
+          rooms: totalRooms,
+          members: totalMembers,
+        },
+      };
+    });
+    
     return NextResponse.json({
-      universes,
+      universes: universesWithCounts,
       pagination: {
         page,
         limit,

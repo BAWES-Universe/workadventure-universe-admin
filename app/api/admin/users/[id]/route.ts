@@ -43,6 +43,16 @@ export async function GET(
                 worlds: true,
               },
             },
+            worlds: {
+              select: {
+                _count: {
+                  select: {
+                    rooms: true,
+                    members: true,
+                  },
+                },
+              },
+            },
           },
           orderBy: { createdAt: 'desc' },
         },
@@ -92,7 +102,24 @@ export async function GET(
       );
     }
     
-    return NextResponse.json(user);
+    // Calculate total rooms and members counts for each universe
+    const userWithCounts = {
+      ...user,
+      ownedUniverses: user.ownedUniverses.map((universe: any) => {
+        const totalRooms = universe.worlds?.reduce((sum: number, world: any) => sum + (world._count?.rooms || 0), 0) || 0;
+        const totalMembers = universe.worlds?.reduce((sum: number, world: any) => sum + (world._count?.members || 0), 0) || 0;
+        return {
+          ...universe,
+          _count: {
+            ...universe._count,
+            rooms: totalRooms,
+            members: totalMembers,
+          },
+        };
+      }),
+    };
+    
+    return NextResponse.json(userWithCounts);
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized') {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });

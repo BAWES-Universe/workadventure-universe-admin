@@ -15,7 +15,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
-import { ChevronRight, AlertCircle, Loader2, Globe, Users, Star, Ban, UserPlus, Home, Calendar, Clock, Activity } from 'lucide-react';
+import { ChevronRight, AlertCircle, Loader2, Globe, Users, Star, Ban, UserPlus, Activity, Home, Calendar } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import InviteToWorldDialog from '../../components/invite-to-world-dialog';
 
@@ -51,6 +51,8 @@ interface Universe {
   createdAt: string;
   _count?: {
     worlds?: number;
+    rooms?: number;
+    members?: number;
   };
 }
 
@@ -459,8 +461,6 @@ export default function UserDetailPage() {
           </div>
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
             {user.ownedUniverses.map((universe) => {
-              const worldsCount = universe._count?.worlds ?? 0;
-              const createdDate = new Date(universe.createdAt).toLocaleDateString();
               return (
                 <Link
                   key={universe.id}
@@ -520,8 +520,12 @@ export default function UserDetailPage() {
                                   {universeAnalytics[universe.id].totalAccesses.toLocaleString()} accesses
                                 </span>
                               </div>
-                              <div className="text-muted-foreground">
-                                {worldsCount} {worldsCount === 1 ? 'world' : 'worlds'} · Created {createdDate}
+                              <div className="flex items-center gap-1.5">
+                                <Globe className="h-3.5 w-3.5 text-muted-foreground" />
+                                <span className="text-muted-foreground">
+                                  {(universe._count?.worlds ?? 0)} {(universe._count?.worlds ?? 0) === 1 ? 'world' : 'worlds'} · {(universe._count?.rooms ?? 0)} {(universe._count?.rooms ?? 0) === 1 ? 'room' : 'rooms'} · {(universe._count?.members ?? 0)}{' '}
+                                  {(universe._count?.members ?? 0) === 1 ? 'member' : 'members'}
+                                </span>
                               </div>
                               {(universeAnalytics[universe.id].lastVisitedByUser || universeAnalytics[universe.id].lastVisitedOverall) && (
                                 <div className="flex flex-col gap-0.5 mt-0.5">
@@ -554,20 +558,13 @@ export default function UserDetailPage() {
                               )}
                             </>
                           ) : (
-                            <>
-                              <div className="flex items-center gap-1.5">
-                                <Home className="h-3.5 w-3.5 text-muted-foreground" />
-                                <span className="font-medium text-foreground/80">
-                                  {worldsCount} {worldsCount === 1 ? 'world' : 'worlds'}
-                                </span>
-                              </div>
-                              <div className="flex items-center gap-1.5">
-                                <Calendar className="h-3.5 w-3.5 text-muted-foreground" />
-                                <span className="text-muted-foreground">
-                                  Created {createdDate}
-                                </span>
-                              </div>
-                            </>
+                            <div className="flex items-center gap-1.5">
+                              <Globe className="h-3.5 w-3.5 text-muted-foreground" />
+                              <span className="text-muted-foreground">
+                                {(universe._count?.worlds ?? 0)} {(universe._count?.worlds ?? 0) === 1 ? 'world' : 'worlds'} · {(universe._count?.rooms ?? 0)} {(universe._count?.rooms ?? 0) === 1 ? 'room' : 'rooms'} · {(universe._count?.members ?? 0)}{' '}
+                                {(universe._count?.members ?? 0) === 1 ? 'member' : 'members'}
+                              </span>
+                            </div>
                           )}
                         </div>
                         <div className="flex items-center gap-1 text-primary transition-transform group-hover:translate-x-0.5">

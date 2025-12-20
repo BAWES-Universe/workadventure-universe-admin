@@ -48,6 +48,7 @@ interface Universe {
   isPublic: boolean;
   featured: boolean;
   thumbnailUrl: string | null;
+  createdAt: string;
   canEdit?: boolean;
   owner: {
     id: string;
@@ -507,6 +508,10 @@ export default function UniverseDetailPage() {
                   <dd className="mt-1 text-sm">
                     {universe.owner.name || universe.owner.email || 'Unknown'}
                   </dd>
+                </div>
+                <div>
+                  <dt className="text-sm font-medium text-muted-foreground">Created</dt>
+                  <dd className="mt-1 text-sm">{new Date(universe.createdAt).toLocaleDateString()}</dd>
                 </div>
                 <div>
                   <dt className="text-sm font-medium text-muted-foreground">Status</dt>

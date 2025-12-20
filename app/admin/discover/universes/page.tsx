@@ -281,6 +281,7 @@ export default function DiscoverUniversesPage() {
                 universe={universe}
                 ownedByCurrentUser={false}
                 showVisibility={false}
+                showOwner={true}
                 analytics={analyticsByUniverse[universe.id]}
               />
             ))}

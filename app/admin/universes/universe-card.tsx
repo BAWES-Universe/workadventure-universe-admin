@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { ChevronRight, Activity } from 'lucide-react';
+import { ChevronRight, Activity, Globe, Users } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 export interface UniverseAnalytics {
@@ -47,6 +47,8 @@ export interface UniverseCardProps {
     };
     _count?: {
       worlds?: number;
+      rooms?: number;
+      members?: number;
     };
   };
   /**
@@ -60,6 +62,11 @@ export interface UniverseCardProps {
    */
   showVisibility?: boolean;
   /**
+   * Whether to show the owner name.
+   * On discover page, show owner. On user detail page, don't show.
+   */
+  showOwner?: boolean;
+  /**
    * Analytics data for the universe (accesses, last visited, etc.)
    */
   analytics?: UniverseAnalytics;
@@ -70,6 +77,7 @@ export function UniverseCard({
   universe,
   ownedByCurrentUser = false,
   showVisibility = true,
+  showOwner = true,
   analytics,
   className,
 }: UniverseCardProps) {
@@ -79,6 +87,8 @@ export function UniverseCard({
       : universe.owner?.name || universe.owner?.email || 'Unknown owner';
 
   const worldsCount = universe._count?.worlds ?? 0;
+  const roomsCount = universe._count?.rooms ?? 0;
+  const membersCount = universe._count?.members ?? 0;
 
   return (
     <Link
@@ -158,9 +168,21 @@ export function UniverseCard({
                       {analytics.totalAccesses.toLocaleString()} accesses
                     </span>
                   </div>
-                  <div className="text-muted-foreground">
-                    {worldsCount} {worldsCount === 1 ? 'world' : 'worlds'} · {ownerLabel}
+                  <div className="flex items-center gap-1.5">
+                    <Globe className="h-3.5 w-3.5 text-muted-foreground" />
+                    <span className="text-muted-foreground">
+                      {worldsCount} {worldsCount === 1 ? 'world' : 'worlds'} · {roomsCount} {roomsCount === 1 ? 'room' : 'rooms'} · {membersCount}{' '}
+                      {membersCount === 1 ? 'member' : 'members'}
+                    </span>
                   </div>
+                  {showOwner && (
+                    <div className="flex items-center gap-1.5">
+                      <Users className="h-3.5 w-3.5 text-muted-foreground" />
+                      <span className="text-muted-foreground">
+                        {ownerLabel}
+                      </span>
+                    </div>
+                  )}
                   {/* Last visited information */}
                   {analytics.lastVisitedByUser || analytics.lastVisitedOverall ? (
                     <div className="flex flex-col gap-0.5 mt-0.5">
@@ -198,12 +220,21 @@ export function UniverseCard({
                 </>
               ) : (
                 <>
-                  <span className="font-medium text-foreground/80">
-                    {worldsCount} {worldsCount === 1 ? 'world' : 'worlds'}
-                  </span>
-                  <span className="line-clamp-1">
-                    {ownerLabel}
-                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <Globe className="h-3.5 w-3.5 text-muted-foreground" />
+                    <span className="text-muted-foreground">
+                      {worldsCount} {worldsCount === 1 ? 'world' : 'worlds'} · {roomsCount} {roomsCount === 1 ? 'room' : 'rooms'} · {membersCount}{' '}
+                      {membersCount === 1 ? 'member' : 'members'}
+                    </span>
+                  </div>
+                  {showOwner && (
+                    <div className="flex items-center gap-1.5">
+                      <Users className="h-3.5 w-3.5 text-muted-foreground" />
+                      <span className="text-muted-foreground">
+                        {ownerLabel}
+                      </span>
+                    </div>
+                  )}
                 </>
               )}
             </div>
