@@ -237,22 +237,22 @@ function StarredRoomCard({
                 <span className="text-muted-foreground">Access data loading...</span>
               )}
             </div>
-            <div className="flex flex-col items-end gap-2">
-              <Button
-                variant={room.isStarred ? "default" : "outline"}
-                size="sm"
-                onClick={handleToggle}
-                disabled={toggling}
-                className="flex items-center gap-1.5"
-              >
-                {toggling ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <Star className={`h-3.5 w-3.5 ${room.isStarred ? 'fill-current' : ''}`} />
-                )}
-                {room.starCount || 0}
-              </Button>
-            </div>
+          </div>
+          <div className="absolute bottom-5 right-5">
+            <Button
+              variant={room.isStarred ? "default" : "outline"}
+              size="sm"
+              onClick={handleToggle}
+              disabled={toggling}
+              className="flex items-center gap-1.5"
+            >
+              {toggling ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Star className={`h-3.5 w-3.5 ${room.isStarred ? 'fill-current' : ''}`} />
+              )}
+              {room.starCount || 0}
+            </Button>
           </div>
         </div>
       </Card>
