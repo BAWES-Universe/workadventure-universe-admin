@@ -129,8 +129,9 @@ export async function GET(request: NextRequest) {
       const mapStorageApiToken = process.env.MAP_STORAGE_API_TOKEN;
       const playUrl = process.env.PLAY_URL;
       
-      // Convert null to undefined (Prisma returns null, but we use undefined)
-      let wamUrl: string | undefined = roomData.wamUrl ?? undefined;
+      // Always recompute wamUrl from current environment variable when map-storage is configured
+      // Don't trust stored database value as PUBLIC_MAP_STORAGE_URL may have changed
+      let wamUrl: string | undefined = undefined;
       
       // Only proceed with WAM creation if map-storage is configured
       if (publicMapStorageUrl && mapStorageApiToken && playUrl) {
@@ -163,8 +164,21 @@ export async function GET(request: NextRequest) {
             console.error('Failed to create WAM file, using mapUrl as fallback:', wamError);
           }
         } else if (wamExists) {
-          // WAM exists, use computed URL if room doesn't have it stored
-          wamUrl = wamUrl || computedWamUrl;
+          // WAM exists, always use computed URL (don't trust stored database value)
+          wamUrl = computedWamUrl;
+          
+          // Update database if stored URL is different (to keep it in sync)
+          if (roomData.wamUrl !== computedWamUrl) {
+            try {
+              await prisma.room.update({
+                where: { id: roomData.id },
+                data: { wamUrl: computedWamUrl } as any,
+              });
+            } catch (updateError) {
+              // Log but don't fail - the URL is correct for this request
+              console.warn('Failed to update wamUrl in database:', updateError);
+            }
+          }
         }
       }
       
