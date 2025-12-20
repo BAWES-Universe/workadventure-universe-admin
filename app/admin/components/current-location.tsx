@@ -272,7 +272,7 @@ export default function CurrentLocation() {
             Your current location in the Universe
           </p>
         </div>
-        <Card>
+        <Card className="border-border/70">
           <CardContent className="flex items-center justify-center py-12">
             <Alert>
               <AlertCircle className="h-4 w-4" />
@@ -296,11 +296,9 @@ export default function CurrentLocation() {
             Your current location in the Universe
           </p>
         </div>
-        <Card>
-          <CardContent className="flex items-center justify-center py-12">
-            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-          </CardContent>
-        </Card>
+        <div className="flex items-center justify-center py-12">
+          <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+        </div>
       </section>
     );
   }
@@ -478,7 +476,7 @@ export default function CurrentLocation() {
             Your current location in the Universe
           </p>
         </div>
-        <Card>
+        <Card className="border-border/70">
           <CardContent className="flex items-center justify-center py-12">
             <p className="text-sm text-muted-foreground">{roomError}</p>
           </CardContent>
@@ -496,7 +494,7 @@ export default function CurrentLocation() {
             Your current location in the Universe
           </p>
         </div>
-        <Card>
+        <Card className="border-border/70">
           <CardContent className="flex items-center justify-center py-12">
             <p className="truncate font-mono text-[11px] text-muted-foreground/80">
               {playUri}
@@ -515,7 +513,7 @@ export default function CurrentLocation() {
           Your current location in the Universe
         </p>
       </div>
-      <Card>
+      <Card className="border-border/70">
         <CardContent className="flex items-center justify-center py-12">
           <p className="text-sm text-muted-foreground">
             No room information available.
