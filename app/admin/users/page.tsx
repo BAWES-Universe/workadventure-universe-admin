@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { AlertCircle, Loader2, Search, X } from 'lucide-react';
+import { AlertCircle, Loader2, Search, X, Activity, Clock } from 'lucide-react';
 
 interface User {
   id: string;
@@ -16,10 +16,32 @@ interface User {
   email: string | null;
   isGuest: boolean;
   createdAt: string;
+  totalAccesses?: number;
+  lastAccessed?: string | null;
   _count: {
     ownedUniverses: number;
     worldMemberships: number;
   };
+}
+
+function formatTimeAgo(date: Date): string {
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const diffSecs = Math.floor(diffMs / 1000);
+  const diffMins = Math.floor(diffSecs / 60);
+  const diffHours = Math.floor(diffMins / 60);
+  const diffDays = Math.floor(diffHours / 24);
+  const diffWeeks = Math.floor(diffDays / 7);
+  const diffMonths = Math.floor(diffDays / 30);
+  const diffYears = Math.floor(diffDays / 365);
+
+  if (diffSecs < 60) return 'just now';
+  if (diffMins < 60) return `${diffMins} ${diffMins === 1 ? 'minute' : 'minutes'} ago`;
+  if (diffHours < 24) return `${diffHours} ${diffHours === 1 ? 'hour' : 'hours'} ago`;
+  if (diffDays < 7) return `${diffDays} ${diffDays === 1 ? 'day' : 'days'} ago`;
+  if (diffWeeks < 4) return `${diffWeeks} ${diffWeeks === 1 ? 'week' : 'weeks'} ago`;
+  if (diffMonths < 12) return `${diffMonths} ${diffMonths === 1 ? 'month' : 'months'} ago`;
+  return `${diffYears} ${diffYears === 1 ? 'year' : 'years'} ago`;
 }
 
 export default function UsersPage() {
@@ -200,7 +222,7 @@ export default function UsersPage() {
                 className="block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
               >
                 <Card className="group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all hover:-translate-y-1 hover:shadow-lg">
-                  <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-primary/10 via-transparent to-secondary/20 opacity-0 transition-opacity group-hover:opacity-100" />
+                  <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-purple-500/10 via-transparent to-pink-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
                   <CardContent className="relative flex h-full flex-col p-5">
                     <div className="mb-4 flex items-start gap-3">
                       <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full border bg-muted text-sm font-semibold">
@@ -216,22 +238,34 @@ export default function UsersPage() {
                       </div>
                     </div>
 
-                    <div className="mt-auto flex items-center justify-between pt-3 text-xs text-muted-foreground">
-                      <div className="flex flex-col gap-0.5">
-                        <span>
-                          {user._count.ownedUniverses}{' '}
-                          {user._count.ownedUniverses === 1 ? 'universe' : 'universes'}
-                        </span>
-                        <span>
-                          {user._count.worldMemberships}{' '}
-                          {user._count.worldMemberships === 1 ? 'world membership' : 'world memberships'}
-                        </span>
-                      </div>
-                      <div className="text-right">
-                        <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                          Joined
+                    <div className="mt-auto flex items-start justify-between pt-3 text-xs text-muted-foreground">
+                      <div className="flex flex-col gap-1.5 min-h-[3rem]">
+                        {user.totalAccesses !== undefined && (
+                          <div className="flex items-center gap-1.5">
+                            <Activity className="h-3.5 w-3.5 text-muted-foreground" />
+                            <span className="font-medium text-foreground/80">
+                              {user.totalAccesses.toLocaleString()} {user.totalAccesses === 1 ? 'access' : 'accesses'}
+                            </span>
+                          </div>
+                        )}
+                        <div className="flex flex-col gap-0.5">
+                          <span>
+                            {user._count.ownedUniverses}{' '}
+                            {user._count.ownedUniverses === 1 ? 'universe' : 'universes'}
+                          </span>
+                          <span>
+                            {user._count.worldMemberships}{' '}
+                            {user._count.worldMemberships === 1 ? 'world membership' : 'world memberships'}
+                          </span>
                         </div>
-                        <div className="text-xs font-medium text-foreground/80">{created}</div>
+                        {user.lastAccessed && (
+                          <div className="flex items-center gap-1.5 mt-0.5">
+                            <Clock className="h-3.5 w-3.5 text-muted-foreground" />
+                            <span className="text-[11px] text-muted-foreground/70">
+                              Last accessed {formatTimeAgo(new Date(user.lastAccessed))}
+                            </span>
+                          </div>
+                        )}
                       </div>
                     </div>
                   </CardContent>
