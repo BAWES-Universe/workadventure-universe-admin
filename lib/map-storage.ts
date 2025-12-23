@@ -105,7 +105,7 @@ export async function createWamFile(
   playUrl: string
 ): Promise<void> {
   const wamFile: WAMFileFormat = {
-    version: "1.0.0",
+    version: "2.0.0",
     mapUrl: externalMapUrl, // Points to external TMJ (e.g., GitHub Pages)
     entities: {},
     areas: [],
