@@ -37,6 +37,7 @@ function NewRoomPageContent() {
   const [error, setError] = useState<string | null>(null);
   const [worlds, setWorlds] = useState<World[]>([]);
   const [worldDetails, setWorldDetails] = useState<World | null>(null);
+  const [slugManuallyEdited, setSlugManuallyEdited] = useState(false);
   
   const [formData, setFormData] = useState({
     worldId: worldIdParam || '',
@@ -46,6 +47,17 @@ function NewRoomPageContent() {
     mapUrl: '',
     isPublic: true,
   });
+
+  // Helper function to generate slug from name
+  function generateSlug(name: string): string {
+    return name
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9\s-]/g, '') // Remove special characters
+      .replace(/\s+/g, '-') // Replace spaces with hyphens
+      .replace(/-+/g, '-') // Replace multiple hyphens with single hyphen
+      .replace(/^-|-$/g, ''); // Remove leading/trailing hyphens
+  }
 
   useEffect(() => {
     checkAuth();
@@ -203,22 +215,6 @@ function NewRoomPageContent() {
         <CardContent>
           <form onSubmit={handleSubmit} className="space-y-6">
             <div className="space-y-2">
-              <Label htmlFor="slug">
-                Slug <span className="text-destructive">*</span>
-              </Label>
-              <p className="text-sm text-muted-foreground">
-                URL identifier (e.g., "lobby"). Must be unique within the world.
-              </p>
-              <Input
-                id="slug"
-                required
-                value={formData.slug}
-                onChange={(e) => setFormData({ ...formData, slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') })}
-                placeholder="lobby"
-              />
-            </div>
-
-            <div className="space-y-2">
               <Label htmlFor="name">
                 Name <span className="text-destructive">*</span>
               </Label>
@@ -226,8 +222,37 @@ function NewRoomPageContent() {
                 id="name"
                 required
                 value={formData.name}
-                onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                onChange={(e) => {
+                  const newName = e.target.value;
+                  setFormData((prev) => {
+                    const newData = { ...prev, name: newName };
+                    // Auto-generate slug from name if slug hasn't been manually edited
+                    if (!slugManuallyEdited) {
+                      newData.slug = generateSlug(newName);
+                    }
+                    return newData;
+                  });
+                }}
                 placeholder="Lobby"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="slug">
+                Slug <span className="text-destructive">*</span>
+              </Label>
+              <p className="text-sm text-muted-foreground">
+                URL identifier (e.g., "lobby"). Must be unique within the world. Auto-generated from name, but can be edited.
+              </p>
+              <Input
+                id="slug"
+                required
+                value={formData.slug}
+                onChange={(e) => {
+                  setSlugManuallyEdited(true);
+                  setFormData({ ...formData, slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') });
+                }}
+                placeholder="lobby"
               />
             </div>
 

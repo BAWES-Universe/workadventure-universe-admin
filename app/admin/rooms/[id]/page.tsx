@@ -473,18 +473,6 @@ export default function RoomDetailPage() {
           </CardHeader>
           <CardContent className="space-y-6">
             <div className="space-y-2">
-              <Label htmlFor="slug">
-                Slug <span className="text-destructive">*</span>
-              </Label>
-              <Input
-                id="slug"
-                required
-                value={formData.slug}
-                onChange={(e) => setFormData({ ...formData, slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') })}
-              />
-            </div>
-
-            <div className="space-y-2">
               <Label htmlFor="name">
                 Name <span className="text-destructive">*</span>
               </Label>
@@ -493,6 +481,18 @@ export default function RoomDetailPage() {
                 required
                 value={formData.name}
                 onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="slug">
+                Slug <span className="text-destructive">*</span>
+              </Label>
+              <Input
+                id="slug"
+                required
+                value={formData.slug}
+                onChange={(e) => setFormData({ ...formData, slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') })}
               />
             </div>
 
