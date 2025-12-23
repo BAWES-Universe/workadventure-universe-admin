@@ -163,6 +163,12 @@ export default function RoomDetailPage() {
     setSaving(true);
     setError(null);
 
+    if (!formData.mapUrl || formData.mapUrl.trim() === '') {
+      setError('Map URL is required');
+      setSaving(false);
+      return;
+    }
+
     try {
       const { authenticatedFetch } = await import('@/lib/client-auth');
       const response = await authenticatedFetch(`/api/admin/rooms/${id}`, {
@@ -173,7 +179,7 @@ export default function RoomDetailPage() {
         body: JSON.stringify({
           ...formData,
           description: formData.description || null,
-          mapUrl: formData.mapUrl || null,
+          mapUrl: formData.mapUrl.trim(),
         }),
       });
 
@@ -507,13 +513,16 @@ export default function RoomDetailPage() {
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="mapUrl">Map URL (Optional)</Label>
+              <Label htmlFor="mapUrl">
+                Map URL <span className="text-destructive">*</span>
+              </Label>
               <p className="text-sm text-muted-foreground">
-                Override the world's map URL for this room. Leave empty to use the world's map.
+                External TMJ map URL for this room (e.g., https://example.com/map.tmj). Each room must have its own map.
               </p>
               <Input
                 id="mapUrl"
                 type="url"
+                required
                 value={formData.mapUrl}
                 onChange={(e) => setFormData({ ...formData, mapUrl: e.target.value })}
               />
