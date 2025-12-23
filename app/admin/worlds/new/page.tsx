@@ -26,6 +26,7 @@ function NewWorldPageContent() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [universes, setUniverses] = useState<Universe[]>([]);
+  const [slugManuallyEdited, setSlugManuallyEdited] = useState(false);
   
   const [formData, setFormData] = useState({
     universeId: universeIdParam || '',
@@ -36,6 +37,17 @@ function NewWorldPageContent() {
     featured: false,
     thumbnailUrl: '',
   });
+
+  // Helper function to generate slug from name
+  function generateSlug(name: string): string {
+    return name
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9\s-]/g, '') // Remove special characters
+      .replace(/\s+/g, '-') // Replace spaces with hyphens
+      .replace(/-+/g, '-') // Replace multiple hyphens with single hyphen
+      .replace(/^-|-$/g, ''); // Remove leading/trailing hyphens
+  }
 
   useEffect(() => {
     checkAuth();
@@ -193,11 +205,34 @@ function NewWorldPageContent() {
             <input type="hidden" name="universeId" value={formData.universeId} />
 
             <div className="space-y-2">
+              <Label htmlFor="name">
+                Name <span className="text-destructive">*</span>
+              </Label>
+              <Input
+                id="name"
+                required
+                value={formData.name}
+                onChange={(e) => {
+                  const newName = e.target.value;
+                  setFormData((prev) => {
+                    const newData = { ...prev, name: newName };
+                    // Auto-generate slug from name if slug hasn't been manually edited
+                    if (!slugManuallyEdited) {
+                      newData.slug = generateSlug(newName);
+                    }
+                    return newData;
+                  });
+                }}
+                placeholder="Office Building"
+              />
+            </div>
+
+            <div className="space-y-2">
               <Label htmlFor="slug">
                 Slug <span className="text-destructive">*</span>
               </Label>
               <p className="text-sm text-muted-foreground">
-                URL identifier (e.g., "office-world"). Must be unique within the universe.
+                URL identifier (e.g., "office-world"). Must be unique within the universe. Auto-generated from name, but can be edited.
                 {selectedUniverse && (
                   <span className="block mt-1">
                     Full path: <code className="bg-muted px-1 rounded">/{selectedUniverse.slug}/[slug]</code>
@@ -208,21 +243,11 @@ function NewWorldPageContent() {
                 id="slug"
                 required
                 value={formData.slug}
-                onChange={(e) => setFormData({ ...formData, slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') })}
+                onChange={(e) => {
+                  setSlugManuallyEdited(true);
+                  setFormData({ ...formData, slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') });
+                }}
                 placeholder="office-world"
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="name">
-                Name <span className="text-destructive">*</span>
-              </Label>
-              <Input
-                id="name"
-                required
-                value={formData.name}
-                onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                placeholder="Office Building"
               />
             </div>
 
