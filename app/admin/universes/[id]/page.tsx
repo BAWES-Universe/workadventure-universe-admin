@@ -8,13 +8,6 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Checkbox } from '@/components/ui/checkbox';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import {
@@ -69,12 +62,6 @@ interface Universe {
   }>;
 }
 
-interface User {
-  id: string;
-  name: string | null;
-  email: string | null;
-}
-
 export default function UniverseDetailPage() {
   const router = useRouter();
   const params = useParams();
@@ -84,7 +71,6 @@ export default function UniverseDetailPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [users, setUsers] = useState<User[]>([]);
   const [isEditing, setIsEditing] = useState(false);
   const [analytics, setAnalytics] = useState<any>(null);
   const [analyticsLoading, setAnalyticsLoading] = useState(true);
@@ -105,12 +91,11 @@ export default function UniverseDetailPage() {
   useEffect(() => {
     checkAuth();
     fetchUniverse();
-    fetchUsers();
     fetchAnalytics();
   }, [id]);
 
   useEffect(() => {
-    if (universe && universe.worlds.length > 0) {
+    if (universe && universe.worlds && universe.worlds.length > 0) {
       fetchWorldAnalytics();
     }
   }, [universe]);
@@ -159,19 +144,6 @@ export default function UniverseDetailPage() {
     }
   }
 
-  async function fetchUsers() {
-    try {
-      const { authenticatedFetch } = await import('@/lib/client-auth');
-      const response = await authenticatedFetch('/api/admin/users?limit=100');
-      if (response.ok) {
-        const data = await response.json();
-        setUsers(data.users || []);
-      }
-    } catch (err) {
-      // Ignore errors
-    }
-  }
-
   async function fetchAnalytics() {
     try {
       setAnalyticsLoading(true);
@@ -189,7 +161,7 @@ export default function UniverseDetailPage() {
   }
 
   async function fetchWorldAnalytics() {
-    if (!universe || !universe.worlds.length) return;
+    if (!universe || !universe.worlds || !universe.worlds.length) return;
 
     try {
       const { authenticatedFetch } = await import('@/lib/client-auth');
@@ -263,9 +235,13 @@ export default function UniverseDetailPage() {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          ...formData,
+          slug: formData.slug,
+          name: formData.name,
           description: formData.description || null,
           thumbnailUrl: formData.thumbnailUrl || null,
+          isPublic: formData.isPublic,
+          featured: formData.featured,
+          // ownerId is not included - it belongs to the owner and cannot be changed
         }),
       });
 
@@ -413,29 +389,6 @@ export default function UniverseDetailPage() {
               />
             </div>
 
-            {users.length > 0 && (
-              <div className="space-y-2">
-                <Label htmlFor="ownerId">
-                  Owner <span className="text-destructive">*</span>
-                </Label>
-                <Select
-                  value={formData.ownerId}
-                  onValueChange={(value) => setFormData({ ...formData, ownerId: value })}
-                >
-                  <SelectTrigger id="ownerId">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {users.map((u) => (
-                      <SelectItem key={u.id} value={u.id}>
-                        {u.name || u.email || u.id}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            )}
-
             <div className="space-y-2">
               <Label htmlFor="thumbnailUrl">Thumbnail URL</Label>
               <Input
@@ -540,7 +493,7 @@ export default function UniverseDetailPage() {
           <Card>
             <CardHeader>
               <div className="flex items-center justify-between">
-                <CardTitle>Worlds ({universe.worlds.length})</CardTitle>
+                <CardTitle>Worlds ({(universe.worlds || []).length})</CardTitle>
                 {universe.canEdit === true && (
                   <Button variant="outline" size="sm" asChild>
                     <Link href={`/admin/worlds/new?universeId=${id}`}>
@@ -552,7 +505,7 @@ export default function UniverseDetailPage() {
               </div>
             </CardHeader>
             <CardContent>
-              {universe.worlds.length === 0 ? (
+              {!universe.worlds || universe.worlds.length === 0 ? (
                 <p className="text-sm text-muted-foreground">No worlds yet. Create one to get started.</p>
               ) : (
                 <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">

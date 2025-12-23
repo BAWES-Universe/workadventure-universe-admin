@@ -174,16 +174,6 @@ export default function NewUniversePage() {
               />
             </div>
 
-            {user && (
-              <div className="space-y-2">
-                <Label>Owner</Label>
-                <p className="text-sm text-muted-foreground">
-                  {user.name || user.email || user.id} (you)
-                </p>
-                <input type="hidden" name="ownerId" value={formData.ownerId} />
-              </div>
-            )}
-
             <div className="space-y-2">
               <Label htmlFor="thumbnailUrl">Thumbnail URL</Label>
               <Input
