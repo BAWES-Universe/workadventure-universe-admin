@@ -279,7 +279,7 @@ export async function GET(request: NextRequest) {
         loginSceneLogo: `${baseUrl}/assets/logo-300x150.png`,
         
         // Include modules array to tell WorkAdventure which modules to load
-        modules: isAuthenticated ? ["admin-api"] : [],
+        modules: isAuthenticated ? ["admin-api","teleport"] : [],
         // Include metadata (optional, gets passed to extension module's init function)
         ...(isAuthenticated && {
           metadata: {
