@@ -103,7 +103,6 @@ export default function UniverseDetailPage() {
   useEffect(() => {
     checkAuth();
     fetchUniverse();
-    fetchAnalytics();
   }, [id]);
 
   useEffect(() => {
@@ -159,15 +158,14 @@ export default function UniverseDetailPage() {
     }
   }
 
-  async function fetchAnalytics() {
+  async function fetchAnalytics(page: number = 1) {
     try {
       setAnalyticsLoading(true);
       const { authenticatedFetch } = await import('@/lib/client-auth');
-      const response = await authenticatedFetch(`/api/admin/analytics/universes/${id}`);
+      const response = await authenticatedFetch(`/api/admin/analytics/universes/${id}?page=${page}&limit=${visitorsPerPage}`);
       if (response.ok) {
         const data = await response.json();
         setAnalytics(data);
-        setVisitorsPage(1); // Reset to first page when new data loads
       }
     } catch (err) {
       console.error('Failed to fetch analytics:', err);
@@ -175,6 +173,12 @@ export default function UniverseDetailPage() {
       setAnalyticsLoading(false);
     }
   }
+  
+  useEffect(() => {
+    if (activeTab === 'analytics') {
+      fetchAnalytics(visitorsPage);
+    }
+  }, [visitorsPage, activeTab, id]);
 
   async function fetchWorldAnalytics() {
     if (!universe || !universe.worlds || !universe.worlds.length) return;
@@ -752,9 +756,7 @@ export default function UniverseDetailPage() {
                         </TableRow>
                       </TableHeader>
                       <TableBody>
-                        {analytics.recentActivity
-                          .slice((visitorsPage - 1) * visitorsPerPage, visitorsPage * visitorsPerPage)
-                          .map((access: any) => (
+                        {analytics.recentActivity.map((access: any) => (
                             <TableRow key={access.id}>
                               <TableCell className="text-sm">
                                 {new Date(access.accessedAt).toLocaleString()}
@@ -794,10 +796,10 @@ export default function UniverseDetailPage() {
                         </TableBody>
                       </Table>
                     </div>
-                  {analytics.recentActivity.length > visitorsPerPage && (
+                  {analytics.pagination && analytics.pagination.totalPages > 1 && (
                     <div className="flex items-center justify-between">
                       <div className="text-sm text-muted-foreground">
-                        Showing {(visitorsPage - 1) * visitorsPerPage + 1} to {Math.min(visitorsPage * visitorsPerPage, analytics.recentActivity.length)} of {analytics.recentActivity.length} visitors
+                        Showing {(analytics.pagination.page - 1) * analytics.pagination.limit + 1} to {Math.min(analytics.pagination.page * analytics.pagination.limit, analytics.pagination.total)} of {analytics.pagination.total} visitors
                       </div>
                       <div className="flex items-center gap-2">
                         <Button
@@ -813,7 +815,7 @@ export default function UniverseDetailPage() {
                           variant="outline"
                           size="sm"
                           onClick={() => setVisitorsPage(prev => prev + 1)}
-                          disabled={visitorsPage * visitorsPerPage >= analytics.recentActivity.length}
+                          disabled={visitorsPage >= (analytics.pagination?.totalPages || 1)}
                         >
                           Next
                           <ChevronRight className="h-4 w-4 ml-1" />
