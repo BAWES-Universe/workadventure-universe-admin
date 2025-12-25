@@ -175,10 +175,18 @@ export default function UniverseDetailPage() {
   }
   
   useEffect(() => {
-    if (activeTab === 'analytics') {
+    if (universe) {
+      // Fetch analytics on initial load to show totalAccesses count
+      fetchAnalytics(1);
+    }
+  }, [universe, id]);
+
+  useEffect(() => {
+    if (activeTab === 'analytics' && universe) {
+      // Fetch analytics when switching to analytics tab or changing page
       fetchAnalytics(visitorsPage);
     }
-  }, [visitorsPage, activeTab, id]);
+  }, [visitorsPage, activeTab, universe]);
 
   async function fetchWorldAnalytics() {
     if (!universe || !universe.worlds || !universe.worlds.length) return;
