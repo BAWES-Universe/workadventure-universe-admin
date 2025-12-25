@@ -472,9 +472,6 @@ export default function UniverseDetailPage() {
             <div className="flex items-center justify-between">
               <div className="space-y-1">
                 <h2 className="text-xl font-semibold tracking-tight">Details</h2>
-                <p className="text-sm text-muted-foreground">
-                  Created on {new Date(universe.createdAt).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}
-                </p>
               </div>
             </div>
             {universe.description && (
@@ -483,7 +480,9 @@ export default function UniverseDetailPage() {
               </div>
             )}
             <div>
-              <span className="text-sm font-medium text-muted-foreground mb-2 block">Created by</span>
+              <span className="text-sm font-medium text-muted-foreground mb-2 block">
+                Created on {new Date(universe.createdAt).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })} by
+              </span>
               <Link
                 href={`/admin/users/${universe.owner.id}`}
                 className="block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
