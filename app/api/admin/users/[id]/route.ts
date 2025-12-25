@@ -29,6 +29,7 @@ export async function GET(
     const user = await prisma.user.findUnique({
       where: { id },
       include: {
+        visitCard: true,
         ownedUniverses: {
           select: {
             id: true,

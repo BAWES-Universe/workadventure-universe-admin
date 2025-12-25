@@ -15,7 +15,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
-import { ChevronRight, AlertCircle, Loader2, Globe, Users, Star, Ban, UserPlus, Activity, Home, Calendar, MapPin, ChevronLeft } from 'lucide-react';
+import { ChevronRight, AlertCircle, Loader2, Globe, Users, Star, Ban, UserPlus, Activity, Home, Calendar, MapPin, ChevronLeft, ExternalLink } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
   Empty,
@@ -66,6 +66,14 @@ interface Universe {
   };
 }
 
+interface VisitCard {
+  id: string;
+  bio: string | null;
+  links: Array<{ label: string; url: string }>;
+  createdAt: string;
+  updatedAt: string;
+}
+
 interface User {
   id: string;
   uuid: string;
@@ -76,6 +84,7 @@ interface User {
   isGuest: boolean;
   createdAt: string;
   updatedAt: string;
+  visitCard: VisitCard | null;
   ownedUniverses: Universe[];
   worldMemberships: WorldMembership[];
   _count: {
@@ -486,31 +495,78 @@ export default function UserDetailPage() {
       {/* Tab Content */}
       {activeTab === 'details' && (
         <>
-          <section className="space-y-4">
-            <dl className="grid grid-cols-1 gap-6 sm:grid-cols-2">
-              <div>
-                <dt className="text-sm font-medium text-muted-foreground">Email</dt>
-                <dd className="mt-1 text-sm">{user.email || 'N/A'}</dd>
+          <section className="space-y-6">
+            {/* Visit Card */}
+            {user.visitCard && (
+              <div className="space-y-4">
+                <h2 className="text-xl font-semibold tracking-tight">Visit Card</h2>
+                {user.visitCard.bio && (
+                  <div className="space-y-2">
+                    <p className="text-sm font-medium text-muted-foreground">Bio</p>
+                    <p className="text-sm whitespace-pre-line">{user.visitCard.bio}</p>
+                  </div>
+                )}
+                {user.visitCard.links && user.visitCard.links.length > 0 && (
+                  <div className="space-y-2">
+                    <p className="text-sm font-medium text-muted-foreground">Links</p>
+                    <div className="flex flex-wrap gap-2">
+                      {user.visitCard.links.map((link, index) => (
+                        <a
+                          key={index}
+                          href={link.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md border border-border/70 bg-background hover:bg-accent hover:text-accent-foreground transition-colors"
+                        >
+                          <span>{link.label}</span>
+                          <ExternalLink className="h-3 w-3" />
+                        </a>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {!user.visitCard.bio && (!user.visitCard.links || user.visitCard.links.length === 0) && (
+                  <p className="text-sm text-muted-foreground">No visit card information available</p>
+                )}
               </div>
-              <div>
-                <dt className="text-sm font-medium text-muted-foreground">Matrix Chat ID</dt>
-                <dd className="mt-1 text-sm font-mono text-xs">{user.matrixChatId || 'N/A'}</dd>
-              </div>
-              {isSuperAdmin && (
+            )}
+
+            {/* User Information */}
+            <div className="space-y-4">
+              <h2 className="text-xl font-semibold tracking-tight">User Information</h2>
+              <dl className="grid grid-cols-1 gap-6 sm:grid-cols-2">
                 <div>
-                  <dt className="text-sm font-medium text-muted-foreground">Last IP Address</dt>
-                  <dd className="mt-1 text-sm font-mono text-xs">{user.lastIpAddress || 'N/A'}</dd>
+                  <dt className="text-sm font-medium text-muted-foreground">Email</dt>
+                  <dd className="mt-1 text-sm">
+                    {user.email ? (
+                      <a href={`mailto:${user.email}`} className="text-primary hover:underline">
+                        {user.email}
+                      </a>
+                    ) : (
+                      'N/A'
+                    )}
+                  </dd>
                 </div>
-              )}
-              <div>
-                <dt className="text-sm font-medium text-muted-foreground">Created</dt>
-                <dd className="mt-1 text-sm">{new Date(user.createdAt).toLocaleString()}</dd>
-              </div>
-              <div>
-                <dt className="text-sm font-medium text-muted-foreground">Last Updated</dt>
-                <dd className="mt-1 text-sm">{new Date(user.updatedAt).toLocaleString()}</dd>
-              </div>
-            </dl>
+                <div>
+                  <dt className="text-sm font-medium text-muted-foreground">Matrix Chat ID</dt>
+                  <dd className="mt-1 text-sm font-mono text-xs">{user.matrixChatId || 'N/A'}</dd>
+                </div>
+                {isSuperAdmin && (
+                  <div className="sm:col-span-2">
+                    <dt className="text-sm font-medium text-muted-foreground">Last IP Address</dt>
+                    <dd className="mt-1 text-sm font-mono text-xs">{user.lastIpAddress || 'N/A'}</dd>
+                  </div>
+                )}
+                <div>
+                  <dt className="text-sm font-medium text-muted-foreground">Created</dt>
+                  <dd className="mt-1 text-sm">{new Date(user.createdAt).toLocaleString()}</dd>
+                </div>
+                <div>
+                  <dt className="text-sm font-medium text-muted-foreground">Last Updated</dt>
+                  <dd className="mt-1 text-sm">{new Date(user.updatedAt).toLocaleString()}</dd>
+                </div>
+              </dl>
+            </div>
           </section>
         </>
       )}
