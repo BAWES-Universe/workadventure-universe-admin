@@ -29,7 +29,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { ChevronRight, AlertCircle, Loader2, Plus, Edit, Trash2, Globe, Home, Users as UsersIcon, Activity, Star } from 'lucide-react';
+import { ChevronRight, AlertCircle, Loader2, Plus, Edit, Trash2, Globe, Home, Users as UsersIcon, Activity, Star, ChevronLeft } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
   Empty,
@@ -86,6 +86,9 @@ export default function UniverseDetailPage() {
   const [deleting, setDeleting] = useState(false);
   const [worldAnalytics, setWorldAnalytics] = useState<Record<string, { totalAccesses: number; lastVisitedByUser: any; lastVisitedOverall: any }>>({});
   const [currentUser, setCurrentUser] = useState<any>(null);
+  const [activeTab, setActiveTab] = useState<'details' | 'analytics'>('details');
+  const [visitorsPage, setVisitorsPage] = useState(1);
+  const visitorsPerPage = 10;
   
   const [formData, setFormData] = useState({
     slug: '',
@@ -164,6 +167,7 @@ export default function UniverseDetailPage() {
       if (response.ok) {
         const data = await response.json();
         setAnalytics(data);
+        setVisitorsPage(1); // Reset to first page when new data loads
       }
     } catch (err) {
       console.error('Failed to fetch analytics:', err);
@@ -325,19 +329,19 @@ export default function UniverseDetailPage() {
         <span className="text-foreground">{universe.name}</span>
       </nav>
 
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div className="space-y-1">
-          <div className="flex items-center gap-3">
-            <h1 className="text-4xl font-bold tracking-tight">{universe.name}</h1>
-            <div className="flex items-center gap-2">
-              {currentUser && currentUser.id === universe.ownerId && (
-                <Badge variant={universe.isPublic ? 'default' : 'secondary'}>
-                  {universe.isPublic ? 'Public' : 'Private'}
-                </Badge>
-              )}
-              {universe.featured && <Badge variant="outline">Featured</Badge>}
-            </div>
+      <div className="space-y-1">
+        <div className="flex items-center gap-3">
+          <h1 className="text-4xl font-bold tracking-tight">{universe.name}</h1>
+          <div className="flex items-center gap-2">
+            {currentUser && currentUser.id === universe.ownerId && (
+              <Badge variant={universe.isPublic ? 'default' : 'secondary'}>
+                {universe.isPublic ? 'Public' : 'Private'}
+              </Badge>
+            )}
+            {universe.featured && <Badge variant="outline">Featured</Badge>}
           </div>
+        </div>
+        <div className="flex items-center justify-between">
           <p className="text-muted-foreground flex items-center gap-3">
             {analytics && (
               <>
@@ -354,15 +358,13 @@ export default function UniverseDetailPage() {
               Slug: <code className="bg-muted px-1.5 py-0.5 rounded text-sm">{universe.slug}</code>
             </span>
           </p>
-        </div>
-        {!isEditing && universe.canEdit === true && (
-          <div className="flex flex-wrap gap-2">
-            <Button variant="outline" onClick={() => setIsEditing(true)}>
+          {!isEditing && universe.canEdit === true && (
+            <Button variant="outline" size="sm" onClick={() => setIsEditing(true)}>
               <Edit className="mr-2 h-4 w-4" />
               Edit
             </Button>
-          </div>
-        )}
+          )}
+        </div>
       </div>
 
       {error && (
@@ -482,13 +484,37 @@ export default function UniverseDetailPage() {
         </Card>
       ) : (
         <>
-          {/* Details Section */}
-          <section className="space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="space-y-1">
-                <h2 className="text-xl font-semibold tracking-tight">Details</h2>
-              </div>
-            </div>
+          {/* Tabs */}
+          <div>
+            <nav className="flex space-x-8">
+              <button
+                onClick={() => setActiveTab('details')}
+                className={`py-4 px-1 border-b-2 font-medium text-sm ${
+                  activeTab === 'details'
+                    ? 'border-primary text-primary'
+                    : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
+                }`}
+              >
+                Details
+              </button>
+              <button
+                onClick={() => setActiveTab('analytics')}
+                className={`py-4 px-1 border-b-2 font-medium text-sm ${
+                  activeTab === 'analytics'
+                    ? 'border-primary text-primary'
+                    : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
+                }`}
+              >
+                Visitors
+              </button>
+            </nav>
+          </div>
+
+          {/* Tab Content */}
+          {activeTab === 'details' && (
+            <>
+              {/* Details Section */}
+              <section className="space-y-3">
             {universe.description && (
               <div className="text-sm text-foreground whitespace-pre-line">
                 {universe.description}
@@ -696,38 +722,39 @@ export default function UniverseDetailPage() {
                 })}
               </div>
               )}
-            </section>
-          ) : null}
+              </section>
+            ) : null}
+            </>
+          )}
 
-          {/* Analytics Section */}
-          <section className="space-y-3">
-            <div className="space-y-1">
-              <h2 className="text-xl font-semibold tracking-tight">Analytics</h2>
-              <p className="text-sm text-muted-foreground">
-                Access statistics and recent activity
-              </p>
-            </div>
-            {analyticsLoading ? (
-              <div className="flex items-center justify-center py-12">
-                <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-              </div>
-            ) : analytics ? (
-              <div className="space-y-6">
-                {analytics.recentActivity && analytics.recentActivity.length > 0 && (
-                  <div>
-                    <h3 className="text-sm font-medium mb-3">Recent Activity</h3>
-                    <div className="rounded-md border">
-                      <Table>
-                        <TableHeader>
-                          <TableRow>
-                            <TableHead>Date</TableHead>
-                            <TableHead>User</TableHead>
-                            <TableHead>World / Room</TableHead>
-                            <TableHead>Status</TableHead>
-                          </TableRow>
-                        </TableHeader>
-                        <TableBody>
-                          {analytics.recentActivity.slice(0, 10).map((access: any) => (
+          {activeTab === 'analytics' && (
+            <>
+              {analyticsLoading ? (
+                <div className="flex items-center justify-center py-12">
+                  <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+                </div>
+              ) : analytics && analytics.recentActivity && analytics.recentActivity.length > 0 ? (
+                <div className="space-y-6">
+                  <div className="space-y-1">
+                    <h2 className="text-xl font-semibold tracking-tight">Recent Activity</h2>
+                    <p className="text-sm text-muted-foreground">
+                      Visitor activity and access history
+                    </p>
+                  </div>
+                  <div className="rounded-md border">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Date</TableHead>
+                          <TableHead>User</TableHead>
+                          <TableHead>World / Room</TableHead>
+                          <TableHead>Status</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {analytics.recentActivity
+                          .slice((visitorsPage - 1) * visitorsPerPage, visitorsPage * visitorsPerPage)
+                          .map((access: any) => (
                             <TableRow key={access.id}>
                               <TableCell className="text-sm">
                                 {new Date(access.accessedAt).toLocaleString()}
@@ -767,13 +794,49 @@ export default function UniverseDetailPage() {
                         </TableBody>
                       </Table>
                     </div>
-                  </div>
-                )}
-              </div>
-            ) : (
-              <p className="text-sm text-muted-foreground text-center py-12">No analytics data available.</p>
-            )}
-          </section>
+                  {analytics.recentActivity.length > visitorsPerPage && (
+                    <div className="flex items-center justify-between">
+                      <div className="text-sm text-muted-foreground">
+                        Showing {(visitorsPage - 1) * visitorsPerPage + 1} to {Math.min(visitorsPage * visitorsPerPage, analytics.recentActivity.length)} of {analytics.recentActivity.length} visitors
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setVisitorsPage(prev => Math.max(1, prev - 1))}
+                          disabled={visitorsPage === 1}
+                        >
+                          <ChevronLeft className="h-4 w-4 mr-1" />
+                          Previous
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setVisitorsPage(prev => prev + 1)}
+                          disabled={visitorsPage * visitorsPerPage >= analytics.recentActivity.length}
+                        >
+                          Next
+                          <ChevronRight className="h-4 w-4 ml-1" />
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <Empty className="border border-border/70">
+                  <EmptyHeader>
+                    <EmptyMedia variant="icon">
+                      <UsersIcon className="h-6 w-6 text-muted-foreground" />
+                    </EmptyMedia>
+                    <EmptyTitle>No visitors yet</EmptyTitle>
+                    <EmptyDescription>
+                      Visitor activity will appear here once people start accessing this universe.
+                    </EmptyDescription>
+                  </EmptyHeader>
+                </Empty>
+              )}
+            </>
+          )}
         </>
       )}
 
