@@ -30,7 +30,16 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { ChevronRight, AlertCircle, Loader2, Edit, Trash2, Navigation, CheckCircle2, Star } from 'lucide-react';
+import { ChevronRight, AlertCircle, Loader2, Edit, Trash2, Navigation, CheckCircle2, Star, Activity, ChevronLeft, Users } from 'lucide-react';
+import { cn } from '@/lib/utils';
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from '@/components/ui/empty';
 
 interface Room {
   id: string;
@@ -55,6 +64,26 @@ interface Room {
   };
 }
 
+function formatTimeAgo(date: Date): string {
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const diffSecs = Math.floor(diffMs / 1000);
+  const diffMins = Math.floor(diffSecs / 60);
+  const diffHours = Math.floor(diffMins / 60);
+  const diffDays = Math.floor(diffHours / 24);
+  const diffWeeks = Math.floor(diffDays / 7);
+  const diffMonths = Math.floor(diffDays / 30);
+  const diffYears = Math.floor(diffDays / 365);
+
+  if (diffSecs < 60) return 'just now';
+  if (diffMins < 60) return `${diffMins} ${diffMins === 1 ? 'minute' : 'minutes'} ago`;
+  if (diffHours < 24) return `${diffHours} ${diffHours === 1 ? 'hour' : 'hours'} ago`;
+  if (diffDays < 7) return `${diffDays} ${diffDays === 1 ? 'day' : 'days'} ago`;
+  if (diffWeeks < 4) return `${diffWeeks} ${diffWeeks === 1 ? 'week' : 'weeks'} ago`;
+  if (diffMonths < 12) return `${diffMonths} ${diffMonths === 1 ? 'month' : 'months'} ago`;
+  return `${diffYears} ${diffYears === 1 ? 'year' : 'years'} ago`;
+}
+
 export default function RoomDetailPage() {
   const router = useRouter();
   const params = useParams();
@@ -74,6 +103,9 @@ export default function RoomDetailPage() {
   const [isSuperAdmin, setIsSuperAdmin] = useState(false);
   const [currentRoomPath, setCurrentRoomPath] = useState<string | null>(null);
   const [togglingStar, setTogglingStar] = useState(false);
+  const [activeTab, setActiveTab] = useState<'details' | 'analytics'>('details');
+  const [visitorsPage, setVisitorsPage] = useState(1);
+  const visitorsPerPage = 10;
   
   const { wa, isReady: waReady, navigateToRoom } = useWorkAdventure();
   
@@ -88,8 +120,21 @@ export default function RoomDetailPage() {
   useEffect(() => {
     checkAuth();
     fetchRoom();
-    fetchAnalytics();
   }, [id]);
+
+  useEffect(() => {
+    if (room) {
+      // Fetch analytics on initial load to show totalAccesses count
+      fetchAnalytics(1);
+    }
+  }, [room, id]);
+
+  useEffect(() => {
+    if (activeTab === 'analytics' && room) {
+      // Fetch analytics when switching to analytics tab or changing page
+      fetchAnalytics(visitorsPage);
+    }
+  }, [visitorsPage, activeTab, room]);
 
   useEffect(() => {
     if (room && wa && waReady) {
@@ -143,11 +188,11 @@ export default function RoomDetailPage() {
     }
   }
 
-  async function fetchAnalytics() {
+  async function fetchAnalytics(page: number = 1) {
     try {
       setAnalyticsLoading(true);
       const { authenticatedFetch } = await import('@/lib/client-auth');
-      const response = await authenticatedFetch(`/api/admin/analytics/rooms/${id}`);
+      const response = await authenticatedFetch(`/api/admin/analytics/rooms/${id}?page=${page}&limit=${visitorsPerPage}`);
       if (response.ok) {
         const data = await response.json();
         setAnalytics(data);
@@ -399,68 +444,62 @@ export default function RoomDetailPage() {
         <span className="text-foreground">{room.name}</span>
       </nav>
 
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div className="space-y-1">
+      <div className="space-y-1">
+        <div className="flex items-center gap-3">
           <h1 className="text-4xl font-bold tracking-tight">{room.name}</h1>
-          <p className="text-muted-foreground">
-            In <Link href={`/admin/worlds/${room.world.id}`} className="text-primary hover:underline">{room.world.name}</Link> • Slug: <code className="bg-muted px-1.5 py-0.5 rounded text-sm">{room.slug}</code>
-          </p>
-        </div>
-        {!isEditing && (
-          <div className="flex flex-wrap gap-2">
-            {currentUser && (
-              <Button
-                variant="outline"
-                onClick={handleToggleStar}
-                disabled={togglingStar}
-              >
-                {togglingStar ? (
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                ) : (
-                  <Star className={`mr-2 h-4 w-4 ${room.isStarred ? 'fill-yellow-400 text-yellow-400' : ''}`} />
-                )}
-                {room.starCount !== undefined ? room.starCount : 0}
-              </Button>
-            )}
-            {isInCurrentRoom ? (
-              <Alert className="border-green-200 bg-green-50 dark:bg-green-950 dark:border-green-800">
-                <CheckCircle2 className="h-4 w-4 text-green-600 dark:text-green-400" />
-                <AlertTitle className="text-green-800 dark:text-green-200">You are currently in this room</AlertTitle>
-              </Alert>
-            ) : (
-              <Button
-                variant="default"
-                onClick={handleVisitRoomInUniverse}
-                disabled={waNavigating || !waReady}
-                title={!waReady ? 'WorkAdventure API not available (only works in iframe)' : undefined}
-              >
-                {waNavigating ? (
-                  <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Navigating...
-                  </>
-                ) : (
-                  <>
-                    <Navigation className="mr-2 h-4 w-4" />
-                    Visit
-                  </>
-                )}
-              </Button>
-            )}
+          <div className="flex items-center gap-2">
             {room.canEdit !== false && (
+              <Badge variant={room.isPublic ? 'default' : 'secondary'}>
+                {room.isPublic ? 'Public' : 'Private'}
+              </Badge>
+            )}
+          </div>
+        </div>
+        <p className="text-muted-foreground">
+          In <Link href={`/admin/worlds/${room.world.id}`} className="text-primary hover:underline">{room.world.name}</Link>
+        </p>
+        <div className="flex items-center justify-between">
+          <p className="text-muted-foreground flex items-center gap-3">
+            {analytics && (
               <>
+                <span className="flex items-center gap-1.5 text-sm">
+                  <Activity className="h-4 w-4 text-muted-foreground" />
+                  <span className="font-medium text-foreground/80">
+                    {analytics.totalAccesses?.toLocaleString() || 0} {analytics.totalAccesses === 1 ? 'access' : 'accesses'}
+                  </span>
+                </span>
+                <span className="text-muted-foreground">•</span>
+              </>
+            )}
+            <span>
+              Slug: <code className="bg-muted px-1.5 py-0.5 rounded text-sm">{room.slug}</code>
+            </span>
+          </p>
+          {!isEditing && (
+            <div className="flex flex-wrap gap-2">
+              {currentUser && (
+                <Button
+                  variant="outline"
+                  onClick={handleToggleStar}
+                  disabled={togglingStar}
+                >
+                  {togglingStar ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  ) : (
+                    <Star className={`mr-2 h-4 w-4 ${room.isStarred ? 'fill-yellow-400 text-yellow-400' : ''}`} />
+                  )}
+                  {room.starCount !== undefined ? room.starCount : 0}
+                </Button>
+              )}
+              {room.canEdit !== false && (
                 <Button variant="outline" onClick={() => setIsEditing(true)}>
                   <Edit className="mr-2 h-4 w-4" />
                   Edit
                 </Button>
-                <Button variant="destructive" onClick={() => setDeleteDialogOpen(true)}>
-                  <Trash2 className="mr-2 h-4 w-4" />
-                  Delete
-                </Button>
-              </>
-            )}
-          </div>
-        )}
+              )}
+            </div>
+          )}
+        </div>
       </div>
 
       {error && (
@@ -474,8 +513,18 @@ export default function RoomDetailPage() {
       {isEditing ? (
         <Card>
           <CardHeader>
-            <CardTitle>Edit Room</CardTitle>
-            <CardDescription>Update the room details below.</CardDescription>
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle>Edit Room</CardTitle>
+                <CardDescription>Update the room details below.</CardDescription>
+              </div>
+              {room.canEdit !== false && (
+                <Button variant="destructive" onClick={() => setDeleteDialogOpen(true)}>
+                  <Trash2 className="mr-2 h-4 w-4" />
+                  Delete
+                </Button>
+              )}
+            </div>
           </CardHeader>
           <CardContent className="space-y-6">
             <div className="space-y-2">
@@ -564,141 +613,216 @@ export default function RoomDetailPage() {
         </Card>
       ) : (
         <>
-          <Card>
-            <CardHeader>
-              <CardTitle>Details</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <dl className="grid grid-cols-1 gap-6 sm:grid-cols-2">
+          {/* Visit Button / Current Room Alert */}
+          <div className="w-full">
+            {isInCurrentRoom ? (
+              <div className="flex items-center justify-center gap-2 rounded-lg border border-primary/20 bg-primary/5 px-4 py-3">
+                <div className="flex h-2 w-2 rounded-full bg-green-500 animate-pulse" />
+                <span className="text-sm font-medium text-foreground">You are currently in this room</span>
+              </div>
+            ) : (
+              <Button
+                variant="default"
+                className="w-full"
+                onClick={handleVisitRoomInUniverse}
+                disabled={waNavigating || !waReady}
+                title={!waReady ? 'WorkAdventure API not available (only works in iframe)' : undefined}
+              >
+                {waNavigating ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    Navigating...
+                  </>
+                ) : (
+                  <>
+                    <Navigation className="mr-2 h-4 w-4" />
+                    Visit
+                  </>
+                )}
+              </Button>
+            )}
+          </div>
+
+          {/* Tabs */}
+          <div>
+            <nav className="flex space-x-8">
+              <button
+                onClick={() => setActiveTab('details')}
+                className={`py-4 px-1 border-b-2 font-medium text-sm ${
+                  activeTab === 'details'
+                    ? 'border-primary text-primary'
+                    : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
+                }`}
+              >
+                Details
+              </button>
+              <button
+                onClick={() => setActiveTab('analytics')}
+                className={`py-4 px-1 border-b-2 font-medium text-sm ${
+                  activeTab === 'analytics'
+                    ? 'border-primary text-primary'
+                    : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
+                }`}
+              >
+                Visitors
+              </button>
+            </nav>
+          </div>
+
+          {/* Tab Content */}
+          {activeTab === 'details' && (
+            <>
+              <section className="space-y-3">
                 <div>
-                  <dt className="text-sm font-medium text-muted-foreground">Description</dt>
-                  <dd className="mt-1 text-sm">{room.description || 'No description'}</dd>
-                </div>
-                <div>
-                  <dt className="text-sm font-medium text-muted-foreground">Status</dt>
-                  <dd className="mt-1">
-                    <Badge variant={room.isPublic ? 'default' : 'secondary'}>
-                      {room.isPublic ? 'Public' : 'Private'}
-                    </Badge>
-                  </dd>
+                  <h3 className="text-xl font-semibold mb-2">About this Room</h3>
+                  {room.description ? (
+                    <div className="text-sm text-foreground whitespace-pre-line">
+                      {room.description}
+                    </div>
+                  ) : (
+                    <div className="text-sm text-muted-foreground">
+                      No description provided
+                    </div>
+                  )}
                 </div>
                 {isSuperAdmin && room.mapUrl && (
-                  <div className="sm:col-span-2">
-                    <dt className="text-sm font-medium text-muted-foreground">Map URL</dt>
-                    <dd className="mt-1 text-sm break-all">
+                  <div>
+                    <div className="text-sm font-medium text-muted-foreground mb-1">Map URL</div>
+                    <div className="text-sm break-all">
                       <a href={room.mapUrl} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
                         {room.mapUrl}
                       </a>
-                    </dd>
+                    </div>
                   </div>
                 )}
                 {isSuperAdmin && room.wamUrl && (
-                  <div className="sm:col-span-2">
-                    <dt className="text-sm font-medium text-muted-foreground">WAM URL</dt>
-                    <dd className="mt-1 text-sm break-all">
+                  <div>
+                    <div className="text-sm font-medium text-muted-foreground mb-1">WAM URL</div>
+                    <div className="text-sm break-all">
                       <a href={room.wamUrl} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
                         {room.wamUrl}
                       </a>
-                    </dd>
+                    </div>
                   </div>
                 )}
-              </dl>
-            </CardContent>
-          </Card>
+              </section>
+            </>
+          )}
 
-          <Card>
-            <CardHeader>
-              <CardTitle>Analytics</CardTitle>
-            </CardHeader>
-            <CardContent>
+          {activeTab === 'analytics' && (
+            <>
               {analyticsLoading ? (
                 <div className="flex items-center justify-center py-12">
                   <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
                 </div>
-              ) : analytics ? (
+              ) : analytics && analytics.recentActivity && analytics.recentActivity.length > 0 ? (
                 <div className="space-y-6">
-                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-                    <div className="rounded-lg border p-4">
-                      <div className="text-sm font-medium text-muted-foreground">Total Accesses</div>
-                      <div className="mt-1 text-2xl font-semibold">{analytics.totalAccesses || 0}</div>
-                    </div>
-                    <div className="rounded-lg border p-4">
-                      <div className="text-sm font-medium text-muted-foreground">Unique Users</div>
-                      <div className="mt-1 text-2xl font-semibold">{analytics.uniqueUsers || 0}</div>
-                    </div>
-                    <div className="rounded-lg border p-4">
-                      <div className="text-sm font-medium text-muted-foreground">Unique IPs</div>
-                      <div className="mt-1 text-2xl font-semibold">{analytics.uniqueIPs || 0}</div>
-                    </div>
-                    {peakHour !== null && (
-                      <div className="rounded-lg border p-4">
-                        <div className="text-sm font-medium text-muted-foreground">Peak Hour</div>
-                        <div className="mt-1 text-lg font-semibold">
-                          {peakHour === 0 ? '12:00 AM' : peakHour < 12 ? `${peakHour}:00 AM` : peakHour === 12 ? '12:00 PM' : `${peakHour - 12}:00 PM`}
-                        </div>
-                        <div className="text-xs text-muted-foreground">{peakCount} accesses</div>
-                      </div>
-                    )}
+                  <div className="space-y-1">
+                    <h2 className="text-xl font-semibold tracking-tight">Recent Activity</h2>
+                    <p className="text-sm text-muted-foreground">
+                      Visitor activity and access history
+                    </p>
                   </div>
-
-                  {analytics.recentActivity && analytics.recentActivity.length > 0 && (
-                    <div>
-                      <h3 className="text-sm font-medium mb-3">Recent Activity</h3>
-                      <div className="rounded-md border">
-                        <Table>
-                          <TableHeader>
-                            <TableRow>
-                              <TableHead>Date</TableHead>
-                              <TableHead>User</TableHead>
-                              {isSuperAdmin && <TableHead>IP Address</TableHead>}
-                              <TableHead>Status</TableHead>
-                            </TableRow>
-                          </TableHeader>
-                          <TableBody>
-                            {analytics.recentActivity.slice(0, 10).map((access: any) => (
-                              <TableRow key={access.id}>
-                                <TableCell className="text-sm">
-                                  {new Date(access.accessedAt).toLocaleString()}
-                                </TableCell>
-                                <TableCell className="text-sm">
-                                  {access.userId ? (
-                                    <Link
-                                      href={`/admin/users/${access.userId}`}
-                                      className="text-primary hover:underline"
-                                    >
-                                      {access.userName || access.userEmail || access.userUuid || 'Guest'}
-                                    </Link>
-                                  ) : (
-                                    access.userName || access.userEmail || access.userUuid || 'Guest'
-                                  )}
-                                </TableCell>
-                                {isSuperAdmin && (
-                                  <TableCell className="text-sm font-mono text-muted-foreground">
-                                    {access.ipAddress}
-                                  </TableCell>
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+                    {analytics.recentActivity.map((access: any) => {
+                      const userName = access.userName || access.userEmail || access.userUuid || 'Guest';
+                      const accessDate = new Date(access.accessedAt);
+                      const isClickable = !!access.userId;
+                      
+                      return (
+                        <Card
+                          key={access.id}
+                          className={cn(
+                            'group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
+                            'hover:-translate-y-1 hover:shadow-lg',
+                          )}
+                        >
+                          <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-purple-500/10 via-transparent to-pink-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
+                          <CardContent className="relative flex h-full flex-col p-4">
+                            <div className="flex items-start justify-between gap-3 mb-3">
+                              <div className="min-w-0 flex-1 flex items-center gap-2">
+                                {isClickable ? (
+                                  <Link
+                                    href={`/admin/users/${access.userId}`}
+                                    className="block"
+                                    onClick={(e) => e.stopPropagation()}
+                                  >
+                                    <div className="text-sm font-medium text-primary hover:underline truncate">
+                                      {userName}
+                                    </div>
+                                  </Link>
+                                ) : (
+                                  <div className="text-sm font-medium text-muted-foreground truncate">
+                                    {userName}
+                                  </div>
                                 )}
-                                <TableCell>
-                                  {access.hasMembership && access.membershipTags.length > 0 ? (
-                                    <Badge variant="outline">{access.membershipTags.join(', ')}</Badge>
-                                  ) : access.isAuthenticated ? (
-                                    <Badge>Authenticated</Badge>
-                                  ) : (
-                                    <Badge variant="secondary">Guest</Badge>
-                                  )}
-                                </TableCell>
-                              </TableRow>
-                            ))}
-                          </TableBody>
-                        </Table>
+                                {access.hasMembership && access.membershipTags.length > 0 ? (
+                                  <Badge variant="outline" className="text-xs flex-shrink-0">{access.membershipTags.join(', ')}</Badge>
+                                ) : access.isAuthenticated ? (
+                                  <Badge className="text-xs flex-shrink-0">Authenticated</Badge>
+                                ) : (
+                                  <Badge variant="secondary" className="text-xs flex-shrink-0">Guest</Badge>
+                                )}
+                              </div>
+                              <div className="flex-shrink-0 text-xs text-muted-foreground">
+                                {formatTimeAgo(accessDate)}
+                              </div>
+                            </div>
+
+                            {isSuperAdmin && access.ipAddress && (
+                              <div className="text-xs text-muted-foreground font-mono mb-2">
+                                {access.ipAddress}
+                              </div>
+                            )}
+                          </CardContent>
+                        </Card>
+                      );
+                    })}
+                  </div>
+                  {analytics.pagination && analytics.pagination.totalPages > 1 && (
+                    <div className="flex items-center justify-between">
+                      <div className="text-sm text-muted-foreground">
+                        Showing {(analytics.pagination.page - 1) * analytics.pagination.limit + 1} to {Math.min(analytics.pagination.page * analytics.pagination.limit, analytics.pagination.total)} of {analytics.pagination.total} visitors
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setVisitorsPage(prev => Math.max(1, prev - 1))}
+                          disabled={visitorsPage === 1}
+                        >
+                          <ChevronLeft className="h-4 w-4 mr-1" />
+                          Previous
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setVisitorsPage(prev => prev + 1)}
+                          disabled={visitorsPage >= (analytics.pagination?.totalPages || 1)}
+                        >
+                          Next
+                          <ChevronRight className="h-4 w-4 ml-1" />
+                        </Button>
                       </div>
                     </div>
                   )}
                 </div>
               ) : (
-                <p className="text-sm text-muted-foreground text-center py-12">No analytics data available.</p>
+                <Empty className="border border-border/70">
+                  <EmptyHeader>
+                    <EmptyMedia variant="icon">
+                      <Users className="h-6 w-6 text-muted-foreground" />
+                    </EmptyMedia>
+                    <EmptyTitle>No visitors yet</EmptyTitle>
+                    <EmptyDescription>
+                      Visitor activity will appear here once people start accessing this room.
+                    </EmptyDescription>
+                  </EmptyHeader>
+                  <EmptyContent />
+                </Empty>
               )}
-            </CardContent>
-          </Card>
+            </>
+          )}
         </>
       )}
 

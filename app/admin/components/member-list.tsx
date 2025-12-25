@@ -235,7 +235,7 @@ export default function MemberList({ worldId, onRefresh }: MemberListProps) {
         <div className="space-y-1">
           <h3 className="text-xl font-semibold tracking-tight">Active Members</h3>
           <p className="text-sm text-muted-foreground">
-            People who have access to this world
+            Members with special privileges to access special areas, moderate, or use the map and area editor
           </p>
         </div>
         {members.length === 0 ? (

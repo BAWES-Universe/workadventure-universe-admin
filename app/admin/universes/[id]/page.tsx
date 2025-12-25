@@ -29,8 +29,16 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { ChevronRight, AlertCircle, Loader2, Plus, Edit, Trash2, Globe, Home, Users as UsersIcon, Activity, Star } from 'lucide-react';
+import { ChevronRight, AlertCircle, Loader2, Plus, Edit, Trash2, Globe, Home, Users as UsersIcon, Activity, Star, ChevronLeft, Clock, MapPin } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from '@/components/ui/empty';
 
 interface Universe {
   id: string;
@@ -77,6 +85,10 @@ export default function UniverseDetailPage() {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [worldAnalytics, setWorldAnalytics] = useState<Record<string, { totalAccesses: number; lastVisitedByUser: any; lastVisitedOverall: any }>>({});
+  const [currentUser, setCurrentUser] = useState<any>(null);
+  const [activeTab, setActiveTab] = useState<'details' | 'analytics'>('details');
+  const [visitorsPage, setVisitorsPage] = useState(1);
+  const visitorsPerPage = 10;
   
   const [formData, setFormData] = useState({
     slug: '',
@@ -91,7 +103,6 @@ export default function UniverseDetailPage() {
   useEffect(() => {
     checkAuth();
     fetchUniverse();
-    fetchAnalytics();
   }, [id]);
 
   useEffect(() => {
@@ -106,7 +117,10 @@ export default function UniverseDetailPage() {
       const response = await authenticatedFetch('/api/auth/me');
       if (!response.ok) {
         router.push('/admin/login');
+        return;
       }
+      const data = await response.json();
+      setCurrentUser(data.user);
     } catch (err) {
       router.push('/admin/login');
     }
@@ -144,11 +158,11 @@ export default function UniverseDetailPage() {
     }
   }
 
-  async function fetchAnalytics() {
+  async function fetchAnalytics(page: number = 1) {
     try {
       setAnalyticsLoading(true);
       const { authenticatedFetch } = await import('@/lib/client-auth');
-      const response = await authenticatedFetch(`/api/admin/analytics/universes/${id}`);
+      const response = await authenticatedFetch(`/api/admin/analytics/universes/${id}?page=${page}&limit=${visitorsPerPage}`);
       if (response.ok) {
         const data = await response.json();
         setAnalytics(data);
@@ -159,6 +173,20 @@ export default function UniverseDetailPage() {
       setAnalyticsLoading(false);
     }
   }
+  
+  useEffect(() => {
+    if (universe) {
+      // Fetch analytics on initial load to show totalAccesses count
+      fetchAnalytics(1);
+    }
+  }, [universe, id]);
+
+  useEffect(() => {
+    if (activeTab === 'analytics' && universe) {
+      // Fetch analytics when switching to analytics tab or changing page
+      fetchAnalytics(visitorsPage);
+    }
+  }, [visitorsPage, activeTab, universe]);
 
   async function fetchWorldAnalytics() {
     if (!universe || !universe.worlds || !universe.worlds.length) return;
@@ -313,31 +341,42 @@ export default function UniverseDetailPage() {
         <span className="text-foreground">{universe.name}</span>
       </nav>
 
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div className="space-y-1">
+      <div className="space-y-1">
+        <div className="flex items-center gap-3">
           <h1 className="text-4xl font-bold tracking-tight">{universe.name}</h1>
-          <p className="text-muted-foreground">
-            Slug: <code className="bg-muted px-1.5 py-0.5 rounded text-sm">{universe.slug}</code>
-          </p>
+          <div className="flex items-center gap-2">
+            {currentUser && currentUser.id === universe.ownerId && (
+              <Badge variant={universe.isPublic ? 'default' : 'secondary'}>
+                {universe.isPublic ? 'Public' : 'Private'}
+              </Badge>
+            )}
+            {universe.featured && <Badge variant="outline">Featured</Badge>}
+          </div>
         </div>
-        {!isEditing && universe.canEdit === true && (
-          <div className="flex flex-wrap gap-2">
-            <Button variant="default" asChild>
-              <Link href={`/admin/worlds/new?universeId=${id}`}>
-                <Plus className="mr-2 h-4 w-4" />
-                Create World
-              </Link>
-            </Button>
-            <Button variant="outline" onClick={() => setIsEditing(true)}>
+        <div className="flex items-center justify-between">
+          <p className="text-muted-foreground flex items-center gap-3">
+            {analytics && (
+              <>
+                <span className="flex items-center gap-1.5 text-sm">
+                  <Activity className="h-4 w-4 text-muted-foreground" />
+                  <span className="font-medium text-foreground/80">
+                    {analytics.totalAccesses?.toLocaleString() || 0} {analytics.totalAccesses === 1 ? 'access' : 'accesses'}
+                  </span>
+                </span>
+                <span className="text-muted-foreground">•</span>
+              </>
+            )}
+            <span>
+              Slug: <code className="bg-muted px-1.5 py-0.5 rounded text-sm">{universe.slug}</code>
+            </span>
+          </p>
+          {!isEditing && universe.canEdit === true && (
+            <Button variant="outline" size="sm" onClick={() => setIsEditing(true)}>
               <Edit className="mr-2 h-4 w-4" />
               Edit
             </Button>
-            <Button variant="destructive" onClick={() => setDeleteDialogOpen(true)}>
-              <Trash2 className="mr-2 h-4 w-4" />
-              Delete
-            </Button>
-          </div>
-        )}
+          )}
+        </div>
       </div>
 
       {error && (
@@ -351,8 +390,18 @@ export default function UniverseDetailPage() {
       {isEditing ? (
         <Card>
           <CardHeader>
-            <CardTitle>Edit Universe</CardTitle>
-            <CardDescription>Update the universe details below.</CardDescription>
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle>Edit Universe</CardTitle>
+                <CardDescription>Update the universe details below.</CardDescription>
+              </div>
+              {universe.canEdit === true && (
+                <Button variant="destructive" onClick={() => setDeleteDialogOpen(true)}>
+                  <Trash2 className="mr-2 h-4 w-4" />
+                  Delete
+                </Button>
+              )}
+            </div>
           </CardHeader>
           <CardContent className="space-y-6">
             <div className="space-y-2">
@@ -447,290 +496,382 @@ export default function UniverseDetailPage() {
         </Card>
       ) : (
         <>
-          <Card>
-            <CardHeader>
-              <CardTitle>Details</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <dl className="grid grid-cols-1 gap-6 sm:grid-cols-2">
-                <div>
-                  <dt className="text-sm font-medium text-muted-foreground">Description</dt>
-                  <dd className="mt-1 text-sm">{universe.description || 'No description'}</dd>
-                </div>
-                <div>
-                  <dt className="text-sm font-medium text-muted-foreground">Owner</dt>
-                  <dd className="mt-1 text-sm">
-                    {universe.owner.name || universe.owner.email || 'Unknown'}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-sm font-medium text-muted-foreground">Created</dt>
-                  <dd className="mt-1 text-sm">{new Date(universe.createdAt).toLocaleDateString()}</dd>
-                </div>
-                <div>
-                  <dt className="text-sm font-medium text-muted-foreground">Status</dt>
-                  <dd className="mt-1">
-                    <div className="flex items-center gap-2">
-                      <Badge variant={universe.isPublic ? 'default' : 'secondary'}>
-                        {universe.isPublic ? 'Public' : 'Private'}
-                      </Badge>
-                      {universe.featured && <Badge variant="outline">Featured</Badge>}
-                    </div>
-                  </dd>
-                </div>
-                {universe.thumbnailUrl && (
-                  <div>
-                    <dt className="text-sm font-medium text-muted-foreground">Thumbnail</dt>
-                    <dd className="mt-1">
-                      <img src={universe.thumbnailUrl} alt={universe.name} className="h-20 w-20 object-cover rounded" />
-                    </dd>
-                  </div>
-                )}
-              </dl>
-            </CardContent>
-          </Card>
+          {/* Tabs */}
+          <div>
+            <nav className="flex space-x-8">
+              <button
+                onClick={() => setActiveTab('details')}
+                className={`py-4 px-1 border-b-2 font-medium text-sm ${
+                  activeTab === 'details'
+                    ? 'border-primary text-primary'
+                    : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
+                }`}
+              >
+                Details
+              </button>
+              <button
+                onClick={() => setActiveTab('analytics')}
+                className={`py-4 px-1 border-b-2 font-medium text-sm ${
+                  activeTab === 'analytics'
+                    ? 'border-primary text-primary'
+                    : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
+                }`}
+              >
+                Visitors
+              </button>
+            </nav>
+          </div>
 
-          <Card>
-            <CardHeader>
+          {/* Tab Content */}
+          {activeTab === 'details' && (
+            <>
+              {/* Details Section */}
+              <section className="space-y-3">
+            <div>
+              <h3 className="text-xl font-semibold mb-2">About this Universe</h3>
+              {universe.description && (
+                <div className="text-sm text-foreground whitespace-pre-line">
+                  {universe.description}
+                </div>
+              )}
+            </div>
+            <div>
+              <span className="text-sm font-medium text-muted-foreground mb-2 block">
+                Created on {new Date(universe.createdAt).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })} by
+              </span>
+              <Link
+                href={`/admin/users/${universe.owner.id}`}
+                className="block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+              >
+                <Card className="group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all hover:-translate-y-1 hover:shadow-lg max-w-xs">
+                  <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-purple-500/10 via-transparent to-pink-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
+                  <CardContent className="relative flex h-full flex-col p-5">
+                    <div className="flex items-start gap-3">
+                      <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full border bg-muted text-sm font-semibold">
+                        {(universe.owner.name || universe.owner.email || '?').charAt(0).toUpperCase()}
+                      </div>
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <h3 className="truncate text-base font-semibold leading-tight">
+                          {universe.owner.name || universe.owner.email || 'Unknown'}
+                        </h3>
+                        <p className="truncate text-xs text-muted-foreground">
+                          {universe.owner.email || 'No email'}
+                        </p>
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              </Link>
+            </div>
+            {universe.thumbnailUrl && (
+              <div>
+                <img src={universe.thumbnailUrl} alt={universe.name} className="h-12 w-12 object-cover rounded" />
+              </div>
+            )}
+          </section>
+
+          {/* Worlds Section - Only show if (0 worlds AND user owns) OR (has worlds) */}
+          {((!universe.worlds || universe.worlds.length === 0) && currentUser && currentUser.id === universe.ownerId) || (universe.worlds && universe.worlds.length > 0) ? (
+            <section className="space-y-3">
               <div className="flex items-center justify-between">
-                <CardTitle>Worlds ({(universe.worlds || []).length})</CardTitle>
+                <div className="space-y-1">
+                  <h2 className="text-xl font-semibold tracking-tight">Worlds</h2>
+                  <p className="text-sm text-muted-foreground">
+                    {(universe.worlds || []).length} {(universe.worlds || []).length === 1 ? 'world' : 'worlds'} in this universe
+                  </p>
+                </div>
                 {universe.canEdit === true && (
                   <Button variant="outline" size="sm" asChild>
                     <Link href={`/admin/worlds/new?universeId=${id}`}>
                       <Plus className="mr-2 h-4 w-4" />
-                      Add World
+                      Create World
                     </Link>
                   </Button>
                 )}
               </div>
-            </CardHeader>
-            <CardContent>
               {!universe.worlds || universe.worlds.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No worlds yet. Create one to get started.</p>
+                <Empty className="border border-border/70">
+                  <EmptyHeader>
+                    <EmptyMedia variant="icon">
+                      <Globe className="h-6 w-6 text-muted-foreground" />
+                    </EmptyMedia>
+                    <EmptyTitle>No worlds yet</EmptyTitle>
+                    <EmptyDescription>
+                      Create your first world to organize rooms in this universe.
+                    </EmptyDescription>
+                  </EmptyHeader>
+                  <EmptyContent>
+                    {universe.canEdit === true && (
+                      <Button variant="default" asChild>
+                        <Link href={`/admin/worlds/new?universeId=${id}`}>
+                          <Plus className="mr-2 h-4 w-4" />
+                          Create World
+                        </Link>
+                      </Button>
+                    )}
+                  </EmptyContent>
+                </Empty>
               ) : (
-                <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-                  {universe.worlds.map((world) => {
-                    const roomsCount = world._count.rooms ?? 0;
-                    const membersCount = world._count.members ?? 0;
-                    return (
-                      <Link
-                        key={world.id}
-                        href={`/admin/worlds/${world.id}`}
-                        className="block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+                {universe.worlds.map((world) => {
+                  const roomsCount = world._count.rooms ?? 0;
+                  const membersCount = world._count.members ?? 0;
+                  return (
+                    <Link
+                      key={world.id}
+                      href={`/admin/worlds/${world.id}`}
+                      className="block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+                    >
+                      <Card
+                        className={cn(
+                          'group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
+                          'hover:-translate-y-1 hover:shadow-lg',
+                        )}
                       >
+                        <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-blue-500/10 via-transparent to-purple-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
+
+                        <div className="relative flex h-full flex-col p-5">
+                          <div className="mb-4 flex items-start gap-3">
+                            {world.thumbnailUrl ? (
+                              <div className="relative h-16 w-16 flex-shrink-0 overflow-hidden rounded-lg border bg-muted">
+                                {/* eslint-disable-next-line @next/next/no-img-element */}
+                                <img
+                                  src={world.thumbnailUrl}
+                                  alt={world.name}
+                                  className="h-full w-full object-cover"
+                                />
+                              </div>
+                            ) : (
+                              <div className="flex h-16 w-16 flex-shrink-0 items-center justify-center rounded-lg border bg-muted text-lg font-semibold">
+                                {world.name?.charAt(0)?.toUpperCase() || '?'}
+                              </div>
+                            )}
+
+                            <div className="min-w-0 flex-1 space-y-1">
+                              <div className="flex items-start justify-between gap-2">
+                                <h3 className="truncate text-base font-semibold leading-tight">
+                                  {world.name}
+                                </h3>
+                              </div>
+                              <p className="truncate text-xs font-mono text-muted-foreground">
+                                {world.slug}
+                              </p>
+                            </div>
+                          </div>
+
+                          {world.description && (
+                            <p className="mb-3 line-clamp-2 text-sm text-muted-foreground">
+                              {world.description}
+                            </p>
+                          )}
+
+                          <div className="mt-auto flex items-center justify-between pt-3 text-xs text-muted-foreground">
+                            <div className="flex flex-col gap-1.5 min-h-[3rem]">
+                              {worldAnalytics[world.id] ? (
+                                <>
+                                  <div className="flex items-center gap-1.5">
+                                    <Activity className="h-3.5 w-3.5 text-muted-foreground" />
+                                    <span className="font-medium text-foreground/80">
+                                      {worldAnalytics[world.id].totalAccesses.toLocaleString()} accesses
+                                    </span>
+                                  </div>
+                                  <div className="flex items-center gap-1.5">
+                                    <Globe className="h-3.5 w-3.5 text-muted-foreground" />
+                                    <span className="text-muted-foreground">
+                                      {roomsCount} {roomsCount === 1 ? 'room' : 'rooms'} · {membersCount}{' '}
+                                      {membersCount === 1 ? 'member' : 'members'}
+                                    </span>
+                                  </div>
+                                  {(worldAnalytics[world.id].lastVisitedByUser || worldAnalytics[world.id].lastVisitedOverall) && (
+                                    <div className="flex flex-col gap-0.5 mt-0.5">
+                                      {worldAnalytics[world.id].lastVisitedByUser && (
+                                        <div className="text-[11px]">
+                                          <span className="text-muted-foreground/70">Last visited by you: </span>
+                                          <span className="font-medium text-foreground/80">
+                                            {formatTimeAgo(new Date(worldAnalytics[world.id].lastVisitedByUser.accessedAt))}
+                                          </span>
+                                        </div>
+                                      )}
+                                      {worldAnalytics[world.id].lastVisitedOverall && (
+                                        <div className="text-[11px]">
+                                          {worldAnalytics[world.id].lastVisitedByUser && 
+                                           worldAnalytics[world.id].lastVisitedByUser.accessedAt === worldAnalytics[world.id].lastVisitedOverall.accessedAt ? (
+                                            <span className="text-muted-foreground/70 italic">
+                                              You were the last visitor
+                                            </span>
+                                          ) : (
+                                            <>
+                                              <span className="text-muted-foreground/70">Most recent visitor: </span>
+                                              <span className="font-medium text-foreground/80">
+                                                {formatTimeAgo(new Date(worldAnalytics[world.id].lastVisitedOverall.accessedAt))}
+                                              </span>
+                                            </>
+                                          )}
+                                        </div>
+                                      )}
+                                    </div>
+                                  )}
+                                </>
+                              ) : (
+                                <>
+                                  <span className="flex items-center gap-1 font-medium text-foreground/80">
+                                    <Globe className="h-3 w-3" />
+                                    {universe.name}
+                                  </span>
+                                  <span className="line-clamp-1">
+                                    {roomsCount} {roomsCount === 1 ? 'room' : 'rooms'} · {membersCount}{' '}
+                                    {membersCount === 1 ? 'member' : 'members'}
+                                  </span>
+                                </>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-1 text-primary self-end">
+                              <Star className="h-4 w-4" aria-hidden="true" />
+                              <span className="text-xs font-medium">{world._count?.favorites ?? 0}</span>
+                            </div>
+                          </div>
+                        </div>
+                      </Card>
+                    </Link>
+                  );
+                })}
+              </div>
+              )}
+              </section>
+            ) : null}
+            </>
+          )}
+
+          {activeTab === 'analytics' && (
+            <>
+              {analyticsLoading ? (
+                <div className="flex items-center justify-center py-12">
+                  <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+                </div>
+              ) : analytics && analytics.recentActivity && analytics.recentActivity.length > 0 ? (
+                <div className="space-y-6">
+                  <div className="space-y-1">
+                    <h2 className="text-xl font-semibold tracking-tight">Recent Activity</h2>
+                    <p className="text-sm text-muted-foreground">
+                      Visitor activity and access history
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+                    {analytics.recentActivity.map((access: any) => {
+                      const userName = access.userName || access.userEmail || access.userUuid || 'Guest';
+                      const accessDate = new Date(access.accessedAt);
+                      const isClickable = !!access.userId;
+                      
+                      return (
                         <Card
+                          key={access.id}
                           className={cn(
                             'group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
                             'hover:-translate-y-1 hover:shadow-lg',
                           )}
                         >
-                          <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-blue-500/10 via-transparent to-purple-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
-
-                          <div className="relative flex h-full flex-col p-5">
-                            <div className="mb-4 flex items-start gap-3">
-                              {world.thumbnailUrl ? (
-                                <div className="relative h-16 w-16 flex-shrink-0 overflow-hidden rounded-lg border bg-muted">
-                                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                                  <img
-                                    src={world.thumbnailUrl}
-                                    alt={world.name}
-                                    className="h-full w-full object-cover"
-                                  />
-                                </div>
-                              ) : (
-                                <div className="flex h-16 w-16 flex-shrink-0 items-center justify-center rounded-lg border bg-muted text-lg font-semibold">
-                                  {world.name?.charAt(0)?.toUpperCase() || '?'}
-                                </div>
-                              )}
-
-                              <div className="min-w-0 flex-1 space-y-1">
-                                <div className="flex items-start justify-between gap-2">
-                                  <h3 className="truncate text-base font-semibold leading-tight">
-                                    {world.name}
-                                  </h3>
-                                </div>
-                                <p className="truncate text-xs font-mono text-muted-foreground">
-                                  {world.slug}
-                                </p>
-                              </div>
-                            </div>
-
-                            {world.description && (
-                              <p className="mb-3 line-clamp-2 text-sm text-muted-foreground">
-                                {world.description}
-                              </p>
-                            )}
-
-                            <div className="mt-auto flex items-center justify-between pt-3 text-xs text-muted-foreground">
-                              <div className="flex flex-col gap-1.5 min-h-[3rem]">
-                                {worldAnalytics[world.id] ? (
-                                  <>
-                                    <div className="flex items-center gap-1.5">
-                                      <Activity className="h-3.5 w-3.5 text-muted-foreground" />
-                                      <span className="font-medium text-foreground/80">
-                                        {worldAnalytics[world.id].totalAccesses.toLocaleString()} accesses
-                                      </span>
+                          <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-purple-500/10 via-transparent to-pink-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
+                          <CardContent className="relative flex h-full flex-col p-4">
+                            <div className="flex items-start justify-between gap-3 mb-3">
+                              <div className="min-w-0 flex-1 flex items-center gap-2">
+                                {isClickable ? (
+                                  <Link
+                                    href={`/admin/users/${access.userId}`}
+                                    className="block"
+                                    onClick={(e) => e.stopPropagation()}
+                                  >
+                                    <div className="text-sm font-medium text-primary hover:underline truncate">
+                                      {userName}
                                     </div>
-                                    <div className="flex items-center gap-1.5">
-                                      <Globe className="h-3.5 w-3.5 text-muted-foreground" />
-                                      <span className="text-muted-foreground">
-                                        {roomsCount} {roomsCount === 1 ? 'room' : 'rooms'} · {membersCount}{' '}
-                                        {membersCount === 1 ? 'member' : 'members'}
-                                      </span>
-                                    </div>
-                                    {(worldAnalytics[world.id].lastVisitedByUser || worldAnalytics[world.id].lastVisitedOverall) && (
-                                      <div className="flex flex-col gap-0.5 mt-0.5">
-                                        {worldAnalytics[world.id].lastVisitedByUser && (
-                                          <div className="text-[11px]">
-                                            <span className="text-muted-foreground/70">Last visited by you: </span>
-                                            <span className="font-medium text-foreground/80">
-                                              {formatTimeAgo(new Date(worldAnalytics[world.id].lastVisitedByUser.accessedAt))}
-                                            </span>
-                                          </div>
-                                        )}
-                                        {worldAnalytics[world.id].lastVisitedOverall && (
-                                          <div className="text-[11px]">
-                                            {worldAnalytics[world.id].lastVisitedByUser && 
-                                             worldAnalytics[world.id].lastVisitedByUser.accessedAt === worldAnalytics[world.id].lastVisitedOverall.accessedAt ? (
-                                              <span className="text-muted-foreground/70 italic">
-                                                You were the last visitor
-                                              </span>
-                                            ) : (
-                                              <>
-                                                <span className="text-muted-foreground/70">Most recent visitor: </span>
-                                                <span className="font-medium text-foreground/80">
-                                                  {formatTimeAgo(new Date(worldAnalytics[world.id].lastVisitedOverall.accessedAt))}
-                                                </span>
-                                              </>
-                                            )}
-                                          </div>
-                                        )}
-                                      </div>
-                                    )}
-                                  </>
+                                  </Link>
                                 ) : (
-                                  <>
-                                    <span className="flex items-center gap-1 font-medium text-foreground/80">
-                                      <Globe className="h-3 w-3" />
-                                      {universe.name}
-                                    </span>
-                                    <span className="line-clamp-1">
-                                      {roomsCount} {roomsCount === 1 ? 'room' : 'rooms'} · {membersCount}{' '}
-                                      {membersCount === 1 ? 'member' : 'members'}
-                                    </span>
-                                  </>
+                                  <div className="text-sm font-medium text-muted-foreground truncate">
+                                    {userName}
+                                  </div>
+                                )}
+                                {access.hasMembership && access.membershipTags.length > 0 ? (
+                                  <Badge variant="outline" className="text-xs flex-shrink-0">{access.membershipTags.join(', ')}</Badge>
+                                ) : access.isAuthenticated ? (
+                                  <Badge className="text-xs flex-shrink-0">Authenticated</Badge>
+                                ) : (
+                                  <Badge variant="secondary" className="text-xs flex-shrink-0">Guest</Badge>
                                 )}
                               </div>
-                              <div className="flex items-center gap-1 text-primary self-end">
-                                <Star className="h-4 w-4" aria-hidden="true" />
-                                <span className="text-xs font-medium">{world._count?.favorites ?? 0}</span>
+                              <div className="flex-shrink-0 text-xs text-muted-foreground">
+                                {formatTimeAgo(accessDate)}
                               </div>
                             </div>
-                          </div>
+
+                            <div className="grid grid-cols-2 gap-3 text-xs">
+                              <div className="flex items-center gap-2">
+                                <span className="text-muted-foreground">World:</span>
+                                <Link
+                                  href={`/admin/worlds/${access.world.id}`}
+                                  className="text-primary hover:underline truncate"
+                                  onClick={(e) => e.stopPropagation()}
+                                >
+                                  {access.world.name}
+                                </Link>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className="text-muted-foreground">Room:</span>
+                                <Link
+                                  href={`/admin/rooms/${access.room.id}`}
+                                  className="text-primary hover:underline truncate"
+                                  onClick={(e) => e.stopPropagation()}
+                                >
+                                  {access.room.name}
+                                </Link>
+                              </div>
+                            </div>
+                          </CardContent>
                         </Card>
-                      </Link>
-                    );
-                  })}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle>Analytics</CardTitle>
-            </CardHeader>
-            <CardContent>
-              {analyticsLoading ? (
-                <div className="flex items-center justify-center py-12">
-                  <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-                </div>
-              ) : analytics ? (
-                <div className="space-y-6">
-                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-                    <div className="rounded-lg border p-4">
-                      <div className="text-sm font-medium text-muted-foreground">Total Accesses</div>
-                      <div className="mt-1 text-2xl font-semibold">{analytics.totalAccesses || 0}</div>
-                    </div>
-                    <div className="rounded-lg border p-4">
-                      <div className="text-sm font-medium text-muted-foreground">Unique Users</div>
-                      <div className="mt-1 text-2xl font-semibold">{analytics.uniqueUsers || 0}</div>
-                    </div>
-                    <div className="rounded-lg border p-4">
-                      <div className="text-sm font-medium text-muted-foreground">Unique IPs</div>
-                      <div className="mt-1 text-2xl font-semibold">{analytics.uniqueIPs || 0}</div>
-                    </div>
-                    {analytics.mostActiveWorld && (
-                      <div className="rounded-lg border p-4">
-                        <div className="text-sm font-medium text-muted-foreground">Most Active World</div>
-                        <div className="mt-1 text-lg font-semibold">{analytics.mostActiveWorld.name}</div>
-                        <div className="text-xs text-muted-foreground">{analytics.mostActiveWorld.accessCount} accesses</div>
-                      </div>
-                    )}
+                      );
+                    })}
                   </div>
-
-                  {analytics.recentActivity && analytics.recentActivity.length > 0 && (
-                    <div>
-                      <h3 className="text-sm font-medium mb-3">Recent Activity</h3>
-                      <div className="rounded-md border">
-                        <Table>
-                          <TableHeader>
-                            <TableRow>
-                              <TableHead>Date</TableHead>
-                              <TableHead>User</TableHead>
-                              <TableHead>World / Room</TableHead>
-                              <TableHead>Status</TableHead>
-                            </TableRow>
-                          </TableHeader>
-                          <TableBody>
-                            {analytics.recentActivity.slice(0, 10).map((access: any) => (
-                              <TableRow key={access.id}>
-                                <TableCell className="text-sm">
-                                  {new Date(access.accessedAt).toLocaleString()}
-                                </TableCell>
-                                <TableCell className="text-sm">
-                                  {access.userId ? (
-                                    <Link
-                                      href={`/admin/users/${access.userId}`}
-                                      className="text-primary hover:underline"
-                                    >
-                                      {access.userName || access.userEmail || access.userUuid || 'Guest'}
-                                    </Link>
-                                  ) : (
-                                    access.userName || access.userEmail || access.userUuid || 'Guest'
-                                  )}
-                                </TableCell>
-                                <TableCell className="text-sm">
-                                  <Link href={`/admin/worlds/${access.world.id}`} className="text-primary hover:underline">
-                                    {access.world.name}
-                                  </Link>
-                                  <span className="text-muted-foreground mx-1">/</span>
-                                  <Link href={`/admin/rooms/${access.room.id}`} className="text-primary hover:underline">
-                                    {access.room.name}
-                                  </Link>
-                                </TableCell>
-                                <TableCell>
-                                  {access.hasMembership && access.membershipTags.length > 0 ? (
-                                    <Badge variant="outline">{access.membershipTags.join(', ')}</Badge>
-                                  ) : access.isAuthenticated ? (
-                                    <Badge>Authenticated</Badge>
-                                  ) : (
-                                    <Badge variant="secondary">Guest</Badge>
-                                  )}
-                                </TableCell>
-                              </TableRow>
-                            ))}
-                          </TableBody>
-                        </Table>
+                  {analytics.pagination && analytics.pagination.totalPages > 1 && (
+                    <div className="flex items-center justify-between">
+                      <div className="text-sm text-muted-foreground">
+                        Showing {(analytics.pagination.page - 1) * analytics.pagination.limit + 1} to {Math.min(analytics.pagination.page * analytics.pagination.limit, analytics.pagination.total)} of {analytics.pagination.total} visitors
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setVisitorsPage(prev => Math.max(1, prev - 1))}
+                          disabled={visitorsPage === 1}
+                        >
+                          <ChevronLeft className="h-4 w-4 mr-1" />
+                          Previous
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setVisitorsPage(prev => prev + 1)}
+                          disabled={visitorsPage >= (analytics.pagination?.totalPages || 1)}
+                        >
+                          Next
+                          <ChevronRight className="h-4 w-4 ml-1" />
+                        </Button>
                       </div>
                     </div>
                   )}
                 </div>
               ) : (
-                <p className="text-sm text-muted-foreground text-center py-12">No analytics data available.</p>
+                <Empty className="border border-border/70">
+                  <EmptyHeader>
+                    <EmptyMedia variant="icon">
+                      <UsersIcon className="h-6 w-6 text-muted-foreground" />
+                    </EmptyMedia>
+                    <EmptyTitle>No visitors yet</EmptyTitle>
+                    <EmptyDescription>
+                      Visitor activity will appear here once people start accessing this universe.
+                    </EmptyDescription>
+                  </EmptyHeader>
+                </Empty>
               )}
-            </CardContent>
-          </Card>
+            </>
+          )}
         </>
       )}
 
