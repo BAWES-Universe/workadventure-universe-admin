@@ -109,6 +109,7 @@ export default function WorldDetailPage() {
   const [analyticsLoading, setAnalyticsLoading] = useState(true);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [currentUser, setCurrentUser] = useState<any>(null);
   const [activeTab, setActiveTab] = useState<'details' | 'analytics' | 'members'>('details');
   const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
   const [visitorsPage, setVisitorsPage] = useState(1);
@@ -221,7 +222,10 @@ export default function WorldDetailPage() {
       const response = await authenticatedFetch('/api/auth/me');
       if (!response.ok) {
         router.push('/admin/login');
+        return;
       }
+      const data = await response.json();
+      setCurrentUser(data.user);
     } catch (err) {
       router.push('/admin/login');
     }
@@ -365,7 +369,17 @@ export default function WorldDetailPage() {
       </nav>
 
       <div className="space-y-1">
-        <h1 className="text-4xl font-bold tracking-tight">{world.name}</h1>
+        <div className="flex items-center gap-3">
+          <h1 className="text-4xl font-bold tracking-tight">{world.name}</h1>
+          <div className="flex items-center gap-2">
+            {world.canEdit === true && (
+              <Badge variant={world.isPublic ? 'default' : 'secondary'}>
+                {world.isPublic ? 'Public' : 'Private'}
+              </Badge>
+            )}
+            {world.featured && <Badge variant="outline">Featured</Badge>}
+          </div>
+        </div>
         <p className="text-muted-foreground">
           In <Link href={`/admin/universes/${world.universe.id}`} className="text-primary hover:underline">{world.universe.name}</Link>
         </p>
