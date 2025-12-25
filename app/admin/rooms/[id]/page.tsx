@@ -617,7 +617,7 @@ export default function RoomDetailPage() {
           <div className="w-full">
             {isInCurrentRoom ? (
               <div className="flex items-center justify-center gap-2 rounded-lg border border-primary/20 bg-primary/5 px-4 py-3">
-                <div className="flex h-2 w-2 rounded-full bg-primary animate-pulse" />
+                <div className="flex h-2 w-2 rounded-full bg-green-500 animate-pulse" />
                 <span className="text-sm font-medium text-foreground">You are currently in this room</span>
               </div>
             ) : (
