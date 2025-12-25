@@ -523,7 +523,17 @@ export default function WorldDetailPage() {
             <>
               <Card>
                 <CardHeader>
-                  <CardTitle>Details</CardTitle>
+                  <div className="flex items-center justify-between">
+                    <CardTitle>Details</CardTitle>
+                    {analytics && (
+                      <div className="flex items-center gap-1.5 text-sm">
+                        <Activity className="h-4 w-4 text-muted-foreground" />
+                        <span className="font-medium text-foreground/80">
+                          {analytics.totalAccesses?.toLocaleString() || 0} {analytics.totalAccesses === 1 ? 'access' : 'accesses'}
+                        </span>
+                      </div>
+                    )}
+                  </div>
                 </CardHeader>
                 <CardContent>
                   <dl className="grid grid-cols-1 gap-6 sm:grid-cols-2">
@@ -702,13 +712,6 @@ export default function WorldDetailPage() {
                 </div>
               ) : analytics ? (
                 <div className="space-y-6">
-                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-                    <div className="rounded-lg border p-4">
-                      <div className="text-sm font-medium text-muted-foreground">Total Accesses</div>
-                      <div className="mt-1 text-2xl font-semibold">{analytics.totalAccesses || 0}</div>
-                    </div>
-                  </div>
-
                   {analytics.recentActivity && analytics.recentActivity.length > 0 && (
                     <div>
                       <h3 className="text-sm font-medium mb-3">Recent Activity</h3>

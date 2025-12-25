@@ -330,14 +330,29 @@ export default function UniverseDetailPage() {
           <div className="flex items-center gap-3">
             <h1 className="text-4xl font-bold tracking-tight">{universe.name}</h1>
             <div className="flex items-center gap-2">
-              <Badge variant={universe.isPublic ? 'default' : 'secondary'}>
-                {universe.isPublic ? 'Public' : 'Private'}
-              </Badge>
+              {currentUser && currentUser.id === universe.ownerId && (
+                <Badge variant={universe.isPublic ? 'default' : 'secondary'}>
+                  {universe.isPublic ? 'Public' : 'Private'}
+                </Badge>
+              )}
               {universe.featured && <Badge variant="outline">Featured</Badge>}
             </div>
           </div>
-          <p className="text-muted-foreground">
-            Slug: <code className="bg-muted px-1.5 py-0.5 rounded text-sm">{universe.slug}</code>
+          <p className="text-muted-foreground flex items-center gap-3">
+            {analytics && (
+              <>
+                <span className="flex items-center gap-1.5 text-sm">
+                  <Activity className="h-4 w-4 text-muted-foreground" />
+                  <span className="font-medium text-foreground/80">
+                    {analytics.totalAccesses?.toLocaleString() || 0} {analytics.totalAccesses === 1 ? 'access' : 'accesses'}
+                  </span>
+                </span>
+                <span className="text-muted-foreground">•</span>
+              </>
+            )}
+            <span>
+              Slug: <code className="bg-muted px-1.5 py-0.5 rounded text-sm">{universe.slug}</code>
+            </span>
           </p>
         </div>
         {!isEditing && universe.canEdit === true && (
@@ -698,17 +713,6 @@ export default function UniverseDetailPage() {
               </div>
             ) : analytics ? (
               <div className="space-y-6">
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-                  <Card className={cn(
-                    'relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm',
-                  )}>
-                    <CardContent className="relative p-5">
-                      <div className="text-sm font-medium text-muted-foreground mb-1">Total Accesses</div>
-                      <div className="text-3xl font-bold">{analytics.totalAccesses || 0}</div>
-                    </CardContent>
-                  </Card>
-                </div>
-
                 {analytics.recentActivity && analytics.recentActivity.length > 0 && (
                   <div>
                     <h3 className="text-sm font-medium mb-3">Recent Activity</h3>

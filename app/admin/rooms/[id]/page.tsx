@@ -30,7 +30,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { ChevronRight, AlertCircle, Loader2, Edit, Trash2, Navigation, CheckCircle2, Star } from 'lucide-react';
+import { ChevronRight, AlertCircle, Loader2, Edit, Trash2, Navigation, CheckCircle2, Star, Activity } from 'lucide-react';
 
 interface Room {
   id: string;
@@ -570,7 +570,17 @@ export default function RoomDetailPage() {
         <>
           <Card>
             <CardHeader>
-              <CardTitle>Details</CardTitle>
+              <div className="flex items-center justify-between">
+                <CardTitle>Details</CardTitle>
+                {analytics && (
+                  <div className="flex items-center gap-1.5 text-sm">
+                    <Activity className="h-4 w-4 text-muted-foreground" />
+                    <span className="font-medium text-foreground/80">
+                      {analytics.totalAccesses?.toLocaleString() || 0} {analytics.totalAccesses === 1 ? 'access' : 'accesses'}
+                    </span>
+                  </div>
+                )}
+              </div>
             </CardHeader>
             <CardContent>
               <dl className="grid grid-cols-1 gap-6 sm:grid-cols-2">
@@ -621,21 +631,15 @@ export default function RoomDetailPage() {
                 </div>
               ) : analytics ? (
                 <div className="space-y-6">
-                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                  {peakHour !== null && (
                     <div className="rounded-lg border p-4">
-                      <div className="text-sm font-medium text-muted-foreground">Total Accesses</div>
-                      <div className="mt-1 text-2xl font-semibold">{analytics.totalAccesses || 0}</div>
-                    </div>
-                    {peakHour !== null && (
-                      <div className="rounded-lg border p-4">
-                        <div className="text-sm font-medium text-muted-foreground">Peak Hour</div>
-                        <div className="mt-1 text-lg font-semibold">
-                          {peakHour === 0 ? '12:00 AM' : peakHour < 12 ? `${peakHour}:00 AM` : peakHour === 12 ? '12:00 PM' : `${peakHour - 12}:00 PM`}
-                        </div>
-                        <div className="text-xs text-muted-foreground">{peakCount} accesses</div>
+                      <div className="text-sm font-medium text-muted-foreground">Peak Hour</div>
+                      <div className="mt-1 text-lg font-semibold">
+                        {peakHour === 0 ? '12:00 AM' : peakHour < 12 ? `${peakHour}:00 AM` : peakHour === 12 ? '12:00 PM' : `${peakHour - 12}:00 PM`}
                       </div>
-                    )}
-                  </div>
+                      <div className="text-xs text-muted-foreground">{peakCount} accesses</div>
+                    </div>
+                  )}
 
                   {analytics.recentActivity && analytics.recentActivity.length > 0 && (
                     <div>
