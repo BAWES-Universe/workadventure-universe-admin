@@ -448,16 +448,10 @@ export default function RoomDetailPage() {
               </Button>
             )}
             {room.canEdit !== false && (
-              <>
-                <Button variant="outline" onClick={() => setIsEditing(true)}>
-                  <Edit className="mr-2 h-4 w-4" />
-                  Edit
-                </Button>
-                <Button variant="destructive" onClick={() => setDeleteDialogOpen(true)}>
-                  <Trash2 className="mr-2 h-4 w-4" />
-                  Delete
-                </Button>
-              </>
+              <Button variant="outline" onClick={() => setIsEditing(true)}>
+                <Edit className="mr-2 h-4 w-4" />
+                Edit
+              </Button>
             )}
           </div>
         )}
@@ -474,8 +468,18 @@ export default function RoomDetailPage() {
       {isEditing ? (
         <Card>
           <CardHeader>
-            <CardTitle>Edit Room</CardTitle>
-            <CardDescription>Update the room details below.</CardDescription>
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle>Edit Room</CardTitle>
+                <CardDescription>Update the room details below.</CardDescription>
+              </div>
+              {room.canEdit !== false && (
+                <Button variant="destructive" onClick={() => setDeleteDialogOpen(true)}>
+                  <Trash2 className="mr-2 h-4 w-4" />
+                  Delete
+                </Button>
+              )}
+            </div>
           </CardHeader>
           <CardContent className="space-y-6">
             <div className="space-y-2">

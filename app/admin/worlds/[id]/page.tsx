@@ -360,10 +360,6 @@ export default function WorldDetailPage() {
               <Edit className="mr-2 h-4 w-4" />
               Edit
             </Button>
-            <Button variant="destructive" onClick={() => setDeleteDialogOpen(true)}>
-              <Trash2 className="mr-2 h-4 w-4" />
-              Delete
-            </Button>
           </div>
         )}
       </div>
@@ -379,8 +375,18 @@ export default function WorldDetailPage() {
       {isEditing ? (
         <Card>
           <CardHeader>
-            <CardTitle>Edit World</CardTitle>
-            <CardDescription>Update the world details below.</CardDescription>
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle>Edit World</CardTitle>
+                <CardDescription>Update the world details below.</CardDescription>
+              </div>
+              {world.canEdit === true && (
+                <Button variant="destructive" onClick={() => setDeleteDialogOpen(true)}>
+                  <Trash2 className="mr-2 h-4 w-4" />
+                  Delete
+                </Button>
+              )}
+            </div>
           </CardHeader>
           <CardContent className="space-y-6">
             <div className="space-y-2">

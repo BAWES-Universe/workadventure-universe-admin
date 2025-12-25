@@ -332,10 +332,6 @@ export default function UniverseDetailPage() {
               <Edit className="mr-2 h-4 w-4" />
               Edit
             </Button>
-            <Button variant="destructive" onClick={() => setDeleteDialogOpen(true)}>
-              <Trash2 className="mr-2 h-4 w-4" />
-              Delete
-            </Button>
           </div>
         )}
       </div>
@@ -351,8 +347,18 @@ export default function UniverseDetailPage() {
       {isEditing ? (
         <Card>
           <CardHeader>
-            <CardTitle>Edit Universe</CardTitle>
-            <CardDescription>Update the universe details below.</CardDescription>
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle>Edit Universe</CardTitle>
+                <CardDescription>Update the universe details below.</CardDescription>
+              </div>
+              {universe.canEdit === true && (
+                <Button variant="destructive" onClick={() => setDeleteDialogOpen(true)}>
+                  <Trash2 className="mr-2 h-4 w-4" />
+                  Delete
+                </Button>
+              )}
+            </div>
           </CardHeader>
           <CardContent className="space-y-6">
             <div className="space-y-2">
