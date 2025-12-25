@@ -8,7 +8,7 @@ const Empty = React.forwardRef<
   <div
     ref={ref}
     className={cn(
-      "flex min-h-[400px] flex-col items-center justify-center rounded-lg p-8 text-center",
+      "flex min-h-[300px] flex-col items-center justify-center rounded-lg py-4 px-8 text-center",
       className
     )}
     {...props}
