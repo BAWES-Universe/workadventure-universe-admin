@@ -29,8 +29,16 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { ChevronRight, AlertCircle, Loader2, Plus, Edit, Trash2, Users, MapPin, Star, Globe, Home, Activity, Clock } from 'lucide-react';
+import { ChevronRight, AlertCircle, Loader2, Plus, Edit, Trash2, Users, MapPin, Star, Globe, Home, Activity, Clock, ChevronLeft } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from '@/components/ui/empty';
 import InviteMemberDialog from '../../components/invite-member-dialog';
 import MemberList from '../../components/member-list';
 
@@ -103,6 +111,8 @@ export default function WorldDetailPage() {
   const [deleting, setDeleting] = useState(false);
   const [activeTab, setActiveTab] = useState<'details' | 'analytics' | 'members'>('details');
   const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
+  const [visitorsPage, setVisitorsPage] = useState(1);
+  const visitorsPerPage = 10;
   const [roomAnalytics, setRoomAnalytics] = useState<Record<string, { totalAccesses: number; peakHour: number | null; lastVisitedByUser: { accessedAt: string; userId?: string | null; userUuid?: string | null } | null; lastVisitedOverall: { accessedAt: string; userId?: string | null; userUuid?: string | null } | null }>>({});
   
   const [formData, setFormData] = useState({
@@ -117,8 +127,21 @@ export default function WorldDetailPage() {
   useEffect(() => {
     checkAuth();
     fetchWorld();
-    fetchAnalytics();
   }, [id]);
+
+  useEffect(() => {
+    if (world) {
+      // Fetch analytics on initial load to show totalAccesses count
+      fetchAnalytics(1);
+    }
+  }, [world, id]);
+
+  useEffect(() => {
+    if (activeTab === 'analytics' && world) {
+      // Fetch analytics when switching to analytics tab or changing page
+      fetchAnalytics(visitorsPage);
+    }
+  }, [visitorsPage, activeTab, world]);
 
   useEffect(() => {
     async function fetchRoomAnalytics() {
@@ -235,11 +258,11 @@ export default function WorldDetailPage() {
     }
   }
 
-  async function fetchAnalytics() {
+  async function fetchAnalytics(page: number = 1) {
     try {
       setAnalyticsLoading(true);
       const { authenticatedFetch } = await import('@/lib/client-auth');
-      const response = await authenticatedFetch(`/api/admin/analytics/worlds/${id}`);
+      const response = await authenticatedFetch(`/api/admin/analytics/worlds/${id}?page=${page}&limit=${visitorsPerPage}`);
       if (response.ok) {
         const data = await response.json();
         setAnalytics(data);
@@ -341,27 +364,35 @@ export default function WorldDetailPage() {
         <span className="text-foreground">{world.name}</span>
       </nav>
 
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div className="space-y-1">
-          <h1 className="text-4xl font-bold tracking-tight">{world.name}</h1>
-          <p className="text-muted-foreground">
-            In <Link href={`/admin/universes/${world.universe.id}`} className="text-primary hover:underline">{world.universe.name}</Link> • Slug: <code className="bg-muted px-1.5 py-0.5 rounded text-sm">{world.slug}</code>
+      <div className="space-y-1">
+        <h1 className="text-4xl font-bold tracking-tight">{world.name}</h1>
+        <p className="text-muted-foreground">
+          In <Link href={`/admin/universes/${world.universe.id}`} className="text-primary hover:underline">{world.universe.name}</Link>
+        </p>
+        <div className="flex items-center justify-between">
+          <p className="text-muted-foreground flex items-center gap-3">
+            {analytics && (
+              <>
+                <span className="flex items-center gap-1.5 text-sm">
+                  <Activity className="h-4 w-4 text-muted-foreground" />
+                  <span className="font-medium text-foreground/80">
+                    {analytics.totalAccesses?.toLocaleString() || 0} {analytics.totalAccesses === 1 ? 'access' : 'accesses'}
+                  </span>
+                </span>
+                <span className="text-muted-foreground">•</span>
+              </>
+            )}
+            <span>
+              Slug: <code className="bg-muted px-1.5 py-0.5 rounded text-sm">{world.slug}</code>
+            </span>
           </p>
-        </div>
-        {!isEditing && world.canEdit === true && (
-          <div className="flex flex-wrap gap-2">
-            <Button variant="default" asChild>
-              <Link href={`/admin/rooms/new?worldId=${id}`}>
-                <Plus className="mr-2 h-4 w-4" />
-                Create Room
-              </Link>
-            </Button>
+          {!isEditing && world.canEdit === true && (
             <Button variant="outline" onClick={() => setIsEditing(true)}>
               <Edit className="mr-2 h-4 w-4" />
               Edit
             </Button>
-          </div>
-        )}
+          )}
+        </div>
       </div>
 
       {error && (
@@ -482,7 +513,7 @@ export default function WorldDetailPage() {
       ) : (
         <>
           {/* Tabs */}
-          <div className="border-b">
+          <div>
             <nav className="flex space-x-8">
               <button
                 onClick={() => setActiveTab('details')}
@@ -502,7 +533,7 @@ export default function WorldDetailPage() {
                     : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
                 }`}
               >
-                Analytics
+                Visitors
               </button>
               <button
                 onClick={() => setActiveTab('members')}
@@ -521,67 +552,65 @@ export default function WorldDetailPage() {
           {/* Tab Content */}
           {activeTab === 'details' && (
             <>
-              <Card>
-                <CardHeader>
-                  <div className="flex items-center justify-between">
-                    <CardTitle>Details</CardTitle>
-                    {analytics && (
-                      <div className="flex items-center gap-1.5 text-sm">
-                        <Activity className="h-4 w-4 text-muted-foreground" />
-                        <span className="font-medium text-foreground/80">
-                          {analytics.totalAccesses?.toLocaleString() || 0} {analytics.totalAccesses === 1 ? 'access' : 'accesses'}
-                        </span>
-                      </div>
-                    )}
+              <section className="space-y-3">
+                {world.description && (
+                  <div>
+                    <h3 className="text-xl font-semibold mb-2">About this World</h3>
+                    <div className="text-sm text-foreground whitespace-pre-line">
+                      {world.description}
+                    </div>
                   </div>
-                </CardHeader>
-                <CardContent>
-                  <dl className="grid grid-cols-1 gap-6 sm:grid-cols-2">
+                )}
+                {!world.description && (
+                  <div>
+                    <h3 className="text-xl font-semibold mb-2">About this World</h3>
+                  </div>
+                )}
+                {world.thumbnailUrl && (
+                  <div>
+                    <div className="text-sm font-medium text-muted-foreground mb-1">Thumbnail</div>
                     <div>
-                      <dt className="text-sm font-medium text-muted-foreground">Description</dt>
-                      <dd className="mt-1 text-sm">{world.description || 'No description'}</dd>
+                      <img src={world.thumbnailUrl} alt={world.name} className="h-20 w-20 object-cover rounded" />
                     </div>
-                    <div>
-                      <dt className="text-sm font-medium text-muted-foreground">Status</dt>
-                      <dd className="mt-1">
-                        <div className="flex items-center gap-2">
-                          <Badge variant={world.isPublic ? 'default' : 'secondary'}>
-                            {world.isPublic ? 'Public' : 'Private'}
-                          </Badge>
-                          {world.featured && <Badge variant="outline">Featured</Badge>}
-                        </div>
-                      </dd>
-                    </div>
-                    {world.thumbnailUrl && (
-                      <div className="sm:col-span-2">
-                        <dt className="text-sm font-medium text-muted-foreground">Thumbnail</dt>
-                        <dd className="mt-1">
-                          <img src={world.thumbnailUrl} alt={world.name} className="h-20 w-20 object-cover rounded" />
-                        </dd>
-                      </div>
-                    )}
-                  </dl>
-                </CardContent>
-              </Card>
+                  </div>
+                )}
+              </section>
 
-              <Card>
-                <CardHeader>
-                  <div className="flex items-center justify-between">
-                    <CardTitle>Rooms ({world.rooms.length})</CardTitle>
-                    {world.canEdit === true && (
-                      <Button variant="outline" size="sm" asChild>
-                        <Link href={`/admin/rooms/new?worldId=${id}`}>
-                          <Plus className="mr-2 h-4 w-4" />
-                          Add Room
-                        </Link>
-                      </Button>
-                    )}
-                  </div>
-                </CardHeader>
-                <CardContent>
-                  {world.rooms.length === 0 ? (
-                    <p className="text-sm text-muted-foreground">No rooms yet. Create one to get started.</p>
-                  ) : (
+              <section className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-xl font-semibold tracking-tight">Rooms ({world.rooms.length})</h2>
+                  {world.canEdit === true && (
+                    <Button variant="outline" size="sm" asChild>
+                      <Link href={`/admin/rooms/new?worldId=${id}`}>
+                        <Plus className="mr-2 h-4 w-4" />
+                        Create Room
+                      </Link>
+                    </Button>
+                  )}
+                </div>
+                {world.rooms.length === 0 ? (
+                  <Empty className="border border-border/70">
+                    <EmptyHeader>
+                      <EmptyMedia variant="icon">
+                        <MapPin className="h-6 w-6 text-muted-foreground" />
+                      </EmptyMedia>
+                      <EmptyTitle>No rooms yet</EmptyTitle>
+                      <EmptyDescription>
+                        Create your first room to get started.
+                      </EmptyDescription>
+                    </EmptyHeader>
+                    <EmptyContent>
+                      {world.canEdit === true && (
+                        <Button variant="default" asChild>
+                          <Link href={`/admin/rooms/new?worldId=${id}`}>
+                            <Plus className="mr-2 h-4 w-4" />
+                            Create Room
+                          </Link>
+                        </Button>
+                      )}
+                    </EmptyContent>
+                  </Empty>
+                ) : (
                     <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
                       {[...world.rooms].sort((a, b) => {
                         const aAccesses = roomAnalytics[a.id]?.totalAccesses ?? 0;
@@ -695,100 +724,145 @@ export default function WorldDetailPage() {
                       })}
                     </div>
                   )}
-                </CardContent>
-              </Card>
+              </section>
             </>
           )}
 
           {activeTab === 'analytics' && (
-            <Card>
-              <CardHeader>
-                <CardTitle>Analytics</CardTitle>
-              </CardHeader>
-            <CardContent>
+            <>
               {analyticsLoading ? (
                 <div className="flex items-center justify-center py-12">
                   <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
                 </div>
-              ) : analytics ? (
+              ) : analytics && analytics.recentActivity && analytics.recentActivity.length > 0 ? (
                 <div className="space-y-6">
-                  {analytics.recentActivity && analytics.recentActivity.length > 0 && (
-                    <div>
-                      <h3 className="text-sm font-medium mb-3">Recent Activity</h3>
-                      <div className="rounded-md border">
-                        <Table>
-                          <TableHeader>
-                            <TableRow>
-                              <TableHead>Date</TableHead>
-                              <TableHead>User</TableHead>
-                              <TableHead>Room</TableHead>
-                              <TableHead>Status</TableHead>
-                            </TableRow>
-                          </TableHeader>
-                          <TableBody>
-                            {analytics.recentActivity.slice(0, 10).map((access: any) => (
-                              <TableRow key={access.id}>
-                                <TableCell className="text-sm">
-                                  {new Date(access.accessedAt).toLocaleString()}
-                                </TableCell>
-                                <TableCell className="text-sm">
-                                  {access.userId ? (
-                                    <Link
-                                      href={`/admin/users/${access.userId}`}
-                                      className="text-primary hover:underline"
-                                    >
-                                      {access.userName || access.userEmail || access.userUuid || 'Guest'}
-                                    </Link>
-                                  ) : (
-                                    access.userName || access.userEmail || access.userUuid || 'Guest'
-                                  )}
-                                </TableCell>
-                                <TableCell className="text-sm">
-                                  <Link href={`/admin/rooms/${access.room.id}`} className="text-primary hover:underline">
-                                    {access.room.name}
+                  <div className="space-y-1">
+                    <h2 className="text-xl font-semibold tracking-tight">Recent Activity</h2>
+                    <p className="text-sm text-muted-foreground">
+                      Visitor activity and access history
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+                    {analytics.recentActivity.map((access: any) => {
+                      const userName = access.userName || access.userEmail || access.userUuid || 'Guest';
+                      const accessDate = new Date(access.accessedAt);
+                      const isClickable = !!access.userId;
+                      
+                      return (
+                        <Card
+                          key={access.id}
+                          className={cn(
+                            'group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
+                            'hover:-translate-y-1 hover:shadow-lg',
+                          )}
+                        >
+                          <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-purple-500/10 via-transparent to-pink-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
+                          <CardContent className="relative flex h-full flex-col p-4">
+                            <div className="flex items-start justify-between gap-3 mb-3">
+                              <div className="min-w-0 flex-1 flex items-center gap-2">
+                                {isClickable ? (
+                                  <Link
+                                    href={`/admin/users/${access.userId}`}
+                                    className="block"
+                                    onClick={(e) => e.stopPropagation()}
+                                  >
+                                    <div className="text-sm font-medium text-primary hover:underline truncate">
+                                      {userName}
+                                    </div>
                                   </Link>
-                                </TableCell>
-                                <TableCell>
-                                  {access.hasMembership && access.membershipTags.length > 0 ? (
-                                    <Badge variant="outline">{access.membershipTags.join(', ')}</Badge>
-                                  ) : access.isAuthenticated ? (
-                                    <Badge>Authenticated</Badge>
-                                  ) : (
-                                    <Badge variant="secondary">Guest</Badge>
-                                  )}
-                                </TableCell>
-                              </TableRow>
-                            ))}
-                          </TableBody>
-                        </Table>
+                                ) : (
+                                  <div className="text-sm font-medium text-muted-foreground truncate">
+                                    {userName}
+                                  </div>
+                                )}
+                                {access.hasMembership && access.membershipTags.length > 0 ? (
+                                  <Badge variant="outline" className="text-xs flex-shrink-0">{access.membershipTags.join(', ')}</Badge>
+                                ) : access.isAuthenticated ? (
+                                  <Badge className="text-xs flex-shrink-0">Authenticated</Badge>
+                                ) : (
+                                  <Badge variant="secondary" className="text-xs flex-shrink-0">Guest</Badge>
+                                )}
+                              </div>
+                              <div className="flex-shrink-0 text-xs text-muted-foreground">
+                                {formatTimeAgo(accessDate)}
+                              </div>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-3 text-xs">
+                              <div className="flex items-center gap-2">
+                                <span className="text-muted-foreground">Room:</span>
+                                <Link
+                                  href={`/admin/rooms/${access.room.id}`}
+                                  className="text-primary hover:underline truncate"
+                                  onClick={(e) => e.stopPropagation()}
+                                >
+                                  {access.room.name}
+                                </Link>
+                              </div>
+                            </div>
+                          </CardContent>
+                        </Card>
+                      );
+                    })}
+                  </div>
+                  {analytics.pagination && analytics.pagination.totalPages > 1 && (
+                    <div className="flex items-center justify-between">
+                      <div className="text-sm text-muted-foreground">
+                        Showing {(analytics.pagination.page - 1) * analytics.pagination.limit + 1} to {Math.min(analytics.pagination.page * analytics.pagination.limit, analytics.pagination.total)} of {analytics.pagination.total} visitors
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setVisitorsPage(prev => Math.max(1, prev - 1))}
+                          disabled={visitorsPage === 1}
+                        >
+                          <ChevronLeft className="h-4 w-4 mr-1" />
+                          Previous
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setVisitorsPage(prev => prev + 1)}
+                          disabled={visitorsPage >= (analytics.pagination?.totalPages || 1)}
+                        >
+                          Next
+                          <ChevronRight className="h-4 w-4 ml-1" />
+                        </Button>
                       </div>
                     </div>
                   )}
                 </div>
               ) : (
-                <p className="text-sm text-muted-foreground text-center py-12">No analytics data available.</p>
+                <Empty className="border border-border/70">
+                  <EmptyHeader>
+                    <EmptyMedia variant="icon">
+                      <Users className="h-6 w-6 text-muted-foreground" />
+                    </EmptyMedia>
+                    <EmptyTitle>No visitors yet</EmptyTitle>
+                    <EmptyDescription>
+                      Visitor activity will appear here once people start accessing rooms in this world.
+                    </EmptyDescription>
+                  </EmptyHeader>
+                  <EmptyContent />
+                </Empty>
               )}
-            </CardContent>
-          </Card>
+            </>
           )}
 
           {activeTab === 'members' && (
-            <Card>
-              <CardHeader>
-                <div className="flex items-center justify-between">
-                  <CardTitle>Members</CardTitle>
-                  {world.canEdit !== false && (
-                    <Button onClick={() => setInviteDialogOpen(true)}>
-                      <Plus className="mr-2 h-4 w-4" />
-                      Invite Member
-                    </Button>
-                  )}
-                </div>
-              </CardHeader>
-              <CardContent>
-                <MemberList worldId={id} onRefresh={fetchWorld} />
-              </CardContent>
-            </Card>
+            <section className="space-y-4">
+              <div className="flex items-center justify-between">
+                <h2 className="text-xl font-semibold tracking-tight">Members</h2>
+                {world.canEdit !== false && (
+                  <Button onClick={() => setInviteDialogOpen(true)}>
+                    <Plus className="mr-2 h-4 w-4" />
+                    Invite Member
+                  </Button>
+                )}
+              </div>
+              <MemberList worldId={id} onRefresh={fetchWorld} />
+            </section>
           )}
 
           <InviteMemberDialog

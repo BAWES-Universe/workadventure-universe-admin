@@ -25,6 +25,10 @@ export async function GET(
     }
     
     const { id } = await params;
+    const { searchParams } = new URL(request.url);
+    const page = parseInt(searchParams.get('page') || '1');
+    const limit = parseInt(searchParams.get('limit') || '50');
+    const skip = (page - 1) * limit;
     
     // Get total accesses for this world
     const totalAccesses = await prisma.roomAccess.count({
@@ -89,7 +93,7 @@ export async function GET(
       }
     }
     
-    // Get recent activity (last 20 accesses)
+    // Get recent activity with pagination
     const recentActivity = await prisma.roomAccess.findMany({
       where: { worldId: id },
       include: {
@@ -102,7 +106,13 @@ export async function GET(
         },
       },
       orderBy: { accessedAt: 'desc' },
-      take: 20,
+      skip,
+      take: limit,
+    });
+    
+    // Get total count for pagination
+    const totalRecentActivity = await prisma.roomAccess.count({
+      where: { worldId: id },
     });
     
     // Get last visited by current user (if session user exists)
@@ -172,6 +182,12 @@ export async function GET(
         room: access.room,
         playUri: access.playUri,
       })),
+      pagination: {
+        page,
+        limit,
+        total: totalRecentActivity,
+        totalPages: Math.ceil(totalRecentActivity / limit),
+      },
     });
   } catch (error) {
     console.error('Error fetching world analytics:', error);
