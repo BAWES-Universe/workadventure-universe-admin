@@ -475,7 +475,7 @@ export default function UniverseDetailPage() {
               </div>
             </div>
             {universe.description && (
-              <div className="text-sm text-foreground">
+              <div className="text-sm text-foreground whitespace-pre-line">
                 {universe.description}
               </div>
             )}
