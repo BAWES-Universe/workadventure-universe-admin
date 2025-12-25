@@ -15,7 +15,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
-import { ChevronRight, AlertCircle, Loader2, Globe, Users, Star, Ban, UserPlus, Activity, Home, Calendar } from 'lucide-react';
+import { ChevronRight, AlertCircle, Loader2, Globe, Users, Star, Ban, UserPlus, Activity, Home, Calendar, MapPin } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import InviteToWorldDialog from '../../components/invite-to-world-dialog';
 
@@ -97,6 +97,9 @@ export default function UserDetailPage() {
   const [worldsLoading, setWorldsLoading] = useState(false);
   const [universeAnalytics, setUniverseAnalytics] = useState<Record<string, { totalAccesses: number; lastVisitedByUser: any; lastVisitedOverall: any }>>({});
   const [worldAnalytics, setWorldAnalytics] = useState<Record<string, { totalAccesses: number; lastVisitedByUser: any; lastVisitedOverall: any }>>({});
+  const [activeTab, setActiveTab] = useState<'details' | 'owned-universes' | 'world-memberships' | 'starred-rooms' | 'access-history'>('details');
+  const [starredRooms, setStarredRooms] = useState<any[]>([]);
+  const [starredRoomsLoading, setStarredRoomsLoading] = useState(false);
 
   useEffect(() => {
     checkAuth();
@@ -116,6 +119,12 @@ export default function UserDetailPage() {
       fetchWorldAnalytics();
     }
   }, [user]);
+
+  useEffect(() => {
+    if (activeTab === 'starred-rooms' && user) {
+      fetchStarredRooms();
+    }
+  }, [activeTab, user]);
 
   async function checkAuth() {
     try {
@@ -286,6 +295,23 @@ export default function UserDetailPage() {
     }
   }
 
+  async function fetchStarredRooms() {
+    if (!user) return;
+    try {
+      setStarredRoomsLoading(true);
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch(`/api/admin/users/${id}/starred-rooms`);
+      if (response.ok) {
+        const data = await response.json();
+        setStarredRooms(data.rooms || []);
+      }
+    } catch (err) {
+      console.error('Failed to fetch starred rooms:', err);
+    } finally {
+      setStarredRoomsLoading(false);
+    }
+  }
+
   function formatTimeAgo(date: Date): string {
     const now = new Date();
     const diffMs = now.getTime() - date.getTime();
@@ -362,79 +388,104 @@ export default function UserDetailPage() {
         </Alert>
       )}
 
-      <Card>
-        <CardHeader>
-          <CardTitle>User Information</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <dl className="grid grid-cols-1 gap-6 sm:grid-cols-2">
-            <div>
-              <dt className="text-sm font-medium text-muted-foreground">Name</dt>
-              <dd className="mt-1 text-sm">{user.name || 'N/A'}</dd>
-            </div>
-            <div>
-              <dt className="text-sm font-medium text-muted-foreground">Email</dt>
-              <dd className="mt-1 text-sm">{user.email || 'N/A'}</dd>
-            </div>
-            <div>
-              <dt className="text-sm font-medium text-muted-foreground">Matrix Chat ID</dt>
-              <dd className="mt-1 text-sm font-mono text-xs">{user.matrixChatId || 'N/A'}</dd>
-            </div>
-            {isSuperAdmin && (
-              <div>
-                <dt className="text-sm font-medium text-muted-foreground">Last IP Address</dt>
-                <dd className="mt-1 text-sm font-mono text-xs">{user.lastIpAddress || 'N/A'}</dd>
-              </div>
-            )}
-            <div>
-              <dt className="text-sm font-medium text-muted-foreground">Created</dt>
-              <dd className="mt-1 text-sm">{new Date(user.createdAt).toLocaleString()}</dd>
-            </div>
-            <div>
-              <dt className="text-sm font-medium text-muted-foreground">Last Updated</dt>
-              <dd className="mt-1 text-sm">{new Date(user.updatedAt).toLocaleString()}</dd>
-            </div>
-          </dl>
-        </CardContent>
-      </Card>
-
-      <div className="grid grid-cols-2 gap-2 md:grid-cols-4 md:gap-4">
-        <Card>
-          <CardContent className="pt-6">
-            <div className="flex items-center">
-              <div className="flex-shrink-0">
-                <Star className="h-8 w-8 text-muted-foreground" />
-              </div>
-              <div className="ml-4 flex-1">
-                <p className="text-sm font-medium text-muted-foreground">Favorites</p>
-                <p className="text-2xl font-semibold">{user._count.favorites}</p>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardContent className="pt-6">
-            <div className="flex items-center">
-              <div className="flex-shrink-0">
-                <Ban className="h-8 w-8 text-muted-foreground" />
-              </div>
-              <div className="ml-4 flex-1">
-                <p className="text-sm font-medium text-muted-foreground">Bans</p>
-                <p className="text-2xl font-semibold">{user._count.bans}</p>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
+      {/* Tabs */}
+      <div>
+        <nav className="flex space-x-8">
+          <button
+            onClick={() => setActiveTab('details')}
+            className={`py-4 px-1 border-b-2 font-medium text-sm ${
+              activeTab === 'details'
+                ? 'border-primary text-primary'
+                : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
+            }`}
+          >
+            Details
+          </button>
+          <button
+            onClick={() => setActiveTab('owned-universes')}
+            className={`py-4 px-1 border-b-2 font-medium text-sm ${
+              activeTab === 'owned-universes'
+                ? 'border-primary text-primary'
+                : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
+            }`}
+          >
+            Universes
+          </button>
+          <button
+            onClick={() => setActiveTab('world-memberships')}
+            className={`py-4 px-1 border-b-2 font-medium text-sm ${
+              activeTab === 'world-memberships'
+                ? 'border-primary text-primary'
+                : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
+            }`}
+          >
+            Memberships
+          </button>
+          <button
+            onClick={() => setActiveTab('starred-rooms')}
+            className={`py-4 px-1 border-b-2 font-medium text-sm ${
+              activeTab === 'starred-rooms'
+                ? 'border-primary text-primary'
+                : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
+            }`}
+          >
+            Starred
+          </button>
+          <button
+            onClick={() => setActiveTab('access-history')}
+            className={`py-4 px-1 border-b-2 font-medium text-sm ${
+              activeTab === 'access-history'
+                ? 'border-primary text-primary'
+                : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
+            }`}
+          >
+            Accesses
+          </button>
+        </nav>
       </div>
 
-      {user.ownedUniverses.length > 0 && (
-        <section className="space-y-3">
-          <div className="space-y-1">
-            <h2 className="text-xl font-semibold tracking-tight">Owned Universes</h2>
-            <p className="text-sm text-muted-foreground">
-              Universes owned by this user
-            </p>
-          </div>
+      {/* Tab Content */}
+      {activeTab === 'details' && (
+        <>
+          <section className="space-y-4">
+            <dl className="grid grid-cols-1 gap-6 sm:grid-cols-2">
+              <div>
+                <dt className="text-sm font-medium text-muted-foreground">Email</dt>
+                <dd className="mt-1 text-sm">{user.email || 'N/A'}</dd>
+              </div>
+              <div>
+                <dt className="text-sm font-medium text-muted-foreground">Matrix Chat ID</dt>
+                <dd className="mt-1 text-sm font-mono text-xs">{user.matrixChatId || 'N/A'}</dd>
+              </div>
+              {isSuperAdmin && (
+                <div>
+                  <dt className="text-sm font-medium text-muted-foreground">Last IP Address</dt>
+                  <dd className="mt-1 text-sm font-mono text-xs">{user.lastIpAddress || 'N/A'}</dd>
+                </div>
+              )}
+              <div>
+                <dt className="text-sm font-medium text-muted-foreground">Created</dt>
+                <dd className="mt-1 text-sm">{new Date(user.createdAt).toLocaleString()}</dd>
+              </div>
+              <div>
+                <dt className="text-sm font-medium text-muted-foreground">Last Updated</dt>
+                <dd className="mt-1 text-sm">{new Date(user.updatedAt).toLocaleString()}</dd>
+              </div>
+            </dl>
+          </section>
+        </>
+      )}
+
+      {activeTab === 'owned-universes' && (
+        <>
+          {user.ownedUniverses.length > 0 ? (
+            <section className="space-y-4">
+              <div className="space-y-1">
+                <h2 className="text-xl font-semibold tracking-tight">Owned Universes</h2>
+                <p className="text-sm text-muted-foreground">
+                  Universes owned by this user
+                </p>
+              </div>
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
             {user.ownedUniverses.map((universe) => {
               return (
@@ -553,18 +604,34 @@ export default function UserDetailPage() {
                 </Link>
               );
             })}
-          </div>
-        </section>
+            </div>
+            </section>
+          ) : (
+            <section className="space-y-4">
+              <div className="space-y-1">
+                <h2 className="text-xl font-semibold tracking-tight">Owned Universes</h2>
+                <p className="text-sm text-muted-foreground">
+                  Universes owned by this user
+                </p>
+              </div>
+              <div className="rounded-lg border border-border/70 bg-gradient-to-br from-background via-background to-background py-12 text-center text-sm text-muted-foreground">
+                This user doesn't own any universes.
+              </div>
+            </section>
+          )}
+        </>
       )}
 
-      {user.worldMemberships.length > 0 && (
-        <section className="space-y-3">
-          <div className="space-y-1">
-            <h2 className="text-xl font-semibold tracking-tight">World Memberships</h2>
-            <p className="text-sm text-muted-foreground">
-              Worlds this user is a member of
-            </p>
-          </div>
+      {activeTab === 'world-memberships' && (
+        <>
+          {user.worldMemberships.length > 0 ? (
+            <section className="space-y-4">
+              <div className="space-y-1">
+                <h2 className="text-xl font-semibold tracking-tight">World Memberships</h2>
+                <p className="text-sm text-muted-foreground">
+                  Worlds this user is a member of
+                </p>
+              </div>
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
             {user.worldMemberships.map((membership) => {
               const roomsCount = membership.world._count?.rooms ?? 0;
@@ -716,40 +783,128 @@ export default function UserDetailPage() {
                 </Link>
               );
             })}
-          </div>
-        </section>
-      )}
-
-      {user.ownedUniverses.length === 0 && user.worldMemberships.length === 0 && (
-        <Card>
-          <CardContent className="py-12 text-center text-sm text-muted-foreground">
-            This user doesn't own any universes or have any world memberships.
-          </CardContent>
-        </Card>
-      )}
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Access History</CardTitle>
-          {accessHistory && (
-            <CardDescription>
-              {accessHistory.total} total accesses
-              {accessHistory.firstAccess && (
-                <> • First: {new Date(accessHistory.firstAccess).toLocaleDateString()}</>
-              )}
-              {accessHistory.lastAccess && (
-                <> • Last: {new Date(accessHistory.lastAccess).toLocaleDateString()}</>
-              )}
-            </CardDescription>
+            </div>
+            </section>
+          ) : (
+            <section className="space-y-4">
+              <div className="space-y-1">
+                <h2 className="text-xl font-semibold tracking-tight">World Memberships</h2>
+                <p className="text-sm text-muted-foreground">
+                  Worlds this user is a member of
+                </p>
+              </div>
+              <div className="rounded-lg border border-border/70 bg-gradient-to-br from-background via-background to-background py-12 text-center text-sm text-muted-foreground">
+                This user doesn't have any world memberships.
+              </div>
+            </section>
           )}
-        </CardHeader>
-        <CardContent>
-          {accessHistoryLoading ? (
+        </>
+      )}
+
+      {activeTab === 'starred-rooms' && (
+        <>
+          {starredRoomsLoading ? (
             <div className="flex items-center justify-center py-12">
               <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
             </div>
-          ) : accessHistory && accessHistory.accesses.length > 0 ? (
-            <div className="space-y-4">
+          ) : starredRooms.length > 0 ? (
+            <section className="space-y-4">
+              <div className="space-y-1">
+                <h2 className="text-xl font-semibold tracking-tight">Starred Rooms</h2>
+                <p className="text-sm text-muted-foreground">
+                  Rooms this user has favorited
+                </p>
+              </div>
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+                {starredRooms.map((room: any) => (
+                  <Link
+                    key={room.id}
+                    href={`/admin/rooms/${room.id}`}
+                    className="block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+                  >
+                    <Card
+                      className={cn(
+                        'group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
+                        'hover:-translate-y-1 hover:shadow-lg',
+                      )}
+                    >
+                      <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-emerald-500/10 via-transparent to-sky-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
+                      <div className="relative flex h-full flex-col p-5">
+                        <div className="mb-3 flex items-start gap-3">
+                          <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full border bg-muted">
+                            <MapPin className="h-5 w-5 text-muted-foreground" />
+                          </div>
+                          <div className="min-w-0 flex-1 space-y-1">
+                            <h3 className="truncate text-base font-semibold leading-tight">
+                              {room.name}
+                            </h3>
+                            <p className="truncate text-xs text-muted-foreground">
+                              {room.world.universe.name} · {room.world.name}
+                            </p>
+                          </div>
+                        </div>
+                        {room.description && (
+                          <p className="mb-3 line-clamp-2 text-sm text-muted-foreground">
+                            {room.description}
+                          </p>
+                        )}
+                        <div className="mt-auto flex items-center justify-between pt-3 text-xs text-muted-foreground">
+                          <div className="flex items-center gap-1.5">
+                            <Calendar className="h-3.5 w-3.5 text-muted-foreground" />
+                            <span className="text-muted-foreground">
+                              Starred {new Date(room.favoritedAt).toLocaleDateString()}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-1 text-primary self-end">
+                            <Star className="h-4 w-4 fill-yellow-400 text-yellow-400" aria-hidden="true" />
+                            <span className="text-xs font-medium">{room.starCount}</span>
+                          </div>
+                        </div>
+                      </div>
+                    </Card>
+                  </Link>
+                ))}
+              </div>
+            </section>
+          ) : (
+            <section className="space-y-4">
+              <div className="space-y-1">
+                <h2 className="text-xl font-semibold tracking-tight">Starred Rooms</h2>
+                <p className="text-sm text-muted-foreground">
+                  Rooms this user has favorited
+                </p>
+              </div>
+              <div className="rounded-lg border border-border/70 bg-gradient-to-br from-background via-background to-background py-12 text-center text-sm text-muted-foreground">
+                This user hasn't starred any rooms.
+              </div>
+            </section>
+          )}
+        </>
+      )}
+
+      {activeTab === 'access-history' && (
+        <>
+          <section className="space-y-4">
+            <div className="space-y-1">
+              <h2 className="text-xl font-semibold tracking-tight">Access History</h2>
+              {accessHistory && (
+                <p className="text-sm text-muted-foreground">
+                  {accessHistory.total} total accesses
+                  {accessHistory.firstAccess && (
+                    <> • First: {new Date(accessHistory.firstAccess).toLocaleDateString()}</>
+                  )}
+                  {accessHistory.lastAccess && (
+                    <> • Last: {new Date(accessHistory.lastAccess).toLocaleDateString()}</>
+                  )}
+                </p>
+              )}
+            </div>
+            {accessHistoryLoading ? (
+              <div className="flex items-center justify-center py-12">
+                <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+              </div>
+            ) : accessHistory && accessHistory.accesses.length > 0 ? (
+              <div className="space-y-4">
               <div className="rounded-md border">
                 <Table>
                   <TableHeader>
@@ -830,12 +985,15 @@ export default function UserDetailPage() {
                   </Button>
                 </div>
               )}
-            </div>
-          ) : (
-            <p className="text-sm text-muted-foreground text-center py-12">No access history found.</p>
-          )}
-        </CardContent>
-      </Card>
+              </div>
+            ) : (
+              <div className="rounded-lg border border-border/70 bg-gradient-to-br from-background via-background to-background py-12 text-center text-sm text-muted-foreground">
+                No access history found.
+              </div>
+            )}
+          </section>
+        </>
+      )}
 
       <InviteToWorldDialog
         open={inviteDialogOpen}
