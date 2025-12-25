@@ -652,13 +652,6 @@ export default function UniverseDetailPage() {
                       <div className="text-sm font-medium text-muted-foreground">Total Accesses</div>
                       <div className="mt-1 text-2xl font-semibold">{analytics.totalAccesses || 0}</div>
                     </div>
-                    {analytics.mostActiveWorld && (
-                      <div className="rounded-lg border p-4">
-                        <div className="text-sm font-medium text-muted-foreground">Most Active World</div>
-                        <div className="mt-1 text-lg font-semibold">{analytics.mostActiveWorld.name}</div>
-                        <div className="text-xs text-muted-foreground">{analytics.mostActiveWorld.accessCount} accesses</div>
-                      </div>
-                    )}
                   </div>
 
                   {analytics.recentActivity && analytics.recentActivity.length > 0 && (
