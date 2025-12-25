@@ -616,10 +616,10 @@ export default function RoomDetailPage() {
           {/* Visit Button / Current Room Alert */}
           <div className="w-full">
             {isInCurrentRoom ? (
-              <Alert className="border-green-200 bg-green-50 dark:bg-green-950 dark:border-green-800">
-                <CheckCircle2 className="h-4 w-4 text-green-600 dark:text-green-400" />
-                <AlertTitle className="text-green-800 dark:text-green-200">You are currently in this room</AlertTitle>
-              </Alert>
+              <div className="flex items-center justify-center gap-2 rounded-lg border border-primary/20 bg-primary/5 px-4 py-3">
+                <div className="flex h-2 w-2 rounded-full bg-primary animate-pulse" />
+                <span className="text-sm font-medium text-foreground">You are currently in this room</span>
+              </div>
             ) : (
               <Button
                 variant="default"
