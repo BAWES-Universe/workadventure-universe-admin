@@ -15,8 +15,16 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
-import { ChevronRight, AlertCircle, Loader2, Globe, Users, Star, Ban, UserPlus, Activity, Home, Calendar, MapPin } from 'lucide-react';
+import { ChevronRight, AlertCircle, Loader2, Globe, Users, Star, Ban, UserPlus, Activity, Home, Calendar, MapPin, ChevronLeft } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from '@/components/ui/empty';
 import InviteToWorldDialog from '../../components/invite-to-world-dialog';
 
 interface WorldMembership {
@@ -884,114 +892,140 @@ export default function UserDetailPage() {
 
       {activeTab === 'access-history' && (
         <>
-          <section className="space-y-4">
-            <div className="space-y-1">
-              <h2 className="text-xl font-semibold tracking-tight">Access History</h2>
-              {accessHistory && (
-                <p className="text-sm text-muted-foreground">
-                  {accessHistory.total} total accesses
-                  {accessHistory.firstAccess && (
-                    <> • First: {new Date(accessHistory.firstAccess).toLocaleDateString()}</>
-                  )}
-                  {accessHistory.lastAccess && (
-                    <> • Last: {new Date(accessHistory.lastAccess).toLocaleDateString()}</>
-                  )}
-                </p>
-              )}
+          {accessHistoryLoading ? (
+            <div className="flex items-center justify-center py-12">
+              <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
             </div>
-            {accessHistoryLoading ? (
-              <div className="flex items-center justify-center py-12">
-                <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+          ) : accessHistory && accessHistory.accesses.length > 0 ? (
+            <div className="space-y-6">
+              <div className="space-y-1">
+                <h2 className="text-xl font-semibold tracking-tight">Access History</h2>
+                {accessHistory && (
+                  <p className="text-sm text-muted-foreground">
+                    {accessHistory.total} total accesses
+                    {accessHistory.firstAccess && (
+                      <> • First: {new Date(accessHistory.firstAccess).toLocaleDateString()}</>
+                    )}
+                    {accessHistory.lastAccess && (
+                      <> • Last: {new Date(accessHistory.lastAccess).toLocaleDateString()}</>
+                    )}
+                  </p>
+                )}
               </div>
-            ) : accessHistory && accessHistory.accesses.length > 0 ? (
-              <div className="space-y-4">
-              <div className="rounded-md border">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Date</TableHead>
-                      <TableHead>Universe / World / Room</TableHead>
-                      {isSuperAdmin && <TableHead>IP Address</TableHead>}
-                      <TableHead>Status</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {accessHistory.accesses.map((access: any) => (
-                      <TableRow key={access.id}>
-                        <TableCell className="text-sm">
-                          {new Date(access.accessedAt).toLocaleString()}
-                        </TableCell>
-                        <TableCell className="text-sm">
-                          <div className="flex flex-wrap items-center gap-1">
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+                {accessHistory.accesses.map((access: any) => {
+                  const accessDate = new Date(access.accessedAt);
+                  
+                  return (
+                    <Card
+                      key={access.id}
+                      className={cn(
+                        'group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
+                        'hover:-translate-y-1 hover:shadow-lg',
+                      )}
+                    >
+                      <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-purple-500/10 via-transparent to-pink-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
+                      <CardContent className="relative flex h-full flex-col p-4">
+                        <div className="flex items-start justify-between gap-3 mb-3">
+                          <div className="min-w-0 flex-1 flex items-center gap-2">
+                            {access.hasMembership && access.membershipTags.length > 0 ? (
+                              <Badge variant="outline" className="text-xs flex-shrink-0">{access.membershipTags.join(', ')}</Badge>
+                            ) : access.isAuthenticated ? (
+                              <Badge className="text-xs flex-shrink-0">Authenticated</Badge>
+                            ) : (
+                              <Badge variant="secondary" className="text-xs flex-shrink-0">Guest</Badge>
+                            )}
+                          </div>
+                          <div className="flex-shrink-0 text-xs text-muted-foreground">
+                            {formatTimeAgo(accessDate)}
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-3 text-xs">
+                          <div className="flex items-center gap-2">
+                            <span className="text-muted-foreground">Universe:</span>
                             <Link
                               href={`/admin/universes/${access.universe.id}`}
-                              className="text-primary hover:underline"
+                              className="text-primary hover:underline truncate"
+                              onClick={(e) => e.stopPropagation()}
                             >
                               {access.universe.name}
                             </Link>
-                            <span className="text-muted-foreground">/</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-muted-foreground">World:</span>
                             <Link
                               href={`/admin/worlds/${access.world.id}`}
-                              className="text-primary hover:underline"
+                              className="text-primary hover:underline truncate"
+                              onClick={(e) => e.stopPropagation()}
                             >
                               {access.world.name}
                             </Link>
-                            <span className="text-muted-foreground">/</span>
+                          </div>
+                          <div className="flex items-center gap-2 col-span-2">
+                            <span className="text-muted-foreground">Room:</span>
                             <Link
                               href={`/admin/rooms/${access.room.id}`}
-                              className="text-primary hover:underline"
+                              className="text-primary hover:underline truncate"
+                              onClick={(e) => e.stopPropagation()}
                             >
                               {access.room.name}
                             </Link>
                           </div>
-                        </TableCell>
-                        {isSuperAdmin && (
-                          <TableCell className="text-sm font-mono text-muted-foreground">
+                        </div>
+
+                        {isSuperAdmin && access.ipAddress && (
+                          <div className="mt-2 text-xs text-muted-foreground font-mono">
                             {access.ipAddress}
-                          </TableCell>
+                          </div>
                         )}
-                        <TableCell>
-                          {access.hasMembership && access.membershipTags.length > 0 ? (
-                            <Badge variant="outline">{access.membershipTags.join(', ')}</Badge>
-                          ) : access.isAuthenticated ? (
-                            <Badge>Authenticated</Badge>
-                          ) : (
-                            <Badge variant="secondary">Guest</Badge>
-                          )}
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
+                      </CardContent>
+                    </Card>
+                  );
+                })}
               </div>
               {accessHistory.totalPages > 1 && (
                 <div className="flex items-center justify-between">
-                  <Button
-                    variant="outline"
-                    onClick={() => setAccessHistoryPage(p => Math.max(1, p - 1))}
-                    disabled={accessHistoryPage === 1}
-                  >
-                    Previous
-                  </Button>
-                  <span className="text-sm text-muted-foreground">
-                    Page {accessHistoryPage} of {accessHistory.totalPages}
-                  </span>
-                  <Button
-                    variant="outline"
-                    onClick={() => setAccessHistoryPage(p => Math.min(accessHistory.totalPages, p + 1))}
-                    disabled={accessHistoryPage >= accessHistory.totalPages}
-                  >
-                    Next
-                  </Button>
+                  <div className="text-sm text-muted-foreground">
+                    Showing {(accessHistory.page - 1) * accessHistory.limit + 1} to {Math.min(accessHistory.page * accessHistory.limit, accessHistory.total)} of {accessHistory.total} accesses
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setAccessHistoryPage(prev => Math.max(1, prev - 1))}
+                      disabled={accessHistoryPage === 1}
+                    >
+                      <ChevronLeft className="h-4 w-4 mr-1" />
+                      Previous
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setAccessHistoryPage(prev => prev + 1)}
+                      disabled={accessHistoryPage >= (accessHistory.totalPages || 1)}
+                    >
+                      Next
+                      <ChevronRight className="h-4 w-4 ml-1" />
+                    </Button>
+                  </div>
                 </div>
               )}
-              </div>
-            ) : (
-              <div className="rounded-lg border border-border/70 bg-gradient-to-br from-background via-background to-background py-12 text-center text-sm text-muted-foreground">
-                No access history found.
-              </div>
-            )}
-          </section>
+            </div>
+          ) : (
+            <Empty className="border border-border/70">
+              <EmptyHeader>
+                <EmptyMedia variant="icon">
+                  <Activity className="h-6 w-6 text-muted-foreground" />
+                </EmptyMedia>
+                <EmptyTitle>No access history</EmptyTitle>
+                <EmptyDescription>
+                  Access history will appear here once this user starts accessing rooms.
+                </EmptyDescription>
+              </EmptyHeader>
+              <EmptyContent />
+            </Empty>
+          )}
         </>
       )}
 
