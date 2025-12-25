@@ -29,7 +29,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { ChevronRight, AlertCircle, Loader2, Plus, Edit, Trash2, Globe, Home, Users as UsersIcon, Activity, Star, ChevronLeft } from 'lucide-react';
+import { ChevronRight, AlertCircle, Loader2, Plus, Edit, Trash2, Globe, Home, Users as UsersIcon, Activity, Star, ChevronLeft, Clock, MapPin } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
   Empty,
@@ -519,11 +519,14 @@ export default function UniverseDetailPage() {
             <>
               {/* Details Section */}
               <section className="space-y-3">
-            {universe.description && (
-              <div className="text-sm text-foreground whitespace-pre-line">
-                {universe.description}
-              </div>
-            )}
+            <div>
+              <h3 className="text-xl font-semibold mb-2">About this Universe</h3>
+              {universe.description && (
+                <div className="text-sm text-foreground whitespace-pre-line">
+                  {universe.description}
+                </div>
+              )}
+            </div>
             <div>
               <span className="text-sm font-medium text-muted-foreground mb-2 block">
                 Created on {new Date(universe.createdAt).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })} by
@@ -745,57 +748,79 @@ export default function UniverseDetailPage() {
                       Visitor activity and access history
                     </p>
                   </div>
-                  <div className="rounded-md border">
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead>Date</TableHead>
-                          <TableHead>User</TableHead>
-                          <TableHead>World / Room</TableHead>
-                          <TableHead>Status</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {analytics.recentActivity.map((access: any) => (
-                            <TableRow key={access.id}>
-                              <TableCell className="text-sm">
-                                {new Date(access.accessedAt).toLocaleString()}
-                              </TableCell>
-                              <TableCell className="text-sm">
-                                {access.userId ? (
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+                    {analytics.recentActivity.map((access: any) => {
+                      const userName = access.userName || access.userEmail || access.userUuid || 'Guest';
+                      const accessDate = new Date(access.accessedAt);
+                      const isClickable = !!access.userId;
+                      
+                      return (
+                        <Card
+                          key={access.id}
+                          className={cn(
+                            'group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
+                            'hover:-translate-y-1 hover:shadow-lg',
+                          )}
+                        >
+                          <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-purple-500/10 via-transparent to-pink-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
+                          <CardContent className="relative flex h-full flex-col p-4">
+                            <div className="flex items-start justify-between gap-3 mb-3">
+                              <div className="min-w-0 flex-1 flex items-center gap-2">
+                                {isClickable ? (
                                   <Link
                                     href={`/admin/users/${access.userId}`}
-                                    className="text-primary hover:underline"
+                                    className="block"
+                                    onClick={(e) => e.stopPropagation()}
                                   >
-                                    {access.userName || access.userEmail || access.userUuid || 'Guest'}
+                                    <div className="text-sm font-medium text-primary hover:underline truncate">
+                                      {userName}
+                                    </div>
                                   </Link>
                                 ) : (
-                                  access.userName || access.userEmail || access.userUuid || 'Guest'
+                                  <div className="text-sm font-medium text-muted-foreground truncate">
+                                    {userName}
+                                  </div>
                                 )}
-                              </TableCell>
-                              <TableCell className="text-sm">
-                                <Link href={`/admin/worlds/${access.world.id}`} className="text-primary hover:underline">
+                                {access.hasMembership && access.membershipTags.length > 0 ? (
+                                  <Badge variant="outline" className="text-xs flex-shrink-0">{access.membershipTags.join(', ')}</Badge>
+                                ) : access.isAuthenticated ? (
+                                  <Badge className="text-xs flex-shrink-0">Authenticated</Badge>
+                                ) : (
+                                  <Badge variant="secondary" className="text-xs flex-shrink-0">Guest</Badge>
+                                )}
+                              </div>
+                              <div className="flex-shrink-0 text-xs text-muted-foreground">
+                                {formatTimeAgo(accessDate)}
+                              </div>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-3 text-xs">
+                              <div className="flex items-center gap-2">
+                                <span className="text-muted-foreground">World:</span>
+                                <Link
+                                  href={`/admin/worlds/${access.world.id}`}
+                                  className="text-primary hover:underline truncate"
+                                  onClick={(e) => e.stopPropagation()}
+                                >
                                   {access.world.name}
                                 </Link>
-                                <span className="text-muted-foreground mx-1">/</span>
-                                <Link href={`/admin/rooms/${access.room.id}`} className="text-primary hover:underline">
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className="text-muted-foreground">Room:</span>
+                                <Link
+                                  href={`/admin/rooms/${access.room.id}`}
+                                  className="text-primary hover:underline truncate"
+                                  onClick={(e) => e.stopPropagation()}
+                                >
                                   {access.room.name}
                                 </Link>
-                              </TableCell>
-                              <TableCell>
-                                {access.hasMembership && access.membershipTags.length > 0 ? (
-                                  <Badge variant="outline">{access.membershipTags.join(', ')}</Badge>
-                                ) : access.isAuthenticated ? (
-                                  <Badge>Authenticated</Badge>
-                                ) : (
-                                  <Badge variant="secondary">Guest</Badge>
-                                )}
-                              </TableCell>
-                            </TableRow>
-                          ))}
-                        </TableBody>
-                      </Table>
-                    </div>
+                              </div>
+                            </div>
+                          </CardContent>
+                        </Card>
+                      );
+                    })}
+                  </div>
                   {analytics.pagination && analytics.pagination.totalPages > 1 && (
                     <div className="flex items-center justify-between">
                       <div className="text-sm text-muted-foreground">
