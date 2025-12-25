@@ -826,6 +826,12 @@ export default function UserDetailPage() {
                         </div>
                       </div>
 
+                      {membership.world.description && (
+                        <p className="mb-3 line-clamp-2 text-sm text-muted-foreground">
+                          {membership.world.description}
+                        </p>
+                      )}
+
                       <div className="mt-auto flex items-center justify-between pt-3 text-xs text-muted-foreground">
                         <div className="flex flex-col gap-1.5 min-h-[3rem]">
                           {worldAnalytics[membership.world.id] ? (
