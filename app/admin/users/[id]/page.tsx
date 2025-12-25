@@ -15,7 +15,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
-import { ChevronRight, AlertCircle, Loader2, Globe, Users, Star, Ban, UserPlus, Activity, Home, Calendar, MapPin, ChevronLeft, ExternalLink } from 'lucide-react';
+import { ChevronRight, AlertCircle, Loader2, Globe, Users, Star, Ban, UserPlus, Activity, Home, Calendar, MapPin, ChevronLeft, ExternalLink, User, FileText } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
   Empty,
@@ -438,56 +438,81 @@ export default function UserDetailPage() {
 
       {/* Tabs */}
       <div>
-        <nav className="flex space-x-8">
+        <nav className="flex flex-wrap gap-x-4 sm:gap-x-8 gap-y-2">
           <button
             onClick={() => setActiveTab('details')}
-            className={`py-4 px-1 border-b-2 font-medium text-sm ${
+            className={`py-3 sm:py-4 px-1 border-b-2 font-medium text-xs sm:text-sm flex items-center gap-1.5 sm:gap-2 transition-colors ${
               activeTab === 'details'
                 ? 'border-primary text-primary'
                 : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
             }`}
           >
-            Details
+            <FileText className="h-3.5 w-3.5 sm:h-4 sm:w-4 flex-shrink-0" />
+            <span>Details</span>
           </button>
           <button
             onClick={() => setActiveTab('owned-universes')}
-            className={`py-4 px-1 border-b-2 font-medium text-sm ${
+            className={`py-3 sm:py-4 px-1 border-b-2 font-medium text-xs sm:text-sm flex items-center gap-1.5 sm:gap-2 transition-colors ${
               activeTab === 'owned-universes'
                 ? 'border-primary text-primary'
                 : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
             }`}
           >
-            Universes
+            <Globe className="h-3.5 w-3.5 sm:h-4 sm:w-4 flex-shrink-0" />
+            <span>Universes</span>
+            {user && (
+              <Badge variant="secondary" className="ml-0.5 text-xs font-normal">
+                {user.ownedUniverses.length}
+              </Badge>
+            )}
           </button>
           <button
             onClick={() => setActiveTab('world-memberships')}
-            className={`py-4 px-1 border-b-2 font-medium text-sm ${
+            className={`py-3 sm:py-4 px-1 border-b-2 font-medium text-xs sm:text-sm flex items-center gap-1.5 sm:gap-2 transition-colors ${
               activeTab === 'world-memberships'
                 ? 'border-primary text-primary'
                 : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
             }`}
           >
-            Memberships
+            <Users className="h-3.5 w-3.5 sm:h-4 sm:w-4 flex-shrink-0" />
+            <span>Memberships</span>
+            {user && (
+              <Badge variant="secondary" className="ml-0.5 text-xs font-normal">
+                {user.worldMemberships.length}
+              </Badge>
+            )}
           </button>
           <button
             onClick={() => setActiveTab('starred-rooms')}
-            className={`py-4 px-1 border-b-2 font-medium text-sm ${
+            className={`py-3 sm:py-4 px-1 border-b-2 font-medium text-xs sm:text-sm flex items-center gap-1.5 sm:gap-2 transition-colors ${
               activeTab === 'starred-rooms'
                 ? 'border-primary text-primary'
                 : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
             }`}
           >
-            Starred
+            <Star className="h-3.5 w-3.5 sm:h-4 sm:w-4 flex-shrink-0" />
+            <span>Stars</span>
+            {starredRooms.length > 0 && (
+              <Badge variant="secondary" className="ml-0.5 text-xs font-normal">
+                {starredRooms.length}
+              </Badge>
+            )}
           </button>
           <button
             onClick={() => setActiveTab('access-history')}
-            className={`py-4 px-1 border-b-2 font-medium text-sm ${
+            className={`py-3 sm:py-4 px-1 border-b-2 font-medium text-xs sm:text-sm flex items-center gap-1.5 sm:gap-2 transition-colors ${
               activeTab === 'access-history'
                 ? 'border-primary text-primary'
                 : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
             }`}
           >
-            Accesses
+            <Activity className="h-3.5 w-3.5 sm:h-4 sm:w-4 flex-shrink-0" />
+            <span>Accesses</span>
+            {accessHistory && accessHistory.total !== undefined && (
+              <Badge variant="secondary" className="ml-0.5 text-xs font-normal">
+                {accessHistory.total.toLocaleString()}
+              </Badge>
+            )}
           </button>
         </nav>
       </div>
@@ -559,11 +584,11 @@ export default function UserDetailPage() {
                 )}
                 <div>
                   <dt className="text-sm font-medium text-muted-foreground">Created</dt>
-                  <dd className="mt-1 text-sm">{new Date(user.createdAt).toLocaleString()}</dd>
+                  <dd className="mt-1 text-sm">{formatTimeAgo(new Date(user.createdAt))}</dd>
                 </div>
                 <div>
                   <dt className="text-sm font-medium text-muted-foreground">Last Updated</dt>
-                  <dd className="mt-1 text-sm">{new Date(user.updatedAt).toLocaleString()}</dd>
+                  <dd className="mt-1 text-sm">{formatTimeAgo(new Date(user.updatedAt))}</dd>
                 </div>
               </dl>
             </div>
