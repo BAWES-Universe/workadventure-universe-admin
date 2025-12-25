@@ -673,19 +673,18 @@ export default function RoomDetailPage() {
           {activeTab === 'details' && (
             <>
               <section className="space-y-3">
-                {room.description && (
-                  <div>
-                    <h3 className="text-xl font-semibold mb-2">About this Room</h3>
+                <div>
+                  <h3 className="text-xl font-semibold mb-2">About this Room</h3>
+                  {room.description ? (
                     <div className="text-sm text-foreground whitespace-pre-line">
                       {room.description}
                     </div>
-                  </div>
-                )}
-                {!room.description && (
-                  <div>
-                    <h3 className="text-xl font-semibold mb-2">About this Room</h3>
-                  </div>
-                )}
+                  ) : (
+                    <div className="text-sm text-muted-foreground">
+                      No description provided
+                    </div>
+                  )}
+                </div>
                 {isSuperAdmin && room.mapUrl && (
                   <div>
                     <div className="text-sm font-medium text-muted-foreground mb-1">Map URL</div>
