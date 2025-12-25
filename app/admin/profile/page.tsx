@@ -7,7 +7,6 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Trash2, Plus, ExternalLink } from 'lucide-react';
 
@@ -144,7 +143,7 @@ export default function VisitCardPage() {
         <div className="mb-6">
           <h1 className="text-3xl font-bold tracking-tight">Customize Visit Card</h1>
           <p className="mt-2 text-muted-foreground">
-            Customize your public visit card that appears when other users click on you in WorkAdventure.
+            Customize your public visit card that appears when other users click on you.
           </p>
         </div>
 
@@ -160,14 +159,7 @@ export default function VisitCardPage() {
           </Alert>
         )}
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Visit Card Details</CardTitle>
-            <CardDescription>
-              Customize your public visit card that appears when other users click on you in WorkAdventure.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-6">
+        <section className="space-y-6">
             {/* Bio */}
             <div className="space-y-2">
               <Label htmlFor="bio">Bio</Label>
@@ -233,7 +225,7 @@ export default function VisitCardPage() {
                 </div>
               )}
               <p className="text-xs text-muted-foreground">
-                Add links to your social media profiles, website, or other resources.
+                Add links to your social media profiles, website, meeting scheduling link or other resources.
               </p>
             </div>
 
@@ -247,18 +239,17 @@ export default function VisitCardPage() {
                 {saving ? 'Saving...' : 'Save Visit Card'}
               </Button>
             </div>
-          </CardContent>
-        </Card>
+        </section>
 
         {/* Preview Section */}
-        <Card className="mt-6">
-          <CardHeader>
-            <CardTitle>Preview</CardTitle>
-            <CardDescription>
+        <section className="mt-6 space-y-4">
+          <div className="space-y-1">
+            <h2 className="text-xl font-semibold tracking-tight">Preview</h2>
+            <p className="text-sm text-muted-foreground">
               This is how your visit card will appear to others.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
+            </p>
+          </div>
+          <div>
             <div className="bg-gray-900 rounded-lg p-6 text-white">
               {bio || links.length > 0 ? (
                 <div>
@@ -291,8 +282,8 @@ export default function VisitCardPage() {
                 </p>
               )}
             </div>
-          </CardContent>
-        </Card>
+          </div>
+        </section>
       </div>
     </div>
   );
