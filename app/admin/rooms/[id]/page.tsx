@@ -622,14 +622,6 @@ export default function RoomDetailPage() {
                       <div className="text-sm font-medium text-muted-foreground">Total Accesses</div>
                       <div className="mt-1 text-2xl font-semibold">{analytics.totalAccesses || 0}</div>
                     </div>
-                    <div className="rounded-lg border p-4">
-                      <div className="text-sm font-medium text-muted-foreground">Unique Users</div>
-                      <div className="mt-1 text-2xl font-semibold">{analytics.uniqueUsers || 0}</div>
-                    </div>
-                    <div className="rounded-lg border p-4">
-                      <div className="text-sm font-medium text-muted-foreground">Unique IPs</div>
-                      <div className="mt-1 text-2xl font-semibold">{analytics.uniqueIPs || 0}</div>
-                    </div>
                     {peakHour !== null && (
                       <div className="rounded-lg border p-4">
                         <div className="text-sm font-medium text-muted-foreground">Peak Hour</div>
