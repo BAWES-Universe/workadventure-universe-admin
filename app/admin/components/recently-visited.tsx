@@ -118,25 +118,33 @@ export default function RecentlyVisited() {
   }
 
   return (
-    <div className="grid gap-4 md:grid-cols-2">
-      {recentRooms.map((room) => (
-        <RecentRoomCard
-          key={room.roomId}
-          room={{
-            roomId: room.roomId,
-            roomName: room.roomName,
-            roomSlug: room.roomSlug,
-            worldId: room.worldId,
-            worldName: room.worldName,
-            worldSlug: room.worldSlug,
-            universeId: room.universeId,
-            universeName: room.universeName,
-            universeSlug: room.universeSlug,
-            accessedAt: new Date(room.accessedAt),
-          }}
-        />
-      ))}
-    </div>
+    <section className="space-y-3">
+      <div className="space-y-1">
+        <h2 className="text-xl font-semibold tracking-tight">Recently visited</h2>
+        <p className="text-sm text-muted-foreground">
+          Jump back into rooms that have been active most recently.
+        </p>
+      </div>
+      <div className="grid gap-4 md:grid-cols-2">
+        {recentRooms.map((room) => (
+          <RecentRoomCard
+            key={room.roomId}
+            room={{
+              roomId: room.roomId,
+              roomName: room.roomName,
+              roomSlug: room.roomSlug,
+              worldId: room.worldId,
+              worldName: room.worldName,
+              worldSlug: room.worldSlug,
+              universeId: room.universeId,
+              universeName: room.universeName,
+              universeSlug: room.universeSlug,
+              accessedAt: new Date(room.accessedAt),
+            }}
+          />
+        ))}
+      </div>
+    </section>
   );
 }
 
