@@ -127,6 +127,8 @@ export default function UserDetailPage() {
     if (user) {
       // Fetch access history on initial load to show total and last access (page 1)
       fetchAccessHistory(1);
+      // Fetch starred rooms on initial load to show count
+      fetchStarredRooms();
     }
   }, [user, id]);
 
@@ -398,35 +400,37 @@ export default function UserDetailPage() {
         <span className="text-foreground">{user.name || user.email || 'User'}</span>
       </nav>
 
-      <div className="space-y-1">
-        <h1 className="text-4xl font-bold tracking-tight">{user.name || user.email || 'Unknown User'}</h1>
-        {accessHistory && (
-          <p className="text-muted-foreground flex items-center gap-3">
-            <span className="flex items-center gap-1.5 text-sm">
-              <Activity className="h-4 w-4 text-muted-foreground" />
-              <span className="font-medium text-foreground/80">
-                {accessHistory.total?.toLocaleString() || 0} {accessHistory.total === 1 ? 'access' : 'accesses'}
-              </span>
-            </span>
-            {accessHistory.lastAccess && (
-              <>
-                <span className="text-muted-foreground">•</span>
-                <span className="text-sm">
-                  Last: {formatTimeAgo(new Date(accessHistory.lastAccess))}
+      <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
+        <div className="space-y-1">
+          <h1 className="text-4xl font-bold tracking-tight">{user.name || user.email || 'Unknown User'}</h1>
+          {accessHistory && (
+            <p className="text-muted-foreground flex items-center gap-3">
+              <span className="flex items-center gap-1.5 text-sm">
+                <Activity className="h-4 w-4 text-muted-foreground" />
+                <span className="font-medium text-foreground/80">
+                  {accessHistory.total?.toLocaleString() || 0} {accessHistory.total === 1 ? 'access' : 'accesses'}
                 </span>
-              </>
-            )}
-          </p>
+              </span>
+              {accessHistory.lastAccess && (
+                <>
+                  <span className="text-muted-foreground">•</span>
+                  <span className="text-sm">
+                    Last: {formatTimeAgo(new Date(accessHistory.lastAccess))}
+                  </span>
+                </>
+              )}
+            </p>
+          )}
+        </div>
+        {currentUser && currentUser.id !== user.id && availableWorlds.length > 0 && (
+          <div className="w-full lg:w-auto">
+            <Button onClick={() => setInviteDialogOpen(true)} className="w-full lg:w-auto">
+              <UserPlus className="mr-2 h-4 w-4" />
+              Invite to World
+            </Button>
+          </div>
         )}
       </div>
-      {currentUser && currentUser.id !== user.id && availableWorlds.length > 0 && (
-        <div className="flex justify-end">
-          <Button onClick={() => setInviteDialogOpen(true)}>
-            <UserPlus className="mr-2 h-4 w-4" />
-            Invite to World
-          </Button>
-        </div>
-      )}
 
       {error && (
         <Alert variant="destructive">
@@ -492,7 +496,7 @@ export default function UserDetailPage() {
           >
             <Star className="h-3.5 w-3.5 sm:h-4 sm:w-4 flex-shrink-0" />
             <span>Stars</span>
-            {starredRooms.length > 0 && (
+            {!starredRoomsLoading && (
               <Badge variant="secondary" className="ml-0.5 text-xs font-normal">
                 {starredRooms.length}
               </Badge>
@@ -507,7 +511,7 @@ export default function UserDetailPage() {
             }`}
           >
             <Activity className="h-3.5 w-3.5 sm:h-4 sm:w-4 flex-shrink-0" />
-            <span>Accesses</span>
+            <span>Access</span>
             {accessHistory && accessHistory.total !== undefined && (
               <Badge variant="secondary" className="ml-0.5 text-xs font-normal">
                 {accessHistory.total.toLocaleString()}
@@ -821,12 +825,6 @@ export default function UserDetailPage() {
                           </div>
                         </div>
                       </div>
-
-                      {membership.world.description && (
-                        <p className="mb-3 line-clamp-2 text-sm text-muted-foreground">
-                          {membership.world.description}
-                        </p>
-                      )}
 
                       <div className="mt-auto flex items-center justify-between pt-3 text-xs text-muted-foreground">
                         <div className="flex flex-col gap-1.5 min-h-[3rem]">
