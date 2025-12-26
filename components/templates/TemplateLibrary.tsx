@@ -166,14 +166,16 @@ export function TemplateLibrary({ onSelectTemplate, selectedCategory }: Template
                 </div>
 
                 {template.shortDescription && (
-                  <p className="mb-2 line-clamp-2 text-sm text-muted-foreground">
+                  <p className="mb-3 line-clamp-2 text-sm text-muted-foreground">
                     {template.shortDescription}
                   </p>
                 )}
                 {template.philosophy && (
-                  <p className="mb-3 text-sm italic text-muted-foreground">
-                    &ldquo;{template.philosophy}&rdquo;
-                  </p>
+                  <div className="mb-3 border-l-2 border-muted-foreground/30 pl-3">
+                    <p className="text-xs italic text-white leading-relaxed">
+                      &ldquo;{template.philosophy}&rdquo;
+                    </p>
+                  </div>
                 )}
 
                 <div className="mt-auto flex items-center gap-1.5 pt-3 text-xs text-muted-foreground">
