@@ -362,7 +362,7 @@ export default function TemplateDetailPage() {
 
       {/* Template Details */}
       {(template.philosophy || template.purpose || template.whoItsFor || template.typicalUseCases.length > 0) && (
-        <Card>
+        <Card className="border-0">
           <CardContent className="space-y-4 pt-6">
             {template.philosophy && (
               <div>
@@ -384,12 +384,17 @@ export default function TemplateDetailPage() {
             )}
             {template.typicalUseCases.length > 0 && (
               <div>
-                <h3 className="font-semibold mb-1">Typical Use Cases</h3>
-                <ul className="list-disc list-inside text-sm text-muted-foreground space-y-1">
+                <h3 className="font-semibold mb-2">Typical Use Cases</h3>
+                <div className="flex flex-wrap gap-2">
                   {template.typicalUseCases.map((useCase, idx) => (
-                    <li key={idx}>{useCase}</li>
+                    <span
+                      key={idx}
+                      className="inline-flex items-center rounded-md bg-muted px-2.5 py-0.5 text-xs font-medium text-muted-foreground"
+                    >
+                      {useCase}
+                    </span>
                   ))}
-                </ul>
+                </div>
               </div>
             )}
           </CardContent>
