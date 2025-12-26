@@ -87,6 +87,7 @@ export async function GET(request: NextRequest) {
       category: template.category,
       mapCount: template._count.maps,
       isFeatured: template.isFeatured,
+      isActive: template.isActive,
       _count: {
         maps: template._count.maps,
       },

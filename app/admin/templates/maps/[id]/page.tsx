@@ -74,6 +74,7 @@ export default function MapDetailPage() {
   const [map, setMap] = useState<TemplateMap | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [isSuperAdmin, setIsSuperAdmin] = useState(false);
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -113,6 +114,20 @@ export default function MapDetailPage() {
     try {
       setLoading(true);
       setError(null);
+      
+      // Check if user is super admin
+      let userIsSuperAdmin = false;
+      try {
+        const { authenticatedFetch } = await import('@/lib/client-auth');
+        const authResponse = await authenticatedFetch('/api/auth/me');
+        if (authResponse.ok) {
+          const authData = await authResponse.json();
+          userIsSuperAdmin = authData.user?.isSuperAdmin || false;
+        }
+      } catch {
+        // Not authenticated, continue as regular user
+      }
+      setIsSuperAdmin(userIsSuperAdmin);
       
       const { authenticatedFetch } = await import('@/lib/client-auth');
       const response = await authenticatedFetch(`/api/admin/templates/maps/${params.id}`);
@@ -234,41 +249,41 @@ export default function MapDetailPage() {
 
   return (
     <div className="space-y-8">
-      <div className="flex items-center gap-4">
+      <div className="flex items-center justify-between">
         <Button variant="ghost" size="sm" asChild>
           <Link href={`/admin/templates/templates/${map.template.id}`}>
             <ChevronLeft className="h-4 w-4 mr-2" />
             Back to {map.template.name}
           </Link>
         </Button>
-      </div>
-
-      <div className="flex items-center justify-between">
-        <div className="space-y-1">
-          <div className="flex items-center gap-3">
-            <div className="flex h-12 w-12 items-center justify-center rounded-lg border bg-muted text-2xl">
-              {map.template.category.icon || <MapPin className="h-6 w-6 text-muted-foreground" />}
-            </div>
-            <div>
-              <h1 className="text-4xl font-bold tracking-tight">{map.name}</h1>
-              <p className="text-muted-foreground text-lg font-mono">{map.slug}</p>
-            </div>
-          </div>
-          {map.description && (
-            <p className="text-muted-foreground mt-2">{map.description}</p>
-          )}
-          <div className="flex flex-wrap items-center gap-2 mt-2">
-            <Badge variant={map.isActive ? 'default' : 'secondary'}>
-              {map.isActive ? 'Active' : 'Inactive'}
-            </Badge>
-            {map.sizeLabel && <Badge variant="outline">{map.sizeLabel}</Badge>}
-          </div>
-        </div>
-        <div className="flex gap-2">
+        {isSuperAdmin && (
           <Button variant="outline" onClick={() => setIsEditDialogOpen(true)}>
             <Edit className="h-4 w-4 mr-2" />
             Edit
           </Button>
+        )}
+      </div>
+
+      <div className="space-y-1">
+        <div className="flex items-center gap-3">
+          <div className="flex h-12 w-12 items-center justify-center rounded-lg border bg-muted text-2xl">
+            {map.template.category.icon || <MapPin className="h-6 w-6 text-muted-foreground" />}
+          </div>
+          <div>
+            <h1 className="text-4xl font-bold tracking-tight">{map.name}</h1>
+            <p className="text-muted-foreground text-lg font-mono">{map.slug}</p>
+          </div>
+        </div>
+        {map.description && (
+          <p className="text-muted-foreground mt-2">{map.description}</p>
+        )}
+        <div className="flex flex-wrap items-center gap-2 mt-2">
+          {isSuperAdmin && (
+            <Badge variant={map.isActive ? 'default' : 'secondary'}>
+              {map.isActive ? 'Active' : 'Inactive'}
+            </Badge>
+          )}
+          {map.sizeLabel && <Badge variant="outline">{map.sizeLabel}</Badge>}
         </div>
       </div>
 
@@ -293,18 +308,6 @@ export default function MapDetailPage() {
                 {map.template.category.name} - {map.template.name}
               </p>
             </div>
-            <div>
-              <h3 className="font-semibold mb-1">Map URL</h3>
-              <a
-                href={map.mapUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-sm text-primary hover:underline break-all flex items-center gap-1"
-              >
-                {map.mapUrl}
-                <ExternalLink className="h-3 w-3" />
-              </a>
-            </div>
             {map.previewImageUrl && (
               <div>
                 <h3 className="font-semibold mb-1">Preview Image</h3>
@@ -319,12 +322,6 @@ export default function MapDetailPage() {
                 </a>
               </div>
             )}
-            <div>
-              <h3 className="font-semibold mb-1">Order</h3>
-              <div className="text-sm text-muted-foreground">
-                <p>{map.order}</p>
-              </div>
-            </div>
           </CardContent>
         </Card>
 
@@ -342,6 +339,34 @@ export default function MapDetailPage() {
           </CardContent>
         </Card>
       </div>
+
+      {isSuperAdmin && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Private Information</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div>
+              <h3 className="font-semibold mb-1">Map URL</h3>
+              <a
+                href={map.mapUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-sm text-primary hover:underline break-all flex items-center gap-1"
+              >
+                {map.mapUrl}
+                <ExternalLink className="h-3 w-3" />
+              </a>
+            </div>
+            <div>
+              <h3 className="font-semibold mb-1">Order</h3>
+              <div className="text-sm text-muted-foreground">
+                <p>{map.order}</p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Edit Dialog */}
       <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>

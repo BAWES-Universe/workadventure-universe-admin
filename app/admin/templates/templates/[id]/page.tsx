@@ -338,11 +338,12 @@ export default function TemplateDetailPage() {
             <p className="text-muted-foreground mt-2">{template.shortDescription}</p>
           )}
           <div className="flex flex-wrap items-center gap-2 mt-2">
-            <Badge variant={template.isActive ? 'default' : 'secondary'}>
-              {template.isActive ? 'Active' : 'Inactive'}
-            </Badge>
+            {isSuperAdmin && (
+              <Badge variant={template.isActive ? 'default' : 'secondary'}>
+                {template.isActive ? 'Active' : 'Inactive'}
+              </Badge>
+            )}
             {template.isFeatured && <Badge variant="outline">Featured</Badge>}
-            <Badge variant="outline">{template.visibility}</Badge>
           </div>
         </div>
       </div>

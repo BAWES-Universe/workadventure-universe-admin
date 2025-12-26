@@ -344,9 +344,11 @@ export default function CategoryDetailPage() {
                         {template.slug}
                       </p>
                       <div className="flex flex-wrap items-center gap-2 text-xs">
-                        <Badge variant={template.isActive ? 'default' : 'secondary'}>
-                          {template.isActive ? 'Active' : 'Inactive'}
-                        </Badge>
+                        {isSuperAdmin && (
+                          <Badge variant={template.isActive ? 'default' : 'secondary'}>
+                            {template.isActive ? 'Active' : 'Inactive'}
+                          </Badge>
+                        )}
                         {template.isFeatured && (
                           <Badge variant="outline">Featured</Badge>
                         )}
