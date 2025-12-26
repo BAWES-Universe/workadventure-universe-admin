@@ -283,13 +283,6 @@ export default function TemplateDetailPage() {
             <Edit className="h-4 w-4 mr-2" />
             Edit
           </Button>
-          <Button
-            variant="destructive"
-            onClick={() => setIsDeleteDialogOpen(true)}
-          >
-            <Trash2 className="h-4 w-4 mr-2" />
-            Delete
-          </Button>
           <Button asChild>
             <Link href={`/admin/templates/maps/new?templateId=${template.id}`}>
               <Plus className="h-4 w-4 mr-2" />
@@ -423,9 +416,21 @@ export default function TemplateDetailPage() {
       {/* Edit Dialog */}
       <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>
         <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
+          <DialogHeader className="relative">
             <DialogTitle>Edit Template</DialogTitle>
             <DialogDescription>Update template details</DialogDescription>
+            <Button
+              variant="destructive"
+              size="sm"
+              className="absolute top-0 right-0"
+              onClick={() => {
+                setIsEditDialogOpen(false);
+                setIsDeleteDialogOpen(true);
+              }}
+            >
+              <Trash2 className="h-4 w-4 mr-2" />
+              Delete
+            </Button>
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">

@@ -235,13 +235,6 @@ export default function CategoryDetailPage() {
             <Edit className="h-4 w-4 mr-2" />
             Edit
           </Button>
-          <Button
-            variant="destructive"
-            onClick={() => setIsDeleteDialogOpen(true)}
-          >
-            <Trash2 className="h-4 w-4 mr-2" />
-            Delete
-          </Button>
           <Button asChild>
             <Link href={`/admin/templates/templates/new?categoryId=${category.id}`}>
               <Plus className="h-4 w-4 mr-2" />
@@ -335,9 +328,21 @@ export default function CategoryDetailPage() {
       {/* Edit Dialog */}
       <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>
         <DialogContent>
-          <DialogHeader>
+          <DialogHeader className="relative">
             <DialogTitle>Edit Category</DialogTitle>
             <DialogDescription>Update category details</DialogDescription>
+            <Button
+              variant="destructive"
+              size="sm"
+              className="absolute top-0 right-0"
+              onClick={() => {
+                setIsEditDialogOpen(false);
+                setIsDeleteDialogOpen(true);
+              }}
+            >
+              <Trash2 className="h-4 w-4 mr-2" />
+              Delete
+            </Button>
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
