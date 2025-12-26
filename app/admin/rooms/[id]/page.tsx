@@ -634,17 +634,29 @@ export default function RoomDetailPage() {
               variant={!useCustomMap ? 'default' : 'outline'}
               onClick={() => {
                 setUseCustomMap(false);
-                // Restore original templateMapId if it existed
+                // If room has a template, restore it
                 if (originalTemplateMapId || room?.templateMapId) {
                   const templateIdToRestore = originalTemplateMapId || room?.templateMapId;
                   setFormData(prev => ({
                     ...prev,
                     templateMapId: templateIdToRestore,
                   }));
-                }
-                // If switching back to template and no map selected, show template selection
-                if (!formData.templateMapId && !selectedMapId && !originalTemplateMapId && !room?.templateMapId) {
+                  // Clear any new selection when restoring original
+                  setSelectedMapId(null);
+                  setSelectedMapUrl(null);
+                  setSelectedTemplateName(null);
+                  setSelectedMapName(null);
+                } else {
+                  // If no original template, clear everything to show template library
                   setSelectedTemplateSlug(null);
+                  setSelectedMapId(null);
+                  setSelectedMapUrl(null);
+                  setSelectedTemplateName(null);
+                  setSelectedMapName(null);
+                  setFormData(prev => ({
+                    ...prev,
+                    templateMapId: null,
+                  }));
                 }
               }}
             >
@@ -750,9 +762,7 @@ export default function RoomDetailPage() {
                     )}
                   </CardHeader>
                   <CardContent>
-                    {selectedTemplateSlug ? null : isChangingTemplate || !room?.templateMapId ? (
-                      <TemplateLibrary onSelectTemplate={handleSelectTemplate} />
-                    ) : selectedMapId && selectedTemplateName && selectedMapName ? (
+                    {selectedTemplateSlug ? null : selectedMapId && selectedTemplateName && selectedMapName ? (
                       <div className="p-4 rounded-lg bg-muted/50">
                         <div className="flex items-start justify-between">
                           <div className="flex-1">
@@ -780,6 +790,8 @@ export default function RoomDetailPage() {
                           </Button>
                         </div>
                       </div>
+                    ) : isChangingTemplate || !room?.templateMapId ? (
+                      <TemplateLibrary onSelectTemplate={handleSelectTemplate} />
                     ) : room?.templateMap && !selectedMapId ? (
                       <div className="p-4 rounded-lg bg-muted/50">
                         <div className="flex items-start justify-between">
