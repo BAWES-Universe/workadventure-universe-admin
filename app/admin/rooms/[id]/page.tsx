@@ -677,7 +677,7 @@ export default function RoomDetailPage() {
           {!useCustomMap && (
             <>
               {selectedTemplateSlug ? (
-                <Card>
+                <Card className="border-0 shadow-none">
                   <CardHeader>
                     <div className="flex items-center gap-2 mb-2">
                       <Button
@@ -691,9 +691,9 @@ export default function RoomDetailPage() {
                         Back
                       </Button>
                     </div>
-                    <CardTitle>Select Template</CardTitle>
+                    <CardTitle>{selectedTemplateSlug ? 'Select Map' : 'Select Template'}</CardTitle>
                     <CardDescription>
-                      Choose a template to get started, or switch to custom map.
+                      {selectedTemplateSlug ? 'Choose from the available maps.' : 'Choose a template to get started'}
                     </CardDescription>
                   </CardHeader>
                   <CardContent>
@@ -707,7 +707,7 @@ export default function RoomDetailPage() {
                   </CardContent>
                 </Card>
               ) : (
-                <Card>
+                <Card className="border-0 shadow-none">
                   <CardHeader>
                     {isChangingTemplate ? (
                       <>
@@ -735,7 +735,7 @@ export default function RoomDetailPage() {
                         </div>
                         <CardTitle>Select Template</CardTitle>
                         <CardDescription>
-                          Choose a template to get started, or switch to custom map.
+                          Choose a template to get started
                         </CardDescription>
                       </>
                     ) : (
@@ -744,7 +744,7 @@ export default function RoomDetailPage() {
                         <CardDescription>
                           {room?.templateMap 
                             ? 'Current template map for this room. Click "Change Template" to select a different one.'
-                            : 'Choose a template to get started, or switch to custom map.'}
+                            : 'Choose a template to get started'}
                         </CardDescription>
                       </>
                     )}
@@ -753,7 +753,7 @@ export default function RoomDetailPage() {
                     {selectedTemplateSlug ? null : isChangingTemplate || !room?.templateMapId ? (
                       <TemplateLibrary onSelectTemplate={handleSelectTemplate} />
                     ) : selectedMapId && selectedTemplateName && selectedMapName ? (
-                      <div className="p-4 border rounded-lg bg-muted/50">
+                      <div className="p-4 rounded-lg bg-muted/50">
                         <div className="flex items-start justify-between">
                           <div className="flex-1">
                             <div className="text-sm font-medium mb-1">Selected Template Map</div>
@@ -781,7 +781,7 @@ export default function RoomDetailPage() {
                         </div>
                       </div>
                     ) : room?.templateMap && !selectedMapId ? (
-                      <div className="p-4 border rounded-lg bg-muted/50">
+                      <div className="p-4 rounded-lg bg-muted/50">
                         <div className="flex items-start justify-between">
                           <div className="flex-1">
                             <div className="text-sm font-medium mb-1">Current Template Map</div>
@@ -817,7 +817,7 @@ export default function RoomDetailPage() {
 
           {/* Room Form - Only show when not using template, or when template map is selected (and not actively selecting) */}
           {(!useCustomMap ? ((selectedMapId || room?.templateMapId) && !selectedTemplateSlug && !isChangingTemplate) : true) && (
-            <Card>
+            <Card className="border-0 shadow-none">
               <CardHeader>
                 <div className="flex items-center justify-between">
                   <div>

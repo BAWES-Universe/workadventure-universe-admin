@@ -339,9 +339,9 @@ function NewRoomPageContent() {
                 </Button>
               </div>
             )}
-            <CardTitle>Select Template</CardTitle>
+            <CardTitle>{selectedTemplateSlug ? 'Select Map' : 'Select Template'}</CardTitle>
             <CardDescription>
-              Choose a template to get started, or switch to manual entry.
+              {selectedTemplateSlug ? 'Choose from the available maps.' : 'Choose a template to get started'}
             </CardDescription>
           </CardHeader>
           <CardContent>
