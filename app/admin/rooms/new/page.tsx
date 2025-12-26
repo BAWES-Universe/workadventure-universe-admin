@@ -156,6 +156,16 @@ function NewRoomPageContent() {
 
   function handleBackToTemplates() {
     setSelectedTemplateSlug(null);
+    // Clear map selection when going back
+    setSelectedMapId(null);
+    setSelectedMapUrl(null);
+    setSelectedTemplateName(null);
+    setSelectedMapName(null);
+    setFormData(prev => ({
+      ...prev,
+      templateMapId: null,
+      mapUrl: '',
+    }));
   }
 
   function handleClearTemplate() {
@@ -329,34 +339,6 @@ function NewRoomPageContent() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            {/* Selected Template Info */}
-            {useTemplate && selectedMapId && selectedTemplateName && (
-              <Alert className="mb-6">
-                <div className="flex items-start justify-between">
-                  <div>
-                    <AlertTitle>Template Selected</AlertTitle>
-                    <AlertDescription>
-                      <div className="mt-2 space-y-1">
-                        <div><strong>Template:</strong> {selectedTemplateName}</div>
-                        {selectedMapName && (
-                          <div><strong>Map:</strong> {selectedMapName}</div>
-                        )}
-                      </div>
-                    </AlertDescription>
-                  </div>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    onClick={handleClearTemplate}
-                    className="h-6 w-6 p-0"
-                  >
-                    <X className="h-4 w-4" />
-                  </Button>
-                </div>
-              </Alert>
-            )}
-
             <form onSubmit={handleSubmit} className="space-y-6">
             <div className="space-y-2">
               <Label htmlFor="name">
