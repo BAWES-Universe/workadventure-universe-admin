@@ -180,7 +180,10 @@ export function TemplateDetail({
 
       {/* Map Variants */}
       <div>
-        <h3 className="text-xl font-semibold mb-4">Available Maps</h3>
+        <div className="mb-4">
+          <h3 className="text-xl font-semibold mb-1">Select Map</h3>
+          <p className="text-sm text-muted-foreground">Choose from the available maps.</p>
+        </div>
         {template.maps.length === 0 ? (
           <Card>
             <CardContent className="py-8 text-center text-muted-foreground">

@@ -324,9 +324,9 @@ function NewRoomPageContent() {
       {/* Template Selection Flow */}
       {useTemplate && (
         <Card className="border-0 shadow-none">
-          <CardHeader>
-            {selectedTemplateSlug && (
-              <div className="flex items-center gap-2 mb-2">
+          {selectedTemplateSlug ? (
+            <>
+              <div className="p-6 pb-0">
                 <Button
                   type="button"
                   variant="ghost"
@@ -338,58 +338,64 @@ function NewRoomPageContent() {
                   Back
                 </Button>
               </div>
-            )}
-            <CardTitle>{selectedTemplateSlug ? 'Select Map' : 'Select Template'}</CardTitle>
-            <CardDescription>
-              {selectedTemplateSlug ? 'Choose from the available maps.' : 'Choose a template to get started'}
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            {selectedTemplateSlug ? (
-              <TemplateDetail
-                templateSlug={selectedTemplateSlug}
-                onSelectMap={handleSelectMap}
-                onBack={handleBackToTemplates}
-                selectedMapId={selectedMapId || undefined}
-                hideBackButton={true}
-              />
-            ) : selectedMapId && selectedTemplateName && selectedMapName ? (
-              <div className="p-4 rounded-lg bg-muted/50">
-                <div className="flex items-start justify-between">
-                  <div className="flex-1">
-                    <div className="text-sm font-medium mb-1">Selected Template Map</div>
-                    <div className="text-sm text-muted-foreground">
-                      <div><strong>Template:</strong> {selectedTemplateName}</div>
-                      <div><strong>Map:</strong> {selectedMapName}</div>
+              <CardContent className="pt-4">
+                <TemplateDetail
+                  templateSlug={selectedTemplateSlug}
+                  onSelectMap={handleSelectMap}
+                  onBack={handleBackToTemplates}
+                  selectedMapId={selectedMapId || undefined}
+                  hideBackButton={true}
+                />
+              </CardContent>
+            </>
+          ) : (
+            <>
+              <CardHeader>
+                <CardTitle>Select Template</CardTitle>
+                <CardDescription>
+                  Choose a template to get started
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                {selectedMapId && selectedTemplateName && selectedMapName ? (
+                  <div className="p-4 rounded-lg bg-muted/50">
+                    <div className="flex items-start justify-between">
+                      <div className="flex-1">
+                        <div className="text-sm font-medium mb-1">Selected Template Map</div>
+                        <div className="text-sm text-muted-foreground">
+                          <div><strong>Template:</strong> {selectedTemplateName}</div>
+                          <div><strong>Map:</strong> {selectedMapName}</div>
+                        </div>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => {
+                          setSelectedTemplateSlug(null);
+                          setSelectedMapId(null);
+                          setSelectedMapUrl(null);
+                          setSelectedTemplateName(null);
+                          setSelectedMapName(null);
+                          setFormData(prev => ({
+                            ...prev,
+                            templateMapId: null,
+                            mapUrl: '',
+                          }));
+                        }}
+                      >
+                        Change Template
+                      </Button>
                     </div>
                   </div>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() => {
-                      setSelectedTemplateSlug(null);
-                      setSelectedMapId(null);
-                      setSelectedMapUrl(null);
-                      setSelectedTemplateName(null);
-                      setSelectedMapName(null);
-                      setFormData(prev => ({
-                        ...prev,
-                        templateMapId: null,
-                        mapUrl: '',
-                      }));
-                    }}
-                  >
-                    Change Template
-                  </Button>
-                </div>
-              </div>
-            ) : (
-              <TemplateLibrary
-                onSelectTemplate={handleSelectTemplate}
-              />
-            )}
-          </CardContent>
+                ) : (
+                  <TemplateLibrary
+                    onSelectTemplate={handleSelectTemplate}
+                  />
+                )}
+              </CardContent>
+            </>
+          )}
         </Card>
       )}
 

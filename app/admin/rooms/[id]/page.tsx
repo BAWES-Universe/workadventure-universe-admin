@@ -690,25 +690,19 @@ export default function RoomDetailPage() {
             <>
               {selectedTemplateSlug ? (
                 <Card className="border-0 shadow-none">
-                  <CardHeader>
-                    <div className="flex items-center gap-2 mb-2">
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        onClick={handleBackToTemplates}
-                        className="gap-2 -ml-2"
-                      >
-                        <ArrowLeft className="h-4 w-4" />
-                        Back
-                      </Button>
-                    </div>
-                    <CardTitle>{selectedTemplateSlug ? 'Select Map' : 'Select Template'}</CardTitle>
-                    <CardDescription>
-                      {selectedTemplateSlug ? 'Choose from the available maps.' : 'Choose a template to get started'}
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent>
+                  <div className="p-6 pb-0">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={handleBackToTemplates}
+                      className="gap-2 -ml-2"
+                    >
+                      <ArrowLeft className="h-4 w-4" />
+                      Back
+                    </Button>
+                  </div>
+                  <CardContent className="pt-4">
                     <TemplateDetail
                       templateSlug={selectedTemplateSlug}
                       onSelectMap={handleSelectMap}
@@ -720,108 +714,107 @@ export default function RoomDetailPage() {
                 </Card>
               ) : (
                 <Card className="border-0 shadow-none">
-                  <CardHeader>
-                    {isChangingTemplate ? (
-                      <>
-                        <div className="flex items-center gap-2 mb-2">
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => {
-                              setIsChangingTemplate(false);
-                              // Restore original template if it existed
-                              if (originalTemplateMapId || room?.templateMapId) {
-                                const templateIdToRestore = originalTemplateMapId || room?.templateMapId;
-                                setFormData(prev => ({
-                                  ...prev,
-                                  templateMapId: templateIdToRestore,
-                                }));
-                              }
-                            }}
-                            className="gap-2 -ml-2"
-                          >
-                            <ChevronLeft className="h-4 w-4" />
-                            Back
-                          </Button>
-                        </div>
-                        <CardTitle>Select Template</CardTitle>
-                        <CardDescription>
-                          Choose a template to get started
-                        </CardDescription>
-                      </>
-                    ) : (
-                      <>
+                  {isChangingTemplate ? (
+                    <>
+                      <div className="p-6 pb-0">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => {
+                            setIsChangingTemplate(false);
+                            // Restore original template if it existed
+                            if (originalTemplateMapId || room?.templateMapId) {
+                              const templateIdToRestore = originalTemplateMapId || room?.templateMapId;
+                              setFormData(prev => ({
+                                ...prev,
+                                templateMapId: templateIdToRestore,
+                              }));
+                            }
+                          }}
+                          className="gap-2 -ml-2"
+                        >
+                          <ChevronLeft className="h-4 w-4" />
+                          Back
+                        </Button>
+                      </div>
+                      <CardContent className="pt-4">
+                        <TemplateLibrary onSelectTemplate={handleSelectTemplate} />
+                      </CardContent>
+                    </>
+                  ) : (
+                    <>
+                      <CardHeader>
                         <CardTitle>Template Map</CardTitle>
                         <CardDescription>
                           {room?.templateMap 
                             ? 'Current template map for this room. Click "Change Template" to select a different one.'
                             : 'Choose a template to get started'}
                         </CardDescription>
-                      </>
-                    )}
-                  </CardHeader>
-                  <CardContent>
-                    {selectedTemplateSlug ? null : selectedMapId && selectedTemplateName && selectedMapName ? (
-                      <div className="p-4 rounded-lg bg-muted/50">
-                        <div className="flex items-start justify-between">
-                          <div className="flex-1">
-                            <div className="text-sm font-medium mb-1">Selected Template Map</div>
-                            <div className="text-sm text-muted-foreground">
-                              <div><strong>Template:</strong> {selectedTemplateName}</div>
-                              <div><strong>Map:</strong> {selectedMapName}</div>
+                      </CardHeader>
+                      <CardContent>
+                        {selectedMapId && selectedTemplateName && selectedMapName ? (
+                          <div className="p-4 rounded-lg bg-muted/50">
+                            <div className="flex items-start justify-between">
+                              <div className="flex-1">
+                                <div className="text-sm font-medium mb-1">Selected Template Map</div>
+                                <div className="text-sm text-muted-foreground">
+                                  <div><strong>Template:</strong> {selectedTemplateName}</div>
+                                  <div><strong>Map:</strong> {selectedMapName}</div>
+                                </div>
+                              </div>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                onClick={() => {
+                                  // Show template library to change template
+                                  setIsChangingTemplate(true);
+                                  setSelectedTemplateSlug(null);
+                                  setSelectedMapId(null);
+                                  setSelectedMapUrl(null);
+                                  setSelectedTemplateName(null);
+                                  setSelectedMapName(null);
+                                }}
+                              >
+                                Change Template
+                              </Button>
                             </div>
                           </div>
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            onClick={() => {
-                              // Show template library to change template
-                              setIsChangingTemplate(true);
-                              setSelectedTemplateSlug(null);
-                              setSelectedMapId(null);
-                              setSelectedMapUrl(null);
-                              setSelectedTemplateName(null);
-                              setSelectedMapName(null);
-                            }}
-                          >
-                            Change Template
-                          </Button>
-                        </div>
-                      </div>
-                    ) : isChangingTemplate || !room?.templateMapId ? (
-                      <TemplateLibrary onSelectTemplate={handleSelectTemplate} />
-                    ) : room?.templateMap && !selectedMapId ? (
-                      <div className="p-4 rounded-lg bg-muted/50">
-                        <div className="flex items-start justify-between">
-                          <div className="flex-1">
-                            <div className="text-sm font-medium mb-1">Current Template Map</div>
-                            <div className="text-sm text-muted-foreground">
-                              <div><strong>Template:</strong> {room.templateMap.template.category.name} - {room.templateMap.template.name}</div>
-                              <div><strong>Map:</strong> {room.templateMap.name}</div>
+                        ) : room?.templateMap && !selectedMapId ? (
+                          <div className="p-4 rounded-lg bg-muted/50">
+                            <div className="flex items-start justify-between">
+                              <div className="flex-1">
+                                <div className="text-sm font-medium mb-1">Current Template Map</div>
+                                <div className="text-sm text-muted-foreground">
+                                  <div><strong>Template:</strong> {room.templateMap.template.category.name} - {room.templateMap.template.name}</div>
+                                  <div><strong>Map:</strong> {room.templateMap.name}</div>
+                                </div>
+                              </div>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                onClick={() => {
+                                  // Show template library to change template
+                                  setIsChangingTemplate(true);
+                                  setSelectedTemplateSlug(null);
+                                  setSelectedMapId(null);
+                                  setSelectedMapUrl(null);
+                                  setSelectedTemplateName(null);
+                                  setSelectedMapName(null);
+                                }}
+                              >
+                                Change Template
+                              </Button>
                             </div>
                           </div>
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            onClick={() => {
-                              // Show template library to change template
-                              setIsChangingTemplate(true);
-                              setSelectedTemplateSlug(null);
-                              setSelectedMapId(null);
-                              setSelectedMapUrl(null);
-                              setSelectedTemplateName(null);
-                              setSelectedMapName(null);
-                            }}
-                          >
-                            Change Template
-                          </Button>
-                        </div>
-                      </div>
-                    ) : null}
-                  </CardContent>
+                        ) : !room?.templateMapId ? (
+                          <TemplateLibrary onSelectTemplate={handleSelectTemplate} />
+                        ) : null}
+                      </CardContent>
+                    </>
+                  )}
                 </Card>
               )}
             </>
