@@ -160,6 +160,26 @@ export async function GET(
                       },
                     },
                   },
+                  templateMap: {
+                    select: {
+                      id: true,
+                      name: true,
+                      template: {
+                        select: {
+                          id: true,
+                          name: true,
+                          slug: true,
+                          category: {
+                            select: {
+                              id: true,
+                              name: true,
+                              slug: true,
+                            },
+                          },
+                        },
+                      },
+                    },
+                  },
                 },
               });
               if (!room) {
@@ -200,6 +220,26 @@ export async function GET(
                           name: true,
                           slug: true,
                           ownerId: true,
+                        },
+                      },
+                    },
+                  },
+                  templateMap: {
+                    select: {
+                      id: true,
+                      name: true,
+                      template: {
+                        select: {
+                          id: true,
+                          name: true,
+                          slug: true,
+                          category: {
+                            select: {
+                              id: true,
+                              name: true,
+                              slug: true,
+                            },
+                          },
                         },
                       },
                     },

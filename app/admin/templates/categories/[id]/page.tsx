@@ -146,7 +146,14 @@ export default function CategoryDetailPage() {
       }
 
       setIsEditDialogOpen(false);
-      await fetchCategory();
+      // Reload category data
+      if (params.id) {
+        const response = await fetch(`/api/admin/templates/categories/${params.id}`);
+        if (response.ok) {
+          const data = await response.json();
+          setCategory(data.category);
+        }
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save category');
     } finally {
