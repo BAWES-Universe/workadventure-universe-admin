@@ -104,9 +104,40 @@ export function ImageUpload({ value, onChange, mapId, templateId, disabled, clas
     }
   };
 
+  // Reset file input when label is clicked (for replace functionality)
+  useEffect(() => {
+    const input = fileInputRef.current;
+    if (!input) return;
+
+    const handleLabelClick = () => {
+      // Reset the input value to allow selecting the same file again
+      input.value = '';
+    };
+
+    // Listen for focus events which happen when label is clicked
+    input.addEventListener('focus', handleLabelClick);
+    
+    return () => {
+      input.removeEventListener('focus', handleLabelClick);
+    };
+  }, []);
+
+  const fileInputId = `file-input-${mapId || templateId || 'upload'}`;
+
   return (
     <div className={cn('space-y-2', className)}>
       <Label>Preview Image</Label>
+      
+      {/* File input - always present but hidden */}
+      <input
+        id={fileInputId}
+        ref={fileInputRef}
+        type="file"
+        accept="image/jpeg,image/jpg,image/png,image/webp,image/gif"
+        onChange={handleFileSelect}
+        style={{ display: 'none' }}
+        disabled={disabled || uploading}
+      />
       
       {preview ? (
         <div className="relative group">
@@ -114,20 +145,26 @@ export function ImageUpload({ value, onChange, mapId, templateId, disabled, clas
             <img
               src={preview}
               alt="Preview"
-              className="w-full h-full object-contain"
+              className="w-full h-full object-contain pointer-events-none"
             />
             {!disabled && (
-              <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2">
-                <Button
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={uploading}
-                >
-                  <Upload className="h-4 w-4 mr-2" />
-                  Replace
-                </Button>
+              <div 
+                className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2 z-10"
+              >
+                <label htmlFor={fileInputId} style={{ margin: 0 }}>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    asChild
+                    disabled={uploading || disabled}
+                  >
+                    <span>
+                      <Upload className="h-4 w-4 mr-2" />
+                      Replace
+                    </span>
+                  </Button>
+                </label>
                 <Button
                   type="button"
                   variant="destructive"
@@ -152,14 +189,6 @@ export function ImageUpload({ value, onChange, mapId, templateId, disabled, clas
           )}
           onClick={() => !disabled && !uploading && fileInputRef.current?.click()}
         >
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/jpeg,image/jpg,image/png,image/webp,image/gif"
-            onChange={handleFileSelect}
-            className="hidden"
-            disabled={disabled || uploading}
-          />
           {uploading ? (
             <>
               <Loader2 className="h-8 w-8 animate-spin mx-auto mb-2 text-muted-foreground" />
