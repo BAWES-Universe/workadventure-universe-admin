@@ -152,6 +152,9 @@ function NewRoomPageContent() {
         console.error('Failed to fetch template details:', err);
       }
     }
+    
+    // Close template selection after map is selected
+    setSelectedTemplateSlug(null);
   }
 
   function handleBackToTemplates() {
@@ -342,17 +345,48 @@ function NewRoomPageContent() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            {!selectedTemplateSlug ? (
-              <TemplateLibrary
-                onSelectTemplate={handleSelectTemplate}
-              />
-            ) : (
+            {selectedTemplateSlug ? (
               <TemplateDetail
                 templateSlug={selectedTemplateSlug}
                 onSelectMap={handleSelectMap}
                 onBack={handleBackToTemplates}
                 selectedMapId={selectedMapId || undefined}
                 hideBackButton={true}
+              />
+            ) : selectedMapId && selectedTemplateName && selectedMapName ? (
+              <div className="p-4 border rounded-lg bg-muted/50">
+                <div className="flex items-start justify-between">
+                  <div className="flex-1">
+                    <div className="text-sm font-medium mb-1">Selected Template Map</div>
+                    <div className="text-sm text-muted-foreground">
+                      <div><strong>Template:</strong> {selectedTemplateName}</div>
+                      <div><strong>Map:</strong> {selectedMapName}</div>
+                    </div>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setSelectedTemplateSlug(null);
+                      setSelectedMapId(null);
+                      setSelectedMapUrl(null);
+                      setSelectedTemplateName(null);
+                      setSelectedMapName(null);
+                      setFormData(prev => ({
+                        ...prev,
+                        templateMapId: null,
+                        mapUrl: '',
+                      }));
+                    }}
+                  >
+                    Change Template
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <TemplateLibrary
+                onSelectTemplate={handleSelectTemplate}
               />
             )}
           </CardContent>
