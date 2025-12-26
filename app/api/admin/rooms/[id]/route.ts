@@ -9,6 +9,7 @@ const updateRoomSchema = z.object({
   name: z.string().min(1).max(200).optional(),
   description: z.string().optional().nullable(),
   mapUrl: z.string().url().optional().nullable().or(z.literal('')),
+  templateMapId: z.string().uuid().optional().nullable(),
   isPublic: z.boolean().optional(),
 });
 
@@ -53,6 +54,23 @@ export async function GET(
                 name: true,
                 slug: true,
                 ownerId: true,
+              },
+            },
+          },
+        },
+        templateMap: {
+          select: {
+            id: true,
+            name: true,
+            template: {
+              select: {
+                id: true,
+                name: true,
+                category: {
+                  select: {
+                    name: true,
+                  },
+                },
               },
             },
           },
@@ -280,6 +298,9 @@ export async function PATCH(
     if (body.mapUrl === '') {
       body.mapUrl = null;
     }
+    if (body.templateMapId === '') {
+      body.templateMapId = null;
+    }
     
     const data = updateRoomSchema.parse(body);
     
@@ -347,11 +368,42 @@ export async function PATCH(
       }
     }
     
+    // Handle templateMapId - if provided, fetch the template map and use its mapUrl
+    let mapUrl = data.mapUrl;
+    let templateMapId: string | null | undefined = data.templateMapId;
+    
+    if (templateMapId !== null && templateMapId !== undefined) {
+      const templateMap = await prisma.roomTemplateMap.findUnique({
+        where: { id: templateMapId },
+      });
+      
+      if (!templateMap) {
+        return NextResponse.json(
+          { error: 'Template map not found' },
+          { status: 404 }
+        );
+      }
+      
+      if (!templateMap.isActive) {
+        return NextResponse.json(
+          { error: 'Template map is not active' },
+          { status: 400 }
+        );
+      }
+      
+      // Use template map's URL
+      mapUrl = templateMap.mapUrl;
+    } else if (templateMapId === null && data.mapUrl === undefined) {
+      // If templateMapId is explicitly set to null but mapUrl is not provided, keep existing mapUrl
+      mapUrl = existing.mapUrl;
+    }
+    
     const updateData: any = {};
     if (data.slug !== undefined) updateData.slug = data.slug;
     if (data.name !== undefined) updateData.name = data.name;
     if (data.description !== undefined) updateData.description = data.description;
-    if (data.mapUrl !== undefined) updateData.mapUrl = data.mapUrl || null;
+    if (mapUrl !== undefined) updateData.mapUrl = mapUrl;
+    if (templateMapId !== undefined) updateData.templateMapId = templateMapId;
     if (data.isPublic !== undefined) updateData.isPublic = data.isPublic;
     
     const room = await prisma.room.update({

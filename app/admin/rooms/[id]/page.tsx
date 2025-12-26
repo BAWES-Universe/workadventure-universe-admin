@@ -48,6 +48,18 @@ interface Room {
   description: string | null;
   mapUrl: string | null;
   wamUrl: string | null;
+  templateMapId: string | null;
+  templateMap?: {
+    id: string;
+    name: string;
+    template: {
+      id: string;
+      name: string;
+      category: {
+        name: string;
+      };
+    };
+  } | null;
   isPublic: boolean;
   canEdit?: boolean;
   isStarred?: boolean;
@@ -114,8 +126,10 @@ export default function RoomDetailPage() {
     name: '',
     description: '',
     mapUrl: '',
+    templateMapId: null as string | null,
     isPublic: true,
   });
+  const [useCustomMap, setUseCustomMap] = useState(false);
 
   useEffect(() => {
     checkAuth();
@@ -179,8 +193,11 @@ export default function RoomDetailPage() {
         name: data.name,
         description: data.description || '',
         mapUrl: data.mapUrl || '',
+        templateMapId: data.templateMapId || null,
         isPublic: data.isPublic,
       });
+      // If room has a templateMap, default to template mode; otherwise use custom map mode
+      setUseCustomMap(!data.templateMapId);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load room');
     } finally {
@@ -208,24 +225,46 @@ export default function RoomDetailPage() {
     setSaving(true);
     setError(null);
 
-    if (!formData.mapUrl || formData.mapUrl.trim() === '') {
-      setError('Map URL is required');
-      setSaving(false);
-      return;
+    // Validate based on mode
+    if (useCustomMap) {
+      if (!formData.mapUrl || formData.mapUrl.trim() === '') {
+        setError('Map URL is required when using custom map');
+        setSaving(false);
+        return;
+      }
+    } else {
+      if (!formData.templateMapId) {
+        setError('Template map is required');
+        setSaving(false);
+        return;
+      }
     }
 
     try {
       const { authenticatedFetch } = await import('@/lib/client-auth');
+      
+      // Build request body based on mode
+      const requestBody: any = {
+        slug: formData.slug,
+        name: formData.name,
+        description: formData.description || null,
+        isPublic: formData.isPublic,
+      };
+      
+      if (useCustomMap) {
+        requestBody.mapUrl = formData.mapUrl.trim();
+        requestBody.templateMapId = null; // Clear template reference
+      } else {
+        requestBody.templateMapId = formData.templateMapId;
+        // Don't send mapUrl - API will set it from template
+      }
+      
       const response = await authenticatedFetch(`/api/admin/rooms/${id}`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          ...formData,
-          description: formData.description || null,
-          mapUrl: formData.mapUrl.trim(),
-        }),
+        body: JSON.stringify(requestBody),
       });
 
       if (!response.ok) {
@@ -561,21 +600,61 @@ export default function RoomDetailPage() {
               />
             </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="mapUrl">
-                Map URL <span className="text-destructive">*</span>
-              </Label>
-              <p className="text-sm text-muted-foreground">
-                External TMJ map URL for this room (e.g., https://example.com/map.tmj). Each room must have its own map.
-              </p>
-              <Input
-                id="mapUrl"
-                type="url"
-                required
-                value={formData.mapUrl}
-                onChange={(e) => setFormData({ ...formData, mapUrl: e.target.value })}
-              />
+            {/* Template/Custom Map Toggle */}
+            <div className="flex items-center gap-4 mb-4">
+              <Button
+                type="button"
+                variant={!useCustomMap ? 'default' : 'outline'}
+                onClick={() => setUseCustomMap(false)}
+              >
+                Use Template
+              </Button>
+              <Button
+                type="button"
+                variant={useCustomMap ? 'default' : 'outline'}
+                onClick={() => setUseCustomMap(true)}
+              >
+                Custom Map (Advanced)
+              </Button>
             </div>
+
+            {/* Template Map Info */}
+            {!useCustomMap && room?.templateMap && (
+              <div className="mb-4 p-4 border rounded-lg bg-muted/50">
+                <div className="text-sm font-medium mb-1">Template Map</div>
+                <div className="text-sm text-muted-foreground">
+                  <div><strong>Template:</strong> {room.templateMap.template.category.name} - {room.templateMap.template.name}</div>
+                  <div><strong>Map:</strong> {room.templateMap.name}</div>
+                </div>
+                <p className="text-xs text-muted-foreground mt-2">
+                  Map URL is automatically set from the template. Switch to "Custom Map" to override.
+                </p>
+              </div>
+            )}
+
+            {/* Custom Map URL Input - Only show when using custom map */}
+            {useCustomMap && (
+              <div className="space-y-2">
+                <Label htmlFor="mapUrl">
+                  Map URL <span className="text-destructive">*</span>
+                </Label>
+                <p className="text-sm text-muted-foreground">
+                  External TMJ map URL for this room (e.g., https://example.com/map.tmj). Each room must have its own map.
+                </p>
+                <Input
+                  id="mapUrl"
+                  type="url"
+                  required
+                  value={formData.mapUrl}
+                  onChange={(e) => setFormData({ ...formData, mapUrl: e.target.value })}
+                />
+                {room?.templateMapId && (
+                  <p className="text-xs text-muted-foreground mt-1">
+                    ⚠️ Switching to custom map will disconnect this room from the template.
+                  </p>
+                )}
+              </div>
+            )}
 
             <div className="flex items-center space-x-2">
               <Checkbox
