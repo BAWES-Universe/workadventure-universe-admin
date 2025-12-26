@@ -77,7 +77,7 @@ export async function GET(request: NextRequest) {
       },
     });
 
-    // Transform templates to include map count
+    // Transform templates to include map count and preserve _count structure
     const templatesWithMapCount = templates.map((template) => ({
       id: template.id,
       slug: template.slug,
@@ -87,6 +87,9 @@ export async function GET(request: NextRequest) {
       category: template.category,
       mapCount: template._count.maps,
       isFeatured: template.isFeatured,
+      _count: {
+        maps: template._count.maps,
+      },
     }));
 
     return NextResponse.json({

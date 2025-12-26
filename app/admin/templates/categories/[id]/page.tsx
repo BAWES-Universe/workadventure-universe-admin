@@ -64,6 +64,7 @@ export default function CategoryDetailPage() {
   const [templates, setTemplates] = useState<Template[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [isSuperAdmin, setIsSuperAdmin] = useState(false);
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -87,35 +88,79 @@ export default function CategoryDetailPage() {
       setLoading(true);
       setError(null);
       
-      // Fetch category and templates in parallel
-      const [categoryResponse, templatesResponse] = await Promise.all([
-        (await import('@/lib/client-auth')).authenticatedFetch(`/api/admin/templates/categories/${params.id}`),
-        (await import('@/lib/client-auth')).authenticatedFetch(`/api/admin/templates?categoryId=${params.id}`),
-      ]);
+      // Check if user is super admin
+      let userIsSuperAdmin = false;
+      try {
+        const { authenticatedFetch } = await import('@/lib/client-auth');
+        const authResponse = await authenticatedFetch('/api/auth/me');
+        if (authResponse.ok) {
+          const authData = await authResponse.json();
+          userIsSuperAdmin = authData.user?.isSuperAdmin || false;
+        }
+      } catch {
+        // Not authenticated, continue as regular user
+      }
+      setIsSuperAdmin(userIsSuperAdmin);
       
-      // Handle category response
-      if (!categoryResponse.ok) {
-        if (categoryResponse.status === 404) {
+      // Fetch category - try admin endpoint first if super admin, otherwise use public list
+      let categoryData: any = null;
+      let categorySlug: string | null = null;
+      
+      if (userIsSuperAdmin) {
+        try {
+          const { authenticatedFetch } = await import('@/lib/client-auth');
+          const categoryResponse = await authenticatedFetch(`/api/admin/templates/categories/${params.id}`);
+          if (categoryResponse.ok) {
+            const data = await categoryResponse.json();
+            categoryData = data.category;
+            categorySlug = data.category.slug;
+          }
+        } catch {
+          // Fall through to public API
+        }
+      }
+      
+      // If not found via admin API, try public categories list
+      if (!categoryData) {
+        const categoriesResponse = await fetch('/api/templates/categories');
+        if (categoriesResponse.ok) {
+          const categoriesData = await categoriesResponse.json();
+          const foundCategory = categoriesData.categories.find((cat: any) => cat.id === params.id);
+          if (foundCategory) {
+            categoryData = {
+              ...foundCategory,
+              order: foundCategory.order || 0,
+              isActive: true,
+            };
+            categorySlug = foundCategory.slug;
+          } else {
+            router.push('/admin/templates');
+            return;
+          }
+        } else {
           router.push('/admin/templates');
           return;
         }
-        throw new Error('Failed to fetch category');
       }
-
-      const categoryData = await categoryResponse.json();
-      setCategory(categoryData.category);
-      setFormData({
-        name: categoryData.category.name,
-        description: categoryData.category.description || '',
-        icon: categoryData.category.icon || '',
-        order: categoryData.category.order,
-        isActive: categoryData.category.isActive,
-      });
       
-      // Handle templates response
-      if (templatesResponse.ok) {
-        const templatesData = await templatesResponse.json();
-        setTemplates(templatesData.templates || []);
+      setCategory(categoryData);
+      if (userIsSuperAdmin) {
+        setFormData({
+          name: categoryData.name,
+          description: categoryData.description || '',
+          icon: categoryData.icon || '',
+          order: categoryData.order,
+          isActive: categoryData.isActive,
+        });
+      }
+      
+      // Fetch templates using public API with category slug
+      if (categorySlug) {
+        const templatesResponse = await fetch(`/api/templates?category=${categorySlug}`);
+        if (templatesResponse.ok) {
+          const templatesData = await templatesResponse.json();
+          setTemplates(templatesData.templates || []);
+        }
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load category');
@@ -247,12 +292,14 @@ export default function CategoryDetailPage() {
       <div>
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-2xl font-semibold">Templates</h2>
-          <Button asChild>
-            <Link href={`/admin/templates/templates/new?categoryId=${category.id}`}>
-              <Plus className="h-4 w-4 mr-2" />
-              Create Template
-            </Link>
-          </Button>
+          {isSuperAdmin && (
+            <Button asChild>
+              <Link href={`/admin/templates/templates/new?categoryId=${category.id}`}>
+                <Plus className="h-4 w-4 mr-2" />
+                Create Template
+              </Link>
+            </Button>
+          )}
         </div>
         {templates.length === 0 ? (
           <Card>

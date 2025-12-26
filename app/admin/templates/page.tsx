@@ -46,13 +46,8 @@ export default function TemplatesAdminPage() {
       }
 
       const data = await response.json();
-      if (!data.user?.isSuperAdmin) {
-        setError('Access denied. Super admin privileges required.');
-        setIsSuperAdmin(false);
-      } else {
-        setIsSuperAdmin(true);
-        fetchCategories();
-      }
+      setIsSuperAdmin(data.user?.isSuperAdmin || false);
+      fetchCategories();
     } catch (err) {
       router.push('/admin/login');
     } finally {
@@ -63,8 +58,8 @@ export default function TemplatesAdminPage() {
   async function fetchCategories() {
     try {
       setLoading(true);
-      const { authenticatedFetch } = await import('@/lib/client-auth');
-      const response = await authenticatedFetch('/api/admin/templates/categories');
+      // Use public API endpoint for all users
+      const response = await fetch('/api/templates/categories');
       
       if (!response.ok) {
         throw new Error('Failed to fetch categories');
@@ -88,44 +83,27 @@ export default function TemplatesAdminPage() {
     );
   }
 
-  if (!isSuperAdmin) {
-    return (
-      <div className="space-y-8">
-        <div className="space-y-1">
-          <h1 className="text-4xl font-bold tracking-tight">Template Management</h1>
-          <p className="text-muted-foreground text-lg">
-            Manage room templates, categories, and maps
-          </p>
-        </div>
-        <Alert variant="destructive">
-          <AlertCircle className="h-4 w-4" />
-          <AlertTitle>Access Denied</AlertTitle>
-          <AlertDescription>
-            {error || 'Super admin privileges are required to access this page.'}
-          </AlertDescription>
-        </Alert>
-      </div>
-    );
-  }
-
   return (
     <div className="space-y-8">
-      <div className="flex items-center justify-between">
-        <div className="space-y-1">
-          <div className="flex items-center gap-2">
-            <Shield className="h-6 w-6 text-primary" />
-            <h1 className="text-4xl font-bold tracking-tight">Template Management</h1>
-          </div>
+      <div className="space-y-4">
+        <div className="space-y-2">
+          <h1 className="text-4xl font-bold tracking-tight">Room Templates</h1>
           <p className="text-muted-foreground text-lg">
-            Manage room templates, categories, and maps (Super Admin Only)
+            Browse our directory of room templates and maps to use when creating rooms. Each template includes multiple map variants to choose from.
           </p>
         </div>
-        <Button asChild>
-          <Link href="/admin/templates/categories/new">
-            <Plus className="h-4 w-4 mr-2" />
-            Create Category
-          </Link>
-        </Button>
+        
+        <div className="flex items-center justify-between">
+          <h2 className="text-2xl font-semibold">Categories</h2>
+          {isSuperAdmin && (
+            <Button asChild>
+              <Link href="/admin/templates/categories/new">
+                <Plus className="h-4 w-4 mr-2" />
+                Create Category
+              </Link>
+            </Button>
+          )}
+        </div>
       </div>
 
       {error && (
@@ -147,17 +125,21 @@ export default function TemplatesAdminPage() {
           <CardHeader>
             <CardTitle>No categories yet</CardTitle>
             <CardDescription>
-              Create your first category to start organizing templates.
+              {isSuperAdmin 
+                ? 'Create your first category to start organizing templates.'
+                : 'No template categories are available yet.'}
             </CardDescription>
           </CardHeader>
-          <CardContent>
-            <Button asChild>
-              <Link href="/admin/templates/categories/new">
-                <Plus className="mr-2 h-4 w-4" />
-                Create your first category
-              </Link>
-            </Button>
-          </CardContent>
+          {isSuperAdmin && (
+            <CardContent>
+              <Button asChild>
+                <Link href="/admin/templates/categories/new">
+                  <Plus className="mr-2 h-4 w-4" />
+                  Create your first category
+                </Link>
+              </Button>
+            </CardContent>
+          )}
         </Card>
       ) : (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">

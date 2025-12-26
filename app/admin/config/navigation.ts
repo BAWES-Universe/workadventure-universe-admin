@@ -14,6 +14,9 @@ export const NAV_ITEMS: NavItem[] = [
   // Primary dashboard entry (no group, always at top)
   { href: '/admin', label: 'Dashboard', icon: LayoutDashboard },
 
+  // Room Templates - available to all users
+  { href: '/admin/templates', label: 'Room Templates', icon: FolderOpen },
+
   // Personalize section
   { href: '/admin/universes', label: 'My Universes', icon: Globe, group: 'my' },
   { href: '/admin/stars', label: 'My Stars', icon: Star, group: 'my' },
@@ -25,9 +28,6 @@ export const NAV_ITEMS: NavItem[] = [
   { href: '/admin/discover/worlds', label: 'Worlds', icon: Home, group: 'discover' },
   { href: '/admin/discover/rooms', label: 'Rooms', icon: FolderOpen, group: 'discover' },
   { href: '/admin/users', label: 'Users', icon: Users, group: 'discover' },
-
-  // Admin section (Super Admin only)
-  { href: '/admin/templates', label: 'Template Management', icon: Shield, requiresSuperAdmin: true, group: 'admin' },
 ];
 
 export function getNavItems(user: { name: string | null; email: string | null; isSuperAdmin?: boolean } | null): NavItem[] {

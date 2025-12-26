@@ -81,6 +81,7 @@ export default function TemplateDetailPage() {
   const [categories, setCategories] = useState<Array<{ id: string; name: string; icon: string | null }>>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [isSuperAdmin, setIsSuperAdmin] = useState(false);
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -109,47 +110,99 @@ export default function TemplateDetailPage() {
       setLoading(true);
       setError(null);
       
-      // Fetch template, maps, and categories in parallel
-      const [templateResponse, mapsResponse, categoriesResponse] = await Promise.all([
-        (await import('@/lib/client-auth')).authenticatedFetch(`/api/admin/templates/${params.id}`),
-        (await import('@/lib/client-auth')).authenticatedFetch(`/api/admin/templates/maps?templateId=${params.id}`),
-        (await import('@/lib/client-auth')).authenticatedFetch('/api/admin/templates/categories'),
-      ]);
+      // Check if user is super admin
+      let userIsSuperAdmin = false;
+      try {
+        const { authenticatedFetch } = await import('@/lib/client-auth');
+        const authResponse = await authenticatedFetch('/api/auth/me');
+        if (authResponse.ok) {
+          const authData = await authResponse.json();
+          userIsSuperAdmin = authData.user?.isSuperAdmin || false;
+        }
+      } catch {
+        // Not authenticated, continue as regular user
+      }
+      setIsSuperAdmin(userIsSuperAdmin);
       
-      // Handle template response
-      if (!templateResponse.ok) {
-        if (templateResponse.status === 404) {
+      // Fetch template using public API (by slug if we have it, or by ID from admin API if super admin)
+      let templateData: any = null;
+      
+      // Try to get template slug first - if we have template ID, we need to find its slug
+      // For now, try public API with template ID lookup, or use admin API if super admin
+      if (userIsSuperAdmin) {
+        // Super admin can use admin API for full data
+        const { authenticatedFetch } = await import('@/lib/client-auth');
+        const [templateResponse, mapsResponse, categoriesResponse] = await Promise.all([
+          authenticatedFetch(`/api/admin/templates/${params.id}`),
+          authenticatedFetch(`/api/admin/templates/maps?templateId=${params.id}`),
+          authenticatedFetch('/api/admin/templates/categories'),
+        ]);
+        
+        if (!templateResponse.ok) {
+          if (templateResponse.status === 404) {
+            router.push('/admin/templates');
+            return;
+          }
+          throw new Error('Failed to fetch template');
+        }
+
+        templateData = await templateResponse.json();
+        setTemplate(templateData.template);
+        setFormData({
+          categoryId: templateData.template.category.id,
+          name: templateData.template.name,
+          shortDescription: templateData.template.shortDescription || '',
+          philosophy: templateData.template.philosophy || '',
+          purpose: templateData.template.purpose || '',
+          whoItsFor: templateData.template.whoItsFor || '',
+          typicalUseCases: templateData.template.typicalUseCases.join('\n'),
+          visibility: templateData.template.visibility,
+          isFeatured: templateData.template.isFeatured,
+          isActive: templateData.template.isActive,
+        });
+        
+        if (mapsResponse.ok) {
+          const mapsData = await mapsResponse.json();
+          setMaps(mapsData.maps || []);
+        }
+
+        if (categoriesResponse.ok) {
+          const categoriesData = await categoriesResponse.json();
+          setCategories(categoriesData.categories || []);
+        }
+      } else {
+        // Regular users use public API - need to find template by ID
+        // First, get all templates and find the one with matching ID
+        const templatesResponse = await fetch('/api/templates');
+        if (templatesResponse.ok) {
+          const templatesData = await templatesResponse.json();
+          const foundTemplate = templatesData.templates.find((t: any) => t.id === params.id);
+          if (foundTemplate) {
+            // Fetch full template details by slug
+            const templateDetailResponse = await fetch(`/api/templates/${foundTemplate.slug}`);
+            if (templateDetailResponse.ok) {
+              const detailData = await templateDetailResponse.json();
+              setTemplate(detailData.template);
+              setMaps(detailData.template.maps || []);
+            } else {
+              router.push('/admin/templates');
+              return;
+            }
+          } else {
+            router.push('/admin/templates');
+            return;
+          }
+        } else {
           router.push('/admin/templates');
           return;
         }
-        throw new Error('Failed to fetch template');
-      }
-
-      const templateData = await templateResponse.json();
-      setTemplate(templateData.template);
-      setFormData({
-        categoryId: templateData.template.category.id,
-        name: templateData.template.name,
-        shortDescription: templateData.template.shortDescription || '',
-        philosophy: templateData.template.philosophy || '',
-        purpose: templateData.template.purpose || '',
-        whoItsFor: templateData.template.whoItsFor || '',
-        typicalUseCases: templateData.template.typicalUseCases.join('\n'),
-        visibility: templateData.template.visibility,
-        isFeatured: templateData.template.isFeatured,
-        isActive: templateData.template.isActive,
-      });
-      
-      // Handle maps response
-      if (mapsResponse.ok) {
-        const mapsData = await mapsResponse.json();
-        setMaps(mapsData.maps || []);
-      }
-
-      // Handle categories response
-      if (categoriesResponse.ok) {
-        const categoriesData = await categoriesResponse.json();
-        setCategories(categoriesData.categories || []);
+        
+        // Fetch categories for regular users
+        const categoriesResponse = await fetch('/api/templates/categories');
+        if (categoriesResponse.ok) {
+          const categoriesData = await categoriesResponse.json();
+          setCategories(categoriesData.categories || []);
+        }
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load template');
@@ -254,10 +307,12 @@ export default function TemplateDetailPage() {
             Back to {template.category.name}
           </Link>
         </Button>
-        <Button variant="outline" onClick={() => setIsEditDialogOpen(true)}>
-          <Edit className="h-4 w-4 mr-2" />
-          Edit
-        </Button>
+        {isSuperAdmin && (
+          <Button variant="outline" onClick={() => setIsEditDialogOpen(true)}>
+            <Edit className="h-4 w-4 mr-2" />
+            Edit
+          </Button>
+        )}
       </div>
 
       <div className="flex items-center justify-between">
@@ -335,12 +390,14 @@ export default function TemplateDetailPage() {
       <div>
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-2xl font-semibold">Maps</h2>
-          <Button asChild>
-            <Link href={`/admin/templates/maps/new?templateId=${template.id}`}>
-              <Plus className="h-4 w-4 mr-2" />
-              Create Map
-            </Link>
-          </Button>
+          {isSuperAdmin && (
+            <Button asChild>
+              <Link href={`/admin/templates/maps/new?templateId=${template.id}`}>
+                <Plus className="h-4 w-4 mr-2" />
+                Create Map
+              </Link>
+            </Button>
+          )}
         </div>
         {maps.length === 0 ? (
           <Card>
