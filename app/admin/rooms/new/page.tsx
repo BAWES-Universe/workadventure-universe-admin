@@ -200,20 +200,37 @@ function NewRoomPageContent() {
 
     try {
       const { authenticatedFetch } = await import('@/lib/client-auth');
+      
+      // Build request body
+      const requestBody: any = {
+        worldId: formData.worldId,
+        slug: formData.slug,
+        name: formData.name,
+        description: formData.description || null,
+        isPublic: formData.isPublic,
+      };
+      
+      // Handle mapUrl and templateMapId
+      // If using template (templateMapId exists and is valid UUID), use it and let API set mapUrl
+      // Otherwise, use the manually entered mapUrl
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      const templateMapIdValue = formData.templateMapId ? String(formData.templateMapId).trim() : '';
+      
+      if (templateMapIdValue && uuidRegex.test(templateMapIdValue)) {
+        // Valid templateMapId - API will fetch and use the mapUrl from template
+        requestBody.templateMapId = templateMapIdValue;
+        // Don't send mapUrl when using template - API will set it
+      } else {
+        // No valid templateMapId - use manually entered mapUrl
+        requestBody.mapUrl = formData.mapUrl.trim();
+      }
+      
       const response = await authenticatedFetch('/api/admin/rooms', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          worldId: formData.worldId,
-          slug: formData.slug,
-          name: formData.name,
-          description: formData.description || null,
-          mapUrl: formData.mapUrl.trim(),
-          templateMapId: formData.templateMapId || undefined,
-          isPublic: formData.isPublic,
-        }),
+        body: JSON.stringify(requestBody),
       });
 
       if (!response.ok) {

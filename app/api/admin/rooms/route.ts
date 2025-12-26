@@ -307,7 +307,7 @@ export async function POST(request: NextRequest) {
     
     // If templateMapId is provided, fetch the template map and use its mapUrl
     let mapUrl = data.mapUrl;
-    let templateMapId = data.templateMapId;
+    let templateMapId: string | null = data.templateMapId || null;
     
     if (templateMapId) {
       const templateMap = await prisma.roomTemplateMap.findUnique({
@@ -409,7 +409,7 @@ export async function POST(request: NextRequest) {
         name: data.name,
         description: data.description || null,
         mapUrl: mapUrl,
-        templateMapId: templateMapId || null,
+        templateMapId: templateMapId, // Already null if not provided
         isPublic: data.isPublic,
       },
       include: {
