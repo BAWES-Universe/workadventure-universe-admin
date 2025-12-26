@@ -149,13 +149,8 @@ export async function DELETE(
       );
     }
 
-    if (category._count.templates > 0) {
-      return NextResponse.json(
-        { error: 'Cannot delete category with existing templates' },
-        { status: 400 }
-      );
-    }
-
+    // Note: Schema has onDelete: Cascade, so templates will be automatically deleted
+    // We allow deletion even with templates, but the UI should warn the user
     await prisma.roomTemplateCategory.delete({
       where: { id },
     });

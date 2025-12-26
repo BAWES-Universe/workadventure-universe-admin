@@ -7,7 +7,36 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
-import { ChevronLeft, Loader2, Plus, AlertCircle, MapPin } from 'lucide-react';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Textarea } from '@/components/ui/textarea';
+import { Checkbox } from '@/components/ui/checkbox';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { ChevronLeft, Loader2, Plus, Edit, Trash2, AlertCircle, MapPin } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface Template {
@@ -49,8 +78,25 @@ export default function TemplateDetailPage() {
   const params = useParams();
   const [template, setTemplate] = useState<Template | null>(null);
   const [maps, setMaps] = useState<TemplateMap[]>([]);
+  const [categories, setCategories] = useState<Array<{ id: string; name: string; icon: string | null }>>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
+  const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const [formData, setFormData] = useState({
+    categoryId: '',
+    name: '',
+    shortDescription: '',
+    philosophy: '',
+    purpose: '',
+    whoItsFor: '',
+    typicalUseCases: '',
+    visibility: 'public',
+    isFeatured: false,
+    isActive: true,
+  });
 
   useEffect(() => {
     if (params.id) {
@@ -63,10 +109,11 @@ export default function TemplateDetailPage() {
       setLoading(true);
       setError(null);
       
-      // Fetch template and maps in parallel
-      const [templateResponse, mapsResponse] = await Promise.all([
+      // Fetch template, maps, and categories in parallel
+      const [templateResponse, mapsResponse, categoriesResponse] = await Promise.all([
         (await import('@/lib/client-auth')).authenticatedFetch(`/api/admin/templates/${params.id}`),
         (await import('@/lib/client-auth')).authenticatedFetch(`/api/admin/templates/maps?templateId=${params.id}`),
+        (await import('@/lib/client-auth')).authenticatedFetch('/api/admin/templates/categories'),
       ]);
       
       // Handle template response
@@ -80,16 +127,99 @@ export default function TemplateDetailPage() {
 
       const templateData = await templateResponse.json();
       setTemplate(templateData.template);
+      setFormData({
+        categoryId: templateData.template.category.id,
+        name: templateData.template.name,
+        shortDescription: templateData.template.shortDescription || '',
+        philosophy: templateData.template.philosophy || '',
+        purpose: templateData.template.purpose || '',
+        whoItsFor: templateData.template.whoItsFor || '',
+        typicalUseCases: templateData.template.typicalUseCases.join('\n'),
+        visibility: templateData.template.visibility,
+        isFeatured: templateData.template.isFeatured,
+        isActive: templateData.template.isActive,
+      });
       
       // Handle maps response
       if (mapsResponse.ok) {
         const mapsData = await mapsResponse.json();
         setMaps(mapsData.maps || []);
       }
+
+      // Handle categories response
+      if (categoriesResponse.ok) {
+        const categoriesData = await categoriesResponse.json();
+        setCategories(categoriesData.categories || []);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load template');
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleSave() {
+    if (!template) return;
+
+    try {
+      setSaving(true);
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      
+      // Parse typicalUseCases from newline-separated string
+      const typicalUseCases = formData.typicalUseCases
+        .split('\n')
+        .map(s => s.trim())
+        .filter(s => s.length > 0);
+
+      const response = await authenticatedFetch(`/api/admin/templates/${template.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          categoryId: formData.categoryId,
+          name: formData.name,
+          shortDescription: formData.shortDescription || null,
+          philosophy: formData.philosophy || null,
+          purpose: formData.purpose || null,
+          whoItsFor: formData.whoItsFor || null,
+          typicalUseCases,
+          visibility: formData.visibility,
+          isFeatured: formData.isFeatured,
+          isActive: formData.isActive,
+        }),
+      });
+
+      if (!response.ok) {
+        const data = await response.json();
+        throw new Error(data.error || 'Failed to save template');
+      }
+
+      setIsEditDialogOpen(false);
+      await fetchData();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save template');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleDelete() {
+    if (!template) return;
+
+    try {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch(`/api/admin/templates/${template.id}`, {
+        method: 'DELETE',
+      });
+
+      if (!response.ok) {
+        const data = await response.json();
+        throw new Error(data.error || 'Failed to delete template');
+      }
+
+      router.push(`/admin/templates/categories/${template.category.id}`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete template');
+      setIsDeleteDialogOpen(false);
     }
   }
 
@@ -148,12 +278,25 @@ export default function TemplateDetailPage() {
             <Badge variant="outline">{template.visibility}</Badge>
           </div>
         </div>
-        <Button asChild>
-          <Link href={`/admin/templates/maps/new?templateId=${template.id}`}>
-            <Plus className="h-4 w-4 mr-2" />
-            Create Map
-          </Link>
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={() => setIsEditDialogOpen(true)}>
+            <Edit className="h-4 w-4 mr-2" />
+            Edit
+          </Button>
+          <Button
+            variant="destructive"
+            onClick={() => setIsDeleteDialogOpen(true)}
+          >
+            <Trash2 className="h-4 w-4 mr-2" />
+            Delete
+          </Button>
+          <Button asChild>
+            <Link href={`/admin/templates/maps/new?templateId=${template.id}`}>
+              <Plus className="h-4 w-4 mr-2" />
+              Create Map
+            </Link>
+          </Button>
+        </div>
       </div>
 
       {error && (
@@ -276,6 +419,170 @@ export default function TemplateDetailPage() {
           </div>
         )}
       </div>
+
+      {/* Edit Dialog */}
+      <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>
+        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Edit Template</DialogTitle>
+            <DialogDescription>Update template details</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="categoryId">Category *</Label>
+              <Select
+                value={formData.categoryId}
+                onValueChange={(value) => setFormData({ ...formData, categoryId: value })}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Select a category" />
+                </SelectTrigger>
+                <SelectContent>
+                  {categories.map((cat) => (
+                    <SelectItem key={cat.id} value={cat.id}>
+                      {cat.icon && <span className="mr-2">{cat.icon}</span>}
+                      {cat.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="name">Name *</Label>
+              <Input
+                id="name"
+                value={formData.name}
+                onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="shortDescription">Short Description</Label>
+              <Textarea
+                id="shortDescription"
+                value={formData.shortDescription}
+                onChange={(e) => setFormData({ ...formData, shortDescription: e.target.value })}
+                rows={2}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="philosophy">Philosophy</Label>
+              <Textarea
+                id="philosophy"
+                value={formData.philosophy}
+                onChange={(e) => setFormData({ ...formData, philosophy: e.target.value })}
+                rows={3}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="purpose">Purpose</Label>
+              <Textarea
+                id="purpose"
+                value={formData.purpose}
+                onChange={(e) => setFormData({ ...formData, purpose: e.target.value })}
+                rows={2}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="whoItsFor">Who It's For</Label>
+              <Textarea
+                id="whoItsFor"
+                value={formData.whoItsFor}
+                onChange={(e) => setFormData({ ...formData, whoItsFor: e.target.value })}
+                rows={2}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="typicalUseCases">Typical Use Cases (one per line)</Label>
+              <Textarea
+                id="typicalUseCases"
+                value={formData.typicalUseCases}
+                onChange={(e) => setFormData({ ...formData, typicalUseCases: e.target.value })}
+                rows={4}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="visibility">Visibility</Label>
+              <Select
+                value={formData.visibility}
+                onValueChange={(value) => setFormData({ ...formData, visibility: value })}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="public">Public</SelectItem>
+                  <SelectItem value="private">Private</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex items-center space-x-2">
+              <Checkbox
+                id="isFeatured"
+                checked={formData.isFeatured}
+                onCheckedChange={(checked) =>
+                  setFormData({ ...formData, isFeatured: checked === true })
+                }
+              />
+              <Label htmlFor="isFeatured" className="font-normal cursor-pointer">
+                Featured
+              </Label>
+            </div>
+            <div className="flex items-center space-x-2">
+              <Checkbox
+                id="isActive"
+                checked={formData.isActive}
+                onCheckedChange={(checked) =>
+                  setFormData({ ...formData, isActive: checked === true })
+                }
+              />
+              <Label htmlFor="isActive" className="font-normal cursor-pointer">
+                Active
+              </Label>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIsEditDialogOpen(false)}>
+              Cancel
+            </Button>
+            <Button onClick={handleSave} disabled={saving || !formData.name || !formData.categoryId}>
+              {saving ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  Saving...
+                </>
+              ) : (
+                'Save'
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete Dialog */}
+      <AlertDialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Template</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to delete "{template?.name}"? This action cannot be undone.
+              {maps.length > 0 && (
+                <span className="block mt-2 text-destructive font-semibold">
+                  ⚠️ Warning: This will also delete {maps.length} map(s). This cannot be undone!
+                </span>
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleDelete}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              Delete{maps.length > 0 ? ' All' : ''}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

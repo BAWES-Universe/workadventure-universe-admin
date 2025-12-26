@@ -178,13 +178,8 @@ export async function DELETE(
       );
     }
 
-    if (template._count.maps > 0) {
-      return NextResponse.json(
-        { error: 'Cannot delete template with existing maps. Delete maps first.' },
-        { status: 400 }
-      );
-    }
-
+    // Note: Schema has onDelete: Cascade, so maps will be automatically deleted
+    // We allow deletion even with maps, but the UI should warn the user
     await prisma.roomTemplate.delete({
       where: { id },
     });

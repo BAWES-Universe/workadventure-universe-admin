@@ -231,7 +231,6 @@ export default function CategoryDetailPage() {
           <Button
             variant="destructive"
             onClick={() => setIsDeleteDialogOpen(true)}
-            disabled={templates.length > 0}
           >
             <Trash2 className="h-4 w-4 mr-2" />
             Delete
@@ -408,8 +407,8 @@ export default function CategoryDetailPage() {
             <AlertDialogDescription>
               Are you sure you want to delete "{category.name}"? This action cannot be undone.
               {templates.length > 0 && (
-                <span className="block mt-2 text-destructive">
-                  This category has {templates.length} template(s) and cannot be deleted.
+                <span className="block mt-2 text-destructive font-semibold">
+                  ⚠️ Warning: This will also delete {templates.length} template(s) and all their maps. This cannot be undone!
                 </span>
               )}
             </AlertDialogDescription>
@@ -418,10 +417,9 @@ export default function CategoryDetailPage() {
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
               onClick={handleDelete}
-              disabled={templates.length > 0}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
-              Delete
+              Delete{templates.length > 0 ? ' All' : ''}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
