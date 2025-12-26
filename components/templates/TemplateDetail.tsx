@@ -43,6 +43,7 @@ interface TemplateDetailProps {
   onSelectMap: (mapId: string, mapUrl: string) => void;
   onBack: () => void;
   selectedMapId?: string;
+  hideBackButton?: boolean;
 }
 
 export function TemplateDetail({
@@ -50,6 +51,7 @@ export function TemplateDetail({
   onSelectMap,
   onBack,
   selectedMapId,
+  hideBackButton = false,
 }: TemplateDetailProps) {
   const [template, setTemplate] = useState<Template | null>(null);
   const [loading, setLoading] = useState(true);
@@ -106,10 +108,12 @@ export function TemplateDetail({
     <div className="space-y-6">
       {/* Header */}
       <div className="flex items-start gap-4">
-        <Button variant="ghost" onClick={onBack} className="gap-2">
-          <ArrowLeft className="h-4 w-4" />
-          Back
-        </Button>
+        {!hideBackButton && (
+          <Button variant="ghost" onClick={onBack} className="gap-2">
+            <ArrowLeft className="h-4 w-4" />
+            Back
+          </Button>
+        )}
         <div className="flex-1">
           <div className="flex items-center gap-3">
             {template.category.icon && (

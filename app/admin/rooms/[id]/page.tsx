@@ -30,7 +30,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { ChevronRight, AlertCircle, Loader2, Edit, Trash2, Navigation, CheckCircle2, Star, Activity, ChevronLeft, Users, X } from 'lucide-react';
+import { ChevronRight, AlertCircle, Loader2, Edit, Trash2, Navigation, CheckCircle2, Star, Activity, ChevronLeft, Users, X, ArrowLeft } from 'lucide-react';
 import { TemplateLibrary } from '@/components/templates/TemplateLibrary';
 import { TemplateDetail } from '@/components/templates/TemplateDetail';
 import { cn } from '@/lib/utils';
@@ -679,6 +679,18 @@ export default function RoomDetailPage() {
               {selectedTemplateSlug ? (
                 <Card>
                   <CardHeader>
+                    <div className="flex items-center gap-2 mb-2">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={handleBackToTemplates}
+                        className="gap-2 -ml-2"
+                      >
+                        <ArrowLeft className="h-4 w-4" />
+                        Back
+                      </Button>
+                    </div>
                     <CardTitle>Select Template</CardTitle>
                     <CardDescription>
                       Choose a template to get started, or switch to custom map.
@@ -690,18 +702,52 @@ export default function RoomDetailPage() {
                       onSelectMap={handleSelectMap}
                       onBack={handleBackToTemplates}
                       selectedMapId={selectedMapId || room?.templateMapId || undefined}
+                      hideBackButton={true}
                     />
                   </CardContent>
                 </Card>
               ) : (
                 <Card>
                   <CardHeader>
-                    <CardTitle>Template Map</CardTitle>
-                    <CardDescription>
-                      {room?.templateMap 
-                        ? 'Current template map for this room. Click "Change Template" to select a different one.'
-                        : 'Choose a template to get started, or switch to custom map.'}
-                    </CardDescription>
+                    {isChangingTemplate ? (
+                      <>
+                        <div className="flex items-center gap-2 mb-2">
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => {
+                              setIsChangingTemplate(false);
+                              // Restore original template if it existed
+                              if (originalTemplateMapId || room?.templateMapId) {
+                                const templateIdToRestore = originalTemplateMapId || room?.templateMapId;
+                                setFormData(prev => ({
+                                  ...prev,
+                                  templateMapId: templateIdToRestore,
+                                }));
+                              }
+                            }}
+                            className="gap-2 -ml-2"
+                          >
+                            <ChevronLeft className="h-4 w-4" />
+                            Back
+                          </Button>
+                        </div>
+                        <CardTitle>Select Template</CardTitle>
+                        <CardDescription>
+                          Choose a template to get started, or switch to custom map.
+                        </CardDescription>
+                      </>
+                    ) : (
+                      <>
+                        <CardTitle>Template Map</CardTitle>
+                        <CardDescription>
+                          {room?.templateMap 
+                            ? 'Current template map for this room. Click "Change Template" to select a different one.'
+                            : 'Choose a template to get started, or switch to custom map.'}
+                        </CardDescription>
+                      </>
+                    )}
                   </CardHeader>
                   <CardContent>
                     {selectedTemplateSlug ? null : isChangingTemplate || !room?.templateMapId ? (
