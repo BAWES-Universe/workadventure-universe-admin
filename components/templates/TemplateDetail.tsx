@@ -109,14 +109,14 @@ export function TemplateDetail({
       {/* Header */}
       <Card className="border-border/70 bg-gradient-to-br from-background via-background to-background relative">
         {template.isFeatured && (
-          <div className="absolute top-4 right-4">
+          <div className="absolute top-4 right-4 z-10">
             <Badge variant="outline" className="text-xs">Featured</Badge>
           </div>
         )}
-        <CardHeader className="pr-20">
+        <CardHeader>
           <div className="space-y-4">
-            <div>
-              <h2 className="text-3xl font-bold tracking-tight">{template.name}</h2>
+            <div className={template.isFeatured ? 'pr-20' : ''}>
+              <h2 className="text-xl font-bold tracking-tight">{template.name}</h2>
               <div className="flex items-center gap-1.5 mt-2">
                 {template.category.icon && (
                   <span className="text-sm">{template.category.icon}</span>
@@ -164,9 +164,12 @@ export function TemplateDetail({
                 <h4 className="text-sm font-semibold mb-2">Typical Use Cases</h4>
                 <div className="flex flex-wrap gap-2">
                   {template.typicalUseCases.map((useCase, index) => (
-                    <Badge key={index} variant="outline" className="text-xs">
+                    <span
+                      key={index}
+                      className="inline-flex items-center rounded-md bg-muted px-2.5 py-0.5 text-xs font-medium text-muted-foreground"
+                    >
                       {useCase}
-                    </Badge>
+                    </span>
                   ))}
                 </div>
               </div>
