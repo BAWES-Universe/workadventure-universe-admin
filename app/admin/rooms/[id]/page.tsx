@@ -580,6 +580,16 @@ export default function RoomDetailPage() {
               Slug: <code className="bg-muted px-1.5 py-0.5 rounded text-sm">{room.slug}</code>
             </span>
           </p>
+          {isEditing && room.canEdit !== false && (
+            <Button 
+              variant="destructive" 
+              size="sm"
+              onClick={() => setDeleteDialogOpen(true)}
+            >
+              <Trash2 className="h-4 w-4 mr-2" />
+              Delete
+            </Button>
+          )}
           {!isEditing && (
             <div className="flex flex-wrap gap-2">
               {currentUser && (
@@ -772,12 +782,6 @@ export default function RoomDetailPage() {
                         : 'Update the room details below.'}
                     </CardDescription>
                   </div>
-                  {room.canEdit !== false && (
-                    <Button variant="destructive" onClick={() => setDeleteDialogOpen(true)}>
-                      <Trash2 className="mr-2 h-4 w-4" />
-                      Delete
-                    </Button>
-                  )}
                 </div>
               </CardHeader>
               <CardContent className="space-y-6">
