@@ -93,6 +93,21 @@ export default function MapDetailPage() {
     }
   }, [params.id]);
 
+  // Reset formData when edit dialog opens
+  useEffect(() => {
+    if (isEditDialogOpen && map) {
+      setFormData({
+        name: map.name,
+        description: map.description || '',
+        mapUrl: map.mapUrl,
+        previewImageUrl: map.previewImageUrl || '',
+        sizeLabel: map.sizeLabel ? map.sizeLabel.toLowerCase() : '',
+        order: map.order,
+        isActive: map.isActive,
+      });
+    }
+  }, [isEditDialogOpen, map]);
+
   async function fetchMap() {
     try {
       setLoading(true);
@@ -116,7 +131,7 @@ export default function MapDetailPage() {
         description: data.map.description || '',
         mapUrl: data.map.mapUrl,
         previewImageUrl: data.map.previewImageUrl || '',
-        sizeLabel: data.map.sizeLabel || '',
+        sizeLabel: data.map.sizeLabel ? data.map.sizeLabel.toLowerCase() : '',
         order: data.map.order,
         isActive: data.map.isActive,
       });
@@ -142,7 +157,7 @@ export default function MapDetailPage() {
           description: formData.description || null,
           mapUrl: formData.mapUrl,
           previewImageUrl: formData.previewImageUrl || null,
-          sizeLabel: formData.sizeLabel || null,
+          sizeLabel: formData.sizeLabel && formData.sizeLabel.trim() !== '' ? formData.sizeLabel.toLowerCase() : null,
           orientation: 'orthogonal', // Default value
           tileSize: 32, // Default value
           recommendedWorldTags: [], // Default value
@@ -374,7 +389,8 @@ export default function MapDetailPage() {
               <div className="space-y-2">
                 <Label htmlFor="sizeLabel">Size Label</Label>
                 <Select
-                  value={formData.sizeLabel || undefined}
+                  key={`size-select-${map?.id}-${map?.sizeLabel || 'empty'}`}
+                  value={formData.sizeLabel && formData.sizeLabel.trim() !== '' ? formData.sizeLabel : undefined}
                   onValueChange={(value) => setFormData({ ...formData, sizeLabel: value })}
                 >
                   <SelectTrigger>
