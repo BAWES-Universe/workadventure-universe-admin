@@ -248,6 +248,7 @@ export default function RoomDetailPage() {
     
     // Close template selection after map is selected
     setSelectedTemplateSlug(null);
+    setIsChangingTemplate(false); // Reset changing template flag
   }
 
   function handleBackToTemplates() {
@@ -678,6 +679,34 @@ export default function RoomDetailPage() {
                   <CardContent>
                     {selectedTemplateSlug ? null : isChangingTemplate || !room?.templateMapId ? (
                       <TemplateLibrary onSelectTemplate={handleSelectTemplate} />
+                    ) : selectedMapId && selectedTemplateName && selectedMapName ? (
+                      <div className="p-4 border rounded-lg bg-muted/50">
+                        <div className="flex items-start justify-between">
+                          <div className="flex-1">
+                            <div className="text-sm font-medium mb-1">Selected Template Map</div>
+                            <div className="text-sm text-muted-foreground">
+                              <div><strong>Template:</strong> {selectedTemplateName}</div>
+                              <div><strong>Map:</strong> {selectedMapName}</div>
+                            </div>
+                          </div>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => {
+                              // Show template library to change template
+                              setIsChangingTemplate(true);
+                              setSelectedTemplateSlug(null);
+                              setSelectedMapId(null);
+                              setSelectedMapUrl(null);
+                              setSelectedTemplateName(null);
+                              setSelectedMapName(null);
+                            }}
+                          >
+                            Change Template
+                          </Button>
+                        </div>
+                      </div>
                     ) : room?.templateMap && !selectedMapId ? (
                       <div className="p-4 border rounded-lg bg-muted/50">
                         <div className="flex items-start justify-between">
