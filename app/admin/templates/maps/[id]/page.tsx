@@ -90,6 +90,8 @@ export default function MapDetailPage() {
   });
 
   useEffect(() => {
+    // Reset super admin state when params change
+    setIsSuperAdmin(false);
     if (params.id) {
       fetchMap();
     }
@@ -122,34 +124,96 @@ export default function MapDetailPage() {
         const authResponse = await authenticatedFetch('/api/auth/me');
         if (authResponse.ok) {
           const authData = await authResponse.json();
-          userIsSuperAdmin = authData.user?.isSuperAdmin || false;
+          // Explicitly check for true value
+          userIsSuperAdmin = authData.user?.isSuperAdmin === true;
         }
       } catch {
         // Not authenticated, continue as regular user
+        userIsSuperAdmin = false;
       }
+      // Always set the state explicitly
       setIsSuperAdmin(userIsSuperAdmin);
       
-      const { authenticatedFetch } = await import('@/lib/client-auth');
-      const response = await authenticatedFetch(`/api/admin/templates/maps/${params.id}`);
+      let mapData: any = null;
       
-      if (!response.ok) {
-        if (response.status === 404) {
+      if (userIsSuperAdmin) {
+        // Super admin can use admin API for full data
+        const { authenticatedFetch } = await import('@/lib/client-auth');
+        const response = await authenticatedFetch(`/api/admin/templates/maps/${params.id}`);
+        
+        if (!response.ok) {
+          if (response.status === 404) {
+            router.push('/admin/templates');
+            return;
+          }
+          throw new Error('Failed to fetch map');
+        }
+
+        const data = await response.json();
+        mapData = data.map;
+      } else {
+        // Regular users use public API - need to find map by searching through templates
+        const templatesResponse = await fetch('/api/templates');
+        if (!templatesResponse.ok) {
+          throw new Error('Failed to fetch templates');
+        }
+        
+        const templatesData = await templatesResponse.json();
+        let foundMap: any = null;
+        let foundTemplate: any = null;
+        
+        // Search through all templates to find the map
+        for (const template of templatesData.templates || []) {
+          // Fetch full template details to get maps
+          const templateDetailResponse = await fetch(`/api/templates/${template.slug}`);
+          if (templateDetailResponse.ok) {
+            const detailData = await templateDetailResponse.json();
+            const map = detailData.template.maps.find((m: any) => m.id === params.id);
+            if (map) {
+              foundMap = map;
+              foundTemplate = detailData.template;
+              break;
+            }
+          }
+        }
+        
+        if (!foundMap) {
           router.push('/admin/templates');
           return;
         }
-        throw new Error('Failed to fetch map');
+        
+        // Transform the map data to match the expected structure
+        mapData = {
+          id: foundMap.id,
+          slug: foundMap.slug,
+          name: foundMap.name,
+          description: foundMap.description,
+          mapUrl: foundMap.mapUrl,
+          previewImageUrl: foundMap.previewImageUrl,
+          sizeLabel: foundMap.sizeLabel,
+          order: foundMap.order,
+          isActive: true, // Public API only returns active maps
+          _count: {
+            rooms: foundMap._count?.rooms || 0,
+          },
+          template: {
+            id: foundTemplate.id,
+            slug: foundTemplate.slug,
+            name: foundTemplate.name,
+            category: foundTemplate.category,
+          },
+        };
       }
 
-      const data = await response.json();
-      setMap(data.map);
+      setMap(mapData);
       setFormData({
-        name: data.map.name,
-        description: data.map.description || '',
-        mapUrl: data.map.mapUrl,
-        previewImageUrl: data.map.previewImageUrl || '',
-        sizeLabel: data.map.sizeLabel ? data.map.sizeLabel.toLowerCase() : '',
-        order: data.map.order,
-        isActive: data.map.isActive,
+        name: mapData.name,
+        description: mapData.description || '',
+        mapUrl: mapData.mapUrl,
+        previewImageUrl: mapData.previewImageUrl || '',
+        sizeLabel: mapData.sizeLabel ? mapData.sizeLabel.toLowerCase() : '',
+        order: mapData.order,
+        isActive: mapData.isActive,
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load map');
