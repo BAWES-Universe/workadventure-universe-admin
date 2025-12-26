@@ -17,7 +17,10 @@ import {
 } from '@/components/ui/select';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { ChevronRight, AlertCircle, Loader2, AlertTriangle } from 'lucide-react';
+import { ChevronRight, AlertCircle, Loader2, AlertTriangle, X } from 'lucide-react';
+import { TemplateLibrary } from '@/components/templates/TemplateLibrary';
+import { TemplateDetail } from '@/components/templates/TemplateDetail';
+import { Badge } from '@/components/ui/badge';
 
 interface World {
   id: string;
@@ -39,12 +42,21 @@ function NewRoomPageContent() {
   const [worldDetails, setWorldDetails] = useState<World | null>(null);
   const [slugManuallyEdited, setSlugManuallyEdited] = useState(false);
   
+  // Template selection state
+  const [useTemplate, setUseTemplate] = useState(false);
+  const [selectedTemplateSlug, setSelectedTemplateSlug] = useState<string | null>(null);
+  const [selectedMapId, setSelectedMapId] = useState<string | null>(null);
+  const [selectedMapUrl, setSelectedMapUrl] = useState<string | null>(null);
+  const [selectedTemplateName, setSelectedTemplateName] = useState<string | null>(null);
+  const [selectedMapName, setSelectedMapName] = useState<string | null>(null);
+  
   const [formData, setFormData] = useState({
     worldId: worldIdParam || '',
     slug: '',
     name: '',
     description: '',
     mapUrl: '',
+    templateMapId: null as string | null,
     isPublic: true,
   });
 
@@ -111,6 +123,55 @@ function NewRoomPageContent() {
     }
   }
 
+  function handleSelectTemplate(templateSlug: string) {
+    setSelectedTemplateSlug(templateSlug);
+  }
+
+  async function handleSelectMap(mapId: string, mapUrl: string) {
+    setSelectedMapId(mapId);
+    setSelectedMapUrl(mapUrl);
+    setFormData(prev => ({
+      ...prev,
+      templateMapId: mapId,
+      mapUrl: mapUrl,
+    }));
+    
+    // Fetch template name for display
+    if (selectedTemplateSlug) {
+      try {
+        const response = await fetch(`/api/templates/${selectedTemplateSlug}`);
+        const data = await response.json();
+        if (data.template) {
+          setSelectedTemplateName(data.template.name);
+          const map = data.template.maps.find((m: any) => m.id === mapId);
+          if (map) {
+            setSelectedMapName(map.name);
+          }
+        }
+      } catch (err) {
+        console.error('Failed to fetch template details:', err);
+      }
+    }
+  }
+
+  function handleBackToTemplates() {
+    setSelectedTemplateSlug(null);
+  }
+
+  function handleClearTemplate() {
+    setUseTemplate(false);
+    setSelectedTemplateSlug(null);
+    setSelectedMapId(null);
+    setSelectedMapUrl(null);
+    setSelectedTemplateName(null);
+    setSelectedMapName(null);
+    setFormData(prev => ({
+      ...prev,
+      templateMapId: null,
+      mapUrl: '',
+    }));
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     
@@ -135,9 +196,13 @@ function NewRoomPageContent() {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          ...formData,
+          worldId: formData.worldId,
+          slug: formData.slug,
+          name: formData.name,
           description: formData.description || null,
           mapUrl: formData.mapUrl.trim(),
+          templateMapId: formData.templateMapId || undefined,
+          isPublic: formData.isPublic,
         }),
       });
 
@@ -205,14 +270,92 @@ function NewRoomPageContent() {
         </Alert>
       )}
 
+      {/* Template/Manual Toggle */}
+      <div className="flex items-center gap-4">
+        <Button
+          type="button"
+          variant={useTemplate ? 'outline' : 'default'}
+          onClick={() => {
+            setUseTemplate(false);
+            handleClearTemplate();
+          }}
+        >
+          Manual Entry
+        </Button>
+        <Button
+          type="button"
+          variant={useTemplate ? 'default' : 'outline'}
+          onClick={() => setUseTemplate(true)}
+        >
+          Use Template
+        </Button>
+      </div>
+
+      {/* Template Selection Flow */}
+      {useTemplate && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Select Template</CardTitle>
+            <CardDescription>
+              Choose a template to get started, or switch to manual entry.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {!selectedTemplateSlug ? (
+              <TemplateLibrary
+                onSelectTemplate={handleSelectTemplate}
+              />
+            ) : (
+              <TemplateDetail
+                templateSlug={selectedTemplateSlug}
+                onSelectMap={handleSelectMap}
+                onBack={handleBackToTemplates}
+                selectedMapId={selectedMapId || undefined}
+              />
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Room Form */}
       <Card>
         <CardHeader>
           <CardTitle>Room Details</CardTitle>
           <CardDescription>
-            Fill in the information below to create a new room.
+            {useTemplate && selectedMapId
+              ? 'Review and customize your room details. Map is set from template.'
+              : 'Fill in the information below to create a new room.'}
           </CardDescription>
         </CardHeader>
         <CardContent>
+          {/* Selected Template Info */}
+          {useTemplate && selectedMapId && selectedTemplateName && (
+            <Alert className="mb-6">
+              <div className="flex items-start justify-between">
+                <div>
+                  <AlertTitle>Template Selected</AlertTitle>
+                  <AlertDescription>
+                    <div className="mt-2 space-y-1">
+                      <div><strong>Template:</strong> {selectedTemplateName}</div>
+                      {selectedMapName && (
+                        <div><strong>Map:</strong> {selectedMapName}</div>
+                      )}
+                    </div>
+                  </AlertDescription>
+                </div>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={handleClearTemplate}
+                  className="h-6 w-6 p-0"
+                >
+                  <X className="h-4 w-4" />
+                </Button>
+              </div>
+            </Alert>
+          )}
+
           <form onSubmit={handleSubmit} className="space-y-6">
             <div className="space-y-2">
               <Label htmlFor="name">
@@ -272,16 +415,30 @@ function NewRoomPageContent() {
                 Map URL <span className="text-destructive">*</span>
               </Label>
               <p className="text-sm text-muted-foreground">
-                External TMJ map URL for this room (e.g., https://example.com/map.tmj). Each room must have its own map.
+                {useTemplate && selectedMapId
+                  ? 'Map URL is set from the selected template. You can override it below if needed.'
+                  : 'External TMJ map URL for this room (e.g., https://example.com/map.tmj). Each room must have its own map.'}
               </p>
               <Input
                 id="mapUrl"
                 type="url"
                 required
                 value={formData.mapUrl}
-                onChange={(e) => setFormData({ ...formData, mapUrl: e.target.value })}
+                onChange={(e) => {
+                  setFormData({ ...formData, mapUrl: e.target.value });
+                  // If manually editing mapUrl, clear templateMapId
+                  if (useTemplate && selectedMapId) {
+                    setFormData(prev => ({ ...prev, templateMapId: null }));
+                  }
+                }}
                 placeholder="https://example.com/room-map.tmj"
+                disabled={useTemplate && selectedMapId ? false : false} // Allow editing even with template
               />
+              {useTemplate && selectedMapId && (
+                <p className="text-xs text-muted-foreground mt-1">
+                  ⚠️ Changing the map URL will disconnect this room from the template.
+                </p>
+              )}
             </div>
 
             <div className="flex items-center space-x-2">

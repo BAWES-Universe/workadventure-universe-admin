@@ -8,9 +8,16 @@ const createRoomSchema = z.object({
   slug: z.string().min(1).max(100),
   name: z.string().min(1).max(200),
   description: z.string().nullable().optional(),
-  mapUrl: z.string().url(), // Required - each room must have its own map
+  mapUrl: z.string().url().optional(), // Required if templateMapId not provided
+  templateMapId: z.string().uuid().optional(), // Optional - if provided, mapUrl will be auto-filled
   isPublic: z.boolean().default(true),
-});
+}).refine(
+  (data) => data.mapUrl || data.templateMapId,
+  {
+    message: "Either mapUrl or templateMapId must be provided",
+    path: ["mapUrl"],
+  }
+);
 
 // GET /api/admin/rooms
 export async function GET(request: NextRequest) {
@@ -292,19 +299,49 @@ export async function POST(request: NextRequest) {
     if (body.description === '') {
       body.description = null;
     }
+    if (body.mapUrl === '') {
+      body.mapUrl = undefined;
+    }
     
-    // Validate mapUrl is not empty (required field)
-    if (!body.mapUrl || body.mapUrl.trim() === '') {
+    const data = createRoomSchema.parse(body);
+    
+    // If templateMapId is provided, fetch the template map and use its mapUrl
+    let mapUrl = data.mapUrl;
+    let templateMapId = data.templateMapId;
+    
+    if (templateMapId) {
+      const templateMap = await prisma.roomTemplateMap.findUnique({
+        where: { id: templateMapId },
+      });
+      
+      if (!templateMap) {
+        return NextResponse.json(
+          { error: 'Template map not found' },
+          { status: 404 }
+        );
+      }
+      
+      if (!templateMap.isActive) {
+        return NextResponse.json(
+          { error: 'Template map is not active' },
+          { status: 400 }
+        );
+      }
+      
+      // Use template map's URL
+      mapUrl = templateMap.mapUrl;
+    }
+    
+    // Ensure we have a mapUrl at this point
+    if (!mapUrl) {
       return NextResponse.json(
         { 
           error: 'Validation error', 
-          message: 'mapUrl: Required',
+          message: 'mapUrl is required if templateMapId is not provided',
         },
         { status: 400 }
       );
     }
-    
-    const data = createRoomSchema.parse(body);
     
     // Verify world exists and get universe info
     const world = await prisma.world.findUnique({
@@ -371,7 +408,8 @@ export async function POST(request: NextRequest) {
         slug: data.slug,
         name: data.name,
         description: data.description || null,
-        mapUrl: data.mapUrl, // Required field
+        mapUrl: mapUrl,
+        templateMapId: templateMapId || null,
         isPublic: data.isPublic,
       },
       include: {
