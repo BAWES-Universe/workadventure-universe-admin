@@ -139,6 +139,7 @@ export default function RoomDetailPage() {
   const [selectedTemplateName, setSelectedTemplateName] = useState<string | null>(null);
   const [selectedMapName, setSelectedMapName] = useState<string | null>(null);
   const [isChangingTemplate, setIsChangingTemplate] = useState(false);
+  const [originalTemplateMapId, setOriginalTemplateMapId] = useState<string | null>(null);
 
   useEffect(() => {
     checkAuth();
@@ -207,6 +208,8 @@ export default function RoomDetailPage() {
       });
       // If room has a templateMap, default to template mode; otherwise use custom map mode
       setUseCustomMap(!data.templateMapId);
+      // Preserve original templateMapId for restoration when switching back from custom map
+      setOriginalTemplateMapId(data.templateMapId || null);
       // Don't set selectedMapId on initial load - we'll use room.templateMapId to check if template exists
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load room');
@@ -621,8 +624,16 @@ export default function RoomDetailPage() {
               variant={!useCustomMap ? 'default' : 'outline'}
               onClick={() => {
                 setUseCustomMap(false);
+                // Restore original templateMapId if it existed
+                if (originalTemplateMapId || room?.templateMapId) {
+                  const templateIdToRestore = originalTemplateMapId || room?.templateMapId;
+                  setFormData(prev => ({
+                    ...prev,
+                    templateMapId: templateIdToRestore,
+                  }));
+                }
                 // If switching back to template and no map selected, show template selection
-                if (!formData.templateMapId && !selectedMapId) {
+                if (!formData.templateMapId && !selectedMapId && !originalTemplateMapId && !room?.templateMapId) {
                   setSelectedTemplateSlug(null);
                 }
               }}
@@ -640,6 +651,12 @@ export default function RoomDetailPage() {
                 setSelectedMapUrl(null);
                 setSelectedTemplateName(null);
                 setSelectedMapName(null);
+                setIsChangingTemplate(false);
+                // Clear templateMapId from form data
+                setFormData(prev => ({
+                  ...prev,
+                  templateMapId: null,
+                }));
               }}
             >
               Custom Map (Advanced)
@@ -743,7 +760,7 @@ export default function RoomDetailPage() {
           )}
 
           {/* Room Form - Only show when not using template, or when template map is selected (and not actively selecting) */}
-          {(!useCustomMap ? ((selectedMapId || room?.templateMapId) && !selectedTemplateSlug) : true) && (
+          {(!useCustomMap ? ((selectedMapId || room?.templateMapId) && !selectedTemplateSlug && !isChangingTemplate) : true) && (
             <Card>
               <CardHeader>
                 <div className="flex items-center justify-between">
