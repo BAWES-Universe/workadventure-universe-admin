@@ -107,39 +107,83 @@ export function TemplateDetail({
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-start gap-4">
-        {!hideBackButton && (
-          <Button variant="ghost" onClick={onBack} className="gap-2">
-            <ArrowLeft className="h-4 w-4" />
-            Back
-          </Button>
+      <Card className="border-border/70 bg-gradient-to-br from-background via-background to-background relative">
+        {template.isFeatured && (
+          <div className="absolute top-4 right-4">
+            <Badge variant="outline" className="text-xs">Featured</Badge>
+          </div>
         )}
-        <div className="flex-1">
-          <div className="flex items-center gap-3">
-            {template.category.icon && (
-              <span className="text-3xl">{template.category.icon}</span>
-            )}
+        <CardHeader className="pr-20">
+          <div className="space-y-4">
             <div>
-              <h2 className="text-3xl font-bold">{template.name}</h2>
-              <p className="text-muted-foreground mt-1">{template.shortDescription}</p>
+              <h2 className="text-3xl font-bold tracking-tight">{template.name}</h2>
+              <div className="flex items-center gap-1.5 mt-2">
+                {template.category.icon && (
+                  <span className="text-sm">{template.category.icon}</span>
+                )}
+                <p className="text-xs text-muted-foreground">
+                  {template.category.name}
+                </p>
+              </div>
             </div>
-            {template.isFeatured && (
-              <Badge variant="secondary">Featured</Badge>
+            
+            {template.shortDescription && (
+              <p className="text-muted-foreground text-lg">
+                {template.shortDescription}
+              </p>
+            )}
+            
+            {template.philosophy && (
+              <div className="border-l-2 border-muted-foreground/30 pl-4">
+                <p className="text-sm italic text-white leading-relaxed">
+                  &ldquo;{template.philosophy}&rdquo;
+                </p>
+              </div>
             )}
           </div>
-          <Badge variant="outline" className="mt-2">
-            {template.category.name}
-          </Badge>
-        </div>
-      </div>
+        </CardHeader>
+        
+        {(template.purpose || template.whoItsFor || template.typicalUseCases?.length) && (
+          <CardContent className="space-y-4 pt-0">
+            {template.purpose && (
+              <div>
+                <h4 className="text-sm font-semibold mb-1">Purpose</h4>
+                <p className="text-sm text-muted-foreground">{template.purpose}</p>
+              </div>
+            )}
+            
+            {template.whoItsFor && (
+              <div>
+                <h4 className="text-sm font-semibold mb-1">Who It's For</h4>
+                <p className="text-sm text-muted-foreground">{template.whoItsFor}</p>
+              </div>
+            )}
+            
+            {template.typicalUseCases && template.typicalUseCases.length > 0 && (
+              <div>
+                <h4 className="text-sm font-semibold mb-2">Typical Use Cases</h4>
+                <div className="flex flex-wrap gap-2">
+                  {template.typicalUseCases.map((useCase, index) => (
+                    <Badge key={index} variant="outline" className="text-xs">
+                      {useCase}
+                    </Badge>
+                  ))}
+                </div>
+              </div>
+            )}
+          </CardContent>
+        )}
+      </Card>
 
       {/* Map Variants */}
       <div>
         <h3 className="text-xl font-semibold mb-4">Available Maps</h3>
         {template.maps.length === 0 ? (
-          <div className="rounded-lg border p-4 text-center text-muted-foreground">
-            No maps available for this template.
-          </div>
+          <Card>
+            <CardContent className="py-8 text-center text-muted-foreground">
+              No maps available for this template.
+            </CardContent>
+          </Card>
         ) : (
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             {template.maps.map((map) => {
@@ -147,31 +191,36 @@ export function TemplateDetail({
               return (
                 <Card
                   key={map.id}
-                  className={`cursor-pointer transition-all ${
+                  className={`cursor-pointer transition-all group relative overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background ${
                     isSelected
-                      ? 'ring-2 ring-primary'
-                      : 'hover:shadow-md'
+                      ? 'ring-2 ring-primary shadow-lg'
+                      : 'hover:-translate-y-1 hover:shadow-lg'
                   }`}
                   onClick={() => onSelectMap(map.id, map.mapUrl)}
                 >
-                  <CardHeader>
+                  <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-blue-500/10 via-transparent to-indigo-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
+                  
+                  <CardHeader className="relative">
                     <div className="flex items-start justify-between">
                       <CardTitle className="text-lg">{map.name}</CardTitle>
                       {isSelected && (
-                        <Check className="h-5 w-5 text-primary" />
+                        <Check className="h-5 w-5 text-primary flex-shrink-0" />
                       )}
                     </div>
                     {map.description && (
-                      <CardDescription>{map.description}</CardDescription>
+                      <CardDescription className="mt-2">{map.description}</CardDescription>
                     )}
                   </CardHeader>
-                  <CardContent>
+                  <CardContent className="relative">
                     <div className="flex items-center justify-between">
                       {map.sizeLabel && (
-                        <Badge variant="outline">{map.sizeLabel}</Badge>
+                        <Badge variant="outline" className="text-xs">
+                          {map.sizeLabel}
+                        </Badge>
                       )}
                       <Button
                         variant={isSelected ? 'default' : 'outline'}
+                        size="sm"
                         onClick={(e) => {
                           e.stopPropagation();
                           onSelectMap(map.id, map.mapUrl);
