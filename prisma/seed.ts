@@ -497,24 +497,47 @@ async function seedRoomTemplates() {
     }
 
     const { templateSlug, recommendedWorldTags, ...mapFields } = mapData;
-    await prisma.roomTemplateMap.upsert({
+    
+    // Check if a map with this slug already exists
+    const existing = await prisma.roomTemplateMap.findUnique({
       where: {
         templateId_slug: {
           templateId: template.id,
           slug: mapData.slug,
         },
       },
-      update: {
-        name: mapFields.name,
-        description: mapFields.description,
-        mapUrl: mapFields.mapUrl,
-        previewImageUrl: mapFields.previewImageUrl,
-        sizeLabel: mapFields.sizeLabel,
-        authorId: mapFields.authorId,
-        order: mapFields.order,
-        recommendedWorldTags: recommendedWorldTags || [],
-      },
-      create: {
+    });
+    
+    if (existing) {
+      // If it exists with a slug-based ID, delete it first so we can create a new one with a UUID
+      if (existing.id.startsWith('map-')) {
+        console.log(`  Deleting map with slug-based ID: ${existing.id}`);
+        await prisma.roomTemplateMap.delete({
+          where: { id: existing.id },
+        });
+        // Fall through to create new record with UUID
+      } else {
+        // If it already has a UUID, just update it
+        await prisma.roomTemplateMap.update({
+          where: { id: existing.id },
+          data: {
+            name: mapFields.name,
+            description: mapFields.description,
+            mapUrl: mapFields.mapUrl,
+            previewImageUrl: mapFields.previewImageUrl,
+            sizeLabel: mapFields.sizeLabel,
+            authorId: mapFields.authorId,
+            order: mapFields.order,
+            recommendedWorldTags: recommendedWorldTags || [],
+          },
+        });
+        continue; // Skip to next map - already updated
+      }
+    }
+    
+    // Create new record (will get auto-generated UUID)
+    await prisma.roomTemplateMap.create({
+      data: {
         ...mapFields,
         templateId: template.id,
         recommendedWorldTags: recommendedWorldTags || [],

@@ -424,6 +424,12 @@ export async function POST(request: NextRequest) {
             },
           },
         },
+        templateMap: {
+          select: {
+            id: true,
+            name: true,
+          },
+        },
       },
     });
     

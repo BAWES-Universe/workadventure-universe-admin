@@ -685,26 +685,6 @@ export default function RoomDetailPage() {
                     </div>
                   )}
                 </div>
-                {isSuperAdmin && room.mapUrl && (
-                  <div>
-                    <div className="text-sm font-medium text-muted-foreground mb-1">Map URL</div>
-                    <div className="text-sm break-all">
-                      <a href={room.mapUrl} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
-                        {room.mapUrl}
-                      </a>
-                    </div>
-                  </div>
-                )}
-                {isSuperAdmin && room.wamUrl && (
-                  <div>
-                    <div className="text-sm font-medium text-muted-foreground mb-1">WAM URL</div>
-                    <div className="text-sm break-all">
-                      <a href={room.wamUrl} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
-                        {room.wamUrl}
-                      </a>
-                    </div>
-                  </div>
-                )}
               </section>
             </>
           )}
