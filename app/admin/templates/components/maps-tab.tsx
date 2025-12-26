@@ -102,9 +102,6 @@ export function MapsTab() {
     mapUrl: '',
     previewImageUrl: '',
     sizeLabel: '',
-    orientation: 'orthogonal',
-    tileSize: 32,
-    recommendedWorldTags: '',
     order: 0,
     isActive: true,
   });
@@ -157,9 +154,6 @@ export function MapsTab() {
       mapUrl: '',
       previewImageUrl: '',
       sizeLabel: '',
-      orientation: 'orthogonal',
-      tileSize: 32,
-      recommendedWorldTags: '',
       order: 0,
       isActive: true,
     });
@@ -176,9 +170,6 @@ export function MapsTab() {
       mapUrl: map.mapUrl,
       previewImageUrl: map.previewImageUrl || '',
       sizeLabel: map.sizeLabel || '',
-      orientation: map.orientation,
-      tileSize: map.tileSize,
-      recommendedWorldTags: map.recommendedWorldTags.join('\n'),
       order: map.order,
       isActive: map.isActive,
     });
@@ -196,12 +187,6 @@ export function MapsTab() {
       
       const method = editingMap ? 'PUT' : 'POST';
       
-      // Parse recommendedWorldTags from newline-separated string
-      const recommendedWorldTags = formData.recommendedWorldTags
-        .split('\n')
-        .map(s => s.trim())
-        .filter(s => s.length > 0);
-
       const response = await authenticatedFetch(url, {
         method,
         headers: { 'Content-Type': 'application/json' },
@@ -213,9 +198,9 @@ export function MapsTab() {
           mapUrl: formData.mapUrl,
           previewImageUrl: formData.previewImageUrl || null,
           sizeLabel: formData.sizeLabel || null,
-          orientation: formData.orientation,
-          tileSize: formData.tileSize,
-          recommendedWorldTags,
+          orientation: 'orthogonal', // Default value
+          tileSize: 32, // Default value
+          recommendedWorldTags: [], // Default value
           order: formData.order,
           isActive: formData.isActive,
         }),
@@ -477,32 +462,6 @@ export function MapsTab() {
                 </Select>
               </div>
               <div className="space-y-2">
-                <Label htmlFor="orientation">Orientation</Label>
-                <Select
-                  value={formData.orientation}
-                  onValueChange={(value) => setFormData({ ...formData, orientation: value })}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="orthogonal">Orthogonal</SelectItem>
-                    <SelectItem value="isometric">Isometric</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label htmlFor="tileSize">Tile Size</Label>
-                <Input
-                  id="tileSize"
-                  type="number"
-                  value={formData.tileSize}
-                  onChange={(e) => setFormData({ ...formData, tileSize: parseInt(e.target.value) || 32 })}
-                />
-              </div>
-              <div className="space-y-2">
                 <Label htmlFor="order">Order</Label>
                 <Input
                   id="order"
@@ -511,16 +470,6 @@ export function MapsTab() {
                   onChange={(e) => setFormData({ ...formData, order: parseInt(e.target.value) || 0 })}
                 />
               </div>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="recommendedWorldTags">Recommended World Tags (one per line)</Label>
-              <Textarea
-                id="recommendedWorldTags"
-                value={formData.recommendedWorldTags}
-                onChange={(e) => setFormData({ ...formData, recommendedWorldTags: e.target.value })}
-                placeholder="work&#10;meeting&#10;collaboration"
-                rows={3}
-              />
             </div>
             <div className="flex items-center space-x-2">
               <Checkbox

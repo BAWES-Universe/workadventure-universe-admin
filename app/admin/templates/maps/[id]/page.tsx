@@ -83,9 +83,6 @@ export default function MapDetailPage() {
     mapUrl: '',
     previewImageUrl: '',
     sizeLabel: '',
-    orientation: 'orthogonal',
-    tileSize: 32,
-    recommendedWorldTags: '',
     order: 0,
     isActive: true,
   });
@@ -120,9 +117,6 @@ export default function MapDetailPage() {
         mapUrl: data.map.mapUrl,
         previewImageUrl: data.map.previewImageUrl || '',
         sizeLabel: data.map.sizeLabel || '',
-        orientation: data.map.orientation,
-        tileSize: data.map.tileSize,
-        recommendedWorldTags: data.map.recommendedWorldTags.join('\n'),
         order: data.map.order,
         isActive: data.map.isActive,
       });
@@ -140,12 +134,6 @@ export default function MapDetailPage() {
       setSaving(true);
       const { authenticatedFetch } = await import('@/lib/client-auth');
       
-      // Parse recommendedWorldTags from newline-separated string
-      const recommendedWorldTags = formData.recommendedWorldTags
-        .split('\n')
-        .map(s => s.trim())
-        .filter(s => s.length > 0);
-
       const response = await authenticatedFetch(`/api/admin/templates/maps/${map.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -155,9 +143,9 @@ export default function MapDetailPage() {
           mapUrl: formData.mapUrl,
           previewImageUrl: formData.previewImageUrl || null,
           sizeLabel: formData.sizeLabel || null,
-          orientation: formData.orientation,
-          tileSize: formData.tileSize,
-          recommendedWorldTags,
+          orientation: 'orthogonal', // Default value
+          tileSize: 32, // Default value
+          recommendedWorldTags: [], // Default value
           order: formData.order,
           isActive: formData.isActive,
         }),
@@ -250,7 +238,6 @@ export default function MapDetailPage() {
               {map.isActive ? 'Active' : 'Inactive'}
             </Badge>
             {map.sizeLabel && <Badge variant="outline">{map.sizeLabel}</Badge>}
-            <Badge variant="outline">{map.orientation}</Badge>
           </div>
         </div>
         <div className="flex gap-2">
@@ -317,11 +304,9 @@ export default function MapDetailPage() {
               </div>
             )}
             <div>
-              <h3 className="font-semibold mb-1">Technical Details</h3>
-              <div className="text-sm text-muted-foreground space-y-1">
-                <p>Orientation: {map.orientation}</p>
-                <p>Tile Size: {map.tileSize}px</p>
-                <p>Order: {map.order}</p>
+              <h3 className="font-semibold mb-1">Order</h3>
+              <div className="text-sm text-muted-foreground">
+                <p>{map.order}</p>
               </div>
             </div>
           </CardContent>
@@ -338,16 +323,6 @@ export default function MapDetailPage() {
                 {map._count.rooms} {map._count.rooms === 1 ? 'room' : 'rooms'} using this map
               </span>
             </div>
-            {map.recommendedWorldTags.length > 0 && (
-              <div className="mt-4">
-                <h3 className="font-semibold mb-2">Recommended World Tags</h3>
-                <div className="flex flex-wrap gap-2">
-                  {map.recommendedWorldTags.map((tag, idx) => (
-                    <Badge key={idx} variant="outline">{tag}</Badge>
-                  ))}
-                </div>
-              </div>
-            )}
           </CardContent>
         </Card>
       </div>
@@ -413,32 +388,6 @@ export default function MapDetailPage() {
                 </Select>
               </div>
               <div className="space-y-2">
-                <Label htmlFor="orientation">Orientation</Label>
-                <Select
-                  value={formData.orientation}
-                  onValueChange={(value) => setFormData({ ...formData, orientation: value })}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="orthogonal">Orthogonal</SelectItem>
-                    <SelectItem value="isometric">Isometric</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label htmlFor="tileSize">Tile Size</Label>
-                <Input
-                  id="tileSize"
-                  type="number"
-                  value={formData.tileSize}
-                  onChange={(e) => setFormData({ ...formData, tileSize: parseInt(e.target.value) || 32 })}
-                />
-              </div>
-              <div className="space-y-2">
                 <Label htmlFor="order">Order</Label>
                 <Input
                   id="order"
@@ -447,15 +396,6 @@ export default function MapDetailPage() {
                   onChange={(e) => setFormData({ ...formData, order: parseInt(e.target.value) || 0 })}
                 />
               </div>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="recommendedWorldTags">Recommended World Tags (one per line)</Label>
-              <Textarea
-                id="recommendedWorldTags"
-                value={formData.recommendedWorldTags}
-                onChange={(e) => setFormData({ ...formData, recommendedWorldTags: e.target.value })}
-                rows={3}
-              />
             </div>
             <div className="flex items-center space-x-2">
               <Checkbox
