@@ -65,6 +65,7 @@ export async function GET(
             template: {
               select: {
                 id: true,
+                slug: true,
                 name: true,
                 category: {
                   select: {

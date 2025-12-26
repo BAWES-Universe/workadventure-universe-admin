@@ -30,7 +30,9 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { ChevronRight, AlertCircle, Loader2, Edit, Trash2, Navigation, CheckCircle2, Star, Activity, ChevronLeft, Users } from 'lucide-react';
+import { ChevronRight, AlertCircle, Loader2, Edit, Trash2, Navigation, CheckCircle2, Star, Activity, ChevronLeft, Users, X } from 'lucide-react';
+import { TemplateLibrary } from '@/components/templates/TemplateLibrary';
+import { TemplateDetail } from '@/components/templates/TemplateDetail';
 import { cn } from '@/lib/utils';
 import {
   Empty,
@@ -54,6 +56,7 @@ interface Room {
     name: string;
     template: {
       id: string;
+      slug: string;
       name: string;
       category: {
         name: string;
@@ -130,6 +133,12 @@ export default function RoomDetailPage() {
     isPublic: true,
   });
   const [useCustomMap, setUseCustomMap] = useState(false);
+  const [selectedTemplateSlug, setSelectedTemplateSlug] = useState<string | null>(null);
+  const [selectedMapId, setSelectedMapId] = useState<string | null>(null);
+  const [selectedMapUrl, setSelectedMapUrl] = useState<string | null>(null);
+  const [selectedTemplateName, setSelectedTemplateName] = useState<string | null>(null);
+  const [selectedMapName, setSelectedMapName] = useState<string | null>(null);
+  const [isChangingTemplate, setIsChangingTemplate] = useState(false);
 
   useEffect(() => {
     checkAuth();
@@ -198,12 +207,65 @@ export default function RoomDetailPage() {
       });
       // If room has a templateMap, default to template mode; otherwise use custom map mode
       setUseCustomMap(!data.templateMapId);
+      // Don't set selectedMapId on initial load - we'll use room.templateMapId to check if template exists
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load room');
     } finally {
       setLoading(false);
     }
   }
+
+  function handleSelectTemplate(templateSlug: string) {
+    setSelectedTemplateSlug(templateSlug);
+    setIsChangingTemplate(false); // Reset flag when template is selected
+  }
+
+  async function handleSelectMap(mapId: string, mapUrl: string) {
+    setSelectedMapId(mapId);
+    setSelectedMapUrl(mapUrl);
+    setFormData(prev => ({
+      ...prev,
+      templateMapId: mapId,
+      mapUrl: mapUrl,
+    }));
+    
+    // Fetch template name for display
+    if (selectedTemplateSlug) {
+      try {
+        const response = await fetch(`/api/templates/${selectedTemplateSlug}`);
+        const data = await response.json();
+        if (data.template) {
+          setSelectedTemplateName(data.template.name);
+          const map = data.template.maps.find((m: any) => m.id === mapId);
+          if (map) {
+            setSelectedMapName(map.name);
+          }
+        }
+      } catch (err) {
+        console.error('Failed to fetch template details:', err);
+      }
+    }
+    
+    // Close template selection after map is selected
+    setSelectedTemplateSlug(null);
+  }
+
+  function handleBackToTemplates() {
+    setSelectedTemplateSlug(null);
+    // If we were changing template, go back to showing current template
+    if (isChangingTemplate && room?.templateMap) {
+      setIsChangingTemplate(false);
+      setSelectedMapId(null);
+      setSelectedMapUrl(null);
+      setSelectedTemplateName(null);
+      setSelectedMapName(null);
+      setFormData(prev => ({
+        ...prev,
+        templateMapId: room.templateMap!.id,
+      }));
+    }
+  }
+
 
   async function fetchAnalytics(page: number = 1) {
     try {
@@ -550,146 +612,223 @@ export default function RoomDetailPage() {
       )}
 
       {isEditing ? (
-        <Card>
-          <CardHeader>
-            <div className="flex items-center justify-between">
-              <div>
-                <CardTitle>Edit Room</CardTitle>
-                <CardDescription>Update the room details below.</CardDescription>
-              </div>
-              {room.canEdit !== false && (
-                <Button variant="destructive" onClick={() => setDeleteDialogOpen(true)}>
-                  <Trash2 className="mr-2 h-4 w-4" />
-                  Delete
-                </Button>
+        <>
+          {/* Template/Custom Map Toggle - At the top */}
+          <div className="flex items-center gap-4">
+            <Button
+              type="button"
+              variant={!useCustomMap ? 'default' : 'outline'}
+              onClick={() => {
+                setUseCustomMap(false);
+                // If switching back to template and no map selected, show template selection
+                if (!formData.templateMapId && !selectedMapId) {
+                  setSelectedTemplateSlug(null);
+                }
+              }}
+            >
+              Use Template
+            </Button>
+            <Button
+              type="button"
+              variant={useCustomMap ? 'default' : 'outline'}
+              onClick={() => {
+                setUseCustomMap(true);
+                // Clear template selection when switching to custom map
+                setSelectedTemplateSlug(null);
+                setSelectedMapId(null);
+                setSelectedMapUrl(null);
+                setSelectedTemplateName(null);
+                setSelectedMapName(null);
+              }}
+            >
+              Custom Map (Advanced)
+            </Button>
+          </div>
+
+          {/* Template Selection Flow - Only show when using template */}
+          {!useCustomMap && (
+            <>
+              {selectedTemplateSlug ? (
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Select Template</CardTitle>
+                    <CardDescription>
+                      Choose a template to get started, or switch to custom map.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <TemplateDetail
+                      templateSlug={selectedTemplateSlug}
+                      onSelectMap={handleSelectMap}
+                      onBack={handleBackToTemplates}
+                      selectedMapId={selectedMapId || room?.templateMapId || undefined}
+                    />
+                  </CardContent>
+                </Card>
+              ) : (
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Template Map</CardTitle>
+                    <CardDescription>
+                      {room?.templateMap 
+                        ? 'Current template map for this room. Click "Change Template" to select a different one.'
+                        : 'Choose a template to get started, or switch to custom map.'}
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    {selectedTemplateSlug ? null : isChangingTemplate || !room?.templateMapId ? (
+                      <TemplateLibrary onSelectTemplate={handleSelectTemplate} />
+                    ) : room?.templateMap && !selectedMapId ? (
+                      <div className="p-4 border rounded-lg bg-muted/50">
+                        <div className="flex items-start justify-between">
+                          <div className="flex-1">
+                            <div className="text-sm font-medium mb-1">Current Template Map</div>
+                            <div className="text-sm text-muted-foreground">
+                              <div><strong>Template:</strong> {room.templateMap.template.category.name} - {room.templateMap.template.name}</div>
+                              <div><strong>Map:</strong> {room.templateMap.name}</div>
+                            </div>
+                          </div>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => {
+                              // Show template library to change template
+                              setIsChangingTemplate(true);
+                              setSelectedTemplateSlug(null);
+                              setSelectedMapId(null);
+                              setSelectedMapUrl(null);
+                              setSelectedTemplateName(null);
+                              setSelectedMapName(null);
+                            }}
+                          >
+                            Change Template
+                          </Button>
+                        </div>
+                      </div>
+                    ) : null}
+                  </CardContent>
+                </Card>
               )}
-            </div>
-          </CardHeader>
-          <CardContent className="space-y-6">
-            <div className="space-y-2">
-              <Label htmlFor="name">
-                Name <span className="text-destructive">*</span>
-              </Label>
-              <Input
-                id="name"
-                required
-                value={formData.name}
-                onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-              />
-            </div>
+            </>
+          )}
 
-            <div className="space-y-2">
-              <Label htmlFor="slug">
-                Slug <span className="text-destructive">*</span>
-              </Label>
-              <Input
-                id="slug"
-                required
-                value={formData.slug}
-                onChange={(e) => setFormData({ ...formData, slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') })}
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="description">Description</Label>
-              <Textarea
-                id="description"
-                rows={3}
-                value={formData.description}
-                onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-              />
-            </div>
-
-            {/* Template/Custom Map Toggle */}
-            <div className="flex items-center gap-4 mb-4">
-              <Button
-                type="button"
-                variant={!useCustomMap ? 'default' : 'outline'}
-                onClick={() => setUseCustomMap(false)}
-              >
-                Use Template
-              </Button>
-              <Button
-                type="button"
-                variant={useCustomMap ? 'default' : 'outline'}
-                onClick={() => setUseCustomMap(true)}
-              >
-                Custom Map (Advanced)
-              </Button>
-            </div>
-
-            {/* Template Map Info */}
-            {!useCustomMap && room?.templateMap && (
-              <div className="mb-4 p-4 border rounded-lg bg-muted/50">
-                <div className="text-sm font-medium mb-1">Template Map</div>
-                <div className="text-sm text-muted-foreground">
-                  <div><strong>Template:</strong> {room.templateMap.template.category.name} - {room.templateMap.template.name}</div>
-                  <div><strong>Map:</strong> {room.templateMap.name}</div>
+          {/* Room Form - Only show when not using template, or when template map is selected (and not actively selecting) */}
+          {(!useCustomMap ? ((selectedMapId || room?.templateMapId) && !selectedTemplateSlug) : true) && (
+            <Card>
+              <CardHeader>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <CardTitle>Room Details</CardTitle>
+                    <CardDescription>
+                      {!useCustomMap && (selectedMapId || room?.templateMapId)
+                        ? 'Review and customize your room details. Map is set from template.'
+                        : 'Update the room details below.'}
+                    </CardDescription>
+                  </div>
+                  {room.canEdit !== false && (
+                    <Button variant="destructive" onClick={() => setDeleteDialogOpen(true)}>
+                      <Trash2 className="mr-2 h-4 w-4" />
+                      Delete
+                    </Button>
+                  )}
                 </div>
-                <p className="text-xs text-muted-foreground mt-2">
-                  Map URL is automatically set from the template. Switch to "Custom Map" to override.
-                </p>
-              </div>
-            )}
+              </CardHeader>
+              <CardContent className="space-y-6">
+                <div className="space-y-2">
+                  <Label htmlFor="name">
+                    Name <span className="text-destructive">*</span>
+                  </Label>
+                  <Input
+                    id="name"
+                    required
+                    value={formData.name}
+                    onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                  />
+                </div>
 
-            {/* Custom Map URL Input - Only show when using custom map */}
-            {useCustomMap && (
-              <div className="space-y-2">
-                <Label htmlFor="mapUrl">
-                  Map URL <span className="text-destructive">*</span>
-                </Label>
-                <p className="text-sm text-muted-foreground">
-                  External TMJ map URL for this room (e.g., https://example.com/map.tmj). Each room must have its own map.
-                </p>
-                <Input
-                  id="mapUrl"
-                  type="url"
-                  required
-                  value={formData.mapUrl}
-                  onChange={(e) => setFormData({ ...formData, mapUrl: e.target.value })}
-                />
-                {room?.templateMapId && (
-                  <p className="text-xs text-muted-foreground mt-1">
-                    ⚠️ Switching to custom map will disconnect this room from the template.
-                  </p>
+                <div className="space-y-2">
+                  <Label htmlFor="slug">
+                    Slug <span className="text-destructive">*</span>
+                  </Label>
+                  <Input
+                    id="slug"
+                    required
+                    value={formData.slug}
+                    onChange={(e) => setFormData({ ...formData, slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') })}
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="description">Description</Label>
+                  <Textarea
+                    id="description"
+                    rows={3}
+                    value={formData.description}
+                    onChange={(e) => setFormData({ ...formData, description: e.target.value })}
+                  />
+                </div>
+
+                {/* Custom Map URL Input - Only show when using custom map */}
+                {useCustomMap && (
+                  <div className="space-y-2">
+                    <Label htmlFor="mapUrl">
+                      Map URL <span className="text-destructive">*</span>
+                    </Label>
+                    <p className="text-sm text-muted-foreground">
+                      External TMJ map URL for this room (e.g., https://example.com/map.tmj). Each room must have its own map.
+                    </p>
+                    <Input
+                      id="mapUrl"
+                      type="url"
+                      required
+                      value={formData.mapUrl}
+                      onChange={(e) => setFormData({ ...formData, mapUrl: e.target.value })}
+                    />
+                    {room?.templateMapId && (
+                      <p className="text-xs text-muted-foreground mt-1">
+                        ⚠️ Switching to custom map will disconnect this room from the template.
+                      </p>
+                    )}
+                  </div>
                 )}
-              </div>
-            )}
 
-            <div className="flex items-center space-x-2">
-              <Checkbox
-                id="isPublic"
-                checked={formData.isPublic}
-                onCheckedChange={(checked) => setFormData({ ...formData, isPublic: checked === true })}
-              />
-              <Label htmlFor="isPublic" className="font-normal cursor-pointer">
-                Public
-              </Label>
-            </div>
+                <div className="flex items-center space-x-2">
+                  <Checkbox
+                    id="isPublic"
+                    checked={formData.isPublic}
+                    onCheckedChange={(checked) => setFormData({ ...formData, isPublic: checked === true })}
+                  />
+                  <Label htmlFor="isPublic" className="font-normal cursor-pointer">
+                    Public
+                  </Label>
+                </div>
 
-            <div className="flex flex-col-reverse sm:flex-row justify-end gap-3 pt-4">
-              <Button
-                variant="secondary"
-                onClick={() => {
-                  setIsEditing(false);
-                  fetchRoom();
-                }}
-              >
-                Cancel
-              </Button>
-              <Button onClick={handleSave} disabled={saving}>
-                {saving ? (
-                  <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Saving...
-                  </>
-                ) : (
-                  'Save Changes'
-                )}
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
+                <div className="flex flex-col-reverse sm:flex-row justify-end gap-3 pt-4">
+                  <Button
+                    variant="secondary"
+                    onClick={() => {
+                      setIsEditing(false);
+                      fetchRoom();
+                    }}
+                  >
+                    Cancel
+                  </Button>
+                  <Button onClick={handleSave} disabled={saving}>
+                    {saving ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        Saving...
+                      </>
+                    ) : (
+                      'Save Changes'
+                    )}
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+        </>
       ) : (
         <>
           {/* Visit Button / Current Room Alert */}
