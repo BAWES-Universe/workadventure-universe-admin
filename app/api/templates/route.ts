@@ -43,23 +43,14 @@ export async function GET(request: NextRequest) {
             icon: true,
           },
         },
-        maps: {
-          where: {
-            isActive: true,
-          },
+        _count: {
           select: {
-            id: true,
-            slug: true,
-            name: true,
-            description: true,
-            mapUrl: true,
-            sizeLabel: true,
-            order: true,
+            maps: {
+              where: {
+                isActive: true,
+              },
+            },
           },
-          orderBy: {
-            order: 'asc',
-          },
-          take: 1, // Just get count, not all maps
         },
       },
       orderBy: [
@@ -93,7 +84,7 @@ export async function GET(request: NextRequest) {
       name: template.name,
       shortDescription: template.shortDescription,
       category: template.category,
-      mapCount: template.maps.length,
+      mapCount: template._count.maps,
       isFeatured: template.isFeatured,
     }));
 
