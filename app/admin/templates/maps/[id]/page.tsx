@@ -37,6 +37,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { ChevronLeft, Loader2, Edit, Trash2, AlertCircle, MapPin, ExternalLink } from 'lucide-react';
+import { ImageUpload } from '@/components/templates/ImageUpload';
 
 interface TemplateMap {
   id: string;
@@ -377,12 +378,22 @@ export default function MapDetailPage() {
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="previewImageUrl">Preview Image URL</Label>
+              <ImageUpload
+                value={formData.previewImageUrl}
+                onChange={(url) => setFormData({ ...formData, previewImageUrl: url })}
+                mapId={map.id}
+                disabled={saving}
+              />
+              <div className="text-xs text-muted-foreground">
+                Or enter a URL manually:
+              </div>
               <Input
                 id="previewImageUrl"
                 type="url"
                 value={formData.previewImageUrl}
                 onChange={(e) => setFormData({ ...formData, previewImageUrl: e.target.value })}
+                placeholder="https://example.com/preview.png"
+                disabled={saving}
               />
             </div>
             <div className="grid grid-cols-2 gap-4">

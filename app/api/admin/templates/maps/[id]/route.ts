@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { z } from 'zod';
+import { deleteImageFromS3, extractS3KeyFromUrl } from '@/lib/s3-upload';
 
 const updateMapSchema = z.object({
   templateId: z.string().uuid().optional(),
@@ -124,6 +125,12 @@ export async function PUT(
       }
     }
 
+    // If previewImageUrl is being changed, delete the old image from S3
+    let oldImageUrl: string | null = null;
+    if (data.previewImageUrl !== undefined && data.previewImageUrl !== existing.previewImageUrl) {
+      oldImageUrl = existing.previewImageUrl;
+    }
+
     const map = await prisma.roomTemplateMap.update({
       where: { id },
       data: {
@@ -149,6 +156,19 @@ export async function PUT(
         },
       },
     });
+
+    // Delete old image from S3 if it was replaced
+    if (oldImageUrl) {
+      try {
+        const s3Key = extractS3KeyFromUrl(oldImageUrl);
+        if (s3Key && s3Key.startsWith('template-maps/')) {
+          await deleteImageFromS3(s3Key);
+        }
+      } catch (error) {
+        // Log error but don't fail the request
+        console.error('Error deleting old preview image:', error);
+      }
+    }
 
     return NextResponse.json({ map });
   } catch (error) {
@@ -201,6 +221,19 @@ export async function DELETE(
         { error: 'Cannot delete map that is used by existing rooms' },
         { status: 400 }
       );
+    }
+
+    // Delete preview image from S3 if it exists
+    if (map.previewImageUrl) {
+      try {
+        const s3Key = extractS3KeyFromUrl(map.previewImageUrl);
+        if (s3Key && s3Key.startsWith('template-maps/')) {
+          await deleteImageFromS3(s3Key);
+        }
+      } catch (error) {
+        // Log error but don't fail the request
+        console.error('Error deleting preview image:', error);
+      }
     }
 
     await prisma.roomTemplateMap.delete({

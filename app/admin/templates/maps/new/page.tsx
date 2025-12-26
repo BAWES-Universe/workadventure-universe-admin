@@ -18,6 +18,7 @@ import {
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { ChevronRight, AlertCircle, Loader2 } from 'lucide-react';
+import { ImageUpload } from '@/components/templates/ImageUpload';
 
 interface Template {
   id: string;
@@ -295,16 +296,27 @@ function NewMapPageContent() {
               />
             </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="previewImageUrl">Preview Image URL</Label>
-              <Input
-                id="previewImageUrl"
-                type="url"
-                value={formData.previewImageUrl}
-                onChange={(e) => setFormData({ ...formData, previewImageUrl: e.target.value })}
-                placeholder="https://example.com/preview.png"
-              />
-            </div>
+            {templateIdParam && (
+              <div className="space-y-2">
+                <ImageUpload
+                  value={formData.previewImageUrl}
+                  onChange={(url) => setFormData({ ...formData, previewImageUrl: url })}
+                  templateId={templateIdParam}
+                  disabled={loading}
+                />
+                <div className="text-xs text-muted-foreground">
+                  Or enter a URL manually:
+                </div>
+                <Input
+                  id="previewImageUrl"
+                  type="url"
+                  value={formData.previewImageUrl}
+                  onChange={(e) => setFormData({ ...formData, previewImageUrl: e.target.value })}
+                  placeholder="https://example.com/preview.png"
+                  disabled={loading}
+                />
+              </div>
+            )}
 
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">

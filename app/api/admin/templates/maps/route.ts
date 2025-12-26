@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { z } from 'zod';
+import { moveTempPreviewImage } from '@/lib/s3-upload';
 
 const createMapSchema = z.object({
   templateId: z.string().uuid(),
@@ -144,6 +145,29 @@ export async function POST(request: NextRequest) {
         },
       },
     });
+
+    // If previewImageUrl is a temp image, move it to the final location with the actual mapId
+    if (map.previewImageUrl && map.previewImageUrl.includes('template-maps/temp-')) {
+      try {
+        const movedUrl = await moveTempPreviewImage(map.previewImageUrl, map.id);
+        // Update the map with the final URL
+        const updatedMap = await prisma.roomTemplateMap.update({
+          where: { id: map.id },
+          data: { previewImageUrl: movedUrl },
+          include: {
+            template: {
+              include: {
+                category: true,
+              },
+            },
+          },
+        });
+        return NextResponse.json(updatedMap, { status: 201 });
+      } catch (error) {
+        console.error('Error moving temp preview image after map creation:', error);
+        // Continue with original URL if move fails
+      }
+    }
 
     return NextResponse.json(map, { status: 201 });
   } catch (error) {
