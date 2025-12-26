@@ -246,8 +246,16 @@ export default function TemplateDetailPage() {
         throw new Error(data.error || 'Failed to save template');
       }
 
+      const data = await response.json();
+      const updatedTemplate = data.template;
+      
+      // Update template state immediately
+      setTemplate({
+        ...updatedTemplate,
+        _count: template._count, // Preserve _count if it exists
+      });
+
       setIsEditDialogOpen(false);
-      await fetchData();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save template');
     } finally {

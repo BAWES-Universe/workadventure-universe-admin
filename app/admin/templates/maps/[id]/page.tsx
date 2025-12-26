@@ -172,8 +172,16 @@ export default function MapDetailPage() {
         throw new Error(data.error || 'Failed to save map');
       }
 
+      const data = await response.json();
+      const updatedMap = data.map;
+      
+      // Update map state immediately
+      setMap({
+        ...updatedMap,
+        _count: map._count, // Preserve _count if it exists
+      });
+
       setIsEditDialogOpen(false);
-      await fetchMap();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save map');
     } finally {

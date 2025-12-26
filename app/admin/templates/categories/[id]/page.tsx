@@ -190,15 +190,16 @@ export default function CategoryDetailPage() {
         throw new Error(data.error || 'Failed to save category');
       }
 
+      const data = await response.json();
+      const updatedCategory = data.category;
+      
+      // Update category state immediately
+      setCategory({
+        ...updatedCategory,
+        _count: category._count, // Preserve _count if it exists
+      });
+
       setIsEditDialogOpen(false);
-      // Reload category data
-      if (params.id) {
-        const response = await fetch(`/api/admin/templates/categories/${params.id}`);
-        if (response.ok) {
-          const data = await response.json();
-          setCategory(data.category);
-        }
-      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save category');
     } finally {
