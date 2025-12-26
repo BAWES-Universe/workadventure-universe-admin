@@ -363,10 +363,7 @@ export default function TemplateDetailPage() {
       {/* Template Details */}
       {(template.philosophy || template.purpose || template.whoItsFor || template.typicalUseCases.length > 0) && (
         <Card>
-          <CardHeader>
-            <CardTitle>Details</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
+          <CardContent className="space-y-4 pt-6">
             {template.philosophy && (
               <div>
                 <h3 className="font-semibold mb-1">Philosophy</h3>
