@@ -100,6 +100,8 @@ export default function TemplateDetailPage() {
   });
 
   useEffect(() => {
+    // Reset super admin state when params change
+    setIsSuperAdmin(false);
     if (params.id) {
       fetchData();
     }
@@ -117,11 +119,14 @@ export default function TemplateDetailPage() {
         const authResponse = await authenticatedFetch('/api/auth/me');
         if (authResponse.ok) {
           const authData = await authResponse.json();
-          userIsSuperAdmin = authData.user?.isSuperAdmin || false;
+          // Explicitly check for true value
+          userIsSuperAdmin = authData.user?.isSuperAdmin === true;
         }
       } catch {
         // Not authenticated, continue as regular user
+        userIsSuperAdmin = false;
       }
+      // Always set the state explicitly
       setIsSuperAdmin(userIsSuperAdmin);
       
       // Fetch template using public API (by slug if we have it, or by ID from admin API if super admin)
@@ -252,7 +257,6 @@ export default function TemplateDetailPage() {
       // Update template state immediately
       setTemplate({
         ...updatedTemplate,
-        _count: template._count, // Preserve _count if it exists
       });
 
       setIsEditDialogOpen(false);
@@ -315,7 +319,7 @@ export default function TemplateDetailPage() {
             Back to {template.category.name}
           </Link>
         </Button>
-        {isSuperAdmin && (
+        {isSuperAdmin === true && (
           <Button variant="outline" onClick={() => setIsEditDialogOpen(true)}>
             <Edit className="h-4 w-4 mr-2" />
             Edit
@@ -417,12 +421,14 @@ export default function TemplateDetailPage() {
               </CardDescription>
             </CardHeader>
             <CardContent>
-              <Button asChild>
-                <Link href={`/admin/templates/maps/new?templateId=${template.id}`}>
-                  <Plus className="mr-2 h-4 w-4" />
-                  Create your first map
-                </Link>
-              </Button>
+              {isSuperAdmin && (
+                <Button asChild>
+                  <Link href={`/admin/templates/maps/new?templateId=${template.id}`}>
+                    <Plus className="mr-2 h-4 w-4" />
+                    Create your first map
+                  </Link>
+                </Button>
+              )}
             </CardContent>
           </Card>
         ) : (
@@ -468,7 +474,7 @@ export default function TemplateDetailPage() {
                     <div className="mt-auto flex items-center gap-1.5 pt-3 text-xs text-muted-foreground">
                       <MapPin className="h-3.5 w-3.5" />
                       <span>
-                        {map._count.rooms} {map._count.rooms === 1 ? 'room' : 'rooms'} using this map
+                        {map._count?.rooms || 0} {map._count?.rooms === 1 ? 'room' : 'rooms'} using this map
                       </span>
                     </div>
                   </div>

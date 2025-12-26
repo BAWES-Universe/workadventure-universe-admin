@@ -171,11 +171,13 @@ export default function TemplatesAdminPage() {
                         {category.slug}
                       </p>
 
-                      <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
-                        <Badge variant={category.isActive ? 'default' : 'secondary'}>
-                          {category.isActive ? 'Active' : 'Inactive'}
-                        </Badge>
-                      </div>
+                      {isSuperAdmin && (
+                        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+                          <Badge variant={category.isActive ? 'default' : 'secondary'}>
+                            {category.isActive ? 'Active' : 'Inactive'}
+                          </Badge>
+                        </div>
+                      )}
                     </div>
                   </div>
 

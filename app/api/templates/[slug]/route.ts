@@ -40,6 +40,11 @@ export async function GET(
             sizeLabel: true,
             recommendedWorldTags: true,
             order: true,
+            _count: {
+              select: {
+                rooms: true,
+              },
+            },
           },
           orderBy: {
             order: 'asc',

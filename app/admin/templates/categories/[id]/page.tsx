@@ -78,6 +78,8 @@ export default function CategoryDetailPage() {
   });
 
   useEffect(() => {
+    // Reset super admin state when params change
+    setIsSuperAdmin(false);
     if (params.id) {
       fetchData();
     }
@@ -95,11 +97,14 @@ export default function CategoryDetailPage() {
         const authResponse = await authenticatedFetch('/api/auth/me');
         if (authResponse.ok) {
           const authData = await authResponse.json();
-          userIsSuperAdmin = authData.user?.isSuperAdmin || false;
+          // Explicitly check for true value
+          userIsSuperAdmin = authData.user?.isSuperAdmin === true;
         }
       } catch {
         // Not authenticated, continue as regular user
+        userIsSuperAdmin = false;
       }
+      // Always set the state explicitly
       setIsSuperAdmin(userIsSuperAdmin);
       
       // Fetch category - try admin endpoint first if super admin, otherwise use public list
@@ -259,10 +264,12 @@ export default function CategoryDetailPage() {
             Back to Categories
           </Link>
         </Button>
-        <Button variant="outline" onClick={() => setIsEditDialogOpen(true)}>
-          <Edit className="h-4 w-4 mr-2" />
-          Edit
-        </Button>
+        {isSuperAdmin === true && (
+          <Button variant="outline" onClick={() => setIsEditDialogOpen(true)}>
+            <Edit className="h-4 w-4 mr-2" />
+            Edit
+          </Button>
+        )}
       </div>
 
       <div className="flex items-center justify-between">
