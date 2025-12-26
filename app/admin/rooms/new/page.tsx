@@ -323,7 +323,7 @@ function NewRoomPageContent() {
 
       {/* Template Selection Flow */}
       {useTemplate && (
-        <Card>
+        <Card className="border-0 shadow-none">
           <CardHeader>
             {selectedTemplateSlug && (
               <div className="flex items-center gap-2 mb-2">
@@ -354,7 +354,7 @@ function NewRoomPageContent() {
                 hideBackButton={true}
               />
             ) : selectedMapId && selectedTemplateName && selectedMapName ? (
-              <div className="p-4 border rounded-lg bg-muted/50">
+              <div className="p-4 rounded-lg bg-muted/50">
                 <div className="flex items-start justify-between">
                   <div className="flex-1">
                     <div className="text-sm font-medium mb-1">Selected Template Map</div>
@@ -395,7 +395,7 @@ function NewRoomPageContent() {
 
       {/* Room Form - Only show when not using template, or when template map is selected */}
       {(useTemplate ? (selectedMapId !== null && selectedMapId !== '') : true) && (
-        <Card>
+        <Card className="border-0 shadow-none">
           <CardHeader>
             <CardTitle>Room Details</CardTitle>
             <CardDescription>
