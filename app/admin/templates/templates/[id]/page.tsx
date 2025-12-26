@@ -247,12 +247,16 @@ export default function TemplateDetailPage() {
 
   return (
     <div className="space-y-8">
-      <div className="flex items-center gap-4">
+      <div className="flex items-center justify-between">
         <Button variant="ghost" size="sm" asChild>
           <Link href={`/admin/templates/categories/${template.category.id}`}>
             <ChevronLeft className="h-4 w-4 mr-2" />
             Back to {template.category.name}
           </Link>
+        </Button>
+        <Button variant="outline" onClick={() => setIsEditDialogOpen(true)}>
+          <Edit className="h-4 w-4 mr-2" />
+          Edit
         </Button>
       </div>
 
@@ -277,18 +281,6 @@ export default function TemplateDetailPage() {
             {template.isFeatured && <Badge variant="outline">Featured</Badge>}
             <Badge variant="outline">{template.visibility}</Badge>
           </div>
-        </div>
-        <div className="flex gap-2">
-          <Button variant="outline" onClick={() => setIsEditDialogOpen(true)}>
-            <Edit className="h-4 w-4 mr-2" />
-            Edit
-          </Button>
-          <Button asChild>
-            <Link href={`/admin/templates/maps/new?templateId=${template.id}`}>
-              <Plus className="h-4 w-4 mr-2" />
-              Create Map
-            </Link>
-          </Button>
         </div>
       </div>
 
@@ -341,7 +333,15 @@ export default function TemplateDetailPage() {
 
       {/* Maps */}
       <div>
-        <h2 className="text-2xl font-semibold mb-4">Maps</h2>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-2xl font-semibold">Maps</h2>
+          <Button asChild>
+            <Link href={`/admin/templates/maps/new?templateId=${template.id}`}>
+              <Plus className="h-4 w-4 mr-2" />
+              Create Map
+            </Link>
+          </Button>
+        </div>
         {maps.length === 0 ? (
           <Card>
             <CardHeader>
