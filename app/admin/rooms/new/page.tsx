@@ -17,7 +17,7 @@ import {
 } from '@/components/ui/select';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { ChevronRight, AlertCircle, Loader2, AlertTriangle, X } from 'lucide-react';
+import { ChevronRight, AlertCircle, Loader2, AlertTriangle, X, ArrowLeft } from 'lucide-react';
 import { TemplateLibrary } from '@/components/templates/TemplateLibrary';
 import { TemplateDetail } from '@/components/templates/TemplateDetail';
 import { Badge } from '@/components/ui/badge';
@@ -322,6 +322,20 @@ function NewRoomPageContent() {
       {useTemplate && (
         <Card>
           <CardHeader>
+            {selectedTemplateSlug && (
+              <div className="flex items-center gap-2 mb-2">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={handleBackToTemplates}
+                  className="gap-2 -ml-2"
+                >
+                  <ArrowLeft className="h-4 w-4" />
+                  Back
+                </Button>
+              </div>
+            )}
             <CardTitle>Select Template</CardTitle>
             <CardDescription>
               Choose a template to get started, or switch to manual entry.
@@ -338,6 +352,7 @@ function NewRoomPageContent() {
                 onSelectMap={handleSelectMap}
                 onBack={handleBackToTemplates}
                 selectedMapId={selectedMapId || undefined}
+                hideBackButton={true}
               />
             )}
           </CardContent>
