@@ -334,7 +334,7 @@ export default function MapDetailPage() {
             {map.template.category.icon || <MapPin className="h-6 w-6 text-muted-foreground" />}
           </div>
           <div>
-            <h1 className="text-4xl font-bold tracking-tight">{map.name}</h1>
+            <h1 className="text-2xl font-bold tracking-tight">{map.name}</h1>
             <p className="text-muted-foreground text-lg font-mono">{map.slug}</p>
           </div>
         </div>
@@ -361,9 +361,9 @@ export default function MapDetailPage() {
 
       {/* Map Details */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        <Card>
+        <Card className="border-0">
           <CardHeader>
-            <CardTitle>Map Information</CardTitle>
+            <CardTitle className="text-xl">Map Information</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
             <div>
@@ -389,9 +389,9 @@ export default function MapDetailPage() {
           </CardContent>
         </Card>
 
-        <Card>
+        <Card className="border-0">
           <CardHeader>
-            <CardTitle>Usage</CardTitle>
+            <CardTitle className="text-xl">Usage</CardTitle>
           </CardHeader>
           <CardContent>
             <div className="flex items-center gap-2 text-sm">
@@ -405,9 +405,9 @@ export default function MapDetailPage() {
       </div>
 
       {isSuperAdmin && (
-        <Card>
+        <Card className="border-0">
           <CardHeader>
-            <CardTitle>Private Information</CardTitle>
+            <CardTitle className="text-xl">Private Information</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
             <div>
