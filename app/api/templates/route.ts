@@ -83,6 +83,7 @@ export async function GET(request: NextRequest) {
       slug: template.slug,
       name: template.name,
       shortDescription: template.shortDescription,
+      philosophy: template.philosophy,
       category: template.category,
       mapCount: template._count.maps,
       isFeatured: template.isFeatured,

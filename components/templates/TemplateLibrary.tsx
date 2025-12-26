@@ -4,8 +4,9 @@ import { useState, useEffect } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { Loader2, Search } from 'lucide-react';
+import { Loader2, Search, FolderOpen } from 'lucide-react';
 import { Input } from '@/components/ui/input';
+import { cn } from '@/lib/utils';
 
 interface Category {
   id: string;
@@ -21,6 +22,7 @@ interface Template {
   slug: string;
   name: string;
   shortDescription?: string;
+  philosophy?: string;
   category: {
     id: string;
     slug: string;
@@ -131,40 +133,56 @@ export function TemplateLibrary({ onSelectTemplate, selectedCategory }: Template
           No templates found. Try a different search or category.
         </div>
       ) : (
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
           {templates.map((template) => (
             <Card
               key={template.id}
-              className="cursor-pointer transition-shadow hover:shadow-md"
+              className={cn(
+                'group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all cursor-pointer',
+                'hover:-translate-y-1 hover:shadow-lg',
+              )}
               onClick={() => onSelectTemplate(template.slug)}
             >
-              <CardHeader>
-                <div className="flex items-start justify-between">
-                  <div className="flex items-center gap-2">
-                    {template.category.icon && (
-                      <span className="text-2xl">{template.category.icon}</span>
-                    )}
-                    <CardTitle className="text-lg">{template.name}</CardTitle>
+              <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-blue-500/10 via-transparent to-indigo-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
+
+              <div className="relative flex flex-col h-full p-5">
+                {template.isFeatured && (
+                  <div className="absolute top-4 right-4">
+                    <Badge variant="outline" className="text-xs">Featured</Badge>
                   </div>
-                  {template.isFeatured && (
-                    <Badge variant="secondary" className="text-xs">
-                      Featured
-                    </Badge>
-                  )}
+                )}
+                <div className="mb-4 space-y-1 pr-16">
+                  <h3 className="truncate text-base font-semibold leading-tight">
+                    {template.name}
+                  </h3>
+                  <div className="flex items-center gap-1.5">
+                    {template.category.icon && (
+                      <span className="text-sm">{template.category.icon}</span>
+                    )}
+                    <p className="truncate text-xs text-muted-foreground">
+                      {template.category.name}
+                    </p>
+                  </div>
                 </div>
-                <CardDescription className="mt-2">
-                  {template.shortDescription || 'No description available'}
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="flex items-center justify-between text-sm text-muted-foreground">
-                  <span>{template.category.name}</span>
-                  <span>{template.mapCount} map{template.mapCount !== 1 ? 's' : ''}</span>
+
+                {template.shortDescription && (
+                  <p className="mb-2 line-clamp-2 text-sm text-muted-foreground">
+                    {template.shortDescription}
+                  </p>
+                )}
+                {template.philosophy && (
+                  <p className="mb-3 text-sm italic text-muted-foreground">
+                    &ldquo;{template.philosophy}&rdquo;
+                  </p>
+                )}
+
+                <div className="mt-auto flex items-center gap-1.5 pt-3 text-xs text-muted-foreground">
+                  <FolderOpen className="h-3.5 w-3.5" />
+                  <span>
+                    {template.mapCount} {template.mapCount === 1 ? 'map' : 'maps'}
+                  </span>
                 </div>
-                <Button className="mt-4 w-full" variant="outline">
-                  View Details
-                </Button>
-              </CardContent>
+              </div>
             </Card>
           ))}
         </div>
