@@ -206,12 +206,16 @@ export default function CategoryDetailPage() {
 
   return (
     <div className="space-y-8">
-      <div className="flex items-center gap-4">
+      <div className="flex items-center justify-between">
         <Button variant="ghost" size="sm" asChild>
           <Link href="/admin/templates">
             <ChevronLeft className="h-4 w-4 mr-2" />
             Back to Categories
           </Link>
+        </Button>
+        <Button variant="outline" onClick={() => setIsEditDialogOpen(true)}>
+          <Edit className="h-4 w-4 mr-2" />
+          Edit
         </Button>
       </div>
 
@@ -230,18 +234,6 @@ export default function CategoryDetailPage() {
             <p className="text-muted-foreground mt-2">{category.description}</p>
           )}
         </div>
-        <div className="flex gap-2">
-          <Button variant="outline" onClick={() => setIsEditDialogOpen(true)}>
-            <Edit className="h-4 w-4 mr-2" />
-            Edit
-          </Button>
-          <Button asChild>
-            <Link href={`/admin/templates/templates/new?categoryId=${category.id}`}>
-              <Plus className="h-4 w-4 mr-2" />
-              Create Template
-            </Link>
-          </Button>
-        </div>
       </div>
 
       {error && (
@@ -253,7 +245,15 @@ export default function CategoryDetailPage() {
       )}
 
       <div>
-        <h2 className="text-2xl font-semibold mb-4">Templates</h2>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-2xl font-semibold">Templates</h2>
+          <Button asChild>
+            <Link href={`/admin/templates/templates/new?categoryId=${category.id}`}>
+              <Plus className="h-4 w-4 mr-2" />
+              Create Template
+            </Link>
+          </Button>
+        </div>
         {templates.length === 0 ? (
           <Card>
             <CardHeader>
