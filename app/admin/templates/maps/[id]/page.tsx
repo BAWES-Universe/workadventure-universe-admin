@@ -1,16 +1,11 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { useRouter, useParams } from 'next/navigation';
+import Link from 'next/link';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import {
   Dialog,
@@ -41,19 +36,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { Plus, Edit, Trash2, Loader2, ExternalLink } from 'lucide-react';
-import { Alert, AlertDescription } from '@/components/ui/alert';
-
-interface Template {
-  id: string;
-  slug: string;
-  name: string;
-  category: {
-    id: string;
-    slug: string;
-    name: string;
-  };
-}
+import { ChevronLeft, Loader2, Edit, Trash2, AlertCircle, MapPin, ExternalLink } from 'lucide-react';
 
 interface TemplateMap {
   id: string;
@@ -66,8 +49,8 @@ interface TemplateMap {
   orientation: string;
   tileSize: number;
   recommendedWorldTags: string[];
-  isActive: boolean;
   order: number;
+  isActive: boolean;
   template: {
     id: string;
     slug: string;
@@ -76,6 +59,7 @@ interface TemplateMap {
       id: string;
       slug: string;
       name: string;
+      icon: string | null;
     };
   };
   _count: {
@@ -83,20 +67,17 @@ interface TemplateMap {
   };
 }
 
-export function MapsTab() {
-  const [maps, setMaps] = useState<TemplateMap[]>([]);
-  const [templates, setTemplates] = useState<Template[]>([]);
+export default function MapDetailPage() {
+  const router = useRouter();
+  const params = useParams();
+  const [map, setMap] = useState<TemplateMap | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [isDialogOpen, setIsDialogOpen] = useState(false);
+  const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
-  const [editingMap, setEditingMap] = useState<TemplateMap | null>(null);
-  const [deleteMap, setDeleteMap] = useState<TemplateMap | null>(null);
   const [saving, setSaving] = useState(false);
 
   const [formData, setFormData] = useState({
-    templateId: '',
-    slug: '',
     name: '',
     description: '',
     mapUrl: '',
@@ -110,91 +91,54 @@ export function MapsTab() {
   });
 
   useEffect(() => {
-    fetchTemplates();
-    fetchMaps();
-  }, []);
-
-  async function fetchTemplates() {
-    try {
-      const { authenticatedFetch } = await import('@/lib/client-auth');
-      const response = await authenticatedFetch('/api/admin/templates');
-      if (response.ok) {
-        const data = await response.json();
-        setTemplates(data.templates || []);
-      }
-    } catch (err) {
-      // Ignore errors
+    if (params.id) {
+      fetchMap();
     }
-  }
+  }, [params.id]);
 
-  async function fetchMaps() {
+  async function fetchMap() {
     try {
       setLoading(true);
+      setError(null);
+      
       const { authenticatedFetch } = await import('@/lib/client-auth');
-      const response = await authenticatedFetch('/api/admin/templates/maps');
+      const response = await authenticatedFetch(`/api/admin/templates/maps/${params.id}`);
       
       if (!response.ok) {
-        throw new Error('Failed to fetch maps');
+        if (response.status === 404) {
+          router.push('/admin/templates');
+          return;
+        }
+        throw new Error('Failed to fetch map');
       }
 
       const data = await response.json();
-      setMaps(data.maps || []);
-      setError(null);
+      setMap(data.map);
+      setFormData({
+        name: data.map.name,
+        description: data.map.description || '',
+        mapUrl: data.map.mapUrl,
+        previewImageUrl: data.map.previewImageUrl || '',
+        sizeLabel: data.map.sizeLabel || '',
+        orientation: data.map.orientation,
+        tileSize: data.map.tileSize,
+        recommendedWorldTags: data.map.recommendedWorldTags.join('\n'),
+        order: data.map.order,
+        isActive: data.map.isActive,
+      });
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load maps');
+      setError(err instanceof Error ? err.message : 'Failed to load map');
     } finally {
       setLoading(false);
     }
   }
 
-  function openCreateDialog() {
-    setEditingMap(null);
-    setFormData({
-      templateId: templates[0]?.id || '',
-      slug: '',
-      name: '',
-      description: '',
-      mapUrl: '',
-      previewImageUrl: '',
-      sizeLabel: '',
-      orientation: 'orthogonal',
-      tileSize: 32,
-      recommendedWorldTags: '',
-      order: 0,
-      isActive: true,
-    });
-    setIsDialogOpen(true);
-  }
-
-  function openEditDialog(map: TemplateMap) {
-    setEditingMap(map);
-    setFormData({
-      templateId: map.template.id,
-      slug: map.slug,
-      name: map.name,
-      description: map.description || '',
-      mapUrl: map.mapUrl,
-      previewImageUrl: map.previewImageUrl || '',
-      sizeLabel: map.sizeLabel || '',
-      orientation: map.orientation,
-      tileSize: map.tileSize,
-      recommendedWorldTags: map.recommendedWorldTags.join('\n'),
-      order: map.order,
-      isActive: map.isActive,
-    });
-    setIsDialogOpen(true);
-  }
-
   async function handleSave() {
+    if (!map) return;
+
     try {
       setSaving(true);
       const { authenticatedFetch } = await import('@/lib/client-auth');
-      
-      const url = editingMap
-        ? `/api/admin/templates/maps/${editingMap.id}`
-        : '/api/admin/templates/maps';
-      
-      const method = editingMap ? 'PUT' : 'POST';
       
       // Parse recommendedWorldTags from newline-separated string
       const recommendedWorldTags = formData.recommendedWorldTags
@@ -202,12 +146,10 @@ export function MapsTab() {
         .map(s => s.trim())
         .filter(s => s.length > 0);
 
-      const response = await authenticatedFetch(url, {
-        method,
+      const response = await authenticatedFetch(`/api/admin/templates/maps/${map.id}`, {
+        method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          templateId: formData.templateId,
-          slug: formData.slug,
           name: formData.name,
           description: formData.description || null,
           mapUrl: formData.mapUrl,
@@ -226,8 +168,8 @@ export function MapsTab() {
         throw new Error(data.error || 'Failed to save map');
       }
 
-      setIsDialogOpen(false);
-      await fetchMaps();
+      setIsEditDialogOpen(false);
+      await fetchMap();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save map');
     } finally {
@@ -235,31 +177,24 @@ export function MapsTab() {
     }
   }
 
-  function openDeleteDialog(map: TemplateMap) {
-    setDeleteMap(map);
-    setIsDeleteDialogOpen(true);
-  }
-
   async function handleDelete() {
-    if (!deleteMap) return;
+    if (!map) return;
 
     try {
       const { authenticatedFetch } = await import('@/lib/client-auth');
-      const response = await authenticatedFetch(
-        `/api/admin/templates/maps/${deleteMap.id}`,
-        { method: 'DELETE' }
-      );
+      const response = await authenticatedFetch(`/api/admin/templates/maps/${map.id}`, {
+        method: 'DELETE',
+      });
 
       if (!response.ok) {
         const data = await response.json();
         throw new Error(data.error || 'Failed to delete map');
       }
 
-      setIsDeleteDialogOpen(false);
-      setDeleteMap(null);
-      await fetchMaps();
+      router.push(`/admin/templates/templates/${map.template.id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to delete map');
+      setIsDeleteDialogOpen(false);
     }
   }
 
@@ -271,162 +206,166 @@ export function MapsTab() {
     );
   }
 
+  if (!map) {
+    return (
+      <div className="space-y-8">
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>Map not found</AlertTitle>
+          <AlertDescription>
+            The map you're looking for doesn't exist.
+          </AlertDescription>
+        </Alert>
+      </div>
+    );
+  }
+
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-2xl font-semibold">Template Maps</h2>
-          <p className="text-sm text-muted-foreground">
-            Manage template map variants
-          </p>
-        </div>
-        <Button onClick={openCreateDialog} disabled={templates.length === 0}>
-          <Plus className="h-4 w-4 mr-2" />
-          Create Map
+    <div className="space-y-8">
+      <div className="flex items-center gap-4">
+        <Button variant="ghost" size="sm" asChild>
+          <Link href={`/admin/templates/templates/${map.template.id}`}>
+            <ChevronLeft className="h-4 w-4 mr-2" />
+            Back to {map.template.name}
+          </Link>
         </Button>
       </div>
 
-      {templates.length === 0 && (
-        <Alert>
-          <AlertDescription>
-            No templates available. Please create a template first.
-          </AlertDescription>
-        </Alert>
-      )}
+      <div className="flex items-center justify-between">
+        <div className="space-y-1">
+          <div className="flex items-center gap-3">
+            <div className="flex h-12 w-12 items-center justify-center rounded-lg border bg-muted text-2xl">
+              {map.template.category.icon || <MapPin className="h-6 w-6 text-muted-foreground" />}
+            </div>
+            <div>
+              <h1 className="text-4xl font-bold tracking-tight">{map.name}</h1>
+              <p className="text-muted-foreground text-lg font-mono">{map.slug}</p>
+            </div>
+          </div>
+          {map.description && (
+            <p className="text-muted-foreground mt-2">{map.description}</p>
+          )}
+          <div className="flex flex-wrap items-center gap-2 mt-2">
+            <Badge variant={map.isActive ? 'default' : 'secondary'}>
+              {map.isActive ? 'Active' : 'Inactive'}
+            </Badge>
+            {map.sizeLabel && <Badge variant="outline">{map.sizeLabel}</Badge>}
+            <Badge variant="outline">{map.orientation}</Badge>
+          </div>
+        </div>
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={() => setIsEditDialogOpen(true)}>
+            <Edit className="h-4 w-4 mr-2" />
+            Edit
+          </Button>
+          <Button
+            variant="destructive"
+            onClick={() => setIsDeleteDialogOpen(true)}
+            disabled={map._count.rooms > 0}
+          >
+            <Trash2 className="h-4 w-4 mr-2" />
+            Delete
+          </Button>
+        </div>
+      </div>
 
       {error && (
         <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>Error</AlertTitle>
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
 
-      <Card>
-        <CardHeader>
-          <CardTitle>All Maps</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {maps.length === 0 ? (
-            <div className="text-center py-8 text-muted-foreground">
-              No maps found. Create your first map.
+      {/* Map Details */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <Card>
+          <CardHeader>
+            <CardTitle>Map Information</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div>
+              <h3 className="font-semibold mb-1">Template</h3>
+              <p className="text-sm text-muted-foreground">
+                {map.template.category.name} - {map.template.name}
+              </p>
             </div>
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Template</TableHead>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Slug</TableHead>
-                  <TableHead>Size</TableHead>
-                  <TableHead>Rooms</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead className="text-right">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {maps.map((map) => (
-                  <TableRow key={map.id}>
-                    <TableCell>
-                      <div className="flex flex-col">
-                        <span className="font-medium">{map.template.name}</span>
-                        <span className="text-xs text-muted-foreground">
-                          {map.template.category.name}
-                        </span>
-                      </div>
-                    </TableCell>
-                    <TableCell className="font-medium">{map.name}</TableCell>
-                    <TableCell className="text-muted-foreground">{map.slug}</TableCell>
-                    <TableCell>
-                      {map.sizeLabel && <Badge variant="outline">{map.sizeLabel}</Badge>}
-                    </TableCell>
-                    <TableCell>{map._count.rooms}</TableCell>
-                    <TableCell>
-                      <Badge variant={map.isActive ? 'default' : 'secondary'}>
-                        {map.isActive ? 'Active' : 'Inactive'}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <div className="flex justify-end gap-2">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => openEditDialog(map)}
-                        >
-                          <Edit className="h-4 w-4" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => openDeleteDialog(map)}
-                          disabled={map._count.rooms > 0}
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                        <Button variant="ghost" size="sm" asChild>
-                          <a href={map.mapUrl} target="_blank" rel="noopener noreferrer">
-                            <ExternalLink className="h-4 w-4" />
-                          </a>
-                        </Button>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          )}
-        </CardContent>
-      </Card>
+            <div>
+              <h3 className="font-semibold mb-1">Map URL</h3>
+              <a
+                href={map.mapUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-sm text-primary hover:underline break-all flex items-center gap-1"
+              >
+                {map.mapUrl}
+                <ExternalLink className="h-3 w-3" />
+              </a>
+            </div>
+            {map.previewImageUrl && (
+              <div>
+                <h3 className="font-semibold mb-1">Preview Image</h3>
+                <a
+                  href={map.previewImageUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-sm text-primary hover:underline break-all flex items-center gap-1"
+                >
+                  {map.previewImageUrl}
+                  <ExternalLink className="h-3 w-3" />
+                </a>
+              </div>
+            )}
+            <div>
+              <h3 className="font-semibold mb-1">Technical Details</h3>
+              <div className="text-sm text-muted-foreground space-y-1">
+                <p>Orientation: {map.orientation}</p>
+                <p>Tile Size: {map.tileSize}px</p>
+                <p>Order: {map.order}</p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
 
-      {/* Create/Edit Dialog */}
-      <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
+        <Card>
+          <CardHeader>
+            <CardTitle>Usage</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="flex items-center gap-2 text-sm">
+              <MapPin className="h-4 w-4 text-muted-foreground" />
+              <span>
+                {map._count.rooms} {map._count.rooms === 1 ? 'room' : 'rooms'} using this map
+              </span>
+            </div>
+            {map.recommendedWorldTags.length > 0 && (
+              <div className="mt-4">
+                <h3 className="font-semibold mb-2">Recommended World Tags</h3>
+                <div className="flex flex-wrap gap-2">
+                  {map.recommendedWorldTags.map((tag, idx) => (
+                    <Badge key={idx} variant="outline">{tag}</Badge>
+                  ))}
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Edit Dialog */}
+      <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>
         <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>
-              {editingMap ? 'Edit Map' : 'Create Map'}
-            </DialogTitle>
-            <DialogDescription>
-              {editingMap
-                ? 'Update map details'
-                : 'Create a new template map variant'}
-            </DialogDescription>
+            <DialogTitle>Edit Map</DialogTitle>
+            <DialogDescription>Update map details</DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label htmlFor="templateId">Template *</Label>
-              <Select
-                value={formData.templateId}
-                onValueChange={(value) => setFormData({ ...formData, templateId: value })}
-              >
-                <SelectTrigger>
-                  <SelectValue placeholder="Select a template" />
-                </SelectTrigger>
-                <SelectContent>
-                  {templates.map((tpl) => (
-                    <SelectItem key={tpl.id} value={tpl.id}>
-                      {tpl.category.name} - {tpl.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="slug">Slug *</Label>
-              <Input
-                id="slug"
-                value={formData.slug}
-                onChange={(e) =>
-                  setFormData({ ...formData, slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') })
-                }
-                placeholder="small-focus"
-                disabled={!!editingMap}
-              />
-            </div>
             <div className="space-y-2">
               <Label htmlFor="name">Name *</Label>
               <Input
                 id="name"
                 value={formData.name}
                 onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                placeholder="Small Focus Room"
               />
             </div>
             <div className="space-y-2">
@@ -435,7 +374,6 @@ export function MapsTab() {
                 id="description"
                 value={formData.description}
                 onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-                placeholder="A compact version of the focus room..."
                 rows={2}
               />
             </div>
@@ -446,7 +384,6 @@ export function MapsTab() {
                 type="url"
                 value={formData.mapUrl}
                 onChange={(e) => setFormData({ ...formData, mapUrl: e.target.value })}
-                placeholder="https://example.com/map.tmj"
               />
             </div>
             <div className="space-y-2">
@@ -456,7 +393,6 @@ export function MapsTab() {
                 type="url"
                 value={formData.previewImageUrl}
                 onChange={(e) => setFormData({ ...formData, previewImageUrl: e.target.value })}
-                placeholder="https://example.com/preview.png"
               />
             </div>
             <div className="grid grid-cols-2 gap-4">
@@ -518,7 +454,6 @@ export function MapsTab() {
                 id="recommendedWorldTags"
                 value={formData.recommendedWorldTags}
                 onChange={(e) => setFormData({ ...formData, recommendedWorldTags: e.target.value })}
-                placeholder="work&#10;meeting&#10;collaboration"
                 rows={3}
               />
             </div>
@@ -536,10 +471,10 @@ export function MapsTab() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setIsDialogOpen(false)}>
+            <Button variant="outline" onClick={() => setIsEditDialogOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={handleSave} disabled={saving || !formData.slug || !formData.name || !formData.templateId || !formData.mapUrl}>
+            <Button onClick={handleSave} disabled={saving || !formData.name || !formData.mapUrl}>
               {saving ? (
                 <>
                   <Loader2 className="h-4 w-4 mr-2 animate-spin" />
@@ -559,10 +494,10 @@ export function MapsTab() {
           <AlertDialogHeader>
             <AlertDialogTitle>Delete Map</AlertDialogTitle>
             <AlertDialogDescription>
-              Are you sure you want to delete "{deleteMap?.name}"? This action cannot be undone.
-              {deleteMap && deleteMap._count.rooms > 0 && (
+              Are you sure you want to delete "{map.name}"? This action cannot be undone.
+              {map._count.rooms > 0 && (
                 <span className="block mt-2 text-destructive">
-                  This map has {deleteMap._count.rooms} room(s) and cannot be deleted.
+                  This map has {map._count.rooms} room(s) and cannot be deleted.
                 </span>
               )}
             </AlertDialogDescription>
@@ -571,7 +506,7 @@ export function MapsTab() {
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
               onClick={handleDelete}
-              disabled={deleteMap?._count.rooms ? deleteMap._count.rooms > 0 : false}
+              disabled={map._count.rooms > 0}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
               Delete
@@ -582,3 +517,4 @@ export function MapsTab() {
     </div>
   );
 }
+

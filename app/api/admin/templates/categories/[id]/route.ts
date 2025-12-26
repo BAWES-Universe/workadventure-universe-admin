@@ -28,12 +28,8 @@ export async function GET(
     const category = await prisma.roomTemplateCategory.findUnique({
       where: { id },
       include: {
-        templates: {
-          select: {
-            id: true,
-            slug: true,
-            name: true,
-          },
+        _count: {
+          select: { templates: true },
         },
       },
     });
