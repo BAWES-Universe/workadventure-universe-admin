@@ -279,6 +279,7 @@ export default function MapDetailPage() {
     order: 0,
     isActive: true,
   });
+  const [pendingImageFile, setPendingImageFile] = useState<File | null>(null);
 
   useEffect(() => {
     // Reset super admin state when params change
@@ -310,6 +311,7 @@ export default function MapDetailPage() {
         order: map.order,
         isActive: map.isActive,
       });
+      setPendingImageFile(null); // Reset pending file when dialog opens
     }
   }, [isEditDialogOpen, map]);
 
@@ -435,6 +437,28 @@ export default function MapDetailPage() {
       setSaving(true);
       const { authenticatedFetch } = await import('@/lib/client-auth');
       
+      // Upload image if there's a pending file
+      let previewImageUrl = formData.previewImageUrl;
+      if (pendingImageFile) {
+        const uploadFormData = new FormData();
+        uploadFormData.append('file', pendingImageFile);
+        uploadFormData.append('mapId', map.id);
+
+        const uploadResponse = await authenticatedFetch('/api/admin/templates/maps/upload-image', {
+          method: 'POST',
+          body: uploadFormData,
+        });
+
+        if (!uploadResponse.ok) {
+          const data = await uploadResponse.json();
+          throw new Error(data.error || 'Failed to upload image');
+        }
+
+        const uploadData = await uploadResponse.json();
+        previewImageUrl = uploadData.url;
+        setPendingImageFile(null);
+      }
+      
       const response = await authenticatedFetch(`/api/admin/templates/maps/${map.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -442,7 +466,7 @@ export default function MapDetailPage() {
           name: formData.name,
           description: formData.description || null,
           mapUrl: formData.mapUrl,
-          previewImageUrl: formData.previewImageUrl || null,
+          previewImageUrl: previewImageUrl || null,
           sizeLabel: formData.sizeLabel && formData.sizeLabel.trim() !== '' ? formData.sizeLabel.toLowerCase() : null,
           orientation: 'orthogonal', // Default value
           tileSize: 32, // Default value
@@ -461,10 +485,18 @@ export default function MapDetailPage() {
       const updatedMap = data.map;
       
       // Update map state immediately - use updatedMap as base to ensure all fields are fresh
-      setMap({
+      // Ensure we preserve all relations and counts
+      const newMapState = {
         ...updatedMap,
-        _count: map._count, // Preserve _count if it exists
-      });
+        _count: updatedMap._count || map._count, // Use updated count if available, otherwise preserve
+      };
+      
+      // Explicitly set previewImageUrl to ensure it's updated
+      if (updatedMap.previewImageUrl !== undefined) {
+        newMapState.previewImageUrl = updatedMap.previewImageUrl;
+      }
+      
+      setMap(newMapState);
 
       // Also update formData to reflect the saved state
       setFormData({
@@ -977,6 +1009,8 @@ export default function MapDetailPage() {
                 onChange={(url) => setFormData({ ...formData, previewImageUrl: url })}
                 mapId={map.id}
                 disabled={saving}
+                deferUpload={true}
+                onFileChange={(file) => setPendingImageFile(file)}
               />
               <div className="text-xs text-muted-foreground">
                 Or enter a URL manually:

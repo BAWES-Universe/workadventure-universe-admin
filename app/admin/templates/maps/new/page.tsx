@@ -52,6 +52,7 @@ function NewMapPageContent() {
     order: 0,
     isActive: true,
   });
+  const [pendingImageFile, setPendingImageFile] = useState<File | null>(null);
 
   // Helper function to generate slug from name
   function generateSlug(name: string): string {
@@ -118,13 +119,36 @@ function NewMapPageContent() {
     }
 
     try {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      
+      // Upload image to temp location if there's a pending file
+      let previewImageUrl = formData.previewImageUrl;
+      if (pendingImageFile) {
+        const uploadFormData = new FormData();
+        uploadFormData.append('file', pendingImageFile);
+        uploadFormData.append('templateId', templateIdParam);
+
+        const uploadResponse = await authenticatedFetch('/api/admin/templates/maps/upload-image', {
+          method: 'POST',
+          body: uploadFormData,
+        });
+
+        if (!uploadResponse.ok) {
+          const data = await uploadResponse.json();
+          throw new Error(data.error || 'Failed to upload image');
+        }
+
+        const uploadData = await uploadResponse.json();
+        previewImageUrl = uploadData.url;
+      }
+      
       const payload = {
         templateId: templateIdParam,
         slug: formData.slug,
         name: formData.name,
         description: formData.description || null,
         mapUrl: formData.mapUrl,
-        previewImageUrl: formData.previewImageUrl || null,
+        previewImageUrl: previewImageUrl || null,
         sizeLabel: formData.sizeLabel || null,
         orientation: 'orthogonal', // Default value
         tileSize: 32, // Default value
@@ -133,7 +157,6 @@ function NewMapPageContent() {
         isActive: formData.isActive,
       };
       
-      const { authenticatedFetch } = await import('@/lib/client-auth');
       const response = await authenticatedFetch('/api/admin/templates/maps', {
         method: 'POST',
         headers: {
@@ -303,6 +326,8 @@ function NewMapPageContent() {
                   onChange={(url) => setFormData({ ...formData, previewImageUrl: url })}
                   templateId={templateIdParam}
                   disabled={loading}
+                  deferUpload={true}
+                  onFileChange={(file) => setPendingImageFile(file)}
                 />
                 <div className="text-xs text-muted-foreground">
                   Or enter a URL manually:

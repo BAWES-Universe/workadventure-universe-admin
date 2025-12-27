@@ -14,12 +14,15 @@ interface ImageUploadProps {
   templateId?: string;
   disabled?: boolean;
   className?: string;
+  deferUpload?: boolean; // If true, only show local preview and call onFileChange with File object
+  onFileChange?: (file: File | null) => void; // Called when file is selected (for deferred upload)
 }
 
-export function ImageUpload({ value, onChange, mapId, templateId, disabled, className }: ImageUploadProps) {
+export function ImageUpload({ value, onChange, mapId, templateId, disabled, className, deferUpload = false, onFileChange }: ImageUploadProps) {
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState<string | null>(value || null);
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Update preview when value changes externally
@@ -46,16 +49,31 @@ export function ImageUpload({ value, onChange, mapId, templateId, disabled, clas
     }
 
     setError(null);
+
+    // Create preview
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      setPreview(reader.result as string);
+    };
+    reader.readAsDataURL(file);
+
+    if (deferUpload) {
+      // Store file for deferred upload
+      setPendingFile(file);
+      if (onFileChange) {
+        onFileChange(file);
+      }
+      // Reset file input
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+      return;
+    }
+
+    // Upload immediately (original behavior)
     setUploading(true);
 
     try {
-      // Create preview
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setPreview(reader.result as string);
-      };
-      reader.readAsDataURL(file);
-
       // Upload to server
       const formData = new FormData();
       formData.append('file', file);
@@ -99,6 +117,10 @@ export function ImageUpload({ value, onChange, mapId, templateId, disabled, clas
     onChange('');
     setPreview(null);
     setError(null);
+    setPendingFile(null);
+    if (onFileChange) {
+      onFileChange(null);
+    }
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
     }
