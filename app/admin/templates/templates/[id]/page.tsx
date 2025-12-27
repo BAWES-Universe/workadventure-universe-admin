@@ -368,8 +368,12 @@ export default function TemplateDetailPage() {
           <CardContent className="space-y-4 pt-6">
             {template.philosophy && (
               <div>
-                <h3 className="font-semibold mb-1">Philosophy</h3>
-                <p className="text-sm text-muted-foreground">{template.philosophy}</p>
+                <h3 className="font-semibold mb-2">Philosophy</h3>
+                <div className="border-l-2 border-muted-foreground/30 pl-4">
+                  <p className="text-sm italic text-muted-foreground leading-relaxed">
+                    &ldquo;{template.philosophy}&rdquo;
+                  </p>
+                </div>
               </div>
             )}
             {template.purpose && (
