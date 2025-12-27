@@ -129,8 +129,16 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(template, { status: 201 });
   } catch (error) {
     if (error instanceof z.ZodError) {
+      const errorMessages = error.issues.map(issue => {
+        const path = issue.path.join('.');
+        return `${path ? `${path}: ` : ''}${issue.message}`;
+      });
       return NextResponse.json(
-        { error: 'Validation error', details: error.issues },
+        { 
+          error: 'Validation error', 
+          details: error.issues,
+          message: errorMessages.join('; ')
+        },
         { status: 400 }
       );
     }

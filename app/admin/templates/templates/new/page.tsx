@@ -94,8 +94,15 @@ function NewTemplatePageContent() {
       if (response.ok) {
         const data = await response.json();
         setCategories(data.categories || []);
-        if (categoryIdParam && !formData.categoryId) {
-          setFormData(prev => ({ ...prev, categoryId: categoryIdParam }));
+        // Only set categoryId from URL param if it's a valid UUID and exists in categories
+        if (categoryIdParam) {
+          const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+          if (uuidRegex.test(categoryIdParam)) {
+            const categoryExists = data.categories?.some((cat: Category) => cat.id === categoryIdParam);
+            if (categoryExists && !formData.categoryId) {
+              setFormData(prev => ({ ...prev, categoryId: categoryIdParam }));
+            }
+          }
         }
       }
     } catch (err) {
@@ -110,6 +117,14 @@ function NewTemplatePageContent() {
 
     if (!formData.categoryId) {
       setError('Category is required');
+      setLoading(false);
+      return;
+    }
+
+    // Validate that categoryId is a valid UUID
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidRegex.test(formData.categoryId)) {
+      setError('Invalid category ID. Please select a category from the dropdown.');
       setLoading(false);
       return;
     }
@@ -146,7 +161,16 @@ function NewTemplatePageContent() {
 
       if (!response.ok) {
         const data = await response.json();
-        const errorMessage = data.error || 'Failed to create template';
+        let errorMessage = data.error || 'Failed to create template';
+        // Include validation details if available
+        if (data.message) {
+          errorMessage = `${errorMessage}: ${data.message}`;
+        } else if (data.details && Array.isArray(data.details)) {
+          const details = data.details.map((issue: any) => 
+            `${issue.path.join('.')}: ${issue.message}`
+          ).join(', ');
+          errorMessage = `${errorMessage} (${details})`;
+        }
         throw new Error(errorMessage);
       }
 

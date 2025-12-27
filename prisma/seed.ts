@@ -246,10 +246,9 @@ async function main() {
 async function seedRoomTemplates() {
   console.log('🌱 Seeding room templates...');
 
-  // Define categories
+  // Define categories (without id - let Prisma generate UUIDs)
   const categories = [
     {
-      id: 'cat-empty',
       slug: 'empty',
       name: 'Empty & Primitive',
       description: 'Neutral starting points with minimal assumptions.',
@@ -257,7 +256,6 @@ async function seedRoomTemplates() {
       order: 1,
     },
     {
-      id: 'cat-work',
       slug: 'work',
       name: 'Work Rooms',
       description: 'Rooms designed for focused productivity and real operations.',
@@ -265,7 +263,6 @@ async function seedRoomTemplates() {
       order: 2,
     },
     {
-      id: 'cat-social',
       slug: 'social',
       name: 'Social Rooms',
       description: 'Casual spaces for community interaction and belonging.',
@@ -273,7 +270,6 @@ async function seedRoomTemplates() {
       order: 3,
     },
     {
-      id: 'cat-knowledge',
       slug: 'knowledge',
       name: 'Knowledge Rooms',
       description: 'Learning, teaching, and structured attention spaces.',
@@ -281,7 +277,6 @@ async function seedRoomTemplates() {
       order: 4,
     },
     {
-      id: 'cat-event',
       slug: 'event',
       name: 'Event & Stage Rooms',
       description: 'Spaces built for shared moments and broadcast-style experiences.',
@@ -291,6 +286,26 @@ async function seedRoomTemplates() {
   ];
 
   // Seed categories
+  // First, delete existing categories with slug-based IDs to ensure clean UUIDs
+  const existingCategories = await prisma.roomTemplateCategory.findMany({
+    where: {
+      slug: {
+        in: categories.map(c => c.slug),
+      },
+    },
+  });
+  
+  // Delete categories that have non-UUID IDs (slug-based IDs)
+  for (const existing of existingCategories) {
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidRegex.test(existing.id)) {
+      await prisma.roomTemplateCategory.delete({
+        where: { id: existing.id },
+      });
+    }
+  }
+  
+  // Now upsert categories (Prisma will generate UUIDs)
   for (const catData of categories) {
     await prisma.roomTemplateCategory.upsert({
       where: { slug: catData.slug },
