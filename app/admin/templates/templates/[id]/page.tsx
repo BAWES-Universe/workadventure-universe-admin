@@ -329,13 +329,15 @@ export default function TemplateDetailPage() {
 
       <div className="flex items-center justify-between">
         <div className="space-y-1">
-          <div className="flex items-center gap-3">
-            <div className="flex h-12 w-12 items-center justify-center rounded-lg border bg-muted text-2xl">
-              {template.category.icon || <MapPin className="h-6 w-6 text-muted-foreground" />}
-            </div>
-            <div>
-              <h1 className="text-4xl font-bold tracking-tight">{template.name}</h1>
-              <p className="text-muted-foreground text-lg font-mono">{template.slug}</p>
+          <div>
+            <h1 className="text-4xl font-bold tracking-tight">{template.name}</h1>
+            <div className="flex items-center gap-1.5 mt-2">
+              {template.category.icon && (
+                <span className="text-sm">{template.category.icon}</span>
+              )}
+              <p className="text-xs text-muted-foreground">
+                {template.category.name}
+              </p>
             </div>
           </div>
           {template.shortDescription && (
