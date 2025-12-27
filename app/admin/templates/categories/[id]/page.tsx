@@ -50,6 +50,7 @@ interface Template {
   slug: string;
   name: string;
   shortDescription: string | null;
+  philosophy: string | null;
   isFeatured: boolean;
   isActive: boolean;
   _count: {
@@ -280,7 +281,6 @@ export default function CategoryDetailPage() {
             </div>
             <div>
               <h1 className="text-4xl font-bold tracking-tight">{category.name}</h1>
-              <p className="text-muted-foreground text-lg font-mono">{category.slug}</p>
             </div>
           </div>
           {category.description && (
@@ -343,29 +343,35 @@ export default function CategoryDetailPage() {
                   <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-purple-500/10 via-transparent to-pink-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
 
                   <div className="relative flex flex-col h-full p-5">
+                    {template.isFeatured && (
+                      <div className="absolute top-4 right-4 z-10">
+                        <Badge variant="outline" className="text-xs">Featured</Badge>
+                      </div>
+                    )}
+                    {isSuperAdmin && (
+                      <div className="absolute bottom-4 right-4 z-10">
+                        <Badge variant={template.isActive ? 'default' : 'secondary'}>
+                          {template.isActive ? 'Active' : 'Inactive'}
+                        </Badge>
+                      </div>
+                    )}
                     <div className="mb-4">
                       <h3 className="truncate text-base font-semibold leading-tight mb-1">
                         {template.name}
                       </h3>
-                      <p className="truncate text-xs font-mono text-muted-foreground mb-2">
-                        {template.slug}
-                      </p>
-                      <div className="flex flex-wrap items-center gap-2 text-xs">
-                        {isSuperAdmin && (
-                          <Badge variant={template.isActive ? 'default' : 'secondary'}>
-                            {template.isActive ? 'Active' : 'Inactive'}
-                          </Badge>
-                        )}
-                        {template.isFeatured && (
-                          <Badge variant="outline">Featured</Badge>
-                        )}
-                      </div>
                     </div>
 
                     {template.shortDescription && (
                       <p className="mb-3 line-clamp-2 text-sm text-muted-foreground">
                         {template.shortDescription}
                       </p>
+                    )}
+                    {template.philosophy && (
+                      <div className="mb-3 border-l-2 border-muted-foreground/30 pl-3">
+                        <p className="text-xs italic text-white leading-relaxed">
+                          &ldquo;{template.philosophy}&rdquo;
+                        </p>
+                      </div>
                     )}
 
                     <div className="mt-auto flex items-center gap-1.5 pt-3 text-xs text-muted-foreground">
