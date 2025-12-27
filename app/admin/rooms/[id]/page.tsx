@@ -322,7 +322,9 @@ export default function RoomDetailPage() {
         requestBody.templateMapId = null; // Clear template reference
       } else {
         requestBody.templateMapId = formData.templateMapId;
-        // Don't send mapUrl - API will set it from template
+        // Explicitly don't send mapUrl - API will set it from template
+        // This ensures the old mapUrl value doesn't interfere
+        requestBody.mapUrl = undefined;
       }
       
       const response = await authenticatedFetch(`/api/admin/rooms/${id}`, {

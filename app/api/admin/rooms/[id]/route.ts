@@ -410,7 +410,7 @@ export async function PATCH(
     }
     
     // Handle templateMapId - if provided, fetch the template map and use its mapUrl
-    let mapUrl = data.mapUrl;
+    let mapUrl: string | undefined = undefined;
     let templateMapId: string | null | undefined = data.templateMapId;
     
     if (templateMapId !== null && templateMapId !== undefined) {
@@ -432,19 +432,32 @@ export async function PATCH(
         );
       }
       
-      // Use template map's URL
+      // Always use template map's URL when templateMapId is provided
+      // Ignore any mapUrl that was sent - the template map's URL takes precedence
       mapUrl = templateMap.mapUrl;
-    } else if (templateMapId === null && data.mapUrl === undefined) {
-      // If templateMapId is explicitly set to null but mapUrl is not provided, keep existing mapUrl
-      mapUrl = existing.mapUrl;
+    } else if (templateMapId === null) {
+      // If templateMapId is explicitly set to null, use provided mapUrl or keep existing
+      if (data.mapUrl !== undefined && data.mapUrl !== null) {
+        mapUrl = data.mapUrl;
+      } else {
+        mapUrl = existing.mapUrl || undefined;
+      }
+    } else if (data.mapUrl !== undefined) {
+      // If templateMapId is not provided but mapUrl is, use the provided mapUrl
+      mapUrl = data.mapUrl || undefined;
     }
+    // If neither templateMapId nor mapUrl is provided, mapUrl stays undefined (won't update)
     
     const updateData: any = {};
     if (data.slug !== undefined) updateData.slug = data.slug;
     if (data.name !== undefined) updateData.name = data.name;
     if (data.description !== undefined) updateData.description = data.description;
-    if (mapUrl !== undefined) updateData.mapUrl = mapUrl;
-    if (templateMapId !== undefined) updateData.templateMapId = templateMapId;
+    if (mapUrl !== undefined) {
+      updateData.mapUrl = mapUrl;
+    }
+    if (templateMapId !== undefined) {
+      updateData.templateMapId = templateMapId;
+    }
     if (data.isPublic !== undefined) updateData.isPublic = data.isPublic;
     
     const room = await prisma.room.update({
@@ -462,8 +475,112 @@ export async function PATCH(
             },
           },
         },
+        templateMap: {
+          select: {
+            id: true,
+            name: true,
+            mapUrl: true,
+            template: {
+              select: {
+                id: true,
+                slug: true,
+                name: true,
+                category: {
+                  select: {
+                    name: true,
+                  },
+                },
+              },
+            },
+          },
+        },
       },
     });
+    
+    // Regenerate WAM file if mapUrl changed and map-storage is configured
+    if (mapUrl !== undefined && room.mapUrl) {
+      const publicMapStorageUrl = process.env.PUBLIC_MAP_STORAGE_URL;
+      const mapStorageApiToken = process.env.MAP_STORAGE_API_TOKEN;
+      const playUrl = process.env.PLAY_URL;
+      
+      if (publicMapStorageUrl && mapStorageApiToken && playUrl) {
+        try {
+          // Determine domain from PLAY_URL or use DEFAULT_DOMAIN
+          let domain: string;
+          if (process.env.DEFAULT_DOMAIN) {
+            domain = process.env.DEFAULT_DOMAIN;
+          } else {
+            try {
+              const playUrlObj = new URL(playUrl);
+              domain = playUrlObj.hostname;
+            } catch {
+              domain = 'workadventure.localhost'; // Fallback
+            }
+          }
+          
+          const wamPath = getWamPath(domain, room.world.universe.slug, room.world.slug, room.slug);
+          const computedWamUrl = getWamUrl(domain, room.world.universe.slug, room.world.slug, room.slug, publicMapStorageUrl);
+          
+          // Always regenerate WAM file when mapUrl changes (PUT will overwrite existing)
+          try {
+            await createWamFile(
+              publicMapStorageUrl,
+              wamPath,
+              room.mapUrl, // Use the updated mapUrl
+              mapStorageApiToken,
+              playUrl
+            );
+            
+            // Update room with wamUrl in database
+            const updatedRoom = await prisma.room.update({
+              where: { id: room.id },
+              data: { wamUrl: computedWamUrl } as any,
+              include: {
+                world: {
+                  include: {
+                    universe: {
+                      select: {
+                        id: true,
+                        name: true,
+                        slug: true,
+                      },
+                    },
+                  },
+                },
+                templateMap: {
+                  select: {
+                    id: true,
+                    name: true,
+                    mapUrl: true,
+                    template: {
+                      select: {
+                        id: true,
+                        slug: true,
+                        name: true,
+                        category: {
+                          select: {
+                            name: true,
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            });
+            
+            return NextResponse.json(updatedRoom);
+          } catch (wamError) {
+            // Log error but continue - WAM regeneration is optional
+            console.error('Failed to regenerate WAM file after room update:', wamError);
+            // Return room even if WAM regeneration failed
+          }
+        } catch (error) {
+          // Log error but continue - WAM sync is optional
+          console.error('Error regenerating WAM file for room:', error);
+        }
+      }
+    }
     
     return NextResponse.json(room);
   } catch (error) {
