@@ -167,9 +167,6 @@ export default function TemplatesAdminPage() {
                       <h3 className="truncate text-base font-semibold leading-tight">
                         {category.name}
                       </h3>
-                      <p className="truncate text-xs font-mono text-muted-foreground">
-                        {category.slug}
-                      </p>
 
                       {isSuperAdmin && (
                         <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
