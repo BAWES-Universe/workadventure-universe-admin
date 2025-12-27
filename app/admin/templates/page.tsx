@@ -88,8 +88,8 @@ export default function TemplatesAdminPage() {
     <div className="space-y-8">
       <div className="space-y-4">
         <div className="space-y-2">
-          <h1 className="text-4xl font-bold tracking-tight">Room Templates</h1>
-          <p className="text-muted-foreground text-lg">
+          <h1 className="text-4xl font-bold tracking-tight mb-[20px]">Room Templates</h1>
+          <p className="text-muted-foreground text-base mb-[30px]">
             Browse our directory of room templates and maps to use when creating rooms. Each template includes multiple map variants to choose from.
           </p>
         </div>
@@ -159,31 +159,29 @@ export default function TemplatesAdminPage() {
                 <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-blue-500/10 via-transparent to-indigo-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
 
                 <div className="relative flex flex-col h-full p-5">
+                  {isSuperAdmin && (
+                    <div className="absolute bottom-4 right-4 z-10">
+                      <Badge variant={category.isActive ? 'default' : 'secondary'}>
+                        {category.isActive ? 'Active' : 'Inactive'}
+                      </Badge>
+                    </div>
+                  )}
                   <div className="mb-4 flex items-start gap-3">
-                    <div className="flex h-16 w-16 flex-shrink-0 items-center justify-center rounded-lg border-border/70 border bg-muted text-2xl">
-                      {category.icon || <FolderOpen className="h-8 w-8 text-muted-foreground" />}
+                    <div className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-lg border-border/70 border bg-muted text-xl">
+                      {category.icon || <FolderOpen className="h-6 w-6 text-muted-foreground" />}
                     </div>
 
                     <div className="min-w-0 flex-1 space-y-1">
                       <h3 className="truncate text-base font-semibold leading-tight">
                         {category.name}
                       </h3>
-
-                      {isSuperAdmin && (
-                        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
-                          <Badge variant={category.isActive ? 'default' : 'secondary'}>
-                            {category.isActive ? 'Active' : 'Inactive'}
-                          </Badge>
-                        </div>
+                      {category.description && (
+                        <p className="line-clamp-2 text-sm text-muted-foreground">
+                          {category.description}
+                        </p>
                       )}
                     </div>
                   </div>
-
-                  {category.description && (
-                    <p className="mb-3 line-clamp-2 text-sm text-muted-foreground">
-                      {category.description}
-                    </p>
-                  )}
 
                   <div className="mt-auto flex items-center gap-3 pt-3 text-xs text-muted-foreground">
                     <div className="flex items-center gap-1.5">
