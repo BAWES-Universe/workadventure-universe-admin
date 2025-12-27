@@ -1,6 +1,7 @@
 import { ReactNode } from 'react';
 import { cookies } from 'next/headers';
 import { prisma } from '@/lib/db';
+import { isSuperAdmin } from '@/lib/super-admin';
 import ConditionalNav from './components/conditional-nav';
 import ConditionalContent from './components/conditional-content';
 import { ThemeProvider } from './components/theme-provider';
@@ -51,6 +52,7 @@ async function getSessionUser() {
         email: user.email,
         name: user.name,
         tags: session.tags || [],
+        isSuperAdmin: isSuperAdmin(user.email),
       };
     } catch (error) {
       // Database query failed, return null to allow page to load

@@ -29,6 +29,7 @@
     "db:seed": "docker exec admin-api-dev sh -c 'cd /app && npx prisma db seed'"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.958.0",
     "@prisma/adapter-pg": "^7.1.0",
     "@prisma/client": "^7.1.0",
     "@radix-ui/react-alert-dialog": "^1.1.15",
@@ -41,6 +42,7 @@
     "@radix-ui/react-select": "^2.2.6",
     "@radix-ui/react-separator": "^1.1.8",
     "@radix-ui/react-slot": "^1.2.4",
+    "@radix-ui/react-tabs": "^1.1.13",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "ioredis": "^5.8.2",

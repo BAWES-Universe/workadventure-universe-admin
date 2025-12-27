@@ -1,4 +1,4 @@
-import { LayoutDashboard, Globe, Users, UserCircle, Mail, Compass, Home, FolderOpen, Star } from 'lucide-react';
+import { LayoutDashboard, Globe, Users, UserCircle, Mail, Compass, Home, FolderOpen, Star, Shield } from 'lucide-react';
 import { LucideIcon } from 'lucide-react';
 
 export interface NavItem {
@@ -6,12 +6,16 @@ export interface NavItem {
   label: string;
   icon: LucideIcon;
   requiresAuth?: boolean;
-  group?: 'menu' | 'discover' | 'my';
+  requiresSuperAdmin?: boolean;
+  group?: 'menu' | 'discover' | 'my' | 'admin';
 }
 
 export const NAV_ITEMS: NavItem[] = [
   // Primary dashboard entry (no group, always at top)
   { href: '/admin', label: 'Dashboard', icon: LayoutDashboard },
+
+  // Room Templates - available to all users
+  { href: '/admin/templates', label: 'Room Templates', icon: FolderOpen },
 
   // Personalize section
   { href: '/admin/universes', label: 'My Universes', icon: Globe, group: 'my' },
@@ -26,7 +30,11 @@ export const NAV_ITEMS: NavItem[] = [
   { href: '/admin/users', label: 'Users', icon: Users, group: 'discover' },
 ];
 
-export function getNavItems(user: { name: string | null; email: string | null } | null): NavItem[] {
-  return NAV_ITEMS.filter(item => !item.requiresAuth || user !== null);
+export function getNavItems(user: { name: string | null; email: string | null; isSuperAdmin?: boolean } | null): NavItem[] {
+  return NAV_ITEMS.filter(item => {
+    if (item.requiresAuth && !user) return false;
+    if (item.requiresSuperAdmin && (!user || !user.isSuperAdmin)) return false;
+    return true;
+  });
 }
 

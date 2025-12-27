@@ -231,9 +231,336 @@ async function main() {
     console.log('ℹ️  Map-storage not configured, WAM file will be created on first room access');
   }
 
+  // Seed room templates
+  await seedRoomTemplates();
+
   console.log('✅ Database seed completed successfully!');
   console.log(`   Default room URL: /@/default/default/default`);
   console.log(`   Map URL: ${defaultMapUrl}`);
+}
+
+/**
+ * Seed room templates, categories, and maps
+ * Idempotent - can be run multiple times safely
+ */
+async function seedRoomTemplates() {
+  console.log('🌱 Seeding room templates...');
+
+  // Define categories (without id - let Prisma generate UUIDs)
+  const categories = [
+    {
+      slug: 'empty',
+      name: 'Empty & Primitive',
+      description: 'Neutral starting points with minimal assumptions.',
+      icon: '⬜',
+      order: 1,
+    },
+    {
+      slug: 'work',
+      name: 'Work Rooms',
+      description: 'Rooms designed for focused productivity and real operations.',
+      icon: '🛠️',
+      order: 2,
+    },
+    {
+      slug: 'social',
+      name: 'Social Rooms',
+      description: 'Casual spaces for community interaction and belonging.',
+      icon: '💬',
+      order: 3,
+    },
+    {
+      slug: 'knowledge',
+      name: 'Knowledge Rooms',
+      description: 'Learning, teaching, and structured attention spaces.',
+      icon: '🧠',
+      order: 4,
+    },
+    {
+      slug: 'event',
+      name: 'Event & Stage Rooms',
+      description: 'Spaces built for shared moments and broadcast-style experiences.',
+      icon: '🎤',
+      order: 5,
+    },
+  ];
+
+  // Seed categories
+  // First, delete existing categories with slug-based IDs to ensure clean UUIDs
+  const existingCategories = await prisma.roomTemplateCategory.findMany({
+    where: {
+      slug: {
+        in: categories.map(c => c.slug),
+      },
+    },
+  });
+  
+  // Delete categories that have non-UUID IDs (slug-based IDs)
+  for (const existing of existingCategories) {
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidRegex.test(existing.id)) {
+      await prisma.roomTemplateCategory.delete({
+        where: { id: existing.id },
+      });
+    }
+  }
+  
+  // Now upsert categories (Prisma will generate UUIDs)
+  for (const catData of categories) {
+    await prisma.roomTemplateCategory.upsert({
+      where: { slug: catData.slug },
+      update: {
+        name: catData.name,
+        description: catData.description,
+        icon: catData.icon,
+        order: catData.order,
+      },
+      create: catData,
+    });
+  }
+  console.log(`✓ Seeded ${categories.length} categories`);
+
+  // Define templates
+  const templates = [
+    {
+      id: 'tpl-empty-room',
+      slug: 'empty-room',
+      name: 'Empty Room',
+      shortDescription: 'Absolute freedom with no predefined layout.',
+      philosophy: 'Nothing is wrong here because nothing is defined.',
+      purpose: 'Provide a neutral canvas for any idea.',
+      whoItsFor: 'Builders, artists, thinkers, experimental users',
+      typicalUseCases: ['First room in a world', 'Creative experiments', 'Private thinking', 'Ritual or meditation'],
+      visibility: 'public',
+      isFeatured: true,
+      categorySlug: 'empty',
+      authorId: 'author-universe-core',
+    },
+    {
+      id: 'tpl-work-room',
+      slug: 'work-room',
+      name: 'Work Room',
+      shortDescription: 'Structured space for real work and paid roles.',
+      philosophy: 'Work becomes visible when presence has shape.',
+      purpose: 'Enable focused productivity and operational flow.',
+      whoItsFor: 'Teams, staff, operators, paid contributors',
+      typicalUseCases: ['Support desks', 'Remote jobs', 'Shift-based work', 'Operations rooms'],
+      visibility: 'public',
+      isFeatured: true,
+      categorySlug: 'work',
+      authorId: 'author-studio-atlas',
+    },
+    {
+      id: 'tpl-social-room',
+      slug: 'social-room',
+      name: 'Social Room',
+      shortDescription: 'Low-pressure space for conversation and hanging out.',
+      philosophy: "Belonging doesn't need instruction.",
+      purpose: 'Encourage organic social interaction.',
+      whoItsFor: 'Communities, creators, informal groups',
+      typicalUseCases: ['Lounges', 'Hangouts', 'After-events', 'Community rooms'],
+      visibility: 'public',
+      isFeatured: false,
+      categorySlug: 'social',
+      authorId: 'author-universe-core',
+    },
+    {
+      id: 'tpl-knowledge-room',
+      slug: 'knowledge-room',
+      name: 'Knowledge Room',
+      shortDescription: 'Presentation-oriented learning environment.',
+      philosophy: 'Knowledge flows where attention is respected.',
+      purpose: 'Support teaching, learning, and mentorship.',
+      whoItsFor: 'Students, teachers, mentors, researchers',
+      typicalUseCases: ['Lectures', 'Study groups', 'Workshops', 'Mentorship sessions'],
+      visibility: 'public',
+      isFeatured: false,
+      categorySlug: 'knowledge',
+      authorId: 'author-universe-core',
+    },
+    {
+      id: 'tpl-event-room',
+      slug: 'event-room',
+      name: 'Event Room',
+      shortDescription: 'Stage-focused room for shared moments.',
+      philosophy: 'Moments matter when everyone faces the same direction.',
+      purpose: 'Host talks, launches, and town halls.',
+      whoItsFor: 'Hosts, speakers, audiences',
+      typicalUseCases: ['Talks', 'Town halls', 'Product launches', 'Performances'],
+      visibility: 'public',
+      isFeatured: true,
+      categorySlug: 'event',
+      authorId: 'author-studio-atlas',
+    },
+  ];
+
+  // Seed templates
+  for (const tplData of templates) {
+    const category = await prisma.roomTemplateCategory.findUnique({
+      where: { slug: tplData.categorySlug },
+    });
+
+    if (!category) {
+      console.warn(`⚠️  Category ${tplData.categorySlug} not found, skipping template ${tplData.slug}`);
+      continue;
+    }
+
+    const { categorySlug, ...templateData } = tplData;
+    await prisma.roomTemplate.upsert({
+      where: { slug: tplData.slug },
+      update: {
+        name: templateData.name,
+        shortDescription: templateData.shortDescription,
+        philosophy: templateData.philosophy,
+        purpose: templateData.purpose,
+        whoItsFor: templateData.whoItsFor,
+        typicalUseCases: templateData.typicalUseCases,
+        visibility: templateData.visibility,
+        isFeatured: templateData.isFeatured,
+        authorId: templateData.authorId,
+        categoryId: category.id,
+      },
+      create: {
+        ...templateData,
+        categoryId: category.id,
+      },
+    });
+  }
+  console.log(`✓ Seeded ${templates.length} templates`);
+
+  // Define template maps
+  // Note: IDs are auto-generated by Prisma as UUIDs, so we don't set them here
+  const templateMaps = [
+    {
+      templateSlug: 'empty-room',
+      slug: 'default',
+      name: 'Empty Room — Default',
+      description: 'Minimal orthogonal room with spawn point only.',
+      mapUrl: 'https://maps.example/empty/default.tmj', // TODO: Replace with actual map URL
+      previewImageUrl: 'https://maps.example/empty/default.png',
+      sizeLabel: 'Medium',
+      authorId: 'author-universe-core',
+      order: 0,
+    },
+    {
+      templateSlug: 'work-room',
+      slug: 'standard',
+      name: 'Work Room — Standard',
+      description: 'Balanced layout with desk clusters and ops wall.',
+      mapUrl: 'https://maps.example/work/standard.tmj', // TODO: Replace with actual map URL
+      previewImageUrl: 'https://maps.example/work/standard.png',
+      sizeLabel: 'Medium',
+      authorId: 'author-studio-atlas',
+      recommendedWorldTags: ['staff', 'admin'],
+      order: 0,
+    },
+    {
+      templateSlug: 'work-room',
+      slug: 'support-desk',
+      name: 'Work Room — Support Desk',
+      description: 'Front-facing desk layout for handling traffic.',
+      mapUrl: 'https://maps.example/work/support.tmj', // TODO: Replace with actual map URL
+      previewImageUrl: 'https://maps.example/work/support.png',
+      sizeLabel: 'Small',
+      authorId: 'author-studio-atlas',
+      order: 1,
+    },
+    {
+      templateSlug: 'social-room',
+      slug: 'lounge',
+      name: 'Social Room — Lounge',
+      description: 'Open lounge with informal seating.',
+      mapUrl: 'https://maps.example/social/lounge.tmj', // TODO: Replace with actual map URL
+      previewImageUrl: 'https://maps.example/social/lounge.png',
+      sizeLabel: 'Medium',
+      authorId: 'author-universe-core',
+      order: 0,
+    },
+    {
+      templateSlug: 'knowledge-room',
+      slug: 'classroom',
+      name: 'Knowledge Room — Classroom',
+      description: 'Presentation-oriented classroom layout.',
+      mapUrl: 'https://maps.example/knowledge/classroom.tmj', // TODO: Replace with actual map URL
+      previewImageUrl: 'https://maps.example/knowledge/classroom.png',
+      sizeLabel: 'Medium',
+      authorId: 'author-universe-core',
+      order: 0,
+    },
+    {
+      templateSlug: 'event-room',
+      slug: 'auditorium',
+      name: 'Event Room — Auditorium',
+      description: 'Stage with audience seating and broadcast focus.',
+      mapUrl: 'https://maps.example/event/auditorium.tmj', // TODO: Replace with actual map URL
+      previewImageUrl: 'https://maps.example/event/auditorium.png',
+      sizeLabel: 'Large',
+      authorId: 'author-studio-atlas',
+      order: 0,
+    },
+  ];
+
+  // Seed template maps
+  for (const mapData of templateMaps) {
+    const template = await prisma.roomTemplate.findUnique({
+      where: { slug: mapData.templateSlug },
+    });
+
+    if (!template) {
+      console.warn(`⚠️  Template ${mapData.templateSlug} not found, skipping map ${mapData.slug}`);
+      continue;
+    }
+
+    const { templateSlug, recommendedWorldTags, ...mapFields } = mapData;
+    
+    // Check if a map with this slug already exists
+    const existing = await prisma.roomTemplateMap.findUnique({
+      where: {
+        templateId_slug: {
+          templateId: template.id,
+          slug: mapData.slug,
+        },
+      },
+    });
+    
+    if (existing) {
+      // If it exists with a slug-based ID, delete it first so we can create a new one with a UUID
+      if (existing.id.startsWith('map-')) {
+        console.log(`  Deleting map with slug-based ID: ${existing.id}`);
+        await prisma.roomTemplateMap.delete({
+          where: { id: existing.id },
+        });
+        // Fall through to create new record with UUID
+      } else {
+        // If it already has a UUID, just update it
+        await prisma.roomTemplateMap.update({
+          where: { id: existing.id },
+          data: {
+            name: mapFields.name,
+            description: mapFields.description,
+            mapUrl: mapFields.mapUrl,
+            previewImageUrl: mapFields.previewImageUrl,
+            sizeLabel: mapFields.sizeLabel,
+            authorId: mapFields.authorId,
+            order: mapFields.order,
+            recommendedWorldTags: recommendedWorldTags || [],
+          },
+        });
+        continue; // Skip to next map - already updated
+      }
+    }
+    
+    // Create new record (will get auto-generated UUID)
+    await prisma.roomTemplateMap.create({
+      data: {
+        ...mapFields,
+        templateId: template.id,
+        recommendedWorldTags: recommendedWorldTags || [],
+      },
+    });
+  }
+  console.log(`✓ Seeded ${templateMaps.length} template maps`);
+  console.log('✅ Room templates seeding completed!');
 }
 
 main()

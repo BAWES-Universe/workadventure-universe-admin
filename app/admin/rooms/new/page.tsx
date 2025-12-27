@@ -17,7 +17,10 @@ import {
 } from '@/components/ui/select';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { ChevronRight, AlertCircle, Loader2, AlertTriangle } from 'lucide-react';
+import { ChevronRight, AlertCircle, Loader2, AlertTriangle, X, ArrowLeft } from 'lucide-react';
+import { TemplateLibrary } from '@/components/templates/TemplateLibrary';
+import { TemplateDetail } from '@/components/templates/TemplateDetail';
+import { Badge } from '@/components/ui/badge';
 
 interface World {
   id: string;
@@ -32,6 +35,7 @@ function NewRoomPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const worldIdParam = searchParams.get('worldId');
+  const templateMapIdParam = searchParams.get('templateMapId');
   
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -39,12 +43,21 @@ function NewRoomPageContent() {
   const [worldDetails, setWorldDetails] = useState<World | null>(null);
   const [slugManuallyEdited, setSlugManuallyEdited] = useState(false);
   
+  // Template selection state
+  const [useTemplate, setUseTemplate] = useState(true);
+  const [selectedTemplateSlug, setSelectedTemplateSlug] = useState<string | null>(null);
+  const [selectedMapId, setSelectedMapId] = useState<string | null>(templateMapIdParam);
+  const [selectedMapUrl, setSelectedMapUrl] = useState<string | null>(null);
+  const [selectedTemplateName, setSelectedTemplateName] = useState<string | null>(null);
+  const [selectedMapName, setSelectedMapName] = useState<string | null>(null);
+  
   const [formData, setFormData] = useState({
     worldId: worldIdParam || '',
     slug: '',
     name: '',
     description: '',
     mapUrl: '',
+    templateMapId: templateMapIdParam || null as string | null,
     isPublic: true,
   });
 
@@ -64,7 +77,10 @@ function NewRoomPageContent() {
     if (!worldIdParam) {
       fetchWorlds();
     }
-  }, []);
+    if (templateMapIdParam) {
+      fetchTemplateMap(templateMapIdParam);
+    }
+  }, [templateMapIdParam]);
 
   useEffect(() => {
     async function fetchWorldDetails() {
@@ -111,6 +127,96 @@ function NewRoomPageContent() {
     }
   }
 
+  async function fetchTemplateMap(mapId: string) {
+    try {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch(`/api/admin/templates/maps/${mapId}`);
+      if (response.ok) {
+        const data = await response.json();
+        const map = data.map;
+        if (map && map.template) {
+          // Don't set selectedTemplateSlug - we want to show the selection card, not the full detail view
+          // Only set the map info so it shows "Selected Template Map" card
+          setSelectedMapId(map.id);
+          setSelectedMapUrl(map.mapUrl);
+          setSelectedMapName(map.name);
+          setSelectedTemplateName(map.template.name);
+          setFormData(prev => ({
+            ...prev,
+            templateMapId: map.id,
+            mapUrl: map.mapUrl,
+            // Don't pre-fill name and description - let user enter them
+          }));
+        }
+      }
+    } catch (err) {
+      console.error('Failed to load template map:', err);
+      // Don't set error, just continue without pre-selection
+    }
+  }
+
+  function handleSelectTemplate(templateSlug: string) {
+    setSelectedTemplateSlug(templateSlug);
+  }
+
+  async function handleSelectMap(mapId: string, mapUrl: string) {
+    setSelectedMapId(mapId);
+    setSelectedMapUrl(mapUrl);
+    setFormData(prev => ({
+      ...prev,
+      templateMapId: mapId,
+      mapUrl: mapUrl,
+    }));
+    
+    // Fetch template name for display
+    if (selectedTemplateSlug) {
+      try {
+        const response = await fetch(`/api/templates/${selectedTemplateSlug}`);
+        const data = await response.json();
+        if (data.template) {
+          setSelectedTemplateName(data.template.name);
+          const map = data.template.maps.find((m: any) => m.id === mapId);
+          if (map) {
+            setSelectedMapName(map.name);
+          }
+        }
+      } catch (err) {
+        console.error('Failed to fetch template details:', err);
+      }
+    }
+    
+    // Close template selection after map is selected
+    setSelectedTemplateSlug(null);
+  }
+
+  function handleBackToTemplates() {
+    setSelectedTemplateSlug(null);
+    // Clear map selection when going back
+    setSelectedMapId(null);
+    setSelectedMapUrl(null);
+    setSelectedTemplateName(null);
+    setSelectedMapName(null);
+    setFormData(prev => ({
+      ...prev,
+      templateMapId: null,
+      mapUrl: '',
+    }));
+  }
+
+  function handleClearTemplate() {
+    setUseTemplate(false);
+    setSelectedTemplateSlug(null);
+    setSelectedMapId(null);
+    setSelectedMapUrl(null);
+    setSelectedTemplateName(null);
+    setSelectedMapName(null);
+    setFormData(prev => ({
+      ...prev,
+      templateMapId: null,
+      mapUrl: '',
+    }));
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     
@@ -129,16 +235,37 @@ function NewRoomPageContent() {
 
     try {
       const { authenticatedFetch } = await import('@/lib/client-auth');
+      
+      // Build request body
+      const requestBody: any = {
+        worldId: formData.worldId,
+        slug: formData.slug,
+        name: formData.name,
+        description: formData.description || null,
+        isPublic: formData.isPublic,
+      };
+      
+      // Handle mapUrl and templateMapId
+      // If using template (templateMapId exists and is valid UUID), use it and let API set mapUrl
+      // Otherwise, use the manually entered mapUrl
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      const templateMapIdValue = formData.templateMapId ? String(formData.templateMapId).trim() : '';
+      
+      if (templateMapIdValue && uuidRegex.test(templateMapIdValue)) {
+        // Valid templateMapId - API will fetch and use the mapUrl from template
+        requestBody.templateMapId = templateMapIdValue;
+        // Don't send mapUrl when using template - API will set it
+      } else {
+        // No valid templateMapId - use manually entered mapUrl
+        requestBody.mapUrl = formData.mapUrl.trim();
+      }
+      
       const response = await authenticatedFetch('/api/admin/rooms', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          ...formData,
-          description: formData.description || null,
-          mapUrl: formData.mapUrl.trim(),
-        }),
+        body: JSON.stringify(requestBody),
       });
 
       if (!response.ok) {
@@ -205,15 +332,119 @@ function NewRoomPageContent() {
         </Alert>
       )}
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Room Details</CardTitle>
-          <CardDescription>
-            Fill in the information below to create a new room.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={handleSubmit} className="space-y-6">
+      {/* Template/Manual Toggle */}
+      <div className="flex items-center gap-4">
+        <Button
+          type="button"
+          variant={useTemplate ? 'default' : 'outline'}
+          onClick={() => setUseTemplate(true)}
+        >
+          Use Template
+        </Button>
+        <Button
+          type="button"
+          variant={useTemplate ? 'outline' : 'default'}
+          onClick={() => {
+            setUseTemplate(false);
+            handleClearTemplate();
+          }}
+        >
+          Custom Map (Advanced)
+        </Button>
+      </div>
+
+      {/* Template Selection Flow */}
+      {useTemplate && (
+        <Card className="border-0 shadow-none">
+          {selectedTemplateSlug ? (
+            <>
+              <div className="p-6 pb-0">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={handleBackToTemplates}
+                  className="gap-2 -ml-2"
+                >
+                  <ArrowLeft className="h-4 w-4" />
+                  Back
+                </Button>
+              </div>
+              <CardContent className="pt-4">
+                <TemplateDetail
+                  templateSlug={selectedTemplateSlug}
+                  onSelectMap={handleSelectMap}
+                  onBack={handleBackToTemplates}
+                  selectedMapId={selectedMapId || undefined}
+                  hideBackButton={true}
+                />
+              </CardContent>
+            </>
+          ) : (
+            <>
+              <CardHeader>
+                <CardTitle>Select Template</CardTitle>
+                <CardDescription>
+                  Choose a template to get started
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                {selectedMapId && selectedTemplateName && selectedMapName ? (
+                  <div className="p-4 rounded-lg bg-muted/50">
+                    <div className="flex items-start justify-between">
+                      <div className="flex-1">
+                        <div className="text-sm font-medium mb-1">Selected Template Map</div>
+                        <div className="text-sm text-muted-foreground">
+                          <div><strong>Template:</strong> {selectedTemplateName}</div>
+                          <div><strong>Map:</strong> {selectedMapName}</div>
+                        </div>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => {
+                          // Clear map selection but keep template info for display
+                          setSelectedMapId(null);
+                          setSelectedMapUrl(null);
+                          setSelectedMapName(null);
+                          setFormData(prev => ({
+                            ...prev,
+                            templateMapId: null,
+                            mapUrl: '',
+                          }));
+                          // Show template library
+                          setSelectedTemplateSlug(null);
+                        }}
+                      >
+                        Change Template
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <TemplateLibrary
+                    onSelectTemplate={handleSelectTemplate}
+                  />
+                )}
+              </CardContent>
+            </>
+          )}
+        </Card>
+      )}
+
+      {/* Room Form - Only show when not using template, or when template map is selected */}
+      {(useTemplate ? (selectedMapId !== null && selectedMapId !== '') : true) && (
+        <Card className="border-0 shadow-none">
+          <CardHeader>
+            <CardTitle>Room Details</CardTitle>
+            <CardDescription>
+              {useTemplate && selectedMapId
+                ? 'Review and customize your room details. Map is set from template.'
+                : 'Fill in the information below to create a new room.'}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <form onSubmit={handleSubmit} className="space-y-6">
             <div className="space-y-2">
               <Label htmlFor="name">
                 Name <span className="text-destructive">*</span>
@@ -267,22 +498,27 @@ function NewRoomPageContent() {
               />
             </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="mapUrl">
-                Map URL <span className="text-destructive">*</span>
-              </Label>
-              <p className="text-sm text-muted-foreground">
-                External TMJ map URL for this room (e.g., https://example.com/map.tmj). Each room must have its own map.
-              </p>
-              <Input
-                id="mapUrl"
-                type="url"
-                required
-                value={formData.mapUrl}
-                onChange={(e) => setFormData({ ...formData, mapUrl: e.target.value })}
-                placeholder="https://example.com/room-map.tmj"
-              />
-            </div>
+            {/* Map URL - Hidden when using template (set automatically) */}
+            {!useTemplate || !selectedMapId ? (
+              <div className="space-y-2">
+                <Label htmlFor="mapUrl">
+                  Map URL <span className="text-destructive">*</span>
+                </Label>
+                <p className="text-sm text-muted-foreground">
+                  External TMJ map URL for this room (e.g., https://example.com/map.tmj). Each room must have its own map.
+                </p>
+                <Input
+                  id="mapUrl"
+                  type="url"
+                  required
+                  value={formData.mapUrl}
+                  onChange={(e) => {
+                    setFormData({ ...formData, mapUrl: e.target.value });
+                  }}
+                  placeholder="https://example.com/room-map.tmj"
+                />
+              </div>
+            ) : null}
 
             <div className="flex items-center space-x-2">
               <Checkbox
@@ -315,6 +551,7 @@ function NewRoomPageContent() {
           </form>
         </CardContent>
       </Card>
+      )}
     </div>
   );
 }

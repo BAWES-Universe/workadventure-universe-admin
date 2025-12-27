@@ -6,6 +6,7 @@ interface User {
   id: string;
   name: string | null;
   email: string | null;
+  isSuperAdmin?: boolean;
 }
 
 export function useUser(initialUser: User | null = null) {
@@ -41,6 +42,7 @@ export function useUser(initialUser: User | null = null) {
             id: data.user.id,
             name: data.user.name,
             email: data.user.email,
+            isSuperAdmin: data.user.isSuperAdmin || false,
           } : null;
           setUser(fetchedUser);
         } else {

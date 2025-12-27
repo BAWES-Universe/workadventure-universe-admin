@@ -111,10 +111,30 @@ export async function authenticatedFetch(url: string, options: RequestInit = {})
   // Include token in URL for server-side middleware
   const urlWithToken = getApiUrlWithToken(url);
 
+  // Get auth headers
+  const authHeaders = getAuthHeaders();
+  
+  // If body is FormData, don't set Content-Type - let browser set it automatically with boundary
+  const isFormData = options.body instanceof FormData;
+  if (isFormData) {
+    // Remove Content-Type from authHeaders when using FormData
+    // Convert to plain object to safely remove Content-Type
+    const headersObj = authHeaders as Record<string, string>;
+    const { 'Content-Type': _, ...headersWithoutContentType } = headersObj;
+    return fetch(urlWithToken, {
+      ...options,
+      headers: {
+        ...headersWithoutContentType,
+        ...options.headers,
+      },
+      credentials: 'include', // Still send cookies as fallback
+    });
+  }
+
   return fetch(urlWithToken, {
     ...options,
     headers: {
-      ...getAuthHeaders(),
+      ...authHeaders,
       ...options.headers,
     },
     credentials: 'include', // Still send cookies as fallback

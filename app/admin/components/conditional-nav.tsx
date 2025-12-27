@@ -9,6 +9,7 @@ interface ConditionalNavProps {
   user: {
     name: string | null;
     email: string | null;
+    isSuperAdmin?: boolean;
   } | null;
 }
 

@@ -97,6 +97,7 @@ model Room {
   description String?
   mapUrl      String?  @map("map_url") // External TMJ URL (e.g., GitHub Pages)
   wamUrl      String?  @map("wam_url") // WAM file URL in map-storage (created via PUT)
+  templateMapId String? @map("template_map_id") // Reference to template map if created from template
   authenticationMandatory Boolean @default(false) @map("authentication_mandatory")
   isPublic    Boolean  @default(true) @map("is_public")
   createdAt   DateTime @default(now()) @map("created_at")
@@ -104,6 +105,7 @@ model Room {
 
   // Relations
   world      World      @relation(fields: [worldId], references: [id], onDelete: Cascade)
+  templateMap RoomTemplateMap? @relation(fields: [templateMapId], references: [id], onDelete: SetNull)
   favorites  Favorite[]
   roomAccesses RoomAccess[]
 
@@ -308,4 +310,73 @@ model MembershipInvitation {
   @@index([invitedByUserId])
   @@index([status])
   @@map("membership_invitations")
+}
+
+// Room Template Categories
+model RoomTemplateCategory {
+  id          String   @id @default(uuid())
+  slug        String   @unique
+  name        String
+  description String?
+  icon        String?  // emoji
+  order       Int      @default(0)
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  templates   RoomTemplate[]
+
+  @@map("room_template_categories")
+}
+
+// Room Templates
+model RoomTemplate {
+  id               String   @id @default(uuid())
+  categoryId       String   @map("category_id")
+  slug             String   @unique
+  name             String
+  shortDescription String?  @map("short_description")
+  // Future fields (store but don't use in MVP UI):
+  philosophy       String?
+  purpose          String?
+  whoItsFor        String?  @map("who_its_for")
+  typicalUseCases  String[] @map("typical_use_cases")
+  visibility       String   @default("public")
+  isFeatured       Boolean  @default(false) @map("is_featured")
+  authorId         String?  @map("author_id") // String for now, TemplateAuthor model in v2
+  isActive          Boolean  @default(true) @map("is_active")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  category         RoomTemplateCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  maps             RoomTemplateMap[]
+
+  @@map("room_templates")
+}
+
+// Room Template Maps (Actual Selectable Maps)
+model RoomTemplateMap {
+  id                  String   @id @default(uuid())
+  templateId          String   @map("template_id")
+  slug                String
+  name                String
+  description         String?
+  mapUrl              String   @map("map_url") // TMJ or WAM URL
+  previewImageUrl     String?  @map("preview_image_url") // Store but don't display in MVP
+  sizeLabel           String?  @map("size_label") // small | medium | large
+  orientation         String   @default("orthogonal")
+  tileSize            Int      @default(32) @map("tile_size")
+  recommendedWorldTags String[] @map("recommended_world_tags") // Store but don't use in MVP
+  authorId            String?  @map("author_id") // String for now
+  order               Int      @default(0)
+  isActive            Boolean  @default(true) @map("is_active")
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  template            RoomTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  rooms               Room[]
+
+  @@unique([templateId, slug])
+  @@index([templateId])
+  @@map("room_template_maps")
 }

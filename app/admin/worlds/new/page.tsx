@@ -262,17 +262,6 @@ function NewWorldPageContent() {
               />
             </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="thumbnailUrl">Thumbnail URL</Label>
-              <Input
-                id="thumbnailUrl"
-                type="url"
-                value={formData.thumbnailUrl}
-                onChange={(e) => setFormData({ ...formData, thumbnailUrl: e.target.value })}
-                placeholder="https://example.com/thumbnail.jpg"
-              />
-            </div>
-
             <div className="flex flex-col sm:flex-row gap-6">
               <div className="flex items-center space-x-2">
                 <Checkbox
