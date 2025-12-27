@@ -1012,17 +1012,6 @@ export default function MapDetailPage() {
                 deferUpload={true}
                 onFileChange={(file) => setPendingImageFile(file)}
               />
-              <div className="text-xs text-muted-foreground">
-                Or enter a URL manually:
-              </div>
-              <Input
-                id="previewImageUrl"
-                type="url"
-                value={formData.previewImageUrl}
-                onChange={(e) => setFormData({ ...formData, previewImageUrl: e.target.value })}
-                placeholder="https://example.com/preview.png"
-                disabled={saving}
-              />
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">

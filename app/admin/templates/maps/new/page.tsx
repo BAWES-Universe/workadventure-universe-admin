@@ -329,17 +329,6 @@ function NewMapPageContent() {
                   deferUpload={true}
                   onFileChange={(file) => setPendingImageFile(file)}
                 />
-                <div className="text-xs text-muted-foreground">
-                  Or enter a URL manually:
-                </div>
-                <Input
-                  id="previewImageUrl"
-                  type="url"
-                  value={formData.previewImageUrl}
-                  onChange={(e) => setFormData({ ...formData, previewImageUrl: e.target.value })}
-                  placeholder="https://example.com/preview.png"
-                  disabled={loading}
-                />
               </div>
             )}
 
