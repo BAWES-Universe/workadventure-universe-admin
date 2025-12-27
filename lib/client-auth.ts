@@ -118,7 +118,9 @@ export async function authenticatedFetch(url: string, options: RequestInit = {})
   const isFormData = options.body instanceof FormData;
   if (isFormData) {
     // Remove Content-Type from authHeaders when using FormData
-    const { 'Content-Type': _, ...headersWithoutContentType } = authHeaders;
+    // Convert to plain object to safely remove Content-Type
+    const headersObj = authHeaders as Record<string, string>;
+    const { 'Content-Type': _, ...headersWithoutContentType } = headersObj;
     return fetch(urlWithToken, {
       ...options,
       headers: {
