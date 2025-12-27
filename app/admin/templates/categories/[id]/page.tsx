@@ -275,7 +275,7 @@ export default function CategoryDetailPage() {
       <div className="flex items-center justify-between">
         <div className="space-y-1">
           <div className="flex items-center gap-3">
-            <div className="flex h-12 w-12 items-center justify-center rounded-lg border bg-muted text-2xl">
+            <div className="flex h-12 w-12 items-center justify-center rounded-lg border-border/70 border bg-muted text-2xl">
               {category.icon || <FolderOpen className="h-6 w-6 text-muted-foreground" />}
             </div>
             <div>

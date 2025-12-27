@@ -159,7 +159,7 @@ export default function TemplatesAdminPage() {
 
                 <div className="relative flex flex-col h-full p-5">
                   <div className="mb-4 flex items-start gap-3">
-                    <div className="flex h-16 w-16 flex-shrink-0 items-center justify-center rounded-lg border bg-muted text-2xl">
+                    <div className="flex h-16 w-16 flex-shrink-0 items-center justify-center rounded-lg border-border/70 border bg-muted text-2xl">
                       {category.icon || <FolderOpen className="h-8 w-8 text-muted-foreground" />}
                     </div>
 
