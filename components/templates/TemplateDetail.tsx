@@ -134,10 +134,13 @@ export function TemplateDetail({
             )}
             
             {template.philosophy && (
-              <div className="border-l-2 border-muted-foreground/30 pl-4">
-                <p className="text-sm italic text-white leading-relaxed">
-                  &ldquo;{template.philosophy}&rdquo;
-                </p>
+              <div>
+                <h4 className="text-sm font-semibold mb-2">Philosophy</h4>
+                <div className="border-l-2 border-muted-foreground/30 pl-4">
+                  <p className="text-sm italic text-white leading-relaxed">
+                    &ldquo;{template.philosophy}&rdquo;
+                  </p>
+                </div>
               </div>
             )}
           </div>
