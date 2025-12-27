@@ -752,81 +752,67 @@ export default function MapDetailPage() {
       )}
 
       {/* Map Details */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        <Card className="border-0">
-          <CardHeader>
-            <CardTitle className="text-xl">Map Information</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div>
-              <h3 className="font-semibold mb-1">Template</h3>
-              <p className="text-sm text-muted-foreground">
-                {map.template.category.name} - {map.template.name}
-              </p>
-            </div>
-            {map.previewImageUrl && (
-              <div>
-                <h3 className="font-semibold mb-1">Preview Image</h3>
-                <a
-                  key={map.previewImageUrl}
-                  href={map.previewImageUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-sm text-primary hover:underline break-all flex items-center gap-1"
+      <Card className="border-0">
+        <CardContent className="p-6">
+          {map.previewImageUrl ? (
+            <div className="space-y-4">
+              <img
+                src={map.previewImageUrl}
+                alt={map.name}
+                className="w-full rounded-lg object-cover"
+              />
+              {managedWorlds.length > 0 && (
+                <Button
+                  onClick={() => setIsCreateRoomDialogOpen(true)}
+                  className="w-full"
                 >
-                  {map.previewImageUrl}
-                  <ExternalLink className="h-3 w-3" />
-                </a>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        <Card className="border-0">
-          <CardHeader>
-            <CardTitle className="text-xl">Usage</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="flex items-center gap-2 text-sm">
-              <MapPin className="h-4 w-4 text-muted-foreground" />
-              <span>
-                {map._count.rooms} {map._count.rooms === 1 ? 'room' : 'rooms'} using this map
-              </span>
+                  <Plus className="h-4 w-4 mr-2" />
+                  Create Room from Template
+                </Button>
+              )}
             </div>
-          </CardContent>
-        </Card>
-      </div>
+          ) : (
+            managedWorlds.length > 0 && (
+              <Button
+                onClick={() => setIsCreateRoomDialogOpen(true)}
+                className="w-full"
+              >
+                <Plus className="h-4 w-4 mr-2" />
+                Create Room from Template
+              </Button>
+            )
+          )}
+        </CardContent>
+      </Card>
 
       {/* Rooms Using This Map */}
       <div>
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-2xl font-semibold">Rooms Using This Map</h2>
-          <div className="flex items-center gap-3">
-            <div className="flex items-center gap-2">
-              <Label htmlFor="sortBy" className="text-sm text-muted-foreground">Sort by:</Label>
-              <Select
-                value={roomsSortBy}
-                onValueChange={(value) => handleSortChange(value as 'created' | 'accesses' | 'stars')}
-                disabled={roomsLoading}
-              >
-                <SelectTrigger id="sortBy" className="w-[140px]">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="created">Date Created</SelectItem>
-                  <SelectItem value="accesses">Access Count</SelectItem>
-                  <SelectItem value="stars">Stars</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            {managedWorlds.length > 0 && (
-              <Button onClick={() => setIsCreateRoomDialogOpen(true)}>
-                <Plus className="h-4 w-4 mr-2" />
-                Create Room
-              </Button>
-            )}
-          </div>
+        <h2 className="text-2xl font-semibold mb-2">Rooms Using This Map</h2>
+        <div className="flex items-center gap-2 text-sm mb-4">
+          <MapPin className="h-4 w-4 text-muted-foreground" />
+          <span>
+            {map._count.rooms} {map._count.rooms === 1 ? 'room' : 'rooms'} using this map
+          </span>
         </div>
+        {map._count.rooms > 3 && (
+          <div className="flex items-center gap-2 mb-4">
+            <Label htmlFor="sortBy" className="text-sm text-muted-foreground">Sort by:</Label>
+            <Select
+              value={roomsSortBy}
+              onValueChange={(value) => handleSortChange(value as 'created' | 'accesses' | 'stars')}
+              disabled={roomsLoading}
+            >
+              <SelectTrigger id="sortBy" className="w-[140px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="created">Date Created</SelectItem>
+                <SelectItem value="accesses">Access Count</SelectItem>
+                <SelectItem value="stars">Stars</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        )}
         {roomsLoading ? (
           <div className="flex items-center justify-center py-12">
             <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
