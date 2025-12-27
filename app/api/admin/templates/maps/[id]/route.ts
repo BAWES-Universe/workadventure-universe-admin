@@ -22,17 +22,18 @@ const updateMapSchema = z.object({
 });
 
 // GET /api/admin/templates/maps/[id]
+// Public endpoint - accessible to all authenticated users
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     const user = await getSessionUser(request);
-    if (!user || !isSuperAdmin(user.email)) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 403 });
-    }
-
     const { id } = await params;
+    
+    // Check if user is super admin for full access
+    const userIsSuperAdmin = user ? isSuperAdmin(user.email) : false;
+    
     const map = await prisma.roomTemplateMap.findUnique({
       where: { id },
       include: {
@@ -48,6 +49,14 @@ export async function GET(
     });
 
     if (!map) {
+      return NextResponse.json(
+        { error: 'Map not found' },
+        { status: 404 }
+      );
+    }
+
+    // Non-super admins can only see active maps
+    if (!userIsSuperAdmin && !map.isActive) {
       return NextResponse.json(
         { error: 'Map not found' },
         { status: 404 }

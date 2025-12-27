@@ -35,6 +35,7 @@ function NewRoomPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const worldIdParam = searchParams.get('worldId');
+  const templateMapIdParam = searchParams.get('templateMapId');
   
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -45,7 +46,7 @@ function NewRoomPageContent() {
   // Template selection state
   const [useTemplate, setUseTemplate] = useState(true);
   const [selectedTemplateSlug, setSelectedTemplateSlug] = useState<string | null>(null);
-  const [selectedMapId, setSelectedMapId] = useState<string | null>(null);
+  const [selectedMapId, setSelectedMapId] = useState<string | null>(templateMapIdParam);
   const [selectedMapUrl, setSelectedMapUrl] = useState<string | null>(null);
   const [selectedTemplateName, setSelectedTemplateName] = useState<string | null>(null);
   const [selectedMapName, setSelectedMapName] = useState<string | null>(null);
@@ -56,7 +57,7 @@ function NewRoomPageContent() {
     name: '',
     description: '',
     mapUrl: '',
-    templateMapId: null as string | null,
+    templateMapId: templateMapIdParam || null as string | null,
     isPublic: true,
   });
 
@@ -76,7 +77,10 @@ function NewRoomPageContent() {
     if (!worldIdParam) {
       fetchWorlds();
     }
-  }, []);
+    if (templateMapIdParam) {
+      fetchTemplateMap(templateMapIdParam);
+    }
+  }, [templateMapIdParam]);
 
   useEffect(() => {
     async function fetchWorldDetails() {
@@ -120,6 +124,34 @@ function NewRoomPageContent() {
       }
     } catch (err) {
       setError('Failed to load worlds');
+    }
+  }
+
+  async function fetchTemplateMap(mapId: string) {
+    try {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch(`/api/admin/templates/maps/${mapId}`);
+      if (response.ok) {
+        const data = await response.json();
+        const map = data.map;
+        if (map && map.template) {
+          // Don't set selectedTemplateSlug - we want to show the selection card, not the full detail view
+          // Only set the map info so it shows "Selected Template Map" card
+          setSelectedMapId(map.id);
+          setSelectedMapUrl(map.mapUrl);
+          setSelectedMapName(map.name);
+          setSelectedTemplateName(map.template.name);
+          setFormData(prev => ({
+            ...prev,
+            templateMapId: map.id,
+            mapUrl: map.mapUrl,
+            // Don't pre-fill name and description - let user enter them
+          }));
+        }
+      }
+    } catch (err) {
+      console.error('Failed to load template map:', err);
+      // Don't set error, just continue without pre-selection
     }
   }
 
@@ -372,16 +404,17 @@ function NewRoomPageContent() {
                         variant="outline"
                         size="sm"
                         onClick={() => {
-                          setSelectedTemplateSlug(null);
+                          // Clear map selection but keep template info for display
                           setSelectedMapId(null);
                           setSelectedMapUrl(null);
-                          setSelectedTemplateName(null);
                           setSelectedMapName(null);
                           setFormData(prev => ({
                             ...prev,
                             templateMapId: null,
                             mapUrl: '',
                           }));
+                          // Show template library
+                          setSelectedTemplateSlug(null);
                         }}
                       >
                         Change Template

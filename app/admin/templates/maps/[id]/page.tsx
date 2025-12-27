@@ -36,8 +36,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { ChevronLeft, Loader2, Edit, Trash2, AlertCircle, MapPin, ExternalLink } from 'lucide-react';
+import { ChevronLeft, Loader2, Edit, Trash2, AlertCircle, MapPin, ExternalLink, Plus, Star, Activity, Clock } from 'lucide-react';
 import { ImageUpload } from '@/components/templates/ImageUpload';
+import { cn } from '@/lib/utils';
 
 interface TemplateMap {
   id: string;
@@ -68,6 +69,113 @@ interface TemplateMap {
   };
 }
 
+interface Room {
+  id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  mapUrl: string | null;
+  isPublic: boolean;
+  world: {
+    id: string;
+    name: string;
+    slug: string;
+    universe: {
+      id: string;
+      name: string;
+      slug: string;
+    };
+  };
+  _count?: {
+    favorites?: number;
+  };
+}
+
+interface ManagedWorld {
+  id: string;
+  name: string;
+  slug: string;
+  universe: {
+    id: string;
+    name: string;
+    slug: string;
+  };
+}
+
+function formatTimeAgo(date: Date): string {
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const diffSecs = Math.floor(diffMs / 1000);
+  const diffMins = Math.floor(diffSecs / 60);
+  const diffHours = Math.floor(diffMins / 60);
+  const diffDays = Math.floor(diffHours / 24);
+  const diffWeeks = Math.floor(diffDays / 7);
+  const diffMonths = Math.floor(diffDays / 30);
+  const diffYears = Math.floor(diffDays / 365);
+
+  if (diffSecs < 60) return 'just now';
+  if (diffMins < 60) return `${diffMins} ${diffMins === 1 ? 'minute' : 'minutes'} ago`;
+  if (diffHours < 24) return `${diffHours} ${diffHours === 1 ? 'hour' : 'hours'} ago`;
+  if (diffDays < 7) return `${diffDays} ${diffDays === 1 ? 'day' : 'days'} ago`;
+  if (diffWeeks < 4) return `${diffWeeks} ${diffWeeks === 1 ? 'week' : 'weeks'} ago`;
+  if (diffMonths < 12) return `${diffMonths} ${diffMonths === 1 ? 'month' : 'months'} ago`;
+  return `${diffYears} ${diffYears === 1 ? 'year' : 'years'} ago`;
+}
+
+function RoomCard({ room }: { room: Room }) {
+  const favorites = room._count?.favorites ?? 0;
+
+  return (
+    <Link
+      href={`/admin/rooms/${room.id}`}
+      className="block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+      aria-label={`View room ${room.name} in world ${room.world.name}`}
+    >
+      <Card
+        className={cn(
+          'group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
+          'hover:-translate-y-1 hover:shadow-lg',
+        )}
+      >
+        <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-emerald-500/10 via-transparent to-sky-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
+
+        <div className="relative flex h-full flex-col p-5">
+          <div className="mb-3 flex items-start gap-3">
+            <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full border bg-muted">
+              <MapPin className="h-5 w-5 text-muted-foreground" />
+            </div>
+
+            <div className="min-w-0 flex-1 space-y-1">
+              <h3 className="truncate text-base font-semibold leading-tight">
+                {room.name}
+              </h3>
+              <p className="truncate text-xs font-mono text-muted-foreground">
+                {room.world.universe.name} · {room.world.name}
+              </p>
+            </div>
+          </div>
+
+          {room.description && (
+            <p className="mb-3 line-clamp-2 text-sm text-muted-foreground">
+              {room.description}
+            </p>
+          )}
+
+          <div className="mt-auto flex items-start justify-between pt-3 text-xs text-muted-foreground">
+            <div className="flex flex-col gap-1.5 min-h-[3rem]">
+              <span className="text-muted-foreground">No analytics available</span>
+            </div>
+            <div className="flex items-center gap-1 text-primary self-end">
+              <Star className="h-4 w-4" aria-hidden="true" />
+              <span className="text-xs font-medium">{favorites}</span>
+            </div>
+          </div>
+        </div>
+      </Card>
+    </Link>
+  );
+}
+
 export default function MapDetailPage() {
   const router = useRouter();
   const params = useParams();
@@ -78,6 +186,12 @@ export default function MapDetailPage() {
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [rooms, setRooms] = useState<Room[]>([]);
+  const [roomsLoading, setRoomsLoading] = useState(false);
+  const [managedWorlds, setManagedWorlds] = useState<ManagedWorld[]>([]);
+  const [worldsLoading, setWorldsLoading] = useState(false);
+  const [isCreateRoomDialogOpen, setIsCreateRoomDialogOpen] = useState(false);
+  const [selectedWorldId, setSelectedWorldId] = useState<string>('');
 
   const [formData, setFormData] = useState({
     name: '',
@@ -94,6 +208,8 @@ export default function MapDetailPage() {
     setIsSuperAdmin(false);
     if (params.id) {
       fetchMap();
+      fetchRooms();
+      fetchManagedWorlds();
     }
   }, [params.id]);
 
@@ -197,12 +313,17 @@ export default function MapDetailPage() {
             rooms: foundMap._count?.rooms || 0,
           },
           template: {
-            id: foundTemplate.id,
+            id: foundTemplate.id || '',
             slug: foundTemplate.slug,
             name: foundTemplate.name,
             category: foundTemplate.category,
           },
         };
+      }
+
+      // Ensure template.id exists
+      if (!mapData.template?.id) {
+        throw new Error('Template ID not found');
       }
 
       setMap(mapData);
@@ -282,11 +403,61 @@ export default function MapDetailPage() {
         throw new Error(data.error || 'Failed to delete map');
       }
 
-      router.push(`/admin/templates/templates/${map.template.id}`);
+      router.push(map.template?.id ? `/admin/templates/templates/${map.template.id}` : '/admin/templates');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to delete map');
       setIsDeleteDialogOpen(false);
     }
+  }
+
+  async function fetchRooms() {
+    if (!params.id) return;
+    
+    try {
+      setRoomsLoading(true);
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch(`/api/admin/templates/maps/${params.id}/rooms`);
+      
+      if (!response.ok) {
+        throw new Error('Failed to fetch rooms');
+      }
+
+      const data = await response.json();
+      setRooms(data.rooms || []);
+    } catch (err) {
+      console.error('Error fetching rooms:', err);
+      setRooms([]);
+    } finally {
+      setRoomsLoading(false);
+    }
+  }
+
+  async function fetchManagedWorlds() {
+    try {
+      setWorldsLoading(true);
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch('/api/admin/worlds/managed');
+      
+      if (!response.ok) {
+        throw new Error('Failed to fetch managed worlds');
+      }
+
+      const data = await response.json();
+      setManagedWorlds(data.worlds || []);
+    } catch (err) {
+      console.error('Error fetching managed worlds:', err);
+      setManagedWorlds([]);
+    } finally {
+      setWorldsLoading(false);
+    }
+  }
+
+  function handleCreateRoom() {
+    if (!map || !selectedWorldId) return;
+
+    // Navigate to create room page with template map pre-selected
+    setIsCreateRoomDialogOpen(false);
+    router.push(`/admin/rooms/new?worldId=${selectedWorldId}&templateMapId=${map.id}`);
   }
 
   if (loading) {
@@ -315,9 +486,9 @@ export default function MapDetailPage() {
     <div className="space-y-8">
       <div className="flex items-center justify-between">
         <Button variant="ghost" size="sm" asChild>
-          <Link href={`/admin/templates/templates/${map.template.id}`}>
+          <Link href={map.template?.id ? `/admin/templates/templates/${map.template.id}` : '/admin/templates'}>
             <ChevronLeft className="h-4 w-4 mr-2" />
-            Back to {map.template.name}
+            Back to {map.template?.name || 'Templates'}
           </Link>
         </Button>
         {isSuperAdmin && (
@@ -409,6 +580,113 @@ export default function MapDetailPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Rooms Using This Map */}
+      <div>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-2xl font-semibold">Rooms Using This Map</h2>
+          {managedWorlds.length > 0 && (
+            <Button onClick={() => setIsCreateRoomDialogOpen(true)}>
+              <Plus className="h-4 w-4 mr-2" />
+              Create Room
+            </Button>
+          )}
+        </div>
+        {roomsLoading ? (
+          <div className="flex items-center justify-center py-12">
+            <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+          </div>
+        ) : rooms.length === 0 ? (
+          <Card className="border-0">
+            <CardContent className="py-12 text-center">
+              <MapPin className="h-12 w-12 mx-auto mb-4 text-muted-foreground" />
+              <p className="text-muted-foreground">No rooms are using this map yet.</p>
+              {managedWorlds.length > 0 && (
+                <Button
+                  onClick={() => setIsCreateRoomDialogOpen(true)}
+                  className="mt-4"
+                >
+                  <Plus className="h-4 w-4 mr-2" />
+                  Create First Room
+                </Button>
+              )}
+            </CardContent>
+          </Card>
+        ) : (
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+            {rooms.map((room) => (
+              <RoomCard key={room.id} room={room} />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Create Room Dialog */}
+      <Dialog open={isCreateRoomDialogOpen} onOpenChange={setIsCreateRoomDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Create Room from Template Map</DialogTitle>
+            <DialogDescription>
+              Select a world to create a room using this template map.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="world">World *</Label>
+              {worldsLoading ? (
+                <div className="flex items-center justify-center py-4">
+                  <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                </div>
+              ) : managedWorlds.length === 0 ? (
+                <Alert>
+                  <AlertCircle className="h-4 w-4" />
+                  <AlertDescription>
+                    You don't have any worlds you can manage. Create a universe and world first.
+                  </AlertDescription>
+                </Alert>
+              ) : (
+                <Select
+                  value={selectedWorldId}
+                  onValueChange={setSelectedWorldId}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select a world" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {managedWorlds.map((world) => (
+                      <SelectItem key={world.id} value={world.id}>
+                        {world.universe.name} · {world.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+            </div>
+            {map && (
+              <div className="space-y-2">
+                <Label>Template Map</Label>
+                <div className="p-3 bg-muted rounded-md">
+                  <p className="font-medium">{map.name}</p>
+                  {map.description && (
+                    <p className="text-sm text-muted-foreground mt-1">{map.description}</p>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIsCreateRoomDialogOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={handleCreateRoom}
+              disabled={!selectedWorldId || worldsLoading || managedWorlds.length === 0}
+            >
+              Create Room
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Edit Dialog */}
       <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>
