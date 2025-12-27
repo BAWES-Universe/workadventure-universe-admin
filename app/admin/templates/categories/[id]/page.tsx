@@ -61,6 +61,7 @@ interface Template {
 export default function CategoryDetailPage() {
   const router = useRouter();
   const params = useParams();
+  const categoryId = params?.id as string;
   const [category, setCategory] = useState<Category | null>(null);
   const [templates, setTemplates] = useState<Template[]>([]);
   const [loading, setLoading] = useState(true);
@@ -81,10 +82,13 @@ export default function CategoryDetailPage() {
   useEffect(() => {
     // Reset super admin state when params change
     setIsSuperAdmin(false);
-    if (params.id) {
+    if (categoryId) {
       fetchData();
+    } else {
+      setLoading(false);
+      setError('Category ID is required');
     }
-  }, [params.id]);
+  }, [categoryId]);
 
   async function fetchData() {
     try {
@@ -115,7 +119,7 @@ export default function CategoryDetailPage() {
       if (userIsSuperAdmin) {
         try {
           const { authenticatedFetch } = await import('@/lib/client-auth');
-          const categoryResponse = await authenticatedFetch(`/api/admin/templates/categories/${params.id}`);
+          const categoryResponse = await authenticatedFetch(`/api/admin/templates/categories/${categoryId}`);
           if (categoryResponse.ok) {
             const data = await categoryResponse.json();
             categoryData = data.category;
@@ -131,7 +135,7 @@ export default function CategoryDetailPage() {
         const categoriesResponse = await fetch('/api/templates/categories');
         if (categoriesResponse.ok) {
           const categoriesData = await categoriesResponse.json();
-          const foundCategory = categoriesData.categories.find((cat: any) => cat.id === params.id);
+          const foundCategory = categoriesData.categories.find((cat: any) => cat.id === categoryId);
           if (foundCategory) {
             categoryData = {
               ...foundCategory,
@@ -232,6 +236,20 @@ export default function CategoryDetailPage() {
       setError(err instanceof Error ? err.message : 'Failed to delete category');
       setIsDeleteDialogOpen(false);
     }
+  }
+
+  if (!categoryId) {
+    return (
+      <div className="flex items-center justify-center py-12">
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>Invalid Category</AlertTitle>
+          <AlertDescription>
+            Category ID is missing from the URL.
+          </AlertDescription>
+        </Alert>
+      </div>
+    );
   }
 
   if (loading) {
