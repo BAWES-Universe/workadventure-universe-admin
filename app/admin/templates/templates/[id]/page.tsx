@@ -456,21 +456,22 @@ export default function TemplateDetailPage() {
                   <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-green-500/10 via-transparent to-emerald-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
 
                   <div className="relative flex flex-col h-full p-5">
+                    {isSuperAdmin && (
+                      <div className="absolute bottom-4 right-4 z-10">
+                        <Badge variant={map.isActive ? 'default' : 'secondary'}>
+                          {map.isActive ? 'Active' : 'Inactive'}
+                        </Badge>
+                      </div>
+                    )}
                     <div className="mb-4">
                       <h3 className="truncate text-base font-semibold leading-tight mb-1">
                         {map.name}
                       </h3>
-                      <p className="truncate text-xs font-mono text-muted-foreground mb-2">
-                        {map.slug}
-                      </p>
-                      <div className="flex flex-wrap items-center gap-2 text-xs">
-                        <Badge variant={map.isActive ? 'default' : 'secondary'}>
-                          {map.isActive ? 'Active' : 'Inactive'}
+                      {map.sizeLabel && (
+                        <Badge variant="secondary" className="text-xs">
+                          {map.sizeLabel} size
                         </Badge>
-                        {map.sizeLabel && (
-                          <Badge variant="outline">{map.sizeLabel}</Badge>
-                        )}
-                      </div>
+                      )}
                     </div>
 
                     {map.description && (
