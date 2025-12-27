@@ -460,10 +460,21 @@ export default function MapDetailPage() {
       const data = await response.json();
       const updatedMap = data.map;
       
-      // Update map state immediately
+      // Update map state immediately - use updatedMap as base to ensure all fields are fresh
       setMap({
         ...updatedMap,
         _count: map._count, // Preserve _count if it exists
+      });
+
+      // Also update formData to reflect the saved state
+      setFormData({
+        name: updatedMap.name,
+        description: updatedMap.description || '',
+        mapUrl: updatedMap.mapUrl,
+        previewImageUrl: updatedMap.previewImageUrl || '',
+        sizeLabel: updatedMap.sizeLabel ? updatedMap.sizeLabel.toLowerCase() : '',
+        order: updatedMap.order,
+        isActive: updatedMap.isActive,
       });
 
       setIsEditDialogOpen(false);
@@ -725,6 +736,7 @@ export default function MapDetailPage() {
               <div>
                 <h3 className="font-semibold mb-1">Preview Image</h3>
                 <a
+                  key={map.previewImageUrl}
                   href={map.previewImageUrl}
                   target="_blank"
                   rel="noopener noreferrer"

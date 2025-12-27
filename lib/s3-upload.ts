@@ -41,9 +41,10 @@ export async function uploadImageToS3(
   await s3Client.send(command);
 
   // Construct public URL
-  const url = AWS_URL.endsWith('/') ? AWS_URL.slice(0, -1) : AWS_URL;
-  const keyWithSlash = key.startsWith('/') ? key : `/${key}`;
-  return `${url}${keyWithSlash}`;
+  // With forcePathStyle: true, the URL format is: https://endpoint/bucket-name/key
+  const baseUrl = AWS_URL.endsWith('/') ? AWS_URL.slice(0, -1) : AWS_URL;
+  const cleanKey = key.startsWith('/') ? key.slice(1) : key;
+  return `${baseUrl}/${BUCKET}/${cleanKey}`;
 }
 
 /**
@@ -158,8 +159,10 @@ export async function moveTempPreviewImage(tempUrl: string, mapId: string): Prom
     await deleteImageFromS3(tempKey);
 
     // Return the new URL
-    const url = AWS_URL.endsWith('/') ? AWS_URL.slice(0, -1) : AWS_URL;
-    return `${url}/${newKey}`;
+    // With forcePathStyle: true, the URL format is: https://endpoint/bucket-name/key
+    const baseUrl = AWS_URL.endsWith('/') ? AWS_URL.slice(0, -1) : AWS_URL;
+    const cleanKey = newKey.startsWith('/') ? newKey.slice(1) : newKey;
+    return `${baseUrl}/${BUCKET}/${cleanKey}`;
   } catch (error) {
     console.error('Error moving temp preview image:', error);
     return tempUrl; // Return original URL if move failed
