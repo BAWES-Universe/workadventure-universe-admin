@@ -329,13 +329,15 @@ export default function MapDetailPage() {
       </div>
 
       <div className="space-y-1">
-        <div className="flex items-center gap-3">
-          <div className="flex h-12 w-12 items-center justify-center rounded-lg border bg-muted text-2xl">
-            {map.template.category.icon || <MapPin className="h-6 w-6 text-muted-foreground" />}
-          </div>
-          <div>
-            <h1 className="text-2xl font-bold tracking-tight">{map.name}</h1>
-            <p className="text-muted-foreground text-lg font-mono">{map.slug}</p>
+        <div>
+          <h1 className="text-4xl font-bold tracking-tight">{map.name}</h1>
+          <div className="flex items-center gap-1.5 mt-2">
+            {map.template.category.icon && (
+              <span className="text-sm">{map.template.category.icon}</span>
+            )}
+            <p className="text-xs text-muted-foreground">
+              {map.template.category.name}
+            </p>
           </div>
         </div>
         {map.description && (
@@ -347,7 +349,11 @@ export default function MapDetailPage() {
               {map.isActive ? 'Active' : 'Inactive'}
             </Badge>
           )}
-          {map.sizeLabel && <Badge variant="outline">{map.sizeLabel}</Badge>}
+          {map.sizeLabel && (
+            <Badge variant="secondary">
+              {map.sizeLabel} size
+            </Badge>
+          )}
         </div>
       </div>
 
@@ -403,34 +409,6 @@ export default function MapDetailPage() {
           </CardContent>
         </Card>
       </div>
-
-      {isSuperAdmin && (
-        <Card className="border-0">
-          <CardHeader>
-            <CardTitle className="text-xl">Private Information</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div>
-              <h3 className="font-semibold mb-1">Map URL</h3>
-              <a
-                href={map.mapUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-sm text-primary hover:underline break-all flex items-center gap-1"
-              >
-                {map.mapUrl}
-                <ExternalLink className="h-3 w-3" />
-              </a>
-            </div>
-            <div>
-              <h3 className="font-semibold mb-1">Order</h3>
-              <div className="text-sm text-muted-foreground">
-                <p>{map.order}</p>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-      )}
 
       {/* Edit Dialog */}
       <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>
