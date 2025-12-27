@@ -10,6 +10,11 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
+    const { searchParams } = new URL(request.url);
+    const page = parseInt(searchParams.get('page') || '1');
+    const limit = parseInt(searchParams.get('limit') || '12');
+    const sortBy = searchParams.get('sortBy') || 'created';
+    const skip = (page - 1) * limit;
 
     // Verify map exists
     const map = await prisma.roomTemplateMap.findUnique({
@@ -24,36 +29,128 @@ export async function GET(
       );
     }
 
-    // Get all public rooms using this template map
-    const rooms = await prisma.room.findMany({
+    // Get total count
+    const total = await prisma.room.count({
       where: {
         templateMapId: id,
         isPublic: true,
       },
-      include: {
-        world: {
+    });
+
+    let rooms: any[];
+    let roomIds: string[] = [];
+
+    // Handle sorting by access count or favorites using raw SQL
+    if (sortBy === 'accesses') {
+      const result = await prisma.$queryRaw<Array<{ room_id: string; access_count: bigint }>>`
+        SELECT 
+          r.id as room_id,
+          COALESCE(COUNT(ra.id), 0)::bigint as access_count
+        FROM rooms r
+        LEFT JOIN room_accesses ra ON r.id = ra.room_id
+        WHERE r.template_map_id = ${id}
+        AND r.is_public = true
+        GROUP BY r.id
+        ORDER BY access_count DESC, r.created_at DESC
+        LIMIT ${limit} OFFSET ${skip}
+      `;
+      roomIds = result.map((r: any) => r.room_id);
+    } else if (sortBy === 'stars') {
+      const result = await prisma.$queryRaw<Array<{ room_id: string; favorite_count: bigint }>>`
+        SELECT 
+          r.id as room_id,
+          COALESCE(COUNT(f.id), 0)::bigint as favorite_count
+        FROM rooms r
+        LEFT JOIN favorites f ON r.id = f.room_id
+        WHERE r.template_map_id = ${id}
+        AND r.is_public = true
+        GROUP BY r.id
+        ORDER BY favorite_count DESC, r.created_at DESC
+        LIMIT ${limit} OFFSET ${skip}
+      `;
+      roomIds = result.map((r: any) => r.room_id);
+    }
+
+    // Fetch full room data
+    if (sortBy === 'accesses' || sortBy === 'stars') {
+      // For access/stars sorting, fetch rooms in the order from the sorted query
+      if (roomIds.length > 0) {
+        rooms = await prisma.room.findMany({
+          where: {
+            id: { in: roomIds },
+            templateMapId: id,
+            isPublic: true,
+          },
           include: {
-            universe: {
+            world: {
+              include: {
+                universe: {
+                  select: {
+                    id: true,
+                    name: true,
+                    slug: true,
+                  },
+                },
+              },
+            },
+            _count: {
               select: {
-                id: true,
-                name: true,
-                slug: true,
+                favorites: true,
               },
             },
           },
+        });
+
+        // Maintain the order from the sorted query
+        const roomMap = new Map(rooms.map(r => [r.id, r]));
+        rooms = roomIds.map(id => roomMap.get(id)).filter(Boolean) as any[];
+      } else {
+        rooms = [];
+      }
+    } else {
+      // Default: sort by createdAt
+      rooms = await prisma.room.findMany({
+        where: {
+          templateMapId: id,
+          isPublic: true,
         },
-        _count: {
-          select: {
-            favorites: true,
+        include: {
+          world: {
+            include: {
+              universe: {
+                select: {
+                  id: true,
+                  name: true,
+                  slug: true,
+                },
+              },
+            },
+          },
+          _count: {
+            select: {
+              favorites: true,
+            },
           },
         },
-      },
-      orderBy: {
-        createdAt: 'desc',
+        orderBy: {
+          createdAt: 'desc',
+        },
+        skip,
+        take: limit,
+      });
+    }
+
+    const totalPages = Math.ceil(total / limit);
+
+    return NextResponse.json({
+      rooms,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages,
       },
     });
-
-    return NextResponse.json({ rooms });
   } catch (error) {
     console.error('Error fetching rooms for map:', error);
     return NextResponse.json(

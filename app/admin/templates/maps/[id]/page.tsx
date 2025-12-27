@@ -36,7 +36,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { ChevronLeft, Loader2, Edit, Trash2, AlertCircle, MapPin, ExternalLink, Plus, Star, Activity, Clock } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Loader2, Edit, Trash2, AlertCircle, MapPin, ExternalLink, Plus, Star, Activity, Clock } from 'lucide-react';
 import { ImageUpload } from '@/components/templates/ImageUpload';
 import { cn } from '@/lib/utils';
 
@@ -102,6 +102,20 @@ interface ManagedWorld {
   };
 }
 
+interface RoomAnalytics {
+  totalAccesses: number;
+  peakHour: number | null;
+  lastVisitedByUser: { accessedAt: string; userId?: string | null; userUuid?: string | null } | null;
+  lastVisitedOverall: { accessedAt: string; userId?: string | null; userUuid?: string | null } | null;
+}
+
+function formatHourTo12Hour(hour: number): string {
+  if (hour === 0) return '12:00 AM';
+  if (hour < 12) return `${hour}:00 AM`;
+  if (hour === 12) return '12:00 PM';
+  return `${hour - 12}:00 PM`;
+}
+
 function formatTimeAgo(date: Date): string {
   const now = new Date();
   const diffMs = now.getTime() - date.getTime();
@@ -122,7 +136,7 @@ function formatTimeAgo(date: Date): string {
   return `${diffYears} ${diffYears === 1 ? 'year' : 'years'} ago`;
 }
 
-function RoomCard({ room }: { room: Room }) {
+function RoomCard({ room, analytics }: { room: Room; analytics?: RoomAnalytics }) {
   const favorites = room._count?.favorites ?? 0;
 
   return (
@@ -163,7 +177,60 @@ function RoomCard({ room }: { room: Room }) {
 
           <div className="mt-auto flex items-start justify-between pt-3 text-xs text-muted-foreground">
             <div className="flex flex-col gap-1.5 min-h-[3rem]">
-              <span className="text-muted-foreground">No analytics available</span>
+              {analytics ? (
+                <>
+                  <div className="flex items-center gap-1.5">
+                    <Activity className="h-3.5 w-3.5 text-muted-foreground" />
+                    <span className="font-medium text-foreground/80">
+                      {analytics.totalAccesses.toLocaleString()} accesses
+                    </span>
+                  </div>
+                  {analytics.peakHour !== null && (
+                    <div className="flex items-center gap-1.5">
+                      <Clock className="h-3.5 w-3.5 text-muted-foreground" />
+                      <span className="text-muted-foreground">
+                        Peak: {formatHourTo12Hour(analytics.peakHour)}
+                      </span>
+                    </div>
+                  )}
+                  {/* Last visited information */}
+                  {analytics.lastVisitedByUser || analytics.lastVisitedOverall ? (
+                    <div className="flex flex-col gap-0.5 mt-0.5">
+                      {analytics.lastVisitedByUser && (
+                        <div className="text-[11px]">
+                          <span className="text-muted-foreground/70">Last visited by you: </span>
+                          <span className="font-medium text-foreground/80">
+                            {formatTimeAgo(new Date(analytics.lastVisitedByUser.accessedAt))}
+                          </span>
+                        </div>
+                      )}
+                      {analytics.lastVisitedOverall && (
+                        <div className="text-[11px]">
+                          {analytics.lastVisitedByUser && 
+                           analytics.lastVisitedByUser.accessedAt === analytics.lastVisitedOverall.accessedAt ? (
+                            <span className="text-muted-foreground/70 italic">
+                              You were the last visitor
+                            </span>
+                          ) : (
+                            <>
+                              <span className="text-muted-foreground/70">Most recent visitor: </span>
+                              <span className="font-medium text-foreground/80">
+                                {formatTimeAgo(new Date(analytics.lastVisitedOverall.accessedAt))}
+                              </span>
+                            </>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="text-[11px] text-muted-foreground/70 mt-0.5">
+                      No visits recorded
+                    </div>
+                  )}
+                </>
+              ) : (
+                <span className="text-muted-foreground">Access data loading...</span>
+              )}
             </div>
             <div className="flex items-center gap-1 text-primary self-end">
               <Star className="h-4 w-4" aria-hidden="true" />
@@ -188,6 +255,16 @@ export default function MapDetailPage() {
   const [saving, setSaving] = useState(false);
   const [rooms, setRooms] = useState<Room[]>([]);
   const [roomsLoading, setRoomsLoading] = useState(false);
+  const [analyticsByRoom, setAnalyticsByRoom] = useState<Record<string, RoomAnalytics>>({});
+  const [roomsPage, setRoomsPage] = useState(1);
+  const roomsPerPage = 12;
+  const [roomsSortBy, setRoomsSortBy] = useState<'created' | 'accesses' | 'stars'>('created');
+  const [roomsPagination, setRoomsPagination] = useState<{
+    page: number;
+    limit: number;
+    total: number;
+    totalPages: number;
+  } | null>(null);
   const [managedWorlds, setManagedWorlds] = useState<ManagedWorld[]>([]);
   const [worldsLoading, setWorldsLoading] = useState(false);
   const [isCreateRoomDialogOpen, setIsCreateRoomDialogOpen] = useState(false);
@@ -208,10 +285,18 @@ export default function MapDetailPage() {
     setIsSuperAdmin(false);
     if (params.id) {
       fetchMap();
-      fetchRooms();
+      setRoomsPage(1);
+      setRoomsSortBy('created');
+      fetchRooms(1, 'created');
       fetchManagedWorlds();
     }
   }, [params.id]);
+
+  useEffect(() => {
+    if (params.id && roomsPage > 0) {
+      fetchRooms(roomsPage, roomsSortBy);
+    }
+  }, [roomsPage, roomsSortBy]);
 
   // Reset formData when edit dialog opens
   useEffect(() => {
@@ -410,13 +495,15 @@ export default function MapDetailPage() {
     }
   }
 
-  async function fetchRooms() {
+  async function fetchRooms(page: number = roomsPage, sortBy: 'created' | 'accesses' | 'stars' = roomsSortBy) {
     if (!params.id) return;
     
     try {
       setRoomsLoading(true);
       const { authenticatedFetch } = await import('@/lib/client-auth');
-      const response = await authenticatedFetch(`/api/admin/templates/maps/${params.id}/rooms`);
+      const response = await authenticatedFetch(
+        `/api/admin/templates/maps/${params.id}/rooms?page=${page}&limit=${roomsPerPage}&sortBy=${sortBy}`
+      );
       
       if (!response.ok) {
         throw new Error('Failed to fetch rooms');
@@ -424,13 +511,98 @@ export default function MapDetailPage() {
 
       const data = await response.json();
       setRooms(data.rooms || []);
+      setRoomsPagination(data.pagination || null);
     } catch (err) {
       console.error('Error fetching rooms:', err);
       setRooms([]);
+      setRoomsPagination(null);
     } finally {
       setRoomsLoading(false);
     }
   }
+
+  function handleSortChange(sortBy: 'created' | 'accesses' | 'stars') {
+    setRoomsSortBy(sortBy);
+    setRoomsPage(1); // Reset to first page when sorting changes
+  }
+
+  useEffect(() => {
+    async function fetchAnalyticsForRooms() {
+      const missing = rooms.filter((room) => !analyticsByRoom[room.id]);
+      if (missing.length === 0) return;
+
+      try {
+        const { authenticatedFetch } = await import('@/lib/client-auth');
+        const results = await Promise.all(
+          missing.map(async (room) => {
+            try {
+              const response = await authenticatedFetch(
+                `/api/admin/analytics/rooms/${room.id}`,
+              );
+              if (!response.ok) {
+                return null;
+              }
+              const data = await response.json();
+              
+              // Calculate peak hour from recent activity in local timezone (like detail page)
+              let peakHour = null;
+              if (data.recentActivity && data.recentActivity.length > 0) {
+                const hourCounts = new Map<number, number>();
+                data.recentActivity.forEach((access: any) => {
+                  const date = new Date(access.accessedAt);
+                  const hour = date.getHours(); // Local timezone
+                  hourCounts.set(hour, (hourCounts.get(hour) || 0) + 1);
+                });
+                const localPeakTimes = Array.from(hourCounts.entries())
+                  .map(([hour, count]) => ({ hour, count }))
+                  .sort((a, b) => b.count - a.count);
+                if (localPeakTimes.length > 0) {
+                  peakHour = localPeakTimes[0].hour;
+                }
+              }
+              
+              // Fallback to UTC peakTimes if no recent activity
+              if (peakHour === null && Array.isArray(data.peakTimes) && data.peakTimes.length > 0) {
+                peakHour = data.peakTimes[0].hour;
+              }
+              
+              return {
+                roomId: room.id,
+                totalAccesses: data.totalAccesses || 0,
+                peakHour,
+                lastVisitedByUser: data.lastVisitedByUser || null,
+                lastVisitedOverall: data.lastVisitedOverall || null,
+              };
+            } catch {
+              return null;
+            }
+          }),
+        );
+
+        const newAnalytics: Record<string, RoomAnalytics> = {};
+        results.forEach((result) => {
+          if (result) {
+            newAnalytics[result.roomId] = {
+              totalAccesses: result.totalAccesses,
+              peakHour: result.peakHour,
+              lastVisitedByUser: result.lastVisitedByUser,
+              lastVisitedOverall: result.lastVisitedOverall,
+            };
+          }
+        });
+
+        if (Object.keys(newAnalytics).length > 0) {
+          setAnalyticsByRoom((prev) => ({ ...prev, ...newAnalytics }));
+        }
+      } catch (err) {
+        console.error('Error fetching analytics:', err);
+      }
+    }
+
+    if (rooms.length > 0) {
+      fetchAnalyticsForRooms();
+    }
+  }, [rooms, analyticsByRoom]);
 
   async function fetchManagedWorlds() {
     try {
@@ -585,12 +757,31 @@ export default function MapDetailPage() {
       <div>
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-2xl font-semibold">Rooms Using This Map</h2>
-          {managedWorlds.length > 0 && (
-            <Button onClick={() => setIsCreateRoomDialogOpen(true)}>
-              <Plus className="h-4 w-4 mr-2" />
-              Create Room
-            </Button>
-          )}
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2">
+              <Label htmlFor="sortBy" className="text-sm text-muted-foreground">Sort by:</Label>
+              <Select
+                value={roomsSortBy}
+                onValueChange={(value) => handleSortChange(value as 'created' | 'accesses' | 'stars')}
+                disabled={roomsLoading}
+              >
+                <SelectTrigger id="sortBy" className="w-[140px]">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="created">Date Created</SelectItem>
+                  <SelectItem value="accesses">Access Count</SelectItem>
+                  <SelectItem value="stars">Stars</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            {managedWorlds.length > 0 && (
+              <Button onClick={() => setIsCreateRoomDialogOpen(true)}>
+                <Plus className="h-4 w-4 mr-2" />
+                Create Room
+              </Button>
+            )}
+          </div>
         </div>
         {roomsLoading ? (
           <div className="flex items-center justify-center py-12">
@@ -613,11 +804,44 @@ export default function MapDetailPage() {
             </CardContent>
           </Card>
         ) : (
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-            {rooms.map((room) => (
-              <RoomCard key={room.id} room={room} />
-            ))}
-          </div>
+          <>
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+              {rooms.map((room) => (
+                <RoomCard
+                  key={room.id}
+                  room={room}
+                  analytics={analyticsByRoom[room.id]}
+                />
+              ))}
+            </div>
+            {roomsPagination && roomsPagination.totalPages > 1 && (
+              <div className="flex items-center justify-between pt-2">
+                <div className="text-sm text-muted-foreground">
+                  Showing {(roomsPagination.page - 1) * roomsPagination.limit + 1} to {Math.min(roomsPagination.page * roomsPagination.limit, roomsPagination.total)} of {roomsPagination.total} {roomsPagination.total === 1 ? 'room' : 'rooms'}
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setRoomsPage(prev => Math.max(1, prev - 1))}
+                    disabled={roomsPage === 1 || roomsLoading}
+                  >
+                    <ChevronLeft className="h-4 w-4 mr-1" />
+                    Previous
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setRoomsPage(prev => prev + 1)}
+                    disabled={roomsPage >= (roomsPagination?.totalPages || 1) || roomsLoading}
+                  >
+                    Next
+                    <ChevronRight className="h-4 w-4 ml-1" />
+                  </Button>
+                </div>
+              </div>
+            )}
+          </>
         )}
       </div>
 
