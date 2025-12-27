@@ -20,6 +20,7 @@ interface Category {
   isActive: boolean;
   _count: {
     templates: number;
+    maps: number;
   };
 }
 
@@ -184,11 +185,19 @@ export default function TemplatesAdminPage() {
                     </p>
                   )}
 
-                  <div className="mt-auto flex items-center gap-1.5 pt-3 text-xs text-muted-foreground">
-                    <FolderOpen className="h-3.5 w-3.5" />
-                    <span>
-                      {category._count.templates} {category._count.templates === 1 ? 'template' : 'templates'}
-                    </span>
+                  <div className="mt-auto flex items-center gap-3 pt-3 text-xs text-muted-foreground">
+                    <div className="flex items-center gap-1.5">
+                      <FolderOpen className="h-3.5 w-3.5" />
+                      <span>
+                        {category._count.templates} {category._count.templates === 1 ? 'template' : 'templates'}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <FolderOpen className="h-3.5 w-3.5" />
+                      <span>
+                        {category._count.maps} {category._count.maps === 1 ? 'map' : 'maps'}
+                      </span>
+                    </div>
                   </div>
                 </div>
               </Card>
