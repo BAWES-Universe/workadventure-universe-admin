@@ -48,6 +48,7 @@ function NewRoomPageContent() {
   const [selectedTemplateSlug, setSelectedTemplateSlug] = useState<string | null>(null);
   const [selectedMapId, setSelectedMapId] = useState<string | null>(templateMapIdParam);
   const [selectedMapUrl, setSelectedMapUrl] = useState<string | null>(null);
+  const [selectedMapPreviewImageUrl, setSelectedMapPreviewImageUrl] = useState<string | null>(null);
   const [selectedTemplateName, setSelectedTemplateName] = useState<string | null>(null);
   const [selectedMapName, setSelectedMapName] = useState<string | null>(null);
   
@@ -139,6 +140,7 @@ function NewRoomPageContent() {
           // Only set the map info so it shows "Selected Template Map" card
           setSelectedMapId(map.id);
           setSelectedMapUrl(map.mapUrl);
+          setSelectedMapPreviewImageUrl(map.previewImageUrl || null);
           setSelectedMapName(map.name);
           setSelectedTemplateName(map.template.name);
           setFormData(prev => ({
@@ -168,7 +170,7 @@ function NewRoomPageContent() {
       mapUrl: mapUrl,
     }));
     
-    // Fetch template name for display
+    // Fetch template name and map preview image for display
     if (selectedTemplateSlug) {
       try {
         const response = await fetch(`/api/templates/${selectedTemplateSlug}`);
@@ -178,6 +180,7 @@ function NewRoomPageContent() {
           const map = data.template.maps.find((m: any) => m.id === mapId);
           if (map) {
             setSelectedMapName(map.name);
+            setSelectedMapPreviewImageUrl(map.previewImageUrl || null);
           }
         }
       } catch (err) {
@@ -194,6 +197,7 @@ function NewRoomPageContent() {
     // Clear map selection when going back
     setSelectedMapId(null);
     setSelectedMapUrl(null);
+    setSelectedMapPreviewImageUrl(null);
     setSelectedTemplateName(null);
     setSelectedMapName(null);
     setFormData(prev => ({
@@ -208,6 +212,7 @@ function NewRoomPageContent() {
     setSelectedTemplateSlug(null);
     setSelectedMapId(null);
     setSelectedMapUrl(null);
+    setSelectedMapPreviewImageUrl(null);
     setSelectedTemplateName(null);
     setSelectedMapName(null);
     setFormData(prev => ({
@@ -390,35 +395,50 @@ function NewRoomPageContent() {
               </CardHeader>
               <CardContent>
                 {selectedMapId && selectedTemplateName && selectedMapName ? (
-                  <div className="p-4 rounded-lg bg-muted/50">
-                    <div className="flex items-start justify-between">
-                      <div className="flex-1">
-                        <div className="text-sm font-medium mb-1">Selected Template Map</div>
-                        <div className="text-sm text-muted-foreground">
-                          <div><strong>Template:</strong> {selectedTemplateName}</div>
-                          <div><strong>Map:</strong> {selectedMapName}</div>
-                        </div>
+                  <div className="rounded-lg bg-muted/50 border border-border/70 overflow-hidden">
+                    {selectedMapPreviewImageUrl && (
+                      <div className="relative w-full h-48 overflow-hidden bg-muted">
+                        <img
+                          src={selectedMapPreviewImageUrl}
+                          alt={selectedMapName}
+                          className="w-full h-full object-cover"
+                          onError={(e) => {
+                            (e.target as HTMLImageElement).style.display = 'none';
+                          }}
+                        />
                       </div>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        onClick={() => {
-                          // Clear map selection but keep template info for display
-                          setSelectedMapId(null);
-                          setSelectedMapUrl(null);
-                          setSelectedMapName(null);
-                          setFormData(prev => ({
-                            ...prev,
-                            templateMapId: null,
-                            mapUrl: '',
-                          }));
-                          // Show template library
-                          setSelectedTemplateSlug(null);
-                        }}
-                      >
-                        Change Template
-                      </Button>
+                    )}
+                    <div className="p-4">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex-1 min-w-0">
+                          <div className="text-sm font-medium mb-1">Selected Template Map</div>
+                          <div className="text-sm text-muted-foreground">
+                            <div><strong>Template:</strong> {selectedTemplateName}</div>
+                            <div><strong>Map:</strong> {selectedMapName}</div>
+                          </div>
+                        </div>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => {
+                            // Clear map selection but keep template info for display
+                            setSelectedMapId(null);
+                            setSelectedMapUrl(null);
+                            setSelectedMapPreviewImageUrl(null);
+                            setSelectedMapName(null);
+                            setFormData(prev => ({
+                              ...prev,
+                              templateMapId: null,
+                              mapUrl: '',
+                            }));
+                            // Show template library
+                            setSelectedTemplateSlug(null);
+                          }}
+                        >
+                          Change Template
+                        </Button>
+                      </div>
                     </div>
                   </div>
                 ) : (
