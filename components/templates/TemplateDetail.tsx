@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -50,11 +50,20 @@ interface TemplateDetailProps {
 function MapCardWithImage({ map, isSelected, onSelectMap }: { map: TemplateMap; isSelected: boolean; onSelectMap: (mapId: string, mapUrl: string) => void }) {
   const [imageReady, setImageReady] = useState(false);
   const [imageError, setImageError] = useState(false);
+  const imageRef = useRef<HTMLImageElement | null>(null);
 
   // Reset states when previewImageUrl changes
   useEffect(() => {
     setImageReady(false);
     setImageError(false);
+    
+    // Check if image is already cached
+    if (map.previewImageUrl) {
+      const img = new Image();
+      img.onload = () => setImageReady(true);
+      img.onerror = () => setImageError(true);
+      img.src = map.previewImageUrl;
+    }
   }, [map.previewImageUrl]);
 
   return (
@@ -68,23 +77,12 @@ function MapCardWithImage({ map, isSelected, onSelectMap }: { map: TemplateMap; 
     >
       <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-blue-500/10 via-transparent to-indigo-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
       
-      {/* Hidden pre-loader: test if image loads before showing container */}
-      {map.previewImageUrl && !imageReady && !imageError && (
-        <img
-          src={map.previewImageUrl}
-          alt=""
-          className="absolute opacity-0 pointer-events-none"
-          style={{ width: 1, height: 1 }}
-          onLoad={() => setImageReady(true)}
-          onError={() => setImageError(true)}
-        />
-      )}
-      
       {/* Preview Image - only show container after image successfully loaded
           If no previewImageUrl or image errors, nothing renders (no grey area) */}
       {map.previewImageUrl && imageReady && !imageError && (
         <div className="relative w-full h-48 overflow-hidden bg-muted">
           <img
+            ref={imageRef}
             src={map.previewImageUrl}
             alt={map.name}
             className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
