@@ -129,7 +129,7 @@ export function TemplateDetail({
             </div>
             
             {template.shortDescription && (
-              <p className="text-muted-foreground text-lg">
+              <p className="text-foreground text-lg">
                 {template.shortDescription}
               </p>
             )}
