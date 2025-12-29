@@ -62,6 +62,7 @@ export async function GET(
           select: {
             id: true,
             name: true,
+            previewImageUrl: true,
             template: {
               select: {
                 id: true,
@@ -164,6 +165,7 @@ export async function GET(
                     select: {
                       id: true,
                       name: true,
+                      previewImageUrl: true,
                       template: {
                         select: {
                           id: true,
@@ -228,6 +230,7 @@ export async function GET(
                     select: {
                       id: true,
                       name: true,
+                      previewImageUrl: true,
                       template: {
                         select: {
                           id: true,
@@ -480,6 +483,7 @@ export async function PATCH(
             id: true,
             name: true,
             mapUrl: true,
+            previewImageUrl: true,
             template: {
               select: {
                 id: true,
@@ -552,6 +556,7 @@ export async function PATCH(
                     id: true,
                     name: true,
                     mapUrl: true,
+                    previewImageUrl: true,
                     template: {
                       select: {
                         id: true,
