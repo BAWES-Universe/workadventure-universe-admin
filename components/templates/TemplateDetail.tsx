@@ -235,9 +235,9 @@ export function TemplateDetail({
                   <CardHeader className="relative">
                     <div className="flex items-start justify-between">
                       <div className="flex-1">
-                        <CardTitle className="text-lg">{map.name}</CardTitle>
+                        <CardTitle className="text-base font-semibold leading-tight mb-1">{map.name}</CardTitle>
                         {map.sizeLabel && (
-                          <Badge variant="secondary" className="text-xs mt-1">
+                          <Badge variant="secondary" className="text-xs">
                             {map.sizeLabel.charAt(0).toUpperCase() + map.sizeLabel.slice(1).toLowerCase()} size
                           </Badge>
                         )}
@@ -247,7 +247,7 @@ export function TemplateDetail({
                       )}
                     </div>
                     {map.description && (
-                      <CardDescription className="mt-2">{map.description}</CardDescription>
+                      <CardDescription className="mt-3">{map.description}</CardDescription>
                     )}
                   </CardHeader>
                   <CardContent className="relative">
