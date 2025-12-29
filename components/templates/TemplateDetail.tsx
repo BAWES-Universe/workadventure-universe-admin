@@ -12,6 +12,7 @@ interface TemplateMap {
   name: string;
   description?: string;
   mapUrl: string;
+  previewImageUrl?: string | null;
   sizeLabel?: string;
   order: number;
 }
@@ -209,10 +210,32 @@ export function TemplateDetail({
                 >
                   <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-blue-500/10 via-transparent to-indigo-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
                   
+                  {/* Preview Image */}
+                  {map.previewImageUrl && (
+                    <div className="relative w-full h-48 overflow-hidden bg-muted border-b">
+                      <img
+                        src={map.previewImageUrl}
+                        alt={map.name}
+                        className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+                        onError={(e) => {
+                          // Hide image on error
+                          (e.target as HTMLImageElement).style.display = 'none';
+                        }}
+                      />
+                      {isSelected && (
+                        <div className="absolute top-2 right-2 z-10">
+                          <div className="bg-primary text-primary-foreground rounded-full p-1.5 shadow-lg">
+                            <Check className="h-4 w-4" />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  
                   <CardHeader className="relative">
                     <div className="flex items-start justify-between">
                       <CardTitle className="text-lg">{map.name}</CardTitle>
-                      {isSelected && (
+                      {isSelected && !map.previewImageUrl && (
                         <Check className="h-5 w-5 text-primary flex-shrink-0" />
                       )}
                     </div>
