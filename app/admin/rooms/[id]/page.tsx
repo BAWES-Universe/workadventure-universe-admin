@@ -759,18 +759,21 @@ export default function RoomDetailPage() {
                       <CardContent>
                         {selectedMapId && selectedTemplateName && selectedMapName ? (
                           <div className="rounded-lg bg-muted/50 border border-border/70 overflow-hidden">
-                            {selectedMapPreviewImageUrl && (
+                            {selectedMapPreviewImageUrl ? (
                               <div className="relative w-full h-48 overflow-hidden bg-muted">
                                 <img
                                   src={selectedMapPreviewImageUrl}
                                   alt={selectedMapName}
                                   className="w-full h-full object-cover"
                                   onError={(e) => {
-                                    (e.target as HTMLImageElement).style.display = 'none';
+                                    const container = (e.target as HTMLImageElement).parentElement;
+                                    if (container) {
+                                      container.style.display = 'none';
+                                    }
                                   }}
                                 />
                               </div>
-                            )}
+                            ) : null}
                             <div className="p-4">
                               <div className="flex items-start justify-between gap-2">
                                 <div className="flex-1 min-w-0">
@@ -802,18 +805,21 @@ export default function RoomDetailPage() {
                           </div>
                         ) : room?.templateMap && !selectedMapId ? (
                           <div className="rounded-lg bg-muted/50 border border-border/70 overflow-hidden">
-                            {room.templateMap.previewImageUrl && (
+                            {room.templateMap.previewImageUrl ? (
                               <div className="relative w-full h-48 overflow-hidden bg-muted">
                                 <img
                                   src={room.templateMap.previewImageUrl}
                                   alt={room.templateMap.name}
                                   className="w-full h-full object-cover"
                                   onError={(e) => {
-                                    (e.target as HTMLImageElement).style.display = 'none';
+                                    const container = (e.target as HTMLImageElement).parentElement;
+                                    if (container) {
+                                      container.style.display = 'none';
+                                    }
                                   }}
                                 />
                               </div>
-                            )}
+                            ) : null}
                             <div className="p-4">
                               <div className="flex items-start justify-between gap-2">
                                 <div className="flex-1 min-w-0">
