@@ -74,6 +74,97 @@ interface TemplateMap {
   };
 }
 
+function MapCardWithImageError({ map, isSuperAdmin }: { map: TemplateMap; isSuperAdmin: boolean }) {
+  const [imageReady, setImageReady] = useState(false);
+  const [imageError, setImageError] = useState(false);
+
+  // Reset states when previewImageUrl changes
+  useEffect(() => {
+    setImageReady(false);
+    setImageError(false);
+  }, [map.previewImageUrl]);
+
+  return (
+    <Link
+      href={`/admin/templates/maps/${map.id}`}
+      className="block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+    >
+      <Card
+        className={cn(
+          'group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
+          'hover:-translate-y-1 hover:shadow-lg',
+        )}
+      >
+        <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-green-500/10 via-transparent to-emerald-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
+
+        {/* Hidden pre-loader: test if image loads before showing container */}
+        {map.previewImageUrl && !imageReady && !imageError && (
+          <img
+            src={map.previewImageUrl}
+            alt=""
+            className="absolute opacity-0 pointer-events-none"
+            style={{ width: 1, height: 1 }}
+            onLoad={() => setImageReady(true)}
+            onError={() => setImageError(true)}
+          />
+        )}
+
+        {/* Preview Image - only show container after image successfully loaded
+            If no previewImageUrl or image errors, nothing renders (no grey area) */}
+        {map.previewImageUrl && imageReady && !imageError && (
+          <div className="relative w-full h-48 overflow-hidden bg-muted">
+            <img
+              src={map.previewImageUrl}
+              alt={map.name}
+              className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+            />
+            {isSuperAdmin && (
+              <div className="absolute top-2 right-2 z-10">
+                <Badge variant={map.isActive ? 'default' : 'secondary'} className="shadow-lg">
+                  {map.isActive ? 'Active' : 'Inactive'}
+                </Badge>
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="relative flex flex-col p-5">
+          {isSuperAdmin && (!map.previewImageUrl || imageError) && (
+            <div className="absolute bottom-4 right-4 z-10">
+              <Badge variant={map.isActive ? 'default' : 'secondary'}>
+                {map.isActive ? 'Active' : 'Inactive'}
+              </Badge>
+            </div>
+          )}
+          <div className="mb-2">
+            <h3 className="truncate text-base font-semibold leading-tight mb-1">
+              {map.name}
+            </h3>
+            {map.sizeLabel && (
+              <Badge variant="secondary" className="text-xs">
+                {map.sizeLabel.charAt(0).toUpperCase() + map.sizeLabel.slice(1).toLowerCase()} size
+              </Badge>
+            )}
+          </div>
+
+          {map.description && (
+            <p className="mb-3 line-clamp-2 text-sm text-muted-foreground">
+              {map.description}
+            </p>
+          )}
+
+          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <MapPin className="h-3.5 w-3.5" />
+            <span>
+              {map._count?.rooms || 0} {map._count?.rooms === 1 ? 'room' : 'rooms'} using this map
+            </span>
+          </div>
+        </div>
+      </Card>
+    </Link>
+  );
+}
+
 export default function TemplateDetailPage() {
   const router = useRouter();
   const params = useParams();
@@ -443,75 +534,7 @@ export default function TemplateDetailPage() {
         ) : (
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
             {maps.map((map) => (
-              <Link
-                key={map.id}
-                href={`/admin/templates/maps/${map.id}`}
-                className="block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-              >
-                <Card
-                  className={cn(
-                    'group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
-                    'hover:-translate-y-1 hover:shadow-lg',
-                  )}
-                >
-                  <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-green-500/10 via-transparent to-emerald-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
-
-                  {/* Preview Image */}
-                  {map.previewImageUrl && (
-                    <div className="relative w-full h-48 overflow-hidden bg-muted">
-                      <img
-                        src={map.previewImageUrl}
-                        alt={map.name}
-                        className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
-                        onError={(e) => {
-                          // Hide image on error
-                          (e.target as HTMLImageElement).style.display = 'none';
-                        }}
-                      />
-                      {isSuperAdmin && (
-                        <div className="absolute top-2 right-2 z-10">
-                          <Badge variant={map.isActive ? 'default' : 'secondary'} className="shadow-lg">
-                            {map.isActive ? 'Active' : 'Inactive'}
-                          </Badge>
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  <div className="relative flex flex-col p-5">
-                    {isSuperAdmin && !map.previewImageUrl && (
-                      <div className="absolute bottom-4 right-4 z-10">
-                        <Badge variant={map.isActive ? 'default' : 'secondary'}>
-                          {map.isActive ? 'Active' : 'Inactive'}
-                        </Badge>
-                      </div>
-                    )}
-                    <div className="mb-2">
-                      <h3 className="truncate text-base font-semibold leading-tight mb-1">
-                        {map.name}
-                      </h3>
-                      {map.sizeLabel && (
-                        <Badge variant="secondary" className="text-xs">
-                          {map.sizeLabel.charAt(0).toUpperCase() + map.sizeLabel.slice(1).toLowerCase()} size
-                        </Badge>
-                      )}
-                    </div>
-
-                    {map.description && (
-                      <p className="mb-3 line-clamp-2 text-sm text-muted-foreground">
-                        {map.description}
-                      </p>
-                    )}
-
-                    <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                      <MapPin className="h-3.5 w-3.5" />
-                      <span>
-                        {map._count?.rooms || 0} {map._count?.rooms === 1 ? 'room' : 'rooms'} using this map
-                      </span>
-                    </div>
-                  </div>
-                </Card>
-              </Link>
+              <MapCardWithImageError key={map.id} map={map} isSuperAdmin={isSuperAdmin} />
             ))}
           </div>
         )}

@@ -47,6 +47,93 @@ interface TemplateDetailProps {
   hideBackButton?: boolean;
 }
 
+function MapCardWithImage({ map, isSelected, onSelectMap }: { map: TemplateMap; isSelected: boolean; onSelectMap: (mapId: string, mapUrl: string) => void }) {
+  const [imageReady, setImageReady] = useState(false);
+  const [imageError, setImageError] = useState(false);
+
+  // Reset states when previewImageUrl changes
+  useEffect(() => {
+    setImageReady(false);
+    setImageError(false);
+  }, [map.previewImageUrl]);
+
+  return (
+    <Card
+      className={`cursor-pointer transition-all group relative overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background ${
+        isSelected
+          ? 'ring-2 ring-primary shadow-lg'
+          : 'hover:-translate-y-1 hover:shadow-lg'
+      }`}
+      onClick={() => onSelectMap(map.id, map.mapUrl)}
+    >
+      <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-blue-500/10 via-transparent to-indigo-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
+      
+      {/* Hidden pre-loader: test if image loads before showing container */}
+      {map.previewImageUrl && !imageReady && !imageError && (
+        <img
+          src={map.previewImageUrl}
+          alt=""
+          className="absolute opacity-0 pointer-events-none"
+          style={{ width: 1, height: 1 }}
+          onLoad={() => setImageReady(true)}
+          onError={() => setImageError(true)}
+        />
+      )}
+      
+      {/* Preview Image - only show container after image successfully loaded
+          If no previewImageUrl or image errors, nothing renders (no grey area) */}
+      {map.previewImageUrl && imageReady && !imageError && (
+        <div className="relative w-full h-48 overflow-hidden bg-muted">
+          <img
+            src={map.previewImageUrl}
+            alt={map.name}
+            className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+          />
+          {isSelected && (
+            <div className="absolute top-2 right-2 z-10">
+              <div className="bg-primary text-primary-foreground rounded-full p-1.5 shadow-lg">
+                <Check className="h-4 w-4" />
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+      
+      <CardHeader className="relative">
+        <div className="flex items-start justify-between">
+          <div className="flex-1">
+            <CardTitle className="text-base font-semibold leading-tight mb-1">{map.name}</CardTitle>
+            {map.sizeLabel && (
+              <Badge variant="secondary" className="text-xs">
+                {map.sizeLabel.charAt(0).toUpperCase() + map.sizeLabel.slice(1).toLowerCase()} size
+              </Badge>
+            )}
+          </div>
+          {isSelected && (!map.previewImageUrl || imageError || !imageReady) && (
+            <Check className="h-5 w-5 text-primary flex-shrink-0" />
+          )}
+        </div>
+        {map.description && (
+          <CardDescription className="mt-3">{map.description}</CardDescription>
+        )}
+      </CardHeader>
+      <CardContent className="relative">
+        <Button
+          variant={isSelected ? 'default' : 'outline'}
+          size="sm"
+          className="w-full"
+          onClick={(e) => {
+            e.stopPropagation();
+            onSelectMap(map.id, map.mapUrl);
+          }}
+        >
+          {isSelected ? 'Selected' : 'Use this map'}
+        </Button>
+      </CardContent>
+    </Card>
+  );
+}
+
 export function TemplateDetail({
   templateSlug,
   onSelectMap,
@@ -199,71 +286,12 @@ export function TemplateDetail({
             {template.maps.map((map) => {
               const isSelected = selectedMapId === map.id;
               return (
-                <Card
+                <MapCardWithImage
                   key={map.id}
-                  className={`cursor-pointer transition-all group relative overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background ${
-                    isSelected
-                      ? 'ring-2 ring-primary shadow-lg'
-                      : 'hover:-translate-y-1 hover:shadow-lg'
-                  }`}
-                  onClick={() => onSelectMap(map.id, map.mapUrl)}
-                >
-                  <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-blue-500/10 via-transparent to-indigo-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
-                  
-                  {/* Preview Image */}
-                  {map.previewImageUrl && (
-                    <div className="relative w-full h-48 overflow-hidden bg-muted">
-                      <img
-                        src={map.previewImageUrl}
-                        alt={map.name}
-                        className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
-                        onError={(e) => {
-                          // Hide image on error
-                          (e.target as HTMLImageElement).style.display = 'none';
-                        }}
-                      />
-                      {isSelected && (
-                        <div className="absolute top-2 right-2 z-10">
-                          <div className="bg-primary text-primary-foreground rounded-full p-1.5 shadow-lg">
-                            <Check className="h-4 w-4" />
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  
-                  <CardHeader className="relative">
-                    <div className="flex items-start justify-between">
-                      <div className="flex-1">
-                        <CardTitle className="text-base font-semibold leading-tight mb-1">{map.name}</CardTitle>
-                        {map.sizeLabel && (
-                          <Badge variant="secondary" className="text-xs">
-                            {map.sizeLabel.charAt(0).toUpperCase() + map.sizeLabel.slice(1).toLowerCase()} size
-                          </Badge>
-                        )}
-                      </div>
-                      {isSelected && !map.previewImageUrl && (
-                        <Check className="h-5 w-5 text-primary flex-shrink-0" />
-                      )}
-                    </div>
-                    {map.description && (
-                      <CardDescription className="mt-3">{map.description}</CardDescription>
-                    )}
-                  </CardHeader>
-                  <CardContent className="relative">
-                    <Button
-                      variant={isSelected ? 'default' : 'outline'}
-                      size="sm"
-                      className="w-full"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onSelectMap(map.id, map.mapUrl);
-                      }}
-                    >
-                      {isSelected ? 'Selected' : 'Use this map'}
-                    </Button>
-                  </CardContent>
-                </Card>
+                  map={map}
+                  isSelected={isSelected}
+                  onSelectMap={onSelectMap}
+                />
               );
             })}
           </div>
