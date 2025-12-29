@@ -212,7 +212,7 @@ export function TemplateDetail({
                   
                   {/* Preview Image */}
                   {map.previewImageUrl && (
-                    <div className="relative w-full h-48 overflow-hidden bg-muted border-b">
+                    <div className="relative w-full h-48 overflow-hidden bg-muted">
                       <img
                         src={map.previewImageUrl}
                         alt={map.name}
@@ -234,7 +234,14 @@ export function TemplateDetail({
                   
                   <CardHeader className="relative">
                     <div className="flex items-start justify-between">
-                      <CardTitle className="text-lg">{map.name}</CardTitle>
+                      <div className="flex-1">
+                        <CardTitle className="text-lg">{map.name}</CardTitle>
+                        {map.sizeLabel && (
+                          <Badge variant="secondary" className="text-xs mt-1">
+                            {map.sizeLabel.charAt(0).toUpperCase() + map.sizeLabel.slice(1).toLowerCase()} size
+                          </Badge>
+                        )}
+                      </div>
                       {isSelected && !map.previewImageUrl && (
                         <Check className="h-5 w-5 text-primary flex-shrink-0" />
                       )}
@@ -244,23 +251,17 @@ export function TemplateDetail({
                     )}
                   </CardHeader>
                   <CardContent className="relative">
-                    <div className="flex items-center justify-between">
-                      {map.sizeLabel && (
-                        <Badge variant="outline" className="text-xs">
-                          {map.sizeLabel}
-                        </Badge>
-                      )}
-                      <Button
-                        variant={isSelected ? 'default' : 'outline'}
-                        size="sm"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onSelectMap(map.id, map.mapUrl);
-                        }}
-                      >
-                        {isSelected ? 'Selected' : 'Use this map'}
-                      </Button>
-                    </div>
+                    <Button
+                      variant={isSelected ? 'default' : 'outline'}
+                      size="sm"
+                      className="w-full"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onSelectMap(map.id, map.mapUrl);
+                      }}
+                    >
+                      {isSelected ? 'Selected' : 'Use this map'}
+                    </Button>
                   </CardContent>
                 </Card>
               );

@@ -321,7 +321,11 @@ export function MapsTab() {
                     <TableCell className="font-medium">{map.name}</TableCell>
                     <TableCell className="text-muted-foreground">{map.slug}</TableCell>
                     <TableCell>
-                      {map.sizeLabel && <Badge variant="outline">{map.sizeLabel}</Badge>}
+                      {map.sizeLabel && (
+                        <Badge variant="outline">
+                          {map.sizeLabel.charAt(0).toUpperCase() + map.sizeLabel.slice(1).toLowerCase()} size
+                        </Badge>
+                      )}
                     </TableCell>
                     <TableCell>{map._count.rooms}</TableCell>
                     <TableCell>

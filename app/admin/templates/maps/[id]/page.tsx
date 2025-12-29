@@ -737,7 +737,7 @@ export default function MapDetailPage() {
           )}
           {map.sizeLabel && (
             <Badge variant="secondary">
-              {map.sizeLabel} size
+              {map.sizeLabel.charAt(0).toUpperCase() + map.sizeLabel.slice(1).toLowerCase()} size
             </Badge>
           )}
         </div>
