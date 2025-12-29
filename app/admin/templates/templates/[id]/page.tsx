@@ -118,24 +118,19 @@ function MapCardWithImageError({ map, isSuperAdmin }: { map: TemplateMap; isSupe
               alt={map.name}
               className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
             />
-            {isSuperAdmin && (
-              <div className="absolute top-2 right-2 z-10">
-                <Badge variant={map.isActive ? 'default' : 'secondary'} className="shadow-lg">
-                  {map.isActive ? 'Active' : 'Inactive'}
-                </Badge>
-              </div>
-            )}
+          </div>
+        )}
+
+        {/* Active badge - show immediately, always in bottom-right corner */}
+        {isSuperAdmin && (
+          <div className="absolute bottom-4 right-4 z-10">
+            <Badge variant={map.isActive ? 'default' : 'secondary'}>
+              {map.isActive ? 'Active' : 'Inactive'}
+            </Badge>
           </div>
         )}
 
         <div className="relative flex flex-col p-5">
-          {isSuperAdmin && (!map.previewImageUrl || imageError) && (
-            <div className="absolute bottom-4 right-4 z-10">
-              <Badge variant={map.isActive ? 'default' : 'secondary'}>
-                {map.isActive ? 'Active' : 'Inactive'}
-              </Badge>
-            </div>
-          )}
           <div className="mb-2">
             <h3 className="truncate text-base font-semibold leading-tight mb-1">
               {map.name}
