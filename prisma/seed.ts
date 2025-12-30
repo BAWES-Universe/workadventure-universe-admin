@@ -405,7 +405,8 @@ async function seedRoomTemplates() {
       continue;
     }
 
-    const { categorySlug, ...templateData } = tplData;
+    // Remove 'id' and 'categorySlug' from templateData - Prisma will generate UUID for id
+    const { categorySlug, id, ...templateData } = tplData;
     await prisma.roomTemplate.upsert({
       where: { slug: tplData.slug },
       update: {
