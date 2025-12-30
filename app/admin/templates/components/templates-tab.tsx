@@ -41,7 +41,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { Plus, Edit, Trash2, Loader2, ExternalLink, Wrench } from 'lucide-react';
+import { Plus, Edit, Trash2, Loader2, ExternalLink } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 
 interface Category {
@@ -84,8 +84,6 @@ export function TemplatesTab() {
   const [editingTemplate, setEditingTemplate] = useState<Template | null>(null);
   const [deleteTemplate, setDeleteTemplate] = useState<Template | null>(null);
   const [saving, setSaving] = useState(false);
-  const [isSuperAdmin, setIsSuperAdmin] = useState(false);
-  const [fixingIds, setFixingIds] = useState(false);
 
   const [formData, setFormData] = useState({
     categoryId: '',
@@ -102,23 +100,9 @@ export function TemplatesTab() {
   });
 
   useEffect(() => {
-    checkAuth();
     fetchCategories();
     fetchTemplates();
   }, []);
-
-  async function checkAuth() {
-    try {
-      const { authenticatedFetch } = await import('@/lib/client-auth');
-      const response = await authenticatedFetch('/api/auth/me');
-      if (response.ok) {
-        const data = await response.json();
-        setIsSuperAdmin(data.user?.isSuperAdmin || false);
-      }
-    } catch (err) {
-      // Ignore auth errors
-    }
-  }
 
   async function fetchCategories() {
     try {
@@ -266,31 +250,6 @@ export function TemplatesTab() {
     }
   }
 
-  async function handleFixTemplateIds() {
-    try {
-      setFixingIds(true);
-      setError(null);
-      const { authenticatedFetch } = await import('@/lib/client-auth');
-      const response = await authenticatedFetch('/api/admin/templates/fix-template-ids', {
-        method: 'POST',
-      });
-
-      if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.error || 'Failed to fix template IDs');
-      }
-
-      const data = await response.json();
-      alert(`Success! Fixed ${data.fixed} template(s).`);
-      // Refresh templates to show updated IDs
-      await fetchTemplates();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to fix template IDs');
-    } finally {
-      setFixingIds(false);
-    }
-  }
-
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12">
@@ -308,27 +267,10 @@ export function TemplatesTab() {
             Manage room templates
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          {isSuperAdmin && (
-            <Button
-              onClick={handleFixTemplateIds}
-              disabled={fixingIds}
-              variant="outline"
-              title="Fix template IDs that were seeded with slugs instead of UUIDs"
-            >
-              {fixingIds ? (
-                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-              ) : (
-                <Wrench className="h-4 w-4 mr-2" />
-              )}
-              Fix Template IDs
-            </Button>
-          )}
-          <Button onClick={openCreateDialog} disabled={categories.length === 0}>
-            <Plus className="h-4 w-4 mr-2" />
-            Create Template
-          </Button>
-        </div>
+        <Button onClick={openCreateDialog} disabled={categories.length === 0}>
+          <Plus className="h-4 w-4 mr-2" />
+          Create Template
+        </Button>
       </div>
 
       {categories.length === 0 && (
