@@ -54,6 +54,7 @@ interface Room {
   templateMap?: {
     id: string;
     name: string;
+    previewImageUrl: string | null;
     template: {
       id: string;
       slug: string;
