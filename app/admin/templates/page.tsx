@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
-import { AlertCircle, Loader2, Shield, Plus, FolderOpen, Wrench } from 'lucide-react';
+import { AlertCircle, Loader2, Shield, Plus, FolderOpen } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface Category {
@@ -31,7 +31,6 @@ export default function TemplatesAdminPage() {
   const [categories, setCategories] = useState<Category[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [fixingIds, setFixingIds] = useState(false);
 
   useEffect(() => {
     checkAuth();
@@ -77,35 +76,6 @@ export default function TemplatesAdminPage() {
     }
   }
 
-  async function handleFixTemplateIds() {
-    try {
-      setFixingIds(true);
-      setError(null);
-      const { authenticatedFetch } = await import('@/lib/client-auth');
-      const response = await authenticatedFetch('/api/admin/templates/fix-template-ids', {
-        method: 'POST',
-      });
-
-      if (!response.ok) {
-        const data = await response.json();
-        const errorMsg = data.details 
-          ? `${data.error}: ${data.details}` 
-          : data.error || 'Failed to fix template IDs';
-        console.error('Error response:', data);
-        throw new Error(errorMsg);
-      }
-
-      const data = await response.json();
-      alert(`Success! Fixed ${data.fixed} template(s).`);
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'Failed to fix template IDs';
-      setError(errorMessage);
-      console.error('Error fixing template IDs:', err);
-    } finally {
-      setFixingIds(false);
-    }
-  }
-
   if (checkingAuth) {
     return (
       <div className="flex items-center justify-center py-12">
@@ -127,28 +97,12 @@ export default function TemplatesAdminPage() {
         <div className="flex items-center justify-between">
           <h2 className="text-2xl font-semibold">Categories</h2>
           {isSuperAdmin && (
-            <div className="flex items-center gap-2">
-              {/* Temporary button to fix template IDs - remove after use */}
-              <Button
-                onClick={handleFixTemplateIds}
-                disabled={fixingIds}
-                variant="outline"
-                title="Fix template IDs that were seeded with slugs instead of UUIDs"
-              >
-                {fixingIds ? (
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                ) : (
-                  <Wrench className="h-4 w-4 mr-2" />
-                )}
-                Fix Template IDs
-              </Button>
-              <Button asChild>
-                <Link href="/admin/templates/categories/new">
-                  <Plus className="h-4 w-4 mr-2" />
-                  Create Category
-                </Link>
-              </Button>
-            </div>
+            <Button asChild>
+              <Link href="/admin/templates/categories/new">
+                <Plus className="h-4 w-4 mr-2" />
+                Create Category
+              </Link>
+            </Button>
           )}
         </div>
       </div>
