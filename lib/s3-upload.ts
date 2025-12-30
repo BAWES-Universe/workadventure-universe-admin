@@ -40,7 +40,24 @@ export async function uploadImageToS3(
   });
 
   try {
-  await s3Client.send(command);
+    await s3Client.send(command);
+    
+    // Verify the file is actually available by attempting to read it
+    // This ensures the upload has fully propagated before returning the URL
+    const verifyCommand = new GetObjectCommand({
+      Bucket: BUCKET,
+      Key: key,
+    });
+    
+    try {
+      await s3Client.send(verifyCommand);
+    } catch (verifyError: any) {
+      // If verification fails, log but don't fail the upload
+      // The file might still be propagating (eventual consistency)
+      console.warn(`File uploaded but not immediately readable: ${key}`, verifyError);
+      // Wait a brief moment for eventual consistency
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
   } catch (error: any) {
     // Better error handling for S3 errors
     if (error.Code === 'NoSuchBucket') {
