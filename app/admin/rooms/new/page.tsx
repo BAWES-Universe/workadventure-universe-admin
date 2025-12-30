@@ -414,33 +414,33 @@ function NewRoomPageContent() {
                     <div className="p-4">
                       <div className="flex items-start justify-between gap-2">
                         <div className="flex-1 min-w-0">
-                          <div className="text-sm font-medium mb-1">Selected Template Map</div>
-                          <div className="text-sm text-muted-foreground">
-                            <div><strong>Template:</strong> {selectedTemplateName}</div>
-                            <div><strong>Map:</strong> {selectedMapName}</div>
-                          </div>
+                        <div className="text-sm font-medium mb-1">Selected Template Map</div>
+                        <div className="text-sm text-muted-foreground">
+                          <div><strong>Template:</strong> {selectedTemplateName}</div>
+                          <div><strong>Map:</strong> {selectedMapName}</div>
                         </div>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          onClick={() => {
-                            // Clear map selection but keep template info for display
-                            setSelectedMapId(null);
-                            setSelectedMapUrl(null);
+                      </div>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => {
+                          // Clear map selection but keep template info for display
+                          setSelectedMapId(null);
+                          setSelectedMapUrl(null);
                             setSelectedMapPreviewImageUrl(null);
-                            setSelectedMapName(null);
-                            setFormData(prev => ({
-                              ...prev,
-                              templateMapId: null,
-                              mapUrl: '',
-                            }));
-                            // Show template library
-                            setSelectedTemplateSlug(null);
-                          }}
-                        >
-                          Change Template
-                        </Button>
+                          setSelectedMapName(null);
+                          setFormData(prev => ({
+                            ...prev,
+                            templateMapId: null,
+                            mapUrl: '',
+                          }));
+                          // Show template library
+                          setSelectedTemplateSlug(null);
+                        }}
+                      >
+                        Change Template
+                      </Button>
                       </div>
                     </div>
                   </div>

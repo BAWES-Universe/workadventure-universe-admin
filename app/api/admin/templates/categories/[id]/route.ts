@@ -132,12 +132,23 @@ export async function DELETE(
 
     const { id } = await params;
 
-    // Check if category has templates
+    // Get category with all templates, maps, and rooms
     const category = await prisma.roomTemplateCategory.findUnique({
       where: { id },
       include: {
-        _count: {
-          select: { templates: true },
+        templates: {
+          include: {
+            maps: {
+              include: {
+                rooms: {
+                  select: {
+                    id: true,
+                    mapUrl: true,
+                  },
+                },
+              },
+            },
+          },
         },
       },
     });
@@ -149,13 +160,42 @@ export async function DELETE(
       );
     }
 
-    // Note: Schema has onDelete: Cascade, so templates will be automatically deleted
-    // We allow deletion even with templates, but the UI should warn the user
+    // Preserve all rooms by copying mapUrl from each map before deletion
+    let totalRoomsPreserved = 0;
+    let totalMapsDeleted = 0;
+    
+    for (const template of category.templates) {
+      for (const map of template.maps) {
+        totalMapsDeleted++;
+        if (map.rooms.length > 0) {
+          await prisma.room.updateMany({
+            where: {
+              templateMapId: map.id,
+            },
+            data: {
+              mapUrl: map.mapUrl, // Copy the template map's URL to preserve the room
+            },
+          });
+          totalRoomsPreserved += map.rooms.length;
+        }
+      }
+    }
+
+    if (totalRoomsPreserved > 0) {
+      console.log(`Preserved ${totalRoomsPreserved} room(s) across ${totalMapsDeleted} map(s) in ${category.templates.length} template(s) before category deletion`);
+    }
+
+    // Delete the category (cascades to templates and maps)
     await prisma.roomTemplateCategory.delete({
       where: { id },
     });
 
-    return NextResponse.json({ success: true });
+    return NextResponse.json({ 
+      success: true,
+      roomsPreserved: totalRoomsPreserved,
+      templatesDeleted: category.templates.length,
+      mapsDeleted: totalMapsDeleted,
+    });
   } catch (error) {
     console.error('Error deleting category:', error);
     return NextResponse.json(

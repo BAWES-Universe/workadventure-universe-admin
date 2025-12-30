@@ -778,29 +778,29 @@ export default function RoomDetailPage() {
                             <div className="p-4">
                               <div className="flex items-start justify-between gap-2">
                                 <div className="flex-1 min-w-0">
-                                  <div className="text-sm font-medium mb-1">Selected Template Map</div>
-                                  <div className="text-sm text-muted-foreground">
-                                    <div><strong>Template:</strong> {selectedTemplateName}</div>
-                                    <div><strong>Map:</strong> {selectedMapName}</div>
-                                  </div>
+                                <div className="text-sm font-medium mb-1">Selected Template Map</div>
+                                <div className="text-sm text-muted-foreground">
+                                  <div><strong>Template:</strong> {selectedTemplateName}</div>
+                                  <div><strong>Map:</strong> {selectedMapName}</div>
                                 </div>
-                                <Button
-                                  type="button"
-                                  variant="outline"
-                                  size="sm"
-                                  onClick={() => {
-                                    // Show template library to change template
-                                    setIsChangingTemplate(true);
-                                    setSelectedTemplateSlug(null);
-                                    setSelectedMapId(null);
-                                    setSelectedMapUrl(null);
+                              </div>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                onClick={() => {
+                                  // Show template library to change template
+                                  setIsChangingTemplate(true);
+                                  setSelectedTemplateSlug(null);
+                                  setSelectedMapId(null);
+                                  setSelectedMapUrl(null);
                                     setSelectedMapPreviewImageUrl(null);
-                                    setSelectedTemplateName(null);
-                                    setSelectedMapName(null);
-                                  }}
-                                >
-                                  Change Template
-                                </Button>
+                                  setSelectedTemplateName(null);
+                                  setSelectedMapName(null);
+                                }}
+                              >
+                                Change Template
+                              </Button>
                               </div>
                             </div>
                           </div>
@@ -824,29 +824,29 @@ export default function RoomDetailPage() {
                             <div className="p-4">
                               <div className="flex items-start justify-between gap-2">
                                 <div className="flex-1 min-w-0">
-                                  <div className="text-sm font-medium mb-1">Current Template Map</div>
-                                  <div className="text-sm text-muted-foreground">
-                                    <div><strong>Template:</strong> {room.templateMap.template.category.name} - {room.templateMap.template.name}</div>
-                                    <div><strong>Map:</strong> {room.templateMap.name}</div>
-                                  </div>
+                                <div className="text-sm font-medium mb-1">Current Template Map</div>
+                                <div className="text-sm text-muted-foreground">
+                                  <div><strong>Template:</strong> {room.templateMap.template.category.name} - {room.templateMap.template.name}</div>
+                                  <div><strong>Map:</strong> {room.templateMap.name}</div>
                                 </div>
-                                <Button
-                                  type="button"
-                                  variant="outline"
-                                  size="sm"
-                                  onClick={() => {
-                                    // Show template library to change template
-                                    setIsChangingTemplate(true);
-                                    setSelectedTemplateSlug(null);
-                                    setSelectedMapId(null);
-                                    setSelectedMapUrl(null);
+                              </div>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                onClick={() => {
+                                  // Show template library to change template
+                                  setIsChangingTemplate(true);
+                                  setSelectedTemplateSlug(null);
+                                  setSelectedMapId(null);
+                                  setSelectedMapUrl(null);
                                     setSelectedMapPreviewImageUrl(null);
-                                    setSelectedTemplateName(null);
-                                    setSelectedMapName(null);
-                                  }}
-                                >
-                                  Change Template
-                                </Button>
+                                  setSelectedTemplateName(null);
+                                  setSelectedMapName(null);
+                                }}
+                              >
+                                Change Template
+                              </Button>
                               </div>
                             </div>
                           </div>

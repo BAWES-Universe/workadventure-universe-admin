@@ -40,7 +40,7 @@ export async function uploadImageToS3(
   });
 
   try {
-    await s3Client.send(command);
+  await s3Client.send(command);
   } catch (error: any) {
     // Better error handling for S3 errors
     if (error.Code === 'NoSuchBucket') {
@@ -237,7 +237,7 @@ export async function moveTempPreviewImage(tempUrl: string, mapId: string): Prom
 
     // Delete the temp file - do this even if there's an error above
     try {
-      await deleteImageFromS3(tempKey);
+    await deleteImageFromS3(tempKey);
     } catch (deleteError) {
       console.error('Error deleting temp file after move:', deleteError);
       // Continue anyway - the file is moved

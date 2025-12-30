@@ -208,12 +208,15 @@ export async function DELETE(
 
     const { id } = await params;
 
-    // Check if map is used by any rooms
+    // Get the map with its rooms
     const map = await prisma.roomTemplateMap.findUnique({
       where: { id },
       include: {
-        _count: {
-          select: { rooms: true },
+        rooms: {
+          select: {
+            id: true,
+            mapUrl: true,
+          },
         },
       },
     });
@@ -225,11 +228,17 @@ export async function DELETE(
       );
     }
 
-    if (map._count.rooms > 0) {
-      return NextResponse.json(
-        { error: 'Cannot delete map that is used by existing rooms' },
-        { status: 400 }
-      );
+    // Preserve rooms by copying mapUrl before deletion
+    if (map.rooms.length > 0) {
+      await prisma.room.updateMany({
+        where: {
+          templateMapId: id,
+        },
+        data: {
+          mapUrl: map.mapUrl, // Copy the template map's URL to preserve the room
+        },
+      });
+      console.log(`Preserved ${map.rooms.length} room(s) by copying mapUrl before map deletion`);
     }
 
     // Delete preview image from S3 if it exists
@@ -249,7 +258,10 @@ export async function DELETE(
       where: { id },
     });
 
-    return NextResponse.json({ success: true });
+    return NextResponse.json({ 
+      success: true,
+      roomsPreserved: map.rooms.length,
+    });
   } catch (error) {
     console.error('Error deleting map:', error);
     return NextResponse.json(

@@ -161,12 +161,19 @@ export async function DELETE(
 
     const { id } = await params;
 
-    // Check if template has maps
+    // Get template with all maps and their rooms
     const template = await prisma.roomTemplate.findUnique({
       where: { id },
       include: {
-        _count: {
-          select: { maps: true },
+        maps: {
+          include: {
+            rooms: {
+              select: {
+                id: true,
+                mapUrl: true,
+              },
+            },
+          },
         },
       },
     });
@@ -178,13 +185,36 @@ export async function DELETE(
       );
     }
 
-    // Note: Schema has onDelete: Cascade, so maps will be automatically deleted
-    // We allow deletion even with maps, but the UI should warn the user
+    // Preserve all rooms by copying mapUrl from each map before deletion
+    let totalRoomsPreserved = 0;
+    for (const map of template.maps) {
+      if (map.rooms.length > 0) {
+        await prisma.room.updateMany({
+          where: {
+            templateMapId: map.id,
+          },
+          data: {
+            mapUrl: map.mapUrl, // Copy the template map's URL to preserve the room
+          },
+        });
+        totalRoomsPreserved += map.rooms.length;
+      }
+    }
+
+    if (totalRoomsPreserved > 0) {
+      console.log(`Preserved ${totalRoomsPreserved} room(s) across ${template.maps.length} map(s) before template deletion`);
+    }
+
+    // Delete the template (cascades to maps)
     await prisma.roomTemplate.delete({
       where: { id },
     });
 
-    return NextResponse.json({ success: true });
+    return NextResponse.json({ 
+      success: true,
+      roomsPreserved: totalRoomsPreserved,
+      mapsDeleted: template.maps.length,
+    });
   } catch (error) {
     console.error('Error deleting template:', error);
     return NextResponse.json(
