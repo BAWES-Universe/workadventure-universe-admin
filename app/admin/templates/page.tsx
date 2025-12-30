@@ -88,13 +88,19 @@ export default function TemplatesAdminPage() {
 
       if (!response.ok) {
         const data = await response.json();
-        throw new Error(data.error || 'Failed to fix template IDs');
+        const errorMsg = data.details 
+          ? `${data.error}: ${data.details}` 
+          : data.error || 'Failed to fix template IDs';
+        console.error('Error response:', data);
+        throw new Error(errorMsg);
       }
 
       const data = await response.json();
       alert(`Success! Fixed ${data.fixed} template(s).`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to fix template IDs');
+      const errorMessage = err instanceof Error ? err.message : 'Failed to fix template IDs';
+      setError(errorMessage);
+      console.error('Error fixing template IDs:', err);
     } finally {
       setFixingIds(false);
     }

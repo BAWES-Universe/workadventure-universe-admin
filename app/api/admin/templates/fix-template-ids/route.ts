@@ -36,29 +36,24 @@ export async function POST(request: NextRequest) {
 
     const results = [];
 
+    // The foreign key constraint has ON UPDATE CASCADE, which means
+    // when we update the template ID, the maps' template_id will automatically update
+    // So we only need to update the template ID itself!
     for (const template of templatesWithSlugIds) {
       // Generate a new UUID
       const newId = randomUUID();
-
-      // Update all template maps that reference this template
+      
       let mapsUpdated = 0;
       if (template.maps.length > 0) {
-        await prisma.roomTemplateMap.updateMany({
-          where: {
-            templateId: template.id,
-          },
-          data: {
-            templateId: newId,
-          },
-        });
         mapsUpdated = template.maps.length;
       }
 
-      // Update the template ID itself using raw SQL (Prisma doesn't support updating IDs)
+      // Update template ID - the ON UPDATE CASCADE will automatically update
+      // all room_template_maps.template_id values that reference this template
       await prisma.$executeRaw`
         UPDATE room_templates 
         SET id = ${newId}::text
-        WHERE id = ${template.id}
+        WHERE id = ${template.id}::text
       `;
 
       results.push({
@@ -78,10 +73,12 @@ export async function POST(request: NextRequest) {
     });
   } catch (error: any) {
     console.error('Error fixing template IDs:', error);
+    console.error('Error stack:', error.stack);
     return NextResponse.json(
       {
         error: 'Internal server error',
         details: error.message,
+        stack: process.env.NODE_ENV === 'development' ? error.stack : undefined,
       },
       { status: 500 }
     );
