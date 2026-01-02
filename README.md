@@ -92,6 +92,23 @@ This Admin API integrates with WorkAdventure to provide:
      - ✅ Development when you've changed `schema.prisma` and need to create a new migration
      - ❌ Never use in production (can cause data loss)
 
+6. **Seed the database (optional but recommended):**
+   ```bash
+   # Seed default universe, world, room, and templates
+   docker compose exec admin-api npx prisma db seed
+   
+   # Or use the npm script (from host)
+   npm run db:seed
+   ```
+   
+   This creates:
+   - Default universe, world, and room (accessible at `/@/default/default/default`)
+   - System user for ownership
+   - Room template categories and templates
+   - Template maps for creating rooms
+   
+   **Note:** The seed script is idempotent - it's safe to run multiple times and won't create duplicates.
+
 The Admin API will be available at:
 - **Admin Interface**: http://admin.bawes.localhost:8321
 - **Traefik Dashboard**: http://traefik-admin.bawes.localhost:8321
