@@ -76,12 +76,21 @@ This Admin API integrates with WorkAdventure to provide:
 
 5. **Initialize database:**
    ```bash
-   # Run migrations (from inside the container or using npm scripts)
-   docker compose exec admin-api npx prisma migrate dev --name init
+   # For fresh install - applies existing migrations only
+   docker compose exec admin-api npx prisma migrate deploy
    
    # Or use the npm script (from host)
-   npm run db:migrate
+   npm run db:migrate:deploy
    ```
+   
+   **Migration Commands:**
+   - **`prisma migrate deploy`** - Use for:
+     - ✅ Fresh database setup (applies all existing migrations)
+     - ✅ Production deployments
+     - ✅ Applying migrations without creating new ones
+   - **`prisma migrate dev`** - Use for:
+     - ✅ Development when you've changed `schema.prisma` and need to create a new migration
+     - ❌ Never use in production (can cause data loss)
 
 The Admin API will be available at:
 - **Admin Interface**: http://admin.bawes.localhost:8321
@@ -211,13 +220,13 @@ All Prisma commands run inside the Docker container to ensure compatibility with
 # Generate Prisma Client after schema changes
 npm run db:generate
 
-# Create a new migration
+# Create a new migration (use when you've changed schema.prisma)
 npm run db:migrate
 
-# Deploy migrations (production)
+# Deploy migrations (use for fresh install or production)
 npm run db:migrate:deploy
 
-# Push schema changes directly to database (dev only)
+# Push schema changes directly to database (dev only, bypasses migrations)
 npm run db:push
 
 # Reset database (drops all data and runs migrations)
@@ -226,6 +235,25 @@ npm run db:reset
 # View database in Prisma Studio
 npm run db:studio
 ```
+
+**When to use each command:**
+
+- **`npm run db:migrate:deploy`** (or `prisma migrate deploy`):
+  - ✅ **Fresh database setup** - Applies all existing migrations
+  - ✅ **Production deployments** - Safe, idempotent, applies pending migrations
+  - ✅ **After pulling code** - Applies any new migrations from the repo
+  - ✅ **Never creates new migrations** - Only applies existing ones
+
+- **`npm run db:migrate`** (or `prisma migrate dev`):
+  - ✅ **Development only** - When you've modified `schema.prisma` and need to create a migration
+  - ✅ **Creates new migration file** - Generates SQL migration in `prisma/migrations/`
+  - ❌ **Never use in production** - Can cause data loss, not safe for production databases
+  - ⚠️ **Will prompt for migration name** - If schema differs from database
+
+- **`npm run db:push`** (or `prisma db push`):
+  - ✅ **Quick prototyping** - Pushes schema directly without creating migrations
+  - ❌ **Development only** - Bypasses migration history
+  - ❌ **Not for production** - No migration tracking
 
 #### Prisma Studio
 
