@@ -51,7 +51,8 @@ services:
     volumes:
       - .:/app
       - /app/.next
-      - /app/node_modules  # Exclude node_modules from host mount (use container's node_modules)
+      # Uncomment the line below if you're on Mac and experiencing slow performance:
+      # - /app/node_modules  # Exclude node_modules from host mount (use container's node_modules)
     depends_on:
       postgres:
         condition: service_healthy
