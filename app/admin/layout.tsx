@@ -70,7 +70,7 @@ export default async function AdminLayout({ children }: { children: ReactNode })
   const user = await getSessionUser();
 
   return (
-    <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
+    <ThemeProvider attribute="class" defaultTheme="dark" disableTransitionOnChange>
       <ToastWrapper>
         <div className="min-h-screen bg-background">
           <ConditionalNav user={user} />
