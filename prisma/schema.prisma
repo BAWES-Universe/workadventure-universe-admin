@@ -108,6 +108,7 @@ model Room {
   templateMap RoomTemplateMap? @relation(fields: [templateMapId], references: [id], onDelete: SetNull)
   favorites  Favorite[]
   roomAccesses RoomAccess[]
+  bots       Bot[]
 
   @@unique([worldId, slug]) // Slug unique within world
   @@map("rooms")
@@ -379,4 +380,26 @@ model RoomTemplateMap {
   @@unique([templateId, slug])
   @@index([templateId])
   @@map("room_template_maps")
+}
+
+// Bots
+model Bot {
+  id                  String   @id @default(uuid())
+  roomId              String   @map("room_id")
+  name                String   @db.VarChar(100)
+  description         String?
+  characterTextureId  String?  @map("character_texture_id") @db.VarChar(100)
+  enabled             Boolean  @default(true)
+  behaviorType        String   @default("idle") @map("behavior_type") @db.VarChar(20) // 'idle', 'patrol', or 'social'
+  behaviorConfig      Json     @default("{}") @map("behavior_config")
+  chatInstructions    String?  @map("chat_instructions")
+  movementInstructions String?  @map("movement_instructions")
+  aiProviderRef       String?  @map("ai_provider_ref") @db.VarChar(100)
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@index([roomId])
+  @@map("bots")
 }
