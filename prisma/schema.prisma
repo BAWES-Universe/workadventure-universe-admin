@@ -34,6 +34,8 @@ model User {
   visitCard         VisitCard?
   membershipInvitationsSent MembershipInvitation[] @relation("InvitedBy")
   membershipInvitationsReceived MembershipInvitation[] @relation("InvitedUser")
+  botsCreated       Bot[] @relation("BotCreatedBy")
+  botsUpdated       Bot[] @relation("BotUpdatedBy")
 
   @@map("users")
 }
@@ -397,8 +399,12 @@ model Bot {
   aiProviderRef       String?  @map("ai_provider_ref") @db.VarChar(100)
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
+  createdById         String?  @map("created_by_id")
+  updatedById          String?  @map("updated_by_id")
 
   room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  createdBy User? @relation("BotCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  updatedBy User? @relation("BotUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
 
   @@index([roomId])
   @@map("bots")

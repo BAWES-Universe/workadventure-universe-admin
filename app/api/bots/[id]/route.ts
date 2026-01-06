@@ -3,6 +3,7 @@ import { requireAuth } from '@/lib/auth';
 import { getSessionUser } from '@/lib/auth-session';
 import { prisma } from '@/lib/db';
 import { canManageBots } from '@/lib/bot-permissions';
+import { validateAccessToken } from '@/lib/oidc';
 import { z } from 'zod';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Prisma
@@ -24,6 +25,62 @@ function corsHeaders() {
  */
 export async function OPTIONS() {
   return NextResponse.json({}, { headers: corsHeaders() });
+}
+
+// Helper function to get user ID from various auth methods
+async function getUserIdFromRequest(request: NextRequest): Promise<{ userId: string | null; isAdminToken: boolean }> {
+  const authHeader = request.headers.get('authorization');
+  
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    // No Bearer token, try session
+    const sessionUser = await getSessionUser(request);
+    return { userId: sessionUser?.id || null, isAdminToken: false };
+  }
+  
+  const token = authHeader.replace('Bearer ', '').trim();
+  const expectedToken = process.env.ADMIN_API_TOKEN;
+  
+  // Check if it's the admin API token
+  if (expectedToken && token === expectedToken) {
+    return { userId: null, isAdminToken: true };
+  }
+  
+  // Try to validate as OIDC token
+  try {
+    const userInfo = await validateAccessToken(token);
+    if (userInfo) {
+      // Find or create user from OIDC token
+      const identifier = userInfo.sub || userInfo.email || 'unknown';
+      let user = await prisma.user.findFirst({
+        where: {
+          OR: [
+            { uuid: identifier },
+            { email: userInfo.email || undefined },
+          ],
+        },
+      });
+      
+      if (!user) {
+        // Create user if doesn't exist
+        user = await prisma.user.create({
+          data: {
+            uuid: identifier,
+            email: userInfo.email || null,
+            name: userInfo.name || userInfo.preferred_username || null,
+            isGuest: false,
+          },
+        });
+      }
+      
+      return { userId: user.id, isAdminToken: false };
+    }
+  } catch (error) {
+    // Token validation failed, continue to try session
+  }
+  
+  // Fall back to session
+  const sessionUser = await getSessionUser(request);
+  return { userId: sessionUser?.id || null, isAdminToken: false };
 }
 
 // Validation schema for updating a bot (all fields optional for partial updates)
@@ -58,6 +115,20 @@ function transformBot(bot: any) {
     aiProviderRef: bot.aiProviderRef,
     createdAt: bot.createdAt,
     updatedAt: bot.updatedAt,
+    ...(bot.createdBy && {
+      createdBy: {
+        id: bot.createdBy.id,
+        name: bot.createdBy.name,
+        email: bot.createdBy.email,
+      },
+    }),
+    ...(bot.updatedBy && {
+      updatedBy: {
+        id: bot.updatedBy.id,
+        name: bot.updatedBy.name,
+        email: bot.updatedBy.email,
+      },
+    }),
     ...(bot.room && {
       room: {
         id: bot.room.id,
@@ -84,25 +155,13 @@ export async function GET(
   try {
     const { id } = await params;
 
-    // Check if using admin token or session
-    const authHeader = request.headers.get('authorization');
-    const isAdminToken = authHeader?.startsWith('Bearer ') &&
-      authHeader.replace('Bearer ', '').trim() === process.env.ADMIN_API_TOKEN;
+    // Get user ID from various auth methods
+    const { userId, isAdminToken } = await getUserIdFromRequest(request);
+    const isAuthenticated = isAdminToken || !!userId;
 
-    let userId: string | null = null;
-    let isAuthenticated = false;
-
-    if (!isAdminToken) {
-      // Try to get user from session
-      const sessionUser = await getSessionUser(request);
-      if (sessionUser) {
-        userId = sessionUser.id;
-        isAuthenticated = true;
-      }
-    } else {
+    if (isAdminToken) {
       // Admin token - require it
       requireAuth(request);
-      isAuthenticated = true;
     }
 
     // Fetch bot with room relation (including world and universe for visibility check)
@@ -121,6 +180,32 @@ export async function GET(
                 },
               },
             },
+          },
+          select: {
+            id: true,
+            worldId: true,
+            slug: true,
+            name: true,
+            description: true,
+            mapUrl: true,
+            wamUrl: true,
+            isPublic: true,
+            createdAt: true,
+            updatedAt: true,
+          },
+        },
+        createdBy: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+          },
+        },
+        updatedBy: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
           },
         },
       },
@@ -192,24 +277,21 @@ export async function PUT(
   try {
     const { id } = await params;
 
-    // Check if using admin token or session
-    const authHeader = request.headers.get('authorization');
-    const isAdminToken = authHeader?.startsWith('Bearer ') &&
-      authHeader.replace('Bearer ', '').trim() === process.env.ADMIN_API_TOKEN;
+    // Get user ID from various auth methods
+    const { userId, isAdminToken } = await getUserIdFromRequest(request);
 
-    let userId: string | null = null;
+    if (!isAdminToken && !userId) {
+      const response = NextResponse.json(
+        { error: 'Unauthorized' },
+        { status: 401 }
+      );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
+    }
 
-    if (!isAdminToken) {
-      // Try to get user from session
-      const sessionUser = await getSessionUser(request);
-      if (!sessionUser) {
-        return NextResponse.json(
-          { error: 'Unauthorized' },
-          { status: 401 }
-        );
-      }
-      userId = sessionUser.id;
-    } else {
+    if (isAdminToken) {
       // Admin token - require it
       requireAuth(request);
       // For admin token, we'll skip permission check (full access)
@@ -300,6 +382,11 @@ export async function PUT(
     if (validatedData.aiProviderRef !== undefined) updateData.aiProviderRef = validatedData.aiProviderRef;
 
     // Update bot (updatedAt is automatically updated by Prisma)
+    // Always update updatedById when any field changes
+    if (userId) {
+      updateData.updatedById = userId;
+    }
+
     const bot = await prisma.bot.update({
       where: { id },
       data: updateData,
@@ -316,6 +403,20 @@ export async function PUT(
             isPublic: true,
             createdAt: true,
             updatedAt: true,
+          },
+        },
+        createdBy: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+          },
+        },
+        updatedBy: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
           },
         },
       },
@@ -374,24 +475,21 @@ export async function DELETE(
   try {
     const { id } = await params;
 
-    // Check if using admin token or session
-    const authHeader = request.headers.get('authorization');
-    const isAdminToken = authHeader?.startsWith('Bearer ') &&
-      authHeader.replace('Bearer ', '').trim() === process.env.ADMIN_API_TOKEN;
+    // Get user ID from various auth methods
+    const { userId, isAdminToken } = await getUserIdFromRequest(request);
 
-    let userId: string | null = null;
+    if (!isAdminToken && !userId) {
+      const response = NextResponse.json(
+        { error: 'Unauthorized' },
+        { status: 401 }
+      );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
+    }
 
-    if (!isAdminToken) {
-      // Try to get user from session
-      const sessionUser = await getSessionUser(request);
-      if (!sessionUser) {
-        return NextResponse.json(
-          { error: 'Unauthorized' },
-          { status: 401 }
-        );
-      }
-      userId = sessionUser.id;
-    } else {
+    if (isAdminToken) {
       // Admin token - require it
       requireAuth(request);
       // For admin token, we'll skip permission check (full access)
