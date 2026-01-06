@@ -5,6 +5,27 @@ import { prisma } from '@/lib/db';
 import { canManageBots } from '@/lib/bot-permissions';
 import { z } from 'zod';
 
+// Ensure this route runs in Node.js runtime (not Edge) to support Prisma
+export const runtime = 'nodejs';
+
+// CORS headers helper
+function corsHeaders() {
+  return {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, PUT, DELETE',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Allow-Credentials': 'true',
+  };
+}
+
+/**
+ * OPTIONS /api/bots/:id
+ * Handle CORS preflight
+ */
+export async function OPTIONS() {
+  return NextResponse.json({}, { headers: corsHeaders() });
+}
+
 // Validation schema for updating a bot (all fields optional for partial updates)
 const updateBotSchema = z.object({
   roomId: z.string().uuid('roomId must be a valid UUID').optional(),
@@ -106,10 +127,14 @@ export async function GET(
     });
 
     if (!bot) {
-      return NextResponse.json(
+      const response = NextResponse.json(
         { error: 'Bot not found' },
         { status: 404 }
       );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
     }
 
     // Check visibility: public if room.isPublic AND world.isPublic AND universe.isPublic
@@ -117,28 +142,44 @@ export async function GET(
 
     // If not public, require authentication
     if (!isPublic && !isAuthenticated) {
-      return NextResponse.json(
+      const response = NextResponse.json(
         { error: 'Unauthorized' },
         { status: 401 }
       );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
     }
 
     // Transform to camelCase
     const transformedBot = transformBot(bot);
 
-    return NextResponse.json(transformedBot);
+    const response = NextResponse.json(transformedBot);
+    Object.entries(corsHeaders()).forEach(([key, value]) => {
+      response.headers.set(key, value);
+    });
+    return response;
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized') {
-      return NextResponse.json(
+      const response = NextResponse.json(
         { error: 'Unauthorized' },
         { status: 401 }
       );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
     }
     console.error('Error fetching bot:', error);
-    return NextResponse.json(
+    const response = NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }
     );
+    Object.entries(corsHeaders()).forEach(([key, value]) => {
+      response.headers.set(key, value);
+    });
+    return response;
   }
 }
 
@@ -183,20 +224,28 @@ export async function PUT(
     });
 
     if (!existingBot) {
-      return NextResponse.json(
+      const response = NextResponse.json(
         { error: 'Bot not found' },
         { status: 404 }
       );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
     }
 
     // Check permissions (skip if admin token)
     if (!isAdminToken && userId) {
       const hasPermission = await canManageBots(userId, existingBot.roomId);
       if (!hasPermission) {
-        return NextResponse.json(
+        const response = NextResponse.json(
           { error: 'You do not have permission to manage bots in this room' },
           { status: 403 }
         );
+        Object.entries(corsHeaders()).forEach(([key, value]) => {
+          response.headers.set(key, value);
+        });
+        return response;
       }
     }
 
@@ -211,20 +260,28 @@ export async function PUT(
       });
 
       if (!newRoom) {
-        return NextResponse.json(
+        const response = NextResponse.json(
           { error: 'Room not found' },
           { status: 404 }
         );
+        Object.entries(corsHeaders()).forEach(([key, value]) => {
+          response.headers.set(key, value);
+        });
+        return response;
       }
 
       // Check permissions for the new room
       if (!isAdminToken && userId) {
         const hasPermission = await canManageBots(userId, validatedData.roomId);
         if (!hasPermission) {
-          return NextResponse.json(
+          const response = NextResponse.json(
             { error: 'You do not have permission to manage bots in the target room' },
             { status: 403 }
           );
+          Object.entries(corsHeaders()).forEach(([key, value]) => {
+            response.headers.set(key, value);
+          });
+          return response;
         }
       }
     }
@@ -267,28 +324,44 @@ export async function PUT(
     // Transform to camelCase
     const transformedBot = transformBot(bot);
 
-      return NextResponse.json(transformedBot);
+    const response = NextResponse.json(transformedBot);
+    Object.entries(corsHeaders()).forEach(([key, value]) => {
+      response.headers.set(key, value);
+    });
+    return response;
   } catch (error) {
     if (error instanceof z.ZodError) {
-      return NextResponse.json(
+      const response = NextResponse.json(
         {
           error: 'Invalid input data',
           details: error.issues,
         },
         { status: 400 }
       );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
     }
     if (error instanceof Error && error.message === 'Unauthorized') {
-      return NextResponse.json(
+      const response = NextResponse.json(
         { error: 'Unauthorized' },
         { status: 401 }
       );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
     }
     console.error('Error updating bot:', error);
-    return NextResponse.json(
+    const response = NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }
     );
+    Object.entries(corsHeaders()).forEach(([key, value]) => {
+      response.headers.set(key, value);
+    });
+    return response;
   }
 }
 
@@ -333,20 +406,28 @@ export async function DELETE(
     });
 
     if (!bot) {
-      return NextResponse.json(
+      const response = NextResponse.json(
         { error: 'Bot not found' },
         { status: 404 }
       );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
     }
 
     // Check permissions (skip if admin token)
     if (!isAdminToken && userId) {
       const hasPermission = await canManageBots(userId, bot.roomId);
       if (!hasPermission) {
-        return NextResponse.json(
+        const response = NextResponse.json(
           { error: 'You do not have permission to manage bots in this room' },
           { status: 403 }
         );
+        Object.entries(corsHeaders()).forEach(([key, value]) => {
+          response.headers.set(key, value);
+        });
+        return response;
       }
     }
 
@@ -356,19 +437,31 @@ export async function DELETE(
     });
 
     // Return 204 No Content on success
-    return new NextResponse(null, { status: 204 });
+    const response = new NextResponse(null, { status: 204 });
+    Object.entries(corsHeaders()).forEach(([key, value]) => {
+      response.headers.set(key, value);
+    });
+    return response;
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized') {
-      return NextResponse.json(
+      const response = NextResponse.json(
         { error: 'Unauthorized' },
         { status: 401 }
       );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
     }
     console.error('Error deleting bot:', error);
-    return NextResponse.json(
+    const response = NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }
     );
+    Object.entries(corsHeaders()).forEach(([key, value]) => {
+      response.headers.set(key, value);
+    });
+    return response;
   }
 }
 

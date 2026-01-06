@@ -3,7 +3,29 @@ import { requireAuth } from '@/lib/auth';
 import { getSessionUser } from '@/lib/auth-session';
 import { prisma } from '@/lib/db';
 import { canManageBots } from '@/lib/bot-permissions';
+import { parsePlayUri } from '@/lib/utils';
 import { z } from 'zod';
+
+// Ensure this route runs in Node.js runtime (not Edge) to support Prisma
+export const runtime = 'nodejs';
+
+// CORS headers helper
+function corsHeaders() {
+  return {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, PUT, DELETE',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Allow-Credentials': 'true',
+  };
+}
+
+/**
+ * OPTIONS /api/bots
+ * Handle CORS preflight
+ */
+export async function OPTIONS() {
+  return NextResponse.json({}, { headers: corsHeaders() });
+}
 
 // Validation schema for creating a bot
 const createBotSchema = z.object({
@@ -56,16 +78,21 @@ function transformBot(bot: any) {
 
 // GET /api/bots?roomId={roomId}
 // List all bots for a specific room
+// roomId can be either a UUID or a playUri (e.g., http://play.workadventure.localhost/@/universe/world/room)
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
-    const roomId = searchParams.get('roomId');
+    const roomIdOrPlayUri = searchParams.get('roomId');
 
-    if (!roomId) {
-      return NextResponse.json(
+    if (!roomIdOrPlayUri) {
+      const response = NextResponse.json(
         { error: 'roomId query parameter is required' },
         { status: 400 }
       );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
     }
 
     // Check if using admin token or session
@@ -89,6 +116,56 @@ export async function GET(request: NextRequest) {
       isAuthenticated = true;
     }
 
+    // Determine if roomIdOrPlayUri is a UUID or a playUri
+    let roomId: string;
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(roomIdOrPlayUri);
+    
+    if (isUuid) {
+      // It's a UUID, use it directly
+      roomId = roomIdOrPlayUri;
+    } else {
+      // It's a playUri, parse it and find the room by slugs
+      try {
+        const { universe, world, room } = parsePlayUri(roomIdOrPlayUri);
+        const roomRecord = await prisma.room.findFirst({
+          where: {
+            slug: room,
+            world: {
+              slug: world,
+              universe: {
+                slug: universe,
+              },
+            },
+          },
+          select: {
+            id: true,
+          },
+        });
+        
+        if (!roomRecord) {
+          const response = NextResponse.json(
+            { error: 'Room not found' },
+            { status: 404 }
+          );
+          Object.entries(corsHeaders()).forEach(([key, value]) => {
+            response.headers.set(key, value);
+          });
+          return response;
+        }
+        
+        roomId = roomRecord.id;
+      } catch (parseError) {
+        const response = NextResponse.json(
+          { error: 'Invalid playUri format. Expected UUID or playUri like http://play.workadventure.localhost/@/universe/world/room' },
+          { status: 400 }
+        );
+        Object.entries(corsHeaders()).forEach(([key, value]) => {
+          response.headers.set(key, value);
+        });
+        return response;
+      }
+    }
+
     // Get room with world and universe to check visibility
     const room = await prisma.room.findUnique({
       where: { id: roomId },
@@ -107,10 +184,14 @@ export async function GET(request: NextRequest) {
     });
 
     if (!room) {
-      return NextResponse.json(
+      const response = NextResponse.json(
         { error: 'Room not found' },
         { status: 404 }
       );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
     }
 
     // Check visibility: public if room.isPublic AND world.isPublic AND universe.isPublic
@@ -118,10 +199,14 @@ export async function GET(request: NextRequest) {
 
     // If not public, require authentication
     if (!isPublic && !isAuthenticated) {
-      return NextResponse.json(
+      const response = NextResponse.json(
         { error: 'Unauthorized' },
         { status: 401 }
       );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
     }
 
     // Fetch bots for this room
@@ -151,19 +236,31 @@ export async function GET(request: NextRequest) {
     // Transform bots to camelCase
     const transformedBots = bots.map(transformBot);
 
-    return NextResponse.json(transformedBots);
+    const response = NextResponse.json(transformedBots);
+    Object.entries(corsHeaders()).forEach(([key, value]) => {
+      response.headers.set(key, value);
+    });
+    return response;
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized') {
-      return NextResponse.json(
+      const response = NextResponse.json(
         { error: 'Unauthorized' },
         { status: 401 }
       );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
     }
     console.error('Error fetching bots:', error);
-    return NextResponse.json(
+    const response = NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }
     );
+    Object.entries(corsHeaders()).forEach(([key, value]) => {
+      response.headers.set(key, value);
+    });
+    return response;
   }
 }
 
@@ -182,10 +279,14 @@ export async function POST(request: NextRequest) {
       // Try to get user from session
       const sessionUser = await getSessionUser(request);
       if (!sessionUser) {
-        return NextResponse.json(
+        const response = NextResponse.json(
           { error: 'Unauthorized' },
           { status: 401 }
         );
+        Object.entries(corsHeaders()).forEach(([key, value]) => {
+          response.headers.set(key, value);
+        });
+        return response;
       }
       userId = sessionUser.id;
     } else {
@@ -204,20 +305,28 @@ export async function POST(request: NextRequest) {
     });
 
     if (!room) {
-      return NextResponse.json(
+      const response = NextResponse.json(
         { error: 'Room not found' },
         { status: 404 }
       );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
     }
 
     // Check permissions (skip if admin token)
     if (!isAdminToken && userId) {
       const hasPermission = await canManageBots(userId, validatedData.roomId);
       if (!hasPermission) {
-        return NextResponse.json(
+        const response = NextResponse.json(
           { error: 'You do not have permission to manage bots in this room' },
           { status: 403 }
         );
+        Object.entries(corsHeaders()).forEach(([key, value]) => {
+          response.headers.set(key, value);
+        });
+        return response;
       }
     }
 
@@ -256,28 +365,44 @@ export async function POST(request: NextRequest) {
     // Transform to camelCase
     const transformedBot = transformBot(bot);
 
-    return NextResponse.json(transformedBot, { status: 201 });
+    const response = NextResponse.json(transformedBot, { status: 201 });
+    Object.entries(corsHeaders()).forEach(([key, value]) => {
+      response.headers.set(key, value);
+    });
+    return response;
   } catch (error) {
     if (error instanceof z.ZodError) {
-      return NextResponse.json(
+      const response = NextResponse.json(
         {
           error: 'Invalid input data',
-          details: error.errors,
+          details: error.issues,
         },
         { status: 400 }
       );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
     }
     if (error instanceof Error && error.message === 'Unauthorized') {
-      return NextResponse.json(
+      const response = NextResponse.json(
         { error: 'Unauthorized' },
         { status: 401 }
       );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
     }
     console.error('Error creating bot:', error);
-    return NextResponse.json(
+    const response = NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }
     );
+    Object.entries(corsHeaders()).forEach(([key, value]) => {
+      response.headers.set(key, value);
+    });
+    return response;
   }
 }
 
