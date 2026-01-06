@@ -29,8 +29,9 @@ export async function OPTIONS() {
 }
 
 // Validation schema for creating a bot
+// roomId can be either a UUID or a playUri
 const createBotSchema = z.object({
-  roomId: z.string().uuid('roomId must be a valid UUID'),
+  roomId: z.string().min(1, 'roomId is required'), // Accept any string (UUID or playUri)
   name: z.string().min(1, 'name is required').max(100, 'name must be at most 100 characters'),
   description: z.string().optional().nullable(),
   characterTextureId: z.string().max(100, 'characterTextureId must be at most 100 characters').optional().nullable(),
@@ -365,9 +366,60 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const validatedData = createBotSchema.parse(body);
 
+    // Handle roomId: can be either UUID or playUri
+    let roomId: string;
+    const roomIdOrPlayUri = validatedData.roomId;
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(roomIdOrPlayUri);
+    
+    if (isUuid) {
+      // It's a UUID, use it directly
+      roomId = roomIdOrPlayUri;
+    } else {
+      // It's a playUri, parse it and find the room by slugs
+      try {
+        const { universe, world, room } = parsePlayUri(roomIdOrPlayUri);
+        const roomRecord = await prisma.room.findFirst({
+          where: {
+            slug: room,
+            world: {
+              slug: world,
+              universe: {
+                slug: universe,
+              },
+            },
+          },
+          select: {
+            id: true,
+          },
+        });
+        
+        if (!roomRecord) {
+          const response = NextResponse.json(
+            { error: 'Room not found' },
+            { status: 404 }
+          );
+          Object.entries(corsHeaders()).forEach(([key, value]) => {
+            response.headers.set(key, value);
+          });
+          return response;
+        }
+        
+        roomId = roomRecord.id;
+      } catch (parseError) {
+        const response = NextResponse.json(
+          { error: 'Invalid roomId format. Expected UUID or playUri like http://play.workadventure.localhost/@/universe/world/room' },
+          { status: 400 }
+        );
+        Object.entries(corsHeaders()).forEach(([key, value]) => {
+          response.headers.set(key, value);
+        });
+        return response;
+      }
+    }
+
     // Verify room exists
     const room = await prisma.room.findUnique({
-      where: { id: validatedData.roomId },
+      where: { id: roomId },
     });
 
     if (!room) {
@@ -383,7 +435,7 @@ export async function POST(request: NextRequest) {
 
     // Check permissions (skip if admin token)
     if (!isAdminToken && userId) {
-      const hasPermission = await canManageBots(userId, validatedData.roomId);
+      const hasPermission = await canManageBots(userId, roomId);
       if (!hasPermission) {
         const response = NextResponse.json(
           { error: 'You do not have permission to manage bots in this room' },
@@ -399,7 +451,7 @@ export async function POST(request: NextRequest) {
     // Create bot
     const bot = await prisma.bot.create({
       data: {
-        roomId: validatedData.roomId,
+        roomId: roomId,
         name: validatedData.name,
         description: validatedData.description ?? null,
         characterTextureId: validatedData.characterTextureId ?? null,

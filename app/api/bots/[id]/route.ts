@@ -4,6 +4,7 @@ import { getSessionUser } from '@/lib/auth-session';
 import { prisma } from '@/lib/db';
 import { canManageBots } from '@/lib/bot-permissions';
 import { validateAccessToken } from '@/lib/oidc';
+import { parsePlayUri } from '@/lib/utils';
 import { z } from 'zod';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Prisma
@@ -85,7 +86,7 @@ async function getUserIdFromRequest(request: NextRequest): Promise<{ userId: str
 
 // Validation schema for updating a bot (all fields optional for partial updates)
 const updateBotSchema = z.object({
-  roomId: z.string().uuid('roomId must be a valid UUID').optional(),
+  roomId: z.string().min(1, 'roomId must be a non-empty string').optional(), // Accept UUID or playUri
   name: z.string().min(1, 'name cannot be empty').max(100, 'name must be at most 100 characters').optional(),
   description: z.string().optional().nullable(),
   characterTextureId: z.string().max(100, 'characterTextureId must be at most 100 characters').optional().nullable(),
@@ -335,10 +336,63 @@ export async function PUT(
     const body = await request.json();
     const validatedData = updateBotSchema.parse(body);
 
+    // Handle roomId: can be either UUID or playUri
+    let resolvedRoomId: string | undefined;
+    if (validatedData.roomId !== undefined) {
+      const roomIdOrPlayUri = validatedData.roomId;
+      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(roomIdOrPlayUri);
+      
+      if (isUuid) {
+        // It's a UUID, use it directly
+        resolvedRoomId = roomIdOrPlayUri;
+      } else {
+        // It's a playUri, parse it and find the room by slugs
+        try {
+          const { universe, world, room } = parsePlayUri(roomIdOrPlayUri);
+          const roomRecord = await prisma.room.findFirst({
+            where: {
+              slug: room,
+              world: {
+                slug: world,
+                universe: {
+                  slug: universe,
+                },
+              },
+            },
+            select: {
+              id: true,
+            },
+          });
+          
+          if (!roomRecord) {
+            const response = NextResponse.json(
+              { error: 'Room not found' },
+              { status: 404 }
+            );
+            Object.entries(corsHeaders()).forEach(([key, value]) => {
+              response.headers.set(key, value);
+            });
+            return response;
+          }
+          
+          resolvedRoomId = roomRecord.id;
+        } catch (parseError) {
+          const response = NextResponse.json(
+            { error: 'Invalid roomId format. Expected UUID or playUri like http://play.workadventure.localhost/@/universe/world/room' },
+            { status: 400 }
+          );
+          Object.entries(corsHeaders()).forEach(([key, value]) => {
+            response.headers.set(key, value);
+          });
+          return response;
+        }
+      }
+    }
+
     // If roomId is being updated, verify the new room exists
-    if (validatedData.roomId && validatedData.roomId !== existingBot.roomId) {
+    if (resolvedRoomId && resolvedRoomId !== existingBot.roomId) {
       const newRoom = await prisma.room.findUnique({
-        where: { id: validatedData.roomId },
+        where: { id: resolvedRoomId },
       });
 
       if (!newRoom) {
@@ -354,7 +408,7 @@ export async function PUT(
 
       // Check permissions for the new room
       if (!isAdminToken && userId) {
-        const hasPermission = await canManageBots(userId, validatedData.roomId);
+        const hasPermission = await canManageBots(userId, resolvedRoomId);
         if (!hasPermission) {
           const response = NextResponse.json(
             { error: 'You do not have permission to manage bots in the target room' },
@@ -370,7 +424,7 @@ export async function PUT(
 
     // Prepare update data (only include fields that were provided)
     const updateData: any = {};
-    if (validatedData.roomId !== undefined) updateData.roomId = validatedData.roomId;
+    if (resolvedRoomId !== undefined) updateData.roomId = resolvedRoomId;
     if (validatedData.name !== undefined) updateData.name = validatedData.name;
     if (validatedData.description !== undefined) updateData.description = validatedData.description;
     if (validatedData.characterTextureId !== undefined) updateData.characterTextureId = validatedData.characterTextureId;
