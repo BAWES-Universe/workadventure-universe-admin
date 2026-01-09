@@ -30,12 +30,20 @@ export async function OPTIONS() {
 
 // Helper function to get user ID from various auth methods
 async function getUserIdFromRequest(request: NextRequest): Promise<{ userId: string | null; isAdminToken: boolean }> {
+  // PRIORITY 1: Check session token FIRST (from URL param, cookie, or Authorization header)
+  // This handles session tokens sent via _token URL param, cookies, or Authorization header
+  // Session tokens have 7-day expiration and work even after JWT expires
+  const sessionUser = await getSessionUser(request);
+  if (sessionUser) {
+    return { userId: sessionUser.id, isAdminToken: false };
+  }
+  
+  // PRIORITY 2: Check Authorization header for admin token or OIDC token
   const authHeader = request.headers.get('authorization');
   
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    // No Bearer token, try session
-    const sessionUser = await getSessionUser(request);
-    return { userId: sessionUser?.id || null, isAdminToken: false };
+    // No Bearer token and no session - unauthorized
+    return { userId: null, isAdminToken: false };
   }
   
   const token = authHeader.replace('Bearer ', '').trim();
@@ -46,7 +54,8 @@ async function getUserIdFromRequest(request: NextRequest): Promise<{ userId: str
     return { userId: null, isAdminToken: true };
   }
   
-  // Try to validate as OIDC token
+  // PRIORITY 3: Try to validate as OIDC token (for initial login/fallback)
+  // This will fail if JWT is expired, but that's OK since we already checked session
   try {
     const userInfo = await validateAccessToken(token);
     if (userInfo) {
@@ -62,7 +71,6 @@ async function getUserIdFromRequest(request: NextRequest): Promise<{ userId: str
       });
       
       if (!user) {
-        // Create user if doesn't exist
         user = await prisma.user.create({
           data: {
             uuid: identifier,
@@ -76,12 +84,11 @@ async function getUserIdFromRequest(request: NextRequest): Promise<{ userId: str
       return { userId: user.id, isAdminToken: false };
     }
   } catch (error) {
-    // Token validation failed, continue to try session
+    // Token validation failed - return null (session already checked above)
   }
   
-  // Fall back to session
-  const sessionUser = await getSessionUser(request);
-  return { userId: sessionUser?.id || null, isAdminToken: false };
+  // No valid authentication found
+  return { userId: null, isAdminToken: false };
 }
 
 // Validation schema for updating a bot (all fields optional for partial updates)
