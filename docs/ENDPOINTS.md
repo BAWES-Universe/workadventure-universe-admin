@@ -11,6 +11,7 @@ Complete reference for all Admin API endpoints required for WorkAdventure integr
 - [Moderation Endpoints](#moderation-endpoints)
 - [OAuth & Authentication Endpoints](#oauth--authentication-endpoints)
 - [Room API Endpoints](#room-api-endpoints)
+- [Bot Server AI Provider Endpoints](#bot-server-ai-provider-endpoints)
 - [Optional Endpoints](#optional-endpoints)
 
 ## Authentication
@@ -704,6 +705,125 @@ Get list of members for chat display (member directory/search feature).
 - The `chatId` field should contain the Matrix user ID (stored in `User.matrixChatId`)
 - Only return members who have a `chatId` (Matrix ID) set
 - See [DATABASE.md](./DATABASE.md) for the Prisma schema and implementation examples
+
+---
+
+## Bot Server AI Provider Endpoints
+
+These endpoints are for bot servers to fetch AI provider credentials and track usage. They use a separate service token (`BOT_SERVICE_TOKEN`) instead of the standard `ADMIN_API_TOKEN`.
+
+**Authentication:** All endpoints require `Authorization: Bearer {BOT_SERVICE_TOKEN}` header.
+
+**Note:** See [docs/bots/AI_PROVIDERS.md](./bots/AI_PROVIDERS.md) for complete integration guide.
+
+### GET /api/bots/ai-providers
+
+List available AI providers (metadata only, no credentials).
+
+**Request:**
+- Method: `GET`
+- Headers: `Authorization: Bearer {BOT_SERVICE_TOKEN}`
+- Query Parameters:
+  - `enabled` (optional, boolean): Filter by enabled status
+  - `type` (optional, string): Filter by provider type
+
+**Response:** `200 OK`
+```json
+[
+  {
+    "providerId": "lmstudio-local",
+    "name": "LMStudio Local",
+    "type": "lmstudio",
+    "enabled": true,
+    "supportsStreaming": true
+  }
+]
+```
+
+**Error:** `401 Unauthorized` if service token is invalid
+
+---
+
+### GET /api/bots/ai-providers/:providerId/credentials
+
+Get full provider configuration including encrypted credentials.
+
+**Request:**
+- Method: `GET`
+- Headers: `Authorization: Bearer {BOT_SERVICE_TOKEN}`
+- Path Parameters:
+  - `providerId` (required): Provider ID
+
+**Response:** `200 OK`
+```json
+{
+  "providerId": "lmstudio-local",
+  "name": "LMStudio Local",
+  "type": "lmstudio",
+  "enabled": true,
+  "endpoint": "http://localhost:1234",
+  "apiKeyEncrypted": "iv:authTag:encryptedData",
+  "model": "local-model",
+  "temperature": 0.7,
+  "maxTokens": 500,
+  "supportsStreaming": true,
+  "settings": {}
+}
+```
+
+**Important:** 
+- `apiKeyEncrypted` is encrypted (format: `iv:authTag:encryptedData` - all hex strings)
+- Bot server must decrypt using `ENCRYPTION_KEY` environment variable
+- Returns `null` for `apiKeyEncrypted` if provider doesn't need an API key
+
+**Error Codes:**
+- `401 Unauthorized` - Invalid service token
+- `404 Not Found` - Provider not found
+- `400 Bad Request` - Provider is not enabled
+
+---
+
+### POST /api/bots/ai-usage
+
+Track AI usage (tokens, API calls, costs). This is fire-and-forget - always returns success.
+
+**Request:**
+- Method: `POST`
+- Headers: `Authorization: Bearer {BOT_SERVICE_TOKEN}`, `Content-Type: application/json`
+- Body:
+```json
+{
+  "botId": "bot-123",
+  "providerId": "lmstudio-local",
+  "tokensUsed": 150,
+  "apiCalls": 1,
+  "latency": 1250,
+  "durationSeconds": null,
+  "cost": 0.0015,
+  "error": false,
+  "timestamp": "2025-01-09T12:00:00Z"
+}
+```
+
+**Response:** `200 OK`
+```json
+{
+  "status": "tracked"
+}
+```
+
+**Note:** Always returns `200 OK` even if tracking fails (fire-and-forget design)
+
+**Request Body Fields:**
+- `botId` (required, string): Bot identifier
+- `providerId` (required, string): Provider ID
+- `tokensUsed` (optional, number, default: 0): Tokens used (0 for voice AI)
+- `apiCalls` (optional, number, default: 1): Number of API calls
+- `durationSeconds` (optional, number, nullable): Duration in seconds (voice AI only, null for text AI)
+- `cost` (optional, number, nullable): Calculated cost in USD/credits
+- `latency` (optional, number, nullable): Request latency in milliseconds
+- `error` (optional, boolean, default: false): Whether request resulted in error
+- `timestamp` (optional, ISO 8601 string, default: now): When usage occurred
 
 ---
 
