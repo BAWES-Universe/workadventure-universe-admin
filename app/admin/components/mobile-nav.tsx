@@ -62,7 +62,18 @@ export default function MobileNav({ user: initialUser }: MobileNavProps) {
     if (href === '/admin') {
       return pathname === '/admin';
     }
-    return pathname?.startsWith(href);
+    // Check if there's a more specific nav item that matches
+    const hasMoreSpecificMatch = navItems.some(
+      item => item.href !== href && 
+              item.href.startsWith(href + '/') && 
+              pathname?.startsWith(item.href)
+    );
+    
+    if (hasMoreSpecificMatch) {
+      return false; // Don't match if there's a more specific nav item
+    }
+    
+    return pathname === href || (pathname?.startsWith(href + '/') && pathname !== href);
   };
 
   const menuContent = open && mounted && createPortal(
