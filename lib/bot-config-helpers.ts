@@ -155,17 +155,16 @@ export async function transformBotToServerFormat(
     characterTextureIds: bot.characterTextureId ? [bot.characterTextureId] : [],
     createdAt: bot.createdAt.toISOString(),
     updatedAt: bot.updatedAt.toISOString(),
+    // Always include these configuration fields - bot server needs them
+    aiProviderRef: bot.aiProviderRef || null,
+    chatInstructions: bot.chatInstructions || null,
+    movementInstructions: bot.movementInstructions || null,
   };
   
-  // Include sensitive fields only if requested and user has permission
-  if (includeSensitive && hasPermission) {
-    result.chatInstructions = bot.chatInstructions;
-    result.movementInstructions = bot.movementInstructions;
-    
-    if (bot.aiProviderRef) {
-      result.aiProvider = parseAiProvider(bot.aiProviderRef);
-      result.aiConfig = await getAiConfig(bot.aiProviderRef);
-    }
+  // Include parsed AI provider data only if requested and user has permission
+  if (includeSensitive && hasPermission && bot.aiProviderRef) {
+    result.aiProvider = parseAiProvider(bot.aiProviderRef);
+    result.aiConfig = await getAiConfig(bot.aiProviderRef);
   }
   
   return result;
