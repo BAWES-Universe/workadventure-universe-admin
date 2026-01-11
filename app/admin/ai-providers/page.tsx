@@ -6,7 +6,7 @@ import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { AlertCircle, Loader2, Plus, Settings, CheckCircle2, XCircle, TestTube } from 'lucide-react';
+import { AlertCircle, Loader2, Plus, Settings, CheckCircle2, XCircle } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 
 interface AiProvider {
@@ -75,30 +75,6 @@ export default function AiProvidersPage() {
     }
   }
 
-  async function handleTest(providerId: string) {
-    try {
-      const { authenticatedFetch } = await import('@/lib/client-auth');
-      const response = await authenticatedFetch(`/api/admin/ai-providers/${providerId}/test`, {
-        method: 'POST',
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        alert(`Test failed: ${errorData.error || 'Unknown error'}`);
-        return;
-      }
-
-      const result = await response.json();
-      if (result.success) {
-        alert('Connection test successful!');
-        fetchProviders(); // Refresh to update tested status
-      } else {
-        alert(`Test failed: ${result.error || 'Unknown error'}`);
-      }
-    } catch (err) {
-      alert(`Test error: ${err instanceof Error ? err.message : 'Unknown error'}`);
-    }
-  }
 
   async function handleToggleEnabled(providerId: string, currentEnabled: boolean) {
     try {
@@ -229,16 +205,9 @@ export default function AiProvidersPage() {
                   >
                     <Button variant="outline" size="sm" className="w-full">
                       <Settings className="mr-2 h-4 w-4" />
-                      Edit
+                      View Details
                     </Button>
                   </Link>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => handleTest(provider.providerId)}
-                  >
-                    <TestTube className="h-4 w-4" />
-                  </Button>
                   <Button
                     variant="outline"
                     size="sm"
