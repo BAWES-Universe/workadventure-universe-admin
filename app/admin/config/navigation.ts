@@ -1,4 +1,4 @@
-import { LayoutDashboard, Globe, Users, UserCircle, Mail, Compass, Home, FolderOpen, Star, Shield } from 'lucide-react';
+import { LayoutDashboard, Globe, Users, UserCircle, Mail, Compass, Home, FolderOpen, Star, Shield, Bot, BarChart3 } from 'lucide-react';
 import { LucideIcon } from 'lucide-react';
 
 export interface NavItem {
@@ -28,6 +28,10 @@ export const NAV_ITEMS: NavItem[] = [
   { href: '/admin/discover/worlds', label: 'Worlds', icon: Home, group: 'discover' },
   { href: '/admin/discover/rooms', label: 'Rooms', icon: FolderOpen, group: 'discover' },
   { href: '/admin/users', label: 'Users', icon: Users, group: 'discover' },
+
+  // Admin section (super admin only)
+  { href: '/admin/ai-providers', label: 'AI Providers', icon: Bot, requiresSuperAdmin: true, group: 'admin' },
+  { href: '/admin/ai-providers/usage', label: 'AI Usage', icon: BarChart3, requiresSuperAdmin: true, group: 'admin' },
 ];
 
 export function getNavItems(user: { name: string | null; email: string | null; isSuperAdmin?: boolean } | null): NavItem[] {

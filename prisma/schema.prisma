@@ -409,3 +409,52 @@ model Bot {
   @@index([roomId])
   @@map("bots")
 }
+
+// AI Providers
+model BotsAiProvider {
+  providerId        String   @id @map("provider_id") @db.VarChar(50)
+  name              String   @db.VarChar(255)
+  type              String   @db.VarChar(50) // 'lmstudio', 'openai', 'anthropic', 'ultravox', 'gpt-voice'
+  enabled           Boolean  @default(false)
+  endpoint          String?  @db.Text
+  apiKeyEncrypted   String?  @map("api_key_encrypted") @db.Text // Encrypted API key: "iv:authTag:encryptedData"
+  model             String?  @db.VarChar(255)
+  temperature       Decimal? @db.Decimal(3, 2) @default(0.7)
+  maxTokens         Int?     @map("max_tokens") @default(500)
+  supportsStreaming Boolean  @default(true) @map("supports_streaming")
+  settings          Json?    @default("{}") // Provider-specific settings
+  tested            Boolean  @default(false)
+  testedAt          DateTime? @map("tested_at")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  usage             BotsAiUsage[]
+
+  @@index([enabled])
+  @@index([type])
+  @@map("bots_ai_providers")
+}
+
+// AI Usage Tracking
+model BotsAiUsage {
+  id              Int      @id @default(autoincrement())
+  botId           String   @map("bot_id") @db.VarChar(255)
+  providerId      String   @map("provider_id") @db.VarChar(50)
+  tokensUsed      Int      @default(0) @map("tokens_used")
+  apiCalls        Int      @default(1) @map("api_calls")
+  durationSeconds Int?     @map("duration_seconds") // For voice AI (duration in seconds)
+  cost            Decimal? @db.Decimal(10, 4) // Cost in USD or credits
+  latency         Int?     // Milliseconds
+  error           Boolean  @default(false)
+  timestamp       DateTime @default(now())
+
+  // Relations
+  provider        BotsAiProvider @relation(fields: [providerId], references: [providerId], onDelete: Cascade)
+
+  @@index([botId])
+  @@index([providerId])
+  @@index([timestamp])
+  @@index([botId, providerId, timestamp])
+  @@map("bots_ai_usage")
+}
