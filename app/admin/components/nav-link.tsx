@@ -3,6 +3,7 @@
 import { usePathname } from 'next/navigation';
 import AuthLink from '../auth-link';
 import { cn } from '@/lib/utils';
+import { NAV_ITEMS } from '../config/navigation';
 
 interface NavLinkProps {
   href: string;
@@ -12,7 +13,31 @@ interface NavLinkProps {
 
 export default function NavLink({ href, children, className }: NavLinkProps) {
   const pathname = usePathname();
-  const isActive = href === '/admin' ? pathname === '/admin' : pathname?.startsWith(href);
+  
+  // More precise matching:
+  // - For /admin, only exact match
+  // - For other paths, check if there's a more specific nav item that matches
+  //   If yes, only match exact. If no, match exact or child path.
+  let isActive: boolean;
+  
+  if (href === '/admin') {
+    isActive = pathname === '/admin';
+  } else {
+    // Check if there's a more specific nav item (longer href) that also matches
+    const hasMoreSpecificMatch = NAV_ITEMS.some(
+      item => item.href !== href && 
+              item.href.startsWith(href + '/') && 
+              pathname?.startsWith(item.href)
+    );
+    
+    if (hasMoreSpecificMatch) {
+      // Don't match if there's a more specific nav item that matches
+      isActive = false;
+    } else {
+      // Match exact or child path
+      isActive = pathname === href || (pathname?.startsWith(href + '/') && pathname !== href);
+    }
+  }
 
   return (
     <AuthLink

@@ -105,6 +105,13 @@ The Admin API is an **optional** component that allows you to:
 |------|-------------|
 | [Admin Interface Guide](./admin/guide.md) | Complete admin interface documentation |
 
+### Bot Server Documentation
+
+| File | Description |
+|------|-------------|
+| [Bot API Setup](./bots/BOT_API_SETUP.md) | Bot management API setup and endpoints |
+| [AI Providers Integration](./bots/AI_PROVIDERS.md) | AI provider management for bot servers - credentials, usage tracking, encryption |
+
 ## Key Concepts
 
 ### 1. Bearer Token Authentication
