@@ -424,7 +424,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Transform to server format (include sensitive data for creator)
-    const hasPermission = isAdminToken || (userId && await canManageBots(userId, roomId));
+    const hasPermission = isAdminToken || (userId !== null ? await canManageBots(userId, roomId) : false);
     const transformedBot = await transformBotToServerFormat(bot, true, hasPermission);
 
     const response = NextResponse.json(transformedBot, { status: statusCode });
