@@ -11,6 +11,43 @@ The Bot Management API has been successfully implemented and set up.
 - ✅ Index on `room_id` for performance
 - ✅ Relation added to `Room` model in Prisma schema
 
+### Authentication
+
+Bot management endpoints support two authentication methods, with **session tokens taking priority**:
+
+1. **Session Token (Preferred)**
+   - Send session token via `_token` URL parameter
+   - Example: `GET /api/bots?roomId={roomId}&_token={sessionToken}`
+   - Session tokens have 7-day expiration (independent of JWT)
+   - Work even after WorkAdventure JWT expires
+   - Obtain session token via `POST /api/auth/session` endpoint
+
+2. **JWT AccessToken (Fallback)**
+   - Send OIDC accessToken via `Authorization: Bearer {token}` header
+   - Example: `GET /api/bots?roomId={roomId}` with `Authorization: Bearer {accessToken}`
+   - Falls back to this if no session token provided
+   - Will fail when JWT expires (typically 1 hour)
+
+**Why Session Tokens?**
+- Bot management UI needs to work continuously even after JWT expires
+- Session tokens provide 7-day authentication window
+- Same authentication mechanism as Orbit/Admin interface
+- Supports cross-origin iframe scenarios via URL parameter
+
+**Getting a Session Token:**
+```bash
+# Exchange OIDC token for session token
+curl -X POST \
+  -H "Authorization: Bearer YOUR_OIDC_ACCESS_TOKEN" \
+  http://localhost:3333/api/auth/session
+
+# Response:
+# {
+#   "sessionToken": "base64-encoded-session-data",
+#   "expiresAt": 1768261238170
+# }
+```
+
 ### API Endpoints Created
 
 1. **GET /api/bots?roomId={roomId}** - List bots for a room
@@ -83,16 +120,39 @@ To test the API endpoints:
    docker exec admin-api-postgres psql -U workadventure -d workadventure_admin -t -c "SELECT id FROM rooms LIMIT 1;"
    ```
 
-2. **List bots (requires auth token):**
+2. **List bots (using session token - recommended):**
    ```bash
-   curl -H "Authorization: Bearer YOUR_TOKEN" \
+   curl "http://localhost:3333/api/bots?roomId=ROOM_ID&_token=YOUR_SESSION_TOKEN"
+   ```
+
+   **OR using JWT (fallback):**
+   ```bash
+   curl -H "Authorization: Bearer YOUR_JWT_TOKEN" \
      "http://localhost:3333/api/bots?roomId=ROOM_ID"
    ```
 
-3. **Create a bot:**
+3. **Create a bot (using session token - recommended):**
    ```bash
    curl -X POST \
-     -H "Authorization: Bearer YOUR_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "roomId": "ROOM_ID",
+       "name": "Test Bot",
+       "behaviorType": "social",
+       "behaviorConfig": {
+         "assignedSpace": {
+           "center": { "x": 320, "y": 480 },
+           "radius": 150
+         }
+       }
+     }' \
+     "http://localhost:3333/api/bots?_token=YOUR_SESSION_TOKEN"
+   ```
+
+   **OR using JWT (fallback):**
+   ```bash
+   curl -X POST \
+     -H "Authorization: Bearer YOUR_JWT_TOKEN" \
      -H "Content-Type: application/json" \
      -d '{
        "roomId": "ROOM_ID",

@@ -618,6 +618,51 @@ Refresh an OAuth token.
 
 ---
 
+### POST /api/auth/session
+
+Exchange OIDC accessToken for session token. This endpoint enables bot management UI and other clients to obtain a long-lived session token (7-day expiration) that works independently of the short-lived OIDC JWT.
+
+**Request:**
+- Method: `POST`
+- Headers (preferred): `Authorization: Bearer {oidc_accessToken}`
+- OR Headers: `Content-Type: application/json`
+- Body (optional fallback):
+```json
+{
+  "accessToken": "oidc_accessToken"
+}
+```
+
+**Response:** `200 OK`
+```json
+{
+  "sessionToken": "base64-encoded-session-data",
+  "expiresAt": 1768261238170
+}
+```
+
+**Response Fields:**
+- `sessionToken`: Base64-encoded JSON containing session data (userId, uuid, email, name, tags, createdAt, expiresAt)
+- `expiresAt`: Unix timestamp in milliseconds when the session expires (7 days from creation)
+
+**Error Responses:**
+- `400 Bad Request`: `{ "error": "Missing access token" }`
+- `401 Unauthorized`: `{ "error": "Invalid or expired access token" }`
+- `500 Internal Server Error`: `{ "error": "Internal server error" }`
+
+**Use Cases:**
+- Bot management UI needs session token for API calls after JWT expires
+- Cross-origin iframe scenarios where localStorage from Admin API iframe is not accessible
+- Long-running operations that outlive JWT expiration
+
+**Notes:**
+- Session tokens have 7-day expiration (independent of JWT expiration)
+- Session token format matches `/api/auth/login` response
+- Supports CORS for cross-origin requests
+- Token can be used via `_token` URL parameter or Authorization header
+
+---
+
 ## Room API Endpoints
 
 ### GET /api/room-api/authorization
@@ -705,6 +750,182 @@ Get list of members for chat display (member directory/search feature).
 - The `chatId` field should contain the Matrix user ID (stored in `User.matrixChatId`)
 - Only return members who have a `chatId` (Matrix ID) set
 - See [DATABASE.md](./DATABASE.md) for the Prisma schema and implementation examples
+
+---
+
+## Bot Management Endpoints
+
+These endpoints manage bots in rooms. They support both session token authentication (via `_token` URL parameter) and JWT authentication (via Authorization header), with session tokens taking priority.
+
+**Authentication Priority:**
+1. Session token via `_token` URL parameter (preferred - 7-day expiration)
+2. JWT accessToken via `Authorization: Bearer {token}` header (fallback)
+
+**Note:** Session tokens work even after JWT expires, making them ideal for bot management UI that needs to continue working after the WorkAdventure JWT expires.
+
+### GET /api/bots
+
+List all bots for a specific room.
+
+**Request:**
+- Method: `GET`
+- Query Parameters:
+  - `roomId` (required): Room UUID or playUri (e.g., `http://play.workadventure.localhost/@/universe/world/room`)
+- Authentication:
+  - Session token: `GET /api/bots?roomId={roomId}&_token={sessionToken}`
+  - OR JWT: `Authorization: Bearer {accessToken}`
+
+**Response:** `200 OK`
+```json
+[
+  {
+    "id": "bot-uuid",
+    "roomId": "room-uuid",
+    "name": "Bot Name",
+    "description": "Bot description",
+    "characterTextureId": "texture-id",
+    "enabled": true,
+    "behaviorType": "social",
+    "behaviorConfig": {
+      "assignedSpace": {
+        "center": { "x": 320, "y": 480 },
+        "radius": 150
+      }
+    },
+    "chatInstructions": "Be friendly",
+    "movementInstructions": "Wander around",
+    "aiProviderRef": "lmstudio-local",
+    "createdAt": "2024-01-01T00:00:00.000Z",
+    "updatedAt": "2024-01-01T00:00:00.000Z",
+    "createdBy": {
+      "id": "user-uuid",
+      "name": "User Name",
+      "email": "user@example.com"
+    },
+    "room": {
+      "id": "room-uuid",
+      "worldId": "world-uuid",
+      "slug": "room-slug",
+      "name": "Room Name"
+    }
+  }
+]
+```
+
+**Visibility:**
+- Public rooms (room.isPublic AND world.isPublic AND universe.isPublic): No authentication required
+- Private rooms: Requires authentication
+
+**Error:** `400 Bad Request` if roomId is missing, `401 Unauthorized` if authentication required but missing, `404 Not Found` if room not found
+
+---
+
+### POST /api/bots
+
+Create a new bot.
+
+**Request:**
+- Method: `POST`
+- Headers: `Content-Type: application/json`
+- Authentication:
+  - Session token: `POST /api/bots?_token={sessionToken}`
+  - OR JWT: `Authorization: Bearer {accessToken}`
+- Body:
+```json
+{
+  "roomId": "room-uuid-or-playUri",
+  "name": "Bot Name",
+  "description": "Optional description",
+  "characterTextureId": "optional-texture-id",
+  "enabled": true,
+  "behaviorType": "idle" | "patrol" | "social",
+  "behaviorConfig": {
+    "assignedSpace": {
+      "center": { "x": 320, "y": 480 },
+      "radius": 150
+    }
+  },
+  "chatInstructions": "Optional chat instructions",
+  "movementInstructions": "Optional movement instructions",
+  "aiProviderRef": "optional-ai-provider-ref"
+}
+```
+
+**Response:** `201 Created` (same format as GET response)
+
+**Error:** `400 Bad Request` for invalid input, `401 Unauthorized` if not authenticated, `403 Forbidden` if lacks permission, `404 Not Found` if room not found
+
+---
+
+### GET /api/bots/:id
+
+Get a single bot by UUID.
+
+**Request:**
+- Method: `GET`
+- Path Parameters:
+  - `id` (required): Bot UUID
+- Authentication:
+  - Session token: `GET /api/bots/{id}?_token={sessionToken}`
+  - OR JWT: `Authorization: Bearer {accessToken}`
+
+**Response:** `200 OK` (same format as GET /api/bots array item)
+
+**Visibility:** Same rules as GET /api/bots (public if room is public, otherwise requires auth)
+
+**Error:** `401 Unauthorized` if authentication required but missing, `404 Not Found` if bot not found
+
+---
+
+### PUT /api/bots/:id
+
+Update a bot.
+
+**Request:**
+- Method: `PUT`
+- Path Parameters:
+  - `id` (required): Bot UUID
+- Headers: `Content-Type: application/json`
+- Authentication:
+  - Session token: `PUT /api/bots/{id}?_token={sessionToken}`
+  - OR JWT: `Authorization: Bearer {accessToken}`
+- Body: (all fields optional for partial updates)
+```json
+{
+  "roomId": "room-uuid-or-playUri",
+  "name": "Updated Name",
+  "description": "Updated description",
+  "characterTextureId": "updated-texture-id",
+  "enabled": false,
+  "behaviorType": "patrol",
+  "behaviorConfig": {},
+  "chatInstructions": "Updated instructions",
+  "movementInstructions": "Updated movement",
+  "aiProviderRef": "updated-provider-ref"
+}
+```
+
+**Response:** `200 OK` (updated bot object)
+
+**Error:** `400 Bad Request` for invalid input, `401 Unauthorized` if not authenticated, `403 Forbidden` if lacks permission, `404 Not Found` if bot not found
+
+---
+
+### DELETE /api/bots/:id
+
+Delete a bot.
+
+**Request:**
+- Method: `DELETE`
+- Path Parameters:
+  - `id` (required): Bot UUID
+- Authentication:
+  - Session token: `DELETE /api/bots/{id}?_token={sessionToken}`
+  - OR JWT: `Authorization: Bearer {accessToken}`
+
+**Response:** `204 No Content`
+
+**Error:** `401 Unauthorized` if not authenticated, `403 Forbidden` if lacks permission, `404 Not Found` if bot not found
 
 ---
 
