@@ -35,7 +35,43 @@ export async function GET(
       );
     }
 
-    return NextResponse.json(provider);
+    // Find all bots using this provider
+    const bots = await prisma.bot.findMany({
+      where: {
+        aiProviderRef: id,
+      },
+      select: {
+        id: true,
+        name: true,
+        enabled: true,
+        room: {
+          select: {
+            id: true,
+            name: true,
+            world: {
+              select: {
+                id: true,
+                name: true,
+                universe: {
+                  select: {
+                    id: true,
+                    name: true,
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      orderBy: {
+        name: 'asc',
+      },
+    });
+
+    return NextResponse.json({
+      ...provider,
+      bots,
+    });
   } catch (error) {
     console.error('Error getting AI provider:', error);
     return NextResponse.json(

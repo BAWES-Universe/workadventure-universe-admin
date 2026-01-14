@@ -6,8 +6,26 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { AlertCircle, Loader2, ArrowLeft, TestTube, Edit, CheckCircle2, XCircle } from 'lucide-react';
-import Link from 'next/link';
+import AuthLink from '@/app/admin/auth-link';
 import { Badge } from '@/components/ui/badge';
+
+interface Bot {
+  id: string;
+  name: string;
+  enabled: boolean;
+  room: {
+    id: string;
+    name: string;
+    world: {
+      id: string;
+      name: string;
+      universe: {
+        id: string;
+        name: string;
+      };
+    };
+  };
+}
 
 interface AiProvider {
   providerId: string;
@@ -25,6 +43,7 @@ interface AiProvider {
   testedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  bots?: Bot[];
 }
 
 export default function ProviderDetailPage({ params }: { params: Promise<{ id: string }> }) {
@@ -124,12 +143,12 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
     <div className="space-y-8">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4">
-          <Link href="/admin/ai-providers">
-            <Button variant="ghost" size="sm">
+          <Button variant="ghost" size="sm" asChild>
+            <AuthLink href="/admin/ai-providers">
               <ArrowLeft className="mr-2 h-4 w-4" />
               Back
-            </Button>
-          </Link>
+            </AuthLink>
+          </Button>
           <div className="space-y-1">
             <h1 className="text-4xl font-bold tracking-tight">{provider.name}</h1>
             <p className="text-muted-foreground text-lg">
@@ -137,12 +156,12 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
             </p>
           </div>
         </div>
-        <Link href={`/admin/ai-providers/${providerId}/edit`}>
-          <Button>
+        <Button asChild>
+          <AuthLink href={`/admin/ai-providers/${providerId}/edit`}>
             <Edit className="mr-2 h-4 w-4" />
             Edit
-          </Button>
-        </Link>
+          </AuthLink>
+        </Button>
       </div>
 
       {error && (
@@ -308,6 +327,66 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
           </CardContent>
         </Card>
       )}
+
+      {/* Bots Using This Provider */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Bots Using This Provider</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {!provider.bots || provider.bots.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No bots are using this provider</p>
+          ) : (
+            <div className="space-y-4">
+              {provider.bots.map((bot) => (
+                <div
+                  key={bot.id}
+                  className="flex items-center justify-between border-b pb-4 last:border-0"
+                >
+                  <div className="flex-1">
+                    <AuthLink
+                      href={`/admin/bots/${bot.id}`}
+                      className="font-semibold text-primary hover:underline"
+                    >
+                      {bot.name}
+                    </AuthLink>
+                    <div className="text-sm text-muted-foreground mt-1">
+                      <AuthLink
+                        href={`/admin/rooms/${bot.room.id}`}
+                        className="hover:underline"
+                      >
+                        {bot.room.name}
+                      </AuthLink>
+                      {' • '}
+                      <AuthLink
+                        href={`/admin/worlds/${bot.room.world.id}`}
+                        className="hover:underline"
+                      >
+                        {bot.room.world.name}
+                      </AuthLink>
+                      {' • '}
+                      <AuthLink
+                        href={`/admin/universes/${bot.room.world.universe.id}`}
+                        className="hover:underline"
+                      >
+                        {bot.room.world.universe.name}
+                      </AuthLink>
+                    </div>
+                    <div className="text-xs text-muted-foreground mt-1 font-mono">
+                      {bot.id}
+                    </div>
+                  </div>
+                  <div className="ml-4">
+                    <Badge variant={bot.enabled ? 'default' : 'secondary'}>
+                      {bot.enabled ? 'Enabled' : 'Disabled'}
+                    </Badge>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }

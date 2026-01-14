@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import AuthLink from '@/app/admin/auth-link';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { AlertCircle, Loader2, TrendingUp, DollarSign, Activity, AlertTriangle } from 'lucide-react';
@@ -27,6 +28,7 @@ interface UsageStats {
   }>;
   byBot: Record<string, {
     botId: string;
+    botName: string;
     calls: number;
     tokens: number;
     cost: number;
@@ -296,7 +298,12 @@ export default function UsageDashboardPage() {
                       className="flex items-center justify-between border-b pb-4 last:border-0"
                     >
                       <div>
-                        <div className="font-semibold">{provider.providerName}</div>
+                        <AuthLink
+                          href={`/admin/ai-providers/${provider.providerId}`}
+                          className="font-semibold text-primary hover:underline"
+                        >
+                          {provider.providerName}
+                        </AuthLink>
                         <div className="text-sm text-muted-foreground">
                           {provider.providerType} • {provider.providerId}
                         </div>
@@ -339,7 +346,15 @@ export default function UsageDashboardPage() {
                         className="flex items-center justify-between border-b pb-4 last:border-0"
                       >
                         <div>
-                          <div className="font-semibold">{botId}</div>
+                          <AuthLink
+                            href={`/admin/bots/${botId}`}
+                            className="font-semibold text-primary hover:underline"
+                          >
+                            {bot.botName}
+                          </AuthLink>
+                          <div className="text-xs text-muted-foreground mt-1">
+                            {botId}
+                          </div>
                         </div>
                         <div className="text-right space-y-1">
                           <div className="text-sm">

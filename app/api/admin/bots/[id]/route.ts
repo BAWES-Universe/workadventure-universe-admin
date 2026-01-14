@@ -4,16 +4,13 @@ import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
 
 /**
- * GET /api/admin/ai-providers/usage
- * Get usage analytics (super admin only)
- * 
- * Query params:
- * - startDate: ISO date string
- * - endDate: ISO date string
- * - providerId: filter by provider
- * - botId: filter by bot
+ * GET /api/admin/bots/:id
+ * Get bot details with usage history (super admin only)
  */
-export async function GET(request: NextRequest) {
+export async function GET(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
   try {
     const sessionUser = await getSessionUser(request);
     
@@ -24,36 +21,59 @@ export async function GET(request: NextRequest) {
       );
     }
 
+    const { id } = await params;
     const { searchParams } = new URL(request.url);
     const startDate = searchParams.get('startDate');
     const endDate = searchParams.get('endDate');
-    const providerId = searchParams.get('providerId');
-    const botId = searchParams.get('botId');
 
-    // Build where clause
-    const where: any = {};
+    // Fetch bot with relations (bot may not exist if it was deleted, but usage data remains)
+    const bot = await prisma.bot.findUnique({
+      where: { id },
+      include: {
+        room: {
+          include: {
+            world: {
+              include: {
+                universe: true,
+              },
+            },
+          },
+        },
+        createdBy: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+          },
+        },
+        updatedBy: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+          },
+        },
+      },
+    });
+
+    // Build where clause for usage history (always fetch usage, even if bot was deleted)
+    const usageWhere: any = {
+      botId: id,
+    };
     
     if (startDate || endDate) {
-      where.timestamp = {};
+      usageWhere.timestamp = {};
       if (startDate) {
-        where.timestamp.gte = new Date(startDate);
+        usageWhere.timestamp.gte = new Date(startDate);
       }
       if (endDate) {
-        where.timestamp.lte = new Date(endDate);
+        usageWhere.timestamp.lte = new Date(endDate);
       }
     }
 
-    if (providerId) {
-      where.providerId = providerId;
-    }
-
-    if (botId) {
-      where.botId = botId;
-    }
-
-    // Get usage data
+    // Fetch usage history
     const usage = await prisma.botsAiUsage.findMany({
-      where,
+      where: usageWhere,
       include: {
         provider: {
           select: {
@@ -69,26 +89,7 @@ export async function GET(request: NextRequest) {
       take: 1000, // Limit to prevent huge responses
     });
 
-    // Get unique bot IDs from usage entries
-    const uniqueBotIds = [...new Set(usage.map(entry => entry.botId))];
-    
-    // Fetch bot names for all unique bot IDs
-    const bots = await prisma.bot.findMany({
-      where: {
-        id: {
-          in: uniqueBotIds,
-        },
-      },
-      select: {
-        id: true,
-        name: true,
-      },
-    });
-
-    // Create a map of botId -> bot name
-    const botNameMap = new Map(bots.map(bot => [bot.id, bot.name]));
-
-    // Aggregate statistics
+    // Calculate usage statistics
     const stats = {
       totalCalls: 0,
       totalTokens: 0,
@@ -96,7 +97,6 @@ export async function GET(request: NextRequest) {
       totalDuration: 0,
       errorCount: 0,
       byProvider: {} as Record<string, any>,
-      byBot: {} as Record<string, any>,
     };
 
     usage.forEach((entry) => {
@@ -136,39 +136,17 @@ export async function GET(request: NextRequest) {
       if (entry.error) {
         stats.byProvider[entry.providerId].errors++;
       }
-
-      // By bot
-      if (!stats.byBot[entry.botId]) {
-        stats.byBot[entry.botId] = {
-          botId: entry.botId,
-          botName: botNameMap.get(entry.botId) || entry.botId, // Fallback to botId if not found
-          calls: 0,
-          tokens: 0,
-          cost: 0,
-          duration: 0,
-          errors: 0,
-        };
-      }
-      stats.byBot[entry.botId].calls += entry.apiCalls;
-      stats.byBot[entry.botId].tokens += entry.tokensUsed;
-      if (entry.cost) {
-        stats.byBot[entry.botId].cost += Number(entry.cost);
-      }
-      if (entry.durationSeconds) {
-        stats.byBot[entry.botId].duration += entry.durationSeconds;
-      }
-      if (entry.error) {
-        stats.byBot[entry.botId].errors++;
-      }
     });
 
     return NextResponse.json({
+      bot, // null if bot was deleted
       usage,
       stats,
       totalEntries: usage.length,
+      botExists: bot !== null,
     });
   } catch (error) {
-    console.error('Error getting usage analytics:', error);
+    console.error('Error getting bot details:', error);
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }
