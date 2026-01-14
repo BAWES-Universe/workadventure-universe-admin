@@ -106,6 +106,7 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
   const [stats, setStats] = useState<UsageStats | null>(null);
   const [totalEntries, setTotalEntries] = useState(0);
   const [authChecked, setAuthChecked] = useState(false);
+  const [initialLoad, setInitialLoad] = useState(true);
   const [filters, setFilters] = useState({
     startDate: '',
     endDate: '',
@@ -131,7 +132,7 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
           return;
         }
         setAuthChecked(true);
-        setLoading(false);
+        // Don't set loading to false here - wait for fetchBot to complete
       } catch (err) {
         router.push('/admin/login');
       }
@@ -179,8 +180,11 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
       } else {
         setError(null);
       }
+      
+      setInitialLoad(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
+      setInitialLoad(false);
     } finally {
       setLoading(false);
     }
@@ -221,7 +225,8 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
     return new Date(dateString).toLocaleString();
   }
 
-  if (loading && !bot) {
+  // Show loading spinner during initial load
+  if (loading || initialLoad) {
     return (
       <div className="space-y-8">
         <div className="flex items-center justify-center py-12">
@@ -231,7 +236,8 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
     );
   }
 
-  if (!bot) {
+  // Only show "not found" if we've completed the initial load and bot is null
+  if (!bot && !initialLoad) {
     return (
       <div className="space-y-8">
         <Alert variant="destructive">
