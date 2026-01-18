@@ -1190,46 +1190,102 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
                   <CardHeader>
                     <CardTitle>{emotion.playerName || `Player ${emotion.playerId}`}</CardTitle>
                   </CardHeader>
-                  <CardContent className="space-y-4">
+                  <CardContent className="space-y-6">
                     {emotion.emotions.botEmotion && (
                       <div>
-                        <div className="text-sm font-medium text-muted-foreground mb-2">Bot Emotion</div>
-                        <div className="space-y-1">
-                          {Object.entries(emotion.emotions.botEmotion).map(([key, value]) => (
-                            <div key={key} className="flex items-center justify-between">
-                              <span className="text-sm capitalize">{key}</span>
-                              <div className="flex items-center gap-2">
-                                <div className="w-24 h-2 bg-muted rounded-full overflow-hidden">
-                                  <div
-                                    className="h-full bg-primary"
-                                    style={{ width: `${Math.min(100, (value as number) * 100)}%` }}
-                                  />
+                        <div className="text-sm font-medium text-muted-foreground mb-4">Bot Emotion</div>
+                        <div className="grid grid-cols-2 gap-4">
+                          {Object.entries(emotion.emotions.botEmotion).map(([key, value]) => {
+                            // Values are already out of 100, so use directly (clamp to 0-100)
+                            const percentage = Math.min(100, Math.max(0, value as number));
+                            const circumference = 2 * Math.PI * 36; // radius = 36
+                            const offset = circumference - (percentage / 100) * circumference;
+                            
+                            return (
+                              <div key={key} className="flex flex-col items-center gap-2">
+                                <div className="relative w-20 h-20">
+                                  <svg className="w-20 h-20 transform -rotate-90" viewBox="0 0 80 80">
+                                    {/* Background circle */}
+                                    <circle
+                                      cx="40"
+                                      cy="40"
+                                      r="36"
+                                      stroke="currentColor"
+                                      strokeWidth="6"
+                                      fill="none"
+                                      className="text-muted"
+                                    />
+                                    {/* Progress circle */}
+                                    <circle
+                                      cx="40"
+                                      cy="40"
+                                      r="36"
+                                      stroke="currentColor"
+                                      strokeWidth="6"
+                                      fill="none"
+                                      strokeDasharray={circumference}
+                                      strokeDashoffset={offset}
+                                      strokeLinecap="round"
+                                      className="text-primary transition-all duration-500"
+                                    />
+                                  </svg>
+                                  <div className="absolute inset-0 flex items-center justify-center">
+                                    <span className="text-xs font-semibold">{Math.round(percentage)}%</span>
+                                  </div>
                                 </div>
-                                <span className="text-sm w-8 text-right">{(value as number).toFixed(2)}</span>
+                                <span className="text-xs capitalize text-center text-muted-foreground">{key}</span>
                               </div>
-                            </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       </div>
                     )}
                     {emotion.emotions.personEmotion && (
                       <div>
-                        <div className="text-sm font-medium text-muted-foreground mb-2">Person Emotion</div>
-                        <div className="space-y-1">
-                          {Object.entries(emotion.emotions.personEmotion).map(([key, value]) => (
-                            <div key={key} className="flex items-center justify-between">
-                              <span className="text-sm capitalize">{key}</span>
-                              <div className="flex items-center gap-2">
-                                <div className="w-24 h-2 bg-muted rounded-full overflow-hidden">
-                                  <div
-                                    className="h-full bg-primary"
-                                    style={{ width: `${Math.min(100, (value as number) * 100)}%` }}
-                                  />
+                        <div className="text-sm font-medium text-muted-foreground mb-4">Person Emotion</div>
+                        <div className="grid grid-cols-2 gap-4">
+                          {Object.entries(emotion.emotions.personEmotion).map(([key, value]) => {
+                            // Values are already out of 100, so use directly (clamp to 0-100)
+                            const percentage = Math.min(100, Math.max(0, value as number));
+                            const circumference = 2 * Math.PI * 36; // radius = 36
+                            const offset = circumference - (percentage / 100) * circumference;
+                            
+                            return (
+                              <div key={key} className="flex flex-col items-center gap-2">
+                                <div className="relative w-20 h-20">
+                                  <svg className="w-20 h-20 transform -rotate-90" viewBox="0 0 80 80">
+                                    {/* Background circle */}
+                                    <circle
+                                      cx="40"
+                                      cy="40"
+                                      r="36"
+                                      stroke="currentColor"
+                                      strokeWidth="6"
+                                      fill="none"
+                                      className="text-muted"
+                                    />
+                                    {/* Progress circle */}
+                                    <circle
+                                      cx="40"
+                                      cy="40"
+                                      r="36"
+                                      stroke="currentColor"
+                                      strokeWidth="6"
+                                      fill="none"
+                                      strokeDasharray={circumference}
+                                      strokeDashoffset={offset}
+                                      strokeLinecap="round"
+                                      className="text-primary transition-all duration-500"
+                                    />
+                                  </svg>
+                                  <div className="absolute inset-0 flex items-center justify-center">
+                                    <span className="text-xs font-semibold">{Math.round(percentage)}%</span>
+                                  </div>
                                 </div>
-                                <span className="text-sm w-8 text-right">{(value as number).toFixed(2)}</span>
+                                <span className="text-xs capitalize text-center text-muted-foreground">{key}</span>
                               </div>
-                            </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       </div>
                     )}
