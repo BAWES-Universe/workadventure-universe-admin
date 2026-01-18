@@ -161,6 +161,7 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
   const [usage, setUsage] = useState<UsageEntry[]>([]);
   const [stats, setStats] = useState<UsageStats | null>(null);
   const [totalEntries, setTotalEntries] = useState(0);
+  const [displayedEntries, setDisplayedEntries] = useState(0);
   const [authChecked, setAuthChecked] = useState(false);
   const [initialLoad, setInitialLoad] = useState(true);
   const [filters, setFilters] = useState({
@@ -237,7 +238,8 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
       setBot(data.bot);
       setUsage(data.usage);
       setStats(data.stats);
-      setTotalEntries(data.totalEntries);
+      setTotalEntries(data.totalEntries || 0);
+      setDisplayedEntries(data.displayedEntries || data.usage?.length || 0);
       
       // If bot doesn't exist but we have usage data, show a warning
       if (!data.botExists && data.usage && data.usage.length > 0) {
@@ -780,7 +782,12 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
                   {usage.length > usagePageSize && (
                     <div className="flex items-center justify-between mt-4 pt-4 border-t">
                       <div className="text-sm text-muted-foreground">
-                        Showing {((usagePage - 1) * usagePageSize) + 1} - {Math.min(usagePage * usagePageSize, usage.length)} of {usage.length} entries
+                        Showing {((usagePage - 1) * usagePageSize) + 1} - {Math.min(usagePage * usagePageSize, usage.length)} of {displayedEntries} entries
+                        {totalEntries > displayedEntries && (
+                          <span className="ml-2 text-xs italic">
+                            (out of {formatNumber(totalEntries)} total)
+                          </span>
+                        )}
                       </div>
                       <div className="flex items-center gap-2">
                         <Button

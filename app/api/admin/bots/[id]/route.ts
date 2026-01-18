@@ -71,78 +71,145 @@ export async function GET(
       }
     }
 
-    // Fetch usage history
-    const usage = await prisma.botsAiUsage.findMany({
-      where: usageWhere,
-      include: {
-        provider: {
-          select: {
-            providerId: true,
-            name: true,
-            type: true,
+    // Calculate usage statistics using aggregation for accurate totals from ALL entries
+    // Use try-catch for groupBy as it can fail if there are no matching records
+    let usageStats, errorEntries, providerStats, totalCount;
+    
+    try {
+      [usageStats, errorEntries, totalCount] = await Promise.all([
+        // Aggregate totals across all entries
+        prisma.botsAiUsage.aggregate({
+          where: usageWhere,
+          _sum: {
+            apiCalls: true,
+            tokensUsed: true,
+            cost: true,
+            durationSeconds: true,
           },
-        },
-      },
-      orderBy: {
-        timestamp: 'desc',
-      },
-      take: 1000, // Limit to prevent huge responses
-    });
+        }),
+        // Count errors
+        prisma.botsAiUsage.findMany({
+          where: {
+            ...usageWhere,
+            error: true,
+          },
+          select: {
+            id: true,
+          },
+        }),
+        // Get total count for pagination
+        prisma.botsAiUsage.count({
+          where: usageWhere,
+        }),
+      ]);
 
-    // Calculate usage statistics
+      // Group by provider for breakdown (can fail if no records, so handle separately)
+      try {
+        providerStats = await prisma.botsAiUsage.groupBy({
+          by: ['providerId'],
+          where: usageWhere,
+          _sum: {
+            apiCalls: true,
+            tokensUsed: true,
+            cost: true,
+            durationSeconds: true,
+          },
+        });
+      } catch (groupByError) {
+        // groupBy fails if there are no matching records, so use empty array
+        providerStats = [];
+      }
+    } catch (aggError) {
+      // If aggregation fails, use defaults
+      console.error('Error in usage aggregation:', aggError);
+      usageStats = { _sum: { apiCalls: null, tokensUsed: null, cost: null, durationSeconds: null } };
+      errorEntries = [];
+      providerStats = [];
+      totalCount = 0;
+    }
+
+    // Calculate stats from aggregated data
     const stats = {
-      totalCalls: 0,
-      totalTokens: 0,
-      totalCost: 0,
-      totalDuration: 0,
-      errorCount: 0,
+      totalCalls: Number(usageStats._sum.apiCalls || 0),
+      totalTokens: Number(usageStats._sum.tokensUsed || 0),
+      totalCost: usageStats._sum.cost ? Number(usageStats._sum.cost) : 0,
+      totalDuration: Number(usageStats._sum.durationSeconds || 0),
+      errorCount: errorEntries.length,
       byProvider: {} as Record<string, any>,
     };
 
-    usage.forEach((entry) => {
-      stats.totalCalls += entry.apiCalls;
-      stats.totalTokens += entry.tokensUsed;
-      if (entry.cost) {
-        stats.totalCost += Number(entry.cost);
-      }
-      if (entry.durationSeconds) {
-        stats.totalDuration += entry.durationSeconds;
-      }
-      if (entry.error) {
-        stats.errorCount++;
-      }
+    // Get provider details and error counts for each provider
+    if (providerStats && providerStats.length > 0) {
+      for (const providerStat of providerStats) {
+        try {
+          const provider = await prisma.aiProvider.findUnique({
+            where: { providerId: providerStat.providerId },
+            select: { name: true, type: true },
+          });
 
-      // By provider
-      if (!stats.byProvider[entry.providerId]) {
-        stats.byProvider[entry.providerId] = {
-          providerId: entry.providerId,
-          providerName: entry.provider.name,
-          providerType: entry.provider.type,
-          calls: 0,
-          tokens: 0,
-          cost: 0,
-          duration: 0,
-          errors: 0,
-        };
+          const providerErrors = await prisma.botsAiUsage.count({
+            where: {
+              ...usageWhere,
+              providerId: providerStat.providerId,
+              error: true,
+            },
+          });
+
+          stats.byProvider[providerStat.providerId] = {
+            providerId: providerStat.providerId,
+            providerName: provider?.name || providerStat.providerId,
+            providerType: provider?.type || 'unknown',
+            calls: Number(providerStat._sum?.apiCalls || 0),
+            tokens: Number(providerStat._sum?.tokensUsed || 0),
+            cost: providerStat._sum?.cost ? Number(providerStat._sum.cost) : 0,
+            duration: Number(providerStat._sum?.durationSeconds || 0),
+            errors: providerErrors,
+          };
+        } catch (providerError) {
+          console.error(`Error processing provider ${providerStat.providerId}:`, providerError);
+          // Continue with other providers even if one fails
+        }
       }
-      stats.byProvider[entry.providerId].calls += entry.apiCalls;
-      stats.byProvider[entry.providerId].tokens += entry.tokensUsed;
-      if (entry.cost) {
-        stats.byProvider[entry.providerId].cost += Number(entry.cost);
-      }
-      if (entry.durationSeconds) {
-        stats.byProvider[entry.providerId].duration += entry.durationSeconds;
-      }
-      if (entry.error) {
-        stats.byProvider[entry.providerId].errors++;
-      }
-    });
+    }
+
+    // Fetch usage history (limited to 1000 for display only)
+    let usage = [];
+    try {
+      usage = await prisma.botsAiUsage.findMany({
+        where: usageWhere,
+        include: {
+          provider: {
+            select: {
+              providerId: true,
+              name: true,
+              type: true,
+            },
+          },
+        },
+        orderBy: {
+          timestamp: 'desc',
+        },
+        take: 1000, // Limit to prevent huge responses - only affects displayed entries
+      });
+    } catch (usageError) {
+      console.error('Error fetching usage history:', usageError);
+      // Continue with empty usage array
+      usage = [];
+    }
 
     return NextResponse.json({
       bot, // null if bot was deleted
-      usage,
-      stats,
-      totalEntries: usage.length,
+      usage: usage || [],
+      stats: stats || {
+        totalCalls: 0,
+        totalTokens: 0,
+        totalCost: 0,
+        totalDuration: 0,
+        errorCount: 0,
+        byProvider: {},
+      },
+      totalEntries: totalCount || 0, // True total count across all entries
+      displayedEntries: usage?.length || 0, // Actually displayed entries (max 1000)
       botExists: bot !== null,
     });
   } catch (error) {
