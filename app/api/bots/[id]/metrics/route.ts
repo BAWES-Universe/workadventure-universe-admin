@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
-import { requireServiceToken } from '@/lib/service-tokens';
+import { validateServiceToken } from '@/lib/service-tokens';
+import { requireAdminAuth } from '@/lib/admin-auth';
 import { corsHeaders } from '@/lib/cors';
 
 export const runtime = 'nodejs';
@@ -17,7 +18,7 @@ export async function OPTIONS() {
  * GET /api/bots/:botId/metrics
  * Query metrics with filters
  * 
- * Auth: BOT_SERVICE_TOKEN
+ * Auth: BOT_SERVICE_TOKEN OR Admin (session or admin token)
  * 
  * Query params:
  * - metricType: Filter by metric type
@@ -33,7 +34,12 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    requireServiceToken(request);
+    // Try service token first, then admin auth
+    const { validateServiceToken } = await import('@/lib/service-tokens');
+    const isServiceToken = validateServiceToken(request);
+    if (!isServiceToken) {
+      await requireAdminAuth(request);
+    }
 
     const { id: botId } = await params;
     const { searchParams } = new URL(request.url);
@@ -142,7 +148,7 @@ export async function GET(
 
     return NextResponse.json(result, { headers: corsHeaders() });
   } catch (error: any) {
-    if (error.message === 'Unauthorized: Invalid service token') {
+    if (error.message === 'Unauthorized: Invalid service token' || error.message === 'Unauthorized: Admin authentication required') {
       return NextResponse.json(
         { error: 'Unauthorized' },
         { status: 401, headers: corsHeaders() }
