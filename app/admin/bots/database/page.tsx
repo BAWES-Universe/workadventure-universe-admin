@@ -468,23 +468,23 @@ export default function DatabaseMonitoringPage() {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Cleanup Preview</AlertDialogTitle>
-            <AlertDialogDescription>
+            <AlertDialogDescription asChild>
               {cleanupPreview ? (
                 <div className="space-y-2 mt-4">
-                  <div>
+                  <p>
                     <strong>Will delete:</strong> {cleanupPreview.willDelete?.conversationCount || cleanupPreview.willDelete?.rowCount || 0} records
-                  </div>
-                  <div>
+                  </p>
+                  <p>
                     <strong>Will keep:</strong> {cleanupPreview.willKeep?.conversationCount || cleanupPreview.willKeep?.rowCount || 0} records
-                  </div>
+                  </p>
                   {cleanupPreview.willDelete?.estimatedSizeBytes && (
-                    <div>
+                    <p>
                       <strong>Estimated space freed:</strong> {formatBytes(cleanupPreview.willDelete.estimatedSizeBytes)}
-                    </div>
+                    </p>
                   )}
                 </div>
               ) : (
-                'Loading preview...'
+                <p>Loading preview...</p>
               )}
             </AlertDialogDescription>
           </AlertDialogHeader>
