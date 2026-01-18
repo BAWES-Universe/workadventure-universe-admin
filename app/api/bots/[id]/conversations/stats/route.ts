@@ -21,12 +21,12 @@ export async function OPTIONS() {
  */
 export async function GET(
   request: NextRequest,
-  { params }: { params: Promise<{ botId: string }> }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     await requireAdminAuth(request);
 
-    const { botId } = await params;
+    const { id: botId } = await params;
 
     // Get stats
     const [totalConversations, oldest, newest] = await Promise.all([

@@ -28,12 +28,12 @@ export async function OPTIONS() {
  */
 export async function POST(
   request: NextRequest,
-  { params }: { params: Promise<{ botId: string }> }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     requireServiceToken(request);
 
-    const { botId } = await params;
+    const { id: botId } = await params;
     const body = await request.json();
 
     const {

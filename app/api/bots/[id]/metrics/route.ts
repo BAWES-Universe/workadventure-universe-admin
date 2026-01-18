@@ -30,12 +30,12 @@ export async function OPTIONS() {
  */
 export async function GET(
   request: NextRequest,
-  { params }: { params: Promise<{ botId: string }> }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
     requireServiceToken(request);
 
-    const { botId } = await params;
+    const { id: botId } = await params;
     const { searchParams } = new URL(request.url);
 
     // Parse query params
