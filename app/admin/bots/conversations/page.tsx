@@ -133,7 +133,8 @@ export default function ConversationsBrowsePage() {
           router.push('/admin');
           return;
         }
-        throw new Error('Failed to fetch conversations');
+        const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
+        throw new Error(errorData.error || `Failed to fetch conversations (${response.status})`);
       }
 
       const data = await response.json();
@@ -141,6 +142,7 @@ export default function ConversationsBrowsePage() {
       setPagination(data.pagination || null);
       setError(null);
     } catch (err) {
+      console.error('Error fetching conversations:', err);
       setError(err instanceof Error ? err.message : 'An error occurred');
     } finally {
       setLoading(false);

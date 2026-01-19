@@ -86,10 +86,10 @@ export async function GET(request: NextRequest) {
         totalPages,
       },
     });
-  } catch (error) {
+  } catch (error: any) {
     console.error('Error listing conversations:', error);
     return NextResponse.json(
-      { error: 'Internal server error' },
+      { error: error?.message || 'Internal server error', details: error?.stack },
       { status: 500 }
     );
   }
