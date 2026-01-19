@@ -509,23 +509,6 @@ model BotsTestResult {
   @@map("bots_test_results")
 }
 
-// Bot Improvements - Improvement cycle tracking (dev only)
-model BotsImprovement {
-  id            Int      @id @default(autoincrement())
-  botId         String?  @map("bot_id") @db.VarChar(255)
-  improvementType String? @map("improvement_type") @db.VarChar(50) // 'repetition_fix', 'prompt_optimization', etc.
-  changes       Json     // Changes made
-  metricsBefore Json?   @map("metrics_before") // Metrics before improvement
-  metricsAfter  Json?   @map("metrics_after") // Metrics after improvement
-  deployed      Boolean  @default(false)
-  createdAt     DateTime @default(now()) @map("created_at")
-
-  @@index([botId])
-  @@index([deployed])
-  @@index([createdAt]) // For cleanup queries
-  @@map("bots_improvements")
-}
-
 // Bot Memory - Enhanced memory with emotions
 model BotsMemory {
   id              Int       @id @default(autoincrement())

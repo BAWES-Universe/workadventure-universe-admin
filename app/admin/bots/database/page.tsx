@@ -45,7 +45,6 @@ interface DatabaseStats {
   conversations: TableStats;
   memory: TableStats;
   testResults: TableStats;
-  improvements: TableStats;
   totalSizeBytes: number;
   totalSizeMB: number;
   recommendations: string[];
@@ -75,7 +74,7 @@ export default function DatabaseMonitoringPage() {
   const [stats, setStats] = useState<DatabaseStats | null>(null);
   const [cleanupDialogOpen, setCleanupDialogOpen] = useState(false);
   const [cleanupOptionsDialogOpen, setCleanupOptionsDialogOpen] = useState(false);
-  const [cleanupType, setCleanupType] = useState<'metrics' | 'conversations' | 'memory' | 'testResults' | 'improvements' | 'all' | null>(null);
+  const [cleanupType, setCleanupType] = useState<'metrics' | 'conversations' | 'memory' | 'testResults' | 'all' | null>(null);
   const [cleanupPreview, setCleanupPreview] = useState<any>(null);
   const [cleanupLoading, setCleanupLoading] = useState(false);
   const [cleanupOptions, setCleanupOptions] = useState({
@@ -133,7 +132,7 @@ export default function DatabaseMonitoringPage() {
     }
   }
 
-  async function previewCleanup(type: 'metrics' | 'conversations' | 'memory' | 'testResults' | 'improvements' | 'all') {
+  async function previewCleanup(type: 'metrics' | 'conversations' | 'memory' | 'testResults' | 'all') {
     // Show options dialog first
     setCleanupType(type);
     setCleanupOptionsDialogOpen(true);
@@ -169,8 +168,6 @@ export default function DatabaseMonitoringPage() {
         url = `/api/bots/memory/cleanup/preview?${params.toString()}`;
       } else if (cleanupType === 'testResults') {
         url = `/api/bots/test-results/cleanup/preview?${params.toString()}`;
-      } else if (cleanupType === 'improvements') {
-        url = `/api/bots/improvements/cleanup/preview?${params.toString()}`;
       }
 
       if (url) {
@@ -224,8 +221,6 @@ export default function DatabaseMonitoringPage() {
         url = `/api/bots/memory/cleanup?${params.toString()}`;
       } else if (cleanupType === 'testResults') {
         url = `/api/bots/test-results/cleanup?${params.toString()}`;
-      } else if (cleanupType === 'improvements') {
-        url = `/api/bots/improvements/cleanup?${params.toString()}`;
       }
 
       if (url) {
@@ -248,7 +243,7 @@ export default function DatabaseMonitoringPage() {
   }
 
   async function startFresh() {
-    if (!confirm('This will delete ALL data from Metrics, Conversations, Memory, Test Results, and Improvements tables. This action cannot be undone! Are you absolutely sure?')) {
+    if (!confirm('This will delete ALL data from Metrics, Conversations, Memory, and Test Results tables. This action cannot be undone! Are you absolutely sure?')) {
       return;
     }
 
@@ -257,7 +252,7 @@ export default function DatabaseMonitoringPage() {
       const { authenticatedFetch } = await import('@/lib/client-auth');
       
       // Cleanup all tables
-      const tables = ['metrics', 'conversations', 'memory', 'test-results', 'improvements'];
+      const tables = ['metrics', 'conversations', 'memory', 'test-results'];
       const results: any[] = [];
       
       for (const table of tables) {
@@ -442,7 +437,6 @@ export default function DatabaseMonitoringPage() {
               { key: 'conversations', label: 'Conversations', data: stats.conversations },
               { key: 'memory', label: 'Memory', data: stats.memory },
               { key: 'testResults', label: 'Test Results', data: stats.testResults },
-              { key: 'improvements', label: 'Improvements', data: stats.improvements },
             ].map(({ key, label, data }) => {
               const health = getHealthStatus(data);
               return (
@@ -519,18 +513,16 @@ export default function DatabaseMonitoringPage() {
                       )}
                     </div>
                     <div className="flex gap-2 pt-2 flex-wrap">
-                      {(key === 'metrics' || key === 'testResults' || key === 'improvements' || key === 'conversations' || key === 'memory') && (
+                      {(key === 'metrics' || key === 'testResults' || key === 'conversations' || key === 'memory') && (
                         <AuthLink href={
                           key === 'metrics' ? '/admin/bots/metrics' :
                           key === 'testResults' ? '/admin/bots/test-results' :
-                          key === 'improvements' ? '/admin/bots/improvements' :
                           key === 'conversations' ? '/admin/bots/conversations' :
                           '/admin/bots/memory'
                         }>
                           <Button variant="outline" size="sm">
                             {key === 'metrics' && <BarChart3 className="mr-2 h-4 w-4" />}
                             {key === 'testResults' && <Activity className="mr-2 h-4 w-4" />}
-                            {key === 'improvements' && <TrendingUp className="mr-2 h-4 w-4" />}
                             {key === 'conversations' && <MessageSquare className="mr-2 h-4 w-4" />}
                             {key === 'memory' && <Brain className="mr-2 h-4 w-4" />}
                             Browse
@@ -540,7 +532,7 @@ export default function DatabaseMonitoringPage() {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => previewCleanup(key as 'metrics' | 'conversations' | 'memory' | 'testResults' | 'improvements')}
+                        onClick={() => previewCleanup(key as 'metrics' | 'conversations' | 'memory' | 'testResults')}
                         disabled={cleanupLoading}
                       >
                         <Eye className="mr-2 h-4 w-4" />
@@ -575,7 +567,7 @@ export default function DatabaseMonitoringPage() {
                     <SelectContent>
                       <SelectItem value="deleteAll">Delete All (Start Fresh)</SelectItem>
                       <SelectItem value="olderThanDays">Delete Older Than X Days</SelectItem>
-                      {(cleanupType === 'memory' || cleanupType === 'testResults' || cleanupType === 'improvements') && (
+                      {(cleanupType === 'memory' || cleanupType === 'testResults') && (
                         <SelectItem value="olderThanDays">Delete Older Than X Days</SelectItem>
                       )}
                       {cleanupType === 'metrics' && (

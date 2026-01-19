@@ -39,20 +39,6 @@ CREATE TABLE "bots_test_results" (
 );
 
 -- CreateTable
-CREATE TABLE "bots_improvements" (
-    "id" SERIAL NOT NULL,
-    "bot_id" VARCHAR(255),
-    "improvement_type" VARCHAR(50),
-    "changes" JSONB NOT NULL,
-    "metrics_before" JSONB,
-    "metrics_after" JSONB,
-    "deployed" BOOLEAN NOT NULL DEFAULT false,
-    "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT "bots_improvements_pkey" PRIMARY KEY ("id")
-);
-
--- CreateTable
 CREATE TABLE "bots_memory" (
     "id" SERIAL NOT NULL,
     "bot_id" VARCHAR(255) NOT NULL,
@@ -96,15 +82,6 @@ CREATE INDEX "bots_test_results_test_suite_idx" ON "bots_test_results"("test_sui
 
 -- CreateIndex
 CREATE INDEX "bots_test_results_created_at_idx" ON "bots_test_results"("created_at");
-
--- CreateIndex
-CREATE INDEX "bots_improvements_bot_id_idx" ON "bots_improvements"("bot_id");
-
--- CreateIndex
-CREATE INDEX "bots_improvements_deployed_idx" ON "bots_improvements"("deployed");
-
--- CreateIndex
-CREATE INDEX "bots_improvements_created_at_idx" ON "bots_improvements"("created_at");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "bots_test_results_test_id_key" ON "bots_test_results"("test_id");

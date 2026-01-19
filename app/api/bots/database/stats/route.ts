@@ -29,7 +29,6 @@ export async function GET(request: NextRequest) {
       'bots_conversations_recent',
       'bots_memory',
       'bots_test_results',
-      'bots_improvements',
     ];
 
     const stats: Record<string, any> = {};
@@ -73,15 +72,6 @@ export async function GET(request: NextRequest) {
       `.then((r) => Number((r[0] as any)?.size_bytes || 0)),
     ]);
 
-    const [improvementsCount, improvementsOldest, improvementsNewest, improvementsSize] = await Promise.all([
-      prisma.botsImprovement.count(),
-      prisma.botsImprovement.findFirst({ orderBy: { createdAt: 'asc' }, select: { createdAt: true } }),
-      prisma.botsImprovement.findFirst({ orderBy: { createdAt: 'desc' }, select: { createdAt: true } }),
-      prisma.$queryRaw<Array<{ size_bytes: bigint }>>`
-        SELECT pg_total_relation_size('bots_improvements')::bigint as size_bytes
-      `.then((r) => Number((r[0] as any)?.size_bytes || 0)),
-    ]);
-
     // Process each table's stats
     const processTable = (table: string, count: number, sizeBytes: number, oldest: any, newest: any) => {
       totalSizeBytes += sizeBytes;
@@ -107,7 +97,6 @@ export async function GET(request: NextRequest) {
     processTable('bots_conversations_recent', conversationsCount, conversationsSize, conversationsOldest, conversationsNewest);
     processTable('bots_memory', memoryCount, memorySize, memoryOldest, memoryNewest);
     processTable('bots_test_results', testResultsCount, testResultsSize, testResultsOldest, testResultsNewest);
-    processTable('bots_improvements', improvementsCount, improvementsSize, improvementsOldest, improvementsNewest);
 
     // Format response
     const response: any = {
@@ -131,12 +120,6 @@ export async function GET(request: NextRequest) {
       },
       testResults: stats.bots_test_results || {
         table: 'bots_test_results',
-        rowCount: 0,
-        sizeBytes: 0,
-        recommendation: 'OK: 0 rows, 0MB',
-      },
-      improvements: stats.bots_improvements || {
-        table: 'bots_improvements',
         rowCount: 0,
         sizeBytes: 0,
         recommendation: 'OK: 0 rows, 0MB',

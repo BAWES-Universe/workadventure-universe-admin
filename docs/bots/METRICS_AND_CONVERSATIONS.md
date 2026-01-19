@@ -322,7 +322,6 @@ Database monitoring - show what's bloating the DB.
   "conversations": { ... },
   "memory": { ... },
   "testResults": { ... },
-  "improvements": { ... },
   "totalSizeBytes": 636354560,
   "totalSizeMB": 606.7,
   "recommendations": [
@@ -347,24 +346,6 @@ Store test results for regression testing.
   "testSuite": "personality_compliance",
   "results": { ... },
   "passed": true
-}
-```
-
-### POST /api/bots/improvements
-
-Store improvement cycles for tracking.
-
-**Authentication:** `BOT_SERVICE_TOKEN`
-
-**Request:**
-```json
-{
-  "botId": "bot-123",
-  "improvementType": "repetition_fix",
-  "changes": { ... },
-  "metricsBefore": { ... },
-  "metricsAfter": { ... },
-  "deployed": false
 }
 ```
 
