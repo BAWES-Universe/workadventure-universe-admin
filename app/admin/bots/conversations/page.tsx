@@ -363,7 +363,8 @@ export default function ConversationsBrowsePage() {
             </div>
           ) : (
             <>
-              <div className="overflow-x-auto">
+              {/* Desktop Table View */}
+              <div className="hidden md:block overflow-x-auto">
                 <Table>
                   <TableHeader>
                     <TableRow>
@@ -435,6 +436,79 @@ export default function ConversationsBrowsePage() {
                     ))}
                   </TableBody>
                 </Table>
+              </div>
+
+              {/* Mobile Card View */}
+              <div className="md:hidden space-y-4 p-4">
+                {conversations.map((conv) => (
+                  <Card key={conv.id}>
+                    <CardContent className="pt-6">
+                      <div className="space-y-3">
+                        <div className="flex items-start justify-between">
+                          <div className="space-y-1">
+                            <div className="text-sm font-medium text-muted-foreground">Bot ID</div>
+                            <AuthLink
+                              href={`/admin/bots/${conv.botId}`}
+                              className="text-primary hover:underline font-mono text-sm font-semibold"
+                            >
+                              {conv.botId}
+                            </AuthLink>
+                          </div>
+                          <Badge variant="outline">{conv.messageCount} messages</Badge>
+                        </div>
+                        <div>
+                          <div className="text-sm font-medium text-muted-foreground mb-1">User</div>
+                          {conv.user ? (
+                            <>
+                              <div className="font-semibold">{conv.user.name || conv.userName || 'Unknown'}</div>
+                              {conv.user.email && (
+                                <div className="text-xs text-muted-foreground">{conv.user.email}</div>
+                              )}
+                              <div className="text-xs font-mono text-muted-foreground">
+                                {conv.userId || conv.userUuid || 'N/A'}
+                              </div>
+                              {conv.isGuest && (
+                                <Badge variant="outline" className="text-xs mt-1">Guest</Badge>
+                              )}
+                            </>
+                          ) : (
+                            <>
+                              <div className="font-semibold">{conv.userName || 'Unknown'}</div>
+                              <div className="text-xs font-mono text-muted-foreground">
+                                {conv.userUuid || 'N/A'}
+                              </div>
+                              {conv.isGuest && (
+                                <Badge variant="outline" className="text-xs mt-1">Guest</Badge>
+                              )}
+                            </>
+                          )}
+                        </div>
+                        <div className="grid grid-cols-2 gap-3">
+                          <div>
+                            <div className="text-sm font-medium text-muted-foreground mb-1">Duration</div>
+                            <div className="text-sm">{formatDuration(conv.startedAt, conv.endedAt)}</div>
+                          </div>
+                          <div>
+                            <div className="text-sm font-medium text-muted-foreground mb-1">Started</div>
+                            <div className="text-sm">{formatDate(conv.startedAt)}</div>
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-sm font-medium text-muted-foreground mb-1">Ended</div>
+                          <div className="text-sm">{formatDate(conv.endedAt)}</div>
+                        </div>
+                        <div>
+                          <details className="cursor-pointer">
+                            <summary className="text-sm font-medium text-muted-foreground">View Messages</summary>
+                            <pre className="mt-2 text-xs bg-muted p-2 rounded overflow-auto max-h-64">
+                              {JSON.stringify(conv.messages, null, 2)}
+                            </pre>
+                          </details>
+                        </div>
+                      </div>
+                    </CardContent>
+                  </Card>
+                ))}
               </div>
 
               {/* Pagination */}

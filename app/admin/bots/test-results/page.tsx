@@ -327,7 +327,8 @@ export default function TestResultsBrowsePage() {
             </div>
           ) : (
             <>
-              <div className="overflow-x-auto">
+              {/* Desktop Table View */}
+              <div className="hidden md:block overflow-x-auto">
                 <Table>
                   <TableHeader>
                     <TableRow>
@@ -388,6 +389,64 @@ export default function TestResultsBrowsePage() {
                     ))}
                   </TableBody>
                 </Table>
+              </div>
+
+              {/* Mobile Card View */}
+              <div className="md:hidden space-y-4 p-4">
+                {testResults.map((result) => (
+                  <Card key={result.id}>
+                    <CardContent className="pt-6">
+                      <div className="space-y-3">
+                        <div className="flex items-start justify-between">
+                          <div className="space-y-1 flex-1 min-w-0">
+                            <div className="text-sm font-medium text-muted-foreground">Test ID</div>
+                            <div className="font-mono text-sm font-semibold truncate">{result.testId}</div>
+                          </div>
+                          {result.passed ? (
+                            <Badge variant="default" className="bg-green-600">
+                              <CheckCircle2 className="mr-1 h-3 w-3" />
+                              Passed
+                            </Badge>
+                          ) : (
+                            <Badge variant="destructive">
+                              <XCircle className="mr-1 h-3 w-3" />
+                              Failed
+                            </Badge>
+                          )}
+                        </div>
+                        {result.botId && (
+                          <div>
+                            <div className="text-sm font-medium text-muted-foreground mb-1">Bot ID</div>
+                            <AuthLink
+                              href={`/admin/bots/${result.botId}`}
+                              className="text-primary hover:underline font-mono text-sm font-semibold"
+                            >
+                              {result.botId}
+                            </AuthLink>
+                          </div>
+                        )}
+                        {result.testSuite && (
+                          <div>
+                            <div className="text-sm font-medium text-muted-foreground mb-1">Test Suite</div>
+                            <Badge variant="outline">{result.testSuite}</Badge>
+                          </div>
+                        )}
+                        <div>
+                          <div className="text-sm font-medium text-muted-foreground mb-1">Created</div>
+                          <div className="text-sm">{formatDate(result.createdAt)}</div>
+                        </div>
+                        <div>
+                          <details className="cursor-pointer">
+                            <summary className="text-sm font-medium text-muted-foreground">View Results</summary>
+                            <pre className="mt-2 text-xs bg-muted p-2 rounded overflow-auto">
+                              {JSON.stringify(result.results, null, 2)}
+                            </pre>
+                          </details>
+                        </div>
+                      </div>
+                    </CardContent>
+                  </Card>
+                ))}
               </div>
 
               {/* Pagination */}

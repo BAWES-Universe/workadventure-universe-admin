@@ -348,7 +348,8 @@ export default function MemoryBrowsePage() {
             </div>
           ) : (
             <>
-              <div className="overflow-x-auto">
+              {/* Desktop Table View */}
+              <div className="hidden md:block overflow-x-auto">
                 <Table>
                   <TableHeader>
                     <TableRow>
@@ -429,6 +430,83 @@ export default function MemoryBrowsePage() {
                     ))}
                   </TableBody>
                 </Table>
+              </div>
+
+              {/* Mobile Card View */}
+              <div className="md:hidden space-y-4 p-4">
+                {memory.map((mem) => (
+                  <Card key={mem.id}>
+                    <CardContent className="pt-6">
+                      <div className="space-y-3">
+                        <div className="flex items-start justify-between">
+                          <div className="space-y-1">
+                            <div className="text-sm font-medium text-muted-foreground">Bot ID</div>
+                            <AuthLink
+                              href={`/admin/bots/${mem.botId}`}
+                              className="text-primary hover:underline font-mono text-sm font-semibold"
+                            >
+                              {mem.botId}
+                            </AuthLink>
+                          </div>
+                          {mem.isGuest && (
+                            <Badge variant="outline" className="text-xs">Guest</Badge>
+                          )}
+                        </div>
+                        <div>
+                          <div className="text-sm font-medium text-muted-foreground mb-1">User</div>
+                          {mem.user ? (
+                            <>
+                              <div className="font-semibold">{mem.user.name || mem.userName || 'Unknown'}</div>
+                              {mem.user.email && (
+                                <div className="text-xs text-muted-foreground">{mem.user.email}</div>
+                              )}
+                              <div className="text-xs font-mono text-muted-foreground">
+                                {mem.userId || mem.userUuid || 'N/A'}
+                              </div>
+                            </>
+                          ) : (
+                            <>
+                              <div className="font-semibold">{mem.userName || 'Unknown'}</div>
+                              <div className="text-xs font-mono text-muted-foreground">
+                                {mem.userUuid || 'N/A'}
+                              </div>
+                            </>
+                          )}
+                        </div>
+                        <div className="grid grid-cols-2 gap-3">
+                          <div>
+                            <div className="text-sm font-medium text-muted-foreground mb-1">Last Updated</div>
+                            <div className="text-sm">{formatDate(mem.updatedAt)}</div>
+                          </div>
+                          <div>
+                            <div className="text-sm font-medium text-muted-foreground mb-1">Created</div>
+                            <div className="text-sm">{formatDate(mem.createdAt)}</div>
+                          </div>
+                        </div>
+                        {mem.memories && (
+                          <div>
+                            <details className="cursor-pointer">
+                              <summary className="text-sm font-medium text-muted-foreground">View Memories</summary>
+                              <pre className="mt-2 text-xs bg-muted p-2 rounded overflow-auto max-h-64">
+                                {JSON.stringify(mem.memories, null, 2)}
+                              </pre>
+                            </details>
+                          </div>
+                        )}
+                        {mem.emotions && (
+                          <div>
+                            <details className="cursor-pointer">
+                              <summary className="text-sm font-medium text-muted-foreground">View Emotions</summary>
+                              <pre className="mt-2 text-xs bg-muted p-2 rounded overflow-auto max-h-64">
+                                {JSON.stringify(mem.emotions, null, 2)}
+                              </pre>
+                            </details>
+                          </div>
+                        )}
+                      </div>
+                    </CardContent>
+                  </Card>
+                ))}
               </div>
 
               {/* Pagination */}

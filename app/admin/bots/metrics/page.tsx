@@ -306,7 +306,8 @@ export default function MetricsBrowsePage() {
             </div>
           ) : (
             <>
-              <div className="overflow-x-auto">
+              {/* Desktop Table View */}
+              <div className="hidden md:block overflow-x-auto">
                 <Table>
                   <TableHeader>
                     <TableRow>
@@ -351,6 +352,50 @@ export default function MetricsBrowsePage() {
                     ))}
                   </TableBody>
                 </Table>
+              </div>
+
+              {/* Mobile Card View */}
+              <div className="md:hidden space-y-4 p-4">
+                {metrics.map((metric) => (
+                  <Card key={metric.id}>
+                    <CardContent className="pt-6">
+                      <div className="space-y-3">
+                        <div className="flex items-start justify-between">
+                          <div className="space-y-1">
+                            <div className="text-sm font-medium text-muted-foreground">Bot ID</div>
+                            <AuthLink
+                              href={`/admin/bots/${metric.botId}`}
+                              className="text-primary hover:underline font-mono text-sm font-semibold"
+                            >
+                              {metric.botId}
+                            </AuthLink>
+                          </div>
+                          <Badge variant="outline">{metric.metricType}</Badge>
+                        </div>
+                        <div>
+                          <div className="text-sm font-medium text-muted-foreground mb-1">Value</div>
+                          <div className="font-mono text-lg font-semibold">
+                            {formatNumber(Number(metric.metricValue))}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-sm font-medium text-muted-foreground mb-1">Timestamp</div>
+                          <div className="text-sm">{formatDate(metric.timestamp)}</div>
+                        </div>
+                        {metric.metadata && (
+                          <div>
+                            <details className="cursor-pointer">
+                              <summary className="text-sm font-medium text-muted-foreground">Metadata</summary>
+                              <pre className="mt-2 text-xs bg-muted p-2 rounded overflow-auto">
+                                {JSON.stringify(metric.metadata, null, 2)}
+                              </pre>
+                            </details>
+                          </div>
+                        )}
+                      </div>
+                    </CardContent>
+                  </Card>
+                ))}
               </div>
 
               {/* Pagination */}
