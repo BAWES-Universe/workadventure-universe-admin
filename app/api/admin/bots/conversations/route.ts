@@ -25,7 +25,8 @@ export async function GET(request: NextRequest) {
 
     // Filters
     const botId = searchParams.get('botId');
-    const playerId = searchParams.get('playerId');
+    const userUuid = searchParams.get('userUuid');
+    const userId = searchParams.get('userId');
     const startDate = searchParams.get('startDate');
     const endDate = searchParams.get('endDate');
 
@@ -36,8 +37,11 @@ export async function GET(request: NextRequest) {
       where.botId = botId;
     }
 
-    if (playerId) {
-      where.playerId = parseInt(playerId, 10);
+    if (userUuid) {
+      where.userUuid = userUuid;
+    }
+    if (userId) {
+      where.userId = userId;
     }
 
     if (startDate || endDate) {
@@ -50,10 +54,20 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    // Fetch conversations with pagination
+    // Fetch conversations with pagination and user relation
     const [conversations, total] = await Promise.all([
       prisma.botsConversation.findMany({
         where,
+        include: {
+          user: {
+            select: {
+              id: true,
+              email: true,
+              name: true,
+              uuid: true,
+            },
+          },
+        },
         orderBy: { endedAt: 'desc' },
         skip,
         take: limit,

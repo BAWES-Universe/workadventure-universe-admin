@@ -120,8 +120,16 @@ interface MetricData {
 interface Conversation {
   id: number;
   botId: string;
-  playerId: number;
-  playerName: string | null;
+  userUuid: string | null;
+  userId: string | null;
+  userName: string | null;
+  isGuest: boolean;
+  user?: {
+    id: string;
+    email: string | null;
+    name: string | null;
+    uuid: string;
+  } | null;
   messages: Array<{
     sender: string;
     message: string;
@@ -1162,7 +1170,7 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
                         <div className="flex items-center justify-between">
                           <div className="text-left">
                             <CardTitle className="text-base">
-                              {conv.playerName || `Player ${conv.playerId}`}
+                              {conv.user?.name || conv.userName || conv.userUuid || 'Unknown User'}
                             </CardTitle>
                             <div className="text-sm text-muted-foreground mt-1">
                               {formatRelativeTime(new Date(conv.endedAt).getTime())} • {conv.messageCount} messages

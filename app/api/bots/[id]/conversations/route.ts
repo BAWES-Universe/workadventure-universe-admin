@@ -31,8 +31,10 @@ export async function POST(
     const body = await request.json();
 
     const {
-      playerId,
-      playerName,
+      userUuid,      // WorkAdventure UUID (string)
+      userId,        // User.id if authenticated (string)
+      userName,      // Display name (string)
+      isGuest,       // boolean
       messages,
       startedAt,
       endedAt,
@@ -40,9 +42,9 @@ export async function POST(
     } = body;
 
     // Validate required fields
-    if (!playerId || !messages || !Array.isArray(messages) || !startedAt || !endedAt) {
+    if (!userUuid || !messages || !Array.isArray(messages) || !startedAt || !endedAt) {
       return NextResponse.json(
-        { error: 'Missing required fields: playerId, messages, startedAt, endedAt' },
+        { error: 'Missing required fields: userUuid, messages, startedAt, endedAt' },
         { status: 400, headers: corsHeaders() }
       );
     }
@@ -52,8 +54,10 @@ export async function POST(
       .create({
         data: {
           botId,
-          playerId: Number(playerId),
-          playerName: playerName || null,
+          userUuid,
+          userId: userId || null,
+          userName: userName || null,
+          isGuest: isGuest !== undefined ? isGuest : true,
           messages: messages,
           startedAt: new Date(startedAt),
           endedAt: new Date(endedAt),
@@ -96,7 +100,8 @@ export async function POST(
  * Query params:
  * - limit: Maximum results (default: 50)
  * - offset: Pagination offset
- * - playerId: Filter by player ID
+ * - userUuid: Filter by user UUID (string)
+ * - userId: Filter by user ID (string)
  * - startDate: Start timestamp
  * - endDate: End timestamp
  */
@@ -113,7 +118,8 @@ export async function GET(
     // Parse query params
     const limit = Math.min(parseInt(searchParams.get('limit') || '50', 10), 500);
     const offset = parseInt(searchParams.get('offset') || '0', 10);
-    const playerId = searchParams.get('playerId');
+    const userUuid = searchParams.get('userUuid');
+    const userId = searchParams.get('userId');
     const startDate = searchParams.get('startDate');
     const endDate = searchParams.get('endDate');
 
@@ -122,8 +128,11 @@ export async function GET(
       botId,
     };
 
-    if (playerId) {
-      where.playerId = parseInt(playerId, 10);
+    if (userUuid) {
+      where.userUuid = userUuid;
+    }
+    if (userId) {
+      where.userId = userId;
     }
 
     if (startDate || endDate) {
@@ -136,10 +145,20 @@ export async function GET(
       }
     }
 
-    // Query conversations
+    // Query conversations with user relation
     const [conversations, totalCount] = await Promise.all([
       prisma.botsConversation.findMany({
         where,
+        include: {
+          user: {
+            select: {
+              id: true,
+              email: true,
+              name: true,
+              uuid: true,
+            },
+          },
+        },
         orderBy: { endedAt: 'desc' },
         take: limit,
         skip: offset,

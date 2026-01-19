@@ -14,8 +14,10 @@ CREATE TABLE "bots_metrics" (
 CREATE TABLE "bots_conversations_recent" (
     "id" SERIAL NOT NULL,
     "bot_id" VARCHAR(255) NOT NULL,
-    "player_id" INTEGER NOT NULL,
-    "player_name" VARCHAR(255),
+    "user_uuid" VARCHAR(255),
+    "user_id" VARCHAR(255),
+    "user_name" VARCHAR(255),
+    "is_guest" BOOLEAN NOT NULL DEFAULT true,
     "messages" JSONB NOT NULL,
     "started_at" TIMESTAMP(3) NOT NULL,
     "ended_at" TIMESTAMP(3) NOT NULL,
@@ -66,13 +68,21 @@ CREATE INDEX "bots_metrics_timestamp_idx" ON "bots_metrics"("timestamp");
 CREATE INDEX "bots_conversations_recent_bot_id_created_at_idx" ON "bots_conversations_recent"("bot_id", "created_at");
 
 -- CreateIndex
-CREATE INDEX "bots_conversations_recent_player_id_idx" ON "bots_conversations_recent"("player_id");
+CREATE INDEX "bots_conversations_recent_user_uuid_idx" ON "bots_conversations_recent"("user_uuid");
+
+-- CreateIndex
+CREATE INDEX "bots_conversations_recent_user_id_idx" ON "bots_conversations_recent"("user_id");
 
 -- CreateIndex
 CREATE INDEX "bots_conversations_recent_created_at_idx" ON "bots_conversations_recent"("created_at");
 
 -- CreateIndex
 CREATE INDEX "bots_conversations_recent_ended_at_idx" ON "bots_conversations_recent"("ended_at");
+
+-- AddForeignKey
+ALTER TABLE "bots_conversations_recent" 
+  ADD CONSTRAINT "fk_bots_conversation_user" 
+  FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE SET NULL ON UPDATE CASCADE;
 
 -- CreateIndex
 CREATE INDEX "bots_test_results_bot_id_idx" ON "bots_test_results"("bot_id");
