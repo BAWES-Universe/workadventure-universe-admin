@@ -67,6 +67,7 @@ export async function POST(request: NextRequest) {
 
     for (const metric of metrics) {
       if (!metric.botId || !metric.timestamp || !metric.metrics) {
+        console.warn('Skipping invalid metric:', { botId: metric.botId, hasTimestamp: !!metric.timestamp, hasMetrics: !!metric.metrics });
         continue; // Skip invalid metrics
       }
 
@@ -76,8 +77,13 @@ export async function POST(request: NextRequest) {
       // Flatten nested metrics object
       const metricsObj = metric.metrics;
 
+      // Debug: log what we received
+      const receivedFields = Object.keys(metricsObj);
+      console.log(`Processing metric for bot ${metric.botId}, received fields:`, receivedFields);
+
       // Simple metrics: direct mapping
-      if (metricsObj.responseTime !== undefined) {
+      // Use != null to check for both undefined and null
+      if (metricsObj.responseTime != null) {
         rowsToInsert.push({
           botId: metric.botId,
           metricType: 'response_time',
@@ -87,7 +93,7 @@ export async function POST(request: NextRequest) {
         });
       }
 
-      if (metricsObj.repetitionScore !== undefined) {
+      if (metricsObj.repetitionScore != null) {
         rowsToInsert.push({
           botId: metric.botId,
           metricType: 'repetition_score',
@@ -97,7 +103,7 @@ export async function POST(request: NextRequest) {
         });
       }
 
-      if (metricsObj.personalityCompliance !== undefined) {
+      if (metricsObj.personalityCompliance != null) {
         rowsToInsert.push({
           botId: metric.botId,
           metricType: 'personality_compliance',
@@ -107,7 +113,7 @@ export async function POST(request: NextRequest) {
         });
       }
 
-      if (metricsObj.conversationQuality !== undefined) {
+      if (metricsObj.conversationQuality != null) {
         rowsToInsert.push({
           botId: metric.botId,
           metricType: 'conversation_quality',
@@ -117,7 +123,7 @@ export async function POST(request: NextRequest) {
         });
       }
 
-      if (metricsObj.errorCount !== undefined) {
+      if (metricsObj.errorCount != null) {
         rowsToInsert.push({
           botId: metric.botId,
           metricType: 'error_count',
@@ -128,8 +134,8 @@ export async function POST(request: NextRequest) {
       }
 
       // Token usage: separate rows (Option A)
-      if (metricsObj.tokenUsage) {
-        if (metricsObj.tokenUsage.prompt !== undefined) {
+      if (metricsObj.tokenUsage && typeof metricsObj.tokenUsage === 'object') {
+        if (metricsObj.tokenUsage.prompt != null) {
           rowsToInsert.push({
             botId: metric.botId,
             metricType: 'token_usage_prompt',
@@ -139,7 +145,7 @@ export async function POST(request: NextRequest) {
           });
         }
 
-        if (metricsObj.tokenUsage.completion !== undefined) {
+        if (metricsObj.tokenUsage.completion != null) {
           rowsToInsert.push({
             botId: metric.botId,
             metricType: 'token_usage_completion',
@@ -149,7 +155,7 @@ export async function POST(request: NextRequest) {
           });
         }
 
-        if (metricsObj.tokenUsage.total !== undefined) {
+        if (metricsObj.tokenUsage.total != null) {
           rowsToInsert.push({
             botId: metric.botId,
             metricType: 'token_usage_total',
@@ -161,7 +167,7 @@ export async function POST(request: NextRequest) {
       }
 
       // Boolean metrics: convert to numeric (0/1)
-      if (metricsObj.systemPromptLeakage !== undefined) {
+      if (metricsObj.systemPromptLeakage != null) {
         rowsToInsert.push({
           botId: metric.botId,
           metricType: 'system_prompt_leakage',
@@ -171,6 +177,10 @@ export async function POST(request: NextRequest) {
         });
       }
     }
+
+    // Debug: log what we're inserting
+    const metricTypesInserted = new Set(rowsToInsert.map(r => r.metricType));
+    console.log(`Inserting ${rowsToInsert.length} metric rows with types:`, Array.from(metricTypesInserted));
 
     // Fire-and-forget: Don't await, just start the operation
     if (rowsToInsert.length > 0) {

@@ -171,6 +171,12 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
   const [activeTab, setActiveTab] = useState('overview');
   const [metrics, setMetrics] = useState<MetricData[]>([]);
   const [metricsLoading, setMetricsLoading] = useState(false);
+  const [metricsStats, setMetricsStats] = useState<{
+    avgResponseTime: number;
+    totalTokens: number;
+    totalErrors: number;
+    avgRepetition: number;
+  } | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [conversationStats, setConversationStats] = useState<ConversationStats | null>(null);
   const [conversationsLoading, setConversationsLoading] = useState(false);
@@ -267,10 +273,10 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
 
   // Fetch metrics when metrics tab is active
   useEffect(() => {
-    if (activeTab === 'metrics' && botId && !metricsLoading && metrics.length === 0) {
+    if (activeTab === 'metrics' && botId && !metricsLoading) {
       fetchMetrics();
     }
-  }, [activeTab, botId]);
+  }, [activeTab, botId, filters.startDate, filters.endDate]);
 
   // Fetch conversations when conversations tab is active
   useEffect(() => {
@@ -294,18 +300,44 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
       const { authenticatedFetch } = await import('@/lib/client-auth');
       
       const params = new URLSearchParams();
-      params.append('limit', '500');
+      params.append('limit', '1000'); // Increase limit to get more metric entries
       if (filters.startDate) {
-        params.append('startTime', new Date(filters.startDate).getTime().toString());
+        // Create date at start of day in local timezone
+        const startDate = new Date(filters.startDate);
+        startDate.setHours(0, 0, 0, 0);
+        params.append('startTime', startDate.getTime().toString());
       }
       if (filters.endDate) {
-        params.append('endTime', new Date(filters.endDate).getTime().toString());
+        // Create date at end of day in local timezone
+        const endDate = new Date(filters.endDate);
+        endDate.setHours(23, 59, 59, 999);
+        params.append('endTime', endDate.getTime().toString());
       }
 
-      const response = await authenticatedFetch(`/api/bots/${botId}/metrics?${params.toString()}`);
-      if (response.ok) {
-        const data = await response.json();
+      // Fetch both grouped metrics (for charts) and stats (for summary cards)
+      const [metricsResponse, statsResponse] = await Promise.all([
+        authenticatedFetch(`/api/bots/${botId}/metrics?${params.toString()}`),
+        authenticatedFetch(`/api/bots/${botId}/metrics/stats?${params.toString()}`),
+      ]);
+
+      if (metricsResponse.ok) {
+        const data = await metricsResponse.json();
+        console.log('Fetched metrics:', data?.length || 0, 'entries');
+        if (data && data.length > 0) {
+          console.log('Sample metric:', data[0]);
+        }
         setMetrics(data || []);
+      } else {
+        const errorText = await metricsResponse.text();
+        console.error('Failed to fetch metrics:', metricsResponse.status, errorText);
+      }
+
+      if (statsResponse.ok) {
+        const stats = await statsResponse.json();
+        console.log('Fetched metrics stats:', stats);
+        setMetricsStats(stats);
+      } else {
+        console.error('Failed to fetch metrics stats:', statsResponse.status);
       }
     } catch (err) {
       console.error('Error fetching metrics:', err);
@@ -477,306 +509,306 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
 
         {/* Overview Tab */}
         <TabsContent value="overview" className="space-y-6 animate-in fade-in-50 duration-200">
-          {/* Bot Details */}
-          {bot && (
-            <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
-              <Card>
-                <CardHeader>
-                  <CardTitle>Basic Information</CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                  <div>
-                    <div className="text-sm font-medium text-muted-foreground">Bot ID</div>
-                    <div className="text-base font-mono text-sm">{bot.id}</div>
-                  </div>
-                  <div>
-                    <div className="text-sm font-medium text-muted-foreground">Name</div>
-                    <div className="text-base">{bot.name}</div>
-                  </div>
-                  {bot.description && (
-                    <div>
-                      <div className="text-sm font-medium text-muted-foreground">Description</div>
-                      <div className="text-base">{bot.description}</div>
-                    </div>
-                  )}
-                  <div>
-                    <div className="text-sm font-medium text-muted-foreground">Status</div>
-                    <Badge variant={bot.enabled ? 'default' : 'secondary'}>
-                      {bot.enabled ? 'Enabled' : 'Disabled'}
-                    </Badge>
-                  </div>
-                  {bot.aiProviderRef && (
-                    <div>
-                      <div className="text-sm font-medium text-muted-foreground">AI Provider</div>
-                      <AuthLink
-                        href={`/admin/ai-providers/${bot.aiProviderRef}`}
-                        className="text-base text-primary hover:underline"
-                      >
-                        {bot.aiProviderRef}
-                      </AuthLink>
-                    </div>
-                  )}
-                  <div>
-                    <div className="text-sm font-medium text-muted-foreground">Behavior Type</div>
-                    <Badge variant="outline">{bot.behaviorType}</Badge>
-                  </div>
-                </CardContent>
-              </Card>
-
-              <Card>
-                <CardHeader>
-                  <CardTitle>Location</CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                  <div>
-                    <div className="text-sm font-medium text-muted-foreground">Room</div>
-                    <AuthLink
-                      href={`/admin/rooms/${bot.room.id}`}
-                      className="text-base text-primary hover:underline"
-                    >
-                      {bot.room.name}
-                    </AuthLink>
-                  </div>
-                  <div>
-                    <div className="text-sm font-medium text-muted-foreground">World</div>
-                    <AuthLink
-                      href={`/admin/worlds/${bot.room.world.id}`}
-                      className="text-base text-primary hover:underline"
-                    >
-                      {bot.room.world.name}
-                    </AuthLink>
-                  </div>
-                  <div>
-                    <div className="text-sm font-medium text-muted-foreground">Universe</div>
-                    <AuthLink
-                      href={`/admin/universes/${bot.room.world.universe.id}`}
-                      className="text-base text-primary hover:underline"
-                    >
-                      {bot.room.world.universe.name}
-                    </AuthLink>
-                  </div>
-                  {bot.createdBy && (
-                    <div>
-                      <div className="text-sm font-medium text-muted-foreground">Created By</div>
-                      <div className="text-base">{bot.createdBy.name || bot.createdBy.email}</div>
-                    </div>
-                  )}
-                  <div>
-                    <div className="text-sm font-medium text-muted-foreground">Created At</div>
-                    <div className="text-base">{formatDate(bot.createdAt)}</div>
-                  </div>
-                </CardContent>
-              </Card>
+      {/* Bot Details */}
+      {bot && (
+      <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
+        <Card>
+          <CardHeader>
+            <CardTitle>Basic Information</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div>
+              <div className="text-sm font-medium text-muted-foreground">Bot ID</div>
+              <div className="text-base font-mono text-sm">{bot.id}</div>
             </div>
-          )}
+            <div>
+              <div className="text-sm font-medium text-muted-foreground">Name</div>
+              <div className="text-base">{bot.name}</div>
+            </div>
+            {bot.description && (
+              <div>
+                <div className="text-sm font-medium text-muted-foreground">Description</div>
+                <div className="text-base">{bot.description}</div>
+              </div>
+            )}
+            <div>
+              <div className="text-sm font-medium text-muted-foreground">Status</div>
+              <Badge variant={bot.enabled ? 'default' : 'secondary'}>
+                {bot.enabled ? 'Enabled' : 'Disabled'}
+              </Badge>
+            </div>
+            {bot.aiProviderRef && (
+              <div>
+                <div className="text-sm font-medium text-muted-foreground">AI Provider</div>
+                <AuthLink
+                  href={`/admin/ai-providers/${bot.aiProviderRef}`}
+                  className="text-base text-primary hover:underline"
+                >
+                  {bot.aiProviderRef}
+                </AuthLink>
+              </div>
+            )}
+            <div>
+              <div className="text-sm font-medium text-muted-foreground">Behavior Type</div>
+              <Badge variant="outline">{bot.behaviorType}</Badge>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Location</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div>
+              <div className="text-sm font-medium text-muted-foreground">Room</div>
+              <AuthLink
+                href={`/admin/rooms/${bot.room.id}`}
+                className="text-base text-primary hover:underline"
+              >
+                {bot.room.name}
+              </AuthLink>
+            </div>
+            <div>
+              <div className="text-sm font-medium text-muted-foreground">World</div>
+              <AuthLink
+                href={`/admin/worlds/${bot.room.world.id}`}
+                className="text-base text-primary hover:underline"
+              >
+                {bot.room.world.name}
+              </AuthLink>
+            </div>
+            <div>
+              <div className="text-sm font-medium text-muted-foreground">Universe</div>
+              <AuthLink
+                href={`/admin/universes/${bot.room.world.universe.id}`}
+                className="text-base text-primary hover:underline"
+              >
+                {bot.room.world.universe.name}
+              </AuthLink>
+            </div>
+            {bot.createdBy && (
+              <div>
+                <div className="text-sm font-medium text-muted-foreground">Created By</div>
+                <div className="text-base">{bot.createdBy.name || bot.createdBy.email}</div>
+              </div>
+            )}
+            <div>
+              <div className="text-sm font-medium text-muted-foreground">Created At</div>
+              <div className="text-base">{formatDate(bot.createdAt)}</div>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+      )}
         </TabsContent>
 
         {/* Usage Tab */}
         <TabsContent value="usage" className="space-y-6 animate-in fade-in-50 duration-200">
-          {stats && (
-            <>
+      {stats && (
+        <>
               {/* Usage Statistics */}
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-5">
-                <Card>
-                  <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                    <CardTitle className="text-sm font-medium">Total API Calls</CardTitle>
-                    <Activity className="h-4 w-4 text-muted-foreground" />
-                  </CardHeader>
-                  <CardContent>
-                    <div className="text-2xl font-bold">{formatNumber(stats.totalCalls)}</div>
-                  </CardContent>
-                </Card>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-5">
+            <Card>
+              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                <CardTitle className="text-sm font-medium">Total API Calls</CardTitle>
+                <Activity className="h-4 w-4 text-muted-foreground" />
+              </CardHeader>
+              <CardContent>
+                <div className="text-2xl font-bold">{formatNumber(stats.totalCalls)}</div>
+              </CardContent>
+            </Card>
 
-                <Card>
-                  <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                    <CardTitle className="text-sm font-medium">Total Tokens</CardTitle>
-                    <TrendingUp className="h-4 w-4 text-muted-foreground" />
-                  </CardHeader>
-                  <CardContent>
-                    <div className="text-2xl font-bold">{formatNumber(stats.totalTokens)}</div>
-                  </CardContent>
-                </Card>
+            <Card>
+              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                <CardTitle className="text-sm font-medium">Total Tokens</CardTitle>
+                <TrendingUp className="h-4 w-4 text-muted-foreground" />
+              </CardHeader>
+              <CardContent>
+                <div className="text-2xl font-bold">{formatNumber(stats.totalTokens)}</div>
+              </CardContent>
+            </Card>
 
-                <Card>
-                  <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                    <CardTitle className="text-sm font-medium">Total Cost</CardTitle>
-                    <DollarSign className="h-4 w-4 text-muted-foreground" />
-                  </CardHeader>
-                  <CardContent>
-                    <div className="text-2xl font-bold">{formatCurrency(stats.totalCost)}</div>
-                  </CardContent>
-                </Card>
+            <Card>
+              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                <CardTitle className="text-sm font-medium">Total Cost</CardTitle>
+                <DollarSign className="h-4 w-4 text-muted-foreground" />
+              </CardHeader>
+              <CardContent>
+                <div className="text-2xl font-bold">{formatCurrency(stats.totalCost)}</div>
+              </CardContent>
+            </Card>
 
-                <Card>
-                  <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                    <CardTitle className="text-sm font-medium">Total Duration</CardTitle>
-                    <Activity className="h-4 w-4 text-muted-foreground" />
-                  </CardHeader>
-                  <CardContent>
-                    <div className="text-2xl font-bold">
-                      {formatDuration(stats.totalDuration)}
-                    </div>
-                  </CardContent>
-                </Card>
+            <Card>
+              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                <CardTitle className="text-sm font-medium">Total Duration</CardTitle>
+                <Activity className="h-4 w-4 text-muted-foreground" />
+              </CardHeader>
+              <CardContent>
+                <div className="text-2xl font-bold">
+                  {formatDuration(stats.totalDuration)}
+                </div>
+              </CardContent>
+            </Card>
 
-                <Card>
-                  <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                    <CardTitle className="text-sm font-medium">Errors</CardTitle>
-                    <AlertTriangle className="h-4 w-4 text-muted-foreground" />
-                  </CardHeader>
-                  <CardContent>
-                    <div className="text-2xl font-bold">{formatNumber(stats.errorCount)}</div>
-                    <p className="text-xs text-muted-foreground">
-                      {stats.totalCalls > 0
-                        ? `${((stats.errorCount / stats.totalCalls) * 100).toFixed(2)}% error rate`
-                        : 'N/A'}
-                    </p>
-                  </CardContent>
-                </Card>
-              </div>
+            <Card>
+              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                <CardTitle className="text-sm font-medium">Errors</CardTitle>
+                <AlertTriangle className="h-4 w-4 text-muted-foreground" />
+              </CardHeader>
+              <CardContent>
+                <div className="text-2xl font-bold">{formatNumber(stats.errorCount)}</div>
+                <p className="text-xs text-muted-foreground">
+                  {stats.totalCalls > 0
+                    ? `${((stats.errorCount / stats.totalCalls) * 100).toFixed(2)}% error rate`
+                    : 'N/A'}
+                </p>
+              </CardContent>
+            </Card>
+          </div>
 
-              {/* Usage by Provider */}
-              {Object.keys(stats.byProvider).length > 0 && (
-                <Card>
-                  <CardHeader>
-                    <CardTitle>Usage by Provider</CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="space-y-4">
-                      {Object.values(stats.byProvider).map((provider) => (
-                        <div
-                          key={provider.providerId}
-                          className="flex items-center justify-between border-b pb-4 last:border-0"
+          {/* Usage by Provider */}
+          {Object.keys(stats.byProvider).length > 0 && (
+            <Card>
+              <CardHeader>
+                <CardTitle>Usage by Provider</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="space-y-4">
+                  {Object.values(stats.byProvider).map((provider) => (
+                    <div
+                      key={provider.providerId}
+                      className="flex items-center justify-between border-b pb-4 last:border-0"
+                    >
+                      <div>
+                        <AuthLink
+                          href={`/admin/ai-providers/${provider.providerId}`}
+                          className="font-semibold text-primary hover:underline"
                         >
-                          <div>
-                            <AuthLink
-                              href={`/admin/ai-providers/${provider.providerId}`}
-                              className="font-semibold text-primary hover:underline"
-                            >
-                              {provider.providerName}
-                            </AuthLink>
-                            <div className="text-sm text-muted-foreground">
-                              {provider.providerType} • {provider.providerId}
-                            </div>
-                          </div>
-                          <div className="text-right space-y-1">
-                            <div className="text-sm">
-                              {formatNumber(provider.calls)} calls • {formatNumber(provider.tokens)} tokens
-                            </div>
-                            <div className="text-sm font-medium">
-                              {formatCurrency(provider.cost)}
-                            </div>
-                            {provider.errors > 0 && (
-                              <div className="text-xs text-destructive">
-                                {provider.errors} errors
-                              </div>
-                            )}
-                          </div>
+                          {provider.providerName}
+                        </AuthLink>
+                        <div className="text-sm text-muted-foreground">
+                          {provider.providerType} • {provider.providerId}
                         </div>
-                      ))}
+                      </div>
+                      <div className="text-right space-y-1">
+                        <div className="text-sm">
+                          {formatNumber(provider.calls)} calls • {formatNumber(provider.tokens)} tokens
+                        </div>
+                        <div className="text-sm font-medium">
+                          {formatCurrency(provider.cost)}
+                        </div>
+                        {provider.errors > 0 && (
+                          <div className="text-xs text-destructive">
+                            {provider.errors} errors
+                          </div>
+                        )}
+                      </div>
                     </div>
-                  </CardContent>
-                </Card>
-              )}
-            </>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
           )}
+        </>
+      )}
 
-          {/* Filters */}
-          <Card>
-            <CardHeader>
-              <CardTitle>Filters</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                <div className="space-y-2">
+      {/* Filters */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Filters</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <div className="space-y-2">
                   <Label htmlFor="usageStartDate">Start Date</Label>
-                  <Input
+              <Input
                     id="usageStartDate"
-                    type="date"
-                    value={filters.startDate}
+                type="date"
+                value={filters.startDate}
                     onChange={(e) => {
                       setFilters({ ...filters, startDate: e.target.value });
                       setUsagePage(1);
                     }}
-                  />
-                </div>
-                <div className="space-y-2">
+              />
+            </div>
+            <div className="space-y-2">
                   <Label htmlFor="usageEndDate">End Date</Label>
-                  <Input
+              <Input
                     id="usageEndDate"
-                    type="date"
-                    value={filters.endDate}
+                type="date"
+                value={filters.endDate}
                     onChange={(e) => {
                       setFilters({ ...filters, endDate: e.target.value });
                       setUsagePage(1);
                     }}
-                  />
-                </div>
-              </div>
-            </CardContent>
-          </Card>
+              />
+            </div>
+          </div>
+        </CardContent>
+      </Card>
 
-          {/* Usage History Table */}
-          <Card>
-            <CardHeader>
-              <CardTitle>Usage History</CardTitle>
-            </CardHeader>
-            <CardContent>
-              {usage.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No usage data available</p>
-              ) : (
+      {/* Usage History Table */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Usage History</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {usage.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No usage data available</p>
+          ) : (
                 <>
-                  <div className="overflow-x-auto">
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead>Timestamp</TableHead>
-                          <TableHead>Provider</TableHead>
-                          <TableHead>API Calls</TableHead>
-                          <TableHead>Tokens</TableHead>
-                          <TableHead>Cost</TableHead>
-                          <TableHead>Duration</TableHead>
-                          <TableHead>Latency</TableHead>
-                          <TableHead>Status</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
+            <div className="overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Timestamp</TableHead>
+                    <TableHead>Provider</TableHead>
+                    <TableHead>API Calls</TableHead>
+                    <TableHead>Tokens</TableHead>
+                    <TableHead>Cost</TableHead>
+                    <TableHead>Duration</TableHead>
+                    <TableHead>Latency</TableHead>
+                    <TableHead>Status</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
                         {usage
                           .slice((usagePage - 1) * usagePageSize, usagePage * usagePageSize)
                           .map((entry) => (
-                            <TableRow key={entry.id}>
-                              <TableCell>{formatDate(entry.timestamp)}</TableCell>
-                              <TableCell>
-                                <AuthLink
-                                  href={`/admin/ai-providers/${entry.provider.providerId}`}
-                                  className="text-primary hover:underline"
-                                >
-                                  {entry.provider.name}
-                                </AuthLink>
-                              </TableCell>
-                              <TableCell>{formatNumber(entry.apiCalls)}</TableCell>
-                              <TableCell>{formatNumber(entry.tokensUsed)}</TableCell>
-                              <TableCell>
-                                {entry.cost ? formatCurrency(entry.cost) : 'N/A'}
-                              </TableCell>
-                              <TableCell>
-                                {entry.durationSeconds ? formatDuration(entry.durationSeconds) : 'N/A'}
-                              </TableCell>
-                              <TableCell>
-                                {entry.latency ? `${entry.latency}ms` : 'N/A'}
-                              </TableCell>
-                              <TableCell>
-                                {entry.error ? (
-                                  <Badge variant="destructive">Error</Badge>
-                                ) : (
-                                  <Badge variant="default">Success</Badge>
-                                )}
-                              </TableCell>
-                            </TableRow>
-                          ))}
-                      </TableBody>
-                    </Table>
-                  </div>
+                    <TableRow key={entry.id}>
+                      <TableCell>{formatDate(entry.timestamp)}</TableCell>
+                      <TableCell>
+                        <AuthLink
+                          href={`/admin/ai-providers/${entry.provider.providerId}`}
+                          className="text-primary hover:underline"
+                        >
+                          {entry.provider.name}
+                        </AuthLink>
+                      </TableCell>
+                      <TableCell>{formatNumber(entry.apiCalls)}</TableCell>
+                      <TableCell>{formatNumber(entry.tokensUsed)}</TableCell>
+                      <TableCell>
+                        {entry.cost ? formatCurrency(entry.cost) : 'N/A'}
+                      </TableCell>
+                      <TableCell>
+                        {entry.durationSeconds ? formatDuration(entry.durationSeconds) : 'N/A'}
+                      </TableCell>
+                      <TableCell>
+                        {entry.latency ? `${entry.latency}ms` : 'N/A'}
+                      </TableCell>
+                      <TableCell>
+                        {entry.error ? (
+                          <Badge variant="destructive">Error</Badge>
+                        ) : (
+                          <Badge variant="default">Success</Badge>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
 
                   {/* Pagination */}
                   {usage.length > usagePageSize && (
@@ -813,9 +845,9 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
                     </div>
                   )}
                 </>
-              )}
-            </CardContent>
-          </Card>
+          )}
+        </CardContent>
+      </Card>
         </TabsContent>
 
         {/* Metrics Tab */}
@@ -858,7 +890,7 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
             <div className="flex items-center justify-center py-12">
               <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
             </div>
-          ) : metrics.length === 0 ? (
+          ) : !metrics || metrics.length === 0 ? (
             <Card>
               <CardContent className="py-12 text-center">
                 <BarChart3 className="h-12 w-12 mx-auto mb-4 text-muted-foreground opacity-50" />
@@ -873,10 +905,33 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
               {/* Metric Summary Cards */}
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
                 {(() => {
-                  const avgResponseTime = metrics.reduce((sum, m) => sum + (m.metrics.responseTime || 0), 0) / metrics.length;
-                  const totalTokens = metrics.reduce((sum, m) => sum + (m.metrics.tokenUsage?.total || 0), 0);
-                  const totalErrors = metrics.reduce((sum, m) => sum + (m.metrics.errorCount || 0), 0);
-                  const avgRepetition = metrics.reduce((sum, m) => sum + (m.metrics.repetitionScore || 0), 0) / metrics.length;
+                  // Use stats from dedicated endpoint if available (more accurate)
+                  // Otherwise fall back to calculating from grouped metrics
+                  const avgResponseTime = metricsStats?.avgResponseTime ?? 
+                    (metrics.filter(m => m?.metrics?.responseTime != null && typeof m.metrics.responseTime === 'number' && m.metrics.responseTime > 0).length > 0
+                      ? metrics.filter(m => m?.metrics?.responseTime != null && typeof m.metrics.responseTime === 'number' && m.metrics.responseTime > 0)
+                          .reduce((sum, m) => sum + (m.metrics.responseTime || 0), 0) / 
+                        metrics.filter(m => m?.metrics?.responseTime != null && typeof m.metrics.responseTime === 'number' && m.metrics.responseTime > 0).length
+                      : 0);
+                  
+                  const totalTokens = metricsStats?.totalTokens ?? 
+                    metrics.reduce((sum, m) => {
+                      const tokenTotal = m?.metrics?.tokenUsage?.total;
+                      return sum + (tokenTotal != null && typeof tokenTotal === 'number' ? tokenTotal : 0);
+                    }, 0);
+                  
+                  const totalErrors = metricsStats?.totalErrors ?? 
+                    metrics.reduce((sum, m) => {
+                      const errorCount = m?.metrics?.errorCount;
+                      return sum + (errorCount != null && typeof errorCount === 'number' ? errorCount : 0);
+                    }, 0);
+                  
+                  const avgRepetition = metricsStats?.avgRepetition ?? 
+                    (metrics.filter(m => m?.metrics?.repetitionScore != null && typeof m.metrics.repetitionScore === 'number').length > 0
+                      ? metrics.filter(m => m?.metrics?.repetitionScore != null && typeof m.metrics.repetitionScore === 'number')
+                          .reduce((sum, m) => sum + (m.metrics.repetitionScore || 0), 0) / 
+                        metrics.filter(m => m?.metrics?.repetitionScore != null && typeof m.metrics.repetitionScore === 'number').length
+                      : 0);
 
                   return (
                     <>
@@ -887,6 +942,9 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
                         </CardHeader>
                         <CardContent>
                           <div className="text-2xl font-bold">{avgResponseTime.toFixed(0)}ms</div>
+                          {metricsStats && metricsStats.responseTimeCount === 0 && (
+                            <div className="text-xs text-muted-foreground mt-1">Not available - bot not sending this metric</div>
+                          )}
                         </CardContent>
                       </Card>
                       <Card>
@@ -896,6 +954,9 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
                         </CardHeader>
                         <CardContent>
                           <div className="text-2xl font-bold">{formatNumber(totalTokens)}</div>
+                          {metricsStats && totalTokens === 0 && (
+                            <div className="text-xs text-muted-foreground mt-1">Not available - bot not sending this metric</div>
+                          )}
                         </CardContent>
                       </Card>
                       <Card>
@@ -905,6 +966,9 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
                         </CardHeader>
                         <CardContent>
                           <div className="text-2xl font-bold">{formatNumber(totalErrors)}</div>
+                          {metricsStats && totalErrors === 0 && (
+                            <div className="text-xs text-muted-foreground mt-1">Not available - bot not sending this metric</div>
+                          )}
                         </CardContent>
                       </Card>
                       <Card>
@@ -914,6 +978,9 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
                         </CardHeader>
                         <CardContent>
                           <div className="text-2xl font-bold">{avgRepetition.toFixed(2)}</div>
+                          {metricsStats && metricsStats.repetitionCount === 0 && (
+                            <div className="text-xs text-muted-foreground mt-1">Not available - bot not sending this metric</div>
+                          )}
                         </CardContent>
                       </Card>
                     </>

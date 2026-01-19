@@ -70,12 +70,13 @@ export async function GET(
       }
     }
 
-    // Query flattened rows
+    // Query flattened rows - get more to ensure we capture all metric types
+    // Since metrics are stored flattened, we need enough rows to reconstruct properly
     const rows = await prisma.botsMetric.findMany({
       where,
       orderBy: { timestamp: 'desc' },
-      take: limit * 10, // Get more rows to account for grouping
-      skip: offset * 10, // Approximate offset
+      take: limit * 20, // Get more rows to account for grouping (each metric can have 5-10 types)
+      skip: offset * 20, // Approximate offset
     });
 
     // Group rows by (botId, timestamp) and reconstruct nested format
