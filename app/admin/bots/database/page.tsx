@@ -6,7 +6,11 @@ import AuthLink from '@/app/admin/auth-link';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { AlertCircle, Loader2, Database, CheckCircle2, AlertTriangle, Trash2, Eye } from 'lucide-react';
+import { AlertCircle, Loader2, Database, CheckCircle2, AlertTriangle, Trash2, Eye, RefreshCw, BarChart3, Activity, TrendingUp, ChevronDown, ChevronUp, MessageSquare, Brain } from 'lucide-react';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
 import {
   Table,
@@ -70,9 +74,17 @@ export default function DatabaseMonitoringPage() {
   const [error, setError] = useState<string | null>(null);
   const [stats, setStats] = useState<DatabaseStats | null>(null);
   const [cleanupDialogOpen, setCleanupDialogOpen] = useState(false);
-  const [cleanupType, setCleanupType] = useState<'metrics' | 'conversations' | 'all' | null>(null);
+  const [cleanupOptionsDialogOpen, setCleanupOptionsDialogOpen] = useState(false);
+  const [cleanupType, setCleanupType] = useState<'metrics' | 'conversations' | 'memory' | 'testResults' | 'improvements' | 'all' | null>(null);
   const [cleanupPreview, setCleanupPreview] = useState<any>(null);
   const [cleanupLoading, setCleanupLoading] = useState(false);
+  const [cleanupOptions, setCleanupOptions] = useState({
+    strategy: 'deleteAll' as 'deleteAll' | 'olderThanDays' | 'maxPerBot' | 'maxTotal' | 'maxRows',
+    olderThanDays: 30,
+    maxPerBot: 100,
+    maxTotal: 1000,
+    maxRows: 1000,
+  });
 
   useEffect(() => {
     checkAuth();
@@ -121,23 +133,44 @@ export default function DatabaseMonitoringPage() {
     }
   }
 
-  async function previewCleanup(type: 'metrics' | 'conversations' | 'all') {
+  async function previewCleanup(type: 'metrics' | 'conversations' | 'memory' | 'testResults' | 'improvements' | 'all') {
+    // Show options dialog first
+    setCleanupType(type);
+    setCleanupOptionsDialogOpen(true);
+  }
+
+  async function previewCleanupWithOptions() {
+    if (!cleanupType) return;
+    
     try {
       setCleanupLoading(true);
       const { authenticatedFetch } = await import('@/lib/client-auth');
       
+      const params = new URLSearchParams();
+      
+      if (cleanupOptions.strategy === 'deleteAll') {
+        params.append('deleteAll', 'true');
+      } else if (cleanupOptions.strategy === 'olderThanDays') {
+        params.append('olderThanDays', cleanupOptions.olderThanDays.toString());
+      } else if (cleanupOptions.strategy === 'maxPerBot') {
+        params.append('maxPerBot', cleanupOptions.maxPerBot.toString());
+      } else if (cleanupOptions.strategy === 'maxTotal') {
+        params.append('maxTotal', cleanupOptions.maxTotal.toString());
+      } else if (cleanupOptions.strategy === 'maxRows') {
+        params.append('maxRows', cleanupOptions.maxRows.toString());
+      }
+      
       let url = '';
-      if (type === 'metrics') {
-        url = '/api/bots/metrics/cleanup/preview?olderThanDays=30';
-      } else if (type === 'conversations') {
-        // Use a specific bot's preview endpoint or show general info
-        // For now, show a message that cleanup should be done per-bot
-        setCleanupPreview({
-          note: 'Conversation cleanup should be performed per-bot from the bot detail page.',
-        });
-        setCleanupType(type);
-        setCleanupDialogOpen(true);
-        return;
+      if (cleanupType === 'metrics') {
+        url = `/api/bots/metrics/cleanup/preview?${params.toString()}`;
+      } else if (cleanupType === 'conversations') {
+        url = `/api/bots/conversations/cleanup/preview?${params.toString()}`;
+      } else if (cleanupType === 'memory') {
+        url = `/api/bots/memory/cleanup/preview?${params.toString()}`;
+      } else if (cleanupType === 'testResults') {
+        url = `/api/bots/test-results/cleanup/preview?${params.toString()}`;
+      } else if (cleanupType === 'improvements') {
+        url = `/api/bots/improvements/cleanup/preview?${params.toString()}`;
       }
 
       if (url) {
@@ -145,12 +178,17 @@ export default function DatabaseMonitoringPage() {
         if (response.ok) {
           const data = await response.json();
           setCleanupPreview(data);
-          setCleanupType(type);
+          setCleanupOptionsDialogOpen(false);
           setCleanupDialogOpen(true);
+        } else {
+          const errorData = await response.json();
+          console.error('Preview error:', errorData);
+          setError(errorData.error || 'Failed to preview cleanup');
         }
       }
     } catch (err) {
       console.error('Error previewing cleanup:', err);
+      setError(err instanceof Error ? err.message : 'Failed to preview cleanup');
     } finally {
       setCleanupLoading(false);
     }
@@ -163,26 +201,85 @@ export default function DatabaseMonitoringPage() {
       setCleanupLoading(true);
       const { authenticatedFetch } = await import('@/lib/client-auth');
       
+      const params = new URLSearchParams();
+      
+      if (cleanupOptions.strategy === 'deleteAll') {
+        params.append('deleteAll', 'true');
+      } else if (cleanupOptions.strategy === 'olderThanDays') {
+        params.append('olderThanDays', cleanupOptions.olderThanDays.toString());
+      } else if (cleanupOptions.strategy === 'maxPerBot') {
+        params.append('maxPerBot', cleanupOptions.maxPerBot.toString());
+      } else if (cleanupOptions.strategy === 'maxTotal') {
+        params.append('maxTotal', cleanupOptions.maxTotal.toString());
+      } else if (cleanupOptions.strategy === 'maxRows') {
+        params.append('maxRows', cleanupOptions.maxRows.toString());
+      }
+      
       let url = '';
       if (cleanupType === 'metrics') {
-        // Note: Metrics cleanup endpoint would need to be created
-        // For now, show a message
-        alert('Metrics cleanup endpoint not yet implemented. Please use database tools directly.');
-        setCleanupDialogOpen(false);
-        return;
+        url = `/api/bots/metrics/cleanup?${params.toString()}`;
       } else if (cleanupType === 'conversations') {
-        url = '/api/bots/conversations/cleanup?olderThanDays=30';
+        url = `/api/bots/conversations/cleanup?${params.toString()}`;
+      } else if (cleanupType === 'memory') {
+        url = `/api/bots/memory/cleanup?${params.toString()}`;
+      } else if (cleanupType === 'testResults') {
+        url = `/api/bots/test-results/cleanup?${params.toString()}`;
+      } else if (cleanupType === 'improvements') {
+        url = `/api/bots/improvements/cleanup?${params.toString()}`;
       }
 
       if (url) {
         const response = await authenticatedFetch(url, { method: 'DELETE' });
         if (response.ok) {
           setCleanupDialogOpen(false);
+          setError(null);
           fetchStats(); // Refresh stats
+        } else {
+          const errorData = await response.json();
+          setError(errorData.error || 'Failed to perform cleanup');
         }
       }
     } catch (err) {
       console.error('Error performing cleanup:', err);
+      setError(err instanceof Error ? err.message : 'Failed to perform cleanup');
+    } finally {
+      setCleanupLoading(false);
+    }
+  }
+
+  async function startFresh() {
+    if (!confirm('This will delete ALL data from Metrics, Conversations, Memory, Test Results, and Improvements tables. This action cannot be undone! Are you absolutely sure?')) {
+      return;
+    }
+
+    try {
+      setCleanupLoading(true);
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      
+      // Cleanup all tables
+      const tables = ['metrics', 'conversations', 'memory', 'test-results', 'improvements'];
+      const results: any[] = [];
+      
+      for (const table of tables) {
+        try {
+          const response = await authenticatedFetch(`/api/bots/${table}/cleanup?deleteAll=true`, { method: 'DELETE' });
+          if (response.ok) {
+            const data = await response.json();
+            results.push({ table, ...data });
+          }
+        } catch (err) {
+          console.error(`Error cleaning up ${table}:`, err);
+        }
+      }
+      
+      setError(null);
+      fetchStats(); // Refresh stats
+      
+      // Show success message
+      alert(`Cleanup complete! Deleted records from ${results.length} tables.`);
+    } catch (err) {
+      console.error('Error starting fresh:', err);
+      setError(err instanceof Error ? err.message : 'Failed to start fresh');
     } finally {
       setCleanupLoading(false);
     }
@@ -236,9 +333,19 @@ export default function DatabaseMonitoringPage() {
             Monitor database size and manage cleanup
           </p>
         </div>
-        <Button onClick={fetchStats} variant="outline">
-          Refresh
-        </Button>
+        <div className="flex gap-2">
+          <Button onClick={fetchStats} variant="outline">
+            Refresh
+          </Button>
+          <Button 
+            onClick={startFresh} 
+            variant="destructive"
+            disabled={cleanupLoading}
+          >
+            <RefreshCw className="mr-2 h-4 w-4" />
+            Start Fresh (Dev)
+          </Button>
+        </div>
       </div>
 
       {error && (
@@ -275,18 +382,41 @@ export default function DatabaseMonitoringPage() {
               </div>
               <div className="text-sm text-muted-foreground">
                 {stats.totalSizeMB.toFixed(2)} MB total across all bot tables
-                {stats.totalSizeBytes > 0 && Object.values({
-                  metrics: stats.metrics,
-                  conversations: stats.conversations,
-                  memory: stats.memory,
-                  testResults: stats.testResults,
-                  improvements: stats.improvements,
-                }).every(t => t.rowCount === 0) && (
-                  <div className="mt-2 text-xs italic">
-                    Note: Empty tables still have overhead from indexes and metadata
-                  </div>
-                )}
               </div>
+              {stats.totalSizeBytes > 0 && (
+                <Collapsible className="mt-4">
+                  <CollapsibleTrigger asChild>
+                    <Button variant="ghost" className="w-full justify-between hover:bg-muted/50">
+                      <div className="flex items-center gap-2">
+                        <AlertCircle className="h-4 w-4" />
+                        <span className="font-semibold">About Table Sizes</span>
+                      </div>
+                      <ChevronDown className="h-4 w-4 transition-transform duration-200 data-[state=open]:rotate-180" />
+                    </Button>
+                  </CollapsibleTrigger>
+                  <CollapsibleContent>
+                    <Alert className="mt-2">
+                      <AlertDescription>
+                        <p className="text-sm">
+                          PostgreSQL table sizes include:
+                        </p>
+                        <ul className="list-disc list-inside text-sm mt-2 space-y-1">
+                          <li>Table data (actual rows)</li>
+                          <li>Indexes (for fast queries)</li>
+                          <li>Table structure and metadata</li>
+                          <li>Unused space from deleted rows (reused automatically)</li>
+                        </ul>
+                        <p className="text-sm mt-2">
+                          After deleting all rows, tables still show size due to indexes and structure. 
+                          This is normal PostgreSQL behavior. To reclaim all space, you would need to run 
+                          <code className="bg-muted px-1 rounded">VACUUM FULL</code> directly on the database 
+                          (not recommended for production).
+                        </p>
+                      </AlertDescription>
+                    </Alert>
+                  </CollapsibleContent>
+                </Collapsible>
+              )}
             </CardContent>
           </Card>
 
@@ -354,7 +484,12 @@ export default function DatabaseMonitoringPage() {
                       <div className="text-lg font-semibold">{formatBytes(data.sizeBytes)}</div>
                       {data.rowCount === 0 && data.sizeBytes > 0 && (
                         <div className="text-xs text-muted-foreground mt-1">
-                          (table overhead)
+                          (table overhead - indexes & structure)
+                        </div>
+                      )}
+                      {data.rowCount > 0 && data.sizeBytes > 0 && (data.sizeBytes / data.rowCount) > 1024 * 1024 && (
+                        <div className="text-xs text-yellow-600 mt-1">
+                          ⚠️ Large average row size: {formatBytes(data.sizeBytes / data.rowCount)} per row
                         </div>
                       )}
                     </div>
@@ -374,94 +509,173 @@ export default function DatabaseMonitoringPage() {
                       <div className="text-xs text-muted-foreground">{data.recommendation}</div>
                       {data.rowCount === 0 && data.sizeBytes > 0 && (
                         <div className="text-xs text-muted-foreground mt-1 italic">
-                          Size includes table structure and indexes
+                          Size includes table structure, indexes, and unused space from previous rows
+                        </div>
+                      )}
+                      {key === 'testResults' && data.rowCount > 0 && data.sizeBytes > 5 * 1024 * 1024 && (
+                        <div className="text-xs text-yellow-600 mt-1">
+                          Large size may indicate very large JSON data in test results. Check the browse page to inspect.
                         </div>
                       )}
                     </div>
-                    {(key === 'metrics' || key === 'conversations') && (
-                      <div className="flex gap-2 pt-2">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => previewCleanup(key as 'metrics' | 'conversations')}
-                          disabled={cleanupLoading}
-                        >
-                          <Eye className="mr-2 h-4 w-4" />
-                          Preview Cleanup
-                        </Button>
-                      </div>
-                    )}
+                    <div className="flex gap-2 pt-2 flex-wrap">
+                      {(key === 'metrics' || key === 'testResults' || key === 'improvements' || key === 'conversations' || key === 'memory') && (
+                        <AuthLink href={
+                          key === 'metrics' ? '/admin/bots/metrics' :
+                          key === 'testResults' ? '/admin/bots/test-results' :
+                          key === 'improvements' ? '/admin/bots/improvements' :
+                          key === 'conversations' ? '/admin/bots/conversations' :
+                          '/admin/bots/memory'
+                        }>
+                          <Button variant="outline" size="sm">
+                            {key === 'metrics' && <BarChart3 className="mr-2 h-4 w-4" />}
+                            {key === 'testResults' && <Activity className="mr-2 h-4 w-4" />}
+                            {key === 'improvements' && <TrendingUp className="mr-2 h-4 w-4" />}
+                            {key === 'conversations' && <MessageSquare className="mr-2 h-4 w-4" />}
+                            {key === 'memory' && <Brain className="mr-2 h-4 w-4" />}
+                            Browse
+                          </Button>
+                        </AuthLink>
+                      )}
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => previewCleanup(key as 'metrics' | 'conversations' | 'memory' | 'testResults' | 'improvements')}
+                        disabled={cleanupLoading}
+                      >
+                        <Eye className="mr-2 h-4 w-4" />
+                        Cleanup
+                      </Button>
+                    </div>
                   </CardContent>
                 </Card>
               );
             })}
           </div>
 
-          {/* Detailed Table View */}
-          <Card>
-            <CardHeader>
-              <CardTitle>Detailed Statistics</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="overflow-x-auto">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Table</TableHead>
-                      <TableHead>Row Count</TableHead>
-                      <TableHead>Size</TableHead>
-                      <TableHead>Oldest Record</TableHead>
-                      <TableHead>Newest Record</TableHead>
-                      <TableHead>Status</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {[
-                      { key: 'metrics', label: 'Metrics', data: stats.metrics },
-                      { key: 'conversations', label: 'Conversations', data: stats.conversations },
-                      { key: 'memory', label: 'Memory', data: stats.memory },
-                      { key: 'testResults', label: 'Test Results', data: stats.testResults },
-                      { key: 'improvements', label: 'Improvements', data: stats.improvements },
-                    ].map(({ key, label, data }) => {
-                      const health = getHealthStatus(data);
-                      return (
-                        <TableRow key={key}>
-                          <TableCell className="font-medium">{label}</TableCell>
-                          <TableCell>{formatNumber(data.rowCount)}</TableCell>
-                          <TableCell>{formatBytes(data.sizeBytes)}</TableCell>
-                          <TableCell>
-                            {data.oldestRecord
-                              ? new Date(data.oldestRecord).toLocaleDateString()
-                              : 'N/A'}
-                          </TableCell>
-                          <TableCell>
-                            {data.newestRecord
-                              ? new Date(data.newestRecord).toLocaleDateString()
-                              : 'N/A'}
-                          </TableCell>
-                          <TableCell>
-                            {health === 'healthy' ? (
-                              <Badge variant="default" className="bg-green-600">
-                                Healthy
-                              </Badge>
-                            ) : health === 'warning' ? (
-                              <Badge variant="default" className="bg-yellow-600">
-                                Warning
-                              </Badge>
-                            ) : (
-                              <Badge variant="destructive">Critical</Badge>
-                            )}
-                          </TableCell>
-                        </TableRow>
-                      );
-                    })}
-                  </TableBody>
-                </Table>
-              </div>
-            </CardContent>
-          </Card>
         </>
       )}
+
+      {/* Cleanup Options Dialog */}
+      <AlertDialog open={cleanupOptionsDialogOpen} onOpenChange={setCleanupOptionsDialogOpen}>
+        <AlertDialogContent className="max-w-md">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Choose Cleanup Strategy</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-4 mt-4">
+                <div className="space-y-2">
+                  <Label>Cleanup Strategy</Label>
+                  <Select
+                    value={cleanupOptions.strategy}
+                    onValueChange={(value) => setCleanupOptions({ ...cleanupOptions, strategy: value as any })}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="deleteAll">Delete All (Start Fresh)</SelectItem>
+                      <SelectItem value="olderThanDays">Delete Older Than X Days</SelectItem>
+                      {(cleanupType === 'memory' || cleanupType === 'testResults' || cleanupType === 'improvements') && (
+                        <SelectItem value="olderThanDays">Delete Older Than X Days</SelectItem>
+                      )}
+                      {cleanupType === 'metrics' && (
+                        <>
+                          <SelectItem value="olderThanDays">Delete Older Than X Days</SelectItem>
+                          <SelectItem value="maxRows">Keep Last N Rows Per Bot</SelectItem>
+                        </>
+                      )}
+                      {cleanupType === 'conversations' && (
+                        <>
+                          <SelectItem value="olderThanDays">Delete Older Than X Days</SelectItem>
+                          <SelectItem value="maxPerBot">Keep Last N Per Bot</SelectItem>
+                          <SelectItem value="maxTotal">Keep Last N Total</SelectItem>
+                        </>
+                      )}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                {cleanupOptions.strategy === 'olderThanDays' && (
+                  <div className="space-y-2">
+                    <Label htmlFor="olderThanDays">Days</Label>
+                    <Input
+                      id="olderThanDays"
+                      type="number"
+                      min="1"
+                      value={cleanupOptions.olderThanDays}
+                      onChange={(e) => setCleanupOptions({ ...cleanupOptions, olderThanDays: parseInt(e.target.value) || 30 })}
+                    />
+                  </div>
+                )}
+
+                {cleanupOptions.strategy === 'maxPerBot' && (
+                  <div className="space-y-2">
+                    <Label htmlFor="maxPerBot">Keep Last N Per Bot</Label>
+                    <Input
+                      id="maxPerBot"
+                      type="number"
+                      min="1"
+                      value={cleanupOptions.maxPerBot}
+                      onChange={(e) => setCleanupOptions({ ...cleanupOptions, maxPerBot: parseInt(e.target.value) || 100 })}
+                    />
+                  </div>
+                )}
+
+                {cleanupOptions.strategy === 'maxTotal' && (
+                  <div className="space-y-2">
+                    <Label htmlFor="maxTotal">Keep Last N Total</Label>
+                    <Input
+                      id="maxTotal"
+                      type="number"
+                      min="1"
+                      value={cleanupOptions.maxTotal}
+                      onChange={(e) => setCleanupOptions({ ...cleanupOptions, maxTotal: parseInt(e.target.value) || 1000 })}
+                    />
+                  </div>
+                )}
+
+                {cleanupOptions.strategy === 'maxRows' && (
+                  <div className="space-y-2">
+                    <Label htmlFor="maxRows">Keep Last N Rows Per Bot</Label>
+                    <Input
+                      id="maxRows"
+                      type="number"
+                      min="1"
+                      value={cleanupOptions.maxRows}
+                      onChange={(e) => setCleanupOptions({ ...cleanupOptions, maxRows: parseInt(e.target.value) || 1000 })}
+                    />
+                  </div>
+                )}
+
+                {cleanupOptions.strategy === 'deleteAll' && (
+                  <Alert variant="destructive">
+                    <AlertTriangle className="h-4 w-4" />
+                    <AlertDescription>
+                      This will delete ALL {cleanupType} data. This action cannot be undone!
+                    </AlertDescription>
+                  </Alert>
+                )}
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={previewCleanupWithOptions} disabled={cleanupLoading}>
+              {cleanupLoading ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Loading...
+                </>
+              ) : (
+                <>
+                  <Eye className="mr-2 h-4 w-4" />
+                  Preview Cleanup
+                </>
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Cleanup Preview Dialog */}
       <AlertDialog open={cleanupDialogOpen} onOpenChange={setCleanupDialogOpen}>
@@ -471,16 +685,27 @@ export default function DatabaseMonitoringPage() {
             <AlertDialogDescription asChild>
               {cleanupPreview ? (
                 <div className="space-y-2 mt-4">
-                  <p>
-                    <strong>Will delete:</strong> {cleanupPreview.willDelete?.conversationCount || cleanupPreview.willDelete?.rowCount || 0} records
-                  </p>
-                  <p>
-                    <strong>Will keep:</strong> {cleanupPreview.willKeep?.conversationCount || cleanupPreview.willKeep?.rowCount || 0} records
-                  </p>
-                  {cleanupPreview.willDelete?.estimatedSizeBytes && (
-                    <p>
-                      <strong>Estimated space freed:</strong> {formatBytes(cleanupPreview.willDelete.estimatedSizeBytes)}
-                    </p>
+                  {cleanupPreview.note ? (
+                    <p className="text-sm">{cleanupPreview.note}</p>
+                  ) : (
+                    <>
+                      <p>
+                        <strong>Will delete:</strong> {cleanupPreview.willDelete?.conversationCount || cleanupPreview.willDelete?.metricCount || cleanupPreview.willDelete?.rowCount || 0} records
+                      </p>
+                      <p>
+                        <strong>Will keep:</strong> {cleanupPreview.willKeep?.conversationCount || cleanupPreview.willKeep?.metricCount || cleanupPreview.willKeep?.rowCount || 0} records
+                      </p>
+                      {cleanupPreview.willDelete?.estimatedSizeBytes && (
+                        <p>
+                          <strong>Estimated space freed:</strong> {formatBytes(cleanupPreview.willDelete.estimatedSizeBytes)}
+                        </p>
+                      )}
+                      {cleanupPreview.willDelete?.botsAffected && (
+                        <p>
+                          <strong>Bots affected:</strong> {cleanupPreview.willDelete.botsAffected}
+                        </p>
+                      )}
+                    </>
                   )}
                 </div>
               ) : (

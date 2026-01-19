@@ -30,13 +30,14 @@ export async function DELETE(request: NextRequest) {
 
     const { searchParams } = new URL(request.url);
 
+    const deleteAll = searchParams.get('deleteAll') === 'true';
     const olderThanDays = searchParams.get('olderThanDays');
     const maxPerBot = searchParams.get('maxPerBot');
     const maxTotal = searchParams.get('maxTotal');
 
-    if (!olderThanDays && !maxPerBot && !maxTotal) {
+    if (!deleteAll && !olderThanDays && !maxPerBot && !maxTotal) {
       return NextResponse.json(
-        { error: 'Must provide at least one of: olderThanDays, maxPerBot, maxTotal' },
+        { error: 'Must provide at least one of: deleteAll, olderThanDays, maxPerBot, maxTotal' },
         { status: 400, headers: corsHeaders() }
       );
     }
@@ -45,7 +46,19 @@ export async function DELETE(request: NextRequest) {
     let spaceFreed = 0;
     const botsAffected = new Set<string>();
 
-    if (olderThanDays) {
+    if (deleteAll) {
+      // Delete all conversations
+      const totalCount = await prisma.botsConversation.count();
+      const botIds = await prisma.botsConversation.findMany({
+        select: { botId: true },
+        distinct: ['botId'],
+      });
+      
+      botIds.forEach(b => botsAffected.add(b.botId));
+      deletedCount = totalCount;
+
+      await prisma.botsConversation.deleteMany({});
+    } else if (olderThanDays) {
       const cutoffDate = new Date();
       cutoffDate.setDate(cutoffDate.getDate() - parseInt(olderThanDays, 10));
 

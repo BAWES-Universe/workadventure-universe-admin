@@ -29,12 +29,13 @@ export async function GET(request: NextRequest) {
 
     const { searchParams } = new URL(request.url);
 
+    const deleteAll = searchParams.get('deleteAll') === 'true';
     const olderThanDays = searchParams.get('olderThanDays');
     const maxRows = searchParams.get('maxRows');
 
-    if (!olderThanDays && !maxRows) {
+    if (!deleteAll && !olderThanDays && !maxRows) {
       return NextResponse.json(
-        { error: 'Must provide either olderThanDays or maxRows' },
+        { error: 'Must provide at least one of: deleteAll, olderThanDays, maxRows' },
         { status: 400, headers: corsHeaders() }
       );
     }
@@ -43,7 +44,34 @@ export async function GET(request: NextRequest) {
     let cleanupType = '';
     let cleanupValue: number | null = null;
 
-    if (olderThanDays) {
+    if (deleteAll) {
+      cleanupType = 'deleteAll';
+      const totalCount = await prisma.botsMetric.count();
+      const botIds = await prisma.botsMetric.findMany({
+        select: { botId: true },
+        distinct: ['botId'],
+      });
+
+      return NextResponse.json(
+        {
+          cleanupType,
+          cleanupValue: null,
+          willDelete: {
+            metricCount: totalCount,
+            estimatedSizeBytes: totalCount * 100, // Rough estimate
+            oldestToDelete: null,
+            newestToDelete: null,
+            botsAffected: botIds.length,
+          },
+          willKeep: {
+            metricCount: 0,
+            oldestKept: null,
+            newestKept: null,
+          },
+        },
+        { headers: corsHeaders() }
+      );
+    } else if (olderThanDays) {
       cleanupType = 'olderThanDays';
       cleanupValue = parseInt(olderThanDays, 10);
       const cutoffDate = new Date();
