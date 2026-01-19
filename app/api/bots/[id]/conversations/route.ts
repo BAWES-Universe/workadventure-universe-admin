@@ -31,10 +31,11 @@ export async function POST(
     const body = await request.json();
 
     const {
-      userUuid,      // WorkAdventure UUID (string)
-      userId,        // User.id if authenticated (string)
+      userUuid,      // WorkAdventure UUID (string) - REQUIRED
+      userId,        // User.id if authenticated (string) - Optional, will be matched if not provided
       userName,      // Display name (string)
-      isGuest,       // boolean
+      isGuest,       // boolean - if false, try to match UUID
+      isLogged,      // Alternative field from bot server (true if authenticated)
       messages,
       startedAt,
       endedAt,
@@ -49,25 +50,68 @@ export async function POST(
       );
     }
 
+    // Determine if user is logged in (check both isGuest and isLogged)
+    const userIsLogged = isGuest === false || isLogged === true;
+
     // Fire-and-forget: Don't await, just start the operation
-    prisma.botsConversation
-      .create({
-        data: {
-          botId,
-          userUuid,
-          userId: userId || null,
-          userName: userName || null,
-          isGuest: isGuest !== undefined ? isGuest : true,
-          messages: messages,
-          startedAt: new Date(startedAt),
-          endedAt: new Date(endedAt),
-          messageCount: messageCount || messages.length,
-        },
-      })
-      .catch((err) => {
-        // Log error but don't block response
+    // This includes UUID matching, so it won't block the bot server response
+    (async () => {
+      try {
+        // Try to match userUuid to User table if user is logged in
+        let finalUserId: string | null = userId || null;
+        let finalIsGuest = true;
+
+        if (userIsLogged) {
+          // Try to find user by UUID (even if userId was provided, verify it matches)
+          try {
+            const user = await prisma.user.findUnique({
+              where: { uuid: userUuid },
+              select: { id: true },
+            });
+
+            if (user) {
+              finalUserId = user.id;
+              finalIsGuest = false;
+            } else if (finalUserId) {
+              // userId was provided but UUID doesn't match - use provided userId but log warning
+              console.warn(`User UUID ${userUuid} not found, but userId ${finalUserId} was provided`);
+              finalIsGuest = false;
+            } else {
+              // User claims to be logged in but UUID not found - treat as guest
+              console.warn(`User UUID ${userUuid} not found in database, treating as guest despite isGuest=false`);
+              finalIsGuest = true;
+            }
+          } catch (err) {
+            // Database error during lookup - log but continue with provided userId if available
+            console.error(`Error looking up user with uuid ${userUuid}:`, err);
+            if (finalUserId) {
+              finalIsGuest = false;
+            }
+          }
+        } else if (finalUserId) {
+          // If userId was provided but user is marked as guest, trust the userId
+          finalIsGuest = false;
+        }
+
+        // Store conversation with matched userId
+        await prisma.botsConversation.create({
+          data: {
+            botId,
+            userUuid,
+            userId: finalUserId,
+            userName: userName || null,
+            isGuest: finalIsGuest,
+            messages: messages,
+            startedAt: new Date(startedAt),
+            endedAt: new Date(endedAt),
+            messageCount: messageCount || messages.length,
+          },
+        });
+      } catch (err) {
+        // Log error but don't block response (fire-and-forget)
         console.error('Error storing conversation:', err);
-      });
+      }
+    })();
 
     // Return immediately (fire-and-forget)
     return NextResponse.json(

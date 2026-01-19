@@ -150,8 +150,16 @@ interface ConversationStats {
 }
 
 interface EmotionData {
-  playerId: number;
-  playerName: string | null;
+  userUuid: string;
+  userId: string | null;
+  userName: string | null;
+  isGuest: boolean;
+  user?: {
+    id: string;
+    email: string | null;
+    name: string | null;
+    uuid: string;
+  } | null;
   emotions: {
     botEmotion?: Record<string, number>;
     personEmotion?: Record<string, number>;
@@ -1261,9 +1269,14 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
           ) : (
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
               {emotions.map((emotion) => (
-                <Card key={emotion.playerId}>
+                <Card key={emotion.userUuid}>
                   <CardHeader>
-                    <CardTitle>{emotion.playerName || `Player ${emotion.playerId}`}</CardTitle>
+                    <CardTitle>
+                      {emotion.user?.name || emotion.userName || emotion.userUuid || 'Unknown User'}
+                    </CardTitle>
+                    {emotion.isGuest && (
+                      <Badge variant="outline" className="text-xs mt-1">Guest</Badge>
+                    )}
                   </CardHeader>
                   <CardContent className="space-y-6">
                     {emotion.emotions.botEmotion && (

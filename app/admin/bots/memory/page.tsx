@@ -22,8 +22,16 @@ import { Badge } from '@/components/ui/badge';
 interface Memory {
   id: number;
   botId: string;
-  playerId: number;
-  playerName: string | null;
+  userUuid: string;
+  userId: string | null;
+  userName: string | null;
+  isGuest: boolean;
+  user?: {
+    id: string;
+    email: string | null;
+    name: string | null;
+    uuid: string;
+  } | null;
   memories: any;
   emotions: any;
   lastEmotionUpdate: Date | null;
@@ -60,14 +68,16 @@ export default function MemoryBrowsePage() {
   const [pagination, setPagination] = useState<Pagination | null>(null);
   const [filters, setFilters] = useState({
     botId: '',
-    playerId: '',
+    userUuid: '',
+    userId: '',
     startDate: '',
     endDate: '',
     page: 1,
     limit: 50,
   });
   const [botIdInput, setBotIdInput] = useState('');
-  const [playerIdInput, setPlayerIdInput] = useState('');
+  const [userUuidInput, setUserUuidInput] = useState('');
+  const [userIdInput, setUserIdInput] = useState('');
 
   useEffect(() => {
     checkAuth();
@@ -110,7 +120,8 @@ export default function MemoryBrowsePage() {
       params.append('page', filters.page.toString());
       params.append('limit', filters.limit.toString());
       if (filters.botId) params.append('botId', filters.botId);
-      if (filters.playerId) params.append('playerId', filters.playerId);
+      if (filters.userUuid) params.append('userUuid', filters.userUuid);
+      if (filters.userId) params.append('userId', filters.userId);
       if (filters.startDate) params.append('startDate', filters.startDate);
       if (filters.endDate) params.append('endDate', filters.endDate);
 
@@ -252,24 +263,46 @@ export default function MemoryBrowsePage() {
               </div>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="playerId">Player ID</Label>
+              <Label htmlFor="userUuid">User UUID</Label>
               <div className="flex gap-2">
                 <Input
-                  id="playerId"
-                  type="number"
-                  placeholder="Filter by player ID..."
-                  value={playerIdInput}
-                  onChange={(e) => setPlayerIdInput(e.target.value)}
+                  id="userUuid"
+                  placeholder="Filter by user UUID..."
+                  value={userUuidInput}
+                  onChange={(e) => setUserUuidInput(e.target.value)}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') {
-                      setFilters({ ...filters, playerId: playerIdInput, page: 1 });
+                      setFilters({ ...filters, userUuid: userUuidInput, page: 1 });
                     }
                   }}
                 />
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => setFilters({ ...filters, playerId: playerIdInput, page: 1 })}
+                  onClick={() => setFilters({ ...filters, userUuid: userUuidInput, page: 1 })}
+                >
+                  <Search className="h-4 w-4" />
+                </Button>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="userId">User ID</Label>
+              <div className="flex gap-2">
+                <Input
+                  id="userId"
+                  placeholder="Filter by user ID..."
+                  value={userIdInput}
+                  onChange={(e) => setUserIdInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      setFilters({ ...filters, userId: userIdInput, page: 1 });
+                    }
+                  }}
+                />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setFilters({ ...filters, userId: userIdInput, page: 1 })}
                 >
                   <Search className="h-4 w-4" />
                 </Button>
@@ -340,9 +373,29 @@ export default function MemoryBrowsePage() {
                         </TableCell>
                         <TableCell>
                           <div className="space-y-1">
-                            <div className="font-mono text-sm">{mem.playerId}</div>
-                            {mem.playerName && (
-                              <div className="text-xs text-muted-foreground">{mem.playerName}</div>
+                            {mem.user ? (
+                              <>
+                                <div className="font-semibold">{mem.user.name || mem.userName || 'Unknown'}</div>
+                                {mem.user.email && (
+                                  <div className="text-xs text-muted-foreground">{mem.user.email}</div>
+                                )}
+                                <div className="text-xs font-mono text-muted-foreground">
+                                  {mem.userId || mem.userUuid || 'N/A'}
+                                </div>
+                                {mem.isGuest && (
+                                  <Badge variant="outline" className="text-xs">Guest</Badge>
+                                )}
+                              </>
+                            ) : (
+                              <>
+                                <div className="font-semibold">{mem.userName || 'Unknown'}</div>
+                                <div className="text-xs font-mono text-muted-foreground">
+                                  {mem.userUuid || 'N/A'}
+                                </div>
+                                {mem.isGuest && (
+                                  <Badge variant="outline" className="text-xs">Guest</Badge>
+                                )}
+                              </>
                             )}
                           </div>
                         </TableCell>

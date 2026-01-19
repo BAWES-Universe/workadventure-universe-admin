@@ -37,6 +37,7 @@ model User {
   botsCreated       Bot[] @relation("BotCreatedBy")
   botsUpdated       Bot[] @relation("BotUpdatedBy")
   botConversations BotsConversation[]
+  botMemories      BotsMemory[]
 
   @@map("users")
 }
@@ -520,15 +521,22 @@ model BotsTestResult {
 model BotsMemory {
   id              Int       @id @default(autoincrement())
   botId           String    @map("bot_id") @db.VarChar(255)
-  playerId         Int       @map("player_id")
-  playerName       String?   @map("player_name") @db.VarChar(255)
-  memories        Json?      // Array of memory objects
-  emotions        Json?      // Emotion data: { botEmotion: {...}, personEmotion: {...} }
+  userUuid        String    @map("user_uuid") @db.VarChar(255) // REQUIRED - WorkAdventure UUID
+  userId          String?   @map("user_id") // Optional - Foreign key to User.id
+  userName        String?   @map("user_name") @db.VarChar(255) // Display name
+  isGuest         Boolean   @default(true) @map("is_guest") // true if unauthenticated
+  memories        Json?     // Array of memory objects
+  emotions        Json?     // Emotion data: { botEmotion: {...}, personEmotion: {...} }
   lastEmotionUpdate DateTime? @map("last_emotion_update")
   createdAt       DateTime  @default(now()) @map("created_at")
   updatedAt       DateTime  @updatedAt @map("updated_at")
 
-  @@unique([botId, playerId])
+  // Relations
+  user            User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@unique([botId, userUuid])
   @@index([botId])
+  @@index([userUuid])
+  @@index([userId])
   @@map("bots_memory")
 }

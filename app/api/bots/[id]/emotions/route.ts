@@ -28,21 +28,34 @@ export async function GET(
 
     const { id: botId } = await params;
 
-    // Query memory table for emotions
+    // Query memory table for emotions with user relation
     const memories = await prisma.botsMemory.findMany({
       where: { botId },
       select: {
-        playerId: true,
-        playerName: true,
+        userUuid: true,
+        userId: true,
+        userName: true,
+        isGuest: true,
         emotions: true,
         lastEmotionUpdate: true,
+        user: {
+          select: {
+            id: true,
+            email: true,
+            name: true,
+            uuid: true,
+          },
+        },
       },
     });
 
     // Format response
     const emotions = memories.map((m) => ({
-      playerId: m.playerId,
-      playerName: m.playerName,
+      userUuid: m.userUuid,
+      userId: m.userId,
+      userName: m.userName || m.user?.name || null,
+      isGuest: m.isGuest,
+      user: m.user,
       emotions: m.emotions as any,
       lastEmotionUpdate: m.lastEmotionUpdate?.getTime() || null,
     }));

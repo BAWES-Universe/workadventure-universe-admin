@@ -44,8 +44,10 @@ CREATE TABLE "bots_test_results" (
 CREATE TABLE "bots_memory" (
     "id" SERIAL NOT NULL,
     "bot_id" VARCHAR(255) NOT NULL,
-    "player_id" INTEGER NOT NULL,
-    "player_name" VARCHAR(255),
+    "user_uuid" VARCHAR(255) NOT NULL,
+    "user_id" VARCHAR(255),
+    "user_name" VARCHAR(255),
+    "is_guest" BOOLEAN NOT NULL DEFAULT true,
     "memories" JSONB,
     "emotions" JSONB,
     "last_emotion_update" TIMESTAMP(3),
@@ -97,7 +99,18 @@ CREATE INDEX "bots_test_results_created_at_idx" ON "bots_test_results"("created_
 CREATE UNIQUE INDEX "bots_test_results_test_id_key" ON "bots_test_results"("test_id");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "bots_memory_bot_id_player_id_key" ON "bots_memory"("bot_id", "player_id");
+CREATE UNIQUE INDEX "bots_memory_bot_id_user_uuid_key" ON "bots_memory"("bot_id", "user_uuid");
 
 -- CreateIndex
 CREATE INDEX "bots_memory_bot_id_idx" ON "bots_memory"("bot_id");
+
+-- CreateIndex
+CREATE INDEX "bots_memory_user_uuid_idx" ON "bots_memory"("user_uuid");
+
+-- CreateIndex
+CREATE INDEX "bots_memory_user_id_idx" ON "bots_memory"("user_id");
+
+-- AddForeignKey
+ALTER TABLE "bots_memory" 
+  ADD CONSTRAINT "fk_bots_memory_user" 
+  FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE SET NULL ON UPDATE CASCADE;

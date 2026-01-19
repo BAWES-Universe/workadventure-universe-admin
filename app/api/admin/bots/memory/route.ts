@@ -25,7 +25,8 @@ export async function GET(request: NextRequest) {
 
     // Filters
     const botId = searchParams.get('botId');
-    const playerId = searchParams.get('playerId');
+    const userUuid = searchParams.get('userUuid');
+    const userId = searchParams.get('userId');
     const startDate = searchParams.get('startDate');
     const endDate = searchParams.get('endDate');
 
@@ -36,8 +37,11 @@ export async function GET(request: NextRequest) {
       where.botId = botId;
     }
 
-    if (playerId) {
-      where.playerId = parseInt(playerId, 10);
+    if (userUuid) {
+      where.userUuid = userUuid;
+    }
+    if (userId) {
+      where.userId = userId;
     }
 
     if (startDate || endDate) {
@@ -50,10 +54,20 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    // Fetch memory entries with pagination
+    // Fetch memory entries with pagination and user relation
     const [memory, total] = await Promise.all([
       prisma.botsMemory.findMany({
         where,
+        include: {
+          user: {
+            select: {
+              id: true,
+              email: true,
+              name: true,
+              uuid: true,
+            },
+          },
+        },
         orderBy: { updatedAt: 'desc' },
         skip,
         take: limit,
