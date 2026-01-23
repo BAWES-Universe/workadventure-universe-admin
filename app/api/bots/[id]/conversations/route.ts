@@ -57,43 +57,71 @@ export async function POST(
     // This includes UUID matching, so it won't block the bot server response
     (async () => {
       try {
-        // Try to match userUuid to User table if user is logged in
+        // Try to match userUuid to User table
         let finalUserId: string | null = userId || null;
         let finalIsGuest = true;
 
-        if (userIsLogged) {
-          // Try to find user by UUID (even if userId was provided, verify it matches)
-          try {
-            const user = await prisma.user.findUnique({
-              where: { uuid: userUuid },
-              select: { id: true },
-            });
+        // Check if userUuid looks like an email
+        const isEmail = userUuid.includes('@');
 
+        // Only try to match if user is logged in (isGuest = false) OR if userUuid is an email
+        // (emails are always from authenticated users, even if isGuest flag is wrong)
+        if (!isGuest || isEmail) {
+          try {
+            let user = null;
+            
+            if (isEmail) {
+              // OIDC case: Look up by email
+              user = await prisma.user.findUnique({
+                where: { email: userUuid },
+                select: { id: true, uuid: true },
+              });
+            } else {
+              // Normal case: Look up by UUID
+              user = await prisma.user.findUnique({
+                where: { uuid: userUuid },
+                select: { id: true, uuid: true },
+              });
+            }
+            
             if (user) {
               finalUserId = user.id;
               finalIsGuest = false;
-            } else if (finalUserId) {
-              // userId was provided but UUID doesn't match - use provided userId but log warning
-              console.warn(`User UUID ${userUuid} not found, but userId ${finalUserId} was provided`);
-              finalIsGuest = false;
             } else {
-              // User claims to be logged in but UUID not found - treat as guest
-              console.warn(`User UUID ${userUuid} not found in database, treating as guest despite isGuest=false`);
+              // User not found - treat as guest
               finalIsGuest = true;
+              if (process.env.NODE_ENV === 'development') {
+                if (isEmail) {
+                  console.warn(`User email ${userUuid} not found in database, treating as guest`);
+                } else {
+                  console.warn(`User UUID ${userUuid} not found in database, treating as guest`);
+                }
+              }
             }
           } catch (err) {
-            // Database error during lookup - log but continue with provided userId if available
-            console.error(`Error looking up user with uuid ${userUuid}:`, err);
-            if (finalUserId) {
-              finalIsGuest = false;
-            }
+            // Database error during lookup - log but continue as guest
+            console.error(`Error looking up user (email/uuid: ${userUuid}):`, err);
+            finalIsGuest = true;
           }
-        } else if (finalUserId) {
-          // If userId was provided but user is marked as guest, trust the userId
-          finalIsGuest = false;
+        } else {
+          // Guest user (isGuest = true and not an email) - no lookup needed
+          finalIsGuest = true;
         }
 
-        // Store conversation with matched userId
+        // If userId was explicitly provided, trust it (but still set isGuest correctly)
+        if (userId) {
+          finalUserId = userId;
+          // If userId provided, user is authenticated
+          if (!finalIsGuest) {
+            // Already set to false above
+          } else {
+            // userId provided but lookup failed - trust the userId
+            finalIsGuest = false;
+          }
+        }
+
+        // Always store userUuid (even for guests with no match)
+        // This allows us to track ephemeral guest sessions
         await prisma.botsConversation.create({
           data: {
             botId,
