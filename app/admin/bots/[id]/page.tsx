@@ -137,6 +137,7 @@ interface Conversation {
   }>;
   startedAt: string;
   endedAt: string;
+  endReason?: string | null;
   messageCount: number;
   createdAt: string;
 }
@@ -462,6 +463,39 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
 
   function formatDate(dateString: string): string {
     return new Date(dateString).toLocaleString();
+  }
+
+  function formatConversationDuration(startedAt: string, endedAt: string): string {
+    const start = new Date(startedAt).getTime();
+    const end = new Date(endedAt).getTime();
+    const seconds = Math.floor((end - start) / 1000);
+    
+    // Handle active conversations (where ended_at = started_at)
+    if (seconds === 0) return "Active";
+    
+    if (seconds < 60) return `${seconds}s`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+    const hours = Math.floor(minutes / 60);
+    return `${hours}h ${minutes % 60}m`;
+  }
+
+  function getConversationStatus(startedAt: string, endedAt: string): 'active' | 'completed' {
+    const start = new Date(startedAt).getTime();
+    const end = new Date(endedAt).getTime();
+    return start === end ? 'active' : 'completed';
+  }
+
+  function formatEndReason(endReason: string | null | undefined): string {
+    if (!endReason) return '';
+    
+    switch (endReason) {
+      case 'user_left': return 'User Left';
+      case 'bot_shutdown': return 'Bot Shutdown';
+      case 'timeout': return 'Timeout';
+      case 'manual': return 'Manual';
+      default: return endReason;
+    }
   }
 
   // Show loading spinner during initial load
@@ -1181,7 +1215,20 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
                               {conv.user?.name || conv.userName || conv.userUuid || 'Unknown User'}
                             </CardTitle>
                             <div className="text-sm text-muted-foreground mt-1">
-                              {formatRelativeTime(new Date(conv.endedAt).getTime())} • {conv.messageCount} messages
+                              {formatRelativeTime(new Date(conv.endedAt).getTime())} • {conv.messageCount} messages • {formatConversationDuration(conv.startedAt, conv.endedAt)}
+                            </div>
+                            <div className="flex items-center gap-2 mt-2">
+                              <Badge variant={getConversationStatus(conv.startedAt, conv.endedAt) === 'active' ? 'default' : 'secondary'} className="text-xs">
+                                {getConversationStatus(conv.startedAt, conv.endedAt) === 'active' ? 'Active' : 'Completed'}
+                              </Badge>
+                              {conv.endReason && (
+                                <Badge variant="outline" className="text-xs">
+                                  {formatEndReason(conv.endReason)}
+                                </Badge>
+                              )}
+                              {conv.isGuest && (
+                                <Badge variant="outline" className="text-xs">Guest</Badge>
+                              )}
                             </div>
                           </div>
                           <div className="text-sm text-muted-foreground">

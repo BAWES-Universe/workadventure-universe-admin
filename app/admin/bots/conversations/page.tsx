@@ -36,6 +36,7 @@ interface Conversation {
   messageCount: number;
   startedAt: Date;
   endedAt: Date;
+  endReason?: string | null;
   createdAt: Date;
 }
 
@@ -166,11 +167,33 @@ export default function ConversationsBrowsePage() {
     const start = new Date(startedAt).getTime();
     const end = new Date(endedAt).getTime();
     const seconds = Math.floor((end - start) / 1000);
+    
+    // Handle active conversations (where ended_at = started_at)
+    if (seconds === 0) return "Active";
+    
     if (seconds < 60) return `${seconds}s`;
     const minutes = Math.floor(seconds / 60);
     if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
     const hours = Math.floor(minutes / 60);
     return `${hours}h ${minutes % 60}m`;
+  }
+
+  function getConversationStatus(startedAt: Date | string, endedAt: Date | string): 'active' | 'completed' {
+    const start = new Date(startedAt).getTime();
+    const end = new Date(endedAt).getTime();
+    return start === end ? 'active' : 'completed';
+  }
+
+  function formatEndReason(endReason: string | null | undefined): string {
+    if (!endReason) return '';
+    
+    switch (endReason) {
+      case 'user_left': return 'User Left';
+      case 'bot_shutdown': return 'Bot Shutdown';
+      case 'timeout': return 'Timeout';
+      case 'manual': return 'Manual';
+      default: return endReason;
+    }
   }
 
   if (loading && conversations.length === 0) {
@@ -193,9 +216,9 @@ export default function ConversationsBrowsePage() {
                   <TableHead>Player</TableHead>
                   <TableHead>Messages</TableHead>
                   <TableHead>Duration</TableHead>
+                  <TableHead>Status</TableHead>
                   <TableHead>Started</TableHead>
                   <TableHead>Ended</TableHead>
-                  <TableHead>Messages</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -372,9 +395,9 @@ export default function ConversationsBrowsePage() {
                       <TableHead>Player</TableHead>
                       <TableHead>Messages</TableHead>
                       <TableHead>Duration</TableHead>
+                      <TableHead>Status</TableHead>
                       <TableHead>Started</TableHead>
                       <TableHead>Ended</TableHead>
-                      <TableHead>Messages</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -421,6 +444,18 @@ export default function ConversationsBrowsePage() {
                         </TableCell>
                         <TableCell className="text-sm">
                           {formatDuration(conv.startedAt, conv.endedAt)}
+                        </TableCell>
+                        <TableCell>
+                          <div className="space-y-1">
+                            <Badge variant={getConversationStatus(conv.startedAt, conv.endedAt) === 'active' ? 'default' : 'secondary'}>
+                              {getConversationStatus(conv.startedAt, conv.endedAt) === 'active' ? 'Active' : 'Completed'}
+                            </Badge>
+                            {conv.endReason && (
+                              <Badge variant="outline" className="text-xs">
+                                {formatEndReason(conv.endReason)}
+                              </Badge>
+                            )}
+                          </div>
                         </TableCell>
                         <TableCell className="text-sm">{formatDate(conv.startedAt)}</TableCell>
                         <TableCell className="text-sm">{formatDate(conv.endedAt)}</TableCell>
@@ -493,9 +528,24 @@ export default function ConversationsBrowsePage() {
                             <div className="text-sm">{formatDate(conv.startedAt)}</div>
                           </div>
                         </div>
-                        <div>
-                          <div className="text-sm font-medium text-muted-foreground mb-1">Ended</div>
-                          <div className="text-sm">{formatDate(conv.endedAt)}</div>
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <div className="text-sm font-medium text-muted-foreground mb-1">Status</div>
+                            <div className="flex items-center gap-2">
+                              <Badge variant={getConversationStatus(conv.startedAt, conv.endedAt) === 'active' ? 'default' : 'secondary'}>
+                                {getConversationStatus(conv.startedAt, conv.endedAt) === 'active' ? 'Active' : 'Completed'}
+                              </Badge>
+                              {conv.endReason && (
+                                <Badge variant="outline" className="text-xs">
+                                  {formatEndReason(conv.endReason)}
+                                </Badge>
+                              )}
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            <div className="text-sm font-medium text-muted-foreground mb-1">Ended</div>
+                            <div className="text-sm">{formatDate(conv.endedAt)}</div>
+                          </div>
                         </div>
                         <div>
                           <details className="cursor-pointer">
