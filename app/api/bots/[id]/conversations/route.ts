@@ -136,6 +136,8 @@ export async function POST(
         select: { id: true },
       });
       
+      console.log(`Created new conversation ${conversation.id} for bot ${botId}, user ${userUuid}`);
+      
       return NextResponse.json(
         { 
           conversationId: conversation.id.toString(), 
@@ -149,18 +151,29 @@ export async function POST(
       if (error.code === 'P2002' && error.meta?.target?.includes('bot_id') && error.meta?.target?.includes('user_uuid')) {
         // Active conversation already exists - update it
         try {
-          // Use raw query to find active conversations where ended_at = started_at
-          const existingConversations = await prisma.$queryRaw<{ id: number }[]>`
-            SELECT id FROM bots_conversations_recent 
-            WHERE bot_id = ${botId} 
-            AND user_uuid = ${userUuid} 
-            AND ended_at = started_at
-            LIMIT 1
-          `;
+          // Find existing active conversation using proper Prisma query
+          const existingConversation = await prisma.botsConversation.findFirst({
+            where: {
+              botId,
+              userUuid,
+              // Find active conversations by comparing dates as timestamps
+              AND: [
+                {
+                  startedAt: {
+                    gte: new Date(Date.now() - 300000) // Within last 5 minutes to catch recent conversations
+                  }
+                }
+              ]
+            },
+            select: { id: true, startedAt: true, endedAt: true },
+            orderBy: { createdAt: 'desc' } // Get the most recent conversation
+          });
           
-          const existingConversation = existingConversations[0];
+          // Double-check if this is actually an active conversation (endedAt = startedAt)
+          const isActiveConversation = existingConversation && 
+            existingConversation.startedAt.getTime() === existingConversation.endedAt.getTime();
           
-          if (existingConversation) {
+          if (existingConversation && isActiveConversation) {
             // Update existing active conversation
             await prisma.botsConversation.update({
               where: { id: existingConversation.id },
@@ -184,6 +197,32 @@ export async function POST(
               },
               { headers: corsHeaders() }
             );
+          } else {
+            console.warn(`Unique constraint violation but no active conversation found for bot ${botId}, user ${userUuid}`);
+            
+            // Fallback: Try to find ANY recent conversation for this bot+user combination
+            const anyRecentConversation = await prisma.botsConversation.findFirst({
+              where: {
+                botId,
+                userUuid,
+                createdAt: {
+                  gte: new Date(Date.now() - 60000) // Within last minute
+                }
+              },
+              select: { id: true },
+              orderBy: { createdAt: 'desc' }
+            });
+            
+            if (anyRecentConversation) {
+              console.log(`Found recent conversation ${anyRecentConversation.id} for bot ${botId}, user ${userUuid}`);
+              return NextResponse.json(
+                { 
+                  conversationId: anyRecentConversation.id.toString(), 
+                  status: 'updated' as const 
+                },
+                { headers: corsHeaders() }
+              );
+            }
           }
         } catch (updateError) {
           console.error('Error updating existing conversation:', updateError);

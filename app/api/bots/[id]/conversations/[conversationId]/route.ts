@@ -73,6 +73,20 @@ export async function PUT(
     });
 
     if (!existingConversation) {
+      console.error(`Conversation ${conversationIdNum} not found for bot ${botId}`);
+      
+      // Additional debugging: Check if conversation exists at all
+      const anyConversation = await prisma.botsConversation.findFirst({
+        where: { id: conversationIdNum },
+        select: { id: true, botId: true, userUuid: true },
+      });
+      
+      if (anyConversation) {
+        console.error(`Conversation ${conversationIdNum} exists but belongs to bot ${anyConversation.botId}, not ${botId}`);
+      } else {
+        console.error(`Conversation ${conversationIdNum} does not exist in database at all`);
+      }
+      
       return NextResponse.json(
         { error: 'Conversation not found' },
         { status: 404, headers: corsHeaders() }
@@ -104,6 +118,8 @@ export async function PUT(
       where: { id: conversationIdNum },
       data: updateData,
     });
+
+    console.log(`Successfully updated conversation ${conversationIdNum} for bot ${botId}`);
 
     return NextResponse.json(
       { status: 'updated' },
