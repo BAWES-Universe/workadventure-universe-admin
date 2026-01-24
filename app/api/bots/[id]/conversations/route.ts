@@ -16,9 +16,11 @@ export async function OPTIONS() {
 
 /**
  * POST /api/bots/:botId/conversations
- * Store conversation when it ends
+ * Create new conversation or update existing active conversation
  * 
  * Auth: BOT_SERVICE_TOKEN
+ * 
+ * Response: { conversationId: string, status: "created" | "updated" }
  */
 export async function POST(
   request: NextRequest,
@@ -43,109 +45,154 @@ export async function POST(
     } = body;
 
     // Validate required fields
-    if (!userUuid || !messages || !Array.isArray(messages) || !startedAt || !endedAt) {
+    if (!userUuid || !messages || !Array.isArray(messages) || !startedAt) {
       return NextResponse.json(
-        { error: 'Missing required fields: userUuid, messages, startedAt, endedAt' },
+        { error: 'Missing required fields: userUuid, messages, startedAt' },
         { status: 400, headers: corsHeaders() }
       );
     }
 
-    // Determine if user is logged in (check both isGuest and isLogged)
-    const userIsLogged = isGuest === false || isLogged === true;
+    // Try to match userUuid to User table
+    let finalUserId: string | null = userId || null;
+    let finalIsGuest = true;
 
-    // Fire-and-forget: Don't await, just start the operation
-    // This includes UUID matching, so it won't block the bot server response
-    (async () => {
+    // Check if userUuid looks like an email
+    const isEmail = userUuid.includes('@');
+
+    // Only try to match if user is logged in (isGuest = false) OR if userUuid is an email
+    // (emails are always from authenticated users, even if isGuest flag is wrong)
+    if (!isGuest || isEmail) {
       try {
-        // Try to match userUuid to User table
-        let finalUserId: string | null = userId || null;
-        let finalIsGuest = true;
-
-        // Check if userUuid looks like an email
-        const isEmail = userUuid.includes('@');
-
-        // Only try to match if user is logged in (isGuest = false) OR if userUuid is an email
-        // (emails are always from authenticated users, even if isGuest flag is wrong)
-        if (!isGuest || isEmail) {
-          try {
-            let user = null;
-            
-            if (isEmail) {
-              // OIDC case: Look up by email
-              user = await prisma.user.findUnique({
-                where: { email: userUuid },
-                select: { id: true, uuid: true },
-              });
-            } else {
-              // Normal case: Look up by UUID
-              user = await prisma.user.findUnique({
-                where: { uuid: userUuid },
-                select: { id: true, uuid: true },
-              });
-            }
-            
-            if (user) {
-              finalUserId = user.id;
-              finalIsGuest = false;
-            } else {
-              // User not found - treat as guest
-              finalIsGuest = true;
-              if (process.env.NODE_ENV === 'development') {
-                if (isEmail) {
-                  console.warn(`User email ${userUuid} not found in database, treating as guest`);
-                } else {
-                  console.warn(`User UUID ${userUuid} not found in database, treating as guest`);
-                }
-              }
-            }
-          } catch (err) {
-            // Database error during lookup - log but continue as guest
-            console.error(`Error looking up user (email/uuid: ${userUuid}):`, err);
-            finalIsGuest = true;
-          }
+        let user = null;
+        
+        if (isEmail) {
+          // OIDC case: Look up by email
+          user = await prisma.user.findUnique({
+            where: { email: userUuid },
+            select: { id: true, uuid: true },
+          });
         } else {
-          // Guest user (isGuest = true and not an email) - no lookup needed
-          finalIsGuest = true;
+          // Normal case: Look up by UUID
+          user = await prisma.user.findUnique({
+            where: { uuid: userUuid },
+            select: { id: true, uuid: true },
+          });
         }
-
-        // If userId was explicitly provided, trust it (but still set isGuest correctly)
-        if (userId) {
-          finalUserId = userId;
-          // If userId provided, user is authenticated
-          if (!finalIsGuest) {
-            // Already set to false above
-          } else {
-            // userId provided but lookup failed - trust the userId
-            finalIsGuest = false;
+        
+        if (user) {
+          finalUserId = user.id;
+          finalIsGuest = false;
+        } else {
+          // User not found - treat as guest
+          finalIsGuest = true;
+          if (process.env.NODE_ENV === 'development') {
+            if (isEmail) {
+              console.warn(`User email ${userUuid} not found in database, treating as guest`);
+            } else {
+              console.warn(`User UUID ${userUuid} not found in database, treating as guest`);
+            }
           }
         }
-
-        // Always store userUuid (even for guests with no match)
-        // This allows us to track ephemeral guest sessions
-        await prisma.botsConversation.create({
-          data: {
-            botId,
-            userUuid,
-            userId: finalUserId,
-            userName: userName || null,
-            isGuest: finalIsGuest,
-            messages: messages,
-            startedAt: new Date(startedAt),
-            endedAt: new Date(endedAt),
-            messageCount: messageCount || messages.length,
-          },
-        });
       } catch (err) {
-        // Log error but don't block response (fire-and-forget)
-        console.error('Error storing conversation:', err);
+        // Database error during lookup - log but continue as guest
+        console.error(`Error looking up user (email/uuid: ${userUuid}):`, err);
+        finalIsGuest = true;
       }
-    })();
+    } else {
+      // Guest user (isGuest = true and not an email) - no lookup needed
+      finalIsGuest = true;
+    }
 
-    // Return immediately (fire-and-forget)
-    return NextResponse.json(
-      { status: 'stored' },
-      { headers: corsHeaders() }
-    );
+    // If userId was explicitly provided, trust it (but still set isGuest correctly)
+    if (userId) {
+      finalUserId = userId;
+      // If userId provided, user is authenticated
+      if (!finalIsGuest) {
+        // Already set to false above
+      } else {
+        // userId provided but lookup failed - trust the userId
+        finalIsGuest = false;
+      }
+    }
+
+    // Prepare timestamps
+    const conversationStartedAt = new Date(startedAt);
+    const conversationEndedAt = endedAt ? new Date(endedAt) : conversationStartedAt; // Active: ended_at = started_at
+
+    try {
+      // Try to create new active conversation (ended_at = started_at for active conversations)
+      const conversation = await prisma.botsConversation.create({
+        data: {
+          botId,
+          userUuid,
+          userId: finalUserId,
+          userName: userName || null,
+          isGuest: finalIsGuest,
+          messages: messages,
+          startedAt: conversationStartedAt,
+          endedAt: conversationEndedAt,
+          messageCount: messageCount || messages.length,
+        },
+        select: { id: true },
+      });
+      
+      return NextResponse.json(
+        { 
+          conversationId: conversation.id.toString(), 
+          status: 'created' as const 
+        },
+        { headers: corsHeaders() }
+      );
+      
+    } catch (error: any) {
+      // Check if this is a unique constraint violation for active conversations
+      if (error.code === 'P2002' && error.meta?.target?.includes('bot_id') && error.meta?.target?.includes('user_uuid')) {
+        // Active conversation already exists - update it
+        try {
+          // Use raw query to find active conversations where ended_at = started_at
+          const existingConversations = await prisma.$queryRaw<{ id: number }[]>`
+            SELECT id FROM bots_conversations_recent 
+            WHERE bot_id = ${botId} 
+            AND user_uuid = ${userUuid} 
+            AND ended_at = started_at
+            LIMIT 1
+          `;
+          
+          const existingConversation = existingConversations[0];
+          
+          if (existingConversation) {
+            // Update existing active conversation
+            await prisma.botsConversation.update({
+              where: { id: existingConversation.id },
+              data: {
+                messages: messages,
+                messageCount: messageCount || messages.length,
+                userId: finalUserId,
+                userName: userName || null,
+                isGuest: finalIsGuest,
+                // Keep endedAt = startedAt (still active) unless endedAt was provided and > startedAt
+                endedAt: (endedAt && new Date(endedAt) > conversationStartedAt) 
+                  ? new Date(endedAt) 
+                  : undefined, // Keep current endedAt
+              },
+            });
+            
+            return NextResponse.json(
+              { 
+                conversationId: existingConversation.id.toString(), 
+                status: 'updated' as const 
+              },
+              { headers: corsHeaders() }
+            );
+          }
+        } catch (updateError) {
+          console.error('Error updating existing conversation:', updateError);
+        }
+      }
+      
+      // Re-throw the original error if it's not a handled constraint violation
+      throw error;
+    }
   } catch (error: any) {
     if (error.message === 'Unauthorized: Invalid service token') {
       return NextResponse.json(
@@ -154,11 +201,10 @@ export async function POST(
       );
     }
 
-    // For other errors, still return success (fire-and-forget)
     console.error('Error in conversation storage endpoint:', error);
     return NextResponse.json(
-      { status: 'stored' }, // Return success even on error (fire-and-forget)
-      { headers: corsHeaders() }
+      { error: 'Internal server error' },
+      { status: 500, headers: corsHeaders() }
     );
   }
 }

@@ -477,6 +477,9 @@ model BotsMetric {
 }
 
 // Bot Conversations - Recent conversations for admin viewing
+// Conversation lifecycle:
+// - Active conversations: ended_at = started_at (can be updated)
+// - Completed conversations: ended_at > started_at (historical, read-only)
 model BotsConversation {
   id           Int      @id @default(autoincrement())
   botId        String   @map("bot_id") @db.VarChar(255)
@@ -488,6 +491,7 @@ model BotsConversation {
   startedAt    DateTime @map("started_at")
   endedAt      DateTime @map("ended_at")
   messageCount Int      @map("message_count")
+  endReason    String?  @map("end_reason") @db.VarChar(50) // 'user_left', 'bot_shutdown', 'manual', 'timeout'
   createdAt    DateTime @default(now()) @map("created_at")
 
   // Relations
