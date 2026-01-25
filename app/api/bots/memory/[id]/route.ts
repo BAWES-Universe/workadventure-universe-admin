@@ -15,16 +15,21 @@ export async function OPTIONS() {
 
 /**
  * POST /api/bots/memory/:botId
- * Enhanced memory save - supports immediate emotion saves
+ * Enhanced memory save - supports immediate emotion saves and full memory storage
  * 
  * Auth: BOT_SERVICE_TOKEN
  * 
  * Request body:
  * {
- *   "memories": [...],
+ *   "memories": [...],  // Array of memory entries (for periodic saves)
+ *   "memory" | "memories" | "memoryData": {...},  // Full memory object (for immediate saves)
+ *   "emotions": {...},  // Emotion data
  *   "timestamp": 1704067200000,
- *   "saveType": "immediate" | "periodic" // New field
+ *   "saveType": "immediate" | "periodic"  // Metadata only - full memory is always stored when provided
  * }
+ * 
+ * Note: saveType is metadata for logging/analytics. The full memory_data JSONB is always
+ * stored when provided, regardless of saveType value.
  */
 export async function POST(
   request: NextRequest,
@@ -42,8 +47,8 @@ export async function POST(
       saveType = 'periodic', // Default to periodic for backward compatibility
     } = body;
 
-    // For immediate saves (emotion-only updates), we might only have emotions
-    // For periodic saves, we have full memory data
+    // Both immediate and periodic saves can include full memory data
+    // saveType is just metadata - we always store full memory when provided
     if (!memories && !body.emotions) {
       return NextResponse.json(
         { error: 'memories or emotions required' },
@@ -191,7 +196,9 @@ export async function POST(
           });
         }
 
-        // Handle immediate emotion-only updates (if emotions provided directly)
+        // Handle immediate emotion updates (if emotions provided directly)
+        // IMPORTANT: Always store full memory data when provided, regardless of saveType
+        // saveType is just metadata for logging/analytics, not a signal to skip storing full memory
         if (saveType === 'immediate' && body.emotions && body.userUuid) {
           // Try to match userUuid to User table
           let finalUserId: string | null = body.userId || null;
@@ -256,6 +263,25 @@ export async function POST(
             }
           }
 
+          // Extract full memory data if provided (bot sends full memory object even with immediate saves)
+          // Check for memory data in various possible formats:
+          // 1. First check the memories array for matching userUuid (most common format)
+          // 2. Then check top-level fields: body.memories, body.memory, body.memoryData
+          let fullMemoryData = null;
+          
+          // Check memories array first (bot often sends full memory in array format)
+          if (Array.isArray(memories) && memories.length > 0) {
+            const matchingMemory = memories.find((m: any) => m.userUuid === body.userUuid);
+            if (matchingMemory && matchingMemory.memories) {
+              fullMemoryData = matchingMemory.memories;
+            }
+          }
+          
+          // Fallback to top-level fields if not found in array
+          if (!fullMemoryData) {
+            fullMemoryData = body.memories || body.memory || body.memoryData || null;
+          }
+
           await prisma.botsMemory.upsert({
             where: {
               botId_userUuid: {
@@ -264,7 +290,10 @@ export async function POST(
               },
             },
             update: {
+              // Always update emotions when provided
               emotions: body.emotions,
+              // Always update full memory data when provided (regardless of saveType)
+              memories: fullMemoryData !== null ? fullMemoryData : undefined,
               userId: finalUserId,
               userName: body.userName || undefined,
               isGuest: finalIsGuest,
@@ -277,7 +306,8 @@ export async function POST(
               userId: finalUserId,
               userName: body.userName || null,
               isGuest: finalIsGuest,
-              memories: null,
+              // Store full memory data if provided, otherwise null
+              memories: fullMemoryData,
               emotions: body.emotions,
               lastEmotionUpdate: new Date(),
             },
