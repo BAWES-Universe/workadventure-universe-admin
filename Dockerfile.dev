@@ -14,6 +14,10 @@ RUN npm install --ignore-scripts
 # Copy all source code (needed for prisma generate and initial build)
 COPY . .
 
+# Copy entrypoint script
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+
 # Generate Prisma Client (now that all files are in place)
 # Temporarily rename prisma.config.ts since it requires DATABASE_URL during build
 # prisma generate doesn't need DATABASE_URL - it only reads the schema file
@@ -23,6 +27,9 @@ RUN mv prisma.config.ts prisma.config.ts.bak && \
 
 # Expose port (used by Traefik)
 EXPOSE 3333
+
+# Use entrypoint to handle node_modules volume initialization
+ENTRYPOINT ["/docker-entrypoint.sh"]
 
 # Start development server
 # Next.js dev server binds to 0.0.0.0 by default in Docker
