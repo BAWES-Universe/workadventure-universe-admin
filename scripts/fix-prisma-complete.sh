@@ -16,7 +16,7 @@ echo ""
 # Check if container is running
 if ! docker ps | grep -q admin-api-dev; then
   echo "❌ Error: admin-api-dev container is not running"
-  echo "   Please run: docker-compose up -d"
+  echo "   Please run: docker compose up -d"
   exit 1
 fi
 
@@ -41,7 +41,7 @@ fi
 
 echo ""
 echo "Step 4: Stopping container to clear cache..."
-docker-compose stop admin-api
+docker compose stop admin-api
 
 echo ""
 echo "Step 5: Clearing Next.js cache..."
@@ -53,7 +53,7 @@ docker exec admin-api-dev sh -c 'rm -rf /app/.next' 2>/dev/null || {
 
 echo ""
 echo "Step 6: Restarting container..."
-docker-compose start admin-api
+docker compose start admin-api
 
 echo ""
 echo "Step 7: Waiting for server to be ready..."
