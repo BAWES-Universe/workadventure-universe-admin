@@ -51,8 +51,7 @@ services:
     volumes:
       - .:/app
       - /app/.next
-      # Uncomment the line below if you're on Mac and experiencing slow performance:
-      # - /app/node_modules  # Exclude node_modules from host mount (use container's node_modules)
+      - node_modules_data:/app/node_modules  # Use named volume for node_modules (works on Mac and Windows/WSL2)
     depends_on:
       postgres:
         condition: service_healthy
@@ -101,4 +100,5 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  node_modules_data:  # Named volume for node_modules to avoid platform-specific binary issues
 
