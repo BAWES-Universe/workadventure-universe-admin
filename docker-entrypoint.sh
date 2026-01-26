@@ -31,15 +31,16 @@ if [ "$NEEDS_INSTALL" = "true" ]; then
   echo "[Entrypoint] Dependencies installed successfully"
 fi
 
-# Generate Prisma client if needed
-if [ ! -d "/app/node_modules/.prisma" ]; then
-  echo "[Entrypoint] Generating Prisma client..."
-  cd /app
-  mv prisma.config.ts prisma.config.ts.bak 2>/dev/null || true
-  npx prisma generate --schema=prisma/schema.prisma || true
-  mv prisma.config.ts.bak prisma.config.ts 2>/dev/null || true
-  echo "[Entrypoint] Prisma client generated"
-fi
+# Always regenerate Prisma client to ensure it's in sync with schema
+# This is necessary when using a named volume for node_modules
+echo "[Entrypoint] Regenerating Prisma client to ensure schema sync..."
+cd /app
+mv prisma.config.ts prisma.config.ts.bak 2>/dev/null || true
+npx prisma generate --schema=prisma/schema.prisma || {
+  echo "[Entrypoint] Warning: Prisma client generation failed, but continuing..."
+}
+mv prisma.config.ts.bak prisma.config.ts 2>/dev/null || true
+echo "[Entrypoint] Prisma client regeneration complete"
 
 # Execute the main command
 exec "$@"
