@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
-import { requireServiceToken } from '@/lib/service-tokens';
+import { requireServiceToken, validateServiceToken } from '@/lib/service-tokens';
+import { requireAdminAuth } from '@/lib/admin-auth';
 import { corsHeaders } from '@/lib/cors';
 
 export const runtime = 'nodejs';
@@ -11,6 +12,81 @@ export const runtime = 'nodejs';
  */
 export async function OPTIONS() {
   return NextResponse.json({}, { headers: corsHeaders() });
+}
+
+/**
+ * GET /api/bots/memory/:botId
+ * Return all memory entries for a bot (for restore on startup).
+ *
+ * Auth: BOT_SERVICE_TOKEN or ADMIN_API_TOKEN / session
+ *
+ * Query params (optional):
+ * - userUuid: return only memory for this user
+ *
+ * Response: { memories: [...] } — same shape as POST accepts (read instead of write).
+ * Returns 200 with { memories: [] } when bot has no memories.
+ */
+export async function GET(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  try {
+    const isServiceToken = validateServiceToken(request);
+    if (!isServiceToken) {
+      await requireAdminAuth(request);
+    }
+
+    const { id: botId } = await params;
+    const { searchParams } = new URL(request.url);
+    const userUuidFilter = searchParams.get('userUuid');
+
+    const where: { botId: string; userUuid?: string } = { botId };
+    if (userUuidFilter) {
+      where.userUuid = userUuidFilter;
+    }
+
+    const rows = await prisma.botsMemory.findMany({
+      where,
+      orderBy: { updatedAt: 'desc' },
+    });
+
+    const memories = rows.map((row) => {
+      const rawEmotions = (row.emotions as Record<string, unknown> | null) || {};
+      const lastEmotionMs = row.lastEmotionUpdate
+        ? row.lastEmotionUpdate.getTime()
+        : undefined;
+      const emotions =
+        Object.keys(rawEmotions).length > 0 || lastEmotionMs !== undefined
+          ? { ...rawEmotions, ...(lastEmotionMs !== undefined && { lastEmotionUpdate: lastEmotionMs }) }
+          : null;
+
+      return {
+        userUuid: row.userUuid,
+        userId: row.userId ?? null,
+        userName: row.userName ?? null,
+        isGuest: row.isGuest,
+        memories: row.memories ?? null,
+        emotions,
+      };
+    });
+
+    return NextResponse.json(
+      { memories },
+      { status: 200, headers: corsHeaders() }
+    );
+  } catch (error: unknown) {
+    if (error instanceof Error && error.message?.includes('Unauthorized')) {
+      return NextResponse.json(
+        { error: 'Unauthorized', details: 'Invalid or missing token' },
+        { status: 401, headers: corsHeaders() }
+      );
+    }
+    console.error('Error in GET /api/bots/memory/:botId:', error);
+    return NextResponse.json(
+      { error: 'Internal server error' },
+      { status: 500, headers: corsHeaders() }
+    );
+  }
 }
 
 /**
