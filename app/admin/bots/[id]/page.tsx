@@ -193,6 +193,8 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
     totalTokens: number;
     totalErrors: number;
     avgRepetition: number;
+    responseTimeCount?: number;
+    repetitionCount?: number;
   } | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [conversationStats, setConversationStats] = useState<ConversationStats | null>(null);
