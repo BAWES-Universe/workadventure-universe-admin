@@ -148,8 +148,8 @@ export default function TestResultsBrowsePage() {
     return new Intl.NumberFormat().format(num);
   }
 
-  // Get unique test suites for filter
-  const testSuites = Array.from(new Set(testResults.map(t => t.testSuite).filter(Boolean))).sort();
+  // Get unique test suites for filter (exclude null/undefined so SelectItem value is string)
+  const testSuites = Array.from(new Set(testResults.map(t => t.testSuite).filter((s): s is string => s != null))).sort();
 
   if (loading && testResults.length === 0) {
     return (
