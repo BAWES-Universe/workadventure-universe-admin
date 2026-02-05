@@ -36,6 +36,8 @@ model User {
   membershipInvitationsReceived MembershipInvitation[] @relation("InvitedUser")
   botsCreated       Bot[] @relation("BotCreatedBy")
   botsUpdated       Bot[] @relation("BotUpdatedBy")
+  botConversations BotsConversation[]
+  botMemories      BotsMemory[]
 
   @@map("users")
 }
@@ -457,4 +459,88 @@ model BotsAiUsage {
   @@index([timestamp])
   @@index([botId, providerId, timestamp])
   @@map("bots_ai_usage")
+}
+
+// Bot Metrics - Time-series metrics (flattened storage)
+model BotsMetric {
+  id          Int      @id @default(autoincrement())
+  botId       String   @map("bot_id") @db.VarChar(255)
+  metricType  String   @map("metric_type") @db.VarChar(50) // 'response_time', 'token_usage_prompt', etc.
+  metricValue Decimal  @map("metric_value") @db.Decimal(15, 4) // Supports integers and decimals
+  metadata    Json?   // Additional context (playerId, spaceName, etc.)
+  timestamp   DateTime @default(now())
+
+  @@index([botId, timestamp])
+  @@index([metricType, timestamp])
+  @@index([timestamp]) // For cleanup queries
+  @@map("bots_metrics")
+}
+
+// Bot Conversations - Recent conversations for admin viewing
+// Conversation lifecycle:
+// - Active conversations: ended_at = started_at (can be updated)
+// - Completed conversations: ended_at > started_at (historical, read-only)
+model BotsConversation {
+  id           Int      @id @default(autoincrement())
+  botId        String   @map("bot_id") @db.VarChar(255)
+  userUuid     String?  @map("user_uuid") @db.VarChar(255) // WorkAdventure UUID (ephemeral for guests)
+  userId       String?  @map("user_id") // Foreign key to User.id (only set if authenticated)
+  userName     String?  @map("user_name") @db.VarChar(255) // Display name (from request or User.name)
+  isGuest      Boolean  @default(true) @map("is_guest") // true if unauthenticated
+  messages     Json     // Array of { sender, message, timestamp }
+  startedAt    DateTime @map("started_at")
+  endedAt      DateTime @map("ended_at")
+  messageCount Int      @map("message_count")
+  endReason    String?  @map("end_reason") @db.VarChar(50) // 'user_left', 'bot_shutdown', 'manual', 'timeout'
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  // Relations
+  user         User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([botId, createdAt])
+  @@index([userUuid])
+  @@index([userId])
+  @@index([createdAt]) // For cleanup queries
+  @@index([endedAt]) // For cleanup by date
+  @@map("bots_conversations_recent")
+}
+
+// Bot Test Results - Test results for regression testing (dev only)
+model BotsTestResult {
+  id        Int      @id @default(autoincrement())
+  testId    String   @unique @map("test_id") @db.VarChar(255)
+  botId     String?  @map("bot_id") @db.VarChar(255)
+  testSuite String?  @map("test_suite") @db.VarChar(255)
+  results   Json     // Test results object
+  passed    Boolean
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([botId])
+  @@index([testSuite])
+  @@index([createdAt]) // For cleanup queries
+  @@map("bots_test_results")
+}
+
+// Bot Memory - Enhanced memory with emotions
+model BotsMemory {
+  id              Int       @id @default(autoincrement())
+  botId           String    @map("bot_id") @db.VarChar(255)
+  userUuid        String    @map("user_uuid") @db.VarChar(255) // REQUIRED - WorkAdventure UUID
+  userId          String?   @map("user_id") // Optional - Foreign key to User.id
+  userName        String?   @map("user_name") @db.VarChar(255) // Display name
+  isGuest         Boolean   @default(true) @map("is_guest") // true if unauthenticated
+  memories        Json?     // Array of memory objects
+  emotions        Json?     // Emotion data: { botEmotion: {...}, personEmotion: {...} }
+  lastEmotionUpdate DateTime? @map("last_emotion_update")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  user            User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@unique([botId, userUuid])
+  @@index([botId])
+  @@index([userUuid])
+  @@index([userId])
+  @@map("bots_memory")
 }

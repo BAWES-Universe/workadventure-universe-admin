@@ -937,6 +937,18 @@ These endpoints are for bot servers to fetch AI provider credentials and track u
 
 **Note:** See [docs/bots/AI_PROVIDERS.md](./bots/AI_PROVIDERS.md) for complete integration guide.
 
+---
+
+## Bot Metrics and Conversations Endpoints
+
+These endpoints are for bot servers to store metrics, conversations, and memory data. They support high-volume metrics collection, conversation storage for admin viewing, and enhanced memory with emotions.
+
+**Authentication:** 
+- Bot service endpoints: `Authorization: Bearer {BOT_SERVICE_TOKEN}`
+- Admin endpoints: Session token or `ADMIN_API_TOKEN`
+
+**Note:** See [docs/bots/METRICS_AND_CONVERSATIONS.md](./bots/METRICS_AND_CONVERSATIONS.md) for complete API documentation including all endpoints, request/response formats, and implementation details.
+
 ### GET /api/bots/ai-providers
 
 List available AI providers (metadata only, no credentials).

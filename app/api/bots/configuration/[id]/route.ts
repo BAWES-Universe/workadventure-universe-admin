@@ -99,10 +99,10 @@ async function getUserIdFromRequest(request: NextRequest): Promise<{ userId: str
 // Get single bot configuration
 export async function GET(
   request: NextRequest,
-  { params }: { params: Promise<{ botId: string }> }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const { botId } = await params;
+    const { id: botId } = await params;
 
     // Get user ID from various auth methods
     const { userId, isAdminToken, userEmail } = await getUserIdFromRequest(request);
@@ -180,10 +180,10 @@ export async function GET(
 // Delete bot configuration
 export async function DELETE(
   request: NextRequest,
-  { params }: { params: Promise<{ botId: string }> }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const { botId } = await params;
+    const { id: botId } = await params;
 
     // Get user ID from various auth methods
     const { userId, isAdminToken } = await getUserIdFromRequest(request);
