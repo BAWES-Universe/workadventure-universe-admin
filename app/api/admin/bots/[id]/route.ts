@@ -1,7 +1,23 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
+
+/** Result row from BotsAiUsage.groupBy({ by: ['providerId'], _sum: {...} }) */
+type ProviderStatRow = {
+  providerId: string;
+  _sum: {
+    apiCalls: number | null;
+    tokensUsed: number | null;
+    cost: number | null;
+    durationSeconds: number | null;
+  };
+};
+
+type UsageWithProvider = Prisma.BotsAiUsageGetPayload<{
+  include: { provider: { select: { providerId: true; name: true; type: true } } };
+}>;
 
 /**
  * GET /api/admin/bots/:id
@@ -73,8 +89,11 @@ export async function GET(
 
     // Calculate usage statistics using aggregation for accurate totals from ALL entries
     // Use try-catch for groupBy as it can fail if there are no matching records
-    let usageStats, errorEntries, providerStats, totalCount;
-    
+    let usageStats: Awaited<ReturnType<typeof prisma.botsAiUsage.aggregate>>;
+    let errorEntries: { id: number }[];
+    let providerStats: ProviderStatRow[];
+    let totalCount: number;
+
     try {
       [usageStats, errorEntries, totalCount] = await Promise.all([
         // Aggregate totals across all entries
@@ -105,7 +124,7 @@ export async function GET(
 
       // Group by provider for breakdown (can fail if no records, so handle separately)
       try {
-        providerStats = await prisma.botsAiUsage.groupBy({
+        const rawProviderStats = await prisma.botsAiUsage.groupBy({
           by: ['providerId'],
           where: usageWhere,
           _sum: {
@@ -115,14 +134,21 @@ export async function GET(
             durationSeconds: true,
           },
         });
+        providerStats = rawProviderStats as ProviderStatRow[];
       } catch (groupByError) {
         // groupBy fails if there are no matching records, so use empty array
         providerStats = [];
       }
     } catch (aggError) {
-      // If aggregation fails, use defaults
+      // If aggregation fails, use defaults (only _sum is used below)
       console.error('Error in usage aggregation:', aggError);
-      usageStats = { _sum: { apiCalls: null, tokensUsed: null, cost: null, durationSeconds: null } };
+      usageStats = {
+        _sum: { apiCalls: null, tokensUsed: null, cost: null, durationSeconds: null },
+        _count: { _all: 0 },
+        _avg: { apiCalls: null, tokensUsed: null, cost: null, durationSeconds: null, latency: null },
+        _min: { apiCalls: null, tokensUsed: null, cost: null, durationSeconds: null, latency: null },
+        _max: { apiCalls: null, tokensUsed: null, cost: null, durationSeconds: null, latency: null },
+      } as Awaited<ReturnType<typeof prisma.botsAiUsage.aggregate>>;
       errorEntries = [];
       providerStats = [];
       totalCount = 0;
@@ -130,10 +156,10 @@ export async function GET(
 
     // Calculate stats from aggregated data
     const stats = {
-      totalCalls: Number(usageStats._sum.apiCalls || 0),
-      totalTokens: Number(usageStats._sum.tokensUsed || 0),
-      totalCost: usageStats._sum.cost ? Number(usageStats._sum.cost) : 0,
-      totalDuration: Number(usageStats._sum.durationSeconds || 0),
+      totalCalls: Number(usageStats._sum?.apiCalls || 0),
+      totalTokens: Number(usageStats._sum?.tokensUsed || 0),
+      totalCost: usageStats._sum?.cost ? Number(usageStats._sum.cost) : 0,
+      totalDuration: Number(usageStats._sum?.durationSeconds || 0),
       errorCount: errorEntries.length,
       byProvider: {} as Record<string, any>,
     };
@@ -142,7 +168,7 @@ export async function GET(
     if (providerStats && providerStats.length > 0) {
       for (const providerStat of providerStats) {
         try {
-          const provider = await prisma.aiProvider.findUnique({
+          const provider = await prisma.botsAiProvider.findUnique({
             where: { providerId: providerStat.providerId },
             select: { name: true, type: true },
           });
@@ -173,7 +199,7 @@ export async function GET(
     }
 
     // Fetch usage history (limited to 1000 for display only)
-    let usage = [];
+    let usage: UsageWithProvider[] = [];
     try {
       usage = await prisma.botsAiUsage.findMany({
         where: usageWhere,
