@@ -7,7 +7,7 @@ import { decryptApiKey } from '@/lib/encryption';
 /**
  * POST /api/admin/ai-providers/:id/test
  * Test provider connection (super admin only)
- * 
+ *
  * This endpoint attempts to connect to the provider and verify credentials
  */
 export async function POST(
@@ -16,7 +16,7 @@ export async function POST(
 ) {
   try {
     const sessionUser = await getSessionUser(request);
-    
+
     if (!sessionUser || !isSuperAdmin(sessionUser.email)) {
       return NextResponse.json(
         { error: 'Unauthorized: Super admin access required' },
@@ -44,10 +44,10 @@ export async function POST(
         apiKey = decryptApiKey(provider.apiKeyEncrypted);
       } catch (error) {
         return NextResponse.json(
-          { 
+          {
             success: false,
             error: 'Failed to decrypt API key',
-            details: 'Encryption key may be misconfigured'
+            details: 'Encryption key may be misconfigured',
           },
           { status: 500 }
         );
@@ -70,10 +70,10 @@ export async function POST(
   } catch (error) {
     console.error('Error testing provider connection:', error);
     return NextResponse.json(
-      { 
+      {
         success: false,
         error: 'Internal server error',
-        details: error instanceof Error ? error.message : 'Unknown error'
+        details: error instanceof Error ? error.message : 'Unknown error',
       },
       { status: 500 }
     );
@@ -89,70 +89,49 @@ async function testProviderConnection(
 ): Promise<{ success: boolean; error?: string; details?: string }> {
   const { type, endpoint } = provider;
 
-  if (!endpoint) {
-    return {
-      success: false,
-      error: 'Endpoint not configured',
-    };
-  }
-
   try {
     switch (type) {
+      // OpenAI-compatible providers: lmstudio, openai, deepseek
+      // All use GET /v1/models with optional Bearer auth.
+      // Store endpoint WITHOUT trailing /v1 (e.g. https://api.deepseek.com)
       case 'lmstudio':
-        // LMStudio: Simple HTTP check
-        const lmResponse = await fetch(`${endpoint}/v1/models`, {
-          method: 'GET',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          signal: AbortSignal.timeout(5000), // 5 second timeout
-        });
-
-        if (lmResponse.ok) {
-          return { success: true };
-        } else {
-          return {
-            success: false,
-            error: `Connection failed: ${lmResponse.status} ${lmResponse.statusText}`,
-          };
-        }
-
       case 'openai':
-        // OpenAI: Test with models endpoint
-        if (!apiKey) {
-          return {
-            success: false,
-            error: 'API key required for OpenAI',
-          };
+      case 'deepseek': {
+        // Fall back to OpenAI default only for the openai type
+        const baseUrl = endpoint || (type === 'openai' ? 'https://api.openai.com' : null);
+
+        if (!baseUrl) {
+          return { success: false, error: 'Endpoint not configured' };
         }
 
-        const openaiResponse = await fetch('https://api.openai.com/v1/models', {
+        const headers: Record<string, string> = {
+          'Content-Type': 'application/json',
+        };
+        if (apiKey) {
+          headers['Authorization'] = `Bearer ${apiKey}`;
+        }
+
+        const response = await fetch(`${baseUrl}/v1/models`, {
           method: 'GET',
-          headers: {
-            'Authorization': `Bearer ${apiKey}`,
-            'Content-Type': 'application/json',
-          },
+          headers,
           signal: AbortSignal.timeout(10000),
         });
 
-        if (openaiResponse.ok) {
+        if (response.ok) {
           return { success: true };
-        } else {
-          const errorData = await openaiResponse.json().catch(() => ({}));
-          return {
-            success: false,
-            error: `Connection failed: ${openaiResponse.status}`,
-            details: errorData.error?.message || openaiResponse.statusText,
-          };
         }
 
-      case 'anthropic':
-        // Anthropic: Test with messages endpoint (just validate auth)
+        const errorData = await response.json().catch(() => ({}));
+        return {
+          success: false,
+          error: `Connection failed: ${response.status}`,
+          details: errorData.error?.message || response.statusText,
+        };
+      }
+
+      case 'anthropic': {
         if (!apiKey) {
-          return {
-            success: false,
-            error: 'API key required for Anthropic',
-          };
+          return { success: false, error: 'API key required for Anthropic' };
         }
 
         const anthropicResponse = await fetch('https://api.anthropic.com/v1/messages', {
@@ -170,42 +149,41 @@ async function testProviderConnection(
           signal: AbortSignal.timeout(10000),
         });
 
-        // 400 is expected (invalid request), but means auth worked
-        if (anthropicResponse.status === 400 || anthropicResponse.status === 401) {
-          if (anthropicResponse.status === 401) {
-            return {
-              success: false,
-              error: 'Authentication failed',
-            };
-          }
-          return { success: true }; // Auth worked, request was just invalid
+        // 400 = bad request but auth worked; 401 = bad key
+        if (anthropicResponse.status === 400) {
+          return { success: true };
+        }
+        if (anthropicResponse.status === 401) {
+          return { success: false, error: 'Authentication failed' };
         }
 
         return {
           success: false,
           error: `Unexpected response: ${anthropicResponse.status}`,
         };
+      }
 
       case 'ultravox':
-      case 'gpt-voice':
-        // Voice providers: Just check endpoint is reachable
+      case 'gpt-voice': {
+        if (!endpoint) {
+          return { success: false, error: 'Endpoint not configured' };
+        }
         try {
-          const voiceResponse = await fetch(endpoint, {
-            method: 'HEAD',
-            signal: AbortSignal.timeout(5000),
-          });
+          await fetch(endpoint, { method: 'HEAD', signal: AbortSignal.timeout(5000) });
           return { success: true };
         } catch {
-          // If HEAD fails, try GET
           const voiceGetResponse = await fetch(endpoint, {
             method: 'GET',
             signal: AbortSignal.timeout(5000),
           });
           return { success: voiceGetResponse.ok };
         }
+      }
 
-      default:
-        // Generic: Just check if endpoint is reachable
+      default: {
+        if (!endpoint) {
+          return { success: false, error: 'Endpoint not configured' };
+        }
         try {
           const genericResponse = await fetch(endpoint, {
             method: 'HEAD',
@@ -219,6 +197,7 @@ async function testProviderConnection(
             details: error.message,
           };
         }
+      }
     }
   } catch (error: any) {
     return {
@@ -228,4 +207,3 @@ async function testProviderConnection(
     };
   }
 }
-
