@@ -98,11 +98,15 @@ async function testProviderConnection(
       case 'openai':
       case 'deepseek': {
         // Fall back to OpenAI default only for the openai type
-        const baseUrl = endpoint || (type === 'openai' ? 'https://api.openai.com' : null);
+        let baseUrl = endpoint || (type === 'openai' ? 'https://api.openai.com' : null);
 
         if (!baseUrl) {
           return { success: false, error: 'Endpoint not configured' };
         }
+
+        // Normalize baseUrl: remove trailing slashes and /v1 suffix
+        baseUrl = baseUrl.replace(/\/+$/, ''); // Remove trailing slashes
+        baseUrl = baseUrl.replace(/\/v1$/, ''); // Remove trailing /v1
 
         const headers: Record<string, string> = {
           'Content-Type': 'application/json',
@@ -149,8 +153,8 @@ async function testProviderConnection(
           signal: AbortSignal.timeout(10000),
         });
 
-        // 400 = bad request but auth worked; 401 = bad key
-        if (anthropicResponse.status === 400) {
+        // 2xx responses or 400 (bad request but auth worked) indicate success; 401 = bad key
+        if (anthropicResponse.ok || anthropicResponse.status === 400) {
           return { success: true };
         }
         if (anthropicResponse.status === 401) {
@@ -169,8 +173,11 @@ async function testProviderConnection(
           return { success: false, error: 'Endpoint not configured' };
         }
         try {
-          await fetch(endpoint, { method: 'HEAD', signal: AbortSignal.timeout(5000) });
-          return { success: true };
+          const headResponse = await fetch(endpoint, { method: 'HEAD', signal: AbortSignal.timeout(5000) });
+          if (headResponse.ok) {
+            return { success: true };
+          }
+          return { success: false, error: `Connection failed: ${headResponse.status}` };
         } catch {
           const voiceGetResponse = await fetch(endpoint, {
             method: 'GET',
