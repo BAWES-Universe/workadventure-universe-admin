@@ -8,7 +8,7 @@ export async function PATCH(req: NextRequest, { params }: Params) {
   const actor = await requireAdminSession()
   const body = await req.json()
   const companion = await prisma.avatarCompanion.update({
-    where: { id: params.companionId },
+    where: { id: params.companionId, avatarSetId: params.id },
     data: {
       ...(body.name !== undefined && { name: body.name }),
       ...(body.url !== undefined && { url: body.url }),
@@ -25,7 +25,13 @@ export async function PATCH(req: NextRequest, { params }: Params) {
 
 export async function DELETE(_req: NextRequest, { params }: Params) {
   const actor = await requireAdminSession()
-  const companion = await prisma.avatarCompanion.delete({ where: { id: params.companionId } })
+  const companion = await prisma.avatarCompanion.findFirst({
+    where: { id: params.companionId, avatarSetId: params.id },
+  })
+  if (!companion) {
+    return NextResponse.json({ error: 'Companion not found' }, { status: 404 })
+  }
+  await prisma.avatarCompanion.delete({ where: { id: params.companionId } })
   await prisma.avatarSetAuditLog.create({
     data: { avatarSetId: params.id, actorId: actor.userId, action: 'companion.removed', diff: { textureId: companion.textureId } },
   })

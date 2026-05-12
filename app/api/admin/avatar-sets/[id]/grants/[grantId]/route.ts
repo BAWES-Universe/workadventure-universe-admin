@@ -7,7 +7,7 @@ type Params = { params: { id: string; grantId: string } }
 export async function DELETE(_req: NextRequest, { params }: Params) {
   const actor = await requireAdminSession()
   const grant = await prisma.userAvatarGrant.update({
-    where: { id: params.grantId },
+    where: { id: params.grantId, avatarSetId: params.id },
     data: { isActive: false, revokedAt: new Date() },
   })
   await prisma.avatarSetAuditLog.create({

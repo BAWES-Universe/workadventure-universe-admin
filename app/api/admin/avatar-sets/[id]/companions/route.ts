@@ -18,6 +18,10 @@ export async function POST(req: NextRequest, { params }: Params) {
   const actor = await requireAdminSession()
   const body = await req.json()
 
+  if (!body.textureId || !body.url) {
+    return NextResponse.json({ error: 'textureId and url are required' }, { status: 400 })
+  }
+
   const companion = await prisma.avatarCompanion.create({
     data: {
       avatarSetId: params.id,

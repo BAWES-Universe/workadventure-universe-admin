@@ -25,6 +25,13 @@ export async function POST(req: NextRequest, { params }: Params) {
     return NextResponse.json({ error: 'Invalid action' }, { status: 400 })
   }
 
+  if (body.worldId != null) {
+    const world = await prisma.world.findUnique({ where: { id: body.worldId } })
+    if (!world) {
+      return NextResponse.json({ error: 'World not found' }, { status: 404 })
+    }
+  }
+
   const policy = await prisma.avatarEntitlementPolicy.create({
     data: {
       avatarSetId: params.id,
