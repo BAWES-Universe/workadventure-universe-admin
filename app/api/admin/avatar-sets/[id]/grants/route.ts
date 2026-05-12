@@ -23,16 +23,30 @@ export async function POST(req: NextRequest, { params }: Params) {
     return NextResponse.json({ error: 'userId is required' }, { status: 400 })
   }
 
+  const VALID_GRANT_TYPES = ['select', 'direct', 'subscription', 'promotional']
+  if (!body.grantType || !VALID_GRANT_TYPES.includes(body.grantType)) {
+    return NextResponse.json({ error: 'Invalid or missing grantType' }, { status: 400 })
+  }
+
   const user = await prisma.user.findUnique({ where: { id: body.userId } })
   if (!user) return NextResponse.json({ error: 'User not found' }, { status: 404 })
+
+  let expiresAt = null
+  if (body.expiresAt) {
+    const parsedDate = new Date(body.expiresAt)
+    if (isNaN(parsedDate.getTime())) {
+      return NextResponse.json({ error: 'Invalid expiresAt date' }, { status: 400 })
+    }
+    expiresAt = parsedDate
+  }
 
   const grant = await prisma.userAvatarGrant.create({
     data: {
       userId: body.userId,
       avatarSetId: params.id,
-      grantType: body.grantType ?? 'select',
+      grantType: body.grantType,
       note: body.note ?? null,
-      expiresAt: body.expiresAt ? new Date(body.expiresAt) : null,
+      expiresAt,
     },
   })
 

@@ -84,13 +84,26 @@ export async function GET(req: NextRequest, { params }: Params) {
       where: { userId, avatarSetId: params.id, isActive: true, grantType: 'select' },
     })
     result.checks.push({ check: 'direct_grant', passed: !!directGrant, reason: directGrant ? 'Has direct grant' : 'No direct grant' })
-    result.canSelect = !!directGrant && lifecycleOk && windowOk
+    result.canSelect = !!directGrant && inScope && lifecycleOk && windowOk
   } else if (set.visibility === 'restricted') {
     const policyMatch = set.policies.some((p) => {
       if (p.action !== 'select' && p.action !== 'manage') return false
       if (p.subjectType === 'everyone') return true
       if (p.subjectType === 'membership_tag') return !!p.subjectValue && membershipTags.includes(p.subjectValue)
       if (p.subjectType === 'user') return p.subjectValue === userId
+      if (p.subjectType === 'email_domain') {
+        if (!p.subjectValue || !user.email) return false
+        const userDomain = user.email.split('@')[1]
+        return userDomain === p.subjectValue
+      }
+      if (p.subjectType === 'subscription_plan') {
+        if (!p.subjectValue) return false
+        return user.subscriptionPlan === p.subjectValue
+      }
+      if (p.subjectType === 'external_contract') {
+        if (!p.subjectValue || !user.externalContracts) return false
+        return user.externalContracts.includes(p.subjectValue)
+      }
       return false
     })
     const directGrant = await prisma.userAvatarGrant.findFirst({

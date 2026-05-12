@@ -82,6 +82,15 @@ export async function PATCH(req: NextRequest, { params }: Params) {
 export async function DELETE(_req: NextRequest, { params }: Params) {
   const actor = await requireAdminSession()
 
+  const existingSet = await prisma.avatarSet.findUnique({
+    where: { id: params.id },
+    select: { lifecycle: true },
+  })
+
+  if (!existingSet) {
+    return NextResponse.json({ error: 'Not found' }, { status: 404 })
+  }
+
   // Check for active user grants or current user avatars referencing this set
   const activeGrants = await prisma.userAvatarGrant.count({
     where: { avatarSetId: params.id, isActive: true },
@@ -107,7 +116,7 @@ export async function DELETE(_req: NextRequest, { params }: Params) {
       avatarSetId: params.id,
       actorId: actor.userId,
       action: 'set.archived',
-      diff: { before: { lifecycle: 'active' }, after: { lifecycle: 'archived' } },
+      diff: { before: { lifecycle: existingSet.lifecycle }, after: { lifecycle: 'archived' } },
     },
   })
 

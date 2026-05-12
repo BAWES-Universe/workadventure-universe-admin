@@ -15,6 +15,11 @@ export async function POST(req: NextRequest, { params }: Params) {
   const actor = await requireAdminSession()
   const body = await req.json()
 
+  const VALID_SCOPE_TYPES = ['platform', 'universe', 'world']
+  if (!body.scopeType || !VALID_SCOPE_TYPES.includes(body.scopeType)) {
+    return NextResponse.json({ error: 'Invalid or missing scopeType' }, { status: 400 })
+  }
+
   // Validate scopeId exists for universe/world scopes
   if (body.scopeType === 'world' && body.scopeId) {
     const world = await prisma.world.findUnique({ where: { id: body.scopeId } })

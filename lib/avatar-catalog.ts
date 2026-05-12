@@ -115,7 +115,8 @@ export async function resolvePickerSets(
       },
     })
     for (const grant of grants) {
-      if (!eligible.find((s) => s.id === grant.avatarSet.id)) {
+      // Only include sets with active lifecycle
+      if (grant.avatarSet.lifecycle === 'active' && !eligible.find((s) => s.id === grant.avatarSet.id)) {
         eligible.push(grant.avatarSet)
       }
     }
