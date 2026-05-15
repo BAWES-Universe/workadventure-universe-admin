@@ -5,8 +5,31 @@ import {
   validateOptionalRedirectUri,
 } from '../redirect-uri';
 
+function corsHeaders() {
+  return {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Allow-Credentials': 'true',
+  };
+}
+
+function jsonResponse(body: unknown, init?: ResponseInit) {
+  const response = NextResponse.json(body, init);
+
+  Object.entries(corsHeaders()).forEach(([key, value]) => {
+    response.headers.set(key, value);
+  });
+
+  return response;
+}
+
+export function OPTIONS() {
+  return jsonResponse({});
+}
+
 export function GET() {
-  return NextResponse.json({
+  return jsonResponse({
     mobileRedirectUri: getMobileRedirectUri(),
     allowedRedirectUris: getAllowedMobileRedirectUris(),
   });
@@ -18,7 +41,7 @@ export async function POST(request: NextRequest) {
   try {
     body = await request.json();
   } catch {
-    return NextResponse.json(
+    return jsonResponse(
       { error: 'Request body must be JSON' },
       { status: 400 }
     );
@@ -27,7 +50,7 @@ export async function POST(request: NextRequest) {
   const validation = validateOptionalRedirectUri(body.redirectUri ?? body.redirect_uri);
 
   if (!validation.valid) {
-    return NextResponse.json(
+    return jsonResponse(
       {
         error: validation.error,
         allowedRedirectUris: validation.allowedRedirectUris,
@@ -37,7 +60,7 @@ export async function POST(request: NextRequest) {
   }
 
   if (!validation.redirectUri) {
-    return NextResponse.json(
+    return jsonResponse(
       {
         error: 'redirectUri is required',
         allowedRedirectUris: getAllowedMobileRedirectUris(),
@@ -46,7 +69,7 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  return NextResponse.json({
+  return jsonResponse({
     valid: true,
     redirectUri: validation.redirectUri,
   });
