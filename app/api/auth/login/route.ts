@@ -31,9 +31,13 @@ export async function OPTIONS() {
  */
 export async function POST(request: NextRequest) {
   try {
-    const body = await request.json();
-    const { accessToken, redirectUri, redirect_uri } = body;
-    const redirectValidation = validateOptionalRedirectUri(redirectUri ?? redirect_uri);
+    const parsedBody = await request.json();
+    const body =
+      parsedBody && typeof parsedBody === 'object' && !Array.isArray(parsedBody)
+        ? parsedBody as Record<string, unknown>
+        : {};
+    const accessToken = typeof body.accessToken === 'string' ? body.accessToken : null;
+    const redirectValidation = validateOptionalRedirectUri(body.redirectUri ?? body.redirect_uri);
 
     if (!redirectValidation.valid) {
       const response = NextResponse.json(

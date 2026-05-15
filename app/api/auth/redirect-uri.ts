@@ -8,8 +8,43 @@ export function getMobileRedirectUri(): string {
   return process.env.MOBILE_REDIRECT_URI?.trim() || DEFAULT_MOBILE_REDIRECT_URI;
 }
 
-export function getAllowedMobileRedirectUris(): string[] {
-  return [getMobileRedirectUri()];
+function getAllowedWebRedirectOrigins(): string[] {
+  return [
+    process.env.NEXT_PUBLIC_API_URL,
+    process.env.NEXT_PUBLIC_BASE_URL,
+    process.env.BASE_URL,
+  ].flatMap((value) => {
+    if (!value) {
+      return [];
+    }
+
+    try {
+      const url = new URL(value);
+      return ['http:', 'https:'].includes(url.protocol) ? [url.origin] : [];
+    } catch {
+      return [];
+    }
+  });
+}
+
+export function getAllowedRedirectUris(): string[] {
+  return [
+    getMobileRedirectUri(),
+    ...getAllowedWebRedirectOrigins().map((origin) => `${origin}/*`),
+  ];
+}
+
+function isAllowedWebRedirectUri(redirectUri: string): boolean {
+  try {
+    const url = new URL(redirectUri);
+
+    return (
+      ['http:', 'https:'].includes(url.protocol) &&
+      getAllowedWebRedirectOrigins().includes(url.origin)
+    );
+  } catch {
+    return false;
+  }
 }
 
 export function validateOptionalRedirectUri(value: unknown): RedirectUriValidation {
@@ -18,9 +53,9 @@ export function validateOptionalRedirectUri(value: unknown): RedirectUriValidati
   }
 
   const redirectUri = value.trim();
-  const allowedRedirectUris = getAllowedMobileRedirectUris();
+  const allowedRedirectUris = getAllowedRedirectUris();
 
-  if (allowedRedirectUris.includes(redirectUri)) {
+  if (redirectUri === getMobileRedirectUri() || isAllowedWebRedirectUri(redirectUri)) {
     return { valid: true, redirectUri };
   }
 

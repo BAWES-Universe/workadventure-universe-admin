@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import {
-  getAllowedMobileRedirectUris,
+  getAllowedRedirectUris,
   getMobileRedirectUri,
   validateOptionalRedirectUri,
 } from '../redirect-uri';
@@ -31,12 +31,12 @@ export function OPTIONS() {
 export function GET() {
   return jsonResponse({
     mobileRedirectUri: getMobileRedirectUri(),
-    allowedRedirectUris: getAllowedMobileRedirectUris(),
+    allowedRedirectUris: getAllowedRedirectUris(),
   });
 }
 
 export async function POST(request: NextRequest) {
-  let body: Record<string, unknown> = {};
+  let body: unknown = {};
 
   try {
     body = await request.json();
@@ -47,7 +47,18 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const validation = validateOptionalRedirectUri(body.redirectUri ?? body.redirect_uri);
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return jsonResponse(
+      {
+        error: 'Request body must be a JSON object',
+        allowedRedirectUris: getAllowedRedirectUris(),
+      },
+      { status: 400 }
+    );
+  }
+
+  const { redirectUri, redirect_uri } = body as Record<string, unknown>;
+  const validation = validateOptionalRedirectUri(redirectUri ?? redirect_uri);
 
   if (!validation.valid) {
     return jsonResponse(
@@ -63,7 +74,7 @@ export async function POST(request: NextRequest) {
     return jsonResponse(
       {
         error: 'redirectUri is required',
-        allowedRedirectUris: getAllowedMobileRedirectUris(),
+        allowedRedirectUris: getAllowedRedirectUris(),
       },
       { status: 400 }
     );

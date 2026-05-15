@@ -18,7 +18,7 @@ The admin API accepts this value through `MOBILE_REDIRECT_URI`. If the variable 
 - `POST /api/auth/mobile-redirect` validates a request body containing `redirectUri` or `redirect_uri`.
 - `POST /api/auth/login` and `POST /api/auth/session` accept optional `redirectUri` or `redirect_uri` fields and reject unsupported custom schemes.
 
-The existing web login continues to work without sending a redirect URI. Mobile clients should send `bawes://callback` when exchanging an OIDC access token for an admin session so the server can validate the mobile redirect target.
+The existing web login continues to work without sending a redirect URI. If a web client sends an explicit HTTP(S) redirect URI, it must share the configured admin origin from `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_BASE_URL`, or `BASE_URL`. Mobile clients should send `bawes://callback` when exchanging an OIDC access token for an admin session so the server can validate the mobile redirect target.
 
 ## Capacitor handling
 
