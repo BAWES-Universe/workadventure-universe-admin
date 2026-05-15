@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { validateAccessToken } from '@/lib/oidc';
 import { prisma } from '@/lib/db';
 import { sessionStore } from '@/lib/session-store';
+import { validateOptionalRedirectUri } from '../redirect-uri';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Redis and Prisma
 export const runtime = 'nodejs';
@@ -47,18 +48,42 @@ export async function POST(request: NextRequest) {
   try {
     // Get accessToken from Authorization header (preferred) or request body (fallback)
     let accessToken: string | null = null;
+    let body: Record<string, unknown> | null = null;
     
     const authHeader = request.headers.get('authorization');
     if (authHeader && authHeader.startsWith('Bearer ')) {
       accessToken = authHeader.replace('Bearer ', '').trim();
-    } else {
-      // Fallback to request body
-      try {
-        const body = await request.json();
-        accessToken = body.accessToken || null;
-      } catch {
-        // Body parsing failed or no body - will check accessToken below
-      }
+    }
+
+    try {
+      body = await request.json();
+    } catch {
+      // Body parsing failed or no body - will check accessToken below
+    }
+
+    if (!accessToken) {
+      accessToken = typeof body?.accessToken === 'string' ? body.accessToken : null;
+    }
+
+    const queryRedirectUri =
+      request.nextUrl.searchParams.get('redirectUri') ??
+      request.nextUrl.searchParams.get('redirect_uri');
+    const redirectValidation = validateOptionalRedirectUri(
+      body?.redirectUri ?? body?.redirect_uri ?? queryRedirectUri
+    );
+
+    if (!redirectValidation.valid) {
+      const response = NextResponse.json(
+        {
+          error: redirectValidation.error,
+          allowedRedirectUris: redirectValidation.allowedRedirectUris,
+        },
+        { status: 400 }
+      );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
     }
 
     if (!accessToken) {
@@ -177,6 +202,7 @@ export async function POST(request: NextRequest) {
     const response = NextResponse.json({
       sessionToken,
       expiresAt,
+      ...(redirectValidation.redirectUri ? { redirectUri: redirectValidation.redirectUri } : {}),
     });
 
     // Add CORS headers

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { validateAccessToken } from '@/lib/oidc';
 import { prisma } from '@/lib/db';
 import { sessionStore } from '@/lib/session-store';
+import { validateOptionalRedirectUri } from '../redirect-uri';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Redis and Prisma
 export const runtime = 'nodejs';
@@ -31,7 +32,22 @@ export async function OPTIONS() {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { accessToken } = body;
+    const { accessToken, redirectUri, redirect_uri } = body;
+    const redirectValidation = validateOptionalRedirectUri(redirectUri ?? redirect_uri);
+
+    if (!redirectValidation.valid) {
+      const response = NextResponse.json(
+        {
+          error: redirectValidation.error,
+          allowedRedirectUris: redirectValidation.allowedRedirectUris,
+        },
+        { status: 400 }
+      );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
+    }
 
     if (!accessToken) {
       const response = NextResponse.json(
@@ -146,6 +162,7 @@ export async function POST(request: NextRequest) {
       sessionId, // For server-side store lookup
       sessionToken, // For cookie/URL fallback (base64 encoded session data)
       expiresAt: sessionData.expiresAt,
+      ...(redirectValidation.redirectUri ? { redirectUri: redirectValidation.redirectUri } : {}),
     });
 
     // Set secure cookie with session data (middleware can parse this directly)
