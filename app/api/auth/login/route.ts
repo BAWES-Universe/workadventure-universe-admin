@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { validateAccessToken } from '@/lib/oidc';
 import { prisma } from '@/lib/db';
 import { sessionStore } from '@/lib/session-store';
+import { isAllowedAuthRedirectUri, isMobileAuthRedirectUri } from '../redirect-uri';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Redis and Prisma
 export const runtime = 'nodejs';
@@ -31,11 +32,22 @@ export async function OPTIONS() {
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { accessToken } = body;
+    const { accessToken, redirectUri } = body;
 
     if (!accessToken) {
       const response = NextResponse.json(
         { error: 'Access token required' },
+        { status: 400 }
+      );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
+    }
+
+    if (redirectUri && !isAllowedAuthRedirectUri(redirectUri, request)) {
+      const response = NextResponse.json(
+        { error: 'Invalid redirect URI' },
         { status: 400 }
       );
       Object.entries(corsHeaders()).forEach(([key, value]) => {
@@ -135,7 +147,19 @@ export async function POST(request: NextRequest) {
     const sessionToken = Buffer.from(JSON.stringify(sessionData)).toString('base64');
 
     // Return user info, session ID, and token (for iframe scenarios)
-    const response = NextResponse.json({
+    const responseBody: {
+      user: {
+        id: string;
+        uuid: string;
+        email: string | null;
+        name: string | null;
+        tags: string[];
+      };
+      sessionId: string;
+      sessionToken: string;
+      expiresAt: number;
+      mobileRedirectUri?: string;
+    } = {
       user: {
         id: user.id,
         uuid: user.uuid,
@@ -146,7 +170,13 @@ export async function POST(request: NextRequest) {
       sessionId, // For server-side store lookup
       sessionToken, // For cookie/URL fallback (base64 encoded session data)
       expiresAt: sessionData.expiresAt,
-    });
+    };
+
+    if (isMobileAuthRedirectUri(redirectUri)) {
+      responseBody.mobileRedirectUri = redirectUri;
+    }
+
+    const response = NextResponse.json(responseBody);
 
     // Set secure cookie with session data (middleware can parse this directly)
     const isSecure = request.url.startsWith('https://') || process.env.NODE_ENV === 'production';
