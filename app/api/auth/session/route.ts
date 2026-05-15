@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { validateAccessToken } from '@/lib/oidc';
 import { prisma } from '@/lib/db';
 import { sessionStore } from '@/lib/session-store';
+import { isAllowedAuthRedirectUri, isMobileAuthRedirectUri } from '../redirect-uri';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Redis and Prisma
 export const runtime = 'nodejs';
@@ -47,23 +48,37 @@ export async function POST(request: NextRequest) {
   try {
     // Get accessToken from Authorization header (preferred) or request body (fallback)
     let accessToken: string | null = null;
+    let redirectUri: string | null = request.nextUrl.searchParams.get('redirect_uri');
     
     const authHeader = request.headers.get('authorization');
     if (authHeader && authHeader.startsWith('Bearer ')) {
       accessToken = authHeader.replace('Bearer ', '').trim();
-    } else {
-      // Fallback to request body
-      try {
-        const body = await request.json();
-        accessToken = body.accessToken || null;
-      } catch {
-        // Body parsing failed or no body - will check accessToken below
-      }
+    }
+
+    // Fallback to request body for the token, and allow clients to pass the
+    // redirect URI there when Authorization is already carrying the token.
+    try {
+      const body = await request.json();
+      accessToken = accessToken || body.accessToken || null;
+      redirectUri = redirectUri || body.redirectUri || null;
+    } catch {
+      // Body parsing failed or no body - will check accessToken below
     }
 
     if (!accessToken) {
       const response = NextResponse.json(
         { error: 'Missing access token' },
+        { status: 400 }
+      );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
+    }
+
+    if (redirectUri && !isAllowedAuthRedirectUri(redirectUri, request)) {
+      const response = NextResponse.json(
+        { error: 'Invalid redirect URI' },
         { status: 400 }
       );
       Object.entries(corsHeaders()).forEach(([key, value]) => {
@@ -174,10 +189,20 @@ export async function POST(request: NextRequest) {
     }
 
     // Return session token and expiration
-    const response = NextResponse.json({
+    const responseBody: {
+      sessionToken: string;
+      expiresAt: number;
+      mobileRedirectUri?: string;
+    } = {
       sessionToken,
       expiresAt,
-    });
+    };
+
+    if (redirectUri && isMobileAuthRedirectUri(redirectUri)) {
+      responseBody.mobileRedirectUri = redirectUri;
+    }
+
+    const response = NextResponse.json(responseBody);
 
     // Add CORS headers
     Object.entries(corsHeaders()).forEach(([key, value]) => {
