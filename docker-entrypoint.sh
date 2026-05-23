@@ -11,7 +11,8 @@ if [ ! -d "/app/node_modules" ] || [ -z "$(ls -A /app/node_modules 2>/dev/null)"
 # Check for specific critical packages that must exist
 elif [ ! -d "/app/node_modules/@radix-ui/react-dropdown-menu" ] || \
      [ ! -d "/app/node_modules/next" ] || \
-     [ ! -d "/app/node_modules/react" ]; then
+     [ ! -d "/app/node_modules/react" ] || \
+     [ ! -d "/app/node_modules/recharts" ]; then
   echo "[Entrypoint] Node modules volume is missing critical packages. Installing dependencies..."
   NEEDS_INSTALL=true
 # Verify package-lock.json exists and node_modules is in sync
