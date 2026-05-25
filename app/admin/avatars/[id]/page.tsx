@@ -579,20 +579,20 @@ export default function AvatarSetDetailPage() {
                 <div className="space-y-1.5">
                   <Label className="text-xs">Texture ID</Label>
                   <Input
-                    className="h-9 w-32"
-                    placeholder="male1"
+                    className="h-9 w-32 font-mono text-xs"
+                    placeholder="cowboy-hat"
                     value={newLayer.textureId}
                     onChange={e => setNewLayer(f => ({ ...f, textureId: e.target.value }))}
                   />
                 </div>
                 <div className="space-y-1.5">
                   <Label className="text-xs">Name</Label>
-                  <Input className="h-9 w-32" placeholder="Male 1" value={newLayer.name} onChange={e => setNewLayer(f => ({ ...f, name: e.target.value }))} />
+                  <Input className="h-9 w-28" placeholder="Cowboy Hat" value={newLayer.name} onChange={e => setNewLayer(f => ({ ...f, name: e.target.value }))} />
                 </div>
                 <div className="space-y-1.5">
                   <Label className="text-xs">Layer Type</Label>
                   <Select value={newLayer.layer} onValueChange={v => setNewLayer(f => ({ ...f, layer: v }))}>
-                    <SelectTrigger className="h-9 w-28"><SelectValue /></SelectTrigger>
+                    <SelectTrigger className="h-9 w-24"><SelectValue /></SelectTrigger>
                     <SelectContent>
                       {LAYER_TYPES.map(t => <SelectItem key={t} value={t}>{t}</SelectItem>)}
                     </SelectContent>
@@ -600,17 +600,56 @@ export default function AvatarSetDetailPage() {
                 </div>
                 <div className="space-y-1.5 flex-1 min-w-[150px]">
                   <Label className="text-xs">Image URL</Label>
-                  <Input className="h-9" placeholder="http://..." value={newLayer.url} onChange={e => setNewLayer(f => ({ ...f, url: e.target.value }))} />
+                  <div className="flex gap-1">
+                    <Input className="h-9 flex-1 font-mono text-xs" placeholder="http://... or upload" value={newLayer.url} onChange={e => setNewLayer(f => ({ ...f, url: e.target.value }))} />
+                    <Button variant="outline" size="sm" className="h-9 shrink-0 text-xs" onClick={() => {
+                      const input = document.createElement('input');
+                      input.type = 'file';
+                      input.accept = 'image/png,image/jpeg,image/webp';
+                      input.onchange = async (e) => {
+                        const file = (e.target as HTMLInputElement).files?.[0];
+                        if (!file) return;
+                        // Auto-fill texture ID from filename (strip extension, kebab-case)
+                        const name = file.name.replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-|-$/g, '').toLowerCase();
+                        setNewLayer(f => ({ ...f, textureId: name }));
+                        // Upload and set URL
+                        try {
+                          const { authenticatedFetch } = await import('@/lib/client-auth');
+                          const fd = new FormData();
+                          fd.append('file', file);
+                          fd.append('setId', setId);
+                          fd.append('textureId', name);
+                          const res = await authenticatedFetch('/api/admin/avatar-sets/upload-texture', { method: 'POST', body: fd });
+                          if (res.ok) {
+                            const data = await res.json();
+                            setNewLayer(f => ({ ...f, url: data.url }));
+                          }
+                        } catch {}
+                      };
+                      input.click();
+                    }}>
+                      Upload
+                    </Button>
+                  </div>
                 </div>
                 <div className="space-y-1.5">
-                  <Label className="text-xs">Position</Label>
-                  <Input className="h-9 w-16" type="number" min={0} value={newLayer.position} onChange={e => setNewLayer(f => ({ ...f, position: parseInt(e.target.value) || 0 }))} />
+                  <Label className="text-xs">Pos</Label>
+                  <Input className="h-9 w-14 text-center" type="number" min={0} value={newLayer.position} onChange={e => setNewLayer(f => ({ ...f, position: parseInt(e.target.value) || 0 }))} />
                 </div>
                 <Button size="sm" className="h-9" onClick={handleAddLayer} disabled={addSubmitting || !newLayer.textureId || !newLayer.url}>
                   {addSubmitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5 mr-1" />}
                   Add
                 </Button>
               </div>
+              {/* Naming hint */}
+              {newLayer.textureId && !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(newLayer.textureId) && (
+                <p className="text-[10px] text-amber-500 mt-2">Use kebab-case: lowercase letters, numbers, and hyphens only (e.g. &quot;cowboy-hat&quot;)</p>
+              )}
+              {newLayer.textureId && newLayer.layer && (
+                <p className="text-[10px] text-muted-foreground mt-1">
+                  S3 key: <code className="text-[10px] font-mono bg-muted px-1 rounded">{setId}/{newLayer.layer}s/{newLayer.textureId}.png</code>
+                </p>
+              )}
             </CardContent>
           </Card>
 
@@ -650,25 +689,62 @@ export default function AvatarSetDetailPage() {
               <div className="flex flex-wrap items-end gap-3">
                 <div className="space-y-1.5">
                   <Label className="text-xs">Texture ID</Label>
-                  <Input className="h-9 w-28" placeholder="dog1" value={newCompanion.textureId} onChange={e => setNewCompanion(f => ({ ...f, textureId: e.target.value }))} />
+                  <Input className="h-9 w-28 font-mono text-xs" placeholder="robot-pet" value={newCompanion.textureId} onChange={e => setNewCompanion(f => ({ ...f, textureId: e.target.value }))} />
                 </div>
                 <div className="space-y-1.5">
                   <Label className="text-xs">Name</Label>
-                  <Input className="h-9 w-28" placeholder="Dog" value={newCompanion.name} onChange={e => setNewCompanion(f => ({ ...f, name: e.target.value }))} />
+                  <Input className="h-9 w-28" placeholder="Robot Pet" value={newCompanion.name} onChange={e => setNewCompanion(f => ({ ...f, name: e.target.value }))} />
                 </div>
                 <div className="space-y-1.5 flex-1 min-w-[150px]">
                   <Label className="text-xs">Image URL</Label>
-                  <Input className="h-9" placeholder="http://..." value={newCompanion.url} onChange={e => setNewCompanion(f => ({ ...f, url: e.target.value }))} />
+                  <div className="flex gap-1">
+                    <Input className="h-9 flex-1 font-mono text-xs" placeholder="http://... or upload" value={newCompanion.url} onChange={e => setNewCompanion(f => ({ ...f, url: e.target.value }))} />
+                    <Button variant="outline" size="sm" className="h-9 shrink-0 text-xs" onClick={() => {
+                      const input = document.createElement('input');
+                      input.type = 'file';
+                      input.accept = 'image/png,image/jpeg,image/webp';
+                      input.onchange = async (e) => {
+                        const file = (e.target as HTMLInputElement).files?.[0];
+                        if (!file) return;
+                        const name = file.name.replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-|-$/g, '').toLowerCase();
+                        setNewCompanion(f => ({ ...f, textureId: name }));
+                        try {
+                          const { authenticatedFetch } = await import('@/lib/client-auth');
+                          const fd = new FormData();
+                          fd.append('file', file);
+                          fd.append('setId', setId);
+                          fd.append('textureId', name);
+                          const res = await authenticatedFetch('/api/admin/avatar-sets/upload-texture', { method: 'POST', body: fd });
+                          if (res.ok) {
+                            const data = await res.json();
+                            setNewCompanion(f => ({ ...f, url: data.url }));
+                          }
+                        } catch {}
+                      };
+                      input.click();
+                    }}>
+                      Upload
+                    </Button>
+                  </div>
                 </div>
                 <div className="space-y-1.5">
                   <Label className="text-xs">Behavior</Label>
-                  <Input className="h-9 w-24" placeholder="pet" value={newCompanion.behavior} onChange={e => setNewCompanion(f => ({ ...f, behavior: e.target.value }))} />
+                  <Input className="h-9 w-20" placeholder="pet" value={newCompanion.behavior} onChange={e => setNewCompanion(f => ({ ...f, behavior: e.target.value }))} />
                 </div>
                 <Button size="sm" className="h-9" onClick={handleAddCompanion} disabled={addSubmitting || !newCompanion.textureId || !newCompanion.url}>
                   {addSubmitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5 mr-1" />}
                   Add
                 </Button>
               </div>
+              {/* Naming hint */}
+              {newCompanion.textureId && !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(newCompanion.textureId) && (
+                <p className="text-[10px] text-amber-500 mt-2">Use kebab-case: lowercase letters, numbers, and hyphens only (e.g. &quot;robot-pet&quot;)</p>
+              )}
+              {newCompanion.textureId && (
+                <p className="text-[10px] text-muted-foreground mt-1">
+                  S3 key: <code className="text-[10px] font-mono bg-muted px-1 rounded">{setId}/companions/{newCompanion.textureId}.png</code>
+                </p>
+              )}
             </CardContent>
           </Card>
 
