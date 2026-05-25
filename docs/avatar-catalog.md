@@ -80,6 +80,12 @@ The primary entity. Represents a named, publishable group.
 |---|---|---|
 | `slug` | string (unique) | URL-safe identifier, e.g. `zoo-animals`, `museum-staff` |
 | `kind` | `woka` \| `companion` \| `mixed` | What asset types this set contains |
+
+The `kind` field determines which picker UI the set's textures appear in:
+
+- **`woka`** — Only woka texture layers (body, eyes, hair, clothes, hat, accessory). Shows up in the player character customisation picker. Most default WA textures are this type.
+- **`companion`** — Only companion textures (pets, drones, floaty objects). Shows up in the companion select UI. These are separate from the character body.
+- **`mixed`** — Both woka layers AND companions in the same set. Useful for themed bundles like "VIP Party Pack" that include both an outfit and a matching pet.|
 | `lifecycle` | `draft` \| `active` \| `archived` | Publication state |
 | `visibility` | `public` \| `hidden` \| `restricted` \| `assigned_only` | Who sees it in picker |
 | `sourceOwnerType` | `platform` \| `partner` \| `internal` \| `client` | Who created/owns this set |
