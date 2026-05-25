@@ -28,7 +28,7 @@ interface TextureCardProps {
  * Name is editable via double-click (inline edit with auto-save on blur).
  * Relative URLs are resolved against the play service URL.
  */
-export default function TextureCard({ texture, playServiceUrl, onRename, onDelete }: TextureCardProps) {
+export default function TextureCard({ texture, playServiceUrl = typeof process !== 'undefined' ? process.env.NEXT_PUBLIC_PLAY_URL : undefined, onRename, onDelete }: TextureCardProps) {
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState(texture.name || texture.textureId);
   const [saving, setSaving] = useState(false);
