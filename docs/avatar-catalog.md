@@ -450,6 +450,63 @@ ORDER BY al.created_at DESC
 LIMIT 100;
 ```
 
+---
+
+## Texture Guidelines
+
+### Standard Sizes
+
+All WA character textures use the spritesheet format **96×128 pixels**. This applies to:
+
+| Texture Type | Examples | Size |
+|---|---|---|
+| Full-body woka | `male1`, `female1` | 96×128 |
+| Layer textures | body, eyes, hair, clothes, hat, accessory | 96×128 |
+| Companions | dog, cat, robot | 96×128 |
+
+The spritesheet contains animation frames (walk cycles in multiple directions). Sticking to 96×128 ensures textures render correctly in the game engine.
+
+### Uploading Textures
+
+Textures can be added to avatar sets in two ways:
+
+1. **S3 Upload** (recommended for custom textures)
+   - Use the upload endpoint: `POST /api/admin/avatar-sets/upload-texture`
+   - Accepts: PNG, JPEG, WebP, GIF, AVIF — up to 5 MB
+   - Images are automatically resized to 96×128 (preserving aspect ratio)
+   - PNG files with transparency are kept as PNG; PNGs without transparency are converted to JPEG
+   - S3 key format: `avatar-textures/{setId}/{textureId}.{ext}`
+   - Deleting a layer/companion from the catalog automatically deletes its S3 file
+   - Requires `AWS_*` environment variables to be configured
+
+2. **Direct URL** (for built-in or externally-hosted textures)
+   - Paste any public URL in the layer/companion form
+   - No file is uploaded — just a reference
+   - Deleting the record does NOT delete the external file
+
+### File Recommendations
+
+| Property | Recommended |
+|---|---|
+| **Dimensions** | 96×128 (spritesheet) |
+| **Format** | PNG with transparency |
+| **Max file size** | 5 MB |
+| **Color depth** | 24-bit + alpha |
+| **Palette** | Match the pipoya/WA art style for consistency |
+
+### Naming Convention
+
+Use descriptive, kebab-case texture IDs:
+
+```
+hats/cowboy-hat
+accessories/sunglasses-01
+bodies/astronaut-suit
+companions/robot-pet
+```
+
+This keeps the S3 bucket organised and makes textures easy to find.
+
 ### Known limitations in v1
 
 - `email_domain`, `subscription_plan`, and `external_contract` policy types are modelled

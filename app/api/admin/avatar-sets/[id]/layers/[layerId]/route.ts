@@ -1,6 +1,22 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { requireAdminSession } from '@/lib/auth'
+import { extractS3KeyFromUrl, deleteImageFromS3 } from '@/lib/s3-upload'
+
+/**
+ * Clean up S3 file if the texture URL points to an uploaded texture.
+ * Silently succeeds — deletion of built-in textures (non-S3 URLs) is a no-op.
+ */
+async function cleanupS3Texture(url: string): Promise<void> {
+  const s3Key = extractS3KeyFromUrl(url)
+  if (s3Key && s3Key.startsWith('avatar-textures/')) {
+    try {
+      await deleteImageFromS3(s3Key)
+    } catch (err) {
+      console.warn('Failed to delete S3 texture (file may already be gone):', s3Key)
+    }
+  }
+}
 
 type Params = { params: { id: string; layerId: string } }
 
@@ -35,7 +51,14 @@ export async function PATCH(req: NextRequest, { params }: Params) {
 export async function DELETE(_req: NextRequest, { params }: Params) {
   const actor = await requireAdminSession()
 
+  // Fetch the layer first to get its URL for S3 cleanup
+  const existing = await prisma.avatarLayer.findUnique({ where: { id: params.layerId } })
+  if (!existing) return NextResponse.json({ error: 'Not found' }, { status: 404 })
+
   const layer = await prisma.avatarLayer.delete({ where: { id: params.layerId } })
+
+  // Clean up S3 file if it's an uploaded texture
+  await cleanupS3Texture(layer.url)
 
   await prisma.avatarSetAuditLog.create({
     data: {

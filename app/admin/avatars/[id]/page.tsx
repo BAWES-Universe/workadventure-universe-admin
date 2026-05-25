@@ -570,7 +570,10 @@ export default function AvatarSetDetailPage() {
         {/* === LAYERS === */}
         <TabsContent value="layers" className="space-y-4">
           <Card className="border-border/50">
-            <CardHeader><CardTitle className="text-base">Add Texture Layer</CardTitle></CardHeader>
+            <CardHeader>
+              <CardTitle className="text-base">Add Texture Layer</CardTitle>
+              <CardDescription>Standard WA textures are 96×128 PNG spritesheets</CardDescription>
+            </CardHeader>
             <CardContent>
               <div className="flex flex-wrap items-end gap-3">
                 <div className="space-y-1.5">
