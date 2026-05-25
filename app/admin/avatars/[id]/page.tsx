@@ -20,6 +20,7 @@ import {
   Users, CheckCircle2, Plus, Trash2, Save, Archive, Copy, ExternalLink,
   FileText,
 } from 'lucide-react';
+import TextureCard from '@/components/texture-card';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -115,6 +116,8 @@ export default function AvatarSetDetailPage() {
   const [accessWorldId, setAccessWorldId] = useState('');
   const [accessResult, setAccessResult] = useState<unknown>(null);
   const [accessChecking, setAccessChecking] = useState(false);
+  const [collapsedLayers, setCollapsedLayers] = useState<Record<string, boolean>>({});
+  const [collapsedCompanions, setCollapsedCompanions] = useState(true);
 
   const fetchSet = useCallback(async () => {
     if (!setId) return;
@@ -657,29 +660,57 @@ export default function AvatarSetDetailPage() {
           {LAYER_TYPES.map(type => {
             const items = layersByType[type] || [];
             if (items.length === 0) return null;
+            const isCollapsed = collapsedLayers[type] !== false;
+            const displayItems = isCollapsed ? items.slice(0, 12) : items;
+            const layerRename = async (id: string, name: string) => {
+              const { authenticatedFetch } = await import('@/lib/client-auth');
+              await authenticatedFetch(`/api/admin/avatar-sets/${set.id}/layers/${id}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name }),
+              });
+              fetchSet();
+            };
             return (
               <Card key={type} className="border-border/50">
-                <CardHeader className="py-3">
-                  <CardTitle className="text-sm capitalize">{type} ({items.length})</CardTitle>
+                <CardHeader
+                  className="py-3 cursor-pointer select-none"
+                  onClick={() => setCollapsedLayers(p => ({ ...p, [type]: !isCollapsed }))}
+                >
+                  <CardTitle className="text-sm capitalize flex items-center gap-2">
+                    {type}
+                    <span className="text-muted-foreground font-normal">({items.length})</span>
+                    <span className="ml-auto text-xs text-muted-foreground">
+                      {isCollapsed ? `▼ show all` : '▲ collapse'}
+                    </span>
+                  </CardTitle>
                 </CardHeader>
                 <CardContent className="py-2">
-                  <div className="space-y-1.5">
-                    {items.map(l => (
-                      <div key={l.id} className="flex items-center gap-3 text-xs py-1.5 px-2 rounded hover:bg-muted/30">
-                        <span className="font-mono text-muted-foreground w-20 truncate">{l.textureId}</span>
-                        <span className="flex-1 truncate">{l.name || l.textureId}</span>
-                        <span className="text-muted-foreground w-8 text-right">#{l.position}</span>
-                        <Badge variant="outline" className="text-[10px]">{l.isActive ? 'active' : 'inactive'}</Badge>
-                        <Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground hover:text-red-500" onClick={() => handleDeleteLayer(l.id)}>
-                          <Trash2 className="h-3 w-3" />
-                        </Button>
-                      </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2">
+                    {displayItems.map(l => (
+                      <TextureCard
+                        key={l.id}
+                        texture={l}
+                        onRename={layerRename}
+                        onDelete={(id) => handleDeleteLayer(id)}
+                      />
                     ))}
                   </div>
+                  {isCollapsed && items.length > 12 && (
+                    <button
+                      className="w-full text-xs text-muted-foreground mt-2 hover:text-foreground transition-colors"
+                      onClick={() => setCollapsedLayers(p => ({ ...p, [type]: false }))}
+                    >
+                      + {items.length - 12} more textures
+                    </button>
+                  )}
                 </CardContent>
               </Card>
             );
           })}
+          {LAYER_TYPES.every(t => (layersByType[t] || []).length === 0) && (
+            <p className="text-sm text-muted-foreground text-center py-8">No texture layers added yet.</p>
+          )}
         </TabsContent>
 
         {/* === COMPANIONS === */}
@@ -750,17 +781,33 @@ export default function AvatarSetDetailPage() {
             </CardContent>
           </Card>
 
-          {set.companions.map(c => (
-            <div key={c.id} className="flex items-center gap-3 text-xs py-2 px-3 rounded border border-border/40">
-              <span className="font-mono text-muted-foreground w-20 truncate">{c.textureId}</span>
-              <span className="flex-1 truncate">{c.name || c.textureId}</span>
-              <span className="text-muted-foreground w-24 truncate">{c.url}</span>
-              {c.behavior && <Badge variant="outline" className="text-[10px]">{c.behavior}</Badge>}
-              <Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground hover:text-red-500" onClick={() => handleDeleteCompanion(c.id)}>
-                <Trash2 className="h-3 w-3" />
-              </Button>
-            </div>
-          ))}
+          {/* Companions grid */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2">
+            {(collapsedCompanions ? set.companions.slice(0, 12) : set.companions).map(c => (
+              <TextureCard
+                key={c.id}
+                texture={c}
+                onRename={async (id, name) => {
+                  const { authenticatedFetch } = await import('@/lib/client-auth');
+                  await authenticatedFetch(`/api/admin/avatar-sets/${set.id}/companions/${id}`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name }),
+                  });
+                  fetchSet();
+                }}
+                onDelete={(id) => handleDeleteCompanion(id)}
+              />
+            ))}
+          </div>
+          {collapsedCompanions && set.companions.length > 12 && (
+            <button
+              className="w-full text-xs text-muted-foreground hover:text-foreground transition-colors"
+              onClick={() => setCollapsedCompanions(false)}
+            >
+              + {set.companions.length - 12} more companions
+            </button>
+          )}
           {set.companions.length === 0 && (
             <p className="text-sm text-muted-foreground text-center py-8">No companions added yet.</p>
           )}

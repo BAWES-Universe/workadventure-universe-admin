@@ -79,17 +79,12 @@ async function main() {
   })
   console.log(`  ✓ AvatarSet: "${defaultSet.name}" (${defaultSet.id})`)
 
-  // 2. Platform scope
-  await prisma.avatarSetScope.upsert({
-    where: {
-      avatarSetId_scopeType_scopeId: {
-        avatarSetId: defaultSet.id,
-        scopeType: 'platform',
-        scopeId: '',
-      },
-    },
-    update: {},
-    create: {
+  // 2. Platform scope — delete any duplicate platform scopes first, then create fresh
+  await prisma.avatarSetScope.deleteMany({
+    where: { avatarSetId: defaultSet.id, scopeType: 'platform' },
+  })
+  await prisma.avatarSetScope.create({
+    data: {
       avatarSetId: defaultSet.id,
       scopeType: 'platform',
       scopeId: null,
@@ -126,28 +121,27 @@ async function main() {
   }
   console.log(`  ✓ ${layerCount} AvatarLayer rows upserted`)
 
-  // 4. Import companions
+  // 4. Import companions from config/companions.json
   let companionCount = 0
-  const companionCollections = wokaData.companion?.collections ?? []
-  for (const col of companionCollections) {
-    for (const tex of col.textures ?? []) {
-      await prisma.avatarCompanion.upsert({
-        where: {
-          avatarSetId_textureId: {
+  const companionsPath = path.resolve(__dirname, '../config/companions.json')
+  if (fs.existsSync(companionsPath)) {
+    const companionsData: Array<{ name?: string; textures?: Array<{ id: string; name?: string; url: string; behavior?: string }> }> = JSON.parse(fs.readFileSync(companionsPath, 'utf-8'))
+    for (const group of companionsData) {
+      for (const tex of group.textures ?? []) {
+        await prisma.avatarCompanion.upsert({
+          where: { avatarSetId_textureId: { avatarSetId: defaultSet.id, textureId: tex.id } },
+          update: { url: tex.url, name: tex.name ?? tex.id, behavior: tex.behavior ?? null },
+          create: {
             avatarSetId: defaultSet.id,
             textureId: tex.id,
+            name: tex.name ?? tex.id,
+            url: tex.url,
+            behavior: tex.behavior ?? null,
+            position: 0,
           },
-        },
-        update: { url: tex.url, name: tex.name ?? tex.id, position: tex.position ?? 0 },
-        create: {
-          avatarSetId: defaultSet.id,
-          textureId: tex.id,
-          name: tex.name ?? tex.id,
-          url: tex.url,
-          position: tex.position ?? 0,
-        },
-      })
-      companionCount++
+        })
+        companionCount++
+      }
     }
   }
   console.log(`  ✓ ${companionCount} AvatarCompanion rows upserted`)
