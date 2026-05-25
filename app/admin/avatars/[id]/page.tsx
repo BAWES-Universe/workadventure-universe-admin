@@ -577,16 +577,16 @@ export default function AvatarSetDetailPage() {
             <CardContent>
               <div className="flex flex-wrap items-end gap-3">
                 <div className="space-y-1.5">
-                  <Label className="text-xs">Texture ID</Label>
+                  <Label className="text-xs">Short Name</Label>
                   <Input
-                    className="h-9 w-32 font-mono text-xs"
+                    className="h-9 w-28 font-mono text-xs"
                     placeholder="cowboy-hat"
                     value={newLayer.textureId}
-                    onChange={e => setNewLayer(f => ({ ...f, textureId: e.target.value }))}
+                    onChange={e => setNewLayer(f => ({ ...f, textureId: e.target.value.replace(/[/\s]/g, '-').toLowerCase() }))}
                   />
                 </div>
                 <div className="space-y-1.5">
-                  <Label className="text-xs">Name</Label>
+                  <Label className="text-xs">Display Name</Label>
                   <Input className="h-9 w-28" placeholder="Cowboy Hat" value={newLayer.name} onChange={e => setNewLayer(f => ({ ...f, name: e.target.value }))} />
                 </div>
                 <div className="space-y-1.5">
@@ -643,11 +643,12 @@ export default function AvatarSetDetailPage() {
               </div>
               {/* Naming hint */}
               {newLayer.textureId && !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(newLayer.textureId) && (
-                <p className="text-[10px] text-amber-500 mt-2">Use kebab-case: lowercase letters, numbers, and hyphens only (e.g. &quot;cowboy-hat&quot;)</p>
+                <p className="text-[10px] text-amber-500 mt-2">Kebab-case only: lowercase letters, numbers, and hyphens</p>
               )}
               {newLayer.textureId && newLayer.layer && (
                 <p className="text-[10px] text-muted-foreground mt-1">
-                  S3 key: <code className="text-[10px] font-mono bg-muted px-1 rounded">{setId}/{newLayer.layer}s/{newLayer.textureId}.png</code>
+                  Path: <code className="text-[10px] font-mono bg-muted px-1 rounded">{newLayer.layer}s/{newLayer.textureId}.png</code>
+                  — category auto-set from layer type
                 </p>
               )}
             </CardContent>
@@ -688,11 +689,11 @@ export default function AvatarSetDetailPage() {
             <CardContent>
               <div className="flex flex-wrap items-end gap-3">
                 <div className="space-y-1.5">
-                  <Label className="text-xs">Texture ID</Label>
-                  <Input className="h-9 w-28 font-mono text-xs" placeholder="robot-pet" value={newCompanion.textureId} onChange={e => setNewCompanion(f => ({ ...f, textureId: e.target.value }))} />
+                  <Label className="text-xs">Short Name</Label>
+                  <Input className="h-9 w-28 font-mono text-xs" placeholder="robot-pet" value={newCompanion.textureId} onChange={e => setNewCompanion(f => ({ ...f, textureId: e.target.value.replace(/[/\s]/g, '-').toLowerCase() }))} />
                 </div>
                 <div className="space-y-1.5">
-                  <Label className="text-xs">Name</Label>
+                  <Label className="text-xs">Display Name</Label>
                   <Input className="h-9 w-28" placeholder="Robot Pet" value={newCompanion.name} onChange={e => setNewCompanion(f => ({ ...f, name: e.target.value }))} />
                 </div>
                 <div className="space-y-1.5 flex-1 min-w-[150px]">
@@ -738,11 +739,12 @@ export default function AvatarSetDetailPage() {
               </div>
               {/* Naming hint */}
               {newCompanion.textureId && !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(newCompanion.textureId) && (
-                <p className="text-[10px] text-amber-500 mt-2">Use kebab-case: lowercase letters, numbers, and hyphens only (e.g. &quot;robot-pet&quot;)</p>
+                <p className="text-[10px] text-amber-500 mt-2">Kebab-case only: lowercase letters, numbers, and hyphens</p>
               )}
               {newCompanion.textureId && (
                 <p className="text-[10px] text-muted-foreground mt-1">
-                  S3 key: <code className="text-[10px] font-mono bg-muted px-1 rounded">{setId}/companions/{newCompanion.textureId}.png</code>
+                  Path: <code className="text-[10px] font-mono bg-muted px-1 rounded">companions/{newCompanion.textureId}.png</code>
+                  — category auto-set to companions
                 </p>
               )}
             </CardContent>

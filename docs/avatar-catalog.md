@@ -496,16 +496,32 @@ Textures can be added to avatar sets in two ways:
 
 ### Naming Convention
 
-Use descriptive, kebab-case texture IDs:
+Texture IDs are **short kebab-case names** — no paths, no slashes, just the name.
 
-```
-hats/cowboy-hat
-accessories/sunglasses-01
-bodies/astronaut-suit
-companions/robot-pet
-```
+The full storage path is assembled automatically from the category:
 
-This keeps the S3 bucket organised and makes textures easy to find.
+| Category | Auto-generated Path | Short Name |
+|---|---|---|
+| Body layers | `body/{name}.png` | `body` |
+| Eyes layers | `eyes/{name}.png` | `eyes` |
+| Hair layers | `hair/{name}.png` | `hair` |
+| Clothes layers | `clothes/{name}.png` | `clothes` |
+| Hat layers | `hat/{name}.png` | `hat` |
+| Accessory layers | `accessory/{name}.png` | `accessory` |
+| Companions | `companions/{name}.png` | `companions` |
+
+Examples — just type the Short Name, the system builds the rest:
+
+| Short Name | Display Name | Category | Full Path |
+|---|---|---|---|
+| `cowboy-hat` | Cowboy Hat | hat | `hats/cowboy-hat.png` |
+| `sunglasses-01` | Sunglasses 01 | accessory | `accessories/sunglasses-01.png` |
+| `astronaut-suit` | Astronaut Suit | body | `bodies/astronaut-suit.png` |
+| `robot-pet` | Robot Pet | companion | `companions/robot-pet.png` |
+| `vip-crown` | VIP Crown | hat | `hats/vip-crown.png` |
+
+When uploading via the admin UI, the short name is auto-derived from the filename,
+then placed in the correct category folder based on the layer type selector.
 
 ### Known limitations in v1
 
