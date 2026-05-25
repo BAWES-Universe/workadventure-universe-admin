@@ -780,7 +780,15 @@ export default function AvatarSetDetailPage() {
                 </div>
                 <div className="space-y-1.5">
                   <Label className="text-xs">Behavior</Label>
-                  <Input className="h-9 w-20" placeholder="pet" value={newCompanion.behavior} onChange={e => setNewCompanion(f => ({ ...f, behavior: e.target.value }))} />
+                  <Select value={newCompanion.behavior} onValueChange={v => setNewCompanion(f => ({ ...f, behavior: v }))}>
+                    <SelectTrigger className="h-9 w-24"><SelectValue placeholder="none" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value=" ">None</SelectItem>
+                      <SelectItem value="cat">Cat</SelectItem>
+                      <SelectItem value="dog">Dog</SelectItem>
+                      <SelectItem value="red_panda">Red Panda</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
                 <Button size="sm" className="h-9" onClick={handleAddCompanion} disabled={addSubmitting || !newCompanion.textureId || !newCompanion.url}>
                   {addSubmitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5 mr-1" />}
