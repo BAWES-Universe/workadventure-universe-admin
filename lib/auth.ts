@@ -49,19 +49,46 @@ export function getClientIp(request: NextRequest): string {
  * OIDC session (from the admin web UI). Returns the acting user's ID.
  * Used by admin API routes that don't receive a request object.
  *
+ * Reads session from: user_session cookie, admin_session_id cookie,
+ * or _token URL query parameter (sent by authenticatedFetch).
+ *
  * Throws 'Unauthorized' if no valid session exists.
  */
 export async function requireAdminSession(): Promise<{ userId: string }> {
   const cookieStore = await cookies();
-  
-  // Build a minimal Request-like object for getSessionId
-  const req = new NextRequest('http://localhost', {
-    headers: {
-      cookie: cookieStore.toString(),
-    },
-  });
+  const headersList = await import('next/headers').then(m => m.headers());
 
-  const sessionId = getSessionId(req);
+  // Try to find session ID/token from multiple sources
+  let sessionId: string | null = null;
+
+  // 1. Check user_session cookie (JSON session data)
+  const userSession = cookieStore.get('user_session');
+  if (userSession) {
+    sessionId = userSession.value;
+  }
+
+  // 2. Check admin_session_id cookie
+  if (!sessionId) {
+    const sid = cookieStore.get('admin_session_id');
+    if (sid) sessionId = sid.value;
+  }
+
+  // 3. Check _token URL query parameter (added by authenticatedFetch)
+  if (!sessionId) {
+    // The full URL including query params is needed — read from headers
+    const proto = headersList.get('x-forwarded-proto') || 'http';
+    const host = headersList.get('x-forwarded-host') || headersList.get('host') || 'localhost';
+    const uri = headersList.get('x-forwarded-uri') || '';
+    const fullUrl = `${proto}://${host}${uri}`;
+    try {
+      const url = new URL(fullUrl);
+      const token = url.searchParams.get('_token');
+      if (token) sessionId = token;
+    } catch {
+      // URL parsing failed, ignore
+    }
+  }
+
   if (!sessionId) {
     throw new Error('Unauthorized');
   }
