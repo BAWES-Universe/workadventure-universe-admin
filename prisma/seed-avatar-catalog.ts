@@ -9,10 +9,14 @@
  */
 
 import { PrismaClient } from '@prisma/client'
+import { Pool } from 'pg'
+import { PrismaPg } from '@prisma/adapter-pg'
 import * as path from 'path'
 import * as fs from 'fs'
 
-const prisma = new PrismaClient()
+const pool = new Pool({ connectionString: process.env.DATABASE_URL })
+const adapter = new PrismaPg(pool)
+const prisma = new PrismaClient({ adapter })
 
 type WokaTexture = {
   id: string
@@ -21,15 +25,16 @@ type WokaTexture = {
   position?: number
 }
 type WokaCollection = { name?: string; textures?: WokaTexture[] }
+type WokaPart = { collections?: WokaCollection[]; required?: boolean }
 type WokaJson = {
-  woka?: WokaCollection[]
-  body?: WokaCollection[]
-  eyes?: WokaCollection[]
-  hair?: WokaCollection[]
-  clothes?: WokaCollection[]
-  hat?: WokaCollection[]
-  accessory?: WokaCollection[]
-  companion?: WokaCollection[]
+  woka?: WokaPart
+  body?: WokaPart
+  eyes?: WokaPart
+  hair?: WokaPart
+  clothes?: WokaPart
+  hat?: WokaPart
+  accessory?: WokaPart
+  companion?: WokaPart
 }
 
 const LAYER_KEYS = [
@@ -95,7 +100,7 @@ async function main() {
   // 3. Import layers
   let layerCount = 0
   for (const layerKey of LAYER_KEYS) {
-    const collections = wokaData[layerKey] ?? []
+    const collections = wokaData[layerKey]?.collections ?? []
     for (const col of collections) {
       for (const tex of col.textures ?? []) {
         await prisma.avatarLayer.upsert({
@@ -123,7 +128,8 @@ async function main() {
 
   // 4. Import companions
   let companionCount = 0
-  for (const col of wokaData.companion ?? []) {
+  const companionCollections = wokaData.companion?.collections ?? []
+  for (const col of companionCollections) {
     for (const tex of col.textures ?? []) {
       await prisma.avatarCompanion.upsert({
         where: {
