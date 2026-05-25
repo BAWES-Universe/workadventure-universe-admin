@@ -5,12 +5,14 @@ on:
     branches:
       - main
       - master
+      - develop
     tags:
       - 'v*'
   pull_request:
     branches:
       - main
       - master
+      - develop
   workflow_dispatch:
 
 env:
@@ -48,7 +50,7 @@ jobs:
             type=ref,event=pr
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix={{branch}}-
+            type=sha,format=short
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push Docker image
