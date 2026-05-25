@@ -18,7 +18,7 @@ import { Switch } from '@/components/ui/switch';
 import {
   Loader2, ArrowLeft, AlertCircle, Layers, Puzzle, Globe, Lock, EyeOff,
   Users, CheckCircle2, Plus, Trash2, Save, Archive, Copy, ExternalLink,
-  Draft,
+  FileText,
 } from 'lucide-react';
 
 // ---------------------------------------------------------------------------

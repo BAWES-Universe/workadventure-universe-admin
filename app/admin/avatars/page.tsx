@@ -13,7 +13,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import {
   AlertCircle, Loader2, Plus, Search, Eye, EyeOff, Globe, Lock,
-  Layers, Puzzle, Archive, Draft, CheckCircle2, Users,
+  Layers, Puzzle, Archive, FileText, CheckCircle2, Users,
 } from 'lucide-react';
 
 interface AvatarSet {
@@ -184,7 +184,7 @@ export default function AvatarSetsPage() {
         </Card>
         <Card className="border-border/50">
           <CardContent className="p-4 flex items-center gap-3">
-            <Draft className="h-5 w-5 text-amber-500" />
+            <FileText className="h-5 w-5 text-amber-500" />
             <div>
               <div className="text-2xl font-bold">{sets.filter(s => s.lifecycle === 'draft').length}</div>
               <div className="text-xs text-muted-foreground">Drafts</div>
