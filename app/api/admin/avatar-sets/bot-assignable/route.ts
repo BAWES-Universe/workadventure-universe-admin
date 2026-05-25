@@ -3,7 +3,7 @@
  * Returns all active avatar sets (including hidden/assigned_only) for bot assignment.
  */
 import { NextResponse } from 'next/server'
-import { prisma } from '@/lib/prisma'
+import { prisma } from '@/lib/db'
 import { requireAdminSession } from '@/lib/auth'
 import { resolveBotAssignableSets } from '@/lib/avatar-catalog'
 

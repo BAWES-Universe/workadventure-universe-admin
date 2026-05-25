@@ -5,86 +5,105 @@
  * Resolves scope + entitlement via the avatar catalog engine.
  * Falls back to static config/woka.json when no active catalog sets exist
  * (zero-downtime migration path).
+ *
+ * Auth: Requires ADMIN_API_TOKEN in Authorization header (sent by the play server).
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import { prisma } from '@/lib/prisma'
+import { requireAuth } from '@/lib/auth'
+import { prisma } from '@/lib/db'
 import {
   resolvePickerSets,
   buildWokaListPayload,
 } from '@/lib/avatar-catalog'
-import { getWokaData } from '@/lib/wokas'
+import { getWokaList } from '@/lib/wokas'
 
 export async function GET(request: NextRequest) {
-  const { searchParams } = new URL(request.url)
-  const roomUrl = searchParams.get('roomUrl')
-  const uuid = searchParams.get('uuid')
-
-  if (!roomUrl) {
-    return NextResponse.json(
-      { error: 'roomUrl is required' },
-      { status: 400 }
-    )
-  }
-
-  let worldId: string | null = null
-  let universeId: string | null = null
-  let userId: string | null = null
-  let membershipTags: string[] = []
-
   try {
-    const parsed = parsePlayUri(roomUrl)
-    if (parsed) {
-      const world = await prisma.world.findFirst({
-        where: {
-          slug: parsed.worldSlug,
-          universe: { slug: parsed.universeSlug },
-        },
-        select: { id: true, universeId: true },
-      })
+    requireAuth(request)
 
-      if (world) {
-        worldId = world.id
-        universeId = world.universeId
+    const { searchParams } = new URL(request.url)
+    const roomUrl = searchParams.get('roomUrl')
+    const uuid = searchParams.get('uuid')
 
-        if (uuid) {
-          const user = await prisma.user.findUnique({
-            where: { uuid },
-            select: { id: true },
-          })
-          if (user) {
-            userId = user.id
-            const member = await prisma.worldMember.findUnique({
-              where: {
-                userId_worldId: { userId: user.id, worldId: world.id },
-              },
-              select: { tags: true },
+    if (!roomUrl) {
+      return NextResponse.json(
+        { error: 'roomUrl is required' },
+        { status: 400 }
+      )
+    }
+
+    let worldId: string | null = null
+    let universeId: string | null = null
+    let userId: string | null = null
+    let membershipTags: string[] = []
+
+    try {
+      const parsed = parsePlayUri(roomUrl)
+      if (parsed) {
+        const world = await prisma.world.findFirst({
+          where: {
+            slug: parsed.worldSlug,
+            universe: { slug: parsed.universeSlug },
+          },
+          select: { id: true, universeId: true },
+        })
+
+        if (world) {
+          worldId = world.id
+          universeId = world.universeId
+
+          if (uuid) {
+            const user = await prisma.user.findUnique({
+              where: { uuid },
+              select: { id: true },
             })
-            membershipTags = member?.tags ?? []
+            if (user) {
+              userId = user.id
+              const member = await prisma.worldMember.findUnique({
+                where: {
+                  userId_worldId: { userId: user.id, worldId: world.id },
+                },
+                select: { tags: true },
+              })
+              membershipTags = member?.tags ?? []
+            }
           }
         }
       }
+    } catch {
+      // Non-fatal — fall through to platform-scope sets
     }
-  } catch {
-    // Non-fatal — fall through to platform-scope sets
+
+    const sets = await resolvePickerSets({
+      prisma,
+      worldId,
+      universeId,
+      userId,
+      membershipTags,
+    })
+
+    // Fallback to static woka.json during initial catalog migration
+    if (sets.length === 0) {
+      const playServiceUrl = process.env.PLAY_URL || 'http://play.workadventure.localhost'
+      const staticData = getWokaList(playServiceUrl)
+      return NextResponse.json(staticData)
+    }
+
+    return NextResponse.json(buildWokaListPayload(sets))
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Unauthorized') {
+      return NextResponse.json(
+        { error: 'Unauthorized' },
+        { status: 401 }
+      )
+    }
+    console.error('Error in /api/woka/list:', error)
+    return NextResponse.json(
+      { error: 'Internal server error' },
+      { status: 500 }
+    )
   }
-
-  const sets = await resolvePickerSets({
-    prisma,
-    worldId,
-    universeId,
-    userUuid: uuid,
-    userId,
-    membershipTags,
-  })
-
-  // Fallback to static woka.json during initial catalog migration
-  if (sets.length === 0) {
-    const staticData = getWokaData()
-    return NextResponse.json(staticData)
-  }
-
-  return NextResponse.json(buildWokaListPayload(sets))
 }
 
 function parsePlayUri(
