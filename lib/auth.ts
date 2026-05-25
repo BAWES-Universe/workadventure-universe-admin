@@ -1,4 +1,8 @@
 import { NextRequest } from 'next/server';
+import { cookies } from 'next/headers';
+import { getSessionId, getSessionData } from './auth-token';
+import { isSuperAdmin } from './super-admin';
+import { prisma } from './db';
 
 /**
  * Validates the Bearer token from the Authorization header
@@ -38,5 +42,44 @@ export function getClientIp(request: NextRequest): string {
     request.headers.get('x-real-ip') ||
     'unknown'
   );
+}
+
+/**
+ * Require an admin session — validates that the caller has an active
+ * OIDC session (from the admin web UI). Returns the acting user's ID.
+ * Used by admin API routes that don't receive a request object.
+ *
+ * Throws 'Unauthorized' if no valid session exists.
+ */
+export async function requireAdminSession(): Promise<{ userId: string }> {
+  const cookieStore = await cookies();
+  
+  // Build a minimal Request-like object for getSessionId
+  const req = new NextRequest('http://localhost', {
+    headers: {
+      cookie: cookieStore.toString(),
+    },
+  });
+
+  const sessionId = getSessionId(req);
+  if (!sessionId) {
+    throw new Error('Unauthorized');
+  }
+
+  const session = await getSessionData(sessionId);
+  if (!session) {
+    throw new Error('Unauthorized');
+  }
+
+  const user = await prisma.user.findUnique({
+    where: { id: session.userId },
+    select: { id: true, email: true },
+  });
+
+  if (!user) {
+    throw new Error('Unauthorized');
+  }
+
+  return { userId: user.id };
 }
 
