@@ -23,6 +23,13 @@ type Params = { params: { id: string; companionId: string } }
 export async function PATCH(req: NextRequest, { params }: Params) {
   const actor = await requireAdminSession()
   const body = await req.json()
+
+  // Fetch existing to check for S3 URL change
+  const existing = await prisma.avatarCompanion.findUnique({
+    where: { id: params.companionId },
+  })
+  if (!existing) return NextResponse.json({ error: 'Not found' }, { status: 404 })
+
   const companion = await prisma.avatarCompanion.update({
     where: { id: params.companionId, avatarSetId: params.id },
     data: {
@@ -33,6 +40,12 @@ export async function PATCH(req: NextRequest, { params }: Params) {
       ...(body.isActive !== undefined && { isActive: body.isActive }),
     },
   })
+
+  // If URL changed from an S3 texture, clean up the old file
+  if (body.url !== undefined && body.url !== existing.url) {
+    await cleanupS3Texture(existing.url)
+  }
+
   await prisma.avatarSetAuditLog.create({
     data: { avatarSetId: params.id, actorId: actor.userId, action: 'companion.updated', diff: body },
   })
