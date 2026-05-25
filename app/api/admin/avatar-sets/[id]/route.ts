@@ -2,13 +2,13 @@ import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { requireAdminSession } from '@/lib/auth'
 
-type Params = { params: { id: string } }
+type Params = { params: Promise<{ id: string }> }
 
 // GET /api/admin/avatar-sets/:id
 export async function GET(_req: NextRequest, { params }: Params) {
   await requireAdminSession()
   const set = await prisma.avatarSet.findUnique({
-    where: { id: params.id },
+    where: { id: (await params).id },
     include: {
       layers: { orderBy: { position: 'asc' } },
       companions: { orderBy: { position: 'asc' } },
@@ -34,11 +34,11 @@ export async function PATCH(req: NextRequest, { params }: Params) {
   const actor = await requireAdminSession()
   const body = await req.json()
 
-  const before = await prisma.avatarSet.findUnique({ where: { id: params.id } })
+  const before = await prisma.avatarSet.findUnique({ where: { id: (await params).id } })
   if (!before) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 
   const updated = await prisma.avatarSet.update({
-    where: { id: params.id },
+    where: { id: (await params).id },
     data: {
       ...(body.name !== undefined && { name: body.name }),
       ...(body.description !== undefined && { description: body.description }),
@@ -68,7 +68,7 @@ export async function PATCH(req: NextRequest, { params }: Params) {
 
   await prisma.avatarSetAuditLog.create({
     data: {
-      avatarSetId: params.id,
+      avatarSetId: (await params).id,
       actorId: actor.userId,
       action,
       diff: { before, after: updated },
@@ -83,7 +83,7 @@ export async function DELETE(_req: NextRequest, { params }: Params) {
   const actor = await requireAdminSession()
 
   const existingSet = await prisma.avatarSet.findUnique({
-    where: { id: params.id },
+    where: { id: (await params).id },
     select: { lifecycle: true },
   })
 
@@ -93,7 +93,7 @@ export async function DELETE(_req: NextRequest, { params }: Params) {
 
   // Check for active user grants or current user avatars referencing this set
   const activeGrants = await prisma.userAvatarGrant.count({
-    where: { avatarSetId: params.id, isActive: true },
+    where: { avatarSetId: (await params).id, isActive: true },
   })
 
   if (activeGrants > 0) {
@@ -107,13 +107,13 @@ export async function DELETE(_req: NextRequest, { params }: Params) {
   }
 
   const updated = await prisma.avatarSet.update({
-    where: { id: params.id },
+    where: { id: (await params).id },
     data: { lifecycle: 'archived' },
   })
 
   await prisma.avatarSetAuditLog.create({
     data: {
-      avatarSetId: params.id,
+      avatarSetId: (await params).id,
       actorId: actor.userId,
       action: 'set.archived',
       diff: { before: { lifecycle: existingSet.lifecycle }, after: { lifecycle: 'archived' } },

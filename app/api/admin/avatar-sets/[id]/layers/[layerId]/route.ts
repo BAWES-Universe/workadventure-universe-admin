@@ -18,7 +18,7 @@ async function cleanupS3Texture(url: string): Promise<void> {
   }
 }
 
-type Params = { params: { id: string; layerId: string } }
+type Params = { params: Promise<{ id: string; layerId: string }> }
 
 // PATCH /api/admin/avatar-sets/:id/layers/:layerId
 export async function PATCH(req: NextRequest, { params }: Params) {
@@ -26,11 +26,11 @@ export async function PATCH(req: NextRequest, { params }: Params) {
   const body = await req.json()
 
   // Fetch existing to check for S3 URL change
-  const existing = await prisma.avatarLayer.findUnique({ where: { id: params.layerId } })
+  const existing = await prisma.avatarLayer.findUnique({ where: { id: (await params).layerId } })
   if (!existing) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 
   const layer = await prisma.avatarLayer.update({
-    where: { id: params.layerId },
+    where: { id: (await params).layerId },
     data: {
       ...(body.name !== undefined && { name: body.name }),
       ...(body.url !== undefined && { url: body.url }),
@@ -46,10 +46,10 @@ export async function PATCH(req: NextRequest, { params }: Params) {
 
   await prisma.avatarSetAuditLog.create({
     data: {
-      avatarSetId: params.id,
+      avatarSetId: (await params).id,
       actorId: actor.userId,
       action: 'layer.updated',
-      diff: { layerId: params.layerId, ...body },
+      diff: { layerId: (await params).layerId, ...body },
     },
   })
 
@@ -61,17 +61,17 @@ export async function DELETE(_req: NextRequest, { params }: Params) {
   const actor = await requireAdminSession()
 
   // Fetch the layer first to get its URL for S3 cleanup
-  const existing = await prisma.avatarLayer.findUnique({ where: { id: params.layerId } })
+  const existing = await prisma.avatarLayer.findUnique({ where: { id: (await params).layerId } })
   if (!existing) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 
-  const layer = await prisma.avatarLayer.delete({ where: { id: params.layerId } })
+  const layer = await prisma.avatarLayer.delete({ where: { id: (await params).layerId } })
 
   // Clean up S3 file if it's an uploaded texture
   await cleanupS3Texture(layer.url)
 
   await prisma.avatarSetAuditLog.create({
     data: {
-      avatarSetId: params.id,
+      avatarSetId: (await params).id,
       actorId: actor.userId,
       action: 'layer.removed',
       diff: { textureId: layer.textureId, layer: layer.layer },

@@ -947,7 +947,7 @@ export default function AvatarSetDetailPage() {
             </CardContent>
           </Card>
 
-          {accessResult && (
+          {!!accessResult && (
             <Card className="border-border/50">
               <CardContent className="p-4 space-y-2">
                 {(accessResult as Record<string, unknown>).checks ? (

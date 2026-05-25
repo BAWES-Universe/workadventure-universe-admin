@@ -8,7 +8,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { requireAdminSession } from '@/lib/auth'
 
-type Params = { params: { id: string } }
+type Params = { params: Promise<{ id: string }> }
 
 export async function GET(req: NextRequest, { params }: Params) {
   await requireAdminSession()
@@ -22,10 +22,13 @@ export async function GET(req: NextRequest, { params }: Params) {
 
   const [set, user, world] = await Promise.all([
     prisma.avatarSet.findUnique({
-      where: { id: params.id },
+      where: { id: (await params).id },
       include: { scopes: true, policies: { where: { isActive: true } } },
     }),
-    prisma.user.findUnique({ where: { id: userId } }),
+    prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, email: true },
+    }),
     prisma.world.findUnique({ where: { id: worldId }, select: { id: true, universeId: true } }),
   ])
 
@@ -81,7 +84,7 @@ export async function GET(req: NextRequest, { params }: Params) {
     result.checks.push({ check: 'visibility', passed: false, reason: `${set.visibility} — not shown in player picker` })
     // Check for direct grant anyway
     const directGrant = await prisma.userAvatarGrant.findFirst({
-      where: { userId, avatarSetId: params.id, isActive: true, grantType: 'select' },
+      where: { userId, avatarSetId: (await params).id, isActive: true, grantType: 'select' },
     })
     result.checks.push({ check: 'direct_grant', passed: !!directGrant, reason: directGrant ? 'Has direct grant' : 'No direct grant' })
     result.canSelect = !!directGrant && inScope && lifecycleOk && windowOk
@@ -96,18 +99,12 @@ export async function GET(req: NextRequest, { params }: Params) {
         const userDomain = user.email.split('@')[1]
         return userDomain === p.subjectValue
       }
-      if (p.subjectType === 'subscription_plan') {
-        if (!p.subjectValue) return false
-        return user.subscriptionPlan === p.subjectValue
-      }
-      if (p.subjectType === 'external_contract') {
-        if (!p.subjectValue || !user.externalContracts) return false
-        return user.externalContracts.includes(p.subjectValue)
-      }
+      // subscription_plan and external_contract policy types are modelled in
+      // schema but not yet implemented on the User model — return false
       return false
     })
     const directGrant = await prisma.userAvatarGrant.findFirst({
-      where: { userId, avatarSetId: params.id, isActive: true, grantType: 'select' },
+      where: { userId, avatarSetId: (await params).id, isActive: true, grantType: 'select' },
     })
     const entitlementOk = policyMatch || !!directGrant
     result.checks.push({

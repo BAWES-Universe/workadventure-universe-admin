@@ -2,30 +2,30 @@ import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { requireAdminSession } from '@/lib/auth'
 
-type Params = { params: { id: string; policyId: string } }
+type Params = { params: Promise<{ id: string; policyId: string }> }
 
 export async function PATCH(req: NextRequest, { params }: Params) {
   const actor = await requireAdminSession()
   const body = await req.json()
   const policy = await prisma.avatarEntitlementPolicy.update({
-    where: { id: params.policyId },
+    where: { id: (await params).policyId },
     data: {
       ...(body.isActive !== undefined && { isActive: body.isActive }),
       ...(body.subjectValue !== undefined && { subjectValue: body.subjectValue }),
     },
   })
   await prisma.avatarSetAuditLog.create({
-    data: { avatarSetId: params.id, actorId: actor.userId, action: 'policy.updated', diff: body },
+    data: { avatarSetId: (await params).id, actorId: actor.userId, action: 'policy.updated', diff: body },
   })
   return NextResponse.json(policy)
 }
 
 export async function DELETE(_req: NextRequest, { params }: Params) {
   const actor = await requireAdminSession()
-  const policy = await prisma.avatarEntitlementPolicy.delete({ where: { id: params.policyId } })
+  const policy = await prisma.avatarEntitlementPolicy.delete({ where: { id: (await params).policyId } })
   await prisma.avatarSetAuditLog.create({
     data: {
-      avatarSetId: params.id,
+      avatarSetId: (await params).id,
       actorId: actor.userId,
       action: 'policy.removed',
       diff: { subjectType: policy.subjectType, subjectValue: policy.subjectValue },

@@ -2,12 +2,12 @@ import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { requireAdminSession } from '@/lib/auth'
 
-type Params = { params: { id: string } }
+type Params = { params: Promise<{ id: string }> }
 
 export async function GET(_req: NextRequest, { params }: Params) {
   await requireAdminSession()
   return NextResponse.json(
-    await prisma.avatarSetScope.findMany({ where: { avatarSetId: params.id } })
+    await prisma.avatarSetScope.findMany({ where: { avatarSetId: (await params).id } })
   )
 }
 
@@ -32,7 +32,7 @@ export async function POST(req: NextRequest, { params }: Params) {
 
   const scope = await prisma.avatarSetScope.create({
     data: {
-      avatarSetId: params.id,
+      avatarSetId: (await params).id,
       scopeType: body.scopeType,
       scopeId: body.scopeId ?? null,
       worldId: body.scopeType === 'world' ? (body.scopeId ?? null) : null,
@@ -41,7 +41,7 @@ export async function POST(req: NextRequest, { params }: Params) {
 
   await prisma.avatarSetAuditLog.create({
     data: {
-      avatarSetId: params.id,
+      avatarSetId: (await params).id,
       actorId: actor.userId,
       action: 'scope.added',
       diff: { scopeType: scope.scopeType, scopeId: scope.scopeId },

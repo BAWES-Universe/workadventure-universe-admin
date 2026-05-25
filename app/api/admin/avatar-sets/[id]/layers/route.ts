@@ -2,13 +2,13 @@ import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { requireAdminSession } from '@/lib/auth'
 
-type Params = { params: { id: string } }
+type Params = { params: Promise<{ id: string }> }
 
 // GET /api/admin/avatar-sets/:id/layers
 export async function GET(_req: NextRequest, { params }: Params) {
   await requireAdminSession()
   const layers = await prisma.avatarLayer.findMany({
-    where: { avatarSetId: params.id },
+    where: { avatarSetId: (await params).id },
     orderBy: [{ layer: 'asc' }, { position: 'asc' }],
   })
   return NextResponse.json(layers)
@@ -21,7 +21,7 @@ export async function POST(req: NextRequest, { params }: Params) {
 
   const layer = await prisma.avatarLayer.create({
     data: {
-      avatarSetId: params.id,
+      avatarSetId: (await params).id,
       textureId: body.textureId,
       layer: body.layer,
       name: body.name ?? null,
@@ -32,7 +32,7 @@ export async function POST(req: NextRequest, { params }: Params) {
 
   await prisma.avatarSetAuditLog.create({
     data: {
-      avatarSetId: params.id,
+      avatarSetId: (await params).id,
       actorId: actor.userId,
       action: 'layer.added',
       diff: { after: { textureId: layer.textureId, layer: layer.layer, url: layer.url } },

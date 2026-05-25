@@ -2,12 +2,12 @@ import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { requireAdminSession } from '@/lib/auth'
 
-type Params = { params: { id: string } }
+type Params = { params: Promise<{ id: string }> }
 
 export async function GET(_req: NextRequest, { params }: Params) {
   await requireAdminSession()
   return NextResponse.json(
-    await prisma.avatarEntitlementPolicy.findMany({ where: { avatarSetId: params.id } })
+    await prisma.avatarEntitlementPolicy.findMany({ where: { avatarSetId: (await params).id } })
   )
 }
 
@@ -34,7 +34,7 @@ export async function POST(req: NextRequest, { params }: Params) {
 
   const policy = await prisma.avatarEntitlementPolicy.create({
     data: {
-      avatarSetId: params.id,
+      avatarSetId: (await params).id,
       subjectType: body.subjectType,
       subjectValue: body.subjectValue ?? null,
       action: body.action ?? 'select',
@@ -44,7 +44,7 @@ export async function POST(req: NextRequest, { params }: Params) {
 
   await prisma.avatarSetAuditLog.create({
     data: {
-      avatarSetId: params.id,
+      avatarSetId: (await params).id,
       actorId: actor.userId,
       action: 'policy.added',
       diff: { subjectType: policy.subjectType, subjectValue: policy.subjectValue, action: policy.action },

@@ -3,15 +3,15 @@ import { prisma } from '@/lib/db'
 import { requireAdminSession } from '@/lib/auth'
 import { Prisma } from '@prisma/client'
 
-type Params = { params: { id: string; scopeId: string } }
+type Params = { params: Promise<{ id: string; scopeId: string }> }
 
 export async function DELETE(_req: NextRequest, { params }: Params) {
   const actor = await requireAdminSession()
   try {
-    const scope = await prisma.avatarSetScope.delete({ where: { id: params.scopeId } })
+    const scope = await prisma.avatarSetScope.delete({ where: { id: (await params).scopeId } })
     await prisma.avatarSetAuditLog.create({
       data: {
-        avatarSetId: params.id,
+        avatarSetId: (await params).id,
         actorId: actor.userId,
         action: 'scope.removed',
         diff: { scopeType: scope.scopeType, scopeId: scope.scopeId },
