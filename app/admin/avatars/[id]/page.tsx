@@ -116,6 +116,10 @@ export default function AvatarSetDetailPage() {
   const [accessWorldId, setAccessWorldId] = useState('');
   const [accessResult, setAccessResult] = useState<unknown>(null);
   const [accessChecking, setAccessChecking] = useState(false);
+  const [accessUsers, setAccessUsers] = useState<Array<{ id: string; name: string | null; email: string | null; uuid: string }>>([]);
+  const [accessWorlds, setAccessWorlds] = useState<Array<{ id: string; name: string; slug: string; universe: { name: string } }>>([]);
+  const [accessSearchUser, setAccessSearchUser] = useState('');
+  const [accessSearchWorld, setAccessSearchWorld] = useState('');
   const [collapsedLayers, setCollapsedLayers] = useState<Record<string, boolean>>({});
   const [collapsedCompanions, setCollapsedCompanions] = useState(true);
 
@@ -478,7 +482,22 @@ export default function AvatarSetDetailPage() {
       )}
 
       {/* Tabs */}
-      <Tabs value={activeTab} onValueChange={setActiveTab}>
+      <Tabs value={activeTab} onValueChange={v => {
+        setActiveTab(v);
+        if (v === 'access' && accessUsers.length === 0) {
+          (async () => {
+            const { authenticatedFetch } = await import('@/lib/client-auth');
+            try {
+              const u = await authenticatedFetch('/api/admin/users?limit=200');
+              if (u.ok) setAccessUsers((await u.json()).users || await u.json());
+            } catch {}
+            try {
+              const w = await authenticatedFetch('/api/admin/worlds?limit=200');
+              if (w.ok) setAccessWorlds((await w.json()).worlds || await w.json());
+            } catch {}
+          })();
+        }
+      }}>
         <TabsList>
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="layers">Layers ({set.layers.length})</TabsTrigger>
@@ -978,13 +997,57 @@ export default function AvatarSetDetailPage() {
             <CardHeader><CardTitle className="text-base">Test Access</CardTitle></CardHeader>
             <CardContent>
               <div className="flex flex-wrap items-end gap-3">
-                <div className="space-y-1.5 flex-1 min-w-[180px]">
-                  <Label className="text-xs">User ID</Label>
-                  <Input className="h-9" placeholder="User UUID..." value={accessUserId} onChange={e => setAccessUserId(e.target.value)} />
+                <div className="space-y-1.5 flex-1 min-w-[200px]">
+                  <Label className="text-xs">User</Label>
+                  <div className="space-y-1">
+                    <Input
+                      className="h-9 text-xs"
+                      placeholder="Search name or email..."
+                      value={accessSearchUser}
+                      onChange={e => setAccessSearchUser(e.target.value)}
+                    />
+                    <div className="max-h-[180px] overflow-y-auto border rounded-md p-1 space-y-0.5">
+                      {accessUsers
+                        .filter(u => !accessSearchUser || (u.name || '').toLowerCase().includes(accessSearchUser.toLowerCase()) || (u.email || '').toLowerCase().includes(accessSearchUser.toLowerCase()))
+                        .slice(0, 50)
+                        .map(u => (
+                          <div
+                            key={u.id}
+                            className={`text-xs px-2 py-1 rounded cursor-pointer hover:bg-accent ${accessUserId === u.id ? 'bg-primary/10 font-medium' : ''}`}
+                            onClick={() => setAccessUserId(u.id)}
+                          >
+                            {u.name || 'No name'} {u.email ? `<${u.email}>` : ''}
+                          </div>
+                        ))}
+                      {accessUsers.length === 0 && <p className="text-[10px] text-muted-foreground p-2">Loading users...</p>}
+                    </div>
+                  </div>
                 </div>
-                <div className="space-y-1.5 flex-1 min-w-[180px]">
-                  <Label className="text-xs">World ID</Label>
-                  <Input className="h-9" placeholder="World UUID..." value={accessWorldId} onChange={e => setAccessWorldId(e.target.value)} />
+                <div className="space-y-1.5 flex-1 min-w-[200px]">
+                  <Label className="text-xs">World</Label>
+                  <div className="space-y-1">
+                    <Input
+                      className="h-9 text-xs"
+                      placeholder="Search world name..."
+                      value={accessSearchWorld}
+                      onChange={e => setAccessSearchWorld(e.target.value)}
+                    />
+                    <div className="max-h-[180px] overflow-y-auto border rounded-md p-1 space-y-0.5">
+                      {accessWorlds
+                        .filter(w => !accessSearchWorld || w.name.toLowerCase().includes(accessSearchWorld.toLowerCase()) || (w.universe?.name || '').toLowerCase().includes(accessSearchWorld.toLowerCase()))
+                        .slice(0, 50)
+                        .map(w => (
+                          <div
+                            key={w.id}
+                            className={`text-xs px-2 py-1 rounded cursor-pointer hover:bg-accent ${accessWorldId === w.id ? 'bg-primary/10 font-medium' : ''}`}
+                            onClick={() => setAccessWorldId(w.id)}
+                          >
+                            {w.universe?.name || '?'}/{w.name} <span className="text-muted-foreground">({w.slug})</span>
+                          </div>
+                        ))}
+                      {accessWorlds.length === 0 && <p className="text-[10px] text-muted-foreground p-2">Loading worlds...</p>}
+                    </div>
+                  </div>
                 </div>
                 <Button size="sm" className="h-9" onClick={handleAccessCheck} disabled={accessChecking || !accessUserId || !accessWorldId}>
                   {accessChecking ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-1" /> : null}
