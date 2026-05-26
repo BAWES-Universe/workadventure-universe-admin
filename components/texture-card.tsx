@@ -19,31 +19,19 @@ interface TextureCardProps {
   playServiceUrl?: string;
   /** Called when name is edited inline (blur / Enter) */
   onRename: (id: string, name: string) => Promise<void>;
-  /** Called when URL is edited inline (blur / Enter) */
-  onUpdateUrl: (id: string, url: string) => Promise<void>;
-  /** Called when delete is clicked (caller should confirm) */
+  /** Called when delete is clicked */
   onDelete: (id: string) => void;
 }
 
 /**
- * A small card showing a texture thumbnail with editable name and URL,
- * position, active indicator, and a delete button.
- *
+ * A small card showing a texture thumbnail with name, position, and actions.
  * Name is editable via double-click (inline edit with auto-save on blur).
- * URL is editable via double-click on the URL badge.
  * Delete shows a confirm() dialog before proceeding.
+ * Relative URLs are resolved against the play service URL.
  */
-export default function TextureCard({
-  texture,
-  playServiceUrl = typeof process !== 'undefined' ? process.env.NEXT_PUBLIC_PLAY_URL : undefined,
-  onRename,
-  onUpdateUrl,
-  onDelete,
-}: TextureCardProps) {
-  const [editingName, setEditingName] = useState(false);
+export default function TextureCard({ texture, playServiceUrl = typeof process !== 'undefined' ? process.env.NEXT_PUBLIC_PLAY_URL : undefined, onRename, onDelete }: TextureCardProps) {
+  const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState(texture.name || texture.textureId);
-  const [editingUrl, setEditingUrl] = useState(false);
-  const [editUrl, setEditUrl] = useState(texture.url);
   const [saving, setSaving] = useState(false);
 
   // Build the display URL: if relative, prepend playServiceUrl
@@ -53,9 +41,9 @@ export default function TextureCard({
       ? `${playServiceUrl.replace(/\/$/, '')}/${texture.url}`
       : '';
 
-  async function handleSaveName() {
+  async function handleSave() {
     if (editName === (texture.name || texture.textureId)) {
-      setEditingName(false);
+      setEditing(false);
       return;
     }
     setSaving(true);
@@ -65,22 +53,7 @@ export default function TextureCard({
       setEditName(texture.name || texture.textureId);
     }
     setSaving(false);
-    setEditingName(false);
-  }
-
-  async function handleSaveUrl() {
-    if (editUrl === texture.url) {
-      setEditingUrl(false);
-      return;
-    }
-    setSaving(true);
-    try {
-      await onUpdateUrl(texture.id, editUrl);
-    } catch {
-      setEditUrl(texture.url);
-    }
-    setSaving(false);
-    setEditingUrl(false);
+    setEditing(false);
   }
 
   function handleDelete() {
@@ -121,15 +94,15 @@ export default function TextureCard({
       </span>
 
       {/* Editable name */}
-      {editingName ? (
+      {editing ? (
         <Input
           className="h-6 text-[10px] text-center"
           value={editName}
           onChange={(e) => setEditName(e.target.value)}
-          onBlur={handleSaveName}
+          onBlur={handleSave}
           onKeyDown={(e) => {
-            if (e.key === 'Enter') handleSaveName();
-            if (e.key === 'Escape') { setEditName(texture.name || texture.textureId); setEditingName(false); }
+            if (e.key === 'Enter') handleSave();
+            if (e.key === 'Escape') { setEditName(texture.name || texture.textureId); setEditing(false); }
           }}
           disabled={saving}
           autoFocus
@@ -137,34 +110,10 @@ export default function TextureCard({
       ) : (
         <span
           className="text-[10px] text-center leading-tight cursor-pointer hover:text-primary truncate w-full"
-          onDoubleClick={() => { setEditName(texture.name || texture.textureId); setEditingName(true); }}
+          onDoubleClick={() => { setEditName(texture.name || texture.textureId); setEditing(true); }}
           title={`${texture.textureId} — double-click to rename`}
         >
           {texture.name || texture.textureId}
-        </span>
-      )}
-
-      {/* Editable URL badge */}
-      {editingUrl ? (
-        <Input
-          className="h-5 text-[8px] font-mono text-center"
-          value={editUrl}
-          onChange={(e) => setEditUrl(e.target.value)}
-          onBlur={handleSaveUrl}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') handleSaveUrl();
-            if (e.key === 'Escape') { setEditUrl(texture.url); setEditingUrl(false); }
-          }}
-          disabled={saving}
-          autoFocus
-        />
-      ) : (
-        <span
-          className="text-[8px] font-mono text-muted-foreground truncate w-full text-center cursor-pointer hover:text-primary"
-          onDoubleClick={() => { setEditUrl(texture.url); setEditingUrl(true); }}
-          title={`${texture.url} — double-click to edit URL`}
-        >
-          {texture.url.length > 30 ? texture.url.substring(0, 28) + '…' : texture.url}
         </span>
       )}
 
