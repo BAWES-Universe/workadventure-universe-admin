@@ -15,6 +15,7 @@ export async function GET(request: NextRequest) {
   try {
     const capabilities: Capabilities = {
       "api/woka/list": "v1",
+      "api/companion/list": "v1",
       // Disabled as not yet implemented:
       // "api/save-name": "v1",
       // "api/save-textures": "v1",
