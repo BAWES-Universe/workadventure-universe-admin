@@ -70,21 +70,21 @@ export async function POST(request: NextRequest) {
       const image = sharp(buffer);
       const metadata = await image.metadata();
 
-      // WA textures are 96x128 spritesheets — don't enlarge
-      const maxWidth = 96;
-      const maxHeight = 128;
+      // WA textures must be exactly 96x128 spritesheets
+      const requiredWidth = 96;
+      const requiredHeight = 128;
 
-      let processed = image;
       if (metadata.width && metadata.height) {
-        if (metadata.width > maxWidth || metadata.height > maxHeight) {
-          processed = image.resize(maxWidth, maxHeight, {
-            fit: 'inside',
-            withoutEnlargement: true,
-          });
+        if (metadata.width !== requiredWidth || metadata.height !== requiredHeight) {
+          return NextResponse.json(
+            { error: `Invalid dimensions: ${metadata.width}x${metadata.height}. WA textures must be exactly ${requiredWidth}x${requiredHeight} pixels (spritesheet format).` },
+            { status: 400 }
+          );
         }
       }
 
       const hasAlpha = metadata.hasAlpha || false;
+      const processed = image;
 
       if (file.type === 'image/png' && !hasAlpha) {
         // PNG without transparency → JPEG (smaller)
@@ -105,9 +105,7 @@ export async function POST(request: NextRequest) {
       }
     } catch (err) {
       console.error('Image optimization failed, using original:', err);
-      // Fall back to original if sharp fails
-      const image = sharp(buffer);
-      optimizedBuffer = await image.resize(96, 128, { fit: 'inside', withoutEnlargement: true }).toBuffer();
+      optimizedBuffer = buffer;
     }
 
     // Generate S3 key: avatar-textures/{setId}/{textureId-or-filename}.{ext}

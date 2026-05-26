@@ -735,7 +735,10 @@ export default function AvatarSetDetailPage() {
         {/* === COMPANIONS === */}
         <TabsContent value="companions" className="space-y-4">
           <Card className="border-border/50">
-            <CardHeader><CardTitle className="text-base">Add Companion</CardTitle></CardHeader>
+            <CardHeader>
+              <CardTitle className="text-base">Add Companion</CardTitle>
+              <CardDescription>Standard companion textures are 96×128 PNG spritesheets</CardDescription>
+            </CardHeader>
             <CardContent>
               <div className="flex flex-wrap items-end gap-3">
                 <div className="space-y-1.5">
