@@ -200,7 +200,13 @@ export default function LayerDetailPage() {
             <CardTitle className="text-sm">Sprite Sheet</CardTitle>
           </CardHeader>
           <CardContent className="flex flex-col items-center">
-            {layer && <SpriteSheetPreview url={layer.url} large />}
+            {layer && (
+              <SpriteSheetPreview
+                url={layer.url}
+                playServiceUrl={typeof process !== 'undefined' ? process.env.NEXT_PUBLIC_PLAY_URL : undefined}
+                large
+              />
+            )}
           </CardContent>
         </Card>
 
