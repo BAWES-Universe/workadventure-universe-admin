@@ -45,12 +45,6 @@ services:
       NODE_ENV: development
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://admin.bawes.localhost}
       NEXT_PUBLIC_ENABLE_MANUAL_LOGIN: ${NEXT_PUBLIC_ENABLE_MANUAL_LOGIN:-false}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
-      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-}
-      AWS_ENDPOINT: ${AWS_ENDPOINT:-}
-      AWS_BUCKET: ${AWS_BUCKET:-}
-      AWS_URL: ${AWS_URL:-}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379}
     ports:
       - "5555:5555" # Prisma Studio port
