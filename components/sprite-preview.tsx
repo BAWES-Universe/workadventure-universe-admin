@@ -60,10 +60,10 @@ export default function SpriteSheetPreview({
             <line x1="0" y1="64" x2="192" y2="64" stroke="rgba(255,255,255,0.3)" strokeWidth="1" />
             <line x1="0" y1="128" x2="192" y2="128" stroke="rgba(255,255,255,0.3)" strokeWidth="1" />
             <line x1="0" y1="192" x2="192" y2="192" stroke="rgba(255,255,255,0.3)" strokeWidth="1" />
-            <text x="96" y="30" textAnchor="middle" fill="rgba(255,255,255,0.6)" fontSize="10">Back</text>
-            <text x="96" y="94" textAnchor="middle" fill="rgba(255,255,255,0.6)" fontSize="10">Front</text>
-            <text x="96" y="158" textAnchor="middle" fill="rgba(255,255,255,0.6)" fontSize="10">Side</text>
-            <text x="96" y="222" textAnchor="middle" fill="rgba(255,255,255,0.6)" fontSize="10">Side</text>
+            <text x="96" y="30" textAnchor="middle" fill="rgba(255,255,255,0.6)" fontSize="10">Front</text>
+            <text x="96" y="94" textAnchor="middle" fill="rgba(255,255,255,0.6)" fontSize="10">Left</text>
+            <text x="96" y="158" textAnchor="middle" fill="rgba(255,255,255,0.6)" fontSize="10">Right</text>
+            <text x="96" y="222" textAnchor="middle" fill="rgba(255,255,255,0.6)" fontSize="10">Back</text>
           </svg>
         </div>
         <p className="text-[10px] text-muted-foreground">
