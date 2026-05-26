@@ -711,6 +711,15 @@ export default function AvatarSetDetailPage() {
                         key={l.id}
                         texture={l}
                         onRename={layerRename}
+                        onUpdateUrl={async (id, url) => {
+                          const { authenticatedFetch } = await import('@/lib/client-auth');
+                          await authenticatedFetch(`/api/admin/avatar-sets/${set.id}/layers/${id}`, {
+                            method: 'PATCH',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ url }),
+                          });
+                          fetchSet();
+                        }}
                         onDelete={(id) => handleDeleteLayer(id)}
                       />
                     ))}
@@ -823,6 +832,15 @@ export default function AvatarSetDetailPage() {
                     method: 'PATCH',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ name }),
+                  });
+                  fetchSet();
+                }}
+                onUpdateUrl={async (id, url) => {
+                  const { authenticatedFetch } = await import('@/lib/client-auth');
+                  await authenticatedFetch(`/api/admin/avatar-sets/${set.id}/companions/${id}`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url }),
                   });
                   fetchSet();
                 }}
