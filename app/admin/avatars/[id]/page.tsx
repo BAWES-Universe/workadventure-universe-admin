@@ -712,6 +712,7 @@ export default function AvatarSetDetailPage() {
                         texture={l}
                         onRename={layerRename}
                         onDelete={(id) => handleDeleteLayer(id)}
+                        detailBasePath={`/admin/avatars/${set.id}/layers`}
                       />
                     ))}
                   </div>
@@ -827,6 +828,7 @@ export default function AvatarSetDetailPage() {
                   fetchSet();
                 }}
                 onDelete={(id) => handleDeleteCompanion(id)}
+                detailBasePath={`/admin/avatars/${set.id}/companions`}
               />
             ))}
           </div>
