@@ -11,7 +11,7 @@ import { Loader2, ArrowLeft, Users, Upload, Trash2, Save } from 'lucide-react';
 import SpriteSheetPreview from '@/components/sprite-preview';
 
 const COMPANION_BEHAVIORS = [
-  { value: '', label: 'None' },
+  { value: 'none', label: 'None' },
   { value: 'cat', label: 'Cat' },
   { value: 'dog', label: 'Dog' },
   { value: 'red_panda', label: 'Red Panda' },
