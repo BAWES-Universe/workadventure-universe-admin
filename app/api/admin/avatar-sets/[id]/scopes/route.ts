@@ -12,7 +12,7 @@ export async function GET(_req: NextRequest, { params }: Params) {
 }
 
 export async function POST(req: NextRequest, { params }: Params) {
-  const actor = await requireAdminSession()
+  const actor = await requireSuperAdminSession()
   const body = await req.json()
 
   const VALID_SCOPE_TYPES = ['platform', 'universe', 'world']

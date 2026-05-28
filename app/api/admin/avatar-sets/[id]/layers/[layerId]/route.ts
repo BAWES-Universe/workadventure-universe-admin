@@ -32,7 +32,7 @@ export async function GET(_req: NextRequest, { params }: Params) {
 
 // PATCH /api/admin/avatar-sets/:id/layers/:layerId
 export async function PATCH(req: NextRequest, { params }: Params) {
-  const actor = await requireAdminSession()
+  const actor = await requireSuperAdminSession()
   const body = await req.json()
 
   const existing = await prisma.avatarLayer.findFirst({
@@ -69,7 +69,7 @@ export async function PATCH(req: NextRequest, { params }: Params) {
 
 // DELETE /api/admin/avatar-sets/:id/layers/:layerId
 export async function DELETE(_req: NextRequest, { params }: Params) {
-  const actor = await requireAdminSession()
+  const actor = await requireSuperAdminSession()
 
   // Fetch the layer first to get its URL for S3 cleanup
   const existing = await prisma.avatarLayer.findFirst({

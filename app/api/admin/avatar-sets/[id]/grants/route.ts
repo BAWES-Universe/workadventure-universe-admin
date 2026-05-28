@@ -17,7 +17,7 @@ export async function GET(_req: NextRequest, { params }: Params) {
 }
 
 export async function POST(req: NextRequest, { params }: Params) {
-  const actor = await requireAdminSession()
+  const actor = await requireSuperAdminSession()
   const { id } = await params
 
   let body

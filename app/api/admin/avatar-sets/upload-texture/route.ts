@@ -22,7 +22,7 @@ const ALLOWED_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'im
 
 export async function POST(request: NextRequest) {
   try {
-    await requireAdminSession();
+    await requireSuperAdminSession();
 
     // Check S3 is configured
     if (!process.env.AWS_BUCKET || !process.env.AWS_URL) {

@@ -27,7 +27,7 @@ export async function GET() {
 
 // POST /api/admin/avatar-sets
 export async function POST(req: NextRequest) {
-  const actor = await requireAdminSession()
+  const actor = await requireSuperAdminSession()
   const body = await req.json()
 
   // Validate date fields

@@ -16,7 +16,7 @@ export async function GET(_req: NextRequest, { params }: Params) {
 
 // POST /api/admin/avatar-sets/:id/layers
 export async function POST(req: NextRequest, { params }: Params) {
-  const actor = await requireAdminSession()
+  const actor = await requireSuperAdminSession()
   const body = await req.json()
 
   const VALID_LAYER_TYPES = ['woka', 'body', 'eyes', 'hair', 'clothes', 'hat', 'accessory', 'shoes', 'background']
