@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
-import { requireAdminSession } from '@/lib/auth'
+import { requireSuperAdminSession } from '@/lib/auth'
 
 type Params = { params: Promise<{ id: string; policyId: string }> }
 

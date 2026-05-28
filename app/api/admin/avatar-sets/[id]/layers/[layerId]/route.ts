@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
-import { requireAdminSession } from '@/lib/auth'
+import { requireAdminSession, requireSuperAdminSession } from '@/lib/auth'
 import { extractS3KeyFromUrl, deleteImageFromS3 } from '@/lib/s3-upload'
 
 /**

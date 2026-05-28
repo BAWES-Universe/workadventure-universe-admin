@@ -13,7 +13,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { requireAdminSession } from '@/lib/auth';
+import { requireSuperAdminSession } from '@/lib/auth';
 import { uploadImageToS3 } from '@/lib/s3-upload';
 import sharp from 'sharp';
 
