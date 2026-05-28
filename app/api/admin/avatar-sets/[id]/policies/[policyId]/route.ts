@@ -8,7 +8,7 @@ export async function PATCH(req: NextRequest, { params }: Params) {
   const actor = await requireAdminSession()
   const body = await req.json()
   const policy = await prisma.avatarEntitlementPolicy.update({
-    where: { id: (await params).policyId },
+    where: { id: (await params).policyId, avatarSetId: (await params).id },
     data: {
       ...(body.isActive !== undefined && { isActive: body.isActive }),
       ...(body.subjectValue !== undefined && { subjectValue: body.subjectValue }),
@@ -22,7 +22,7 @@ export async function PATCH(req: NextRequest, { params }: Params) {
 
 export async function DELETE(_req: NextRequest, { params }: Params) {
   const actor = await requireAdminSession()
-  const policy = await prisma.avatarEntitlementPolicy.delete({ where: { id: (await params).policyId } })
+  const policy = await prisma.avatarEntitlementPolicy.delete({ where: { id: (await params).policyId, avatarSetId: (await params).id } })
   await prisma.avatarSetAuditLog.create({
     data: {
       avatarSetId: (await params).id,

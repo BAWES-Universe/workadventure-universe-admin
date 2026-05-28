@@ -16,9 +16,10 @@ export async function GET(request: NextRequest) {
     const capabilities: Capabilities = {
       "api/woka/list": "v1",
       "api/companion/list": "v1",
-      "api/save-name": "v1",
-      "api/save-textures": "v1",
-      "api/save-companion-texture": "v1",
+      // Disabled as not yet implemented:
+      // "api/save-name": "v1",
+      // "api/save-textures": "v1",
+      // "api/ice-servers": "v1",
     };
     
     return NextResponse.json(capabilities);

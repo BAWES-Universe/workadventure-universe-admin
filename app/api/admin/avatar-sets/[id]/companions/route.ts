@@ -38,7 +38,7 @@ export async function POST(req: NextRequest, { params }: Params) {
       avatarSetId: (await params).id,
       actorId: actor.userId,
       action: 'companion.added',
-      diff: { after: { textureId: companion.textureId, url: companion.url } },
+      diff: { after: { textureId: companion.textureId, url: companion.url, name: companion.name, behavior: companion.behavior, position: companion.position } },
     },
   })
 

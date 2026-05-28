@@ -44,6 +44,24 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  const VALID_KINDS = ['woka', 'companion']
+  const VALID_VISIBILITIES = ['public', 'unlisted', 'private']
+  const VALID_MONETIZATION_TYPES = ['free', 'one_time', 'subscription', 'metered']
+  const VALID_SOURCE_OWNER_TYPES = ['platform', 'world_admin', 'partner']
+
+  if (body.kind && !VALID_KINDS.includes(body.kind)) {
+    return NextResponse.json({ error: `Invalid kind. Must be one of: ${VALID_KINDS.join(', ')}` }, { status: 400 })
+  }
+  if (body.visibility && !VALID_VISIBILITIES.includes(body.visibility)) {
+    return NextResponse.json({ error: `Invalid visibility. Must be one of: ${VALID_VISIBILITIES.join(', ')}` }, { status: 400 })
+  }
+  if (body.monetizationType && !VALID_MONETIZATION_TYPES.includes(body.monetizationType)) {
+    return NextResponse.json({ error: `Invalid monetizationType. Must be one of: ${VALID_MONETIZATION_TYPES.join(', ')}` }, { status: 400 })
+  }
+  if (body.sourceOwnerType && !VALID_SOURCE_OWNER_TYPES.includes(body.sourceOwnerType)) {
+    return NextResponse.json({ error: `Invalid sourceOwnerType. Must be one of: ${VALID_SOURCE_OWNER_TYPES.join(', ')}` }, { status: 400 })
+  }
+
   const set = await prisma.avatarSet.create({
     data: {
       slug: body.slug,
