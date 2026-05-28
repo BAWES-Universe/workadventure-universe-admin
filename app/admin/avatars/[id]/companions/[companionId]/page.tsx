@@ -11,7 +11,7 @@ import { Loader2, ArrowLeft, Users, Upload, Trash2, Save } from 'lucide-react';
 import SpriteSheetPreview from '@/components/sprite-preview';
 
 const COMPANION_BEHAVIORS = [
-  { value: 'none', label: 'None' },
+  { value: '', label: 'None' },
   { value: 'cat', label: 'Cat' },
   { value: 'dog', label: 'Dog' },
   { value: 'red_panda', label: 'Red Panda' },
@@ -43,7 +43,7 @@ export default function CompanionDetailPage() {
   // Edit form state
   const [name, setName] = useState('');
   const [url, setUrl] = useState('');
-  const [behavior, setBehavior] = useState('none');
+  const [behavior, setBehavior] = useState('');
   const [position, setPosition] = useState(0);
   const [isActive, setIsActive] = useState(true);
 
@@ -64,7 +64,7 @@ export default function CompanionDetailPage() {
       setCompanion(data);
       setName(data.name || data.textureId);
       setUrl(data.url);
-      setBehavior(data.behavior || 'none');
+      setBehavior(data.behavior || '');
       setPosition(data.position);
       setIsActive(data.isActive);
     } catch (err) {
@@ -205,13 +205,7 @@ export default function CompanionDetailPage() {
             <CardTitle className="text-sm">Sprite Sheet</CardTitle>
           </CardHeader>
           <CardContent className="flex flex-col items-center">
-            {companion && (
-              <SpriteSheetPreview
-                url={companion.url}
-                playServiceUrl={typeof process !== 'undefined' ? process.env.NEXT_PUBLIC_PLAY_URL : undefined}
-                large
-              />
-            )}
+            {companion && <SpriteSheetPreview url={companion.url} large />}
           </CardContent>
         </Card>
 
