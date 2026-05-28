@@ -47,7 +47,9 @@ jobs:
       - name: Run tests
         env:
           DATABASE_URL: "postgresql://dummy:dummy@localhost:5432/dummy"
-        run: npx jest __tests__/lib/ 2>&1 | tail -30
+        run: |
+          set -o pipefail
+          npx jest __tests__/lib/ 2>&1 | tail -30
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
