@@ -25,8 +25,9 @@ export async function PATCH(req: NextRequest, { params }: Params) {
   const actor = await requireAdminSession()
   const body = await req.json()
 
-  // Fetch existing to check for S3 URL change
-  const existing = await prisma.avatarLayer.findUnique({ where: { id: (await params).layerId } })
+  const existing = await prisma.avatarLayer.findFirst({
+    where: { id: (await params).layerId, avatarSetId: (await params).id },
+  })
   if (!existing) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 
   const layer = await prisma.avatarLayer.update({
@@ -61,7 +62,9 @@ export async function DELETE(_req: NextRequest, { params }: Params) {
   const actor = await requireAdminSession()
 
   // Fetch the layer first to get its URL for S3 cleanup
-  const existing = await prisma.avatarLayer.findUnique({ where: { id: (await params).layerId } })
+  const existing = await prisma.avatarLayer.findFirst({
+    where: { id: (await params).layerId, avatarSetId: (await params).id },
+  })
   if (!existing) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 
   const layer = await prisma.avatarLayer.delete({ where: { id: (await params).layerId } })

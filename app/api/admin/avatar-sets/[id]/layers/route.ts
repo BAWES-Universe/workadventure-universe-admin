@@ -19,6 +19,12 @@ export async function POST(req: NextRequest, { params }: Params) {
   const actor = await requireAdminSession()
   const body = await req.json()
 
+  const VALID_LAYER_TYPES = ['woka', 'body', 'eyes', 'hair', 'clothes', 'hat', 'accessory', 'shoes', 'background']
+
+  if (!body.layer || !VALID_LAYER_TYPES.includes(body.layer)) {
+    return NextResponse.json({ error: `Invalid layer type. Must be one of: ${VALID_LAYER_TYPES.join(', ')}` }, { status: 400 })
+  }
+
   const layer = await prisma.avatarLayer.create({
     data: {
       avatarSetId: (await params).id,
