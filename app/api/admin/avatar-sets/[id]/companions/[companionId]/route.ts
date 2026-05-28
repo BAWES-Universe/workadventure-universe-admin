@@ -20,15 +20,6 @@ async function cleanupS3Texture(url: string): Promise<void> {
 
 type Params = { params: Promise<{ id: string; companionId: string }> }
 
-export async function GET(_req: NextRequest, { params }: Params) {
-  await requireAdminSession()
-  const companion = await prisma.avatarCompanion.findUnique({
-    where: { id: (await params).companionId },
-  })
-  if (!companion) return NextResponse.json({ error: 'Not found' }, { status: 404 })
-  return NextResponse.json(companion)
-}
-
 export async function PATCH(req: NextRequest, { params }: Params) {
   const actor = await requireAdminSession()
   const body = await req.json()

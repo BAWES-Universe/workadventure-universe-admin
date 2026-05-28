@@ -20,14 +20,6 @@ async function cleanupS3Texture(url: string): Promise<void> {
 
 type Params = { params: Promise<{ id: string; layerId: string }> }
 
-// GET /api/admin/avatar-sets/:id/layers/:layerId
-export async function GET(_req: NextRequest, { params }: Params) {
-  await requireAdminSession()
-  const layer = await prisma.avatarLayer.findUnique({ where: { id: (await params).layerId } })
-  if (!layer) return NextResponse.json({ error: 'Not found' }, { status: 404 })
-  return NextResponse.json(layer)
-}
-
 // PATCH /api/admin/avatar-sets/:id/layers/:layerId
 export async function PATCH(req: NextRequest, { params }: Params) {
   const actor = await requireAdminSession()
