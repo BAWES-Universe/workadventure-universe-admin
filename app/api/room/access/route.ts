@@ -3,7 +3,7 @@ import { requireAuth, getClientIp } from '@/lib/auth';
 import { parsePlayUri } from '@/lib/utils';
 import { authenticateRequest } from '@/lib/oidc';
 import { prisma } from '@/lib/db';
-import { validateWokaTextures, validateCompanionTexture } from '@/lib/wokas';
+import { resolveTextureUrls, resolveCompanionTexture } from '@/lib/avatar-catalog-validator';
 import { notifyRoomAccess } from '@/lib/discord';
 import type { FetchMemberDataByUuidSuccessResponse, ErrorApiData } from '@/types/workadventure';
 
@@ -318,13 +318,14 @@ export async function GET(request: NextRequest) {
       // Get play service URL for texture validation
       const playServiceUrl = process.env.PLAY_URL || 'http://play.workadventure.localhost';
       
-      // Validate character textures against available Wokas
-      const textureValidation = await validateWokaTextures(textureIds, playServiceUrl);
+      // Validate character textures — first try catalog, fall back to static JSON
+      const textureValidation = await resolveTextureUrls(
+        prisma, textureIds, worldData.id, worldData.universeId, playServiceUrl
+      );
       
       // Validate companion texture if provided
-      const companionValidation = await validateCompanionTexture(
-        companionTextureId,
-        playServiceUrl
+      const companionValidation = await resolveCompanionTexture(
+        prisma, companionTextureId, worldData.id, worldData.universeId, playServiceUrl
       );
       
       // If textures are invalid and we have stored avatar textures, use them as fallback
@@ -332,8 +333,10 @@ export async function GET(request: NextRequest) {
       let isTexturesValid = textureValidation.valid;
       
       if (!isTexturesValid && avatar?.textureIds && avatar.textureIds.length > 0) {
-        // Try to validate stored textures as fallback
-        const fallbackValidation = await validateWokaTextures(avatar.textureIds, playServiceUrl);
+        // Try to validate stored textures as fallback (use catalog, with scope from the same world)
+        const fallbackValidation = await resolveTextureUrls(
+          prisma, avatar.textureIds, worldData.id, worldData.universeId, playServiceUrl
+        );
         if (fallbackValidation.valid) {
           finalTextures = fallbackValidation.textures;
           isTexturesValid = true;
@@ -345,9 +348,8 @@ export async function GET(request: NextRequest) {
       let isCompanionValid = companionValidation.valid;
       
       if (!isCompanionValid && avatar?.companionTextureId) {
-        const fallbackCompanion = await validateCompanionTexture(
-          avatar.companionTextureId,
-          playServiceUrl
+        const fallbackCompanion = await resolveCompanionTexture(
+          prisma, avatar.companionTextureId, worldData.id, worldData.universeId, playServiceUrl
         );
         if (fallbackCompanion.valid) {
           finalCompanionTexture = fallbackCompanion.texture;

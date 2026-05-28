@@ -38,6 +38,8 @@ model User {
   botsUpdated       Bot[] @relation("BotUpdatedBy")
   botConversations BotsConversation[]
   botMemories      BotsMemory[]
+  avatarGrants     UserAvatarGrant[]
+  avatarSetAuditLogs AvatarSetAuditLog[]
 
   @@map("users")
 }
@@ -87,6 +89,7 @@ model World {
   favorites  Favorite[]
   roomAccesses RoomAccess[]
   membershipInvitations MembershipInvitation[]
+  avatarScopes AvatarSetScope[]
 
   @@unique([universeId, slug]) // Slug unique within universe
   @@map("worlds")
@@ -341,14 +344,13 @@ model RoomTemplate {
   slug             String   @unique
   name             String
   shortDescription String?  @map("short_description")
-  // Future fields (store but don't use in MVP UI):
   philosophy       String?
   purpose          String?
   whoItsFor        String?  @map("who_its_for")
   typicalUseCases  String[] @map("typical_use_cases")
   visibility       String   @default("public")
   isFeatured       Boolean  @default(false) @map("is_featured")
-  authorId         String?  @map("author_id") // String for now, TemplateAuthor model in v2
+  authorId         String?  @map("author_id")
   isActive          Boolean  @default(true) @map("is_active")
   createdAt        DateTime @default(now()) @map("created_at")
   updatedAt        DateTime @updatedAt @map("updated_at")
@@ -366,13 +368,13 @@ model RoomTemplateMap {
   slug                String
   name                String
   description         String?
-  mapUrl              String   @map("map_url") // TMJ or WAM URL
-  previewImageUrl     String?  @map("preview_image_url") // Store but don't display in MVP
-  sizeLabel           String?  @map("size_label") // small | medium | large
+  mapUrl              String   @map("map_url")
+  previewImageUrl     String?  @map("preview_image_url")
+  sizeLabel           String?  @map("size_label")
   orientation         String   @default("orthogonal")
   tileSize            Int      @default(32) @map("tile_size")
-  recommendedWorldTags String[] @map("recommended_world_tags") // Store but don't use in MVP
-  authorId            String?  @map("author_id") // String for now
+  recommendedWorldTags String[] @map("recommended_world_tags")
+  authorId            String?  @map("author_id")
   order               Int      @default(0)
   isActive            Boolean  @default(true) @map("is_active")
   createdAt           DateTime @default(now()) @map("created_at")
@@ -394,7 +396,7 @@ model Bot {
   description         String?
   characterTextureId  String?  @map("character_texture_id") @db.VarChar(100)
   enabled             Boolean  @default(true)
-  behaviorType        String   @default("idle") @map("behavior_type") @db.VarChar(20) // 'idle', 'patrol', or 'social'
+  behaviorType        String   @default("idle") @map("behavior_type") @db.VarChar(20)
   behaviorConfig      Json     @default("{}") @map("behavior_config")
   chatInstructions    String?  @map("chat_instructions")
   movementInstructions String?  @map("movement_instructions")
@@ -416,21 +418,20 @@ model Bot {
 model BotsAiProvider {
   providerId        String   @id @map("provider_id") @db.VarChar(50)
   name              String   @db.VarChar(255)
-  type              String   @db.VarChar(50) // 'lmstudio', 'openai', 'anthropic', 'ultravox', 'gpt-voice'
+  type              String   @db.VarChar(50)
   enabled           Boolean  @default(false)
   endpoint          String?  @db.Text
-  apiKeyEncrypted   String?  @map("api_key_encrypted") @db.Text // Encrypted API key: "iv:authTag:encryptedData"
+  apiKeyEncrypted   String?  @map("api_key_encrypted") @db.Text
   model             String?  @db.VarChar(255)
   temperature       Decimal? @db.Decimal(3, 2) @default(0.7)
   maxTokens         Int?     @map("max_tokens") @default(500)
   supportsStreaming Boolean  @default(true) @map("supports_streaming")
-  settings          Json?    @default("{}") // Provider-specific settings
+  settings          Json?    @default("{}")
   tested            Boolean  @default(false)
   testedAt          DateTime? @map("tested_at")
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")
 
-  // Relations
   usage             BotsAiUsage[]
 
   @@index([enabled])
@@ -445,13 +446,12 @@ model BotsAiUsage {
   providerId      String   @map("provider_id") @db.VarChar(50)
   tokensUsed      Int      @default(0) @map("tokens_used")
   apiCalls        Int      @default(1) @map("api_calls")
-  durationSeconds Int?     @map("duration_seconds") // For voice AI (duration in seconds)
-  cost            Decimal? @db.Decimal(10, 4) // Cost in USD or credits
-  latency         Int?     // Milliseconds
+  durationSeconds Int?     @map("duration_seconds")
+  cost            Decimal? @db.Decimal(10, 4)
+  latency         Int?
   error           Boolean  @default(false)
   timestamp       DateTime @default(now())
 
-  // Relations
   provider        BotsAiProvider @relation(fields: [providerId], references: [providerId], onDelete: Cascade)
 
   @@index([botId])
@@ -461,81 +461,76 @@ model BotsAiUsage {
   @@map("bots_ai_usage")
 }
 
-// Bot Metrics - Time-series metrics (flattened storage)
+// Bot Metrics
 model BotsMetric {
   id          Int      @id @default(autoincrement())
   botId       String   @map("bot_id") @db.VarChar(255)
-  metricType  String   @map("metric_type") @db.VarChar(50) // 'response_time', 'token_usage_prompt', etc.
-  metricValue Decimal  @map("metric_value") @db.Decimal(15, 4) // Supports integers and decimals
-  metadata    Json?   // Additional context (playerId, spaceName, etc.)
+  metricType  String   @map("metric_type") @db.VarChar(50)
+  metricValue Decimal  @map("metric_value") @db.Decimal(15, 4)
+  metadata    Json?
   timestamp   DateTime @default(now())
 
   @@index([botId, timestamp])
   @@index([metricType, timestamp])
-  @@index([timestamp]) // For cleanup queries
+  @@index([timestamp])
   @@map("bots_metrics")
 }
 
-// Bot Conversations - Recent conversations for admin viewing
-// Conversation lifecycle:
-// - Active conversations: ended_at = started_at (can be updated)
-// - Completed conversations: ended_at > started_at (historical, read-only)
+// Bot Conversations
 model BotsConversation {
   id           Int      @id @default(autoincrement())
   botId        String   @map("bot_id") @db.VarChar(255)
-  userUuid     String?  @map("user_uuid") @db.VarChar(255) // WorkAdventure UUID (ephemeral for guests)
-  userId       String?  @map("user_id") // Foreign key to User.id (only set if authenticated)
-  userName     String?  @map("user_name") @db.VarChar(255) // Display name (from request or User.name)
-  isGuest      Boolean  @default(true) @map("is_guest") // true if unauthenticated
-  messages     Json     // Array of { sender, message, timestamp }
+  userUuid     String?  @map("user_uuid") @db.VarChar(255)
+  userId       String?  @map("user_id")
+  userName     String?  @map("user_name") @db.VarChar(255)
+  isGuest      Boolean  @default(true) @map("is_guest")
+  messages     Json
   startedAt    DateTime @map("started_at")
   endedAt      DateTime @map("ended_at")
   messageCount Int      @map("message_count")
-  endReason    String?  @map("end_reason") @db.VarChar(50) // 'user_left', 'bot_shutdown', 'manual', 'timeout'
+  endReason    String?  @map("end_reason") @db.VarChar(50)
   createdAt    DateTime @default(now()) @map("created_at")
 
-  // Relations
   user         User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
 
   @@index([botId, createdAt])
   @@index([userUuid])
   @@index([userId])
-  @@index([createdAt]) // For cleanup queries
-  @@index([endedAt]) // For cleanup by date
+  @@index([createdAt])
+  @@index([endedAt])
   @@map("bots_conversations_recent")
 }
 
-// Bot Test Results - Test results for regression testing (dev only)
+// Bot Test Results
 model BotsTestResult {
   id        Int      @id @default(autoincrement())
   testId    String   @unique @map("test_id") @db.VarChar(255)
   botId     String?  @map("bot_id") @db.VarChar(255)
   testSuite String?  @map("test_suite") @db.VarChar(255)
-  results   Json     // Test results object
+  results   Json
   passed    Boolean
   createdAt DateTime @default(now()) @map("created_at")
 
   @@index([botId])
   @@index([testSuite])
-  @@index([createdAt]) // For cleanup queries
+  @@index([createdAt])
   @@map("bots_test_results")
 }
 
-// Bot Memory - Enhanced memory with emotions
+// Bot Memory
 model BotsMemory {
   id              Int       @id @default(autoincrement())
   botId           String    @map("bot_id") @db.VarChar(255)
-  userUuid        String    @map("user_uuid") @db.VarChar(255) // REQUIRED - WorkAdventure UUID
-  userId          String?   @map("user_id") // Optional - Foreign key to User.id
-  userName        String?   @map("user_name") @db.VarChar(255) // Display name
-  isGuest         Boolean   @default(true) @map("is_guest") // true if unauthenticated
-  memories        Json?     // Array of memory objects
-  emotions        Json?     // Emotion data: { botEmotion: {...}, personEmotion: {...} }
+  userUuid        String    @map("user_uuid") @db.VarChar(255)
+  userId          String?   @map("user_id")
+  userName        String?   @map("user_name") @db.VarChar(255)
+  isGuest         Boolean   @default(true) @map("is_guest")
+  memories        Json?
+  emotions        Json?
   lastEmotionUpdate DateTime? @map("last_emotion_update")
   createdAt       DateTime  @default(now()) @map("created_at")
   updatedAt       DateTime  @updatedAt @map("updated_at")
 
-  // Relations
   user            User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
 
   @@unique([botId, userUuid])
@@ -543,4 +538,226 @@ model BotsMemory {
   @@index([userUuid])
   @@index([userId])
   @@map("bots_memory")
+}
+
+// =============================================================================
+// AVATAR CATALOG SYSTEM
+// =============================================================================
+
+// AvatarSet — a named, publishable group of woka layers and/or companions.
+// visibility:
+//   "public"       -> shown to all eligible players in picker
+//   "hidden"       -> never shown in picker; bots/direct assignment only
+//   "restricted"   -> shown only to players who have a matching entitlement
+//   "assigned_only"-> never in picker; only usable via direct UserAvatarGrant
+//
+// scopeType (on AvatarSetScope):
+//   "platform"  -> available across all universes/worlds
+//   "universe"  -> available inside one universe
+//   "world"     -> available inside one world
+model AvatarSet {
+  id          String   @id @default(uuid())
+  slug        String   @unique // e.g. "default", "zoo-animals", "museum-staff"
+  name        String
+  description String?
+
+  // What kind of assets this set provides
+  // "woka" | "companion" | "mixed"
+  kind        String   @default("woka")
+
+  // Lifecycle: "draft" | "active" | "archived"
+  lifecycle   String   @default("draft")
+
+  // Who sees this in the player picker
+  // "public" | "hidden" | "restricted" | "assigned_only"
+  visibility  String   @default("public")
+
+  // Commercial / ownership metadata (for future monetisation)
+  // "platform" | "partner" | "internal" | "client"
+  sourceOwnerType  String  @default("platform") @map("source_owner_type")
+  partnerRef       String? @map("partner_ref")       // external partner/client id
+  campaignCode     String? @map("campaign_code")
+  // "free" | "subscription" | "purchase" | "sponsored" | "custom_contract"
+  monetizationType String  @default("free") @map("monetization_type")
+  billingReference String? @map("billing_reference")
+  licenseNotes     String? @map("license_notes")
+
+  // Availability window (null = no limit)
+  availableFrom DateTime? @map("available_from")
+  availableUntil DateTime? @map("available_until")
+
+  // Display order in admin and picker
+  position    Int      @default(0)
+
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  // Relations
+  layers       AvatarLayer[]
+  companions   AvatarCompanion[]
+  scopes       AvatarSetScope[]
+  policies     AvatarEntitlementPolicy[]
+  userGrants   UserAvatarGrant[]
+  auditLogs    AvatarSetAuditLog[]
+
+  @@index([lifecycle, visibility])
+  @@map("avatar_sets")
+}
+
+// AvatarLayer — a single texture asset belonging to a set.
+// layer values mirror the woka.json top-level keys:
+//   "woka" | "body" | "eyes" | "hair" | "clothes" | "hat" | "accessory"
+model AvatarLayer {
+  id          String  @id @default(uuid())
+  avatarSetId String  @map("avatar_set_id")
+
+  // The texture ID used by WorkAdventure (e.g. "male1", "hair23")
+  textureId   String  @map("texture_id")
+
+  // Which customisation layer this belongs to
+  layer       String  // "woka"|"body"|"eyes"|"hair"|"clothes"|"hat"|"accessory"
+
+  name        String?
+  // Full URL or play-relative path — stored as-is, resolved at runtime
+  url         String
+  position    Int     @default(0)
+  isActive    Boolean @default(true) @map("is_active")
+
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  avatarSet   AvatarSet @relation(fields: [avatarSetId], references: [id], onDelete: Cascade)
+
+  @@unique([avatarSetId, textureId])
+  @@index([avatarSetId, layer])
+  @@index([textureId])
+  @@map("avatar_layers")
+}
+
+// AvatarCompanion — a companion asset belonging to a set.
+model AvatarCompanion {
+  id          String  @id @default(uuid())
+  avatarSetId String  @map("avatar_set_id")
+  textureId   String  @map("texture_id")
+  name        String?
+  url         String
+  behavior    String? // optional WA companion behavior hint
+  position    Int     @default(0)
+  isActive    Boolean @default(true) @map("is_active")
+
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  avatarSet   AvatarSet @relation(fields: [avatarSetId], references: [id], onDelete: Cascade)
+
+  @@unique([avatarSetId, textureId])
+  @@index([avatarSetId])
+  @@map("avatar_companions")
+}
+
+// AvatarSetScope — controls WHERE a set is available.
+// scopeType "platform" -> no scopeId needed (global)
+// scopeType "universe" -> scopeId = Universe.id
+// scopeType "world"    -> scopeId = World.id
+model AvatarSetScope {
+  id          String  @id @default(uuid())
+  avatarSetId String  @map("avatar_set_id")
+  scopeType   String  @map("scope_type") // "platform" | "universe" | "world"
+  scopeId     String? @map("scope_id")   // null for platform scope
+
+  // Optional: a direct World FK so Prisma can validate world-level scopes
+  worldId     String? @map("world_id")
+
+  avatarSet   AvatarSet @relation(fields: [avatarSetId], references: [id], onDelete: Cascade)
+  world       World?    @relation(fields: [worldId], references: [id], onDelete: Cascade)
+
+  @@unique([avatarSetId, scopeType, scopeId])
+  @@index([avatarSetId])
+  @@index([scopeType, scopeId])
+  @@map("avatar_set_scopes")
+}
+
+// AvatarEntitlementPolicy — defines WHO can use a restricted/assigned set.
+// subjectType:
+//   "everyone"         -> all authenticated users (useful with restricted + world scope)
+//   "membership_tag"   -> WorldMembers with matching tag (most common for staff/VIP)
+//   "user"             -> specific User.id
+//   "email_domain"     -> e.g. "@company.com"
+//   "subscription_plan"-> for future paid club feature
+//   "external_contract"-> for partner API grants
+model AvatarEntitlementPolicy {
+  id          String  @id @default(uuid())
+  avatarSetId String  @map("avatar_set_id")
+
+  subjectType  String  @map("subject_type")
+  subjectValue String? @map("subject_value") // tag name, user id, domain, plan id, etc.
+
+  // What the subject can do:
+  // "select"         -> can pick in player woka picker
+  // "assign_to_bot"  -> admin can assign to bots
+  // "manage"         -> full admin control over the set
+  action      String  @default("select")
+
+  // Optional world scope override for tag-based policies
+  worldId     String? @map("world_id")
+
+  isActive    Boolean @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  avatarSet   AvatarSet @relation(fields: [avatarSetId], references: [id], onDelete: Cascade)
+
+  @@index([avatarSetId])
+  @@index([subjectType, subjectValue])
+  @@map("avatar_entitlement_policies")
+}
+
+// UserAvatarGrant — direct per-user grants (overrides visibility rules).
+// Use for: celebrity custom character, contest winner, support/gift grants.
+model UserAvatarGrant {
+  id          String   @id @default(uuid())
+  userId      String   @map("user_id")
+  avatarSetId String   @map("avatar_set_id")
+
+  // "select" | "assigned_only" (admin forced their outfit)
+  grantType   String   @default("select") @map("grant_type")
+
+  // Optional note for audit purposes (e.g. "Contest winner May 2026")
+  note        String?
+
+  expiresAt   DateTime? @map("expires_at") // null = permanent
+  grantedAt   DateTime  @default(now()) @map("granted_at")
+  revokedAt   DateTime? @map("revoked_at")
+  isActive    Boolean   @default(true) @map("is_active")
+
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  avatarSet   AvatarSet @relation(fields: [avatarSetId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isActive])
+  @@index([avatarSetId])
+  @@map("user_avatar_grants")
+}
+
+// AvatarSetAuditLog — immutable audit trail for all catalog changes.
+model AvatarSetAuditLog {
+  id          Int      @id @default(autoincrement())
+  avatarSetId String   @map("avatar_set_id")
+  actorId     String?  @map("actor_id") // User.id who made the change
+
+  // e.g. "set.created", "set.published", "set.archived",
+  //      "layer.added", "layer.removed", "scope.added",
+  //      "policy.added", "policy.removed", "grant.issued", "grant.revoked"
+  action      String
+
+  // JSON snapshot of what changed: { before: {...}, after: {...} }
+  diff        Json?
+
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  avatarSet   AvatarSet @relation(fields: [avatarSetId], references: [id], onDelete: Cascade)
+  actor       User?     @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([avatarSetId, createdAt])
+  @@index([actorId, createdAt])
+  @@index([createdAt])
+  @@map("avatar_set_audit_logs")
 }

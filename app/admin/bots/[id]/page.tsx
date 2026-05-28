@@ -18,6 +18,7 @@ import {
 } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
 import { AlertCircle, Loader2, ArrowLeft, Activity, TrendingUp, DollarSign, AlertTriangle, BarChart3, MessageSquare, Heart, Clock } from 'lucide-react';
+import BotTexturePicker from '@/components/bot-texture-picker';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
@@ -651,6 +652,12 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
             </div>
           </CardContent>
         </Card>
+
+        <BotTexturePicker
+          botId={bot.id}
+          currentTextureId={bot.characterTextureId}
+          onTextureChanged={fetchBot}
+        />
       </div>
       )}
         </TabsContent>
