@@ -139,3 +139,22 @@ export async function requireAdminSession(): Promise<{ userId: string }> {
   return { userId: user.id };
 }
 
+/**
+ * Requires the caller to be a super admin (authenticated session + super admin email).
+ * Throws 'Unauthorized' or 'Forbidden' if the check fails.
+ */
+export async function requireSuperAdminSession(): Promise<{ userId: string }> {
+  const { userId } = await requireAdminSession();
+
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { email: true },
+  });
+
+  if (!user || !isSuperAdmin(user.email)) {
+    throw new Error('Forbidden');
+  }
+
+  return { userId };
+}
+

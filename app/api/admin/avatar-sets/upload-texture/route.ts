@@ -13,7 +13,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { requireAdminSession } from '@/lib/auth';
+import { requireSuperAdminSession } from '@/lib/auth';
 import { uploadImageToS3 } from '@/lib/s3-upload';
 import sharp from 'sharp';
 
@@ -22,7 +22,7 @@ const ALLOWED_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'im
 
 export async function POST(request: NextRequest) {
   try {
-    await requireAdminSession();
+    await requireSuperAdminSession();
 
     // Check S3 is configured
     if (!process.env.AWS_BUCKET || !process.env.AWS_URL) {

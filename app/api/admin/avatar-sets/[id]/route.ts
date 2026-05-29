@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
-import { requireAdminSession } from '@/lib/auth'
+import { requireAdminSession, requireSuperAdminSession } from '@/lib/auth'
 
 type Params = { params: Promise<{ id: string }> }
 
@@ -31,7 +31,7 @@ export async function GET(_req: NextRequest, { params }: Params) {
 
 // PATCH /api/admin/avatar-sets/:id
 export async function PATCH(req: NextRequest, { params }: Params) {
-  const actor = await requireAdminSession()
+  const actor = await requireSuperAdminSession()
   const body = await req.json()
 
   const before = await prisma.avatarSet.findUnique({ where: { id: (await params).id } })
@@ -80,7 +80,7 @@ export async function PATCH(req: NextRequest, { params }: Params) {
 
 // DELETE /api/admin/avatar-sets/:id  — soft archive only
 export async function DELETE(_req: NextRequest, { params }: Params) {
-  const actor = await requireAdminSession()
+  const actor = await requireSuperAdminSession()
 
   const existingSet = await prisma.avatarSet.findUnique({
     where: { id: (await params).id },

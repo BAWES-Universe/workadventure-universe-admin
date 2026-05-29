@@ -1,11 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
-import { requireAdminSession } from '@/lib/auth'
+import { requireSuperAdminSession } from '@/lib/auth'
 
 type Params = { params: Promise<{ id: string; policyId: string }> }
 
 export async function PATCH(req: NextRequest, { params }: Params) {
-  const actor = await requireAdminSession()
+  const actor = await requireSuperAdminSession()
   const body = await req.json()
   const policy = await prisma.avatarEntitlementPolicy.update({
     where: { id: (await params).policyId, avatarSetId: (await params).id },
@@ -21,7 +21,7 @@ export async function PATCH(req: NextRequest, { params }: Params) {
 }
 
 export async function DELETE(_req: NextRequest, { params }: Params) {
-  const actor = await requireAdminSession()
+  const actor = await requireSuperAdminSession()
   const policy = await prisma.avatarEntitlementPolicy.delete({ where: { id: (await params).policyId, avatarSetId: (await params).id } })
   await prisma.avatarSetAuditLog.create({
     data: {
