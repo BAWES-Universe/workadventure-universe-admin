@@ -137,7 +137,8 @@ export async function POST(request: NextRequest) {
         where: { id: user.id },
         data: {
           email: email || user.email,
-          name: name || user.name,
+          // Don't overwrite name — user may have customized it via save-name
+          // name: name || user.name,
           isGuest: false,
         },
       });
