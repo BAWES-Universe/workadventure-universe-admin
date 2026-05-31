@@ -185,7 +185,6 @@ jobs:
             -f environment=admin \
             -f description="v${NEW_VERSION}" \
             -F auto_merge=false \
-            -F required_contexts='[]' \
             --jq '.id')
           gh api repos/${{ github.repository }}/deployments/${DEPLOY_ID}/statuses \
             -f state=success \
