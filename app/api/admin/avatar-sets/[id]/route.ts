@@ -59,6 +59,13 @@ export async function PATCH(req: NextRequest, { params }: Params) {
       }),
       ...(body.position !== undefined && { position: body.position }),
     },
+    include: {
+      layers: { orderBy: { position: 'asc' } },
+      companions: { orderBy: { position: 'asc' } },
+      scopes: true,
+      policies: true,
+      userGrants: true,
+    },
   })
 
   // Determine action label for audit
