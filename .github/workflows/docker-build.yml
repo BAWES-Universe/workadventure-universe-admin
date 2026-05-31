@@ -112,7 +112,7 @@ jobs:
         id: calculate
         run: |
           PKG_VERSION=$(node -p "require('./package.json').version")
-          LATEST_TAG=$(git tag -l 'v*.*.*' --sort=-v:refname | head -1)
+          LATEST_TAG=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -1)
           LATEST_VERSION="${LATEST_TAG#v}"
 
           echo "Package.json: $PKG_VERSION"
@@ -135,8 +135,9 @@ jobs:
       - name: Create tag and release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_VERSION: ${{ steps.calculate.outputs.new_version }}
         run: |
-          VERSION="v${{ steps.calculate.outputs.new_version }}"
+          VERSION="v${NEW_VERSION}"
 
           # Skip if tag already exists
           if git rev-parse "$VERSION" >/dev/null 2>&1; then
