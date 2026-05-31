@@ -64,7 +64,15 @@ export async function PATCH(req: NextRequest, { params }: Params) {
       companions: { orderBy: { position: 'asc' } },
       scopes: true,
       policies: true,
-      userGrants: true,
+      userGrants: {
+        where: { isActive: true },
+        include: { user: { select: { id: true, name: true, email: true, uuid: true } } },
+      },
+      auditLogs: {
+        orderBy: { createdAt: 'desc' },
+        take: 50,
+        include: { actor: { select: { id: true, name: true, email: true } } },
+      },
     },
   })
 
