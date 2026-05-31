@@ -437,7 +437,7 @@ export default function AvatarSetDetailPage() {
   // Filter layers by type
   const layersByType: Record<string, Layer[]> = {};
   for (const t of LAYER_TYPES) layersByType[t] = [];
-  for (const l of set.layers) {
+  for (const l of set.layers ?? []) {
     if (!layersByType[l.layer]) layersByType[l.layer] = [];
     layersByType[l.layer].push(l);
   }
