@@ -181,7 +181,7 @@ jobs:
           NEW_VERSION: ${{ needs.release.outputs.new_version }}
         run: |
           DEPLOY_ID=$(gh api repos/${{ github.repository }}/deployments \
-            -f ref=refs/tags/v${NEW_VERSION} \
+            -f ref=main \
             -f environment=admin \
             -f description="v${NEW_VERSION}" \
             -F auto_merge=false \
