@@ -125,9 +125,13 @@ jobs:
             # Match — auto-bump patch
             IFS='.' read -r MAJOR MINOR PATCH <<< "$PKG_VERSION"
             NEW_VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
-          else
-            # Mismatch — use package.json (user bumped it manually)
+          elif [ "$(printf '%s\n' "$PKG_VERSION" "$LATEST_VERSION" | sort -V | tail -1)" = "$PKG_VERSION" ]; then
+            # package.json ahead of latest tag — use it (user bumped manually)
             NEW_VERSION="$PKG_VERSION"
+          else
+            # package.json behind latest tag — bump from tag instead
+            IFS='.' read -r MAJOR MINOR PATCH <<< "$LATEST_VERSION"
+            NEW_VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
           fi
 
           echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
