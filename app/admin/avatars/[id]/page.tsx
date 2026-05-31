@@ -500,11 +500,11 @@ export default function AvatarSetDetailPage() {
       }}>
         <TabsList>
           <TabsTrigger value="overview">Overview</TabsTrigger>
-          <TabsTrigger value="layers">Layers ({set.layers.length})</TabsTrigger>
-          <TabsTrigger value="companions">Companions ({set.companions.length})</TabsTrigger>
-          <TabsTrigger value="scopes">Scopes ({set.scopes.length})</TabsTrigger>
-          <TabsTrigger value="policies">Policies ({set.policies.length})</TabsTrigger>
-          <TabsTrigger value="grants">Grants ({set.userGrants.length})</TabsTrigger>
+          <TabsTrigger value="layers">Layers ({set.layers?.length ?? 0})</TabsTrigger>
+          <TabsTrigger value="companions">Companions ({set.companions?.length ?? 0})</TabsTrigger>
+          <TabsTrigger value="scopes">Scopes ({set.scopes?.length ?? 0})</TabsTrigger>
+          <TabsTrigger value="policies">Policies ({set.policies?.length ?? 0})</TabsTrigger>
+          <TabsTrigger value="grants">Grants ({set.userGrants?.length ?? 0})</TabsTrigger>
           <TabsTrigger value="access">Access Check</TabsTrigger>
           <TabsTrigger value="audit">
             Audit
@@ -814,7 +814,7 @@ export default function AvatarSetDetailPage() {
 
           {/* Companions grid */}
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2">
-            {(collapsedCompanions ? set.companions.slice(0, 12) : set.companions).map(c => (
+            {(collapsedCompanions ? (set.companions ?? []).slice(0, 12) : (set.companions ?? [])).map(c => (
               <TextureCard
                 key={c.id}
                 texture={c}
@@ -832,15 +832,15 @@ export default function AvatarSetDetailPage() {
               />
             ))}
           </div>
-          {collapsedCompanions && set.companions.length > 12 && (
+          {collapsedCompanions && (set.companions ?? []).length > 12 && (
             <button
               className="w-full text-xs text-muted-foreground hover:text-foreground transition-colors"
               onClick={() => setCollapsedCompanions(false)}
             >
-              + {set.companions.length - 12} more companions
+              + {(set.companions ?? []).length - 12} more companions
             </button>
           )}
-          {set.companions.length === 0 && (
+          {(set.companions ?? []).length === 0 && (
             <p className="text-sm text-muted-foreground text-center py-8">No companions added yet.</p>
           )}
         </TabsContent>
@@ -876,7 +876,7 @@ export default function AvatarSetDetailPage() {
             </CardContent>
           </Card>
 
-          {set.scopes.map(s => (
+          {(set.scopes ?? []).map(s => (
             <div key={s.id} className="flex items-center gap-3 text-xs py-2 px-3 rounded border border-border/40">
               <Badge variant="secondary" className="text-[10px] uppercase">{s.scopeType}</Badge>
               <span className="font-mono text-muted-foreground">{s.scopeId || '(global)'}</span>
@@ -885,7 +885,7 @@ export default function AvatarSetDetailPage() {
               </Button>
             </div>
           ))}
-          {set.scopes.length === 0 && (
+          {(set.scopes ?? []).length === 0 && (
             <p className="text-sm text-muted-foreground text-center py-8">No scopes set. The set won't be visible anywhere.</p>
           )}
         </TabsContent>
@@ -930,7 +930,7 @@ export default function AvatarSetDetailPage() {
             </CardContent>
           </Card>
 
-          {set.policies.map(p => (
+          {(set.policies ?? []).map(p => (
             <div key={p.id} className="flex items-center gap-3 text-xs py-2 px-3 rounded border border-border/40">
               <Badge variant="secondary" className="text-[10px]">{p.subjectType}</Badge>
               <span className="font-mono">{p.subjectValue || '(everyone)'}</span>
@@ -944,7 +944,7 @@ export default function AvatarSetDetailPage() {
               </div>
             </div>
           ))}
-          {set.policies.length === 0 && (
+          {(set.policies ?? []).length === 0 && (
             <p className="text-sm text-muted-foreground text-center py-8">No policies. Restricted sets won't be accessible.</p>
           )}
         </TabsContent>
@@ -985,7 +985,7 @@ export default function AvatarSetDetailPage() {
             </CardContent>
           </Card>
 
-          {set.userGrants.map(g => (
+          {(set.userGrants ?? []).map(g => (
             <div key={g.id} className="flex items-center gap-3 text-xs py-2 px-3 rounded border border-border/40">
               <span className="font-mono text-muted-foreground w-24 truncate">{g.user?.name || g.userId.slice(0, 8)}</span>
               <Badge variant="secondary" className="text-[10px]">{g.grantType}</Badge>
@@ -999,7 +999,7 @@ export default function AvatarSetDetailPage() {
               )}
             </div>
           ))}
-          {set.userGrants.length === 0 && (
+          {(set.userGrants ?? []).length === 0 && (
             <p className="text-sm text-muted-foreground text-center py-8">No grants issued.</p>
           )}
         </TabsContent>
