@@ -184,8 +184,8 @@ jobs:
             -f ref=refs/tags/v${NEW_VERSION} \
             -f environment=admin \
             -f description="v${NEW_VERSION}" \
-            -f auto_merge=false \
-            -f required_contexts='[]' \
+            -F auto_merge=false \
+            -F required_contexts='[]' \
             --jq '.id')
           gh api repos/${{ github.repository }}/deployments/${DEPLOY_ID}/statuses \
             -f state=success \
