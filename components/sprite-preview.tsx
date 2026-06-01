@@ -24,7 +24,7 @@ interface SpriteSheetPreviewProps {
 
 export default function SpriteSheetPreview({
   url,
-  playServiceUrl,
+  playServiceUrl = typeof process !== 'undefined' ? process.env.NEXT_PUBLIC_PLAY_URL : undefined,
   animate = false,
   large = false,
 }: SpriteSheetPreviewProps) {
