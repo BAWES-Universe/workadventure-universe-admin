@@ -16,7 +16,7 @@ describe('/api/room/access response shape', () => {
       tags: [],
       visitCardUrl: null,
       isCharacterTexturesValid: true,
-      characterTextures: [{ id: 'male1', url: 'test.png', layer: 'woka' }],
+      characterTextures: [{ id: 'male1', url: 'test.png', layer: ['woka'] as unknown[] }],
       characterTextureIds: ['male1'],
       isCompanionTextureValid: true,
       messages: [],
@@ -27,7 +27,7 @@ describe('/api/room/access response shape', () => {
     expect(Array.isArray(mockResponse.characterTextureIds)).toBe(true)
   })
 
-  it('allows characterTextureIds to be undefined (empty set, no textures)', () => {
+  it('allows characterTextureIds to be an empty array when no textures exist', () => {
     const mockResponse: FetchMemberDataByUuidSuccessResponse = {
       status: 'ok',
       email: null,
