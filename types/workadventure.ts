@@ -13,6 +13,7 @@ export interface FetchMemberDataByUuidSuccessResponse {
   visitCardUrl: string | null;
   isCharacterTexturesValid: boolean;
   characterTextures: WokaDetail[];
+  characterTextureIds?: string[];
   isCompanionTextureValid: boolean;
   companionTexture?: CompanionDetail | null;
   messages: unknown[];

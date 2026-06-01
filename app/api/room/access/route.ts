@@ -343,6 +343,9 @@ export async function GET(request: NextRequest) {
         }
       }
       
+      // Extract texture IDs for front-end cross-device sync
+      const characterTextureIds = finalTextures.map(t => t.id);
+      
       // Handle companion texture - use stored one if provided one is invalid
       let finalCompanionTexture = companionValidation.texture;
       let isCompanionValid = companionValidation.valid;
@@ -401,6 +404,7 @@ export async function GET(request: NextRequest) {
         visitCardUrl: visitCardUrl,
         isCharacterTexturesValid: isTexturesValid,
         characterTextures: finalTextures,
+        characterTextureIds: characterTextureIds,
         isCompanionTextureValid: isCompanionValid,
         companionTexture: finalCompanionTexture,
         messages: [],
