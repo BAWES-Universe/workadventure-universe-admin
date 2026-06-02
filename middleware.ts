@@ -1,10 +1,14 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
-import { getSessionId, getSessionData } from '@/lib/auth-token';
+import { getSessionId } from '@/lib/auth-token';
 
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
   
+  // Custom-scheme mobile callbacks (bawes://callback) are delivered by the OS
+  // to the Capacitor app, so they never enter this HTTP(S) middleware.
+  // Keep middleware origin checks limited to web requests handled by Next.js.
+
   // Helper function to create response and remove X-Frame-Options for admin pages
   const createAdminResponse = (response: NextResponse) => {
     // Remove X-Frame-Options to allow iframe embedding
