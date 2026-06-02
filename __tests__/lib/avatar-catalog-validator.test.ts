@@ -196,9 +196,9 @@ describe('resolveCompanionTexture', () => {
     jest.clearAllMocks()
   })
 
-  it('returns valid false with null texture for empty ID (triggers DB fallback)', async () => {
+  it('returns valid with null texture for empty ID', async () => {
     const result = await resolveCompanionTexture(mockPrisma, null, null, null, 'http://play.local')
-    expect(result.valid).toBe(false)
+    expect(result.valid).toBe(true)
     expect(result.texture).toBeNull()
   })
 

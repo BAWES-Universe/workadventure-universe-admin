@@ -350,7 +350,7 @@ export async function GET(request: NextRequest) {
       let finalCompanionTexture = companionValidation.texture;
       let isCompanionValid = companionValidation.valid;
       
-      if (!isCompanionValid && avatar?.companionTextureId) {
+      if ((!isCompanionValid || !companionTextureId) && avatar?.companionTextureId) {
         const fallbackCompanion = await resolveCompanionTexture(
           prisma, avatar.companionTextureId, worldData.id, worldData.universeId, playServiceUrl
         );

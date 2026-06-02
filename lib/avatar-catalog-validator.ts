@@ -141,7 +141,7 @@ export async function resolveCompanionTexture(
   playServiceUrl: string
 ): Promise<CompanionValidationResult> {
   if (!companionTextureId) {
-    return { valid: false, texture: null }
+    return { valid: true, texture: null }
   }
 
   const catalogSetCount = await prisma.avatarSet.count({
