@@ -179,9 +179,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NEW_VERSION: ${{ needs.release.outputs.new_version }}
-          COMMIT_SHA: ${{ github.sha }}
         run: |
-          DEPLOY_ID=$(printf '{"ref":"%s","environment":"admin","description":"v%s","required_contexts":[]}' "$COMMIT_SHA" "$NEW_VERSION" | \
+          DEPLOY_ID=$(printf '{"ref":"%s","environment":"admin","description":"v%s","required_contexts":[]}' "${{ github.ref_name }}" "$NEW_VERSION" | \
             gh api repos/${{ github.repository }}/deployments --input - --jq '.id')
           gh api repos/${{ github.repository }}/deployments/${DEPLOY_ID}/statuses \
             -f state=success \
