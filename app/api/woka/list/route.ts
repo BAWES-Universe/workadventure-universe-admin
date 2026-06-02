@@ -75,6 +75,8 @@ export async function GET(request: NextRequest) {
       // Non-fatal — fall through to platform-scope sets
     }
 
+    const playServiceUrl = process.env.PLAY_URL || 'http://play.workadventure.localhost'
+
     const sets = await resolvePickerSets({
       prisma,
       worldId,
@@ -85,12 +87,11 @@ export async function GET(request: NextRequest) {
 
     // Fallback to static woka.json during initial catalog migration
     if (sets.length === 0) {
-      const playServiceUrl = process.env.PLAY_URL || 'http://play.workadventure.localhost'
       const staticData = getWokaList(playServiceUrl)
       return NextResponse.json(staticData)
     }
 
-    return NextResponse.json(buildWokaListPayload(sets))
+    return NextResponse.json(buildWokaListPayload(sets, playServiceUrl))
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized') {
       return NextResponse.json(

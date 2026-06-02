@@ -215,8 +215,10 @@ const LAYER_KEYS = [
  * via /api/room/access.
  */
 export function buildWokaListPayload(
-  sets: AvatarSetFull[]
+  sets: AvatarSetFull[],
+  playUrl?: string
 ): WaWokaListPayload {
+  const playServiceUrl = playUrl?.replace(/\/$/, '');
   // Build buckets per layer: each bucket accumulates WaCollection entries
   const buckets: Record<string, WaCollection[]> = {}
   for (const k of LAYER_KEYS) buckets[k] = []
@@ -240,7 +242,11 @@ export function buildWokaListPayload(
           .map((i) => ({
             id: i.textureId,
             name: i.name ?? i.textureId,
-            url: i.url,
+            url: i.url.startsWith('http')
+              ? i.url
+              : playServiceUrl
+                ? `${playServiceUrl}/${i.url}`
+                : i.url,
             position: i.position,
           })),
       })
