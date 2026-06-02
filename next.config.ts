@@ -1,4 +1,5 @@
 import type { NextConfig } from "next";
+import { withSentryConfig } from "@sentry/nextjs";
 
 const nextConfig: NextConfig = {
   // Headers for security
@@ -80,4 +81,12 @@ const nextConfig: NextConfig = {
   },
 };
 
-export default nextConfig;
+export default withSentryConfig(nextConfig, {
+  org: "bawes-co",
+  project: "universe-admin",
+  authToken: process.env.SENTRY_AUTH_TOKEN_ADMIN || process.env.SENTRY_AUTH_TOKEN,
+  telemetry: false,
+  widenClientFileUpload: true,
+  disableLogger: true,
+  tunnelRoute: "/monitoring",
+});
