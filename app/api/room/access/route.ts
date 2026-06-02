@@ -332,13 +332,14 @@ export async function GET(request: NextRequest) {
       let finalTextures = textureValidation.textures;
       let isTexturesValid = textureValidation.valid;
       
-      if (!isTexturesValid && avatar?.textureIds && avatar.textureIds.length > 0) {
-        // Try to validate stored textures as fallback (use catalog, with scope from the same world)
-        const fallbackValidation = await resolveTextureUrls(
+      // Prefer DB textures over localStorage when user has a saved avatar —
+      // DB is the source of truth across devices and sessions
+      if (avatar?.textureIds && avatar.textureIds.length > 0) {
+        const dbTextures = await resolveTextureUrls(
           prisma, avatar.textureIds, worldData.id, worldData.universeId, playServiceUrl
         );
-        if (fallbackValidation.valid) {
-          finalTextures = fallbackValidation.textures;
+        if (dbTextures.valid) {
+          finalTextures = dbTextures.textures;
           isTexturesValid = true;
         }
       }
