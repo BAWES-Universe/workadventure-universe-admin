@@ -103,6 +103,7 @@ jobs:
       contents: write
     outputs:
       new_version: ${{ steps.calculate.outputs.new_version }}
+      created: ${{ steps.create_release.outputs.created }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -173,7 +174,7 @@ jobs:
   # Fires only if release produced a new version
   # ─────────────────────────────────────────────────
   deploy:
-    if: needs.release.outputs.new_version != ''
+    if: needs.release.outputs.created == 'true'
     needs: release
     runs-on: ubuntu-latest
     steps:
@@ -199,6 +200,7 @@ jobs:
             -f log_url=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
       - name: Mark Sentry deployment
+        if: needs.release.outputs.created == 'true'
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           NEW_VERSION: ${{ needs.release.outputs.new_version }}
