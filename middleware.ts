@@ -20,7 +20,9 @@ export function middleware(request: NextRequest) {
     return NextResponse.next();
   }
   
-  // Allow login page and other API routes
+  // Allow login page and other API routes.
+  // Mobile OIDC callbacks return to the app through bawes://callback, which is
+  // handled outside this HTTP middleware and is not blocked by origin checks here.
   if (pathname === '/admin/login' || pathname.startsWith('/api/')) {
     const response = NextResponse.next();
     // Remove X-Frame-Options for admin login page to allow iframe embedding
