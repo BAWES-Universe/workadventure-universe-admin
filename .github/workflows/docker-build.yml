@@ -162,6 +162,7 @@ jobs:
 
       - name: Create Sentry release
         if: steps.create_release.outputs.created == 'true'
+        continue-on-error: true
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           NEW_VERSION: ${{ steps.calculate.outputs.new_version }}
