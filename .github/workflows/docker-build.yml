@@ -41,12 +41,12 @@ jobs:
 
       - name: Generate Prisma client
         env:
-          DATABASE_URL: "postgresql://dummy:dummy@localhost:5432/dummy"
+          DATABASE_URL: "postgresql://dummy:***@localhost:5432/dummy"
         run: npx prisma generate --schema=prisma/schema.prisma
 
       - name: Run tests
         env:
-          DATABASE_URL: "postgresql://dummy:dummy@localhost:5432/dummy"
+          DATABASE_URL: "postgresql://dummy:***@localhost:5432/dummy"
         run: |
           set -o pipefail
           npx jest __tests__/lib/ 2>&1 | tail -30
@@ -157,6 +157,16 @@ jobs:
 
           gh release create "$VERSION" --generate-notes
 
+      - name: Create Sentry release
+        if: steps.calculate.outputs.new_version != ''
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          NEW_VERSION: ${{ steps.calculate.outputs.new_version }}
+        run: |
+          npx -y @sentry/cli releases new "v${NEW_VERSION}" --org bawes-co --project universe-admin
+          npx -y @sentry/cli releases set-commits "v${NEW_VERSION}" --auto
+          npx -y @sentry/cli releases deploys "v${NEW_VERSION}" new -e production
+
   # ─────────────────────────────────────────────────
   # Deploy: trigger Coolify to pull the new image
   # Fires only if release produced a new version
@@ -174,7 +184,7 @@ jobs:
         run: |
           echo "Deploying v${{ needs.release.outputs.new_version }}..."
           curl -sSf -X POST "${COOLIFY_BASE}/api/v1/deploy?uuid=${COOLIFY_ADMIN_UUID}" \
-            -H "Authorization: Bearer ${COOLIFY_TOKEN}"
+            -H "Authorization: Bearer ***
       - name: Record GitHub deployment
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -186,4 +196,3 @@ jobs:
             -f state=success \
             -f environment_url=https://universe.bawes.net \
             -f log_url=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-
