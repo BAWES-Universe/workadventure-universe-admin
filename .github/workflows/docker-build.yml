@@ -167,7 +167,7 @@ jobs:
           NEW_VERSION: ${{ steps.calculate.outputs.new_version }}
         run: |
           npx -y @sentry/cli@3.4.3 releases new "v${NEW_VERSION}" --org bawes-co --project universe-admin
-          npx -y @sentry/cli@3.4.3 releases set-commits "v${NEW_VERSION}" --auto --org bawes-co
+          npx -y @sentry/cli@3.4.3 releases set-commits "v${NEW_VERSION}" --auto --org bawes-co --project universe-admin
 
   # ─────────────────────────────────────────────────
   # Deploy: trigger Coolify to pull the new image
