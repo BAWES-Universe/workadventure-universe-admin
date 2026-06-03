@@ -166,8 +166,8 @@ jobs:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           NEW_VERSION: ${{ steps.calculate.outputs.new_version }}
         run: |
-          npx -y @sentry/cli releases new "v${NEW_VERSION}" --org bawes-co --project universe-admin
-          npx -y @sentry/cli releases set-commits "v${NEW_VERSION}" --auto --org bawes-co
+          npx -y @sentry/cli@3.4.3 releases new "v${NEW_VERSION}" --org bawes-co --project universe-admin
+          npx -y @sentry/cli@3.4.3 releases set-commits "v${NEW_VERSION}" --auto --org bawes-co
 
   # ─────────────────────────────────────────────────
   # Deploy: trigger Coolify to pull the new image
@@ -205,4 +205,4 @@ jobs:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           NEW_VERSION: ${{ needs.release.outputs.new_version }}
         run: |
-          npx -y @sentry/cli releases deploys "v${NEW_VERSION}" new -e production --org bawes-co
+          npx -y @sentry/cli@3.4.3 releases deploys "v${NEW_VERSION}" new -e production --org bawes-co --project universe-admin
