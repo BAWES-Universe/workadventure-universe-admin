@@ -10,6 +10,7 @@ if [ ! -d "/app/node_modules" ] || [ -z "$(ls -A /app/node_modules 2>/dev/null)"
   NEEDS_INSTALL=true
 # Check for specific critical packages that must exist
 elif [ ! -d "/app/node_modules/@radix-ui/react-dropdown-menu" ] || \
+     [ ! -d "/app/node_modules/@sentry/nextjs" ] || \
      [ ! -d "/app/node_modules/next" ] || \
      [ ! -d "/app/node_modules/react" ] || \
      [ ! -d "/app/node_modules/recharts" ]; then
