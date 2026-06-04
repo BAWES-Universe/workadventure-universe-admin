@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { parsePlayUri } from '@/lib/utils';
 import { prisma } from '@/lib/db';
-import { checkWamExists, createWamFile, getWamUrl, getWamPath } from '@/lib/map-storage';
+import { safeWamExists, createWamFile, getWamUrl, getWamPath } from '@/lib/map-storage';
 import type { MapDetailsData, ErrorApiData, RoomRedirect } from '@/types/workadventure';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Redis and Prisma
@@ -138,8 +138,9 @@ export async function GET(request: NextRequest) {
         const wamPath = getWamPath(domain, universeSlug, worldSlug, roomSlug);
         const computedWamUrl = getWamUrl(domain, universeSlug, worldSlug, roomSlug, publicMapStorageUrl);
         
-        // Check if WAM exists in map-storage
-        const wamExists = await checkWamExists(publicMapStorageUrl, wamPath, mapStorageApiToken);
+        // Check if WAM exists using dual-check guard (cache + direct HEAD)
+        // This prevents false cache misses from overwriting existing WAM files
+        const wamExists = await safeWamExists(publicMapStorageUrl, wamPath, mapStorageApiToken);
         
         // If WAM doesn't exist and mapUrl exists, create WAM via PUT
         if (!wamExists && roomData.mapUrl) {

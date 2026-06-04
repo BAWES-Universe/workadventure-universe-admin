@@ -64,6 +64,11 @@ export function getWamPath(
 /**
  * Checks if a WAM file exists in map-storage
  * Uses GET /maps endpoint to query the maps cache
+ *
+ * NOTE: The cache can be stale or regenerating after a deploy
+ * (WAMVersionHash changes when types.ts changes). A cache miss
+ * should not be treated as definitive — use safeWamExists() instead
+ * which adds a direct HEAD check as secondary guard.
  */
 export async function checkWamExists(
   publicMapStorageUrl: string,
@@ -91,6 +96,57 @@ export async function checkWamExists(
     console.error('Error checking WAM existence:', error);
     return false;
   }
+}
+
+/**
+ * Directly checks if a WAM file exists by HEAD request to the actual WAM URL.
+ * Unlike checkWamExists (which queries the cache), this reaches the actual
+ * file in map-storage, bypassing any cache staleness or version hash issues.
+ */
+export async function checkWamExistsDirect(
+  publicMapStorageUrl: string,
+  wamPath: string,
+  apiToken: string
+): Promise<boolean> {
+  try {
+    const baseUrl = publicMapStorageUrl.replace(/\/$/, '');
+    const response = await fetch(`${baseUrl}/${wamPath}`, {
+      method: 'HEAD',
+      headers: {
+        'Authorization': `Bearer ${apiToken}`,
+      },
+    });
+    return response.ok;
+  } catch (error) {
+    console.error('Error directly checking WAM file existence:', error);
+    return false;
+  }
+}
+
+/**
+ * Combined WAM existence check using a dual-check guard.
+ *
+ * First checks the cache, then if the cache misses, verifies via a direct
+ * HEAD request to the actual WAM URL. Only returns false (doesn't exist)
+ * if BOTH checks agree.
+ *
+ * This prevents a false cache miss (e.g. after deploy when the cache was
+ * regenerated but the WAM file still exists on S3) from triggering a
+ * destructive overwrite via createWamFile().
+ */
+export async function safeWamExists(
+  publicMapStorageUrl: string,
+  wamPath: string,
+  apiToken: string
+): Promise<boolean> {
+  // First check: fast path via cache
+  const cacheExists = await checkWamExists(publicMapStorageUrl, wamPath, apiToken);
+  if (cacheExists) {
+    return true;
+  }
+
+  // Cache miss — verify via direct HEAD to rule out stale cache
+  return await checkWamExistsDirect(publicMapStorageUrl, wamPath, apiToken);
 }
 
 /**

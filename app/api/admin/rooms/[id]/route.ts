@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
-import { checkWamExists, getWamUrl, getWamPath, createWamFile } from '@/lib/map-storage';
+import { safeWamExists, getWamUrl, getWamPath, createWamFile } from '@/lib/map-storage';
 
 const updateRoomSchema = z.object({
   slug: z.string().min(1).max(100).optional(),
@@ -133,7 +133,7 @@ export async function GET(
           const computedWamUrl = getWamUrl(domain, room.world.universe.slug, room.world.slug, room.slug, publicMapStorageUrl);
           
           // Check if WAM exists in map-storage
-          const wamExists = await checkWamExists(publicMapStorageUrl, wamPath, mapStorageApiToken);
+          const wamExists = await safeWamExists(publicMapStorageUrl, wamPath, mapStorageApiToken);
           
           if (wamExists) {
             // WAM exists, update database if not already set
