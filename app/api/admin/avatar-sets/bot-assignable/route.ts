@@ -45,6 +45,20 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: 'Bot not found' }, { status: 404 })
   }
 
+  if (!bot.room) {
+    return NextResponse.json(
+      { error: 'Bot is not assigned to any room' },
+      { status: 400 }
+    )
+  }
+
+  if (!bot.room.world) {
+    return NextResponse.json(
+      { error: 'Bot room is not associated with any world' },
+      { status: 400 }
+    )
+  }
+
   const worldId = bot.room.worldId
   const universeId = bot.room.world.universeId
 
