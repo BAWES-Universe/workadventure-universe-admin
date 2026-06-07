@@ -251,9 +251,19 @@ export async function resolveBotAssignableSets(
       },
     })
     for (const grant of grants) {
-      if (grant.avatarSet.lifecycle === 'active' && !accessible.find((s) => s.id === grant.avatarSet.id)) {
-        accessible.push(grant.avatarSet)
-      }
+      if (grant.avatarSet.lifecycle !== 'active') continue
+      if (accessible.find((s) => s.id === grant.avatarSet.id)) continue
+
+      // Grants still respect scope — a grant doesn't override world boundaries
+      const inScope = grant.avatarSet.scopes.some(
+        (s) =>
+          s.scopeType === 'platform' ||
+          (s.scopeType === 'universe' && s.scopeId === universeId) ||
+          (s.scopeType === 'world' && s.scopeId === worldId)
+      )
+      if (!inScope) continue
+
+      accessible.push(grant.avatarSet)
     }
   }
 
