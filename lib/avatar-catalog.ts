@@ -141,22 +141,123 @@ export async function resolveAdminSets(
   })
 }
 
+export interface ResolveBotOptions {
+  prisma: PrismaClient
+  userId: string
+  isSuperAdmin: boolean
+  worldId: string | null
+  universeId: string | null
+  membershipTags: string[]
+}
+
 /**
- * Returns all active sets including hidden/assigned_only — for bot assignment.
+ * Returns avatar sets available for bot texture assignment.
+ *
+ * Super admins: see EVERY active set regardless of scope, visibility, or policy.
+ *
+ * Regular users: see only sets that are BOTH in-scope for the bot's world
+ * AND accessible via one of:
+ *   - visibility === 'public'
+ *   - AvatarEntitlementPolicy(action: 'assign_to_bot') matching the user
+ *   - UserAvatarGrant (direct grant)
  */
 export async function resolveBotAssignableSets(
-  prisma: PrismaClient
+  opts: ResolveBotOptions
 ): Promise<AvatarSetFull[]> {
-  return prisma.avatarSet.findMany({
-    where: { lifecycle: 'active' },
+  const { prisma, userId, isSuperAdmin, worldId, universeId, membershipTags = [] } = opts
+  const now = new Date()
+
+  // Build the candidate query
+  const where: any = {
+    lifecycle: 'active',
+    AND: [
+      { OR: [{ availableFrom: null }, { availableFrom: { lte: now } }] },
+      { OR: [{ availableUntil: null }, { availableUntil: { gte: now } }] },
+    ],
+  }
+
+  // Non-super-admins: scope-filter candidates to the bot's universe/world + platform
+  if (!isSuperAdmin) {
+    where.scopes = {
+      some: {
+        OR: [
+          { scopeType: 'platform' },
+          ...(universeId ? [{ scopeType: 'universe', scopeId: universeId }] : []),
+          ...(worldId ? [{ scopeType: 'world', scopeId: worldId }] : []),
+        ],
+      },
+    }
+  }
+
+  const candidates = await prisma.avatarSet.findMany({
+    where,
     include: {
       layers: { where: { isActive: true }, orderBy: { position: 'asc' } },
       companions: { where: { isActive: true }, orderBy: { position: 'asc' } },
       scopes: true,
-      policies: true,
+      policies: { where: { isActive: true } },
     },
     orderBy: { position: 'asc' },
   })
+
+  // Super admins: all active candidates are fair game
+  if (isSuperAdmin) {
+    return candidates
+  }
+
+  // Regular users: filter by visibility/policy/grant
+  const accessible: AvatarSetFull[] = []
+
+  for (const set of candidates) {
+    if (set.visibility === 'public') {
+      accessible.push(set)
+      continue
+    }
+
+    // Hidden / restricted / assigned_only — check for assign_to_bot policy
+    const hasPolicy = checkPolicyMatch(set.policies, {
+      userId,
+      membershipTags,
+      worldId,
+      action: 'assign_to_bot',
+    })
+    if (hasPolicy) {
+      accessible.push(set)
+      continue
+    }
+  }
+
+  // Check direct UserAvatarGrants (overrides everything for the granted user)
+  if (userId) {
+    const grants = await prisma.userAvatarGrant.findMany({
+      where: {
+        userId,
+        isActive: true,
+        OR: [
+          { grantType: 'select' },
+          { grantType: 'assigned_only' },
+        ],
+        AND: [{ OR: [{ expiresAt: null }, { expiresAt: { gte: now } }] }],
+      },
+      include: {
+        avatarSet: {
+          include: {
+            layers: { where: { isActive: true }, orderBy: { position: 'asc' } },
+            companions: { where: { isActive: true }, orderBy: { position: 'asc' } },
+            scopes: true,
+            policies: { where: { isActive: true } },
+          },
+        },
+      },
+    })
+    for (const grant of grants) {
+      if (grant.avatarSet.lifecycle === 'active' && !accessible.find((s) => s.id === grant.avatarSet.id)) {
+        accessible.push(grant.avatarSet)
+      }
+    }
+  }
+
+  return accessible
 }
 
 // ---------------------------------------------------------------------------
