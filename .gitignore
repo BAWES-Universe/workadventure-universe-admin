@@ -42,4 +42,5 @@ yarn-error.log*
 next-env.d.ts
 
 /lib/generated/prisma
-fix_cors.js\nsetup_cors.js
+fix_cors.js
+setup_cors.js
