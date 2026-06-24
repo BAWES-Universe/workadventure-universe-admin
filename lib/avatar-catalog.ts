@@ -144,7 +144,6 @@ export async function resolveAdminSets(
 export interface ResolveBotOptions {
   prisma: PrismaClient
   userId: string
-  isSuperAdmin: boolean
   worldId: string | null
   universeId: string | null
   membershipTags: string[]
@@ -153,10 +152,10 @@ export interface ResolveBotOptions {
 /**
  * Returns avatar sets available for bot texture assignment.
  *
- * Super admins: see EVERY active set regardless of scope, visibility, or policy.
+ * All users (including super admins) go through the same scope and entitlement
+ * filters, so everyone experiences the same bot texture picker.
  *
- * Regular users: see only sets that are BOTH in-scope for the bot's world
- * AND accessible via one of:
+ * Only sets that are BOTH in-scope for the bot's world AND accessible via one of:
  *   - visibility === 'public'
  *   - AvatarEntitlementPolicy(action: 'assign_to_bot') matching the user
  *   - UserAvatarGrant (direct grant)
@@ -164,21 +163,13 @@ export interface ResolveBotOptions {
 export async function resolveBotAssignableSets(
   opts: ResolveBotOptions
 ): Promise<AvatarSetFull[]> {
-  const { prisma, userId, isSuperAdmin, worldId, universeId, membershipTags = [] } = opts
+  const { prisma, userId, worldId, universeId, membershipTags = [] } = opts
   const now = new Date()
 
-  // Build the candidate query
+  // Build the candidate query — always scope-filter
   const where: any = {
     lifecycle: 'active',
-    AND: [
-      { OR: [{ availableFrom: null }, { availableFrom: { lte: now } }] },
-      { OR: [{ availableUntil: null }, { availableUntil: { gte: now } }] },
-    ],
-  }
-
-  // Non-super-admins: scope-filter candidates to the bot's universe/world + platform
-  if (!isSuperAdmin) {
-    where.scopes = {
+    scopes: {
       some: {
         OR: [
           { scopeType: 'platform' },
@@ -186,7 +177,11 @@ export async function resolveBotAssignableSets(
           ...(worldId ? [{ scopeType: 'world', scopeId: worldId }] : []),
         ],
       },
-    }
+    },
+    AND: [
+      { OR: [{ availableFrom: null }, { availableFrom: { lte: now } }] },
+      { OR: [{ availableUntil: null }, { availableUntil: { gte: now } }] },
+    ],
   }
 
   const candidates = await prisma.avatarSet.findMany({
@@ -200,12 +195,7 @@ export async function resolveBotAssignableSets(
     orderBy: { position: 'asc' },
   })
 
-  // Super admins: all active candidates are fair game
-  if (isSuperAdmin) {
-    return candidates
-  }
-
-  // Regular users: filter by visibility/policy/grant
+  // Filter by visibility/policy/grant — applies to everyone
   const accessible: AvatarSetFull[] = []
 
   for (const set of candidates) {

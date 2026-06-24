@@ -2,16 +2,12 @@
  * GET /api/admin/avatar-sets/bot-assignable?botId=...
  *
  * Returns avatar sets available for a specific bot's texture picker.
- *
- * Super admins see every active set regardless of scope/visibility.
- * Regular users see only sets scoped to the bot's world + accessible
- * via public visibility, assign_to_bot policy, or direct grant.
+ * All users go through the same scope and entitlement filters.
  */
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { requireAdminSession } from '@/lib/auth'
 import { resolveBotAssignableSets } from '@/lib/avatar-catalog'
-import { isSuperAdmin } from '@/lib/super-admin'
 
 export async function GET(request: NextRequest) {
   const { userId } = await requireAdminSession()
@@ -71,17 +67,9 @@ export async function GET(request: NextRequest) {
   })
   const membershipTags = member?.tags ?? []
 
-  // Check if the caller is a super admin
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    select: { email: true },
-  })
-  const superAdmin = !!user && isSuperAdmin(user.email)
-
   const sets = await resolveBotAssignableSets({
     prisma,
     userId,
-    isSuperAdmin: superAdmin,
     worldId,
     universeId,
     membershipTags,
