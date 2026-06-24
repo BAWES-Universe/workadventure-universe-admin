@@ -40,7 +40,7 @@ export default function BotTexturePicker({ botId, currentTextureId, onTextureCha
       setLoading(true);
       try {
         const { authenticatedFetch } = await import('@/lib/client-auth');
-        const res = await authenticatedFetch('/api/admin/avatar-sets/bot-assignable');
+        const res = await authenticatedFetch(`/api/admin/avatar-sets/bot-assignable?botId=${encodeURIComponent(botId)}`);
         if (res.ok) {
           const data = await res.json();
           setTextureSets(data);
