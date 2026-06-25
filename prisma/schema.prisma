@@ -598,7 +598,6 @@ model AvatarSet {
   scopes       AvatarSetScope[]
   policies     AvatarEntitlementPolicy[]
   userGrants   UserAvatarGrant[]
-  auditLogs    AvatarSetAuditLog[]
 
   @@index([lifecycle, visibility])
   @@map("avatar_sets")
@@ -738,6 +737,8 @@ model UserAvatarGrant {
 }
 
 // AvatarSetAuditLog — immutable audit trail for all catalog changes.
+// avatarSetId is a plain field (no FK constraint) so audit records survive the
+// deletion of the set they reference.
 model AvatarSetAuditLog {
   id          Int      @id @default(autoincrement())
   avatarSetId String   @map("avatar_set_id")
@@ -753,7 +754,7 @@ model AvatarSetAuditLog {
 
   createdAt   DateTime @default(now()) @map("created_at")
 
-  avatarSet   AvatarSet @relation(fields: [avatarSetId], references: [id], onDelete: NoAction)
+  // actor relation preserved — audit logs still reference the user who acted
   actor       User?     @relation(fields: [actorId], references: [id], onDelete: SetNull)
 
   @@index([avatarSetId, createdAt])

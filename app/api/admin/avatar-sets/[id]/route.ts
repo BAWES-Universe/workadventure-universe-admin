@@ -23,8 +23,9 @@ async function cleanupS3Texture(url: string): Promise<void> {
 // GET /api/admin/avatar-sets/:id
 export async function GET(_req: NextRequest, { params }: Params) {
   await requireAdminSession()
+  const id = (await params).id
   const set = await prisma.avatarSet.findUnique({
-    where: { id: (await params).id },
+    where: { id },
     include: {
       layers: { orderBy: { position: 'asc' } },
       companions: { orderBy: { position: 'asc' } },
@@ -34,27 +35,47 @@ export async function GET(_req: NextRequest, { params }: Params) {
         where: { isActive: true },
         include: { user: { select: { id: true, name: true, email: true, uuid: true } } },
       },
-      auditLogs: {
-        orderBy: { createdAt: 'desc' },
-        take: 50,
-        include: { actor: { select: { id: true, name: true, email: true } } },
-      },
     },
   })
   if (!set) return NextResponse.json({ error: 'Not found' }, { status: 404 })
-  return NextResponse.json(set)
+
+  const auditLogs = await prisma.avatarSetAuditLog.findMany({
+    where: { avatarSetId: id },
+    orderBy: { createdAt: 'desc' },
+    take: 50,
+    include: { actor: { select: { id: true, name: true, email: true } } },
+  })
+
+  return NextResponse.json({ ...set, auditLogs })
 }
 
 // PATCH /api/admin/avatar-sets/:id
 export async function PATCH(req: NextRequest, { params }: Params) {
   const actor = await requireSuperAdminSession()
   const body = await req.json()
+  const id = (await params).id
 
-  const before = await prisma.avatarSet.findUnique({ where: { id: (await params).id } })
+  const before = await prisma.avatarSet.findUnique({ where: { id } })
   if (!before) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 
+  // Prevent archiving sets with active grants (same guard as DELETE)
+  if (body.lifecycle === 'archived' && before.lifecycle !== 'archived') {
+    const activeGrants = await prisma.userAvatarGrant.count({
+      where: { avatarSetId: id, isActive: true },
+    })
+    if (activeGrants > 0) {
+      return NextResponse.json(
+        {
+          error: 'Cannot archive: this set has active user grants. Revoke them first.',
+          activeGrants,
+        },
+        { status: 409 }
+      )
+    }
+  }
+
   const updated = await prisma.avatarSet.update({
-    where: { id: (await params).id },
+    where: { id },
     data: {
       ...(body.name !== undefined && { name: body.name }),
       ...(body.description !== undefined && { description: body.description }),
@@ -84,11 +105,6 @@ export async function PATCH(req: NextRequest, { params }: Params) {
         where: { isActive: true },
         include: { user: { select: { id: true, name: true, email: true, uuid: true } } },
       },
-      auditLogs: {
-        orderBy: { createdAt: 'desc' },
-        take: 50,
-        include: { actor: { select: { id: true, name: true, email: true } } },
-      },
     },
   })
 
@@ -99,14 +115,21 @@ export async function PATCH(req: NextRequest, { params }: Params) {
 
   await prisma.avatarSetAuditLog.create({
     data: {
-      avatarSetId: (await params).id,
+      avatarSetId: id,
       actorId: actor.userId,
       action,
       diff: { before, after: updated },
     },
   })
 
-  return NextResponse.json(updated)
+  const auditLogs = await prisma.avatarSetAuditLog.findMany({
+    where: { avatarSetId: id },
+    orderBy: { createdAt: 'desc' },
+    take: 50,
+    include: { actor: { select: { id: true, name: true, email: true } } },
+  })
+
+  return NextResponse.json({ ...updated, auditLogs })
 }
 
 // DELETE /api/admin/avatar-sets/:id
@@ -163,7 +186,7 @@ export async function DELETE(_req: NextRequest, { params }: Params) {
       await cleanupS3Texture(companion.url)
     }
 
-    // Create audit log BEFORE deleting the set (FK references it, and onDelete: NoAction preserves it)
+    // Create audit log BEFORE deleting the set (no FK constraint — audit log survives as a permanent record)
     await prisma.avatarSetAuditLog.create({
       data: {
         avatarSetId: id,
