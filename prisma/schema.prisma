@@ -753,7 +753,7 @@ model AvatarSetAuditLog {
 
   createdAt   DateTime @default(now()) @map("created_at")
 
-  avatarSet   AvatarSet @relation(fields: [avatarSetId], references: [id], onDelete: Cascade)
+  avatarSet   AvatarSet @relation(fields: [avatarSetId], references: [id], onDelete: NoAction)
   actor       User?     @relation(fields: [actorId], references: [id], onDelete: SetNull)
 
   @@index([avatarSetId, createdAt])

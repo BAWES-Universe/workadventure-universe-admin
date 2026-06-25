@@ -163,9 +163,7 @@ export async function DELETE(_req: NextRequest, { params }: Params) {
       await cleanupS3Texture(companion.url)
     }
 
-    // Delete the set — Prisma cascade removes all related records
-    await prisma.avatarSet.delete({ where: { id } })
-
+    // Create audit log BEFORE deleting the set (FK references it, and onDelete: NoAction preserves it)
     await prisma.avatarSetAuditLog.create({
       data: {
         avatarSetId: id,
@@ -174,6 +172,9 @@ export async function DELETE(_req: NextRequest, { params }: Params) {
         diff: { name: existingSet.name, layerCount: layers.length, companionCount: companions.length },
       },
     })
+
+    // Delete the set — related records removed via Prisma cascade
+    await prisma.avatarSet.delete({ where: { id } })
 
     return new NextResponse(null, { status: 204 })
   }
