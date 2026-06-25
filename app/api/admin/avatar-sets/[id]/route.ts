@@ -1,8 +1,24 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { requireAdminSession, requireSuperAdminSession } from '@/lib/auth'
+import { extractS3KeyFromUrl, deleteImageFromS3 } from '@/lib/s3-upload'
 
 type Params = { params: Promise<{ id: string }> }
+
+/**
+ * Clean up S3 file if the texture URL points to an uploaded texture.
+ * Silently succeeds — deletion of built-in textures (non-S3 URLs) is a no-op.
+ */
+async function cleanupS3Texture(url: string): Promise<void> {
+  const s3Key = extractS3KeyFromUrl(url)
+  if (s3Key && s3Key.startsWith('avatar-textures/')) {
+    try {
+      await deleteImageFromS3(s3Key)
+    } catch (err) {
+      console.warn('Failed to delete S3 texture (file may already be gone):', s3Key)
+    }
+  }
+}
 
 // GET /api/admin/avatar-sets/:id
 export async function GET(_req: NextRequest, { params }: Params) {
@@ -93,22 +109,26 @@ export async function PATCH(req: NextRequest, { params }: Params) {
   return NextResponse.json(updated)
 }
 
-// DELETE /api/admin/avatar-sets/:id  — soft archive only
+// DELETE /api/admin/avatar-sets/:id
+//
+// If lifecycle === 'archived': permanently deletes the set, all related records,
+//   and S3-hosted textures. Otherwise: soft-archives (sets lifecycle to 'archived').
 export async function DELETE(_req: NextRequest, { params }: Params) {
   const actor = await requireSuperAdminSession()
+  const id = (await params).id
 
   const existingSet = await prisma.avatarSet.findUnique({
-    where: { id: (await params).id },
-    select: { lifecycle: true },
+    where: { id },
+    select: { lifecycle: true, name: true },
   })
 
   if (!existingSet) {
     return NextResponse.json({ error: 'Not found' }, { status: 404 })
   }
 
-  // Check for active user grants or current user avatars referencing this set
+  // Check for active user grants — blocks both archive AND hard delete
   const activeGrants = await prisma.userAvatarGrant.count({
-    where: { avatarSetId: (await params).id, isActive: true },
+    where: { avatarSetId: id, isActive: true },
   })
 
   if (activeGrants > 0) {
@@ -121,14 +141,52 @@ export async function DELETE(_req: NextRequest, { params }: Params) {
     )
   }
 
+  // --- Hard delete (archive → permanent removal) ---
+  if (existingSet.lifecycle === 'archived') {
+    // Collect all S3-hosted texture URLs for layers and companions
+    const [layers, companions] = await Promise.all([
+      prisma.avatarLayer.findMany({
+        where: { avatarSetId: id },
+        select: { url: true },
+      }),
+      prisma.avatarCompanion.findMany({
+        where: { avatarSetId: id },
+        select: { url: true },
+      }),
+    ])
+
+    // Delete S3 files for each texture (best-effort, built-in URLs skipped)
+    for (const layer of layers) {
+      await cleanupS3Texture(layer.url)
+    }
+    for (const companion of companions) {
+      await cleanupS3Texture(companion.url)
+    }
+
+    // Delete the set — Prisma cascade removes all related records
+    await prisma.avatarSet.delete({ where: { id } })
+
+    await prisma.avatarSetAuditLog.create({
+      data: {
+        avatarSetId: id,
+        actorId: actor.userId,
+        action: 'set.deleted',
+        diff: { name: existingSet.name, layerCount: layers.length, companionCount: companions.length },
+      },
+    })
+
+    return new NextResponse(null, { status: 204 })
+  }
+
+  // --- Soft archive (draft / active → archived) ---
   const updated = await prisma.avatarSet.update({
-    where: { id: (await params).id },
+    where: { id },
     data: { lifecycle: 'archived' },
   })
 
   await prisma.avatarSetAuditLog.create({
     data: {
-      avatarSetId: (await params).id,
+      avatarSetId: id,
       actorId: actor.userId,
       action: 'set.archived',
       diff: { before: { lifecycle: existingSet.lifecycle }, after: { lifecycle: 'archived' } },
