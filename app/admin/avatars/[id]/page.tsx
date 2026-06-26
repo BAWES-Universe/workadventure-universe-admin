@@ -205,7 +205,11 @@ export default function AvatarSetDetailPage() {
     setSaving(true);
     try {
       const { authenticatedFetch } = await import('@/lib/client-auth');
-      const res = await authenticatedFetch(`/api/admin/avatar-sets/${set.id}`, { method: 'DELETE' });
+      const res = await authenticatedFetch(`/api/admin/avatar-sets/${set.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lifecycle: 'archived' }),
+      });
       if (res.status === 409) {
         const data = await res.json();
         throw new Error(data.error || 'Cannot archive');
@@ -1170,7 +1174,7 @@ export default function AvatarSetDetailPage() {
             <h2 className="text-lg font-semibold">Delete &ldquo;{set.name}&rdquo;?</h2>
             <p className="text-sm text-muted-foreground">
               This permanently removes this avatar set, all its layers, companions, scopes,
-              grants, policies, and audit logs. Uploaded textures on S3 will also be deleted.
+              grants, and policies. Uploaded textures on S3 will also be deleted.
               <strong> This cannot be undone.</strong>
             </p>
             <div className="space-y-2">
