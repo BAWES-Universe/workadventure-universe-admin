@@ -24,6 +24,15 @@ function pickAvatarSetScalars(row: Record<string, unknown>): Record<string, unkn
   return out
 }
 
+/** Error type used to abort a transaction with an active-grant conflict. */
+class GrantConflictError extends Error {
+  count: number
+  constructor(count: number) {
+    super('GRANT_CONFLICT')
+    this.count = count
+  }
+}
+
 /**
  * Clean up S3 file if the texture URL points to an uploaded texture.
  * Silently succeeds — deletion of built-in textures (non-S3 URLs) is a no-op.
@@ -34,8 +43,11 @@ async function cleanupS3Texture(url: string): Promise<void> {
 
   // With forcePathStyle the pathname returned by extractS3KeyFromUrl includes
   // the bucket name as the first segment (e.g. "bucket/avatar-textures/…").
-  // Strip any leading path segment so the guard below works reliably.
-  const cleanedKey = s3Key.includes('/') ? s3Key.slice(s3Key.indexOf('/') + 1) : s3Key
+  // For virtual-hosted URLs there is no bucket prefix — the key starts with
+  // "avatar-textures/" directly. Only strip the leading segment when needed.
+  const cleanedKey = s3Key.startsWith('avatar-textures/')
+    ? s3Key
+    : s3Key.replace(/^[^/]+\//, '')
 
   if (cleanedKey.startsWith('avatar-textures/')) {
     try {
@@ -84,11 +96,6 @@ export async function PATCH(req: NextRequest, { params }: Params) {
   const before = await prisma.avatarSet.findUnique({ where: { id } })
   if (!before) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 
-  // Determine action label early (based on request, not DB state)
-  let action = 'set.updated'
-  if (body.lifecycle === 'active' && before.lifecycle !== 'active') action = 'set.published'
-  if (body.lifecycle === 'archived' && before.lifecycle !== 'archived') action = 'set.archived'
-
   // Perform the grant check, update, and audit log inside a single transaction
   // so a concurrent grant cannot slip between the check and the mutation.
   let updated: Record<string, unknown>
@@ -103,9 +110,14 @@ export async function PATCH(req: NextRequest, { params }: Params) {
           where: { avatarSetId: id, isActive: true },
         })
         if (activeGrants > 0) {
-          throw new Error('GRANT_CONFLICT')
+          throw new GrantConflictError(activeGrants)
         }
       }
+
+      // Determine action from the transactional snapshot, not from 'before'
+      let action = 'set.updated'
+      if (body.lifecycle === 'active' && current.lifecycle !== 'active') action = 'set.published'
+      if (body.lifecycle === 'archived' && current.lifecycle !== 'archived') action = 'set.archived'
 
       updated = await tx.avatarSet.update({
         where: { id },
@@ -137,7 +149,7 @@ export async function PATCH(req: NextRequest, { params }: Params) {
           actorId: actor.userId,
           action,
           // Only log scalar field changes — omit relations (layers, grants, etc.)
-          diff: { before: pickAvatarSetScalars(current), after: pickAvatarSetScalars(updated) },
+          diff: { before: pickAvatarSetScalars(current), after: pickAvatarSetScalars(updated) } as any,
         },
       })
     })
@@ -145,11 +157,11 @@ export async function PATCH(req: NextRequest, { params }: Params) {
     if (e instanceof Error && e.message === 'NOT_FOUND') {
       return NextResponse.json({ error: 'Not found' }, { status: 404 })
     }
-    if (e instanceof Error && e.message === 'GRANT_CONFLICT') {
+    if (e instanceof GrantConflictError) {
       return NextResponse.json(
         {
           error: 'Cannot archive: this set has active user grants. Revoke them first.',
-          activeGrants: 1,
+          activeGrants: e.count,
         },
         { status: 409 }
       )
@@ -201,6 +213,7 @@ export async function DELETE(_req: NextRequest, { params }: Params) {
   }
 
   // Check for active user grants — blocks both archive AND hard delete
+  // (Checks happen again inside the transaction for the hard-delete path.)
   const activeGrants = await prisma.userAvatarGrant.count({
     where: { avatarSetId: id, isActive: true },
   })
@@ -215,58 +228,64 @@ export async function DELETE(_req: NextRequest, { params }: Params) {
     )
   }
 
-  // --- Hard delete (archive → permanent removal) ---
-  if (existingSet.lifecycle === 'archived') {
-    // Collect all S3-hosted texture URLs for layers and companions
-    const [layers, companions] = await Promise.all([
-      prisma.avatarLayer.findMany({
-        where: { avatarSetId: id },
-        select: { url: true },
-      }),
-      prisma.avatarCompanion.findMany({
-        where: { avatarSetId: id },
-        select: { url: true },
-      }),
-    ])
+  // Work inside a transaction so we have an up-to-date view of the set.
+  const layers: { url: string }[] = []
+  const companions: { url: string }[] = []
 
-    // DB work first: create audit log + delete set in a single transaction
-    await prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
+    const current = await tx.avatarSet.findUnique({
+      where: { id },
+      select: { lifecycle: true, name: true },
+    })
+    if (!current) throw new Error('NOT_FOUND')
+
+    if (current.lifecycle === 'archived') {
+      // --- Hard delete ---
+      // Collect texture URLs for S3 cleanup outside the transaction
+      const [ls, cs] = await Promise.all([
+        tx.avatarLayer.findMany({ where: { avatarSetId: id }, select: { url: true } }),
+        tx.avatarCompanion.findMany({ where: { avatarSetId: id }, select: { url: true } }),
+      ])
+      layers.push(...ls)
+      companions.push(...cs)
+
       await tx.avatarSetAuditLog.create({
         data: {
           avatarSetId: id,
           actorId: actor.userId,
           action: 'set.deleted',
-          diff: { name: existingSet.name, layerCount: layers.length, companionCount: companions.length },
+          diff: { name: current.name, layerCount: ls.length, companionCount: cs.length },
         },
       })
       await tx.avatarSet.delete({ where: { id } })
+
+      return { type: 'hard-delete' as const }
+    }
+
+    // --- Soft archive ---
+    const updated = await tx.avatarSet.update({
+      where: { id },
+      data: { lifecycle: 'archived' },
     })
 
-    // S3 cleanup after the DB commit — best-effort, textures are disposable
-    for (const layer of layers) {
-      await cleanupS3Texture(layer.url)
-    }
-    for (const companion of companions) {
-      await cleanupS3Texture(companion.url)
-    }
+    await tx.avatarSetAuditLog.create({
+      data: {
+        avatarSetId: id,
+        actorId: actor.userId,
+        action: 'set.archived',
+        diff: { before: { lifecycle: current.lifecycle }, after: { lifecycle: 'archived' } },
+      },
+    })
 
+    return { type: 'soft-archive' as const, updated }
+  })
+
+  if (result.type === 'hard-delete') {
+    // S3 cleanup after the DB commit — best-effort, textures are disposable
+    for (const layer of layers) await cleanupS3Texture(layer.url)
+    for (const companion of companions) await cleanupS3Texture(companion.url)
     return new NextResponse(null, { status: 204 })
   }
 
-  // --- Soft archive (draft / active → archived) ---
-  const updated = await prisma.avatarSet.update({
-    where: { id },
-    data: { lifecycle: 'archived' },
-  })
-
-  await prisma.avatarSetAuditLog.create({
-    data: {
-      avatarSetId: id,
-      actorId: actor.userId,
-      action: 'set.archived',
-      diff: { before: { lifecycle: existingSet.lifecycle }, after: { lifecycle: 'archived' } },
-    },
-  })
-
-  return NextResponse.json(updated)
+  return NextResponse.json(result.updated)
 }
