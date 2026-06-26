@@ -98,14 +98,14 @@ CREATE TABLE "avatar_set_scopes" (
     "id"              TEXT NOT NULL,
     "avatar_set_id"   TEXT NOT NULL,
     "scope_type"      TEXT NOT NULL,
-    "scope_id"        TEXT,
+    "scope_id"        TEXT NOT NULL DEFAULT '',
     "world_id"        TEXT,
 
     CONSTRAINT "avatar_set_scopes_pkey" PRIMARY KEY ("id")
 );
 
 CREATE UNIQUE INDEX "avatar_set_scopes_avatarSetId_scopeType_scopeId_key"
-    ON "avatar_set_scopes"("avatar_set_id", "scope_type", COALESCE("scope_id", ''));
+    ON "avatar_set_scopes"("avatar_set_id", "scope_type", "scope_id");
 CREATE INDEX "avatar_set_scopes_avatarSetId_idx"
     ON "avatar_set_scopes"("avatar_set_id");
 CREATE INDEX "avatar_set_scopes_scopeType_scopeId_idx"

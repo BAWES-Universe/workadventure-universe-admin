@@ -37,7 +37,7 @@ interface AvatarSet {
     policies: number;
     userGrants: number;
   };
-  scopes: Array<{ id: string; scopeType: string; scopeId: string | null }>;
+  scopes: Array<{ id: string; scopeType: string; scopeId: string }>;
 }
 
 const VISIBILITY_LABELS: Record<string, string> = {
