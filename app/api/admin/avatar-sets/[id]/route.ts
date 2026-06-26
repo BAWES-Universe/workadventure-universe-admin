@@ -192,7 +192,18 @@ export async function PATCH(req: NextRequest, { params }: Params) {
     }),
   ])
 
-  return NextResponse.json({ ...fullSet, auditLogs })
+  // If the set was concurrently deleted between the update and this fetch,
+  // fall back to the scalar data we already have from the transaction.
+  const responseSet = fullSet ?? {
+    ...updated,
+    layers: [],
+    companions: [],
+    scopes: [],
+    policies: [],
+    userGrants: [],
+  }
+
+  return NextResponse.json({ ...responseSet, auditLogs })
 }
 
 // DELETE /api/admin/avatar-sets/:id
@@ -240,6 +251,15 @@ export async function DELETE(_req: NextRequest, { params }: Params) {
     if (!current) throw new Error('NOT_FOUND')
 
     if (current.lifecycle === 'archived') {
+      // Re-check grants inside the transaction — a concurrent grant could have been
+      // created between the outer check and this point.
+      const grantCount = await tx.userAvatarGrant.count({
+        where: { avatarSetId: id, isActive: true },
+      })
+      if (grantCount > 0) {
+        throw new GrantConflictError(grantCount)
+      }
+
       // --- Hard delete ---
       // Collect texture URLs for S3 cleanup outside the transaction
       const [ls, cs] = await Promise.all([
