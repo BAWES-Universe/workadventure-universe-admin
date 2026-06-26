@@ -655,14 +655,14 @@ model AvatarCompanion {
 }
 
 // AvatarSetScope — controls WHERE a set is available.
-// scopeType "platform" -> no scopeId needed (global)
+// scopeType "platform" -> scopeId = "" (global, no specific scope)
 // scopeType "universe" -> scopeId = Universe.id
 // scopeType "world"    -> scopeId = World.id
 model AvatarSetScope {
   id          String  @id @default(uuid())
   avatarSetId String  @map("avatar_set_id")
   scopeType   String  @map("scope_type") // "platform" | "universe" | "world"
-  scopeId     String? @map("scope_id")   // null for platform scope
+  scopeId     String  @default("") @map("scope_id") // "" for platform scope
 
   // Optional: a direct World FK so Prisma can validate world-level scopes
   worldId     String? @map("world_id")

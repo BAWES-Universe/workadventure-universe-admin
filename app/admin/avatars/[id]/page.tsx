@@ -27,7 +27,7 @@ import TextureCard from '@/components/texture-card';
 // ---------------------------------------------------------------------------
 
 interface Scope {
-  id: string; scopeType: string; scopeId: string | null; worldId?: string | null;
+  id: string; scopeType: string; scopeId: string; worldId?: string | null;
 }
 interface Policy {
   id: string; subjectType: string; subjectValue: string | null; action: string; worldId: string | null; isActive: boolean;

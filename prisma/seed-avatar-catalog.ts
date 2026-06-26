@@ -87,7 +87,7 @@ async function main() {
     data: {
       avatarSetId: defaultSet.id,
       scopeType: 'platform',
-      scopeId: null,
+      scopeId: '',
     },
   })
   console.log('  ✓ Platform scope ensured')
