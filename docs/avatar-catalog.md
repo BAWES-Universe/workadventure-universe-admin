@@ -117,7 +117,7 @@ Controls WHERE a set is available.
 
 | `scopeType` | `scopeId` | Meaning |
 |---|---|---|
-| `platform` | null | Available everywhere |
+| `platform` | "" (empty) | Available everywhere |
 | `universe` | Universe.id | Available only inside this universe |
 | `world` | World.id | Available only inside this world |
 
