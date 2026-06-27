@@ -238,37 +238,35 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
     setTestResults((prev) => ({ ...prev, [server.id]: { success: false, message: 'Testing...' } }));
 
     try {
-      // Call the MCP server's tools/list endpoint
-      const response = await fetch(server.serverUrl, {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch(`/api/bots/${botId}/mcp-servers/${server.id}/test`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(server.authType === 'bearer'
-            ? { Authorization: `Bearer ${server.authConfig || ''}` }
-            : {}),
-        },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          id: '1',
-          method: 'tools/list',
-          params: {},
-        }),
       });
 
       if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        const text = await response.text().catch(() => '');
+        throw new Error(`HTTP ${response.status}: ${response.statusText}${text ? ' — ' + text : ''}`);
       }
 
       const data = await response.json();
-      const toolCount = data?.result?.tools?.length ?? 0;
 
-      setTestResults((prev) => ({
-        ...prev,
-        [server.id]: {
-          success: true,
-          message: `Connected successfully. ${toolCount} tool${toolCount !== 1 ? 's' : ''} available.`,
-        },
-      }));
+      if (data.success) {
+        setTestResults((prev) => ({
+          ...prev,
+          [server.id]: {
+            success: true,
+            message: `Connected — ${data.toolCount} tool${data.toolCount !== 1 ? 's' : ''} available${data.toolNames?.length ? ': ' + data.toolNames.join(', ') : ''}.`,
+          },
+        }));
+      } else {
+        setTestResults((prev) => ({
+          ...prev,
+          [server.id]: {
+            success: false,
+            message: data.error || 'Connection failed',
+          },
+        }));
+      }
     } catch (err) {
       setTestResults((prev) => ({
         ...prev,
@@ -434,11 +432,9 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
             <p className="text-muted-foreground text-sm mb-4">
               Add an MCP server to extend this bot with custom tools and capabilities.
             </p>
-            <DialogTrigger asChild>
-              <Button>
+            <Button onClick={() => setAddDialogOpen(true)}>
                 <Plus className="mr-2 h-4 w-4" /> Add Your First Server
               </Button>
-            </DialogTrigger>
           </CardContent>
         </Card>
       ) : (
