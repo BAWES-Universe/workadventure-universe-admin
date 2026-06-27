@@ -234,6 +234,15 @@ async function main() {
   // Seed room templates
   await seedRoomTemplates();
 
+  // Seed default avatar catalog (woka textures + companions)
+  console.log('🌱 Seeding avatar catalog...');
+  try {
+    const { main: seedAvatarCatalog } = await import('./seed-avatar-catalog');
+    await seedAvatarCatalog();
+  } catch (avatarErr) {
+    console.warn('⚠️  Failed to seed avatar catalog:', avatarErr instanceof Error ? avatarErr.message : String(avatarErr));
+  }
+
   console.log('✅ Database seed completed successfully!');
   console.log(`   Default room URL: /@/default/default/default`);
   console.log(`   Map URL: ${defaultMapUrl}`);

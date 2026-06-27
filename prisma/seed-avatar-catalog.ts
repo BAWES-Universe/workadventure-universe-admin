@@ -47,7 +47,7 @@ const LAYER_KEYS = [
   'accessory',
 ] as const
 
-async function main() {
+export async function main() {
   console.log('\n▶ Avatar Catalog Seed')
 
   const wokaJsonPath = path.resolve(__dirname, '../config/woka.json')
