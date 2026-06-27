@@ -199,12 +199,12 @@ export async function resolveBotAssignableSets(
   const accessible: AvatarSetFull[] = []
 
   for (const set of candidates) {
-    if (set.visibility === 'public') {
+    if (set.visibility === 'public' || set.visibility === 'hidden') {
       accessible.push(set)
       continue
     }
 
-    // Hidden / restricted / assigned_only — check for assign_to_bot policy
+    // Restricted / assigned_only — check for assign_to_bot policy
     const hasPolicy = checkPolicyMatch(set.policies, {
       userId,
       membershipTags,
