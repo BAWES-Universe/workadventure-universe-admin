@@ -44,5 +44,9 @@ npx prisma generate --schema=prisma/schema.prisma || {
 mv prisma.config.ts.bak prisma.config.ts 2>/dev/null || true
 echo "[Entrypoint] Prisma client regeneration complete"
 
+# Auto-seed default data if database is empty (idempotent — skips if universe already exists)
+echo "[Entrypoint] Checking if database needs seeding..."
+npx prisma db seed 2>/dev/null || echo "[Entrypoint] Seed already applied or skipped"
+
 # Execute the main command
 exec "$@"
