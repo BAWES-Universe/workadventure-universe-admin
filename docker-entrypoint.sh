@@ -46,9 +46,9 @@ echo "[Entrypoint] Prisma client regeneration complete"
 
 # Auto-run migrations and seed default data on fresh install (idempotent)
 echo "[Entrypoint] Running database migrations..."
-npx prisma migrate deploy 2>/dev/null || echo "[Entrypoint] Migrations already applied or skipped"
+npx prisma migrate deploy || echo "[Entrypoint] ⚠️  Migration failed (container will still start)"
 echo "[Entrypoint] Checking if database needs seeding..."
-npx prisma db seed 2>/dev/null || echo "[Entrypoint] Seed already applied or skipped"
+npx prisma db seed || echo "[Entrypoint] ⚠️  Seed failed (container will still start)"
 
 # Execute the main command
 exec "$@"
