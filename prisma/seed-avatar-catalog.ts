@@ -148,9 +148,13 @@ export async function main() {
   console.log('\n✅ Seed complete.\n')
 }
 
-main()
-  .catch((e) => {
-    console.error(e)
-    process.exit(1)
-  })
-  .finally(() => prisma.$disconnect())
+// Allow direct execution: `npx tsx prisma/seed-avatar-catalog.ts`
+const isDirectRun = process.argv[1]?.endsWith('seed-avatar-catalog.ts')
+if (isDirectRun) {
+  main()
+    .catch((e) => {
+      console.error(e)
+      process.exit(1)
+    })
+    .finally(() => prisma.$disconnect())
+}
