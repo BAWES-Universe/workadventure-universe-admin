@@ -243,62 +243,79 @@ export async function DELETE(_req: NextRequest, { params }: Params) {
   const layers: { url: string }[] = []
   const companions: { url: string }[] = []
 
-  const result = await prisma.$transaction(async (tx) => {
-    const current = await tx.avatarSet.findUnique({
-      where: { id },
-      select: { lifecycle: true, name: true },
-    })
-    if (!current) throw new Error('NOT_FOUND')
-
-    if (current.lifecycle === 'archived') {
-      // Re-check grants inside the transaction — a concurrent grant could have been
-      // created between the outer check and this point.
-      const grantCount = await tx.userAvatarGrant.count({
-        where: { avatarSetId: id, isActive: true },
+  let result: { type: 'hard-delete' } | { type: 'soft-archive'; updated: Record<string, unknown> }
+  try {
+    result = await prisma.$transaction(async (tx) => {
+      const current = await tx.avatarSet.findUnique({
+        where: { id },
+        select: { lifecycle: true, name: true },
       })
-      if (grantCount > 0) {
-        throw new GrantConflictError(grantCount)
+      if (!current) throw new Error('NOT_FOUND')
+
+      if (current.lifecycle === 'archived') {
+        // Re-check grants inside the transaction — a concurrent grant could have been
+        // created between the outer check and this point.
+        const grantCount = await tx.userAvatarGrant.count({
+          where: { avatarSetId: id, isActive: true },
+        })
+        if (grantCount > 0) {
+          throw new GrantConflictError(grantCount)
+        }
+
+        // --- Hard delete ---
+        // Collect texture URLs for S3 cleanup outside the transaction
+        const [ls, cs] = await Promise.all([
+          tx.avatarLayer.findMany({ where: { avatarSetId: id }, select: { url: true } }),
+          tx.avatarCompanion.findMany({ where: { avatarSetId: id }, select: { url: true } }),
+        ])
+        layers.push(...ls)
+        companions.push(...cs)
+
+        await tx.avatarSetAuditLog.create({
+          data: {
+            avatarSetId: id,
+            actorId: actor.userId,
+            action: 'set.deleted',
+            diff: { name: current.name, layerCount: ls.length, companionCount: cs.length },
+          },
+        })
+        await tx.avatarSet.delete({ where: { id } })
+
+        return { type: 'hard-delete' as const }
       }
 
-      // --- Hard delete ---
-      // Collect texture URLs for S3 cleanup outside the transaction
-      const [ls, cs] = await Promise.all([
-        tx.avatarLayer.findMany({ where: { avatarSetId: id }, select: { url: true } }),
-        tx.avatarCompanion.findMany({ where: { avatarSetId: id }, select: { url: true } }),
-      ])
-      layers.push(...ls)
-      companions.push(...cs)
+      // --- Soft archive ---
+      const updated = await tx.avatarSet.update({
+        where: { id },
+        data: { lifecycle: 'archived' },
+      })
 
       await tx.avatarSetAuditLog.create({
         data: {
           avatarSetId: id,
           actorId: actor.userId,
-          action: 'set.deleted',
-          diff: { name: current.name, layerCount: ls.length, companionCount: cs.length },
+          action: 'set.archived',
+          diff: { before: { lifecycle: current.lifecycle }, after: { lifecycle: 'archived' } },
         },
       })
-      await tx.avatarSet.delete({ where: { id } })
 
-      return { type: 'hard-delete' as const }
+      return { type: 'soft-archive' as const, updated }
+    })
+  } catch (e) {
+    if (e instanceof Error && e.message === 'NOT_FOUND') {
+      return NextResponse.json({ error: 'Not found' }, { status: 404 })
     }
-
-    // --- Soft archive ---
-    const updated = await tx.avatarSet.update({
-      where: { id },
-      data: { lifecycle: 'archived' },
-    })
-
-    await tx.avatarSetAuditLog.create({
-      data: {
-        avatarSetId: id,
-        actorId: actor.userId,
-        action: 'set.archived',
-        diff: { before: { lifecycle: current.lifecycle }, after: { lifecycle: 'archived' } },
-      },
-    })
-
-    return { type: 'soft-archive' as const, updated }
-  })
+    if (e instanceof GrantConflictError) {
+      return NextResponse.json(
+        {
+          error: 'Cannot archive: this set has active user grants. Revoke them first.',
+          activeGrants: e.count,
+        },
+        { status: 409 }
+      )
+    }
+    throw e
+  }
 
   if (result.type === 'hard-delete') {
     // S3 cleanup after the DB commit — best-effort, textures are disposable
