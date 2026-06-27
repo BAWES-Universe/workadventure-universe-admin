@@ -45,7 +45,7 @@ export async function POST(req: NextRequest) {
   }
 
   const VALID_KINDS = ['woka', 'companion']
-  const VALID_VISIBILITIES = ['public', 'unlisted', 'private']
+  const VALID_VISIBILITIES = ['public', 'hidden', 'restricted', 'assigned_only']
   const VALID_MONETIZATION_TYPES = ['free', 'one_time', 'subscription', 'metered']
   const VALID_SOURCE_OWNER_TYPES = ['platform', 'world_admin', 'partner']
 

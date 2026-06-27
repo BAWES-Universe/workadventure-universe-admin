@@ -234,6 +234,15 @@ async function main() {
   // Seed room templates
   await seedRoomTemplates();
 
+  // Seed default avatar catalog (woka textures + companions)
+  console.log('🌱 Seeding avatar catalog...');
+  try {
+    const { main: seedAvatarCatalog } = await import('./seed-avatar-catalog');
+    await seedAvatarCatalog();
+  } catch (avatarErr) {
+    console.warn('⚠️  Failed to seed avatar catalog:', avatarErr instanceof Error ? avatarErr.message : String(avatarErr));
+  }
+
   console.log('✅ Database seed completed successfully!');
   console.log(`   Default room URL: /@/default/default/default`);
   console.log(`   Map URL: ${defaultMapUrl}`);
@@ -437,8 +446,8 @@ async function seedRoomTemplates() {
       slug: 'default',
       name: 'Empty Room — Default',
       description: 'Minimal orthogonal room with spawn point only.',
-      mapUrl: 'https://maps.example/empty/default.tmj', // TODO: Replace with actual map URL
-      previewImageUrl: 'https://maps.example/empty/default.png',
+      mapUrl: 'https://bawes-universe.github.io/universe-maps/universe-empty.tmj',
+      previewImageUrl: 'https://bawes-universe.github.io/universe-maps/universe-empty.png',
       sizeLabel: 'Medium',
       authorId: 'author-universe-core',
       order: 0,
@@ -448,8 +457,8 @@ async function seedRoomTemplates() {
       slug: 'standard',
       name: 'Work Room — Standard',
       description: 'Balanced layout with desk clusters and ops wall.',
-      mapUrl: 'https://maps.example/work/standard.tmj', // TODO: Replace with actual map URL
-      previewImageUrl: 'https://maps.example/work/standard.png',
+      mapUrl: 'https://bawes-universe.github.io/universe-maps/universe-empty.tmj',
+      previewImageUrl: 'https://bawes-universe.github.io/universe-maps/universe-empty.png',
       sizeLabel: 'Medium',
       authorId: 'author-studio-atlas',
       recommendedWorldTags: ['staff', 'admin'],
@@ -460,8 +469,8 @@ async function seedRoomTemplates() {
       slug: 'support-desk',
       name: 'Work Room — Support Desk',
       description: 'Front-facing desk layout for handling traffic.',
-      mapUrl: 'https://maps.example/work/support.tmj', // TODO: Replace with actual map URL
-      previewImageUrl: 'https://maps.example/work/support.png',
+      mapUrl: 'https://bawes-universe.github.io/universe-maps/universe-empty.tmj',
+      previewImageUrl: 'https://bawes-universe.github.io/universe-maps/universe-empty.png',
       sizeLabel: 'Small',
       authorId: 'author-studio-atlas',
       order: 1,
@@ -471,8 +480,8 @@ async function seedRoomTemplates() {
       slug: 'lounge',
       name: 'Social Room — Lounge',
       description: 'Open lounge with informal seating.',
-      mapUrl: 'https://maps.example/social/lounge.tmj', // TODO: Replace with actual map URL
-      previewImageUrl: 'https://maps.example/social/lounge.png',
+      mapUrl: 'https://bawes-universe.github.io/universe-maps/universe-empty.tmj',
+      previewImageUrl: 'https://bawes-universe.github.io/universe-maps/universe-empty.png',
       sizeLabel: 'Medium',
       authorId: 'author-universe-core',
       order: 0,
@@ -482,8 +491,8 @@ async function seedRoomTemplates() {
       slug: 'classroom',
       name: 'Knowledge Room — Classroom',
       description: 'Presentation-oriented classroom layout.',
-      mapUrl: 'https://maps.example/knowledge/classroom.tmj', // TODO: Replace with actual map URL
-      previewImageUrl: 'https://maps.example/knowledge/classroom.png',
+      mapUrl: 'https://bawes-universe.github.io/universe-maps/universe-empty.tmj',
+      previewImageUrl: 'https://bawes-universe.github.io/universe-maps/universe-empty.png',
       sizeLabel: 'Medium',
       authorId: 'author-universe-core',
       order: 0,
@@ -493,8 +502,8 @@ async function seedRoomTemplates() {
       slug: 'auditorium',
       name: 'Event Room — Auditorium',
       description: 'Stage with audience seating and broadcast focus.',
-      mapUrl: 'https://maps.example/event/auditorium.tmj', // TODO: Replace with actual map URL
-      previewImageUrl: 'https://maps.example/event/auditorium.png',
+      mapUrl: 'https://bawes-universe.github.io/universe-maps/universe-empty.tmj',
+      previewImageUrl: 'https://bawes-universe.github.io/universe-maps/universe-empty.png',
       sizeLabel: 'Large',
       authorId: 'author-studio-atlas',
       order: 0,

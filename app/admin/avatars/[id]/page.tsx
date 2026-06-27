@@ -27,7 +27,7 @@ import TextureCard from '@/components/texture-card';
 // ---------------------------------------------------------------------------
 
 interface Scope {
-  id: string; scopeType: string; scopeId: string | null; worldId?: string | null;
+  id: string; scopeType: string; scopeId: string; worldId?: string | null;
 }
 interface Policy {
   id: string; subjectType: string; subjectValue: string | null; action: string; worldId: string | null; isActive: boolean;
@@ -199,13 +199,17 @@ export default function AvatarSetDetailPage() {
     }
   }
 
-  // Archive
+  // Archive / Delete
   async function handleArchive() {
     if (!set || !confirm('Archive this set? Active grants will block archiving.')) return;
     setSaving(true);
     try {
       const { authenticatedFetch } = await import('@/lib/client-auth');
-      const res = await authenticatedFetch(`/api/admin/avatar-sets/${set.id}`, { method: 'DELETE' });
+      const res = await authenticatedFetch(`/api/admin/avatar-sets/${set.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lifecycle: 'archived' }),
+      });
       if (res.status === 409) {
         const data = await res.json();
         throw new Error(data.error || 'Cannot archive');
@@ -216,6 +220,34 @@ export default function AvatarSetDetailPage() {
       setError(err instanceof Error ? err.message : 'Archive failed');
     } finally {
       setSaving(false);
+    }
+  }
+
+  // Permanent delete (archived sets only)
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [deleteConfirmName, setDeleteConfirmName] = useState('');
+  const [deleting, setDeleting] = useState(false);
+
+  function openDeleteConfirm() { setDeleteConfirmOpen(true); setDeleteConfirmName(''); }
+
+  async function handlePermanentDelete() {
+    if (!set || deleteConfirmName !== set.name) return;
+    setDeleting(true);
+    try {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const res = await authenticatedFetch(`/api/admin/avatar-sets/${set.id}`, { method: 'DELETE' });
+      if (res.status === 409) {
+        const data = await res.json();
+        throw new Error(data.error || 'Cannot delete');
+      }
+      if (!res.ok) throw new Error('Delete failed');
+      router.push('/admin/avatars');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Delete failed');
+      setDeleteConfirmOpen(false);
+      setDeleteConfirmName('');
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -461,7 +493,12 @@ export default function AvatarSetDetailPage() {
         </div>
         <div className="flex items-center gap-2">
           {successMsg && <span className="text-xs text-emerald-600">{successMsg}</span>}
-          {set.lifecycle !== 'archived' && (
+          {set.lifecycle === 'archived' ? (
+            <Button variant="destructive" size="sm" onClick={openDeleteConfirm} disabled={saving || deleting}>
+              <Trash2 className="h-3.5 w-3.5 mr-1.5" />
+              Delete
+            </Button>
+          ) : (
             <Button variant="outline" size="sm" onClick={handleArchive} disabled={saving}>
               <Archive className="h-3.5 w-3.5 mr-1.5" />
               Archive
@@ -557,9 +594,19 @@ export default function AvatarSetDetailPage() {
                 </div>
                 <div className="space-y-2">
                   <Label>Lifecycle</Label>
-                  <div className="flex items-center h-10 px-3 border rounded-md text-sm bg-muted/30">
-                    {lifecycleBadge(editForm.lifecycle)}
-                  </div>
+                  <Select
+                    value={editForm.lifecycle}
+                    onValueChange={v => setEditForm(f => ({ ...f, lifecycle: v }))}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="draft">Draft</SelectItem>
+                      <SelectItem value="active">Active</SelectItem>
+                      <SelectItem value="archived">Archived</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div className="space-y-2">
                   <Label>Position</Label>
@@ -1119,6 +1166,43 @@ export default function AvatarSetDetailPage() {
           )}
         </TabsContent>
       </Tabs>
+
+      {/* Delete confirmation dialog */}
+      {deleteConfirmOpen && set && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center" onClick={() => setDeleteConfirmOpen(false)}>
+          <div className="bg-background border rounded-lg shadow-lg max-w-md w-full mx-4 p-6 space-y-4" onClick={e => e.stopPropagation()}>
+            <h2 className="text-lg font-semibold">Delete &ldquo;{set.name}&rdquo;?</h2>
+            <p className="text-sm text-muted-foreground">
+              This permanently removes this avatar set, all its layers, companions, scopes,
+              grants, and policies. Uploaded textures on S3 will also be deleted.
+              <strong> This cannot be undone.</strong>
+            </p>
+            <div className="space-y-2">
+              <Label>Type the set name to confirm:</Label>
+              <Input
+                placeholder={set.name}
+                value={deleteConfirmName}
+                onChange={e => setDeleteConfirmName(e.target.value)}
+                autoFocus
+              />
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" size="sm" onClick={() => setDeleteConfirmOpen(false)} disabled={deleting}>
+                Cancel
+              </Button>
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={handlePermanentDelete}
+                disabled={deleteConfirmName !== set.name || deleting}
+              >
+                {deleting ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5 mr-1.5" />}
+                Delete Permanently
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

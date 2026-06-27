@@ -141,22 +141,123 @@ export async function resolveAdminSets(
   })
 }
 
+export interface ResolveBotOptions {
+  prisma: PrismaClient
+  userId: string
+  worldId: string | null
+  universeId: string | null
+  membershipTags: string[]
+}
+
 /**
- * Returns all active sets including hidden/assigned_only — for bot assignment.
+ * Returns avatar sets available for bot texture assignment.
+ *
+ * All users (including super admins) go through the same scope and entitlement
+ * filters, so everyone experiences the same bot texture picker.
+ *
+ * Only sets that are BOTH in-scope for the bot's world AND accessible via one of:
+ *   - visibility === 'public'
+ *   - AvatarEntitlementPolicy(action: 'assign_to_bot') matching the user
+ *   - UserAvatarGrant (direct grant)
  */
 export async function resolveBotAssignableSets(
-  prisma: PrismaClient
+  opts: ResolveBotOptions
 ): Promise<AvatarSetFull[]> {
-  return prisma.avatarSet.findMany({
-    where: { lifecycle: 'active' },
+  const { prisma, userId, worldId, universeId, membershipTags = [] } = opts
+  const now = new Date()
+
+  // Build the candidate query — always scope-filter
+  const where: any = {
+    lifecycle: 'active',
+    scopes: {
+      some: {
+        OR: [
+          { scopeType: 'platform' },
+          ...(universeId ? [{ scopeType: 'universe', scopeId: universeId }] : []),
+          ...(worldId ? [{ scopeType: 'world', scopeId: worldId }] : []),
+        ],
+      },
+    },
+    AND: [
+      { OR: [{ availableFrom: null }, { availableFrom: { lte: now } }] },
+      { OR: [{ availableUntil: null }, { availableUntil: { gte: now } }] },
+    ],
+  }
+
+  const candidates = await prisma.avatarSet.findMany({
+    where,
     include: {
       layers: { where: { isActive: true }, orderBy: { position: 'asc' } },
       companions: { where: { isActive: true }, orderBy: { position: 'asc' } },
       scopes: true,
-      policies: true,
+      policies: { where: { isActive: true } },
     },
     orderBy: { position: 'asc' },
   })
+
+  // Filter by visibility/policy/grant — applies to everyone
+  const accessible: AvatarSetFull[] = []
+
+  for (const set of candidates) {
+    if (set.visibility === 'public' || set.visibility === 'hidden') {
+      accessible.push(set)
+      continue
+    }
+
+    // Restricted / assigned_only — check for assign_to_bot policy
+    const hasPolicy = checkPolicyMatch(set.policies, {
+      userId,
+      membershipTags,
+      worldId,
+      action: 'assign_to_bot',
+    })
+    if (hasPolicy) {
+      accessible.push(set)
+      continue
+    }
+  }
+
+  // Check direct UserAvatarGrants (overrides everything for the granted user)
+  if (userId) {
+    const grants = await prisma.userAvatarGrant.findMany({
+      where: {
+        userId,
+        isActive: true,
+        OR: [
+          { grantType: 'select' },
+          { grantType: 'assigned_only' },
+        ],
+        AND: [{ OR: [{ expiresAt: null }, { expiresAt: { gte: now } }] }],
+      },
+      include: {
+        avatarSet: {
+          include: {
+            layers: { where: { isActive: true }, orderBy: { position: 'asc' } },
+            companions: { where: { isActive: true }, orderBy: { position: 'asc' } },
+            scopes: true,
+            policies: { where: { isActive: true } },
+          },
+        },
+      },
+    })
+    for (const grant of grants) {
+      if (grant.avatarSet.lifecycle !== 'active') continue
+      if (accessible.find((s) => s.id === grant.avatarSet.id)) continue
+
+      // Grants still respect scope — a grant doesn't override world boundaries
+      const inScope = grant.avatarSet.scopes.some(
+        (s) =>
+          s.scopeType === 'platform' ||
+          (s.scopeType === 'universe' && s.scopeId === universeId) ||
+          (s.scopeType === 'world' && s.scopeId === worldId)
+      )
+      if (!inScope) continue
+
+      accessible.push(grant.avatarSet)
+    }
+  }
+
+  return accessible
 }
 
 // ---------------------------------------------------------------------------

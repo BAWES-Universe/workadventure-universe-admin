@@ -53,6 +53,9 @@ services:
       AWS_ENDPOINT: ${AWS_ENDPOINT}
       AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION}
       NEXT_PUBLIC_PLAY_URL: ${NEXT_PUBLIC_PLAY_URL:-http://admin.bawes.localhost}
+      PUBLIC_MAP_STORAGE_URL: ${PUBLIC_MAP_STORAGE_URL:-http://map-storage.workadventure.localhost}
+      MAP_STORAGE_API_TOKEN: ${MAP_STORAGE_API_TOKEN}
+      PLAY_URL: ${PLAY_URL:-http://play.workadventure.localhost}
     ports:
       - "5555:5555" # Prisma Studio port
     volumes:
@@ -64,6 +67,9 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    networks:
+      - default
+      - workadventure-universe
     labels:
       # Traefik configuration
       - "traefik.enable=true"
@@ -109,3 +115,7 @@ volumes:
   redis_data:
   node_modules_data:  # Named volume for node_modules to avoid platform-specific binary issues
 
+networks:
+  workadventure-universe:
+    external: true
+    name: workadventure-universe_default

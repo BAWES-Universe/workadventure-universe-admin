@@ -598,7 +598,6 @@ model AvatarSet {
   scopes       AvatarSetScope[]
   policies     AvatarEntitlementPolicy[]
   userGrants   UserAvatarGrant[]
-  auditLogs    AvatarSetAuditLog[]
 
   @@index([lifecycle, visibility])
   @@map("avatar_sets")
@@ -656,14 +655,14 @@ model AvatarCompanion {
 }
 
 // AvatarSetScope — controls WHERE a set is available.
-// scopeType "platform" -> no scopeId needed (global)
+// scopeType "platform" -> scopeId = "" (global, no specific scope)
 // scopeType "universe" -> scopeId = Universe.id
 // scopeType "world"    -> scopeId = World.id
 model AvatarSetScope {
   id          String  @id @default(uuid())
   avatarSetId String  @map("avatar_set_id")
   scopeType   String  @map("scope_type") // "platform" | "universe" | "world"
-  scopeId     String? @map("scope_id")   // null for platform scope
+  scopeId     String  @default("") @map("scope_id") // "" for platform scope
 
   // Optional: a direct World FK so Prisma can validate world-level scopes
   worldId     String? @map("world_id")
@@ -738,6 +737,8 @@ model UserAvatarGrant {
 }
 
 // AvatarSetAuditLog — immutable audit trail for all catalog changes.
+// avatarSetId is a plain field (no FK constraint) so audit records survive the
+// deletion of the set they reference.
 model AvatarSetAuditLog {
   id          Int      @id @default(autoincrement())
   avatarSetId String   @map("avatar_set_id")
@@ -753,7 +754,7 @@ model AvatarSetAuditLog {
 
   createdAt   DateTime @default(now()) @map("created_at")
 
-  avatarSet   AvatarSet @relation(fields: [avatarSetId], references: [id], onDelete: Cascade)
+  // actor relation preserved — audit logs still reference the user who acted
   actor       User?     @relation(fields: [actorId], references: [id], onDelete: SetNull)
 
   @@index([avatarSetId, createdAt])

@@ -14,6 +14,7 @@ import { requireAuth } from '@/lib/auth'
 import { prisma } from '@/lib/db'
 import {
   resolvePickerSets,
+  resolveBotAssignableSets,
   buildWokaListPayload,
 } from '@/lib/avatar-catalog'
 import { getWokaList } from '@/lib/wokas'
@@ -22,9 +23,11 @@ export async function GET(request: NextRequest) {
   try {
     requireAuth(request)
 
-    const { searchParams } = new URL(request.url)
+    const searchParams = new URL(request.url).searchParams
     const roomUrl = searchParams.get('roomUrl')
     const uuid = searchParams.get('uuid')
+    const context = searchParams.get('context')
+    const botId = searchParams.get('botId')
 
     if (!roomUrl) {
       return NextResponse.json(
@@ -77,13 +80,26 @@ export async function GET(request: NextRequest) {
 
     const playServiceUrl = process.env.PLAY_URL || 'http://play.workadventure.localhost'
 
-    const sets = await resolvePickerSets({
-      prisma,
-      worldId,
-      universeId,
-      userId,
-      membershipTags,
-    })
+    let sets
+
+    if (context === 'bot') {
+      // Bot texture picker — use resolveBotAssignableSets so hidden sets appear
+      sets = await resolveBotAssignableSets({
+        prisma,
+        userId: userId ?? '',
+        worldId,
+        universeId,
+        membershipTags,
+      })
+    } else {
+      sets = await resolvePickerSets({
+        prisma,
+        worldId,
+        universeId,
+        userId,
+        membershipTags,
+      })
+    }
 
     // Fallback to static woka.json during initial catalog migration
     if (sets.length === 0) {

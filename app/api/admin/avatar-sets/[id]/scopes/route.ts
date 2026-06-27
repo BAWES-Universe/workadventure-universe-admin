@@ -20,13 +20,24 @@ export async function POST(req: NextRequest, { params }: Params) {
     return NextResponse.json({ error: 'Invalid or missing scopeType' }, { status: 400 })
   }
 
+  // Normalize scopeId: platform scopes get '', universe/world must be non-empty
+  let scopeId: string
+  if (body.scopeType === 'platform') {
+    scopeId = ''
+  } else {
+    scopeId = body.scopeId ?? ''
+    if (!scopeId) {
+      return NextResponse.json({ error: 'scopeId is required for universe/world scopes' }, { status: 400 })
+    }
+  }
+
   // Validate scopeId exists for universe/world scopes
-  if (body.scopeType === 'world' && body.scopeId) {
-    const world = await prisma.world.findUnique({ where: { id: body.scopeId } })
+  if (body.scopeType === 'world') {
+    const world = await prisma.world.findUnique({ where: { id: scopeId } })
     if (!world) return NextResponse.json({ error: 'World not found' }, { status: 404 })
   }
-  if (body.scopeType === 'universe' && body.scopeId) {
-    const universe = await prisma.universe.findUnique({ where: { id: body.scopeId } })
+  if (body.scopeType === 'universe') {
+    const universe = await prisma.universe.findUnique({ where: { id: scopeId } })
     if (!universe) return NextResponse.json({ error: 'Universe not found' }, { status: 404 })
   }
 
@@ -34,8 +45,8 @@ export async function POST(req: NextRequest, { params }: Params) {
     data: {
       avatarSetId: (await params).id,
       scopeType: body.scopeType,
-      scopeId: body.scopeId ?? null,
-      worldId: body.scopeType === 'world' ? (body.scopeId ?? null) : null,
+      scopeId,
+      worldId: body.scopeType === 'world' ? scopeId : null,
     },
   })
 
