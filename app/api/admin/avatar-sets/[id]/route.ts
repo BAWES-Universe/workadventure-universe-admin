@@ -98,7 +98,7 @@ export async function PATCH(req: NextRequest, { params }: Params) {
 
   // Perform the grant check, update, and audit log inside a single transaction
   // so a concurrent grant cannot slip between the check and the mutation.
-  let updated: Record<string, unknown>
+  let updated: Record<string, unknown> = {}
   try {
     await prisma.$transaction(async (tx) => {
       // Re-read inside the transaction for an up-to-date view
