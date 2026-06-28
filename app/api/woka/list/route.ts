@@ -130,7 +130,7 @@ function parsePlayUri(
     const url = new URL(roomUrl)
     // Pattern: /_/<universeSlug>/<worldSlug>/...
     const parts = url.pathname.split('/').filter(Boolean)
-    if (parts.length >= 3 && parts[0] === '_' || parts[0] === '@') {
+    if (parts.length >= 3 && (parts[0] === '_' || parts[0] === '@')) {
       return { universeSlug: parts[1], worldSlug: parts[2] }
     }
     return null
