@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
-import { requireAdminSession } from '@/lib/auth';
+import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { decryptApiKey } from '@/lib/encryption';
 
@@ -132,8 +132,32 @@ export async function POST(
   try {
     const { id: botId, serverId } = await params;
 
-    const actor = await requireAdminSession();
-    await getAuthorizedBot(botId, actor.userId);
+    // Get user from various auth methods (session token, ADMIN_API_TOKEN)
+    const sessionUser = await getSessionUser(request);
+    let userId: string | null = null;
+    let isAdminToken = false;
+
+    if (sessionUser) {
+      userId = sessionUser.id;
+    } else {
+      const authHeader = request.headers.get('authorization');
+      if (authHeader && authHeader.startsWith('Bearer ')) {
+        const token = authHeader.replace('Bearer ', '').trim();
+        const expectedToken = process.env.ADMIN_API_TOKEN;
+        if (expectedToken && token === expectedToken) {
+          isAdminToken = true;
+        }
+      }
+    }
+
+    if (!userId && !isAdminToken) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
+
+    // Admin token skips ownership check (trusted internal call)
+    if (!isAdminToken) {
+      await getAuthorizedBot(botId, userId!);
+    }
 
     // Fetch the MCP server record (includes encrypted authConfig)
     const server = await prisma.botMcpServer.findUnique({

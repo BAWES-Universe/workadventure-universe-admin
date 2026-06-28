@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
-import { requireAdminSession } from '@/lib/auth';
+import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { encryptApiKey } from '@/lib/encryption';
 import { z } from 'zod';
@@ -29,12 +29,27 @@ export async function GET(
   try {
     const { id: botId } = await params;
 
-    // Get the authenticated session
-    const actor = await requireAdminSession();
-    const actorUser = await prisma.user.findUnique({
-      where: { id: actor.userId },
-      select: { email: true },
-    });
+    // Get user from various auth methods (session token, ADMIN_API_TOKEN)
+    const sessionUser = await getSessionUser(request);
+    let userId: string | null = null;
+    let isAdminToken = false;
+
+    if (sessionUser) {
+      userId = sessionUser.id;
+    } else {
+      const authHeader = request.headers.get('authorization');
+      if (authHeader && authHeader.startsWith('Bearer ')) {
+        const token = authHeader.replace('Bearer ', '').trim();
+        const expectedToken = process.env.ADMIN_API_TOKEN;
+        if (expectedToken && token === expectedToken) {
+          isAdminToken = true;
+        }
+      }
+    }
+
+    if (!userId && !isAdminToken) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
 
     // Fetch the bot to check ownership
     const bot = await prisma.bot.findUnique({
@@ -46,12 +61,18 @@ export async function GET(
       return NextResponse.json({ error: 'Bot not found' }, { status: 404 });
     }
 
-    // Gate: user must be the bot creator OR a super admin
-    const isOwner = bot.createdById === actor.userId;
-    const isSuper = actorUser ? isSuperAdmin(actorUser.email) : false;
+    // Gate: admin token skips ownership check (trusted internal call)
+    if (!isAdminToken) {
+      const actorUser = await prisma.user.findUnique({
+        where: { id: userId! },
+        select: { email: true },
+      });
+      const isOwner = bot.createdById === userId;
+      const isSuper = actorUser ? isSuperAdmin(actorUser.email) : false;
 
-    if (!isOwner && !isSuper) {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+      if (!isOwner && !isSuper) {
+        return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+      }
     }
 
     const servers = await prisma.botMcpServer.findMany({
@@ -95,12 +116,27 @@ export async function POST(
   try {
     const { id: botId } = await params;
 
-    // Get the authenticated session
-    const actor = await requireAdminSession();
-    const actorUser = await prisma.user.findUnique({
-      where: { id: actor.userId },
-      select: { email: true },
-    });
+    // Get user from various auth methods (session token, ADMIN_API_TOKEN)
+    const sessionUser = await getSessionUser(request);
+    let userId: string | null = null;
+    let isAdminToken = false;
+
+    if (sessionUser) {
+      userId = sessionUser.id;
+    } else {
+      const authHeader = request.headers.get('authorization');
+      if (authHeader && authHeader.startsWith('Bearer ')) {
+        const token = authHeader.replace('Bearer ', '').trim();
+        const expectedToken = process.env.ADMIN_API_TOKEN;
+        if (expectedToken && token === expectedToken) {
+          isAdminToken = true;
+        }
+      }
+    }
+
+    if (!userId && !isAdminToken) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    }
 
     // Fetch the bot to check ownership
     const bot = await prisma.bot.findUnique({
@@ -112,12 +148,18 @@ export async function POST(
       return NextResponse.json({ error: 'Bot not found' }, { status: 404 });
     }
 
-    // Gate: user must be the bot creator OR a super admin
-    const isOwner = bot.createdById === actor.userId;
-    const isSuper = actorUser ? isSuperAdmin(actorUser.email) : false;
+    // Gate: admin token skips ownership check (trusted internal call)
+    if (!isAdminToken) {
+      const actorUser = await prisma.user.findUnique({
+        where: { id: userId! },
+        select: { email: true },
+      });
+      const isOwner = bot.createdById === userId;
+      const isSuper = actorUser ? isSuperAdmin(actorUser.email) : false;
 
-    if (!isOwner && !isSuper) {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+      if (!isOwner && !isSuper) {
+        return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+      }
     }
 
     // Parse and validate request body
