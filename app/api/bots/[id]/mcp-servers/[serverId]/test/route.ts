@@ -6,6 +6,24 @@ import { decryptApiKey } from '@/lib/encryption';
 
 export const runtime = 'nodejs';
 
+// CORS headers helper
+function corsHeaders() {
+  return {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, PUT, DELETE',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Allow-Credentials': 'true',
+  };
+}
+
+/**
+ * OPTIONS /api/bots/:id/mcp-servers/:serverId/test
+ * Handle CORS preflight
+ */
+export async function OPTIONS() {
+  return NextResponse.json({}, { headers: corsHeaders() });
+}
+
 /**
  * Check if the current user has access to a bot.
  * Returns the bot on success, throws on failure.
@@ -172,7 +190,7 @@ export async function POST(
     // Could add `lastTestedAt` to the schema for observability
 
     const result = await testMcpConnection(server);
-    return NextResponse.json(result);
+    return NextResponse.json(result, { headers: corsHeaders() });
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized') {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });

@@ -7,6 +7,24 @@ import { z } from 'zod';
 
 export const runtime = 'nodejs';
 
+// CORS headers helper
+function corsHeaders() {
+  return {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, PUT, DELETE',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Allow-Credentials': 'true',
+  };
+}
+
+/**
+ * OPTIONS /api/bots/:id/mcp-servers/:serverId
+ * Handle CORS preflight
+ */
+export async function OPTIONS() {
+  return NextResponse.json({}, { headers: corsHeaders() });
+}
+
 // Validation schema for updating an MCP server (all fields optional)
 const updateMcpServerSchema = z.object({
   name: z.string().min(1, 'name cannot be empty').max(255).optional(),
@@ -133,7 +151,7 @@ export async function PATCH(
       enabled: updated.enabled,
       createdAt: updated.createdAt,
       updatedAt: updated.updatedAt,
-    });
+    }, { headers: corsHeaders() });
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized') {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -206,7 +224,7 @@ export async function DELETE(
       where: { id: serverId },
     });
 
-    return new NextResponse(null, { status: 204 });
+    return new NextResponse(null, { status: 204, headers: corsHeaders() });
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized') {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });

@@ -7,6 +7,24 @@ import { z } from 'zod';
 
 export const runtime = 'nodejs';
 
+// CORS headers helper
+function corsHeaders() {
+  return {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, PUT, DELETE',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Allow-Credentials': 'true',
+  };
+}
+
+/**
+ * OPTIONS /api/bots/:id/mcp-servers
+ * Handle CORS preflight
+ */
+export async function OPTIONS() {
+  return NextResponse.json({}, { headers: corsHeaders() });
+}
+
 // Validation schema for creating an MCP server
 const createMcpServerSchema = z.object({
   name: z.string().min(1, 'name is required').max(255, 'name must be at most 255 characters'),
@@ -92,7 +110,7 @@ export async function GET(
       updatedAt: s.updatedAt,
     }));
 
-    return NextResponse.json(transformed);
+    return NextResponse.json(transformed, { headers: corsHeaders() });
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized') {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -214,7 +232,7 @@ export async function POST(
         createdAt: server.createdAt,
         updatedAt: server.updatedAt,
       },
-      { status: 201 }
+      { status: 201, headers: corsHeaders() }
     );
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized') {
