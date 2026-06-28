@@ -202,6 +202,7 @@ jobs:
 
       - name: Mark Sentry deployment
         if: needs.release.outputs.created == 'true'
+        continue-on-error: true
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           NEW_VERSION: ${{ needs.release.outputs.new_version }}
