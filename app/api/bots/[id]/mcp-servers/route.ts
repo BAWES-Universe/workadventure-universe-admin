@@ -19,15 +19,15 @@ const createMcpServerSchema = z.object({
 });
 
 /**
- * GET /api/bots/[botId]/mcp-servers
+ * GET /api/bots/[id]/mcp-servers
  * List all MCP servers for a bot. Gated by: requester matches bot's createdById OR is super admin.
  */
 export async function GET(
   request: NextRequest,
-  { params }: { params: Promise<{ botId: string }> }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const { botId } = await params;
+    const { id: botId } = await params;
 
     // Get the authenticated session
     const actor = await requireAdminSession();
@@ -85,15 +85,15 @@ export async function GET(
 }
 
 /**
- * POST /api/bots/[botId]/mcp-servers
+ * POST /api/bots/[id]/mcp-servers
  * Create a new MCP server for a bot. Soft cap of 5 servers per bot.
  */
 export async function POST(
   request: NextRequest,
-  { params }: { params: Promise<{ botId: string }> }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const { botId } = await params;
+    const { id: botId } = await params;
 
     // Get the authenticated session
     const actor = await requireAdminSession();

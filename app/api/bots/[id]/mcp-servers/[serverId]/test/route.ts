@@ -120,24 +120,24 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
 }
 
 /**
- * POST /api/bots/[botId]/mcp-servers/[id]/test
+ * POST /api/bots/[id]/mcp-servers/[serverId]/test
  * Test connection to an MCP server. Calls tools/list on the server
  * with the stored auth credentials (decrypted server-side only).
  * Gated by bot ownership or super admin.
  */
 export async function POST(
   request: NextRequest,
-  { params }: { params: Promise<{ botId: string; id: string }> }
+  { params }: { params: Promise<{ id: string; serverId: string }> }
 ) {
   try {
-    const { botId, id } = await params;
+    const { id: botId, serverId } = await params;
 
     const actor = await requireAdminSession();
     await getAuthorizedBot(botId, actor.userId);
 
     // Fetch the MCP server record (includes encrypted authConfig)
     const server = await prisma.botMcpServer.findUnique({
-      where: { id },
+      where: { id: serverId },
     });
 
     if (!server || server.botId !== botId) {

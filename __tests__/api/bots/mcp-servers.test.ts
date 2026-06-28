@@ -1,6 +1,6 @@
 import { NextRequest } from 'next/server';
-import { GET, POST } from '@/app/api/bots/[botId]/mcp-servers/route';
-import { PATCH, DELETE } from '@/app/api/bots/[botId]/mcp-servers/[id]/route';
+import { GET, POST } from '@/app/api/bots/[id]/mcp-servers/route';
+import { PATCH, DELETE } from '@/app/api/bots/[id]/mcp-servers/[serverId]/route';
 import { prisma } from '@/lib/db';
 import * as auth from '@/lib/auth';
 import * as superAdmin from '@/lib/super-admin';
@@ -46,7 +46,7 @@ const MOCK_BOT_ID = 'bot-123';
 const MOCK_USER_ID = 'user-456';
 const MOCK_SERVER_ID = 'server-789';
 
-describe('/api/bots/[botId]/mcp-servers', () => {
+describe('/api/bots/[id]/mcp-servers', () => {
   beforeEach(() => {
     jest.clearAllMocks();
 
@@ -84,7 +84,7 @@ describe('/api/bots/[botId]/mcp-servers', () => {
       (prisma.botMcpServer.findMany as jest.Mock).mockResolvedValue(mockServers);
 
       const request = new NextRequest(`http://localhost:3333/api/bots/${MOCK_BOT_ID}/mcp-servers`);
-      const response = await GET(request, { params: Promise.resolve({ botId: MOCK_BOT_ID }) });
+      const response = await GET(request, { params: Promise.resolve({ id: MOCK_BOT_ID }) });
       const data = await response.json();
 
       expect(response.status).toBe(200);
@@ -102,7 +102,7 @@ describe('/api/bots/[botId]/mcp-servers', () => {
       });
 
       const request = new NextRequest(`http://localhost:3333/api/bots/${MOCK_BOT_ID}/mcp-servers`);
-      const response = await GET(request, { params: Promise.resolve({ botId: MOCK_BOT_ID }) });
+      const response = await GET(request, { params: Promise.resolve({ id: MOCK_BOT_ID }) });
 
       expect(response.status).toBe(403);
     });
@@ -111,7 +111,7 @@ describe('/api/bots/[botId]/mcp-servers', () => {
       (prisma.bot.findUnique as jest.Mock).mockResolvedValue(null);
 
       const request = new NextRequest(`http://localhost:3333/api/bots/${MOCK_BOT_ID}/mcp-servers`);
-      const response = await GET(request, { params: Promise.resolve({ botId: MOCK_BOT_ID }) });
+      const response = await GET(request, { params: Promise.resolve({ id: MOCK_BOT_ID }) });
 
       expect(response.status).toBe(404);
     });
@@ -142,7 +142,7 @@ describe('/api/bots/[botId]/mcp-servers', () => {
         }),
       });
 
-      const response = await POST(request, { params: Promise.resolve({ botId: MOCK_BOT_ID }) });
+      const response = await POST(request, { params: Promise.resolve({ id: MOCK_BOT_ID }) });
       const data = await response.json();
 
       expect(response.status).toBe(201);
@@ -175,7 +175,7 @@ describe('/api/bots/[botId]/mcp-servers', () => {
         }),
       });
 
-      await POST(request, { params: Promise.resolve({ botId: MOCK_BOT_ID }) });
+      await POST(request, { params: Promise.resolve({ id: MOCK_BOT_ID }) });
 
       // Verify encryption was called
       expect(encryption.encryptApiKey).toHaveBeenCalledWith('my-api-key');
@@ -202,7 +202,7 @@ describe('/api/bots/[botId]/mcp-servers', () => {
         }),
       });
 
-      const response = await POST(request, { params: Promise.resolve({ botId: MOCK_BOT_ID }) });
+      const response = await POST(request, { params: Promise.resolve({ id: MOCK_BOT_ID }) });
       const data = await response.json();
 
       expect(response.status).toBe(422);
@@ -221,7 +221,7 @@ describe('/api/bots/[botId]/mcp-servers', () => {
         }),
       });
 
-      const response = await POST(request, { params: Promise.resolve({ botId: MOCK_BOT_ID }) });
+      const response = await POST(request, { params: Promise.resolve({ id: MOCK_BOT_ID }) });
 
       expect(response.status).toBe(400);
     });
@@ -260,7 +260,7 @@ describe('/api/bots/[botId]/mcp-servers', () => {
       });
 
       const response = await PATCH(request, {
-        params: Promise.resolve({ botId: MOCK_BOT_ID, id: MOCK_SERVER_ID }),
+        params: Promise.resolve({ id: MOCK_BOT_ID, serverId: MOCK_SERVER_ID }),
       });
       const data = await response.json();
 
@@ -297,7 +297,7 @@ describe('/api/bots/[botId]/mcp-servers', () => {
       });
 
       await PATCH(request, {
-        params: Promise.resolve({ botId: MOCK_BOT_ID, id: MOCK_SERVER_ID }),
+        params: Promise.resolve({ id: MOCK_BOT_ID, serverId: MOCK_SERVER_ID }),
       });
 
       expect(encryption.encryptApiKey).toHaveBeenCalledWith('new-key');
@@ -318,7 +318,7 @@ describe('/api/bots/[botId]/mcp-servers', () => {
       });
 
       const response = await PATCH(request, {
-        params: Promise.resolve({ botId: MOCK_BOT_ID, id: MOCK_SERVER_ID }),
+        params: Promise.resolve({ id: MOCK_BOT_ID, serverId: MOCK_SERVER_ID }),
       });
 
       expect(response.status).toBe(404);
@@ -339,7 +339,7 @@ describe('/api/bots/[botId]/mcp-servers', () => {
       });
 
       const response = await DELETE(request, {
-        params: Promise.resolve({ botId: MOCK_BOT_ID, id: MOCK_SERVER_ID }),
+        params: Promise.resolve({ id: MOCK_BOT_ID, serverId: MOCK_SERVER_ID }),
       });
 
       expect(response.status).toBe(204);
@@ -356,7 +356,7 @@ describe('/api/bots/[botId]/mcp-servers', () => {
       });
 
       const response = await DELETE(request, {
-        params: Promise.resolve({ botId: MOCK_BOT_ID, id: MOCK_SERVER_ID }),
+        params: Promise.resolve({ id: MOCK_BOT_ID, serverId: MOCK_SERVER_ID }),
       });
 
       expect(response.status).toBe(404);
@@ -378,7 +378,7 @@ describe('/api/bots/[botId]/mcp-servers', () => {
       });
 
       const response = await DELETE(request, {
-        params: Promise.resolve({ botId: MOCK_BOT_ID, id: MOCK_SERVER_ID }),
+        params: Promise.resolve({ id: MOCK_BOT_ID, serverId: MOCK_SERVER_ID }),
       });
 
       expect(response.status).toBe(403);
@@ -395,7 +395,7 @@ describe('/api/bots/[botId]/mcp-servers', () => {
       (prisma.botMcpServer.findMany as jest.Mock).mockResolvedValue([]);
 
       const request = new NextRequest(`http://localhost:3333/api/bots/${MOCK_BOT_ID}/mcp-servers`);
-      const response = await GET(request, { params: Promise.resolve({ botId: MOCK_BOT_ID }) });
+      const response = await GET(request, { params: Promise.resolve({ id: MOCK_BOT_ID }) });
 
       expect(response.status).toBe(200);
     });
@@ -404,7 +404,7 @@ describe('/api/bots/[botId]/mcp-servers', () => {
       (auth.requireAdminSession as jest.Mock).mockRejectedValue(new Error('Unauthorized'));
 
       const request = new NextRequest(`http://localhost:3333/api/bots/${MOCK_BOT_ID}/mcp-servers`);
-      const response = await GET(request, { params: Promise.resolve({ botId: MOCK_BOT_ID }) });
+      const response = await GET(request, { params: Promise.resolve({ id: MOCK_BOT_ID }) });
 
       expect(response.status).toBe(401);
     });

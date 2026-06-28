@@ -46,22 +46,22 @@ async function getAuthorizedBot(botId: string, actorUserId: string): Promise<{ i
 }
 
 /**
- * PATCH /api/bots/[botId]/mcp-servers/[id]
+ * PATCH /api/bots/[id]/mcp-servers/[serverId]
  * Update an MCP server. Re-encrypts authConfig if changed.
  */
 export async function PATCH(
   request: NextRequest,
-  { params }: { params: Promise<{ botId: string; id: string }> }
+  { params }: { params: Promise<{ id: string; serverId: string }> }
 ) {
   try {
-    const { botId, id } = await params;
+    const { id: botId, serverId } = await params;
 
     const actor = await requireAdminSession();
     await getAuthorizedBot(botId, actor.userId);
 
     // Fetch existing server
     const existing = await prisma.botMcpServer.findUnique({
-      where: { id },
+      where: { id: serverId },
     });
 
     if (!existing || existing.botId !== botId) {
@@ -96,7 +96,7 @@ export async function PATCH(
     }
 
     const updated = await prisma.botMcpServer.update({
-      where: { id },
+      where: { id: serverId },
       data: updateData,
     });
 
@@ -132,22 +132,22 @@ export async function PATCH(
 }
 
 /**
- * DELETE /api/bots/[botId]/mcp-servers/[id]
+ * DELETE /api/bots/[id]/mcp-servers/[serverId]
  * Delete an MCP server. Returns 204.
  */
 export async function DELETE(
   request: NextRequest,
-  { params }: { params: Promise<{ botId: string; id: string }> }
+  { params }: { params: Promise<{ id: string; serverId: string }> }
 ) {
   try {
-    const { botId, id } = await params;
+    const { id: botId, serverId } = await params;
 
     const actor = await requireAdminSession();
     await getAuthorizedBot(botId, actor.userId);
 
     // Fetch existing server to verify ownership
     const existing = await prisma.botMcpServer.findUnique({
-      where: { id },
+      where: { id: serverId },
     });
 
     if (!existing || existing.botId !== botId) {
@@ -155,7 +155,7 @@ export async function DELETE(
     }
 
     await prisma.botMcpServer.delete({
-      where: { id },
+      where: { id: serverId },
     });
 
     return new NextResponse(null, { status: 204 });
