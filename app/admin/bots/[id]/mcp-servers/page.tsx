@@ -116,6 +116,11 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
           router.push('/admin/login');
           return;
         }
+        const userData = await response.json();
+        if (!userData.user?.isSuperAdmin) {
+          router.push('/admin');
+          return;
+        }
         setAuthChecked(true);
       } catch {
         router.push('/admin/login');
