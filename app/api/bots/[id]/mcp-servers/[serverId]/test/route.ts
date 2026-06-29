@@ -290,7 +290,8 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
       const target = addresses.find(a => a.family === 4) || addresses[0];
       if (!target) throw new Error('DNS resolution returned no addresses');
       // Replace hostname with the resolved IP in the URL
-      parsed.hostname = target.address;
+      // (IPv6 addresses must be bracket-enclosed per URL standard)
+      parsed.hostname = target.family === 6 ? `[${target.address}]` : target.address;
       return parsed.toString();
     }
 
