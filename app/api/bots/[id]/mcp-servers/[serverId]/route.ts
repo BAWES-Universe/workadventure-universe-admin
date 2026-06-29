@@ -54,8 +54,9 @@ function corsHeaders(request?: NextRequest) {
     };
   }
   // Only allow credentials for known admin/play domains
+  // When unset, no cross-origin credentials are allowed (fail-closed)
   const trustedOrigins = (process.env.CORS_ALLOWED_ORIGINS || '').split(',').filter(Boolean);
-  const isTrusted = trustedOrigins.length === 0 || trustedOrigins.includes(origin);
+  const isTrusted = trustedOrigins.includes(origin);
   const headers: Record<string, string> = {
     'Access-Control-Allow-Origin': origin,
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, PUT, PATCH, DELETE',

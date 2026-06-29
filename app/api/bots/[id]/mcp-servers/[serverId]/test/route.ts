@@ -164,8 +164,9 @@ function corsHeaders(request?: NextRequest) {
     };
   }
   // Only allow credentials for known admin/play domains
+  // When unset, no cross-origin credentials are allowed (fail-closed)
   const trustedOrigins = (process.env.CORS_ALLOWED_ORIGINS || '').split(',').filter(Boolean);
-  const isTrusted = trustedOrigins.length === 0 || trustedOrigins.includes(origin);
+  const isTrusted = trustedOrigins.includes(origin);
   const headers: Record<string, string> = {
     'Access-Control-Allow-Origin': origin,
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, PUT, PATCH, DELETE',
@@ -278,8 +279,23 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
       };
     }
 
+    // Resolve hostname ourselves and pin the IP address to eliminate
+    // TOCTOU between DNS check and fetch (attacker could change DNS
+    // record between isAllowedServerIp and the actual fetch).
+    async function resolveAndPin(url: string): Promise<string> {
+      const parsed = new URL(url);
+      const hostname = parsed.hostname;
+      if (isIP(hostname)) return url; // Already an IP literal — no pinning needed
+      const addresses = await lookup(hostname, { all: true });
+      const target = addresses.find(a => a.family === 4) || addresses[0];
+      if (!target) throw new Error('DNS resolution returned no addresses');
+      // Replace hostname with the resolved IP in the URL
+      parsed.hostname = target.address;
+      return parsed.toString();
+    }
+
     // Helper to follow a redirect manually with SSRF validation
-    async function followRedirect(url: string, headers: Record<string, string>, body: string, redirectCount = 0): Promise<Response> {
+    async function followRedirect(url: string, hostname: string, headers: Record<string, string>, body: string, redirectCount = 0): Promise<Response> {
       if (redirectCount > 5) {
         throw new Error('Too many redirects');
       }
@@ -291,9 +307,12 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
       if (!redirectIpCheck.allowed) {
         throw new Error(redirectIpCheck.error || 'Redirect target resolves to a blocked address');
       }
-      const res = await fetch(url, {
+      // DNS-pin: resolve ourselves, fetch to IP + Host header
+      const pinUrl = await resolveAndPin(url);
+      const fetchHeaders = { ...headers, Host: hostname };
+      const res = await fetch(pinUrl, {
         method: 'POST',
-        headers,
+        headers: fetchHeaders,
         body,
         signal: AbortSignal.timeout(10000),
         redirect: 'manual',
@@ -305,17 +324,74 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
         }
         // Resolve relative redirects against the current URL
         const redirectUrl = new URL(location, url).toString();
-        return followRedirect(redirectUrl, headers, body, redirectCount + 1);
+        const parsed = new URL(redirectUrl);
+        return followRedirect(redirectUrl, parsed.hostname, headers, body, redirectCount + 1);
       }
       return res;
     }
 
-    const response = await followRedirect(server.serverUrl, headers, JSON.stringify({
+    // DNS-pin the initial request too (eliminate TOCTOU between isAllowedServerIp and fetch)
+    const parsedInitial = new URL(server.serverUrl);
+    const initialHostname = parsedInitial.hostname;
+    const initialPinUrl = isIP(initialHostname) ? server.serverUrl : await resolveAndPin(server.serverUrl);
+    const initialHeaders = { ...headers, Host: initialHostname };
+    const responseBody = JSON.stringify({
       jsonrpc: '2.0',
       id: '1',
       method: 'tools/list',
       params: {},
-    }));
+    });
+    const response = await fetch(initialPinUrl, {
+      method: 'POST',
+      headers: initialHeaders,
+      body: responseBody,
+      signal: AbortSignal.timeout(10000),
+      redirect: 'manual',
+    });
+
+    // Handle redirect from initial request via the same SSRF-safe followRedirect
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get('location');
+      if (!location) {
+        return {
+          success: false,
+          toolCount: 0,
+          toolNames: [],
+          error: 'Redirect response missing Location header',
+        };
+      }
+      const redirectUrl = new URL(location, server.serverUrl).toString();
+      const parsed = new URL(redirectUrl);
+      const followed = await followRedirect(redirectUrl, parsed.hostname, headers, responseBody).catch((err: unknown) => {
+        const msg = err instanceof Error ? err.message : 'Redirect failure';
+        return new Response(null, { status: 502, statusText: msg });
+      });
+      if (!followed.ok) {
+        return {
+          success: false,
+          toolCount: 0,
+          toolNames: [],
+          error: `HTTP ${followed.status}: ${followed.statusText}`,
+        };
+      }
+      const data = await followed.json();
+      // Process as normal response
+      if (data?.error) {
+        return {
+          success: false,
+          toolCount: 0,
+          toolNames: [],
+          error: `MCP error: ${data.error.message || JSON.stringify(data.error)}`,
+        };
+      }
+      const tools = data?.result?.tools ?? [];
+      const toolNames = tools.map((t: McpToolDescriptor) => t.name || t.function?.name || 'unknown');
+      return {
+        success: true,
+        toolCount: toolNames.length,
+        toolNames,
+      };
+    }
 
     if (!response.ok) {
       return {
