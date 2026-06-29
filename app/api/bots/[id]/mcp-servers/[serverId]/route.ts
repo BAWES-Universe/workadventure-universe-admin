@@ -184,6 +184,11 @@ export async function PATCH(
     } else if (validatedData.authType !== 'none') {
       // New authConfig provided for a non-none auth type (explicitly), or
       // authType was not specified — encrypt it
+      // If authType wasn't sent and existing is 'none', default to bearer
+      // to prevent inconsistent state (authType:'none' with encrypted credentials)
+      if (validatedData.authType === undefined && effectiveAuthType === 'none') {
+        updateData.authType = 'bearer';
+      }
       try {
         updateData.authConfig = encryptApiKey(validatedData.authConfig);
       } catch (encError) {
