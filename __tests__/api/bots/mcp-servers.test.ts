@@ -7,40 +7,34 @@ import * as superAdmin from '@/lib/super-admin';
 import * as encryption from '@/lib/encryption';
 
 // Mock Prisma
-jest.mock('@/lib/db', () => ({
-  prisma: {
-    $transaction: jest.fn(async (cb: Function) => cb({
-      bot: {
-        findUnique: jest.fn(),
-      },
-      user: {
-        findUnique: jest.fn(),
-      },
-      botMcpServer: {
-        findMany: jest.fn(),
-        findUnique: jest.fn(),
-        create: jest.fn(),
-        update: jest.fn(),
-        delete: jest.fn(),
-        count: jest.fn(),
-      },
-    })),
-    bot: {
-      findUnique: jest.fn(),
+jest.mock('@/lib/db', () => {
+  const mockBotMcpServer = {
+    findMany: jest.fn(),
+    findUnique: jest.fn(),
+    create: jest.fn(),
+    update: jest.fn(),
+    delete: jest.fn(),
+    count: jest.fn(),
+  };
+  const mockBot = {
+    findUnique: jest.fn(),
+  };
+  const mockUser = {
+    findUnique: jest.fn(),
+  };
+  return {
+    prisma: {
+      $transaction: jest.fn(async (cb: Function) => cb({
+        botMcpServer: mockBotMcpServer,
+        bot: mockBot,
+        user: mockUser,
+      })),
+      bot: mockBot,
+      user: mockUser,
+      botMcpServer: mockBotMcpServer,
     },
-    user: {
-      findUnique: jest.fn(),
-    },
-    botMcpServer: {
-      findMany: jest.fn(),
-      findUnique: jest.fn(),
-      create: jest.fn(),
-      update: jest.fn(),
-      delete: jest.fn(),
-      count: jest.fn(),
-    },
-  },
-}));
+  };
+});
 
 // Mock auth session
 jest.mock('@/lib/auth-session', () => ({

@@ -424,6 +424,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                     <Button
                       variant="ghost"
                       size="icon"
+                      aria-label="Remove header"
                       onClick={() => {
                         setFormData({
                           ...formData,
@@ -533,6 +534,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                     <TableCell>
                       <div className="flex items-center gap-2">
                         <Switch
+                          aria-label={`Toggle ${server.name} enabled`}
                           checked={server.enabled}
                           onCheckedChange={() => handleToggle(server)}
                         />
@@ -597,6 +599,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                             <Button
                               variant="destructive"
                               size="sm"
+                              aria-label={`Delete ${server.name}`}
                               onClick={() => setDeleteServerId(server.id)}
                             >
                               <Trash2 className="h-3 w-3" />

@@ -16,14 +16,23 @@ function isAllowedServerUrl(url: string): boolean {
     if (hostname.startsWith('[') && hostname.endsWith(']')) {
       hostname = hostname.slice(1, -1);
     }
-    if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '0.0.0.0' || hostname === '::1') return false;
+    if (hostname === 'localhost' || hostname === '::1') return false;
+    if (/^127\.\d+\.\d+\.\d+$/.test(hostname)) return false;         // 127.0.0.0/8 loopback
+    if (/^0\.0\.0\.0$/.test(hostname)) return false;
+    // Handle IPv4-mapped IPv6 addresses (::ffff:127.0.0.1, etc.)
+    if (/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.test(hostname)) {
+      const ipv4 = hostname.replace(/^::ffff:/i, '');
+      if (ipv4 === '127.0.0.1' || /^127\.\d+\.\d+\.\d+$/.test(ipv4) || ipv4 === '0.0.0.0') return false;
+      if (/^10\.\d+\.\d+\.\d+$/.test(ipv4) || /^172\.(1[6-9]|2\d|3[01])\.\d+\.\d+$/.test(ipv4)) return false;
+      if (/^192\.168\.\d+\.\d+$/.test(ipv4) || /^169\.254\.\d+\.\d+$/.test(ipv4)) return false;
+    }
     if (/^10\.\d+\.\d+\.\d+$/.test(hostname)) return false;
     if (/^172\.(1[6-9]|2\d|3[01])\.\d+\.\d+$/.test(hostname)) return false;
     if (/^192\.168\.\d+\.\d+$/.test(hostname)) return false;
-    if (/^169\.\d+\.\d+\.\d+$/.test(hostname)) return false;
+    if (/^169\.254\.\d+\.\d+$/.test(hostname)) return false;
     // Reject private IPv6 ranges (unique-local, link-local, unspecified)
     if (/^f[cd][0-9a-f]{0,3}:/i.test(hostname)) return false;
-    if (/^fe80:/i.test(hostname)) return false;
+    if (/^fe[89a-b][0-9a-f]:/i.test(hostname)) return false;         // fe80::/10 link-local
     if (/^::$/.test(hostname)) return false;
     if (hostname === '169.254.169.254') return false;
     if (hostname === 'metadata.google.internal' || hostname === 'metadata.internal') return false;
@@ -34,16 +43,36 @@ function isAllowedServerUrl(url: string): boolean {
   }
 }
 
-// CORS headers — echo origin for credentialed requests
+// CORS headers — only echo origin with credentials for trusted origins
 function corsHeaders(request?: NextRequest) {
-  const origin = request?.headers?.get('origin') || '*';
-  return {
+  const origin = request?.headers?.get('origin');
+  if (!origin) {
+    // Same-origin request (no Origin header) — no CORS needed
+    return {
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, PUT, PATCH, DELETE',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    };
+  }
+  // Only allow credentials for known admin/play domains.
+  // When CORS_ALLOWED_ORIGINS is unset, deny all cross-origin access (fail-closed).
+  const trustedOrigins = (process.env.CORS_ALLOWED_ORIGINS || '').split(',').filter(Boolean);
+  if (trustedOrigins.length === 0 || !trustedOrigins.includes(origin)) {
+    // No allowlist configured OR origin not in allowlist — deny cross-origin reads
+    return {
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, PUT, PATCH, DELETE',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      'Vary': 'Origin',
+    };
+  }
+  // Trusted origin — echo with credentials
+  const headers: Record<string, string> = {
     'Access-Control-Allow-Origin': origin,
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, PUT, PATCH, DELETE',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-    ...(origin !== '*' ? { 'Vary': 'Origin' } : {}),
-    'Access-Control-Allow-Credentials': 'true',
+    'Vary': 'Origin',
   };
+  headers['Access-Control-Allow-Credentials'] = 'true';
+  return headers;
 }
 
 /**
@@ -73,6 +102,14 @@ const createMcpServerSchema = z.object({
     { message: 'Headers must not include reserved credentials: Authorization, Proxy-Authorization, Cookie, Set-Cookie, X-API-Key' }
   ).optional(),
   enabled: z.boolean().optional().default(true),
+}).superRefine((data, ctx) => {
+  if ((data.authType === 'bearer' || data.authType === 'api-key') && !data.authConfig) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['authConfig'],
+      message: `authConfig is required when authType is '${data.authType}'`,
+    });
+  }
 });
 
 /**

@@ -48,7 +48,7 @@ export async function GET(request: NextRequest) {
     }
 
     const { searchParams } = new URL(request.url);
-    const page = parsePositiveInt(searchParams.get('page'), 1, Infinity);
+    const page = parsePositiveInt(searchParams.get('page'), 1, 1000);
     const limit = parsePositiveInt(searchParams.get('limit'), 20, 100);
     const skip = (page - 1) * limit;
     const search = searchParams.get('search');
@@ -107,7 +107,6 @@ export async function GET(request: NextRequest) {
       serverUrl: s.serverUrl,
       authType: s.authType,
       enabled: s.enabled,
-      headers: s.headers,
       lastTestedAt: s.lastTestedAt,
       lastTestResult: s.lastTestResult,
       createdAt: s.createdAt,

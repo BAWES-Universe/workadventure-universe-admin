@@ -553,7 +553,9 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
       {/* Tabs */}
       <Tabs value={activeTab} onValueChange={(value) => {
           if (value === 'mcp-servers' && botId) {
-            window.location.href = `/admin/bots/${botId}/mcp-servers?_token=${new URLSearchParams(window.location.search).get('_token') || ''}`;
+            const params = new URLSearchParams(window.location.search);
+            const token = params.get('_token') || '';
+            window.location.href = `/admin/bots/${botId}/mcp-servers?_token=${encodeURIComponent(token)}`;
             return;
           }
           setActiveTab(value);
