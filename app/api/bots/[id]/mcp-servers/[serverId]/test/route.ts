@@ -3,6 +3,8 @@ import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { decryptApiKey } from '@/lib/encryption';
+import { lookup } from 'dns/promises';
+import { isIP } from 'net';
 
 export const runtime = 'nodejs';
 
@@ -34,12 +36,58 @@ function isAllowedServerUrl(url: string): boolean {
   }
 }
 
+/**
+ * Resolve a hostname to its IP addresses and verify none are private.
+ * Catches DNS-based SSRF bypasses (domain → private IP).
+ */
+async function isAllowedServerIp(serverUrl: string): Promise<{ allowed: boolean; error?: string }> {
+  try {
+    const parsed = new URL(serverUrl);
+    const hostname = parsed.hostname.toLowerCase();
+
+    // If already an IP literal, the hostname check already caught it
+    if (isIP(hostname)) {
+      return { allowed: true };
+    }
+
+    const addresses = await lookup(hostname, { all: true });
+    for (const addr of addresses) {
+      const ip = addr.address;
+      // Reject private and loopback ranges
+      if (ip === '127.0.0.1' || ip === '::1' || ip === '0.0.0.0') {
+        return { allowed: false, error: `Server resolves to loopback address (${ip})` };
+      }
+      if (/^10\./.test(ip)) {
+        return { allowed: false, error: `Server resolves to private IP range (10.x.x.x)` };
+      }
+      if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) {
+        return { allowed: false, error: `Server resolves to private IP range (172.16-31.x.x)` };
+      }
+      if (/^192\.168\./.test(ip)) {
+        return { allowed: false, error: `Server resolves to private IP range (192.168.x.x)` };
+      }
+      if (/^169\.254\./.test(ip)) {
+        return { allowed: false, error: `Server resolves to link-local address (169.254.x.x)` };
+      }
+      if (addr.family === 6) {
+        // IPv6 private ranges
+        if (/^fe80:/i.test(ip)) return { allowed: false, error: 'Server resolves to link-local IPv6 address (fe80:)' };
+        if (/^fc00:/i.test(ip) || /^fd00:/i.test(ip)) return { allowed: false, error: 'Server resolves to unique-local IPv6 address (fc00:/fd00:)' };
+        if (ip === '::1') return { allowed: false, error: 'Server resolves to IPv6 loopback' };
+      }
+    }
+    return { allowed: true };
+  } catch (dnsError: any) {
+    return { allowed: false, error: `DNS resolution failed: ${dnsError.message || 'Unknown error'}` };
+  }
+}
+
 // CORS headers — echo origin for credentialed requests
 function corsHeaders(request?: NextRequest) {
   const origin = request?.headers?.get('origin') || '*';
   return {
     'Access-Control-Allow-Origin': origin,
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, PUT, DELETE',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, PUT, PATCH, DELETE',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     ...(origin !== '*' ? { 'Vary': 'Origin' } : {}),
     'Access-Control-Allow-Credentials': 'true',
@@ -129,6 +177,17 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
       };
     }
 
+    // DNS-level SSRF guard: resolve hostname and verify resolved IPs are not private
+    const ipCheck = await isAllowedServerIp(server.serverUrl);
+    if (!ipCheck.allowed) {
+      return {
+        success: false,
+        toolCount: 0,
+        toolNames: [],
+        error: ipCheck.error || 'Server URL resolves to a blocked address',
+      };
+    }
+
     const response = await fetch(server.serverUrl, {
       method: 'POST',
       headers,
@@ -139,6 +198,7 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
         params: {},
       }),
       signal: AbortSignal.timeout(10000),
+      redirect: 'manual', // Prevent redirect-based SSRF
     });
 
     if (!response.ok) {

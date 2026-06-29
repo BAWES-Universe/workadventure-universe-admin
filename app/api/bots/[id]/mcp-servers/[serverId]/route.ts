@@ -31,7 +31,7 @@ function corsHeaders(request?: NextRequest) {
   const origin = request?.headers?.get('origin') || '*';
   return {
     'Access-Control-Allow-Origin': origin,
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, PUT, DELETE',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, PUT, PATCH, DELETE',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     ...(origin !== '*' ? { 'Vary': 'Origin' } : {}),
     'Access-Control-Allow-Credentials': 'true',
@@ -55,7 +55,13 @@ const updateMcpServerSchema = z.object({
   ).optional(),
   authType: z.enum(['none', 'bearer', 'api-key']).optional(),
   authConfig: z.string().optional().nullable(),
-  headers: z.record(z.string(), z.string()).optional(),
+  headers: z.record(z.string(), z.string()).refine(
+    (headers) => {
+      const reserved = ['authorization', 'proxy-authorization', 'cookie', 'set-cookie', 'x-api-key'];
+      return !Object.keys(headers).some((key) => reserved.includes(key.toLowerCase()));
+    },
+    { message: 'Headers must not include reserved credentials: Authorization, Proxy-Authorization, Cookie, Set-Cookie, X-API-Key' }
+  ).optional(),
   enabled: z.boolean().optional(),
 });
 
@@ -142,30 +148,41 @@ export async function PATCH(
     const updateData: Record<string, unknown> = {};
     if (validatedData.name !== undefined) updateData.name = validatedData.name;
     if (validatedData.serverUrl !== undefined) updateData.serverUrl = validatedData.serverUrl;
+    // Determine effective auth type after update (existing + incoming changes)
+    const effectiveAuthType = validatedData.authType ?? existing.authType;
+
     if (validatedData.authType !== undefined) {
       updateData.authType = validatedData.authType;
       if (validatedData.authType === 'none') {
         updateData.authConfig = null;
       }
     }
+
     if (validatedData.enabled !== undefined) updateData.enabled = validatedData.enabled;
 
     if (validatedData.headers !== undefined) updateData.headers = validatedData.headers;
 
-    // Handle authConfig: if changed, re-encrypt (skip if authType is 'none')
-    if (validatedData.authConfig !== undefined && validatedData.authType !== 'none') {
-      if (validatedData.authConfig === null || validatedData.authConfig === '') {
+    // Handle authConfig based on effective auth type
+    if (validatedData.authConfig === undefined) {
+      // authConfig not in the request body
+      if (validatedData.authType !== undefined && validatedData.authType !== existing.authType) {
+        // Auth type changed without providing new config — clear old secret
         updateData.authConfig = null;
-      } else {
-        try {
-          updateData.authConfig = encryptApiKey(validatedData.authConfig);
-        } catch (encError) {
-          console.error('Failed to encrypt authConfig:', encError);
-          return NextResponse.json(
-            { error: 'Failed to encrypt auth configuration' },
-            { status: 500 }
-          );
-        }
+      }
+      // else: keep existing authConfig (unchanged)
+    } else if (validatedData.authConfig === null || validatedData.authConfig === '') {
+      // Explicitly clearing authConfig
+      updateData.authConfig = null;
+    } else if (validatedData.authType !== 'none' && effectiveAuthType !== 'none') {
+      // New authConfig provided for a non-none auth type — encrypt it
+      try {
+        updateData.authConfig = encryptApiKey(validatedData.authConfig);
+      } catch (encError) {
+        console.error('Failed to encrypt authConfig:', encError);
+        return NextResponse.json(
+          { error: 'Failed to encrypt auth configuration' },
+          { status: 500 }
+        );
       }
     }
 

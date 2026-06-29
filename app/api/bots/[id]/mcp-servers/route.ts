@@ -31,7 +31,7 @@ function corsHeaders(request?: NextRequest) {
   const origin = request?.headers?.get('origin') || '*';
   return {
     'Access-Control-Allow-Origin': origin,
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, PUT, DELETE',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, PUT, PATCH, DELETE',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     ...(origin !== '*' ? { 'Vary': 'Origin' } : {}),
     'Access-Control-Allow-Credentials': 'true',
@@ -57,7 +57,13 @@ const createMcpServerSchema = z.object({
     message: 'authType must be one of: none, bearer, api-key',
   }).default('none'),
   authConfig: z.string().optional().nullable(),
-  headers: z.record(z.string(), z.string()).optional(),
+  headers: z.record(z.string(), z.string()).refine(
+    (headers) => {
+      const reserved = ['authorization', 'proxy-authorization', 'cookie', 'set-cookie', 'x-api-key'];
+      return !Object.keys(headers).some((key) => reserved.includes(key.toLowerCase()));
+    },
+    { message: 'Headers must not include reserved credentials: Authorization, Proxy-Authorization, Cookie, Set-Cookie, X-API-Key' }
+  ).optional(),
   enabled: z.boolean().optional().default(true),
 });
 
