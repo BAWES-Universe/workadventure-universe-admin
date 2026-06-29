@@ -7,6 +7,25 @@ import { z } from 'zod';
 
 export const runtime = 'nodejs';
 
+// Reject MCP server URLs that point to internal infrastructure (SSRF prevention)
+function isAllowedServerUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const hostname = parsed.hostname.toLowerCase();
+    if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '0.0.0.0' || hostname === '::1') return false;
+    if (/^10\.\d+\.\d+\.\d+$/.test(hostname)) return false;
+    if (/^172\.(1[6-9]|2\d|3[01])\.\d+\.\d+$/.test(hostname)) return false;
+    if (/^192\.168\.\d+\.\d+$/.test(hostname)) return false;
+    if (/^169\.254\.\d+\.\d+$/.test(hostname)) return false;
+    if (hostname === '169.254.169.254') return false;
+    if (hostname === 'metadata.google.internal' || hostname === 'metadata.internal') return false;
+    if (hostname.endsWith('.internal')) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // CORS headers — echo origin for credentialed requests
 function corsHeaders(request?: NextRequest) {
   const origin = request?.headers?.get('origin') || '*';
@@ -30,7 +49,10 @@ export async function OPTIONS(request: NextRequest) {
 // Validation schema for updating an MCP server (all fields optional)
 const updateMcpServerSchema = z.object({
   name: z.string().min(1, 'name cannot be empty').max(255).optional(),
-  serverUrl: z.string().url('serverUrl must be a valid URL').optional(),
+  serverUrl: z.string().url('serverUrl must be a valid URL').refine(
+    (url) => isAllowedServerUrl(url),
+    { message: 'Server URL must not point to internal or private addresses' }
+  ).optional(),
   authType: z.enum(['none', 'bearer', 'api-key']).optional(),
   authConfig: z.string().optional().nullable(),
   enabled: z.boolean().optional(),
