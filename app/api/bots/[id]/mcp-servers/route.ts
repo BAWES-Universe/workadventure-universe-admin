@@ -88,15 +88,6 @@ const createMcpServerSchema = z.object({
     message: 'authType must be one of: none, bearer, api-key',
   }).default('none'),
   authConfig: z.string().optional().nullable(),
-}).superRefine((data, ctx) => {
-  if ((data.authType === 'bearer' || data.authType === 'api-key') && !data.authConfig) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ['authConfig'],
-      message: `authConfig is required when authType is '${data.authType}'`,
-    });
-  }
-}).and(z.object({
   headers: z.record(z.string(), z.string()).refine(
     (headers) => {
       const reserved = ['authorization', 'proxy-authorization', 'cookie', 'set-cookie', 'x-api-key'];
@@ -105,6 +96,14 @@ const createMcpServerSchema = z.object({
     { message: 'Headers must not include reserved credentials: Authorization, Proxy-Authorization, Cookie, Set-Cookie, X-API-Key' }
   ).optional(),
   enabled: z.boolean().optional().default(true),
+}).superRefine((data, ctx) => {
+  if ((data.authType === 'bearer' || data.authType === 'api-key') && !data.authConfig) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['authConfig'],
+      message: `authConfig is required when authType is '${data.authType}'`,
+    });
+  }
 });
 
 /**
