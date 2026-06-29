@@ -133,13 +133,15 @@ export async function GET(
       orderBy: { createdAt: 'asc' },
     });
 
-    // Transform: remove authConfig from response for security
+    // Transform: remove authConfig from response for security,
+    // except for internal bot-server calls authenticated via ADMIN_API_TOKEN
     const transformed = servers.map((s) => ({
       id: s.id,
       botId: s.botId,
       name: s.name,
       serverUrl: s.serverUrl,
       authType: s.authType,
+      ...(isAdminToken ? { authConfig: s.authConfig } : {}),
       enabled: s.enabled,
       headers: s.headers,
       lastTestedAt: s.lastTestedAt,
