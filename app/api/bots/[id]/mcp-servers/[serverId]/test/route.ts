@@ -18,10 +18,16 @@ function isAllowedServerUrl(url: string): boolean {
     const cleanHostname = hostname.startsWith('[') && hostname.endsWith(']') ? hostname.slice(1, -1) : hostname;
 
     // Reject localhost variants
-    if (cleanHostname === 'localhost' || cleanHostname === '127.0.0.1' || cleanHostname === '0.0.0.0' || cleanHostname === '::1') {
-      return false;
+    if (cleanHostname === 'localhost' || cleanHostname === '::1') return false;
+    if (/^127\.\d+\.\d+\.\d+$/.test(cleanHostname)) return false;    // 127.0.0.0/8 loopback
+    if (/^0\.0\.0\.0$/.test(cleanHostname)) return false;
+    // Handle IPv4-mapped IPv6 addresses (::ffff:127.0.0.1, etc.)
+    if (/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.test(cleanHostname)) {
+      const ipv4 = cleanHostname.replace(/^::ffff:/i, '');
+      if (/^127\.\d+\.\d+\.\d+$/.test(ipv4) || ipv4 === '0.0.0.0') return false;
+      if (/^10\.\d+\.\d+\.\d+$/.test(ipv4) || /^172\.(1[6-9]|2\d|3[01])\.\d+\.\d+$/.test(ipv4)) return false;
+      if (/^192\.168\.\d+\.\d+$/.test(ipv4) || /^169\.254\.\d+\.\d+$/.test(ipv4)) return false;
     }
-
     // Reject private IP ranges
     if (/^10\.\d+\.\d+\.\d+$/.test(cleanHostname)) return false;
     if (/^172\.(1[6-9]|2\d|3[01])\.\d+\.\d+$/.test(cleanHostname)) return false;
@@ -30,7 +36,7 @@ function isAllowedServerUrl(url: string): boolean {
 
     // Reject private IPv6 ranges (unique-local, link-local, loopback)
     if (/^f[cd][0-9a-f]{0,3}:/i.test(cleanHostname)) return false; // fc00::/7 unique-local
-    if (/^fe80:/i.test(cleanHostname)) return false;                 // fe80::/10 link-local
+    if (/^fe[89a-b][0-9a-f]:/i.test(cleanHostname)) return false;         // fe80::/10 link-local
     if (/^::$/.test(cleanHostname)) return false;                    // :: (unspecified)
 
     // Reject cloud metadata endpoints
@@ -60,8 +66,30 @@ async function isAllowedServerIp(serverUrl: string): Promise<{ allowed: boolean;
     // Check IP literal hostnames directly (the hostname-pattern check above cannot
     // catch all private IPv6 ranges, so we must check them here too)
     if (isIP(hostname)) {
-      if (hostname === '::1' || hostname === '0.0.0.0' || hostname === '127.0.0.1') {
+      if (hostname === '::1' || hostname === '0.0.0.0') {
         return { allowed: false, error: `Server uses loopback address (${hostname})` };
+      }
+      if (/^127\./.test(hostname)) {
+        return { allowed: false, error: `Server uses loopback address (${hostname})` };
+      }
+      // Handle IPv4-mapped IPv6 (::ffff:127.0.0.1, ::ffff:10.0.0.1, etc.)
+      if (/^::ffff:/i.test(hostname)) {
+        const ipv4 = hostname.replace(/^::ffff:/i, '');
+        if (/^127\./.test(ipv4) || ipv4 === '0.0.0.0') {
+          return { allowed: false, error: `Server uses loopback address via IPv4-mapped IPv6 (${hostname})` };
+        }
+        if (/^10\./.test(ipv4)) {
+          return { allowed: false, error: `Server resolves to private IP via IPv4-mapped IPv6 (${hostname})` };
+        }
+        if (/^172\.(1[6-9]|2\d|3[01])\./.test(ipv4)) {
+          return { allowed: false, error: `Server resolves to private IP via IPv4-mapped IPv6 (${hostname})` };
+        }
+        if (/^192\.168\./.test(ipv4)) {
+          return { allowed: false, error: `Server resolves to private IP via IPv4-mapped IPv6 (${hostname})` };
+        }
+        if (/^169\.254\./.test(ipv4)) {
+          return { allowed: false, error: `Server resolves to link-local via IPv4-mapped IPv6 (${hostname})` };
+        }
       }
       if (/^10\./.test(hostname) || /^172\.(1[6-9]|2\d|3[01])\./.test(hostname) ||
           /^192\.168\./.test(hostname) || /^169\.254\./.test(hostname)) {
@@ -70,7 +98,7 @@ async function isAllowedServerIp(serverUrl: string): Promise<{ allowed: boolean;
       if (/^f[cd][0-9a-f]{0,3}:/i.test(hostname)) {
         return { allowed: false, error: 'Server uses unique-local IPv6 address (fc00::/7)' };
       }
-      if (/^fe80:/i.test(hostname)) {
+      if (/^fe[89a-b][0-9a-f]:/i.test(hostname)) {
         return { allowed: false, error: 'Server uses link-local IPv6 address (fe80::/10)' };
       }
       // IP literal that passed all checks — still resolve it to catch CNAME-based bypasses
@@ -80,7 +108,10 @@ async function isAllowedServerIp(serverUrl: string): Promise<{ allowed: boolean;
     for (const addr of addresses) {
       const ip = addr.address;
       // Reject private and loopback ranges
-      if (ip === '127.0.0.1' || ip === '::1' || ip === '0.0.0.0') {
+      if (ip === '::1' || ip === '0.0.0.0') {
+        return { allowed: false, error: `Server resolves to loopback address (${ip})` };
+      }
+      if (/^127\./.test(ip)) {
         return { allowed: false, error: `Server resolves to loopback address (${ip})` };
       }
       if (/^10\./.test(ip)) {
@@ -95,29 +126,56 @@ async function isAllowedServerIp(serverUrl: string): Promise<{ allowed: boolean;
       if (/^169\.254\./.test(ip)) {
         return { allowed: false, error: `Server resolves to link-local address (169.254.x.x)` };
       }
+      // Handle IPv4-mapped IPv6 in DNS results
+      if (/^::ffff:/i.test(ip)) {
+        const ipv4 = ip.replace(/^::ffff:/i, '');
+        if (/^127\./.test(ipv4) || ipv4 === '0.0.0.0') {
+          return { allowed: false, error: `Server resolves to loopback via IPv4-mapped IPv6 (${ip})` };
+        }
+        if (/^10\./.test(ipv4) || /^172\.(1[6-9]|2\d|3[01])\./.test(ipv4)) {
+          return { allowed: false, error: `Server resolves to private IP via IPv4-mapped IPv6 (${ip})` };
+        }
+        if (/^192\.168\./.test(ipv4) || /^169\.254\./.test(ipv4)) {
+          return { allowed: false, error: `Server resolves to private/link-local via IPv4-mapped IPv6 (${ip})` };
+        }
+      }
       if (addr.family === 6) {
         // IPv6 private ranges
-        if (/^fe80:/i.test(ip)) return { allowed: false, error: 'Server resolves to link-local IPv6 address (fe80:)' };
+        if (/^fe[89a-b][0-9a-f]:/i.test(ip)) return { allowed: false, error: 'Server resolves to link-local IPv6 address (fe80:)' };
         if (/^f[cd][0-9a-f]{0,3}:/i.test(ip)) return { allowed: false, error: 'Server resolves to unique-local IPv6 address (fc00::/7)' };
         if (ip === '::1') return { allowed: false, error: 'Server resolves to IPv6 loopback' };
       }
     }
     return { allowed: true };
-  } catch (dnsError: any) {
-    return { allowed: false, error: `DNS resolution failed: ${dnsError.message || 'Unknown error'}` };
+  } catch (dnsError: unknown) {
+    const message = dnsError instanceof Error ? dnsError.message : 'Unknown error';
+    return { allowed: false, error: `DNS resolution failed: ${message}` };
   }
 }
 
-// CORS headers — echo origin for credentialed requests
+// CORS headers — only echo origin with credentials for trusted origins
 function corsHeaders(request?: NextRequest) {
-  const origin = request?.headers?.get('origin') || '*';
-  return {
+  const origin = request?.headers?.get('origin');
+  if (!origin) {
+    // Same-origin request (no Origin header) — no CORS needed
+    return {
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, PUT, PATCH, DELETE',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    };
+  }
+  // Only allow credentials for known admin/play domains
+  const trustedOrigins = (process.env.CORS_ALLOWED_ORIGINS || '').split(',').filter(Boolean);
+  const isTrusted = trustedOrigins.length === 0 || trustedOrigins.includes(origin);
+  const headers: Record<string, string> = {
     'Access-Control-Allow-Origin': origin,
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, PUT, PATCH, DELETE',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-    ...(origin !== '*' ? { 'Vary': 'Origin' } : {}),
-    'Access-Control-Allow-Credentials': 'true',
+    'Vary': 'Origin',
   };
+  if (isTrusted) {
+    headers['Access-Control-Allow-Credentials'] = 'true';
+  }
+  return headers;
 }
 
 /**
@@ -155,6 +213,12 @@ async function getAuthorizedBot(botId: string, actorUserId: string): Promise<{ i
   }
 
   return { id: bot.id };
+}
+
+interface McpToolDescriptor {
+  name?: string;
+  function?: { name?: string };
+  [key: string]: unknown;
 }
 
 async function testMcpConnection(server: { serverUrl: string; authType: string; authConfig: string | null; headers?: Record<string, string> | null }): Promise<{ success: boolean; toolCount: number; toolNames: string[]; error?: string }> {
@@ -214,42 +278,44 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
       };
     }
 
-    const response = await fetch(server.serverUrl, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        id: '1',
-        method: 'tools/list',
-        params: {},
-      }),
-      signal: AbortSignal.timeout(10000),
-      // Follow redirects but validate the final destination is safe
-      // (prevents redirect-based SSRF while allowing legitimate HTTP→HTTPS upgrades)
-      redirect: 'follow',
-    });
-
-    // SSRF guard: if a redirect occurred, verify the final URL is not internal
-    if (response.url !== server.serverUrl) {
-      if (!isAllowedServerUrl(response.url)) {
-        return {
-          success: false,
-          toolCount: 0,
-          toolNames: [],
-          error: 'Server redirected to an internal or private address',
-        };
+    // Helper to follow a redirect manually with SSRF validation
+    async function followRedirect(url: string, headers: Record<string, string>, body: string, redirectCount = 0): Promise<Response> {
+      if (redirectCount > 5) {
+        throw new Error('Too many redirects');
       }
-      // Also DNS-verify the redirect target
-      const redirectIpCheck = await isAllowedServerIp(response.url);
+      // Validate redirect target before following
+      if (!isAllowedServerUrl(url)) {
+        throw new Error('Server redirected to an internal or private address');
+      }
+      const redirectIpCheck = await isAllowedServerIp(url);
       if (!redirectIpCheck.allowed) {
-        return {
-          success: false,
-          toolCount: 0,
-          toolNames: [],
-          error: redirectIpCheck.error || 'Redirect target resolves to a blocked address',
-        };
+        throw new Error(redirectIpCheck.error || 'Redirect target resolves to a blocked address');
       }
+      const res = await fetch(url, {
+        method: 'POST',
+        headers,
+        body,
+        signal: AbortSignal.timeout(10000),
+        redirect: 'manual',
+      });
+      if (res.status >= 300 && res.status < 400) {
+        const location = res.headers.get('location');
+        if (!location) {
+          throw new Error('Redirect response missing Location header');
+        }
+        // Resolve relative redirects against the current URL
+        const redirectUrl = new URL(location, url).toString();
+        return followRedirect(redirectUrl, headers, body, redirectCount + 1);
+      }
+      return res;
     }
+
+    const response = await followRedirect(server.serverUrl, headers, JSON.stringify({
+      jsonrpc: '2.0',
+      id: '1',
+      method: 'tools/list',
+      params: {},
+    }));
 
     if (!response.ok) {
       return {
@@ -272,14 +338,15 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
     }
 
     const tools = data?.result?.tools ?? [];
-    const toolNames = tools.map((t: any) => t.name || t.function?.name || 'unknown');
+    const toolNames = tools.map((t: McpToolDescriptor) => t.name || t.function?.name || 'unknown');
     return {
       success: true,
       toolCount: toolNames.length,
       toolNames,
     };
-  } catch (error: any) {
-    if (error.name === 'AbortError' || error.name === 'TimeoutError') {
+  } catch (error: unknown) {
+    const err = error as Record<string, unknown>;
+    if (err.name === 'AbortError' || err.name === 'TimeoutError') {
       return {
         success: false,
         toolCount: 0,
@@ -291,7 +358,7 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
       success: false,
       toolCount: 0,
       toolNames: [],
-      error: error.message || 'Connection failed',
+      error: typeof err.message === 'string' ? err.message : 'Connection failed',
     };
   }
 }
