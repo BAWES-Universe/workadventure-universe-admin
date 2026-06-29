@@ -510,7 +510,12 @@ export async function POST(
     // TODO: Flag this bot as having had its MCP server tested?
     // Could add `lastTestedAt` to the schema for observability
 
-    const result = await testMcpConnection(server);
+    const result = await testMcpConnection({
+      serverUrl: server.serverUrl,
+      authType: server.authType,
+      authConfig: server.authConfig,
+      headers: server.headers as Record<string, string> | null,
+    });
 
     // Persist test result to DB (fire-and-forget — non-blocking)
     try {
