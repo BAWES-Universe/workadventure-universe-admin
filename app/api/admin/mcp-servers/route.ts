@@ -108,6 +108,8 @@ export async function GET(request: NextRequest) {
       authType: s.authType,
       enabled: s.enabled,
       headers: s.headers,
+      lastTestedAt: s.lastTestedAt,
+      lastTestResult: s.lastTestResult,
       createdAt: s.createdAt,
       updatedAt: s.updatedAt,
       botOwner: s.bot.createdBy,

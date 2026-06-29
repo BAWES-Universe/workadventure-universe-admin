@@ -64,6 +64,8 @@ interface McpServer {
   authType: string;
   enabled: boolean;
   headers?: Record<string, string>;
+  lastTestedAt?: string | null;
+  lastTestResult?: { success: boolean; toolCount: number; toolNames: string[]; error: string | null } | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -557,6 +559,18 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                           }`}
                         >
                           {testResults[server.id].message}
+                        </span>
+                      ) : server.lastTestResult ? (
+                        <span
+                          className={`text-xs ${
+                            server.lastTestResult.success
+                              ? 'text-green-600'
+                              : 'text-red-600'
+                          }`}
+                        >
+                          {server.lastTestResult.success
+                            ? `Connected — ${server.lastTestResult.toolCount} tool${server.lastTestResult.toolCount !== 1 ? 's' : ''}`
+                            : server.lastTestResult.error || 'Failed'}
                         </span>
                       ) : (
                         <span className="text-xs text-muted-foreground">N/A</span>

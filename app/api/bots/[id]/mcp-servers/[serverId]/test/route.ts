@@ -239,6 +239,26 @@ export async function POST(
     // Could add `lastTestedAt` to the schema for observability
 
     const result = await testMcpConnection(server);
+
+    // Persist test result to DB (fire-and-forget — non-blocking)
+    try {
+      await prisma.botMcpServer.update({
+        where: { id: serverId },
+        data: {
+          lastTestedAt: new Date(),
+          lastTestResult: {
+            success: result.success,
+            toolCount: result.toolCount,
+            toolNames: result.toolNames,
+            error: result.error || null,
+          },
+        },
+      });
+    } catch (dbError) {
+      console.error('Failed to persist MCP test result:', dbError);
+      // Don't fail the request — the test already completed
+    }
+
     return NextResponse.json(result, { headers: corsHeaders(request) });
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized') {

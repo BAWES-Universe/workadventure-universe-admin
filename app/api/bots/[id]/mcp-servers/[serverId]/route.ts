@@ -182,6 +182,8 @@ export async function PATCH(
       authType: updated.authType,
       enabled: updated.enabled,
       headers: updated.headers,
+      lastTestedAt: updated.lastTestedAt,
+      lastTestResult: updated.lastTestResult,
       createdAt: updated.createdAt,
       updatedAt: updated.updatedAt,
     }, { headers: corsHeaders(request) });

@@ -132,6 +132,8 @@ export async function GET(
       authType: s.authType,
       enabled: s.enabled,
       headers: s.headers,
+      lastTestedAt: s.lastTestedAt,
+      lastTestResult: s.lastTestResult,
       createdAt: s.createdAt,
       updatedAt: s.updatedAt,
     }));
@@ -256,6 +258,8 @@ export async function POST(
         authType: server.authType,
         enabled: server.enabled,
         headers: server.headers,
+        lastTestedAt: server.lastTestedAt,
+        lastTestResult: server.lastTestResult,
         createdAt: server.createdAt,
         updatedAt: server.updatedAt,
       },
