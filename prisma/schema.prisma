@@ -409,9 +409,31 @@ model Bot {
   room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
   createdBy User? @relation("BotCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
   updatedBy User? @relation("BotUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
+  mcpServers BotMcpServer[]
 
   @@index([roomId])
   @@map("bots")
+}
+
+// Bot MCP Servers
+model BotMcpServer {
+  id          String   @id @default(uuid())
+  botId       String   @map("bot_id")
+  name        String   @db.VarChar(255)
+  serverUrl   String   @map("server_url") @db.Text
+  authType    String   @default("none") @map("auth_type") @db.VarChar(20)   // none | bearer | api-key
+  authConfig  String?  @map("auth_config") @db.Text                          // encrypted JSON
+  headers     Json?                                                          // extra headers key-value pairs
+  enabled     Boolean  @default(true)
+  lastTestedAt   DateTime?  @map("last_tested_at")
+  lastTestResult Json?      @map("last_test_result")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
+
+  @@index([botId])
+  @@map("bot_mcp_servers")
 }
 
 // AI Providers
