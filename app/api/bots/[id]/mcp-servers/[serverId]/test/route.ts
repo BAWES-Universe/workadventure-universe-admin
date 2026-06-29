@@ -98,7 +98,7 @@ async function isAllowedServerIp(serverUrl: string): Promise<{ allowed: boolean;
       if (addr.family === 6) {
         // IPv6 private ranges
         if (/^fe80:/i.test(ip)) return { allowed: false, error: 'Server resolves to link-local IPv6 address (fe80:)' };
-        if (/^fc00:/i.test(ip) || /^fd00:/i.test(ip)) return { allowed: false, error: 'Server resolves to unique-local IPv6 address (fc00:/fd00:)' };
+        if (/^f[cd][0-9a-f]{0,3}:/i.test(ip)) return { allowed: false, error: 'Server resolves to unique-local IPv6 address (fc00::/7)' };
         if (ip === '::1') return { allowed: false, error: 'Server resolves to IPv6 loopback' };
       }
     }
