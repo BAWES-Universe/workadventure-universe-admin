@@ -6,6 +6,12 @@ import { isSuperAdmin } from '@/lib/super-admin';
 
 export const runtime = 'nodejs';
 
+function parsePositiveInt(value: string | null, defaultVal: number, maxVal: number): number {
+  const parsed = parseInt(value || String(defaultVal), 10);
+  if (isNaN(parsed) || parsed < 1) return defaultVal;
+  return Math.min(parsed, maxVal);
+}
+
 const serverWithBot = Prisma.validator<Prisma.BotMcpServerDefaultArgs>()({
   include: {
     bot: {
@@ -42,8 +48,8 @@ export async function GET(request: NextRequest) {
     }
 
     const { searchParams } = new URL(request.url);
-    const page = Math.max(1, parseInt(searchParams.get('page') || '1', 10));
-    const limit = Math.min(100, Math.max(1, parseInt(searchParams.get('limit') || '20', 10)));
+    const page = parsePositiveInt(searchParams.get('page'), 1, Infinity);
+    const limit = parsePositiveInt(searchParams.get('limit'), 20, 100);
     const skip = (page - 1) * limit;
     const search = searchParams.get('search');
     const enabled = searchParams.get('enabled');
@@ -51,8 +57,10 @@ export async function GET(request: NextRequest) {
     // Build where clause
     const where: Prisma.BotMcpServerWhereInput = {};
 
-    if (enabled !== null && enabled !== undefined) {
-      where.enabled = enabled === 'true';
+    if (enabled === 'true') {
+      where.enabled = true;
+    } else if (enabled === 'false') {
+      where.enabled = false;
     }
 
     if (search) {

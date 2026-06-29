@@ -7,12 +7,14 @@ import { z } from 'zod';
 
 export const runtime = 'nodejs';
 
-// CORS headers helper
-function corsHeaders() {
+// CORS headers — echo origin for credentialed requests
+function corsHeaders(request?: NextRequest) {
+  const origin = request?.headers?.get('origin') || '*';
   return {
-    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Origin': origin,
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, PUT, DELETE',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    ...(origin !== '*' ? { 'Vary': 'Origin' } : {}),
     'Access-Control-Allow-Credentials': 'true',
   };
 }
@@ -21,8 +23,8 @@ function corsHeaders() {
  * OPTIONS /api/bots/:id/mcp-servers/:serverId
  * Handle CORS preflight
  */
-export async function OPTIONS() {
-  return NextResponse.json({}, { headers: corsHeaders() });
+export async function OPTIONS(request: NextRequest) {
+  return NextResponse.json({}, { headers: corsHeaders(request) });
 }
 
 // Validation schema for updating an MCP server (all fields optional)
@@ -117,7 +119,12 @@ export async function PATCH(
     const updateData: Record<string, unknown> = {};
     if (validatedData.name !== undefined) updateData.name = validatedData.name;
     if (validatedData.serverUrl !== undefined) updateData.serverUrl = validatedData.serverUrl;
-    if (validatedData.authType !== undefined) updateData.authType = validatedData.authType;
+    if (validatedData.authType !== undefined) {
+      updateData.authType = validatedData.authType;
+      if (validatedData.authType === 'none') {
+        updateData.authConfig = null;
+      }
+    }
     if (validatedData.enabled !== undefined) updateData.enabled = validatedData.enabled;
 
     // Handle authConfig: if changed, re-encrypt
@@ -151,7 +158,7 @@ export async function PATCH(
       enabled: updated.enabled,
       createdAt: updated.createdAt,
       updatedAt: updated.updatedAt,
-    }, { headers: corsHeaders() });
+    }, { headers: corsHeaders(request) });
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized') {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -224,7 +231,7 @@ export async function DELETE(
       where: { id: serverId },
     });
 
-    return new NextResponse(null, { status: 204, headers: corsHeaders() });
+    return new NextResponse(null, { status: 204, headers: corsHeaders(request) });
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized') {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });

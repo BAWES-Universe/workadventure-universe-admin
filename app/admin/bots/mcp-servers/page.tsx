@@ -38,7 +38,7 @@ export default function McpServersPage() {
   const [filters, setFilters] = useState({ search: '', enabled: '', page: 1, limit: 20 });
   const [searchInput, setSearchInput] = useState('');
 
-  const fetchServers = useCallback(async () => {
+  const fetchServers = useCallback(async (signal?: AbortSignal) => {
     try {
       setLoading(true);
       setError(null);
@@ -50,7 +50,9 @@ export default function McpServersPage() {
       if (filters.enabled) params.append('enabled', filters.enabled);
 
       const { authenticatedFetch } = await import('@/lib/client-auth');
-      const response = await authenticatedFetch(`/api/admin/mcp-servers?${params.toString()}`);
+      const response = await authenticatedFetch(`/api/admin/mcp-servers?${params.toString()}`, {
+        signal,
+      });
 
       if (!response.ok) {
         if (response.status === 403) {
@@ -71,10 +73,14 @@ export default function McpServersPage() {
   }, [filters, router]);
 
   useEffect(() => {
+    const abortController = new AbortController();
     const timer = setTimeout(() => {
-      fetchServers();
+      fetchServers(abortController.signal);
     }, 300);
-    return () => clearTimeout(timer);
+    return () => {
+      clearTimeout(timer);
+      abortController.abort();
+    };
   }, [fetchServers]);
 
   function handleSearch() {

@@ -116,11 +116,6 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
           router.push('/admin/login');
           return;
         }
-        const userData = await response.json();
-        if (!userData.user?.isSuperAdmin) {
-          router.push('/admin');
-          return;
-        }
         setAuthChecked(true);
       } catch {
         router.push('/admin/login');
@@ -535,8 +530,8 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                             <AlertDialogHeader>
                               <AlertDialogTitle>Delete MCP Server</AlertDialogTitle>
                               <AlertDialogDescription>
-                                Are you sure you want to delete "{server.name}"? This action cannot be
-                                undone. The bot will lose access to this MCP server's tools.
+                                Are you sure you want to delete &ldquo;{server.name}&rdquo;? This action cannot be
+                                undone. The bot will lose access to this MCP server&rsquo;s tools.
                               </AlertDialogDescription>
                             </AlertDialogHeader>
                             <AlertDialogFooter>

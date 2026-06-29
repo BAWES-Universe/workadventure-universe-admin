@@ -2,13 +2,29 @@ import { NextRequest } from 'next/server';
 import { GET, POST } from '@/app/api/bots/[id]/mcp-servers/route';
 import { PATCH, DELETE } from '@/app/api/bots/[id]/mcp-servers/[serverId]/route';
 import { prisma } from '@/lib/db';
-import * as auth from '@/lib/auth';
+import * as authSession from '@/lib/auth-session';
 import * as superAdmin from '@/lib/super-admin';
 import * as encryption from '@/lib/encryption';
 
 // Mock Prisma
 jest.mock('@/lib/db', () => ({
   prisma: {
+    $transaction: jest.fn(async (cb: Function) => cb({
+      bot: {
+        findUnique: jest.fn(),
+      },
+      user: {
+        findUnique: jest.fn(),
+      },
+      botMcpServer: {
+        findMany: jest.fn(),
+        findUnique: jest.fn(),
+        create: jest.fn(),
+        update: jest.fn(),
+        delete: jest.fn(),
+        count: jest.fn(),
+      },
+    })),
     bot: {
       findUnique: jest.fn(),
     },
@@ -26,9 +42,9 @@ jest.mock('@/lib/db', () => ({
   },
 }));
 
-// Mock auth
-jest.mock('@/lib/auth', () => ({
-  requireAdminSession: jest.fn(),
+// Mock auth session
+jest.mock('@/lib/auth-session', () => ({
+  getSessionUser: jest.fn(),
 }));
 
 // Mock super admin
@@ -50,8 +66,15 @@ describe('/api/bots/[id]/mcp-servers', () => {
   beforeEach(() => {
     jest.clearAllMocks();
 
-    // Default auth: requireAdminSession returns the mock user
-    (auth.requireAdminSession as jest.Mock).mockResolvedValue({ userId: MOCK_USER_ID });
+    // Default auth: getSessionUser returns the mock user
+    (authSession.getSessionUser as jest.Mock).mockResolvedValue({
+      id: MOCK_USER_ID,
+      uuid: MOCK_USER_ID,
+      email: 'test@example.com',
+      name: 'Test User',
+      tags: [],
+      isSuperAdmin: false,
+    });
     (superAdmin.isSuperAdmin as jest.Mock).mockReturnValue(false);
 
     // Default bot lookup: owned by MOCK_USER_ID
@@ -401,7 +424,7 @@ describe('/api/bots/[id]/mcp-servers', () => {
     });
 
     it('should return 401 when not authenticated', async () => {
-      (auth.requireAdminSession as jest.Mock).mockRejectedValue(new Error('Unauthorized'));
+      (authSession.getSessionUser as jest.Mock).mockResolvedValue(null);
 
       const request = new NextRequest(`http://localhost:3333/api/bots/${MOCK_BOT_ID}/mcp-servers`);
       const response = await GET(request, { params: Promise.resolve({ id: MOCK_BOT_ID }) });

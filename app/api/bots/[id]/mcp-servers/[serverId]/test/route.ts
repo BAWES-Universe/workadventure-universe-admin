@@ -6,12 +6,42 @@ import { decryptApiKey } from '@/lib/encryption';
 
 export const runtime = 'nodejs';
 
-// CORS headers helper
-function corsHeaders() {
+// Reject MCP server URLs that point to internal infrastructure (SSRF prevention)
+function isAllowedServerUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const hostname = parsed.hostname.toLowerCase();
+
+    // Reject localhost variants
+    if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '0.0.0.0' || hostname === '::1') {
+      return false;
+    }
+
+    // Reject private IP ranges
+    if (/^10\.\d+\.\d+\.\d+$/.test(hostname)) return false;
+    if (/^172\.(1[6-9]|2\d|3[01])\.\d+\.\d+$/.test(hostname)) return false;
+    if (/^192\.168\.\d+\.\d+$/.test(hostname)) return false;
+    if (/^169\.254\.\d+\.\d+$/.test(hostname)) return false;
+
+    // Reject cloud metadata endpoints
+    if (hostname === '169.254.169.254') return false;
+    if (hostname === 'metadata.google.internal' || hostname === 'metadata.internal') return false;
+    if (hostname.endsWith('.internal')) return false;
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// CORS headers — echo origin for credentialed requests
+function corsHeaders(request?: NextRequest) {
+  const origin = request?.headers?.get('origin') || '*';
   return {
-    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Origin': origin,
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, PUT, DELETE',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    ...(origin !== '*' ? { 'Vary': 'Origin' } : {}),
     'Access-Control-Allow-Credentials': 'true',
   };
 }
@@ -20,8 +50,8 @@ function corsHeaders() {
  * OPTIONS /api/bots/:id/mcp-servers/:serverId/test
  * Handle CORS preflight
  */
-export async function OPTIONS() {
-  return NextResponse.json({}, { headers: corsHeaders() });
+export async function OPTIONS(request: NextRequest) {
+  return NextResponse.json({}, { headers: corsHeaders(request) });
 }
 
 /**
@@ -80,6 +110,16 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
   }
 
   try {
+    // SSRF guard: reject internal/private addresses before making network request
+    if (!isAllowedServerUrl(server.serverUrl)) {
+      return {
+        success: false,
+        toolCount: 0,
+        toolNames: [],
+        error: 'Server URL points to an internal or private address',
+      };
+    }
+
     const response = await fetch(server.serverUrl, {
       method: 'POST',
       headers,
@@ -190,7 +230,7 @@ export async function POST(
     // Could add `lastTestedAt` to the schema for observability
 
     const result = await testMcpConnection(server);
-    return NextResponse.json(result, { headers: corsHeaders() });
+    return NextResponse.json(result, { headers: corsHeaders(request) });
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized') {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });

@@ -7,12 +7,33 @@ import { z } from 'zod';
 
 export const runtime = 'nodejs';
 
-// CORS headers helper
-function corsHeaders() {
+// Reject MCP server URLs that point to internal infrastructure (SSRF prevention)
+function isAllowedServerUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const hostname = parsed.hostname.toLowerCase();
+    if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '0.0.0.0' || hostname === '::1') return false;
+    if (/^10\.\d+\.\d+\.\d+$/.test(hostname)) return false;
+    if (/^172\.(1[6-9]|2\d|3[01])\.\d+\.\d+$/.test(hostname)) return false;
+    if (/^192\.168\.\d+\.\d+$/.test(hostname)) return false;
+    if (/^169\.254\.\d+\.\d+$/.test(hostname)) return false;
+    if (hostname === '169.254.169.254') return false;
+    if (hostname === 'metadata.google.internal' || hostname === 'metadata.internal') return false;
+    if (hostname.endsWith('.internal')) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// CORS headers — echo origin for credentialed requests
+function corsHeaders(request?: NextRequest) {
+  const origin = request?.headers?.get('origin') || '*';
   return {
-    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Origin': origin,
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, PUT, DELETE',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    ...(origin !== '*' ? { 'Vary': 'Origin' } : {}),
     'Access-Control-Allow-Credentials': 'true',
   };
 }
@@ -21,14 +42,17 @@ function corsHeaders() {
  * OPTIONS /api/bots/:id/mcp-servers
  * Handle CORS preflight
  */
-export async function OPTIONS() {
-  return NextResponse.json({}, { headers: corsHeaders() });
+export async function OPTIONS(request: NextRequest) {
+  return NextResponse.json({}, { headers: corsHeaders(request) });
 }
 
 // Validation schema for creating an MCP server
 const createMcpServerSchema = z.object({
   name: z.string().min(1, 'name is required').max(255, 'name must be at most 255 characters'),
-  serverUrl: z.string().url('serverUrl must be a valid URL'),
+  serverUrl: z.string().url('serverUrl must be a valid URL').refine(
+    (url) => isAllowedServerUrl(url),
+    { message: 'Server URL must not point to internal or private addresses' }
+  ),
   authType: z.enum(['none', 'bearer', 'api-key'], {
     message: 'authType must be one of: none, bearer, api-key',
   }).default('none'),
@@ -110,7 +134,7 @@ export async function GET(
       updatedAt: s.updatedAt,
     }));
 
-    return NextResponse.json(transformed, { headers: corsHeaders() });
+    return NextResponse.json(transformed, { headers: corsHeaders(request) });
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized') {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -184,21 +208,9 @@ export async function POST(
     const body = await request.json();
     const validatedData = createMcpServerSchema.parse(body);
 
-    // Soft cap: reject if bot already has 5 servers
-    const existingCount = await prisma.botMcpServer.count({
-      where: { botId },
-    });
-
-    if (existingCount >= 5) {
-      return NextResponse.json(
-        { error: 'Maximum of 5 MCP servers per bot reached' },
-        { status: 422 }
-      );
-    }
-
-    // Encrypt authConfig if provided
+    // Encrypt authConfig if provided (and if auth type requires it)
     let encryptedAuthConfig: string | null = null;
-    if (validatedData.authConfig) {
+    if (validatedData.authConfig && validatedData.authType !== 'none') {
       try {
         encryptedAuthConfig = encryptApiKey(validatedData.authConfig);
       } catch (encError) {
@@ -210,15 +222,26 @@ export async function POST(
       }
     }
 
-    const server = await prisma.botMcpServer.create({
-      data: {
-        botId,
-        name: validatedData.name,
-        serverUrl: validatedData.serverUrl,
-        authType: validatedData.authType,
-        authConfig: encryptedAuthConfig,
-        enabled: validatedData.enabled,
-      },
+    // Soft cap: reject if bot already has 5 servers (atomic check+create)
+    const server = await prisma.$transaction(async (tx) => {
+      const existingCount = await tx.botMcpServer.count({
+        where: { botId },
+      });
+
+      if (existingCount >= 5) {
+        throw new Error('MaxServersReached');
+      }
+
+      return tx.botMcpServer.create({
+        data: {
+          botId,
+          name: validatedData.name,
+          serverUrl: validatedData.serverUrl,
+          authType: validatedData.authType,
+          authConfig: encryptedAuthConfig,
+          enabled: validatedData.enabled,
+        },
+      });
     });
 
     return NextResponse.json(
@@ -232,9 +255,15 @@ export async function POST(
         createdAt: server.createdAt,
         updatedAt: server.updatedAt,
       },
-      { status: 201, headers: corsHeaders() }
+      { status: 201, headers: corsHeaders(request) }
     );
   } catch (error) {
+    if (error instanceof Error && error.message === 'MaxServersReached') {
+      return NextResponse.json(
+        { error: 'Maximum of 5 MCP servers per bot reached' },
+        { status: 422 }
+      );
+    }
     if (error instanceof Error && error.message === 'Unauthorized') {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
