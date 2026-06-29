@@ -63,6 +63,7 @@ interface McpServer {
   serverUrl: string;
   authType: string;
   enabled: boolean;
+  headers?: Record<string, string>;
   createdAt: string;
   updatedAt: string;
 }
@@ -72,6 +73,7 @@ interface McpServerFormData {
   serverUrl: string;
   authType: string;
   authConfig: string;
+  headers: { key: string; value: string }[];
   enabled: boolean;
 }
 
@@ -80,6 +82,7 @@ const emptyForm: McpServerFormData = {
   serverUrl: '',
   authType: 'none',
   authConfig: '',
+  headers: [],
   enabled: true,
 };
 
@@ -167,6 +170,9 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
           serverUrl: formData.serverUrl,
           authType: formData.authType,
           authConfig: formData.authConfig || null,
+          headers: formData.headers.length > 0
+            ? Object.fromEntries(formData.headers.filter(h => h.key.trim()).map(h => [h.key.trim(), h.value]))
+            : undefined,
           enabled: formData.enabled,
         }),
       });
@@ -386,6 +392,62 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                   />
                 </div>
               )}
+
+              {/* Extra Headers */}
+              <div className="grid gap-2">
+                <Label>Extra Headers</Label>
+                {formData.headers.map((header, index) => (
+                  <div key={index} className="flex items-center gap-2">
+                    <Input
+                      placeholder="Header name"
+                      value={header.key}
+                      onChange={(e) => {
+                        const newHeaders = [...formData.headers];
+                        newHeaders[index] = { ...newHeaders[index], key: e.target.value };
+                        setFormData({ ...formData, headers: newHeaders });
+                      }}
+                      className="flex-1"
+                    />
+                    <Input
+                      placeholder="Value"
+                      type="password"
+                      value={header.value}
+                      onChange={(e) => {
+                        const newHeaders = [...formData.headers];
+                        newHeaders[index] = { ...newHeaders[index], value: e.target.value };
+                        setFormData({ ...formData, headers: newHeaders });
+                      }}
+                      className="flex-1"
+                    />
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => {
+                        setFormData({
+                          ...formData,
+                          headers: formData.headers.filter((_, i) => i !== index),
+                        });
+                      }}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </div>
+                ))}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    setFormData({
+                      ...formData,
+                      headers: [...formData.headers, { key: '', value: '' }],
+                    });
+                  }}
+                  className="w-fit"
+                >
+                  <Plus className="mr-2 h-4 w-4" />
+                  Add Header
+                </Button>
+              </div>
 
               <div className="flex items-center gap-2">
                 <Switch

@@ -55,6 +55,7 @@ const updateMcpServerSchema = z.object({
   ).optional(),
   authType: z.enum(['none', 'bearer', 'api-key']).optional(),
   authConfig: z.string().optional().nullable(),
+  headers: z.record(z.string(), z.string()).optional(),
   enabled: z.boolean().optional(),
 });
 
@@ -149,6 +150,8 @@ export async function PATCH(
     }
     if (validatedData.enabled !== undefined) updateData.enabled = validatedData.enabled;
 
+    if (validatedData.headers !== undefined) updateData.headers = validatedData.headers;
+
     // Handle authConfig: if changed, re-encrypt (skip if authType is 'none')
     if (validatedData.authConfig !== undefined && validatedData.authType !== 'none') {
       if (validatedData.authConfig === null || validatedData.authConfig === '') {
@@ -178,6 +181,7 @@ export async function PATCH(
       serverUrl: updated.serverUrl,
       authType: updated.authType,
       enabled: updated.enabled,
+      headers: updated.headers,
       createdAt: updated.createdAt,
       updatedAt: updated.updatedAt,
     }, { headers: corsHeaders(request) });

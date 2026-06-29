@@ -150,6 +150,7 @@ describe('/api/bots/[id]/mcp-servers', () => {
         serverUrl: 'https://example.com/mcp',
         authType: 'none',
         authConfig: null,
+        headers: null,
         enabled: true,
         createdAt: new Date(),
         updatedAt: new Date(),
@@ -182,6 +183,7 @@ describe('/api/bots/[id]/mcp-servers', () => {
         serverUrl: 'https://example.com/mcp',
         authType: 'bearer',
         authConfig: 'encrypted:my-api-key',
+        headers: null,
         enabled: true,
         createdAt: new Date(),
         updatedAt: new Date(),
@@ -248,6 +250,46 @@ describe('/api/bots/[id]/mcp-servers', () => {
 
       expect(response.status).toBe(400);
     });
+
+    it('should create an MCP server with headers', async () => {
+      (prisma.botMcpServer.count as jest.Mock).mockResolvedValue(0);
+      const mockHeaders = { 'x-posthog-org': 'org-123', 'x-readonly': 'true' };
+      (prisma.botMcpServer.create as jest.Mock).mockResolvedValue({
+        id: MOCK_SERVER_ID,
+        botId: MOCK_BOT_ID,
+        name: 'PostHog Server',
+        serverUrl: 'https://mcp.posthog.com/mcp',
+        authType: 'bearer',
+        authConfig: 'encrypted:phx_key',
+        headers: mockHeaders,
+        enabled: true,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      const request = new NextRequest(`http://localhost:3333/api/bots/${MOCK_BOT_ID}/mcp-servers`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: 'PostHog Server',
+          serverUrl: 'https://mcp.posthog.com/mcp',
+          authType: 'bearer',
+          authConfig: 'phx_key',
+          headers: mockHeaders,
+        }),
+      });
+
+      const response = await POST(request, { params: Promise.resolve({ id: MOCK_BOT_ID }) });
+      const data = await response.json();
+
+      expect(response.status).toBe(201);
+      expect(data.headers).toEqual(mockHeaders);
+      expect(prisma.botMcpServer.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ headers: mockHeaders }),
+        })
+      );
+    });
   });
 
   describe('PATCH', () => {
@@ -268,6 +310,7 @@ describe('/api/bots/[id]/mcp-servers', () => {
         serverUrl: 'https://new.example.com',
         authType: 'bearer',
         enabled: true,
+        headers: null,
         createdAt: new Date(),
         updatedAt: new Date(),
       });
@@ -327,6 +370,49 @@ describe('/api/bots/[id]/mcp-servers', () => {
       expect(prisma.botMcpServer.update).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({ authConfig: 'encrypted:new-key' }),
+        })
+      );
+    });
+
+    it('should update headers on PATCH', async () => {
+      (prisma.botMcpServer.findUnique as jest.Mock).mockResolvedValue({
+        id: MOCK_SERVER_ID,
+        botId: MOCK_BOT_ID,
+        name: 'Server',
+        serverUrl: 'https://example.com',
+        authType: 'none',
+        enabled: true,
+      });
+
+      const newHeaders = { 'x-custom': 'value', 'x-org': 'abc' };
+      (prisma.botMcpServer.update as jest.Mock).mockResolvedValue({
+        id: MOCK_SERVER_ID,
+        botId: MOCK_BOT_ID,
+        name: 'Server',
+        serverUrl: 'https://example.com',
+        authType: 'none',
+        enabled: true,
+        headers: newHeaders,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      const request = new NextRequest(`http://localhost:3333/api/bots/${MOCK_BOT_ID}/mcp-servers/${MOCK_SERVER_ID}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ headers: newHeaders }),
+      });
+
+      const response = await PATCH(request, {
+        params: Promise.resolve({ id: MOCK_BOT_ID, serverId: MOCK_SERVER_ID }),
+      });
+      const data = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(data.headers).toEqual(newHeaders);
+      expect(prisma.botMcpServer.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ headers: newHeaders }),
         })
       );
     });

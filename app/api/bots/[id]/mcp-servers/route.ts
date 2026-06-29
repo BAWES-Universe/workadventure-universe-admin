@@ -57,6 +57,7 @@ const createMcpServerSchema = z.object({
     message: 'authType must be one of: none, bearer, api-key',
   }).default('none'),
   authConfig: z.string().optional().nullable(),
+  headers: z.record(z.string(), z.string()).optional(),
   enabled: z.boolean().optional().default(true),
 });
 
@@ -130,6 +131,7 @@ export async function GET(
       serverUrl: s.serverUrl,
       authType: s.authType,
       enabled: s.enabled,
+      headers: s.headers,
       createdAt: s.createdAt,
       updatedAt: s.updatedAt,
     }));
@@ -239,6 +241,7 @@ export async function POST(
           serverUrl: validatedData.serverUrl,
           authType: validatedData.authType,
           authConfig: encryptedAuthConfig,
+          headers: validatedData.headers ?? undefined,
           enabled: validatedData.enabled,
         },
       });
@@ -252,6 +255,7 @@ export async function POST(
         serverUrl: server.serverUrl,
         authType: server.authType,
         enabled: server.enabled,
+        headers: server.headers,
         createdAt: server.createdAt,
         updatedAt: server.updatedAt,
       },
