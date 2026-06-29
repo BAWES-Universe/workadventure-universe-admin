@@ -316,6 +316,7 @@ describe('/api/bots/[id]/mcp-servers', () => {
           name: 'Updated Name',
           serverUrl: 'https://new.example.com',
           authType: 'bearer',
+          authConfig: 'new-token',
         }),
       });
 

@@ -91,7 +91,7 @@ const updateMcpServerSchema = z.object({
     { message: 'Server URL must not point to internal or private addresses' }
   ).optional(),
   authType: z.enum(['none', 'bearer', 'api-key']).optional(),
-  authConfig: z.string().optional().nullable(),
+  authConfig: z.string().trim().optional().nullable(),
   headers: z.record(z.string(), z.string()).refine(
     (headers) => {
       const reserved = ['authorization', 'proxy-authorization', 'cookie', 'set-cookie', 'x-api-key'];
@@ -103,7 +103,7 @@ const updateMcpServerSchema = z.object({
 }).superRefine((data, ctx) => {
   if (data.authType !== undefined && data.authType !== 'none') {
     // If authType is being set to bearer/api-key and authConfig is also in the request but empty
-    if (data.authConfig !== undefined && !data.authConfig) {
+    if (data.authConfig !== undefined && (!data.authConfig || !data.authConfig.trim())) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['authConfig'],
@@ -172,7 +172,7 @@ export async function PATCH(
     }
 
     if (!userId && !isAdminToken) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401, headers: corsHeaders(request) });
     }
 
     // Admin token skips ownership check (trusted internal call)
@@ -186,7 +186,7 @@ export async function PATCH(
     });
 
     if (!existing || existing.botId !== botId) {
-      return NextResponse.json({ error: 'MCP server not found' }, { status: 404 });
+      return NextResponse.json({ error: 'MCP server not found' }, { status: 404, headers: corsHeaders(request) });
     }
 
     const body = await request.json();
@@ -218,7 +218,7 @@ export async function PATCH(
         if (validatedData.authType === 'bearer' || validatedData.authType === 'api-key') {
           return NextResponse.json(
             { error: `authConfig is required when changing authType to '${validatedData.authType}'` },
-            { status: 400 }
+            { status: 400, headers: corsHeaders(request) }
           );
         }
         // Switching to 'none' — clear the secret
@@ -236,7 +236,7 @@ export async function PATCH(
         console.error('Failed to encrypt authConfig:', encError);
         return NextResponse.json(
           { error: 'Failed to encrypt auth configuration' },
-          { status: 500 }
+          { status: 500, headers: corsHeaders(request) }
         );
       }
     }
@@ -261,22 +261,22 @@ export async function PATCH(
     }, { headers: corsHeaders(request) });
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized') {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401, headers: corsHeaders(request) });
     }
     if (error instanceof Error && error.message === 'Forbidden') {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403, headers: corsHeaders(request) });
     }
     if (error instanceof Error && error.message === 'NotFound') {
-      return NextResponse.json({ error: 'Bot not found' }, { status: 404 });
+      return NextResponse.json({ error: 'Bot not found' }, { status: 404, headers: corsHeaders(request) });
     }
     if (error instanceof z.ZodError) {
       return NextResponse.json(
         { error: 'Invalid input data', details: error.issues },
-        { status: 400 }
+        { status: 400, headers: corsHeaders(request) }
       );
     }
     console.error('Error updating MCP server:', error);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500, headers: corsHeaders(request) });
   }
 }
 
@@ -310,7 +310,7 @@ export async function DELETE(
     }
 
     if (!userId && !isAdminToken) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401, headers: corsHeaders(request) });
     }
 
     // Admin token skips ownership check (trusted internal call)
@@ -324,7 +324,7 @@ export async function DELETE(
     });
 
     if (!existing || existing.botId !== botId) {
-      return NextResponse.json({ error: 'MCP server not found' }, { status: 404 });
+      return NextResponse.json({ error: 'MCP server not found' }, { status: 404, headers: corsHeaders(request) });
     }
 
     await prisma.botMcpServer.delete({
@@ -334,15 +334,15 @@ export async function DELETE(
     return new NextResponse(null, { status: 204, headers: corsHeaders(request) });
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized') {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401, headers: corsHeaders(request) });
     }
     if (error instanceof Error && error.message === 'Forbidden') {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403, headers: corsHeaders(request) });
     }
     if (error instanceof Error && error.message === 'NotFound') {
-      return NextResponse.json({ error: 'Bot not found' }, { status: 404 });
+      return NextResponse.json({ error: 'Bot not found' }, { status: 404, headers: corsHeaders(request) });
     }
     console.error('Error deleting MCP server:', error);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500, headers: corsHeaders(request) });
   }
 }
