@@ -164,8 +164,17 @@ function corsHeaders(request?: NextRequest) {
     };
   }
   // Only allow credentials for known admin/play domains
-  // When unset, no cross-origin credentials are allowed (fail-closed)
+  // When unset and origin is untrusted, no cross-origin access at all (fail-closed)
   const trustedOrigins = (process.env.CORS_ALLOWED_ORIGINS || '').split(',').filter(Boolean);
+  if (trustedOrigins.length > 0 && !trustedOrigins.includes(origin)) {
+    // Untrusted origin — no CORS headers means browser blocks cross-origin reads
+    return {
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, PUT, PATCH, DELETE',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      'Vary': 'Origin',
+    };
+  }
+  // trustedOrigins empty = no allowlist configured = deny credentials for all origins
   const isTrusted = trustedOrigins.includes(origin);
   const headers: Record<string, string> = {
     'Access-Control-Allow-Origin': origin,
