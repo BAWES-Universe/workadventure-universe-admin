@@ -11,7 +11,11 @@ export const runtime = 'nodejs';
 function isAllowedServerUrl(url: string): boolean {
   try {
     const parsed = new URL(url);
-    const hostname = parsed.hostname.toLowerCase();
+    let hostname = parsed.hostname.toLowerCase();
+    // Strip brackets from IPv6 literals (new URL('http://[::1]').hostname returns '[::1]')
+    if (hostname.startsWith('[') && hostname.endsWith(']')) {
+      hostname = hostname.slice(1, -1);
+    }
     if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '0.0.0.0' || hostname === '::1') return false;
     if (/^10\.\d+\.\d+\.\d+$/.test(hostname)) return false;
     if (/^172\.(1[6-9]|2\d|3[01])\.\d+\.\d+$/.test(hostname)) return false;

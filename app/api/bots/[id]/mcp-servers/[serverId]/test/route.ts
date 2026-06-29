@@ -14,26 +14,29 @@ function isAllowedServerUrl(url: string): boolean {
     const parsed = new URL(url);
     const hostname = parsed.hostname.toLowerCase();
 
+    // Strip brackets from IPv6 literals (new URL('http://[::1]').hostname returns '[::1]')
+    const cleanHostname = hostname.startsWith('[') && hostname.endsWith(']') ? hostname.slice(1, -1) : hostname;
+
     // Reject localhost variants
-    if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '0.0.0.0' || hostname === '::1') {
+    if (cleanHostname === 'localhost' || cleanHostname === '127.0.0.1' || cleanHostname === '0.0.0.0' || cleanHostname === '::1') {
       return false;
     }
 
     // Reject private IP ranges
-    if (/^10\.\d+\.\d+\.\d+$/.test(hostname)) return false;
-    if (/^172\.(1[6-9]|2\d|3[01])\.\d+\.\d+$/.test(hostname)) return false;
-    if (/^192\.168\.\d+\.\d+$/.test(hostname)) return false;
-    if (/^169\.254\.\d+\.\d+$/.test(hostname)) return false;
+    if (/^10\.\d+\.\d+\.\d+$/.test(cleanHostname)) return false;
+    if (/^172\.(1[6-9]|2\d|3[01])\.\d+\.\d+$/.test(cleanHostname)) return false;
+    if (/^192\.168\.\d+\.\d+$/.test(cleanHostname)) return false;
+    if (/^169\.254\.\d+\.\d+$/.test(cleanHostname)) return false;
 
     // Reject private IPv6 ranges (unique-local, link-local, loopback)
-    if (/^f[cd][0-9a-f]{0,3}:/i.test(hostname)) return false; // fc00::/7 unique-local
-    if (/^fe80:/i.test(hostname)) return false;                 // fe80::/10 link-local
-    if (/^::$/.test(hostname)) return false;                    // :: (unspecified)
+    if (/^f[cd][0-9a-f]{0,3}:/i.test(cleanHostname)) return false; // fc00::/7 unique-local
+    if (/^fe80:/i.test(cleanHostname)) return false;                 // fe80::/10 link-local
+    if (/^::$/.test(cleanHostname)) return false;                    // :: (unspecified)
 
     // Reject cloud metadata endpoints
-    if (hostname === '169.254.169.254') return false;
-    if (hostname === 'metadata.google.internal' || hostname === 'metadata.internal') return false;
-    if (hostname.endsWith('.internal')) return false;
+    if (cleanHostname === '169.254.169.254') return false;
+    if (cleanHostname === 'metadata.google.internal' || cleanHostname === 'metadata.internal') return false;
+    if (cleanHostname.endsWith('.internal')) return false;
 
     return true;
   } catch {
