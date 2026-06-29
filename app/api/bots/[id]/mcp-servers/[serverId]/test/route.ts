@@ -83,7 +83,7 @@ async function getAuthorizedBot(botId: string, actorUserId: string): Promise<{ i
   return { id: bot.id };
 }
 
-async function testMcpConnection(server: { serverUrl: string; authType: string; authConfig: string | null }): Promise<{ success: boolean; toolCount: number; toolNames: string[]; error?: string }> {
+async function testMcpConnection(server: { serverUrl: string; authType: string; authConfig: string | null; headers?: Record<string, string> | null }): Promise<{ success: boolean; toolCount: number; toolNames: string[]; error?: string }> {
   // Decrypt authConfig if present
   let authValue: string | null = null;
   if (server.authConfig) {
@@ -107,6 +107,15 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
     headers['Authorization'] = `Bearer ${authValue}`;
   } else if (server.authType === 'api-key' && authValue) {
     headers['X-API-Key'] = authValue;
+  }
+
+  // Merge user-configured custom headers (e.g., multi-tenancy, versioning, Cloudflare bypass)
+  if (server.headers) {
+    for (const [key, value] of Object.entries(server.headers)) {
+      if (typeof value === 'string') {
+        headers[key] = value;
+      }
+    }
   }
 
   try {
