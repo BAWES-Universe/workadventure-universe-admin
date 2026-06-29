@@ -51,7 +51,11 @@ function isAllowedServerUrl(url: string): boolean {
 async function isAllowedServerIp(serverUrl: string): Promise<{ allowed: boolean; error?: string }> {
   try {
     const parsed = new URL(serverUrl);
-    const hostname = parsed.hostname.toLowerCase();
+    let hostname = parsed.hostname.toLowerCase();
+    // Strip brackets from IPv6 literals (new URL('http://[::1]').hostname returns '[::1]')
+    if (hostname.startsWith('[') && hostname.endsWith(']')) {
+      hostname = hostname.slice(1, -1);
+    }
 
     // Check IP literal hostnames directly (the hostname-pattern check above cannot
     // catch all private IPv6 ranges, so we must check them here too)
