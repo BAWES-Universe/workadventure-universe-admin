@@ -53,28 +53,25 @@ function corsHeaders(request?: NextRequest) {
       'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     };
   }
-  // Only allow credentials for known admin/play domains
-  // When unset and origin is untrusted, no cross-origin access at all (fail-closed)
+  // Only allow credentials for known admin/play domains.
+  // When CORS_ALLOWED_ORIGINS is unset, deny all cross-origin access (fail-closed).
   const trustedOrigins = (process.env.CORS_ALLOWED_ORIGINS || '').split(',').filter(Boolean);
-  if (trustedOrigins.length > 0 && !trustedOrigins.includes(origin)) {
-    // Untrusted origin — no CORS headers means browser blocks cross-origin reads
+  if (trustedOrigins.length === 0 || !trustedOrigins.includes(origin)) {
+    // No allowlist configured OR origin not in allowlist — deny cross-origin reads
     return {
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, PUT, PATCH, DELETE',
       'Access-Control-Allow-Headers': 'Content-Type, Authorization',
       'Vary': 'Origin',
     };
   }
-  // trustedOrigins empty = no allowlist configured = deny credentials for all origins
-  const isTrusted = trustedOrigins.includes(origin);
+  // Trusted origin — echo with credentials
   const headers: Record<string, string> = {
     'Access-Control-Allow-Origin': origin,
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, PUT, PATCH, DELETE',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     'Vary': 'Origin',
   };
-  if (isTrusted) {
-    headers['Access-Control-Allow-Credentials'] = 'true';
-  }
+  headers['Access-Control-Allow-Credentials'] = 'true';
   return headers;
 }
 
