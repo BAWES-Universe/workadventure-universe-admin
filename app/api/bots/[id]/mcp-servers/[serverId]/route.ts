@@ -16,7 +16,11 @@ function isAllowedServerUrl(url: string): boolean {
     if (/^10\.\d+\.\d+\.\d+$/.test(hostname)) return false;
     if (/^172\.(1[6-9]|2\d|3[01])\.\d+\.\d+$/.test(hostname)) return false;
     if (/^192\.168\.\d+\.\d+$/.test(hostname)) return false;
-    if (/^169\.254\.\d+\.\d+$/.test(hostname)) return false;
+    if (/^169\.\d+\.\d+\.\d+$/.test(hostname)) return false;
+    // Reject private IPv6 ranges (unique-local, link-local, unspecified)
+    if (/^f[cd][0-9a-f]{0,3}:/i.test(hostname)) return false;
+    if (/^fe80:/i.test(hostname)) return false;
+    if (/^::$/.test(hostname)) return false;
     if (hostname === '169.254.169.254') return false;
     if (hostname === 'metadata.google.internal' || hostname === 'metadata.internal') return false;
     if (hostname.endsWith('.internal')) return false;

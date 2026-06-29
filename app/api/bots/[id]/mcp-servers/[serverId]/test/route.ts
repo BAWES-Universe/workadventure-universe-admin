@@ -25,6 +25,11 @@ function isAllowedServerUrl(url: string): boolean {
     if (/^192\.168\.\d+\.\d+$/.test(hostname)) return false;
     if (/^169\.254\.\d+\.\d+$/.test(hostname)) return false;
 
+    // Reject private IPv6 ranges (unique-local, link-local, loopback)
+    if (/^f[cd][0-9a-f]{0,3}:/i.test(hostname)) return false; // fc00::/7 unique-local
+    if (/^fe80:/i.test(hostname)) return false;                 // fe80::/10 link-local
+    if (/^::$/.test(hostname)) return false;                    // :: (unspecified)
+
     // Reject cloud metadata endpoints
     if (hostname === '169.254.169.254') return false;
     if (hostname === 'metadata.google.internal' || hostname === 'metadata.internal') return false;
@@ -45,9 +50,23 @@ async function isAllowedServerIp(serverUrl: string): Promise<{ allowed: boolean;
     const parsed = new URL(serverUrl);
     const hostname = parsed.hostname.toLowerCase();
 
-    // If already an IP literal, the hostname check already caught it
+    // Check IP literal hostnames directly (the hostname-pattern check above cannot
+    // catch all private IPv6 ranges, so we must check them here too)
     if (isIP(hostname)) {
-      return { allowed: true };
+      if (hostname === '::1' || hostname === '0.0.0.0' || hostname === '127.0.0.1') {
+        return { allowed: false, error: `Server uses loopback address (${hostname})` };
+      }
+      if (/^10\./.test(hostname) || /^172\.(1[6-9]|2\d|3[01])\./.test(hostname) ||
+          /^192\.168\./.test(hostname) || /^169\.254\./.test(hostname)) {
+        return { allowed: false, error: `Server uses private IP address (${hostname})` };
+      }
+      if (/^f[cd][0-9a-f]{0,3}:/i.test(hostname)) {
+        return { allowed: false, error: 'Server uses unique-local IPv6 address (fc00::/7)' };
+      }
+      if (/^fe80:/i.test(hostname)) {
+        return { allowed: false, error: 'Server uses link-local IPv6 address (fe80::/10)' };
+      }
+      // IP literal that passed all checks — still resolve it to catch CNAME-based bypasses
     }
 
     const addresses = await lookup(hostname, { all: true });
