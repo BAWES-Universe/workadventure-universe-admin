@@ -66,6 +66,7 @@ export default function McpServersPage() {
       setServers(data.servers || []);
       setPagination(data);
     } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') return;
       setError(err instanceof Error ? err.message : 'An error occurred');
     } finally {
       setLoading(false);

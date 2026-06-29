@@ -127,8 +127,8 @@ export async function PATCH(
     }
     if (validatedData.enabled !== undefined) updateData.enabled = validatedData.enabled;
 
-    // Handle authConfig: if changed, re-encrypt
-    if (validatedData.authConfig !== undefined) {
+    // Handle authConfig: if changed, re-encrypt (skip if authType is 'none')
+    if (validatedData.authConfig !== undefined && validatedData.authType !== 'none') {
       if (validatedData.authConfig === null || validatedData.authConfig === '') {
         updateData.authConfig = null;
       } else {

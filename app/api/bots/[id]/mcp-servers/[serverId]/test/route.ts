@@ -160,7 +160,7 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
       toolNames,
     };
   } catch (error: any) {
-    if (error.name === 'AbortError') {
+    if (error.name === 'AbortError' || error.name === 'TimeoutError') {
       return {
         success: false,
         toolCount: 0,
