@@ -217,8 +217,32 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
         params: {},
       }),
       signal: AbortSignal.timeout(10000),
-      redirect: 'manual', // Prevent redirect-based SSRF
+      // Follow redirects but validate the final destination is safe
+      // (prevents redirect-based SSRF while allowing legitimate HTTP→HTTPS upgrades)
+      redirect: 'follow',
     });
+
+    // SSRF guard: if a redirect occurred, verify the final URL is not internal
+    if (response.url !== server.serverUrl) {
+      if (!isAllowedServerUrl(response.url)) {
+        return {
+          success: false,
+          toolCount: 0,
+          toolNames: [],
+          error: 'Server redirected to an internal or private address',
+        };
+      }
+      // Also DNS-verify the redirect target
+      const redirectIpCheck = await isAllowedServerIp(response.url);
+      if (!redirectIpCheck.allowed) {
+        return {
+          success: false,
+          toolCount: 0,
+          toolNames: [],
+          error: redirectIpCheck.error || 'Redirect target resolves to a blocked address',
+        };
+      }
+    }
 
     if (!response.ok) {
       return {
