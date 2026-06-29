@@ -182,12 +182,14 @@ export async function PATCH(
       // Explicitly clearing authConfig
       updateData.authConfig = null;
     } else if (validatedData.authType !== 'none') {
-      // New authConfig provided for a non-none auth type (explicitly), or
-      // authType was not specified — encrypt it
-      // If authType wasn't sent and existing is 'none', default to bearer
-      // to prevent inconsistent state (authType:'none' with encrypted credentials)
+      // New authConfig provided — encrypt it
+      // If authType wasn't sent and existing is 'none', reject with a clear
+      // message rather than silently defaulting to a type the user didn't choose
       if (validatedData.authType === undefined && effectiveAuthType === 'none') {
-        updateData.authType = 'bearer';
+        return NextResponse.json(
+          { error: 'authConfig requires authType to be "bearer" or "api-key"' },
+          { status: 400 }
+        );
       }
       try {
         updateData.authConfig = encryptApiKey(validatedData.authConfig);
