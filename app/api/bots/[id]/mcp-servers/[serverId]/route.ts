@@ -181,7 +181,7 @@ export async function PATCH(
     } else if (validatedData.authConfig === null || validatedData.authConfig === '') {
       // Explicitly clearing authConfig
       updateData.authConfig = null;
-    } else if (validatedData.authType !== 'none') {
+    } else if (effectiveAuthType !== 'none') {
       // New authConfig provided — encrypt it
       try {
         updateData.authConfig = encryptApiKey(validatedData.authConfig);
