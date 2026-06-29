@@ -295,6 +295,15 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
       return parsed.toString();
     }
 
+    // Helper to strip auth credentials from headers when following redirects
+    // (prevents leaking bearer tokens / API keys to untrusted redirect targets)
+    function withoutAuth(h: Record<string, string>): Record<string, string> {
+      const clean = { ...h };
+      delete clean['Authorization'];
+      delete clean['X-API-Key'];
+      return clean;
+    }
+
     // Helper to follow a redirect manually with SSRF validation
     async function followRedirect(url: string, hostname: string, headers: Record<string, string>, body: string, redirectCount = 0): Promise<Response> {
       if (redirectCount > 5) {
@@ -326,7 +335,7 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
         // Resolve relative redirects against the current URL
         const redirectUrl = new URL(location, url).toString();
         const parsed = new URL(redirectUrl);
-        return followRedirect(redirectUrl, parsed.hostname, headers, body, redirectCount + 1);
+        return followRedirect(redirectUrl, parsed.hostname, withoutAuth(headers), body, redirectCount + 1);
       }
       return res;
     }
@@ -363,7 +372,7 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
       }
       const redirectUrl = new URL(location, server.serverUrl).toString();
       const parsed = new URL(redirectUrl);
-      const followed = await followRedirect(redirectUrl, parsed.hostname, headers, responseBody).catch((err: unknown) => {
+      const followed = await followRedirect(redirectUrl, parsed.hostname, withoutAuth(headers), responseBody).catch((err: unknown) => {
         const msg = err instanceof Error ? err.message : 'Redirect failure';
         return new Response(null, { status: 502, statusText: msg });
       });
