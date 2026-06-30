@@ -91,7 +91,7 @@ const updateMcpServerSchema = z.object({
     { message: 'Server URL must not point to internal or private addresses' }
   ).optional(),
   authType: z.enum(['none', 'bearer', 'api-key']).optional(),
-  authConfig: z.string().trim().optional().nullable(),
+  authConfig: z.string().trim().optional().nullable().transform(val => val === '' ? undefined : val),
   headers: z.record(z.string(), z.string()).refine(
     (headers) => {
       const reserved = ['authorization', 'proxy-authorization', 'cookie', 'set-cookie', 'x-api-key'];
