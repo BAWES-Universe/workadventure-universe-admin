@@ -228,6 +228,48 @@ interface McpToolDescriptor {
   [key: string]: unknown;
 }
 
+/**
+ * Parse an MCP server HTTP response, handling both standard JSON-RPC
+ * and Streamable HTTP (SSE via text/event-stream) response formats.
+ * Streamable HTTP is required by servers like Linear's MCP endpoint.
+ */
+async function parseMcpResponseBody(response: Response): Promise<Record<string, unknown>> {
+  const contentType = response.headers.get('content-type') || '';
+  const text = await response.text();
+
+  // Detect SSE (Server-Sent Events) response: explicit content-type or body starts with event:/data:
+  const isSse =
+    contentType.includes('text/event-stream') ||
+    text.trimStart().startsWith('event:') ||
+    text.trimStart().startsWith('data:');
+
+  if (isSse) {
+    // SSE messages are separated by \n\n. Each message may have event:, data:, etc.
+    // Per the SSE spec, multiple data: lines within one message should be
+    // concatenated with newlines between them before interpreting as data.
+    const messages = text.split('\n\n');
+    for (const msg of messages) {
+      const dataLines: string[] = [];
+      for (const line of msg.trim().split('\n')) {
+        if (line.startsWith('data:')) {
+          // Strip 'data:' prefix and optional trailing space (per SSE spec)
+          dataLines.push(line.slice(5).replace(/^ /, ''));
+        }
+      }
+      if (dataLines.length > 0) {
+        try {
+          return JSON.parse(dataLines.join('\n')) as Record<string, unknown>;
+        } catch {
+          continue;
+        }
+      }
+    }
+    throw new Error('No valid JSON data found in SSE stream');
+  }
+
+  return JSON.parse(text) as Record<string, unknown>;
+}
+
 async function testMcpConnection(server: { serverUrl: string; authType: string; authConfig: string | null; headers?: Record<string, string> | null }): Promise<{ success: boolean; toolCount: number; toolNames: string[]; error?: string }> {
   // Decrypt authConfig if present
   let authValue: string | null = null;
@@ -368,7 +410,7 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
           error: `HTTP ${followed.status}: ${followed.statusText}`,
         };
       }
-      const data = await followed.json();
+      const data = await parseMcpResponseBody(followed);
       // Process as normal response
       if (data?.error) {
         return {
@@ -396,7 +438,7 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
       };
     }
 
-    const data = await initialResponse.json();
+    const data = await parseMcpResponseBody(initialResponse);
 
     if (data?.error) {
       return {
