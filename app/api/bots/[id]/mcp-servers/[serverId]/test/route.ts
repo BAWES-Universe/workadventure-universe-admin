@@ -374,6 +374,7 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
     async function sendMcpRequest(body: string): Promise<{
       success: boolean;
       data?: Record<string, unknown>;
+      headers?: Record<string, string>;
       error?: string;
     }> {
       const res = await fetch(server.serverUrl, {
@@ -398,14 +399,18 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
         if (!followed.ok) {
           return { success: false, error: `HTTP ${followed.status}: ${followed.statusText}` };
         }
-        return { success: true, data: await parseMcpResponseBody(followed) };
+        const resHeaders: Record<string, string> = {};
+        followed.headers.forEach((v: string, k: string) => { resHeaders[k] = v; });
+        return { success: true, data: await parseMcpResponseBody(followed), headers: resHeaders };
       }
 
       if (!res.ok) {
         return { success: false, error: `HTTP ${res.status}: ${res.statusText}` };
       }
 
-      return { success: true, data: await parseMcpResponseBody(res) };
+      const resHeaders: Record<string, string> = {};
+      res.headers.forEach((v: string, k: string) => { resHeaders[k] = v; });
+      return { success: true, data: await parseMcpResponseBody(res), headers: resHeaders };
     }
 
     // Step 1: Initialize MCP session (required by MCP Streamable HTTP spec)
@@ -443,7 +448,12 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
       };
     }
 
-    const sessionId = initResult.data?.result?.sessionId as string | undefined;
+    // Per MCP Streamable HTTP spec, session ID is transmitted in the
+    // Mcp-Session-Id HTTP response header, not in the JSON body.
+    // Check header first, then fall back to body for non-spec servers.
+    const sessionId =
+        (initResult.headers?.['mcp-session-id']) ||
+        (initResult.data as any)?.result?.sessionId as string | undefined;
     if (sessionId) {
       headers['Mcp-Session-Id'] = sessionId;
     }
