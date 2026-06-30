@@ -91,7 +91,7 @@ const updateMcpServerSchema = z.object({
     { message: 'Server URL must not point to internal or private addresses' }
   ).optional(),
   authType: z.enum(['none', 'bearer', 'api-key']).optional(),
-  authConfig: z.string().trim().optional().nullable(),
+  authConfig: z.string().trim().optional().nullable().transform(val => val === '' ? undefined : val),
   headers: z.record(z.string(), z.string()).refine(
     (headers) => {
       const reserved = ['authorization', 'proxy-authorization', 'cookie', 'set-cookie', 'x-api-key'];
@@ -229,7 +229,7 @@ export async function PATCH(
       // Explicitly clearing authConfig
       updateData.authConfig = null;
     } else if (effectiveAuthType !== 'none') {
-      // New authConfig provided — encrypt it
+      // New authConfig provided and auth type supports it — encrypt it
       try {
         updateData.authConfig = encryptApiKey(validatedData.authConfig);
       } catch (encError) {
@@ -238,6 +238,20 @@ export async function PATCH(
           { error: 'Failed to encrypt auth configuration' },
           { status: 500, headers: corsHeaders(request) }
         );
+      }
+    } else {
+      // authConfig provided but effectiveAuthType is 'none' — store it only
+      // if authType isn't being explicitly cleared to 'none' at the same time
+      if (validatedData.authType !== 'none') {
+        try {
+          updateData.authConfig = encryptApiKey(validatedData.authConfig);
+        } catch (encError) {
+          console.error('Failed to encrypt authConfig:', encError);
+          return NextResponse.json(
+            { error: 'Failed to encrypt auth configuration' },
+            { status: 500, headers: corsHeaders(request) }
+          );
+        }
       }
     }
 

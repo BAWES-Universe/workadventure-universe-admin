@@ -93,7 +93,7 @@ const createMcpServerSchema = z.object({
   authType: z.enum(['none', 'bearer', 'api-key'], {
     message: 'authType must be one of: none, bearer, api-key',
   }).default('none'),
-  authConfig: z.string().optional().nullable(),
+  authConfig: z.string().trim().optional().nullable(),
   headers: z.record(z.string(), z.string()).refine(
     (headers) => {
       const reserved = ['authorization', 'proxy-authorization', 'cookie', 'set-cookie', 'x-api-key'];
@@ -265,9 +265,10 @@ export async function POST(
     const body = await request.json();
     const validatedData = createMcpServerSchema.parse(body);
 
-    // Encrypt authConfig if provided (and if auth type requires it)
+    // Encrypt authConfig if provided (store even when authType is 'none',
+    // consistent with the PATCH handler — user explicitly provided it)
     let encryptedAuthConfig: string | null = null;
-    if (validatedData.authConfig && validatedData.authType !== 'none') {
+    if (validatedData.authConfig) {
       try {
         encryptedAuthConfig = encryptApiKey(validatedData.authConfig);
       } catch (encError) {
