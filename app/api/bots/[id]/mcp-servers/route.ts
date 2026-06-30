@@ -93,7 +93,7 @@ const createMcpServerSchema = z.object({
   authType: z.enum(['none', 'bearer', 'api-key'], {
     message: 'authType must be one of: none, bearer, api-key',
   }).default('none'),
-  authConfig: z.string().optional().nullable(),
+  authConfig: z.string().trim().optional().nullable(),
   headers: z.record(z.string(), z.string()).refine(
     (headers) => {
       const reserved = ['authorization', 'proxy-authorization', 'cookie', 'set-cookie', 'x-api-key'];

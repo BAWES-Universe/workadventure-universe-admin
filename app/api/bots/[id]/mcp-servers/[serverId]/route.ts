@@ -229,7 +229,7 @@ export async function PATCH(
       // Explicitly clearing authConfig
       updateData.authConfig = null;
     } else if (effectiveAuthType !== 'none') {
-      // New authConfig provided — encrypt it
+      // New authConfig provided and auth type supports it — encrypt it
       try {
         updateData.authConfig = encryptApiKey(validatedData.authConfig);
       } catch (encError) {
@@ -239,6 +239,10 @@ export async function PATCH(
           { status: 500, headers: corsHeaders(request) }
         );
       }
+    } else {
+      // authConfig provided but authType is 'none' — store it anyway
+      // in case the user plans to change authType later
+      updateData.authConfig = encryptApiKey(validatedData.authConfig);
     }
 
     const updated = await prisma.botMcpServer.update({
