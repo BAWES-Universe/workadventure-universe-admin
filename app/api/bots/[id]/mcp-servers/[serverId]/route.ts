@@ -240,16 +240,18 @@ export async function PATCH(
         );
       }
     } else {
-      // authConfig provided but authType is 'none' — store it anyway
-      // in case the user plans to change authType later
-      try {
-        updateData.authConfig = encryptApiKey(validatedData.authConfig);
-      } catch (encError) {
-        console.error('Failed to encrypt authConfig:', encError);
-        return NextResponse.json(
-          { error: 'Failed to encrypt auth configuration' },
-          { status: 500, headers: corsHeaders(request) }
-        );
+      // authConfig provided but effectiveAuthType is 'none' — store it only
+      // if authType isn't being explicitly cleared to 'none' at the same time
+      if (validatedData.authType !== 'none') {
+        try {
+          updateData.authConfig = encryptApiKey(validatedData.authConfig);
+        } catch (encError) {
+          console.error('Failed to encrypt authConfig:', encError);
+          return NextResponse.json(
+            { error: 'Failed to encrypt auth configuration' },
+            { status: 500, headers: corsHeaders(request) }
+          );
+        }
       }
     }
 
