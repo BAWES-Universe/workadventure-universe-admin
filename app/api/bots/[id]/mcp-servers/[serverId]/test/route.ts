@@ -369,88 +369,129 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
       return res;
     }
 
-    const responseBody = JSON.stringify({
-      jsonrpc: '2.0',
-      id: '1',
-      method: 'tools/list',
-      params: {},
-    });
-
-    // Make the initial request with redirect: 'manual' so redirects are
-    // validated by followRedirect before being followed (SSRF protection)
-    const initialResponse = await fetch(server.serverUrl, {
-      method: 'POST',
-      headers,
-      body: responseBody,
-      signal: AbortSignal.timeout(10000),
-      redirect: 'manual',
-    });
-
-    // Handle redirect from initial request via the same SSRF-safe followRedirect
-    if (initialResponse.status >= 300 && initialResponse.status < 400) {
-      const location = initialResponse.headers.get('location');
-      if (!location) {
-        return {
-          success: false,
-          toolCount: 0,
-          toolNames: [],
-          error: 'Redirect response missing Location header',
-        };
-      }
-      const redirectUrl = new URL(location, server.serverUrl).toString();
-      const followed = await followRedirect(redirectUrl, withoutAuth(headers), responseBody).catch((err: unknown) => {
-        const msg = err instanceof Error ? err.message : 'Redirect failure';
-        return new Response(null, { status: 502, statusText: msg });
+    // Helper to send a single MCP JSON-RPC POST request to the server URL,
+    // handling redirects with SSRF-safe redirect validation.
+    async function sendMcpRequest(body: string): Promise<{
+      success: boolean;
+      data?: Record<string, unknown>;
+      headers?: Record<string, string>;
+      error?: string;
+    }> {
+      const res = await fetch(server.serverUrl, {
+        method: 'POST',
+        headers,
+        body,
+        signal: AbortSignal.timeout(10000),
+        redirect: 'manual',
       });
-      if (!followed.ok) {
-        return {
-          success: false,
-          toolCount: 0,
-          toolNames: [],
-          error: `HTTP ${followed.status}: ${followed.statusText}`,
-        };
+
+      // Handle redirect via the same SSRF-safe followRedirect
+      if (res.status >= 300 && res.status < 400) {
+        const location = res.headers.get('location');
+        if (!location) {
+          return { success: false, error: 'Redirect response missing Location header' };
+        }
+        const redirectUrl = new URL(location, server.serverUrl).toString();
+        const followed = await followRedirect(redirectUrl, withoutAuth(headers), body).catch((err: unknown) => {
+          const msg = err instanceof Error ? err.message : 'Redirect failure';
+          return new Response(null, { status: 502, statusText: msg });
+        });
+        if (!followed.ok) {
+          return { success: false, error: `HTTP ${followed.status}: ${followed.statusText}` };
+        }
+        const resHeaders: Record<string, string> = {};
+        followed.headers.forEach((v: string, k: string) => { resHeaders[k] = v; });
+        return { success: true, data: await parseMcpResponseBody(followed), headers: resHeaders };
       }
-      const data = await parseMcpResponseBody(followed);
-      // Process as normal response
-      if (data?.error) {
-        return {
-          success: false,
-          toolCount: 0,
-          toolNames: [],
-          error: `MCP error: ${data.error.message || JSON.stringify(data.error)}`,
-        };
+
+      if (!res.ok) {
+        return { success: false, error: `HTTP ${res.status}: ${res.statusText}` };
       }
-      const tools = data?.result?.tools ?? [];
-      const toolNames = tools.map((t: McpToolDescriptor) => t.name || t.function?.name || 'unknown');
-      return {
-        success: true,
-        toolCount: toolNames.length,
-        toolNames,
-      };
+
+      const resHeaders: Record<string, string> = {};
+      res.headers.forEach((v: string, k: string) => { resHeaders[k] = v; });
+      return { success: true, data: await parseMcpResponseBody(res), headers: resHeaders };
     }
 
-    if (!initialResponse.ok) {
+    // Step 1: Initialize MCP session (required by MCP Streamable HTTP spec)
+    const initResult = await sendMcpRequest(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: 'init',
+        method: 'initialize',
+        params: {
+          protocolVersion: '2024-11-05',
+          capabilities: {},
+          clientInfo: {
+            name: 'workadventure-mcp-test',
+            version: '1.0.0',
+          },
+        },
+      })
+    );
+
+    if (!initResult.success) {
       return {
         success: false,
         toolCount: 0,
         toolNames: [],
-        error: `HTTP ${initialResponse.status}: ${initialResponse.statusText}`,
+        error: `Initialize failed: ${initResult.error}`,
       };
     }
 
-    const data = await parseMcpResponseBody(initialResponse);
+    if (initResult.data?.error) {
+      return {
+        success: false,
+        toolCount: 0,
+        toolNames: [],
+        error: `Initialize error: ${(initResult.data.error as { message?: string })?.message || JSON.stringify(initResult.data.error)}`,
+      };
+    }
+
+    // Per MCP Streamable HTTP spec, session ID is transmitted in the
+    // Mcp-Session-Id HTTP response header, not in the JSON body.
+    // Check header first, then fall back to body for non-spec servers.
+    const sessionId =
+        (initResult.headers?.['mcp-session-id']) ||
+        (initResult.data as any)?.result?.sessionId as string | undefined;
+    if (sessionId) {
+      headers['Mcp-Session-Id'] = sessionId;
+    }
+
+    // Step 2: Call tools/list
+    const resultResponse = await sendMcpRequest(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: '1',
+        method: 'tools/list',
+        params: {},
+      })
+    );
+
+    if (!resultResponse.success) {
+      return {
+        success: false,
+        toolCount: 0,
+        toolNames: [],
+        error: resultResponse.error,
+      };
+    }
+
+    const data = resultResponse.data!;
 
     if (data?.error) {
       return {
         success: false,
         toolCount: 0,
         toolNames: [],
-        error: `MCP error: ${data.error.message || JSON.stringify(data.error)}`,
+        error: `MCP error: ${(data.error as { message?: string })?.message || JSON.stringify(data.error)}`,
       };
     }
 
-    const tools = data?.result?.tools ?? [];
-    const toolNames = tools.map((t: McpToolDescriptor) => t.name || t.function?.name || 'unknown');
+    const tools = (data as any)?.result?.tools ?? [];
+    const toolNames = (tools as McpToolDescriptor[]).map(
+      (t: McpToolDescriptor) => t.name || t.function?.name || 'unknown'
+    );
     return {
       success: true,
       toolCount: toolNames.length,
