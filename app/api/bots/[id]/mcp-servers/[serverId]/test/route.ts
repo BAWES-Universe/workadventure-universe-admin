@@ -245,17 +245,22 @@ async function parseMcpResponseBody(response: Response): Promise<Record<string, 
 
   if (isSse) {
     // SSE messages are separated by \n\n. Each message may have event:, data:, etc.
-    // We look for the first `data:` line containing valid JSON-RPC.
+    // Per the SSE spec, multiple data: lines within one message should be
+    // concatenated with newlines between them before interpreting as data.
     const messages = text.split('\n\n');
     for (const msg of messages) {
+      const dataLines: string[] = [];
       for (const line of msg.trim().split('\n')) {
         if (line.startsWith('data:')) {
-          try {
-            // Strip 'data:' prefix and optional trailing space (per SSE spec)
-            return JSON.parse(line.slice(5).replace(/^ /, '')) as Record<string, unknown>;
-          } catch {
-            continue;
-          }
+          // Strip 'data:' prefix and optional trailing space (per SSE spec)
+          dataLines.push(line.slice(5).replace(/^ /, ''));
+        }
+      }
+      if (dataLines.length > 0) {
+        try {
+          return JSON.parse(dataLines.join('\n')) as Record<string, unknown>;
+        } catch {
+          continue;
         }
       }
     }
