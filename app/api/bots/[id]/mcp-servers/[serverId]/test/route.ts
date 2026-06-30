@@ -249,9 +249,10 @@ async function parseMcpResponseBody(response: Response): Promise<Record<string, 
     const messages = text.split('\n\n');
     for (const msg of messages) {
       for (const line of msg.trim().split('\n')) {
-        if (line.startsWith('data: ')) {
+        if (line.startsWith('data:')) {
           try {
-            return JSON.parse(line.slice(6)) as Record<string, unknown>;
+            // Strip 'data:' prefix and optional trailing space (per SSE spec)
+            return JSON.parse(line.slice(5).replace(/^ /, '')) as Record<string, unknown>;
           } catch {
             continue;
           }
