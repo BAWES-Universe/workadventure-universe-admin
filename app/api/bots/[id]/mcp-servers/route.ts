@@ -265,9 +265,10 @@ export async function POST(
     const body = await request.json();
     const validatedData = createMcpServerSchema.parse(body);
 
-    // Encrypt authConfig if provided (and if auth type requires it)
+    // Encrypt authConfig if provided (store even when authType is 'none',
+    // consistent with the PATCH handler — user explicitly provided it)
     let encryptedAuthConfig: string | null = null;
-    if (validatedData.authConfig && validatedData.authType !== 'none') {
+    if (validatedData.authConfig) {
       try {
         encryptedAuthConfig = encryptApiKey(validatedData.authConfig);
       } catch (encError) {
