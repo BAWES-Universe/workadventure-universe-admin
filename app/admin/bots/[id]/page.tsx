@@ -551,13 +551,22 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
       )}
 
       {/* Tabs */}
-      <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-        <TabsList className="grid w-full grid-cols-5">
+      <Tabs value={activeTab} onValueChange={(value) => {
+          if (value === 'mcp-servers' && botId) {
+            const params = new URLSearchParams(window.location.search);
+            const token = params.get('_token') || '';
+            window.location.href = `/admin/bots/${botId}/mcp-servers?_token=${encodeURIComponent(token)}`;
+            return;
+          }
+          setActiveTab(value);
+        }} className="w-full">
+        <TabsList className="grid w-full grid-cols-6">
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="usage">Usage</TabsTrigger>
           <TabsTrigger value="metrics">Metrics</TabsTrigger>
           <TabsTrigger value="conversations">Conversations</TabsTrigger>
           <TabsTrigger value="emotions">Emotions</TabsTrigger>
+          <TabsTrigger value="mcp-servers">MCP Servers</TabsTrigger>
         </TabsList>
 
         {/* Overview Tab */}
