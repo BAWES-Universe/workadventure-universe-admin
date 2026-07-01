@@ -548,7 +548,7 @@ export async function POST(
     }
 
     if (!userId && !isAdminToken) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401, headers: corsHeaders(request) });
     }
 
     // Admin token skips ownership check (trusted internal call)
@@ -562,7 +562,7 @@ export async function POST(
     });
 
     if (!server || server.botId !== botId) {
-      return NextResponse.json({ error: 'MCP server not found' }, { status: 404 });
+      return NextResponse.json({ error: 'MCP server not found' }, { status: 404, headers: corsHeaders(request) });
     }
 
     // TODO: Flag this bot as having had its MCP server tested?
@@ -597,18 +597,18 @@ export async function POST(
     return NextResponse.json(result, { headers: corsHeaders(request) });
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized') {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401, headers: corsHeaders(request) });
     }
     if (error instanceof Error && error.message === 'Forbidden') {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403, headers: corsHeaders(request) });
     }
     if (error instanceof Error && error.message === 'NotFound') {
-      return NextResponse.json({ error: 'Bot not found' }, { status: 404 });
+      return NextResponse.json({ error: 'Bot not found' }, { status: 404, headers: corsHeaders(request) });
     }
     console.error('Error testing MCP server connection:', error);
     return NextResponse.json(
       { success: false, toolCount: 0, toolNames: [], error: 'Internal server error' },
-      { status: 500 }
+      { status: 500, headers: corsHeaders(request) }
     );
   }
 }
