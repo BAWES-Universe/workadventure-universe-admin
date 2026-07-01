@@ -142,7 +142,7 @@ export async function GET(
     }
 
     if (!userId && !isAdminToken) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401, headers: corsHeaders(request) });
     }
 
     // Fetch the bot to check ownership
@@ -152,7 +152,7 @@ export async function GET(
     });
 
     if (!bot) {
-      return NextResponse.json({ error: 'Bot not found' }, { status: 404 });
+      return NextResponse.json({ error: 'Bot not found' }, { status: 404, headers: corsHeaders(request) });
     }
 
     // Gate: admin token skips ownership check (trusted internal call)
@@ -165,7 +165,7 @@ export async function GET(
       const isSuper = actorUser ? isSuperAdmin(actorUser.email) : false;
 
       if (!isOwner && !isSuper) {
-        return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+        return NextResponse.json({ error: 'Forbidden' }, { status: 403, headers: corsHeaders(request) });
       }
     }
 
@@ -194,13 +194,13 @@ export async function GET(
     return NextResponse.json(transformed, { headers: corsHeaders(request) });
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized') {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401, headers: corsHeaders(request) });
     }
     if (error instanceof Error && error.message === 'Forbidden') {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403, headers: corsHeaders(request) });
     }
     console.error('Error listing MCP servers:', error);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500, headers: corsHeaders(request) });
   }
 }
 
@@ -234,7 +234,7 @@ export async function POST(
     }
 
     if (!userId && !isAdminToken) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401, headers: corsHeaders(request) });
     }
 
     // Fetch the bot to check ownership
@@ -244,7 +244,7 @@ export async function POST(
     });
 
     if (!bot) {
-      return NextResponse.json({ error: 'Bot not found' }, { status: 404 });
+      return NextResponse.json({ error: 'Bot not found' }, { status: 404, headers: corsHeaders(request) });
     }
 
     // Gate: admin token skips ownership check (trusted internal call)
@@ -257,7 +257,7 @@ export async function POST(
       const isSuper = actorUser ? isSuperAdmin(actorUser.email) : false;
 
       if (!isOwner && !isSuper) {
-        return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+        return NextResponse.json({ error: 'Forbidden' }, { status: 403, headers: corsHeaders(request) });
       }
     }
 
@@ -275,7 +275,7 @@ export async function POST(
         console.error('Failed to encrypt authConfig:', encError);
         return NextResponse.json(
           { error: 'Failed to encrypt auth configuration' },
-          { status: 500 }
+          { status: 500, headers: corsHeaders(request) }
         );
       }
     }
@@ -323,22 +323,22 @@ export async function POST(
     if (error instanceof Error && error.message === 'MaxServersReached') {
       return NextResponse.json(
         { error: 'Maximum of 5 MCP servers per bot reached' },
-        { status: 422 }
+        { status: 422, headers: corsHeaders(request) }
       );
     }
     if (error instanceof Error && error.message === 'Unauthorized') {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401, headers: corsHeaders(request) });
     }
     if (error instanceof Error && error.message === 'Forbidden') {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403, headers: corsHeaders(request) });
     }
     if (error instanceof z.ZodError) {
       return NextResponse.json(
         { error: 'Invalid input data', details: error.issues },
-        { status: 400 }
+        { status: 400, headers: corsHeaders(request) }
       );
     }
     console.error('Error creating MCP server:', error);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500, headers: corsHeaders(request) });
   }
 }
