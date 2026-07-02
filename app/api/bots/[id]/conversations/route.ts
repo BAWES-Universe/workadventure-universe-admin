@@ -147,8 +147,9 @@ export async function POST(
       );
       
     } catch (error: any) {
-      // Check if this is a unique constraint violation for active conversations
-      if (error.code === 'P2002' && error.meta?.target?.includes('bot_id') && error.meta?.target?.includes('user_uuid')) {
+      // Check if this is a unique constraint violation — the inner logic safely
+      // finds and updates the existing active conversation regardless of fields.
+      if (error.code === 'P2002') {
         // Active conversation already exists - update it
         try {
           // Find existing active conversation using proper Prisma query
@@ -224,8 +225,9 @@ export async function POST(
               );
             }
           }
-        } catch (updateError) {
-          console.error('Error updating existing conversation:', updateError);
+        } catch (updateError: any) {
+          const msg = updateError?.message || 'Unknown error';
+          console.error(`Error updating existing conversation: ${msg}`);
         }
       }
       
@@ -240,7 +242,7 @@ export async function POST(
       );
     }
 
-    console.error('Error in conversation storage endpoint:', error);
+    console.error('Error in conversation storage endpoint:', error?.message || 'Unknown error');
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500, headers: corsHeaders() }
