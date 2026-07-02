@@ -55,7 +55,7 @@ export async function getSessionUser(request: NextRequest): Promise<SessionUser 
       isSuperAdmin: isSuperAdmin(user.email),
     };
   } catch (error) {
-    console.error('Get session user error:', error);
+    console.error('Get session user error:', error?.message || 'Unknown error');
     return null;
   }
 }
