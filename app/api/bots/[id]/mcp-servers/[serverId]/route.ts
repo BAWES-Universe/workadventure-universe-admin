@@ -90,7 +90,7 @@ const updateMcpServerSchema = z.object({
     (url) => isAllowedServerUrl(url),
     { message: 'Server URL must not point to internal or private addresses' }
   ).optional(),
-  authType: z.enum(['none', 'bearer', 'api-key']).optional(),
+  authType: z.enum(['none', 'bearer', 'api-key', 'oauth']).optional(),
   authConfig: z.string().trim().optional().nullable().transform(val => val === '' ? null : val),
   headers: z.record(z.string(), z.string()).refine(
     (headers) => {
