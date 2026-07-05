@@ -1,26 +1,39 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { isIP } from 'net';
 
 export const runtime = 'nodejs';
 
-// Block requests to private/internal networks
+// Block requests to private/internal networks (mirrors isAllowedServerUrl from MCP routes)
 function isExternalUrl(url: string): boolean {
   try {
     const parsed = new URL(url);
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
-    const hostname = parsed.hostname.toLowerCase();
-    // Block localhost
-    if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '0.0.0.0' || hostname === '::1') return false;
-    // Block private IP ranges
-    if (isIP(hostname)) {
-      const parts = hostname.split('.').map(Number);
-      if (parts[0] === 10) return false;
-      if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return false;
-      if (parts[0] === 192 && parts[1] === 168) return false;
-      if (parts[0] === 169 && parts[1] === 254) return false; // link-local / metadata
+    let hostname = parsed.hostname.toLowerCase();
+    // Strip brackets from IPv6 literals (new URL('http://[::1]').hostname returns '[::1]')
+    if (hostname.startsWith('[') && hostname.endsWith(']')) {
+      hostname = hostname.slice(1, -1);
     }
-    // Block hostnames ending with internal TLDs
-    if (hostname.endsWith('.local') || hostname.endsWith('.internal')) return false;
+    if (hostname === 'localhost' || hostname === '::1') return false;
+    if (/^127\.\d+\.\d+\.\d+$/.test(hostname)) return false;         // 127.0.0.0/8 loopback
+    if (/^0\.0\.0\.0$/.test(hostname)) return false;
+    // Handle IPv4-mapped IPv6 addresses (::ffff:127.0.0.1, etc.)
+    if (/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.test(hostname)) {
+      const ipv4 = hostname.replace(/^::ffff:/i, '');
+      if (ipv4 === '127.0.0.1' || /^127\.\d+\.\d+\.\d+$/.test(ipv4) || ipv4 === '0.0.0.0') return false;
+      if (/^10\.\d+\.\d+\.\d+$/.test(ipv4) || /^172\.(1[6-9]|2\d|3[01])\.\d+\.\d+$/.test(ipv4)) return false;
+      if (/^192\.168\.\d+\.\d+$/.test(ipv4) || /^169\.254\.\d+\.\d+$/.test(ipv4)) return false;
+    }
+    if (/^10\.\d+\.\d+\.\d+$/.test(hostname)) return false;
+    if (/^172\.(1[6-9]|2\d|3[01])\.\d+\.\d+$/.test(hostname)) return false;
+    if (/^192\.168\.\d+\.\d+$/.test(hostname)) return false;
+    if (/^169\.254\.\d+\.\d+$/.test(hostname)) return false;
+    // Reject private IPv6 ranges (unique-local, link-local, unspecified)
+    if (/^f[cd][0-9a-f]{0,3}:/i.test(hostname)) return false;
+    if (/^fe[89a-b][0-9a-f]:/i.test(hostname)) return false;         // fe80::/10 link-local
+    if (/^::$/.test(hostname)) return false;
+    if (hostname === '169.254.169.254') return false;
+    if (hostname === 'metadata.google.internal' || hostname === 'metadata.internal') return false;
+    if (hostname.endsWith('.internal')) return false;
+    if (hostname.endsWith('.local')) return false;
     return true;
   } catch {
     return false;

@@ -591,7 +591,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                     </div>
                   )}
 
-                  {(oauthDiscovery === 'not_found' || formData.oauthAuthorizeUrl || formData.oauthTokenUrl) && (
+                  {oauthDiscovery !== 'discovered' && (oauthDiscovery === 'not_found' || formData.oauthAuthorizeUrl || formData.oauthTokenUrl) && (
                     <div className="grid gap-2">
                       <Label htmlFor="oauthTokenUrl">Token URL</Label>
                       <Input
