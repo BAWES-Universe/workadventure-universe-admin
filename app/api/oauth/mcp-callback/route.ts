@@ -92,6 +92,19 @@ export async function GET(request: NextRequest) {
       return new NextResponse('OAuth configuration missing required fields (clientId, clientSecret, tokenUrl)', { status: 400 });
     }
 
+    // Validate tokenUrl before attempting exchange
+    try {
+      new URL(oauthConfig.tokenUrl);
+    } catch {
+      console.error('[OAuthCallback] Invalid tokenUrl in authConfig:', oauthConfig.tokenUrl);
+      if (redirectUrl) {
+        return NextResponse.redirect(
+          new URL(redirectUrl + (redirectUrl.includes('?') ? '&' : '?') + 'oauth=error&message=invalid_token_url')
+        );
+      }
+      return new NextResponse('Invalid tokenUrl in authConfig — must be a valid, absolute URL', { status: 400 });
+    }
+
     // Exchange authorization code for tokens at the provider's token endpoint
     const callbackBase = process.env.ADMIN_API_URL || new URL(request.url).origin;
     const tokenResponse = await exchangeCodeForTokens(

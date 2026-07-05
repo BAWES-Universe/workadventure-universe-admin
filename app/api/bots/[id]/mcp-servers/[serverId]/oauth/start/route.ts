@@ -142,7 +142,13 @@ export async function GET(
         ...(process.env.CORS_ALLOWED_ORIGINS || '').split(',').filter(Boolean),
         ...(request.headers.get('origin') ? [request.headers.get('origin')!] : []),
       ];
-      const isAllowed = allowedOrigins.some((origin) => redirectUrl!.startsWith(origin));
+      const isAllowed = allowedOrigins.some((origin) => {
+        try {
+          return new URL(redirectUrl!).origin === origin;
+        } catch {
+          return false;
+        }
+      });
       if (!isAllowed) {
         redirectUrl = `${requestOrigin}/admin/bots/${botId}`;
       }
@@ -165,6 +171,16 @@ export async function GET(
       ts: Date.now(),
     });
     const stateToken = encryptApiKey(statePayload);
+
+    // Validate authorizeUrl before constructing the redirect
+    try {
+      new URL(oauthConfig.authorizeUrl);
+    } catch {
+      return NextResponse.json(
+        { error: 'Invalid authorizeUrl in authConfig — must be a valid, absolute URL' },
+        { status: 400, headers: corsHeaders(request) }
+      );
+    }
 
     // Build authorize URL from the provider's configured endpoint
     const authorizeUrl = new URL(oauthConfig.authorizeUrl);

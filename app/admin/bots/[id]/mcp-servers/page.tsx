@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -304,6 +304,17 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
 
   // OAuth connect state
   const [oauthConnectingId, setOauthConnectingId] = useState<string | null>(null);
+  const pollRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Clean up poll interval on unmount
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    };
+  }, []);
 
   async function handleOAuthConnect(server: { id: string; name: string }) {
     setOauthConnectingId(server.id);
@@ -330,10 +341,13 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
       }
 
       // Poll for popup close
-      const pollInterval = setInterval(async () => {
+      pollRef.current = setInterval(async () => {
         try {
           if (popup.closed) {
-            clearInterval(pollInterval);
+            if (pollRef.current) {
+              clearInterval(pollRef.current);
+              pollRef.current = null;
+            }
             setOauthConnectingId(null);
             await fetchServers();
           }
