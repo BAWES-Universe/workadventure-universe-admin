@@ -126,6 +126,9 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
   useEffect(() => {
     if (formData.authType !== 'oauth' || !formData.serverUrl.trim()) {
       setOauthDiscovery('idle');
+      setDiscoveredAuthUrl('');
+      setDiscoveredTokenUrl('');
+      setDiscoveredScopes(null);
       return;
     }
     let cancelled = false;

@@ -1,6 +1,31 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { isIP } from 'net';
 
 export const runtime = 'nodejs';
+
+// Block requests to private/internal networks
+function isExternalUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+    const hostname = parsed.hostname.toLowerCase();
+    // Block localhost
+    if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '0.0.0.0' || hostname === '::1') return false;
+    // Block private IP ranges
+    if (isIP(hostname)) {
+      const parts = hostname.split('.').map(Number);
+      if (parts[0] === 10) return false;
+      if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return false;
+      if (parts[0] === 192 && parts[1] === 168) return false;
+      if (parts[0] === 169 && parts[1] === 254) return false; // link-local / metadata
+    }
+    // Block hostnames ending with internal TLDs
+    if (hostname.endsWith('.local') || hostname.endsWith('.internal')) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * GET /api/mcp/oauth-discover?serverUrl=<encoded>&callbackUrl=<encoded>
@@ -39,6 +64,14 @@ export async function GET(request: NextRequest) {
     }
 
     const baseUrl = `${parsedServerUrl.protocol}//${parsedServerUrl.host}`;
+
+    // SSRF protection: reject requests to internal/private networks
+    if (!isExternalUrl(serverUrl)) {
+      return NextResponse.json(
+        { error: 'Server URL must point to a public, external address' },
+        { status: 400 }
+      );
+    }
 
     // Step 1: Try metadata discovery
     const metadataUrl = `${baseUrl}/.well-known/oauth-authorization-server`;
@@ -100,6 +133,33 @@ export async function GET(request: NextRequest) {
     let clientSecret: string | null = null;
 
     if (registrationEndpoint && callbackUrl) {
+      // SSRF protection: registration endpoint must belong to the same origin
+      let parsedRegistration: URL;
+      try {
+        parsedRegistration = new URL(registrationEndpoint);
+      } catch {
+        return NextResponse.json({
+          discovered: true,
+          authorizeUrl,
+          tokenUrl,
+          registrationEndpoint: null,
+          scopesSupported,
+          clientId: null,
+          clientSecret: null,
+        });
+      }
+      if (parsedRegistration.origin !== parsedServerUrl.origin) {
+        // Registration is on a different origin — skip auto-registration
+        return NextResponse.json({
+          discovered: true,
+          authorizeUrl,
+          tokenUrl,
+          registrationEndpoint: null,
+          scopesSupported,
+          clientId: null,
+          clientSecret: null,
+        });
+      }
       try {
         const registrationResponse = await fetch(registrationEndpoint, {
           method: 'POST',
