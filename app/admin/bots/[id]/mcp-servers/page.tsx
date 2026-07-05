@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -317,13 +317,13 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
   }, []);
 
   // Close popup window after OAuth completes
-  const searchParams = useSearchParams();
-  const oauthResult = searchParams.get('oauth');
   useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const oauthResult = params.get('oauth');
     if (oauthResult === 'success' || oauthResult === 'error') {
       window.close();
     }
-  }, [oauthResult]);
+  }, []);
 
   async function handleOAuthConnect(server: { id: string; name: string }) {
     // Clear any existing poll interval before starting a new one
@@ -335,7 +335,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
 
     try {
       const { authenticatedFetch } = await import('@/lib/client-auth');
-      const redirectUrl = window.location.href.split('?')[0];
+      const redirectUrl = window.location.href.split('?')[0].split('#')[0];
       const response = await authenticatedFetch(
         `/api/bots/${botId}/mcp-servers/${server.id}/oauth/start?redirectUrl=${encodeURIComponent(redirectUrl)}`,
       );
