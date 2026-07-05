@@ -90,8 +90,8 @@ const createMcpServerSchema = z.object({
     (url) => isAllowedServerUrl(url),
     { message: 'Server URL must not point to internal or private addresses' }
   ),
-  authType: z.enum(['none', 'bearer', 'api-key'], {
-    message: 'authType must be one of: none, bearer, api-key',
+  authType: z.enum(['none', 'bearer', 'api-key', 'oauth'], {
+    message: 'authType must be one of: none, bearer, api-key, oauth',
   }).default('none'),
   authConfig: z.string().trim().optional().nullable(),
   headers: z.record(z.string(), z.string()).refine(
@@ -103,7 +103,7 @@ const createMcpServerSchema = z.object({
   ).optional(),
   enabled: z.boolean().optional().default(true),
 }).superRefine((data, ctx) => {
-  if ((data.authType === 'bearer' || data.authType === 'api-key') && !data.authConfig) {
+  if ((data.authType === 'bearer' || data.authType === 'api-key' || data.authType === 'oauth') && !data.authConfig) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ['authConfig'],

@@ -77,6 +77,12 @@ interface McpServerFormData {
   authConfig: string;
   headers: { key: string; value: string }[];
   enabled: boolean;
+  // OAuth-specific fields (serialized into authConfig on save)
+  oauthAuthorizeUrl?: string;
+  oauthTokenUrl?: string;
+  oauthClientId?: string;
+  oauthClientSecret?: string;
+  oauthScopes?: string;
 }
 
 const emptyForm: McpServerFormData = {
@@ -86,6 +92,11 @@ const emptyForm: McpServerFormData = {
   authConfig: '',
   headers: [],
   enabled: true,
+  oauthAuthorizeUrl: '',
+  oauthTokenUrl: '',
+  oauthClientId: '',
+  oauthClientSecret: '',
+  oauthScopes: '',
 };
 
 export default function BotMcpServersPage({ params }: { params: Promise<{ id: string }> }) {
@@ -171,7 +182,15 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
           name: formData.name,
           serverUrl: formData.serverUrl,
           authType: formData.authType,
-          authConfig: formData.authConfig || null,
+          authConfig: formData.authType === 'oauth'
+            ? JSON.stringify({
+                authorizeUrl: formData.oauthAuthorizeUrl?.trim(),
+                tokenUrl: formData.oauthTokenUrl?.trim(),
+                clientId: formData.oauthClientId?.trim(),
+                clientSecret: formData.oauthClientSecret?.trim(),
+                scopes: formData.oauthScopes?.trim(),
+              })
+            : formData.authConfig || null,
           headers: formData.headers.length > 0
             ? Object.fromEntries(formData.headers.filter(h => h.key.trim()).map(h => [h.key.trim(), h.value]))
             : undefined,
@@ -283,6 +302,51 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
     }
   }
 
+  // OAuth connect state
+  const [oauthConnectingId, setOauthConnectingId] = useState<string | null>(null);
+
+  async function handleOAuthConnect(server: { id: string; name: string }) {
+    setOauthConnectingId(server.id);
+
+    try {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const redirectUrl = window.location.href.split('?')[0];
+      const response = await authenticatedFetch(
+        `/api/bots/${botId}/mcp-servers/${server.id}/oauth/start?redirectUrl=${encodeURIComponent(redirectUrl)}`,
+      );
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.error || 'Failed to start OAuth connection');
+      }
+
+      const data = await response.json();
+      const authorizeUrl = data.authorizeUrl;
+
+      // Open OAuth popup
+      const popup = window.open(authorizeUrl, 'oauth-popup', 'width=600,height=700');
+      if (!popup) {
+        throw new Error('Popup blocked. Please allow popups for this site.');
+      }
+
+      // Poll for popup close
+      const pollInterval = setInterval(async () => {
+        try {
+          if (popup.closed) {
+            clearInterval(pollInterval);
+            setOauthConnectingId(null);
+            await fetchServers();
+          }
+        } catch {
+          // Cross-origin errors during redirect
+        }
+      }, 500);
+    } catch (err) {
+      console.error('OAuth connection error:', err);
+      setOauthConnectingId(null);
+    }
+  }
+
   if (!authChecked || (loading && servers.length === 0)) {
     return (
       <div className="flex items-center justify-center min-h-[400px]">
@@ -374,11 +438,12 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                     <SelectItem value="none">None</SelectItem>
                     <SelectItem value="bearer">Bearer Token</SelectItem>
                     <SelectItem value="api-key">API Key</SelectItem>
+                    <SelectItem value="oauth">OAuth (Connect)</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
 
-              {formData.authType !== 'none' && (
+              {formData.authType !== 'none' && formData.authType !== 'oauth' && (
                 <div className="grid gap-2">
                   <Label htmlFor="authConfig">
                     {formData.authType === 'bearer' ? 'Bearer Token' : 'API Key'}
@@ -393,6 +458,57 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                     onChange={(e) => setFormData({ ...formData, authConfig: e.target.value })}
                   />
                 </div>
+              )}
+
+              {formData.authType === 'oauth' && (
+                <>
+                  <div className="grid gap-2">
+                    <Label htmlFor="oauthAuthorizeUrl">Authorize URL</Label>
+                    <Input
+                      id="oauthAuthorizeUrl"
+                      placeholder="https://app.provider.com/oauth/authorize"
+                      value={formData.oauthAuthorizeUrl || ''}
+                      onChange={(e) => setFormData({ ...formData, oauthAuthorizeUrl: e.target.value })}
+                    />
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="oauthTokenUrl">Token URL</Label>
+                    <Input
+                      id="oauthTokenUrl"
+                      placeholder="https://app.provider.com/oauth/token"
+                      value={formData.oauthTokenUrl || ''}
+                      onChange={(e) => setFormData({ ...formData, oauthTokenUrl: e.target.value })}
+                    />
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="oauthClientId">Client ID</Label>
+                    <Input
+                      id="oauthClientId"
+                      placeholder="Client ID from the OAuth provider"
+                      value={formData.oauthClientId || ''}
+                      onChange={(e) => setFormData({ ...formData, oauthClientId: e.target.value })}
+                    />
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="oauthClientSecret">Client Secret</Label>
+                    <Input
+                      id="oauthClientSecret"
+                      type="password"
+                      placeholder="Client secret from the OAuth provider"
+                      value={formData.oauthClientSecret || ''}
+                      onChange={(e) => setFormData({ ...formData, oauthClientSecret: e.target.value })}
+                    />
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="oauthScopes">Scopes</Label>
+                    <Input
+                      id="oauthScopes"
+                      placeholder="read,write"
+                      value={formData.oauthScopes || ''}
+                      onChange={(e) => setFormData({ ...formData, oauthScopes: e.target.value })}
+                    />
+                  </div>
+                </>
               )}
 
               {/* Extra Headers */}
@@ -593,6 +709,21 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                           )}
                           <span className="ml-1">Test</span>
                         </Button>
+
+                        {server.authType === 'oauth' && (
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => handleOAuthConnect(server)}
+                            disabled={oauthConnectingId === server.id}
+                          >
+                            {oauthConnectingId === server.id ? (
+                              <Loader2 className="h-3 w-3 animate-spin" />
+                            ) : (
+                              <span className="text-xs">Connect with OAuth</span>
+                            )}
+                          </Button>
+                        )}
 
                         <AlertDialog>
                           <AlertDialogTrigger asChild>
