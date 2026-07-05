@@ -111,6 +111,29 @@ const updateMcpServerSchema = z.object({
       });
     }
   }
+  if (data.authType === 'oauth' && data.authConfig && data.authConfig.trim()) {
+    // Validate that the OAuth config contains required non-empty fields
+    try {
+      const parsed = JSON.parse(data.authConfig);
+      const required = ['clientId', 'authorizeUrl', 'tokenUrl'];
+      for (const field of required) {
+        if (!parsed[field] || !parsed[field].toString().trim()) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['authConfig'],
+            message: `OAuth '${field}' is required and must not be empty`,
+          });
+          return;
+        }
+      }
+    } catch {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['authConfig'],
+        message: 'authConfig must be valid JSON for OAuth authentication',
+      });
+    }
+  }
 });
 
 /**

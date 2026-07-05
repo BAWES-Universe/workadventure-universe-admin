@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -315,6 +315,15 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
       }
     };
   }, []);
+
+  // Close popup window after OAuth completes
+  const searchParams = useSearchParams();
+  const oauthResult = searchParams.get('oauth');
+  useEffect(() => {
+    if (oauthResult === 'success' || oauthResult === 'error') {
+      window.close();
+    }
+  }, [oauthResult]);
 
   async function handleOAuthConnect(server: { id: string; name: string }) {
     // Clear any existing poll interval before starting a new one
