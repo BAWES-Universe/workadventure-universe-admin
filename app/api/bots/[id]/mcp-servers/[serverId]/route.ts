@@ -215,7 +215,7 @@ export async function PATCH(
       // authConfig not in the request body
       if (validatedData.authType !== undefined && validatedData.authType !== existing.authType) {
         // Auth type changed without providing new config
-        if (validatedData.authType === 'bearer' || validatedData.authType === 'api-key') {
+        if (validatedData.authType === 'bearer' || validatedData.authType === 'api-key' || validatedData.authType === 'oauth') {
           return NextResponse.json(
             { error: `authConfig is required when changing authType to '${validatedData.authType}'` },
             { status: 400, headers: corsHeaders(request) }
