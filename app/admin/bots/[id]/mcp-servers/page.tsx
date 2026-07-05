@@ -116,7 +116,55 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
   // Delete dialog state
   const [deleteServerId, setDeleteServerId] = useState<string | null>(null);
 
-  // Test connection state
+  // OAuth discovery state
+  const [oauthDiscovery, setOauthDiscovery] = useState<'idle' | 'discovering' | 'discovered' | 'not_found'>('idle');
+  const [discoveredAuthUrl, setDiscoveredAuthUrl] = useState('');
+  const [discoveredTokenUrl, setDiscoveredTokenUrl] = useState('');
+  const [discoveredScopes, setDiscoveredScopes] = useState<string[] | null>(null);
+
+  // Trigger OAuth discovery when serverUrl + authType = oauth
+  useEffect(() => {
+    if (formData.authType !== 'oauth' || !formData.serverUrl.trim()) {
+      setOauthDiscovery('idle');
+      return;
+    }
+    let cancelled = false;
+    setOauthDiscovery('discovering');
+    (async () => {
+      try {
+        const callbackUrl = `${window.location.origin}/api/oauth/mcp-callback`;
+        const res = await fetch(
+          `/api/mcp/oauth-discover?serverUrl=${encodeURIComponent(formData.serverUrl)}&callbackUrl=${encodeURIComponent(callbackUrl)}`
+        );
+        if (cancelled) return;
+        if (!res.ok) {
+          setOauthDiscovery('not_found');
+          return;
+        }
+        const data = await res.json();
+        if (cancelled) return;
+        if (data.discovered) {
+          setDiscoveredAuthUrl(data.authorizeUrl || '');
+          setDiscoveredTokenUrl(data.tokenUrl || '');
+          setDiscoveredScopes(data.scopesSupported || null);
+          setOauthDiscovery('discovered');
+          // Auto-fill form with discovered URLs
+          setFormData((prev) => ({
+            ...prev,
+            oauthAuthorizeUrl: prev.oauthAuthorizeUrl || data.authorizeUrl || '',
+            oauthTokenUrl: prev.oauthTokenUrl || data.tokenUrl || '',
+            oauthClientId: prev.oauthClientId || data.clientId || '',
+            oauthClientSecret: prev.oauthClientSecret || data.clientSecret || '',
+          }));
+        } else {
+          setOauthDiscovery('not_found');
+        }
+      } catch {
+        if (!cancelled) setOauthDiscovery('not_found');
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [formData.serverUrl, formData.authType]);
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, { success: boolean; message: string }>>({});
 
@@ -490,48 +538,105 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
 
               {formData.authType === 'oauth' && (
                 <>
+                  {oauthDiscovery === 'discovering' && (
+                    <div className="flex items-center gap-2 text-sm text-muted-foreground py-2">
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      Discovering OAuth endpoints...
+                    </div>
+                  )}
+
+                  {oauthDiscovery === 'discovered' && (
+                    <>
+                      <div className="flex items-center gap-2 text-sm text-emerald-600 dark:text-emerald-400 py-1">
+                        <span className="h-2 w-2 rounded-full bg-emerald-500" />
+                        OAuth endpoints auto-discovered
+                      </div>
+                      {!discoveredAuthUrl && (
+                        <div className="grid gap-2">
+                          <Label htmlFor="oauthAuthorizeUrl">Authorize URL</Label>
+                          <Input
+                            id="oauthAuthorizeUrl"
+                            placeholder="https://app.provider.com/oauth/authorize"
+                            value={formData.oauthAuthorizeUrl || ''}
+                            onChange={(e) => setFormData({ ...formData, oauthAuthorizeUrl: e.target.value })}
+                          />
+                        </div>
+                      )}
+                      {!discoveredTokenUrl && (
+                        <div className="grid gap-2">
+                          <Label htmlFor="oauthTokenUrl">Token URL</Label>
+                          <Input
+                            id="oauthTokenUrl"
+                            placeholder="https://app.provider.com/oauth/token"
+                            value={formData.oauthTokenUrl || ''}
+                            onChange={(e) => setFormData({ ...formData, oauthTokenUrl: e.target.value })}
+                          />
+                        </div>
+                      )}
+                    </>
+                  )}
+
+                  {oauthDiscovery === 'not_found' && (
+                    <div className="grid gap-2">
+                      <Label htmlFor="oauthAuthorizeUrl">Authorize URL</Label>
+                      <Input
+                        id="oauthAuthorizeUrl"
+                        placeholder="https://app.provider.com/oauth/authorize"
+                        value={formData.oauthAuthorizeUrl || ''}
+                        onChange={(e) => setFormData({ ...formData, oauthAuthorizeUrl: e.target.value })}
+                      />
+                    </div>
+                  )}
+
+                  {(oauthDiscovery === 'not_found' || formData.oauthAuthorizeUrl || formData.oauthTokenUrl) && (
+                    <div className="grid gap-2">
+                      <Label htmlFor="oauthTokenUrl">Token URL</Label>
+                      <Input
+                        id="oauthTokenUrl"
+                        placeholder="https://app.provider.com/oauth/token"
+                        value={formData.oauthTokenUrl || ''}
+                        onChange={(e) => setFormData({ ...formData, oauthTokenUrl: e.target.value })}
+                      />
+                    </div>
+                  )}
+
+                  {(oauthDiscovery !== 'discovered' || !formData.oauthClientId) && (
+                    <div className="grid gap-2">
+                      <Label htmlFor="oauthClientId">Client ID</Label>
+                      <Input
+                        id="oauthClientId"
+                        placeholder="Client ID from the OAuth provider"
+                        value={formData.oauthClientId || ''}
+                        onChange={(e) => setFormData({ ...formData, oauthClientId: e.target.value })}
+                      />
+                    </div>
+                  )}
+
+                  {(oauthDiscovery !== 'discovered' || !formData.oauthClientSecret) && (
+                    <div className="grid gap-2">
+                      <Label htmlFor="oauthClientSecret">Client Secret</Label>
+                      <Input
+                        id="oauthClientSecret"
+                        type="password"
+                        placeholder="Client secret from the OAuth provider"
+                        value={formData.oauthClientSecret || ''}
+                        onChange={(e) => setFormData({ ...formData, oauthClientSecret: e.target.value })}
+                      />
+                    </div>
+                  )}
+
                   <div className="grid gap-2">
-                    <Label htmlFor="oauthAuthorizeUrl">Authorize URL</Label>
-                    <Input
-                      id="oauthAuthorizeUrl"
-                      placeholder="https://app.provider.com/oauth/authorize"
-                      value={formData.oauthAuthorizeUrl || ''}
-                      onChange={(e) => setFormData({ ...formData, oauthAuthorizeUrl: e.target.value })}
-                    />
-                  </div>
-                  <div className="grid gap-2">
-                    <Label htmlFor="oauthTokenUrl">Token URL</Label>
-                    <Input
-                      id="oauthTokenUrl"
-                      placeholder="https://app.provider.com/oauth/token"
-                      value={formData.oauthTokenUrl || ''}
-                      onChange={(e) => setFormData({ ...formData, oauthTokenUrl: e.target.value })}
-                    />
-                  </div>
-                  <div className="grid gap-2">
-                    <Label htmlFor="oauthClientId">Client ID</Label>
-                    <Input
-                      id="oauthClientId"
-                      placeholder="Client ID from the OAuth provider"
-                      value={formData.oauthClientId || ''}
-                      onChange={(e) => setFormData({ ...formData, oauthClientId: e.target.value })}
-                    />
-                  </div>
-                  <div className="grid gap-2">
-                    <Label htmlFor="oauthClientSecret">Client Secret</Label>
-                    <Input
-                      id="oauthClientSecret"
-                      type="password"
-                      placeholder="Client secret from the OAuth provider"
-                      value={formData.oauthClientSecret || ''}
-                      onChange={(e) => setFormData({ ...formData, oauthClientSecret: e.target.value })}
-                    />
-                  </div>
-                  <div className="grid gap-2">
-                    <Label htmlFor="oauthScopes">Scopes</Label>
+                    <Label htmlFor="oauthScopes">
+                      Scopes
+                      {discoveredScopes && (
+                        <span className="text-xs text-muted-foreground ml-2">
+                          (supported: {discoveredScopes.join(', ')})
+                        </span>
+                      )}
+                    </Label>
                     <Input
                       id="oauthScopes"
-                      placeholder="read,write"
+                      placeholder={discoveredScopes ? discoveredScopes.join(', ') : 'read,write'}
                       value={formData.oauthScopes || ''}
                       onChange={(e) => setFormData({ ...formData, oauthScopes: e.target.value })}
                     />
