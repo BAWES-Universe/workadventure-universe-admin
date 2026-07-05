@@ -73,8 +73,6 @@ export async function createTestWorld(data: {
       universeId: data.universeId,
       slug: data.slug,
       name: data.name,
-      mapUrl: data.mapUrl,
-      wamUrl: data.wamUrl,
       isPublic: true,
     },
   });
