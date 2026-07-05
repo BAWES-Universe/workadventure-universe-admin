@@ -115,7 +115,7 @@ const updateMcpServerSchema = z.object({
     // Validate that the OAuth config contains required non-empty fields
     try {
       const parsed = JSON.parse(data.authConfig);
-      const required = ['clientId', 'authorizeUrl', 'tokenUrl'];
+      const required = ['clientId', 'clientSecret', 'authorizeUrl', 'tokenUrl'];
       for (const field of required) {
         if (!parsed[field] || !parsed[field].toString().trim()) {
           ctx.addIssue({
