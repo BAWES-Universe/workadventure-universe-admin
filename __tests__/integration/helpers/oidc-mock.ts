@@ -4,29 +4,25 @@
  */
 
 import { getTestConfig } from '../config';
-import { Issuer, Client } from 'openid-client';
+import * as client from 'openid-client';
 
-let oidcClient: Client | null = null;
-let issuer: Issuer<unknown> | null = null;
+let oidcClient: client.Configuration | null = null;
 
 /**
  * Get OIDC client for WorkAdventure mock
  */
-async function getOidcClient(): Promise<Client> {
+async function getOidcClient(): Promise<client.Configuration> {
   if (oidcClient) {
     return oidcClient;
   }
 
   const config = getTestConfig();
 
-  if (!issuer) {
-    issuer = await Issuer.discover(config.oidcIssuer);
-  }
-
-  oidcClient = new issuer.Client({
-    client_id: config.oidcClientId,
-    client_secret: config.oidcClientSecret,
-  });
+  oidcClient = await client.discovery(
+    new URL(config.oidcIssuer),
+    config.oidcClientId,
+    { client_secret: config.oidcClientSecret },
+  );
 
   return oidcClient;
 }
@@ -43,7 +39,7 @@ async function getOidcClient(): Promise<Client> {
  */
 export async function getOidcToken(username: string, password: string): Promise<string> {
   const config = getTestConfig();
-  const client = await getOidcClient();
+  const oidc = await getOidcClient();
 
   // For integration tests, we need to complete the OIDC flow
   // This is a simplified version - in practice, you'd need to:
@@ -58,12 +54,11 @@ export async function getOidcToken(username: string, password: string): Promise<
   // Check if we can get token via resource owner password credentials grant
   // (if OIDC mock supports it)
   try {
-    const tokenSet = await client.grant({
-      grant_type: 'password',
-      username,
-      password,
-      scope: 'openid profile email',
-    });
+    const tokenSet = await client.genericGrantRequest(
+      oidc,
+      'password',
+      { username, password, scope: 'openid profile email' },
+    );
 
     return tokenSet.access_token || '';
   } catch (error) {
@@ -86,8 +81,8 @@ export async function getOidcToken(username: string, password: string): Promise<
  */
 export async function validateOidcToken(token: string): Promise<boolean> {
   try {
-    const client = await getOidcClient();
-    await client.userinfo(token);
+    const oidc = await getOidcClient();
+    await client.fetchUserInfo(oidc, token, client.skipSubjectCheck);
     return true;
   } catch {
     return false;
@@ -98,7 +93,7 @@ export async function validateOidcToken(token: string): Promise<boolean> {
  * Get user info from OIDC token
  */
 export async function getUserInfoFromToken(token: string) {
-  const client = await getOidcClient();
-  return await client.userinfo(token);
+  const oidc = await getOidcClient();
+  return await client.fetchUserInfo(oidc, token, client.skipSubjectCheck);
 }
 
