@@ -317,6 +317,11 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
   }, []);
 
   async function handleOAuthConnect(server: { id: string; name: string }) {
+    // Clear any existing poll interval before starting a new one
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
     setOauthConnectingId(server.id);
 
     try {
