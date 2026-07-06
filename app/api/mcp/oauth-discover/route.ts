@@ -142,6 +142,7 @@ async function fetchOAuthMetadata(url: string, signal: AbortSignal): Promise<Rec
         for (const server of metadata.authorization_servers) {
           try {
             const asUrl = `${server.replace(/\/$/, '')}/.well-known/oauth-authorization-server`;
+            if (!isExternalUrl(asUrl)) continue;
             const asResponse = await fetch(asUrl, { signal: AbortSignal.timeout(5000) });
             if (asResponse.ok) {
               const asMetadata = await asResponse.json();
