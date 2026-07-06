@@ -90,7 +90,7 @@ const updateMcpServerSchema = z.object({
     (url) => isAllowedServerUrl(url),
     { message: 'Server URL must not point to internal or private addresses' }
   ).optional(),
-  authType: z.enum(['none', 'bearer', 'api-key']).optional(),
+  authType: z.enum(['none', 'bearer', 'api-key', 'oauth']).optional(),
   authConfig: z.string().trim().optional().nullable().transform(val => val === '' ? null : val),
   headers: z.record(z.string(), z.string()).refine(
     (headers) => {
@@ -108,6 +108,47 @@ const updateMcpServerSchema = z.object({
         code: z.ZodIssueCode.custom,
         path: ['authConfig'],
         message: `authConfig must be non-empty when authType is '${data.authType}'`,
+      });
+    }
+  }
+  if (data.authType === 'oauth' && data.authConfig && data.authConfig.trim()) {
+    // Validate the OAuth config JSON — for full replacements, require the
+    // standard fields; partial updates (scopes-only from connected server)
+    // will be merged server-side and are validated by the PATCH handler.
+    try {
+      const parsed = JSON.parse(data.authConfig);
+      // If the config has none of the endpoint fields, it's a partial update
+      // that will be merged with the stored config — no full validation needed.
+      const hasEndpointFields = parsed.authorizeUrl || parsed.tokenUrl || parsed.clientId;
+      if (hasEndpointFields) {
+        const required = ['clientId', 'authorizeUrl', 'tokenUrl'];
+        for (const field of required) {
+          if (!parsed[field] || typeof parsed[field] !== 'string' || !parsed[field].toString().trim()) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ['authConfig'],
+              message: `OAuth '${field}' is required and must be a non-empty string`,
+            });
+            return;
+          }
+        }
+        // If clientSecret is provided, it must be a non-empty string
+        if (parsed.clientSecret !== undefined && parsed.clientSecret !== null) {
+          if (typeof parsed.clientSecret !== 'string' || !parsed.clientSecret.toString().trim()) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ['authConfig'],
+              message: `OAuth 'clientSecret' must be a non-empty string if provided`,
+            });
+            return;
+          }
+        }
+      }
+    } catch {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['authConfig'],
+        message: 'authConfig must be valid JSON for OAuth authentication',
       });
     }
   }
@@ -199,6 +240,48 @@ export async function PATCH(
     // Determine effective auth type after update (existing + incoming changes)
     const effectiveAuthType = validatedData.authType ?? existing.authType;
 
+    // If the effective auth type is OAuth and authConfig is being updated, validate required fields
+    // Skip full validation for partial updates on existing OAuth servers (e.g., scopes-only)
+    // — the merge logic later handles putting it together with the stored config.
+    if (
+      effectiveAuthType === 'oauth' &&
+      validatedData.authConfig !== undefined &&
+      validatedData.authConfig !== null &&
+      validatedData.authConfig.trim()
+    ) {
+      // For existing OAuth servers, partial updates (e.g., { scopes: "..." }) are
+      // merged with the stored config — only validate fields that are present.
+      if (!(existing.authType === 'oauth' && existing.authConfig)) {
+        let parsedConfig: Record<string, unknown>;
+        try {
+          parsedConfig = JSON.parse(validatedData.authConfig);
+        } catch {
+          return NextResponse.json(
+            { error: 'authConfig must be valid JSON for OAuth authentication' },
+            { status: 400, headers: corsHeaders(request) }
+          );
+        }
+        const requiredFields = ['clientId', 'authorizeUrl', 'tokenUrl'];
+        for (const field of requiredFields) {
+          if (!parsedConfig[field] || typeof parsedConfig[field] !== 'string' || !parsedConfig[field].toString().trim()) {
+            return NextResponse.json(
+              { error: `OAuth '${field}' is required and must be a non-empty string` },
+              { status: 400, headers: corsHeaders(request) }
+            );
+          }
+        }
+        // clientSecret is optional — public OAuth clients (PKCE) have no secret
+        if (parsedConfig.clientSecret !== undefined && parsedConfig.clientSecret !== null) {
+          if (typeof parsedConfig.clientSecret !== 'string' || !parsedConfig.clientSecret.toString().trim()) {
+            return NextResponse.json(
+              { error: `OAuth 'clientSecret' must be a non-empty string if provided` },
+              { status: 400, headers: corsHeaders(request) }
+            );
+          }
+        }
+      }
+    }
+
     if (validatedData.authType !== undefined) {
       updateData.authType = validatedData.authType;
       if (validatedData.authType === 'none') {
@@ -215,7 +298,7 @@ export async function PATCH(
       // authConfig not in the request body
       if (validatedData.authType !== undefined && validatedData.authType !== existing.authType) {
         // Auth type changed without providing new config
-        if (validatedData.authType === 'bearer' || validatedData.authType === 'api-key') {
+        if (validatedData.authType === 'bearer' || validatedData.authType === 'api-key' || validatedData.authType === 'oauth') {
           return NextResponse.json(
             { error: `authConfig is required when changing authType to '${validatedData.authType}'` },
             { status: 400, headers: corsHeaders(request) }
@@ -229,9 +312,20 @@ export async function PATCH(
       // Explicitly clearing authConfig
       updateData.authConfig = null;
     } else if (effectiveAuthType !== 'none') {
-      // New authConfig provided and auth type supports it — encrypt it
       try {
-        updateData.authConfig = encryptApiKey(validatedData.authConfig);
+        // For existing OAuth servers, merge partial updates with the stored config
+        // (e.g., frontend sends { scopes: "new" }, merged with existing endpoints/tokens)
+        if (existing.authConfig && existing.authType === 'oauth' && effectiveAuthType === 'oauth') {
+          const existingDecrypted = decryptApiKey(existing.authConfig);
+          const existingParsed = JSON.parse(existingDecrypted);
+          const incomingParsed = JSON.parse(validatedData.authConfig);
+          // Merge: incoming fields overlay existing (partial update supported)
+          const merged = { ...existingParsed, ...incomingParsed };
+          updateData.authConfig = encryptApiKey(JSON.stringify(merged));
+        } else {
+          // Full replacement for non-OAuth or switching auth types
+          updateData.authConfig = encryptApiKey(validatedData.authConfig);
+        }
       } catch (encError) {
         console.error('Failed to encrypt authConfig:', encError);
         return NextResponse.json(

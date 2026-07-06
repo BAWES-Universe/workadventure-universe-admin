@@ -275,7 +275,23 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
   let authValue: string | null = null;
   if (server.authConfig) {
     try {
-      authValue = decryptApiKey(server.authConfig);
+      const decrypted = decryptApiKey(server.authConfig);
+      if (server.authType === 'oauth') {
+        // OAuth authConfig is JSON with an accessToken field
+        try {
+          const oauthConfig = JSON.parse(decrypted);
+          authValue = oauthConfig.accessToken || null;
+        } catch {
+          return {
+            success: false,
+            toolCount: 0,
+            toolNames: [],
+            error: 'Invalid OAuth config — expected JSON with accessToken',
+          };
+        }
+      } else {
+        authValue = decrypted;
+      }
     } catch (error) {
       return {
         success: false,
@@ -291,7 +307,7 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
     'Content-Type': 'application/json',
     'Accept': 'application/json, text/event-stream',
   };
-  if (server.authType === 'bearer' && authValue) {
+  if ((server.authType === 'bearer' || server.authType === 'oauth') && authValue) {
     headers['Authorization'] = `Bearer ${authValue}`;
   } else if (server.authType === 'api-key' && authValue) {
     headers['X-API-Key'] = authValue;
