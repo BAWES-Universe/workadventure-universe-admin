@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
-import { encryptApiKey } from '@/lib/encryption';
+import { encryptApiKey, decryptApiKey } from '@/lib/encryption';
 import { z } from 'zod';
 
 export const runtime = 'nodejs';

@@ -148,14 +148,14 @@ export async function GET(request: NextRequest) {
 
     console.log(`[OAuthCallback] Tokens stored for server ${serverId} (bot ${botId})`);
 
-    // Redirect back to the origin page with success
-    if (redirectUrl) {
-      return NextResponse.redirect(
-        new URL(redirectUrl + (redirectUrl.includes('?') ? '&' : '?') + 'oauth=success')
-      );
-    }
-
-    return new NextResponse('OAuth connection successful! You can close this window.', { status: 200 });
+    // Redirect to the success page instead of the game URL.
+    // Previously we redirected to redirectUrl?oauth=success, which caused the
+    // full game to render inside the OAuth popup before onMount could detect
+    // the query param and close it. The success page is a lightweight HTML page
+    // that closes the popup immediately via window.close().
+    return NextResponse.redirect(
+      new URL(`${callbackBase}/api/oauth/success`)
+    );
   } catch (error) {
     console.error('[OAuthCallback] Error:', error);
     return new NextResponse('Internal server error', { status: 500 });
