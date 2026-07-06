@@ -345,6 +345,26 @@ export async function GET(request: NextRequest) {
     let registeredAuthMethod: string | null = null;
 
     if (registrationEndpoint && callbackUrl) {
+      // Validate callbackUrl before using it in registration
+      try {
+        const parsedCallbackUrl = new URL(callbackUrl);
+        if (!isExternalUrl(callbackUrl)) {
+          throw new Error('callbackUrl must be a valid external URL');
+        }
+      } catch {
+        // Invalid or non-external callbackUrl — skip dynamic registration
+        console.error('[OAuthDiscover] Invalid or non-external callbackUrl:', callbackUrl);
+        return NextResponse.json({
+          discovered: true,
+          authorizeUrl,
+          tokenUrl,
+          scopesSupported,
+          clientId: null,
+          clientSecret: null,
+          registrationStatus: 'manual',
+          registeredAuthMethod: null,
+        }, { headers: corsHeaders(request) });
+      }
       // SSRF protection for registration endpoint:
       // - Metadata from well-known is self-authenticating (served via HTTPS from the server's domain)
       // - Metadata from 401 body must match the MCP server origin
