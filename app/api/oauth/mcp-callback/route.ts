@@ -149,12 +149,13 @@ export async function GET(request: NextRequest) {
     console.log(`[OAuthCallback] Tokens stored for server ${serverId} (bot ${botId})`);
 
     // Redirect to the success page instead of the game URL.
-    // Previously we redirected to redirectUrl?oauth=success, which caused the
-    // full game to render inside the OAuth popup before onMount could detect
-    // the query param and close it. The success page is a lightweight HTML page
-    // that closes the popup immediately via window.close().
+    // Use redirectUrl from the state token (which is always the correct external
+    // origin — the user's browser URL at the time of OAuth start) rather than
+    // request.url.origin, which resolves to an internal Docker hostname in
+    // containerized environments. Resolving /api/oauth/success relative to
+    // redirectUrl gives the correct absolute URL in both dev and prod.
     return NextResponse.redirect(
-      new URL(`${callbackBase}/api/oauth/success`)
+      new URL('/api/oauth/success', redirectUrl)
     );
   } catch (error) {
     console.error('[OAuthCallback] Error:', error);
