@@ -118,23 +118,25 @@ const updateMcpServerSchema = z.object({
       const parsed = JSON.parse(data.authConfig);
       const required = ['clientId', 'authorizeUrl', 'tokenUrl'];
       for (const field of required) {
-        if (!parsed[field] || !parsed[field].toString().trim()) {
+        if (!parsed[field] || typeof parsed[field] !== 'string' || !parsed[field].toString().trim()) {
           ctx.addIssue({
             code: z.ZodIssueCode.custom,
             path: ['authConfig'],
-            message: `OAuth '${field}' is required and must not be empty`,
+            message: `OAuth '${field}' is required and must be a non-empty string`,
           });
           return;
         }
       }
-      // If clientSecret is provided, it must be non-empty
-      if (parsed.clientSecret !== undefined && parsed.clientSecret !== null && !parsed.clientSecret.toString().trim()) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ['authConfig'],
-          message: `OAuth 'clientSecret' must not be empty if provided`,
-        });
-        return;
+      // If clientSecret is provided, it must be a non-empty string
+      if (parsed.clientSecret !== undefined && parsed.clientSecret !== null) {
+        if (typeof parsed.clientSecret !== 'string' || !parsed.clientSecret.toString().trim()) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['authConfig'],
+            message: `OAuth 'clientSecret' must be a non-empty string if provided`,
+          });
+          return;
+        }
       }
     } catch {
       ctx.addIssue({
@@ -252,19 +254,21 @@ export async function PATCH(
       }
       const requiredFields = ['clientId', 'authorizeUrl', 'tokenUrl'];
       for (const field of requiredFields) {
-        if (!parsedConfig[field] || !parsedConfig[field].toString().trim()) {
+        if (!parsedConfig[field] || typeof parsedConfig[field] !== 'string' || !parsedConfig[field].toString().trim()) {
           return NextResponse.json(
-            { error: `OAuth '${field}' is required and must not be empty` },
+            { error: `OAuth '${field}' is required and must be a non-empty string` },
             { status: 400, headers: corsHeaders(request) }
           );
         }
       }
       // clientSecret is optional — public OAuth clients (PKCE) have no secret
-      if (parsedConfig.clientSecret !== undefined && parsedConfig.clientSecret !== null && !parsedConfig.clientSecret.toString().trim()) {
-        return NextResponse.json(
-          { error: `OAuth 'clientSecret' must not be empty if provided` },
-          { status: 400, headers: corsHeaders(request) }
-        );
+      if (parsedConfig.clientSecret !== undefined && parsedConfig.clientSecret !== null) {
+        if (typeof parsedConfig.clientSecret !== 'string' || !parsedConfig.clientSecret.toString().trim()) {
+          return NextResponse.json(
+            { error: `OAuth 'clientSecret' must be a non-empty string if provided` },
+            { status: 400, headers: corsHeaders(request) }
+          );
+        }
       }
     }
 

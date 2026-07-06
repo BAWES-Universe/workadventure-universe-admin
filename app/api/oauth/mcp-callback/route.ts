@@ -82,14 +82,14 @@ export async function GET(request: NextRequest) {
       return new NextResponse('Failed to decrypt OAuth configuration', { status: 500 });
     }
 
-    if (!oauthConfig.clientId || !oauthConfig.clientSecret || !oauthConfig.tokenUrl) {
+    if (!oauthConfig.clientId || !oauthConfig.tokenUrl) {
       console.error('[OAuthCallback] Missing required OAuth config fields');
       if (redirectUrl) {
         return NextResponse.redirect(
           new URL(redirectUrl + (redirectUrl.includes('?') ? '&' : '?') + 'oauth=error&message=missing_oauth_config')
         );
       }
-      return new NextResponse('OAuth configuration missing required fields (clientId, clientSecret, tokenUrl)', { status: 400 });
+      return new NextResponse('OAuth configuration missing required fields (clientId, tokenUrl)', { status: 400 });
     }
 
     // Validate tokenUrl before attempting exchange
@@ -182,7 +182,7 @@ async function exchangeCodeForTokens(
   tokenEndpoint: string,
   code: string,
   clientId: string,
-  clientSecret: string,
+  clientSecret: string | null,
   redirectUri: string,
   codeVerifier?: string
 ): Promise<{ access_token: string; refresh_token?: string; expires_in?: number } | null> {
@@ -191,7 +191,11 @@ async function exchangeCodeForTokens(
     body.set('grant_type', 'authorization_code');
     body.set('code', code);
     body.set('client_id', clientId);
-    body.set('client_secret', clientSecret);
+    // clientSecret is optional — public OAuth clients (PKCE) have no secret
+    // Only send it if present; omitting it signals a public client per RFC 6749 §2.1
+    if (clientSecret !== null) {
+      body.set('client_secret', clientSecret);
+    }
     body.set('redirect_uri', redirectUri);
     if (codeVerifier) {
       body.set('code_verifier', codeVerifier);
