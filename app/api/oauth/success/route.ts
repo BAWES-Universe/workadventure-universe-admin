@@ -6,14 +6,8 @@ export const runtime = 'nodejs';
  * GET /api/oauth/success
  *
  * Minimal success page displayed in the OAuth popup after a successful token
- * exchange. Renders a dark-themed confirmation message and immediately closes
- * the popup via window.close(). If the browser blocks window.close() for
- * non-script-opened windows, a fallback close button is shown.
- *
- * This replaces the previous behavior of redirecting back to the game URL
- * with ?oauth=success, which caused the full game to render in the popup
- * window before onMount could close it — leading to a sluggish experience
- * where the user briefly saw the game world inside the popup.
+ * exchange. Shows a green checkmark and counts down 5 seconds before closing
+ * the popup automatically, so the user can see the confirmation.
  */
 export async function GET() {
   const html = `<!DOCTYPE html>
@@ -60,7 +54,16 @@ export async function GET() {
     p {
       font-size: 1.1rem;
       color: #9ca3af;
+      margin-bottom: 0.5rem;
+    }
+    .countdown {
+      font-size: 0.95rem;
+      color: #6b7280;
       margin-bottom: 2rem;
+    }
+    .countdown span {
+      color: #10b981;
+      font-weight: 700;
     }
     .close-btn {
       display: none;
@@ -81,16 +84,23 @@ export async function GET() {
   <div class="container">
     <div class="checkmark">&#10003;</div>
     <h1>OAuth Connected</h1>
-    <p>Successfully authenticated. This window will close automatically.</p>
+    <p>Successfully authenticated.</p>
+    <p class="countdown">This window will close in <span id="timer">5</span> seconds</p>
     <button class="close-btn" id="closeBtn" onclick="window.close()">
-      Close Window
+      Close Now
     </button>
   </div>
   <script>
-    // Attempt to close immediately — works for popups opened via window.open
-    window.close();
-    // If window.close() was blocked (some browsers require user gesture for
-    // windows not opened by script), show the close button after a short delay
+    var seconds = 5;
+    var timerEl = document.getElementById('timer');
+    var interval = setInterval(function() {
+      seconds--;
+      timerEl.textContent = seconds;
+      if (seconds <= 0) {
+        clearInterval(interval);
+        window.close();
+      }
+    }, 1000);
     setTimeout(function() {
       document.getElementById('closeBtn').style.display = 'inline-block';
     }, 300);
