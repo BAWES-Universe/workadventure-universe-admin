@@ -22,6 +22,8 @@ async function getOidcClient(): Promise<client.Configuration> {
     new URL(config.oidcIssuer),
     config.oidcClientId,
     { client_secret: config.oidcClientSecret },
+    undefined,
+    { execute: [client.allowInsecureRequests] },
   );
 
   return oidcClient;

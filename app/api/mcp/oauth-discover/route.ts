@@ -1,9 +1,33 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSessionUser } from '@/lib/auth-session';
+import { resolve4, resolve6 } from 'dns/promises';
 
 export const runtime = 'nodejs';
 
-// CORS headers
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+interface OAuthMetadata {
+  authorization_endpoint: string;
+  token_endpoint: string;
+  registration_endpoint: string | null;
+  scopes_supported: string[] | null;
+  token_endpoint_auth_methods_supported: string[] | null;
+}
+
+interface RegistrationBody {
+  client_name: string;
+  redirect_uris: string[];
+  grant_types: string[];
+  response_types: string[];
+  token_endpoint_auth_method?: string;
+}
+
+// ---------------------------------------------------------------------------
+// CORS
+// ---------------------------------------------------------------------------
+
 function corsHeaders(request?: NextRequest) {
   const origin = request?.headers?.get('origin');
   if (!origin) {
@@ -29,7 +53,30 @@ export async function OPTIONS(request: NextRequest) {
   return NextResponse.json({}, { headers: corsHeaders(request) });
 }
 
-// Block requests to private/internal networks (mirrors isAllowedServerUrl from MCP routes)
+// ---------------------------------------------------------------------------
+// SSRF protection helpers
+// ---------------------------------------------------------------------------
+
+/** Return true when `ip` belongs to a private / reserved range. */
+function isPrivateIp(ip: string): boolean {
+  if (/^127\.\d+\.\d+\.\d+$/.test(ip)) return true;
+  if (/^0\.0\.0\.0$/.test(ip)) return true;
+  if (/^10\.\d+\.\d+\.\d+$/.test(ip)) return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\.\d+\.\d+$/.test(ip)) return true;
+  if (/^192\.168\.\d+\.\d+$/.test(ip)) return true;
+  if (/^169\.254\.\d+\.\d+$/.test(ip)) return true;
+  if (ip === '169.254.169.254') return true;
+  if (/^f[cd][0-9a-f]{0,3}:/i.test(ip)) return true; // Unique-local / site-local IPv6
+  if (/^fe[89a-b][0-9a-f]:/i.test(ip)) return true;  // Link-local IPv6
+  if (/^::$/.test(ip)) return true;                    // Unspecified
+  return false;
+}
+
+/**
+ * Block requests to private / internal networks.
+ * Checks literal hostnames/IPs first, then resolves the hostname via DNS
+ * and checks every resolved address against private ranges.
+ */
 function isExternalUrl(url: string): boolean {
   try {
     const parsed = new URL(url);
@@ -43,9 +90,7 @@ function isExternalUrl(url: string): boolean {
     if (/^0\.0\.0\.0$/.test(hostname)) return false;
     if (/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.test(hostname)) {
       const ipv4 = hostname.replace(/^::ffff:/i, '');
-      if (ipv4 === '127.0.0.1' || /^127\.\d+\.\d+\.\d+$/.test(ipv4) || ipv4 === '0.0.0.0') return false;
-      if (/^10\.\d+\.\d+\.\d+$/.test(ipv4) || /^172\.(1[6-9]|2\d|3[01])\.\d+\.\d+$/.test(ipv4)) return false;
-      if (/^192\.168\.\d+\.\d+$/.test(ipv4) || /^169\.254\.\d+\.\d+$/.test(ipv4)) return false;
+      if (isPrivateIp(ipv4)) return false;
     }
     if (/^10\.\d+\.\d+\.\d+$/.test(hostname)) return false;
     if (/^172\.(1[6-9]|2\d|3[01])\.\d+\.\d+$/.test(hostname)) return false;
@@ -65,28 +110,124 @@ function isExternalUrl(url: string): boolean {
 }
 
 /**
+ * Resolve a hostname via DNS and validate that none of the resolved addresses
+ * are private / internal.  Returns true when safe (all resolved IPs are
+ * external).  Returns true immediately for literal IPs (already checked by
+ * caller).
+ */
+async function resolveIsExternal(hostname: string): Promise<boolean> {
+  // Skip DNS for literal IP addresses — already validated by isExternalUrl.
+  if (/^[\d.]+$/.test(hostname) || /^[0-9a-f:]+$/i.test(hostname) || hostname.startsWith('[')) {
+    return true;
+  }
+  let safe = true;
+  // Check IPv4
+  try {
+    const v4 = await resolve4(hostname);
+    if (v4.some(isPrivateIp)) safe = false;
+  } catch {
+    // No A record — not a problem
+  }
+  // Check IPv6
+  try {
+    const v6 = await resolve6(hostname);
+    if (v6.some(isPrivateIp)) safe = false;
+  } catch {
+    // No AAAA record — not a problem
+  }
+  return safe;
+}
+
+/**
+ * Fetch a URL with SSRF protection:
+ * 1. DNS-resolve the target hostname and reject private IPs.
+ * 2. Use `redirect: 'manual'` so we can validate each redirect target.
+ * 3. Follow redirects manually (max depth = 5) with per-hop validation.
+ */
+async function safeFetch(
+  url: string,
+  options: RequestInit = {},
+  depth = 0,
+): Promise<Response> {
+  const MAX_REDIRECT_DEPTH = 5;
+  if (depth > MAX_REDIRECT_DEPTH) {
+    throw new Error(`SSRF blocked: too many redirects (depth > ${MAX_REDIRECT_DEPTH})`);
+  }
+
+  // 1. Check literal URL is external
+  if (!isExternalUrl(url)) {
+    throw new Error('SSRF blocked: URL points to a private/internal address');
+  }
+
+  // 2. DNS-resolve the hostname and check for private IPs
+  const parsed = new URL(url);
+  const hostnameSafe = await resolveIsExternal(parsed.hostname);
+  if (!hostnameSafe) {
+    throw new Error(
+      `SSRF blocked: '${parsed.hostname}' resolves to a private/internal IP address`,
+    );
+  }
+
+  // 3. Fetch with redirect: 'manual'
+  const response = await fetch(url, { ...options, redirect: 'manual' });
+
+  // 4. Handle redirects manually
+  if (response.status >= 300 && response.status < 400) {
+    const location = response.headers.get('location');
+    if (!location) {
+      return response;
+    }
+
+    const redirectUrl = new URL(location, url).toString();
+
+    // Validate the redirect target
+    if (!isExternalUrl(redirectUrl)) {
+      throw new Error('SSRF blocked: redirect target points to a private/internal address');
+    }
+    const redirectParsed = new URL(redirectUrl);
+    const redirectSafe = await resolveIsExternal(redirectParsed.hostname);
+    if (!redirectSafe) {
+      throw new Error(
+        `SSRF blocked: redirect target '${redirectParsed.hostname}' resolves to a private/internal IP`,
+      );
+    }
+
+    // Follow the redirect with incremented depth
+    return safeFetch(redirectUrl, options, depth + 1);
+  }
+
+  return response;
+}
+
+// ---------------------------------------------------------------------------
+// OAuth metadata extraction & discovery
+// ---------------------------------------------------------------------------
+
+/**
  * Extract OAuth metadata from a 401 response body or WWW-Authenticate header.
  * Looks for authorization_endpoint / authorizationUrl, token_endpoint / tokenUrl,
  * registration_endpoint, and scopes_supported.
  */
-function extractOAuthMetadata(body: any): Record<string, any> | null {
+function extractOAuthMetadata(body: Record<string, unknown>): OAuthMetadata | null {
   if (!body || typeof body !== 'object') return null;
 
   // JSON-RPC error format: { error: { code, message, data: { authorizationUrl, ... } } }
-  const errorData = body.error?.data || body.error || body;
+  const errorData = (body.error as Record<string, unknown>)?.data as Record<string, unknown>
+    ?? body.error as Record<string, unknown>
+    ?? body;
 
   const authorizeUrl =
-    errorData.authorization_endpoint ||
-    errorData.authorizationUrl ||
-    errorData.authorization_url ||
-    errorData.authorizeUrl ||
-    errorData.authorize_url ||
+    (errorData.authorization_endpoint as string) ??
+    (errorData.authorizationUrl as string) ??
+    (errorData.authorization_url as string) ??
+    (errorData.authorizeUrl as string) ??
+    (errorData.authorize_url as string) ??
     null;
 
   const tokenUrl =
-    errorData.token_endpoint ||
-    errorData.tokenUrl ||
-    errorData.token_url ||
+    (errorData.token_endpoint as string) ??
+    (errorData.tokenUrl as string) ??
+    (errorData.token_url as string) ??
     null;
 
   if (!authorizeUrl || !tokenUrl) return null;
@@ -94,9 +235,9 @@ function extractOAuthMetadata(body: any): Record<string, any> | null {
   return {
     authorization_endpoint: authorizeUrl,
     token_endpoint: tokenUrl,
-    registration_endpoint: errorData.registration_endpoint || errorData.registrationEndpoint || null,
-    scopes_supported: errorData.scopes_supported || null,
-    token_endpoint_auth_methods_supported: errorData.token_endpoint_auth_methods_supported || null,
+    registration_endpoint: (errorData.registration_endpoint as string) ?? (errorData.registrationEndpoint as string) ?? null,
+    scopes_supported: (errorData.scopes_supported as string[]) ?? null,
+    token_endpoint_auth_methods_supported: (errorData.token_endpoint_auth_methods_supported as string[]) ?? null,
   };
 }
 
@@ -128,26 +269,26 @@ function parseWwwAuthenticate(header: string): string | null {
  * If the response is RFC 9728 protected resource metadata (has authorization_servers
  * but no OAuth endpoints), follows the chain to each server's well-known endpoint.
  */
-async function fetchOAuthMetadata(url: string, signal: AbortSignal): Promise<Record<string, any> | null> {
+async function fetchOAuthMetadata(url: string, signal: AbortSignal): Promise<OAuthMetadata | null> {
   try {
-    const response = await fetch(url, { signal });
+    const response = await safeFetch(url, { signal });
     if (response.ok) {
-      const metadata = await response.json();
+      const metadata = await response.json() as Record<string, unknown>;
       // Direct hit: has OAuth authorization server endpoints
       if (metadata.authorization_endpoint || metadata.token_endpoint) {
-        return metadata;
+        return metadata as unknown as OAuthMetadata;
       }
       // RFC 9728 protected resource metadata: follow authorization_servers chain
       if (metadata.authorization_servers && Array.isArray(metadata.authorization_servers)) {
-        for (const server of metadata.authorization_servers) {
+        for (const server of metadata.authorization_servers as string[]) {
           try {
             const asUrl = `${server.replace(/\/$/, '')}/.well-known/oauth-authorization-server`;
             if (!isExternalUrl(asUrl)) continue;
-            const asResponse = await fetch(asUrl, { signal: AbortSignal.timeout(5000) });
+            const asResponse = await safeFetch(asUrl, { signal: AbortSignal.timeout(5000) });
             if (asResponse.ok) {
-              const asMetadata = await asResponse.json();
+              const asMetadata = await asResponse.json() as Record<string, unknown>;
               if (asMetadata.authorization_endpoint || asMetadata.token_endpoint) {
-                return asMetadata;
+                return asMetadata as unknown as OAuthMetadata;
               }
             }
           } catch {
@@ -266,7 +407,7 @@ export async function GET(request: NextRequest) {
 
     // Track where metadata was sourced — well-known metadata is self-authenticating
     // and its registration endpoints can be cross-origin from the MCP server
-    let metadata: Record<string, any> | null = null;
+    let metadata: OAuthMetadata | null = null;
     let metadataSource: 'mcp_401' | 'well_known' | null = null;
 
     // Step 1: Connect to the MCP server with a JSON-RPC initialize request.
@@ -274,7 +415,7 @@ export async function GET(request: NextRequest) {
     let wwwAuthenticateHeader: string | null = null;
 
     try {
-      const mcpResponse = await fetch(serverUrl, {
+      const mcpResponse = await safeFetch(serverUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -300,7 +441,7 @@ export async function GET(request: NextRequest) {
       if (mcpResponse.status === 401) {
         // Try to parse the 401 body for OAuth metadata
         try {
-          const body = await mcpResponse.json();
+          const body = await mcpResponse.json() as Record<string, unknown>;
           metadata = extractOAuthMetadata(body);
           if (metadata) metadataSource = 'mcp_401';
         } catch {
@@ -389,7 +530,7 @@ export async function GET(request: NextRequest) {
         try {
           const preferredAuthMethod = getPreferredAuthMethod(authMethodsSupported);
 
-          const registrationBody: Record<string, any> = {
+          const registrationBody: RegistrationBody = {
             client_name: 'Universe',
             redirect_uris: [callbackUrl],
             grant_types: ['authorization_code'],
@@ -402,7 +543,7 @@ export async function GET(request: NextRequest) {
             registrationBody.token_endpoint_auth_method = preferredAuthMethod;
           }
 
-          const registrationResponse = await fetch(registrationEndpoint, {
+          const registrationResponse = await safeFetch(registrationEndpoint, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(registrationBody),
@@ -410,9 +551,9 @@ export async function GET(request: NextRequest) {
           });
 
           if (registrationResponse.ok) {
-            const registration = await registrationResponse.json();
-            clientId = registration.client_id || null;
-            clientSecret = registration.client_secret || null;
+            const registration = await registrationResponse.json() as Record<string, unknown>;
+            clientId = (registration.client_id as string) ?? null;
+            clientSecret = (registration.client_secret as string) ?? null;
             registered = !!(clientId);
             registeredAuthMethod = preferredAuthMethod;
           }

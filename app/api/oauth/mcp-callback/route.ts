@@ -4,6 +4,18 @@ import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
 
 export const runtime = 'nodejs';
 
+/** OAuth provider config stored in the MCP server's authConfig. */
+interface OAuthConfig {
+  clientId: string;
+  clientSecret?: string;
+  authorizeUrl?: string;
+  tokenUrl: string;
+  scopes?: string;
+  accessToken?: string;
+  refreshToken?: string;
+  expiresAt?: number;
+}
+
 /**
  * GET /api/oauth/mcp-callback
  *
@@ -66,10 +78,10 @@ export async function GET(request: NextRequest) {
     }
 
     // Decrypt OAuth config to get client credentials and token endpoint
-    let oauthConfig: Record<string, any>;
+    let oauthConfig: OAuthConfig;
     try {
       const decrypted = decryptApiKey(server.authConfig!);
-      oauthConfig = JSON.parse(decrypted);
+      oauthConfig = JSON.parse(decrypted) as OAuthConfig;
     } catch {
       console.error('[OAuthCallback] Failed to decrypt OAuth config');
       if (redirectUrl) {
@@ -90,9 +102,10 @@ export async function GET(request: NextRequest) {
       return new NextResponse('OAuth configuration missing required fields (clientId, tokenUrl)', { status: 400 });
     }
 
-    // Validate tokenUrl before attempting exchange
+    // Validate tokenUrl is a proper, absolute URL
+    let parsedTokenUrl: URL;
     try {
-      new URL(oauthConfig.tokenUrl);
+      parsedTokenUrl = new URL(oauthConfig.tokenUrl);
     } catch {
       console.error('[OAuthCallback] Invalid tokenUrl in authConfig:', oauthConfig.tokenUrl);
       if (redirectUrl) {
@@ -101,6 +114,17 @@ export async function GET(request: NextRequest) {
         );
       }
       return new NextResponse('Invalid tokenUrl in authConfig — must be a valid, absolute URL', { status: 400 });
+    }
+
+    // SSRF protection: reject tokenUrl pointing to internal/private hosts
+    if (!isExternalUrl(parsedTokenUrl)) {
+      console.error('[OAuthCallback] SSRF blocked — tokenUrl resolves to an internal/private address:', oauthConfig.tokenUrl);
+      if (redirectUrl) {
+        return NextResponse.redirect(
+          new URL('/api/oauth/error?message=ssrf_blocked', redirectUrl)
+        );
+      }
+      return new NextResponse('Token exchange target is an internal/private address — SSRF blocked', { status: 400 });
     }
 
     // Exchange authorization code for tokens at the provider's token endpoint.
@@ -130,15 +154,15 @@ export async function GET(request: NextRequest) {
     }
 
     // Build updated OAuth config with tokens (preserve provider endpoints)
-    const updatedOAuthConfig = {
+    const updatedOAuthConfig: OAuthConfig = {
       clientId: oauthConfig.clientId,
       clientSecret: oauthConfig.clientSecret,
       scopes: oauthConfig.scopes || '',
       authorizeUrl: oauthConfig.authorizeUrl,
       tokenUrl: oauthConfig.tokenUrl,
       accessToken: tokenResponse.access_token,
-      refreshToken: tokenResponse.refresh_token || null,
-      expiresAt: tokenResponse.expires_in ? Math.floor(Date.now() / 1000) + tokenResponse.expires_in : null,
+      refreshToken: tokenResponse.refresh_token || undefined,
+      expiresAt: tokenResponse.expires_in ? Math.floor(Date.now() / 1000) + tokenResponse.expires_in : undefined,
     };
 
     // Encrypt and save
@@ -249,4 +273,67 @@ async function exchangeCodeForTokens(
     console.error('[OAuthCallback] Token exchange fetch failed:', error);
     return null;
   }
+}
+
+/**
+ * SSRF protection: check that a URL host is an external (public) hostname,
+ * not an internal/private/reserved address.
+ *
+ * This performs a string/hostname-based check only — no DNS resolution is
+ * required. It blocks:
+ *   - Private IPv4 ranges (10.x.x.x, 172.16-31.x.x, 192.168.x.x)
+ *   - Localhost / loopback (127.x.x.x, ::1, 'localhost', '127.0.0.1')
+ *   - Link-local / APIPA (169.254.x.x)
+ *   - Cloud metadata IP (169.254.169.254)
+ *   - Hostnames without a dot (e.g. 'http://internal/')
+ *   - IPv6 link-local and unique-local addresses
+ *
+ * Returns true if the host is safe to call (external), false if it looks internal.
+ */
+function isExternalUrl(url: URL): boolean {
+  const hostname = url.hostname.toLowerCase();
+
+  // Block bare hostnames (no dots) — likely internal service names
+  // e.g. http://internal-service/, http://metadata/, http://localhost/
+  // Exception: allow 'localhost' explicitly handled below by IP checks
+  if (!hostname.includes('.')) {
+    // Allow single-label hostnames that are IP addresses (they'll be caught below)
+    const isIpLike = /^[0-9a-f:.]+$/.test(hostname);
+    if (!isIpLike) {
+      return false;
+    }
+  }
+
+  // Block localhost and loopback
+  if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1') {
+    return false;
+  }
+
+  // Block IPv4 private and reserved ranges
+  const ipv4Match = hostname.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (ipv4Match) {
+    const parts = ipv4Match.slice(1).map(Number);
+    // 10.x.x.x
+    if (parts[0] === 10) return false;
+    // 172.16.0.0 – 172.31.255.255
+    if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return false;
+    // 192.168.x.x
+    if (parts[0] === 192 && parts[1] === 168) return false;
+    // 127.x.x.x (loopback)
+    if (parts[0] === 127) return false;
+    // 169.254.x.x (link-local / APIPA, includes metadata IP 169.254.169.254)
+    if (parts[0] === 169 && parts[1] === 254) return false;
+    // 0.x.x.x
+    if (parts[0] === 0) return false;
+  }
+
+  // Block IPv6 loopback and unique-local (fc00::/7, fd00::/7)
+  if (hostname.startsWith('fc') || hostname.startsWith('fd')) {
+    return false;
+  }
+  if (hostname === '::1' || hostname === '0:0:0:0:0:0:0:1') {
+    return false;
+  }
+
+  return true;
 }
