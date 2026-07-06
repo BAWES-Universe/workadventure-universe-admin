@@ -212,7 +212,13 @@ export async function GET(
 
     // Validate authorizeUrl before constructing the redirect
     try {
-      new URL(oauthConfig.authorizeUrl);
+      const parsedAuthUrl = new URL(oauthConfig.authorizeUrl);
+      if (parsedAuthUrl.protocol !== 'http:' && parsedAuthUrl.protocol !== 'https:') {
+        return NextResponse.json(
+          { error: 'Invalid authorizeUrl in authConfig — must use http or https protocol' },
+          { status: 400, headers: corsHeaders(request) }
+        );
+      }
     } catch {
       return NextResponse.json(
         { error: 'Invalid authorizeUrl in authConfig — must be a valid, absolute URL' },
