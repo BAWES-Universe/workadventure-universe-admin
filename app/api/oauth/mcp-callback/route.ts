@@ -138,7 +138,7 @@ export async function GET(request: NextRequest) {
       oauthConfig.tokenUrl,
       code,
       oauthConfig.clientId,
-      oauthConfig.clientSecret,
+      oauthConfig.clientSecret ?? null,
       tokenExchangeRedirectUri,
       codeVerifier
     );
