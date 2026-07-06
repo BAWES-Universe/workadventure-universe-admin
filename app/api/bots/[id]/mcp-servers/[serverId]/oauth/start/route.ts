@@ -140,7 +140,6 @@ export async function GET(
       const allowedOrigins = [
         requestOrigin,
         ...(process.env.CORS_ALLOWED_ORIGINS || '').split(',').filter(Boolean),
-        ...(request.headers.get('origin') ? [request.headers.get('origin')!] : []),
       ];
       const isAllowed = allowedOrigins.some((origin) => {
         try {

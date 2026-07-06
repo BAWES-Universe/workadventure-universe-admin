@@ -91,8 +91,9 @@ export async function GET(request: NextRequest) {
     }
 
     // Validate tokenUrl before attempting exchange
+    let parsedTokenUrl: URL;
     try {
-      new URL(oauthConfig.tokenUrl);
+      parsedTokenUrl = new URL(oauthConfig.tokenUrl);
     } catch {
       console.error('[OAuthCallback] Invalid tokenUrl in authConfig:', oauthConfig.tokenUrl);
       if (redirectUrl) {
@@ -101,6 +102,33 @@ export async function GET(request: NextRequest) {
         );
       }
       return new NextResponse('Invalid tokenUrl in authConfig — must be a valid, absolute URL', { status: 400 });
+    }
+    // SSRF protection: tokenUrl must point to an external address
+    const hostname = parsedTokenUrl.hostname.toLowerCase();
+    const isPrivate =
+      hostname === 'localhost' ||
+      hostname === '::1' ||
+      hostname === '127.0.0.1' ||
+      hostname === '0.0.0.0' ||
+      hostname === '169.254.169.254' ||
+      hostname === 'metadata.google.internal' ||
+      hostname.endsWith('.internal') ||
+      hostname.endsWith('.local') ||
+      /^127\.\d+\.\d+\.\d+$/.test(hostname) ||
+      /^10\.\d+\.\d+\.\d+$/.test(hostname) ||
+      /^172\.(1[6-9]|2\d|3[01])\.\d+\.\d+$/.test(hostname) ||
+      /^192\.168\.\d+\.\d+$/.test(hostname) ||
+      /^169\.254\.\d+\.\d+$/.test(hostname) ||
+      /^::ffff:(127\.\d+\.\d+\.\d+|0\.0\.0\.0|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+|169\.254\.\d+\.\d+)$/i.test(hostname) ||
+      /^f[cd][0-9a-f]{0,3}:/i.test(hostname);
+    if (isPrivate) {
+      console.error('[OAuthCallback] Blocked tokenUrl pointing to internal address:', oauthConfig.tokenUrl);
+      if (redirectUrl) {
+        return NextResponse.redirect(
+          new URL('/api/oauth/error?message=invalid_token_url', redirectUrl)
+        );
+      }
+      return new NextResponse('Token URL must be a public, external address', { status: 400 });
     }
 
     // Exchange authorization code for tokens at the provider's token endpoint.
