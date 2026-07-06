@@ -124,15 +124,35 @@ function parseWwwAuthenticate(header: string): string | null {
 
 /**
  * Fetch OAuth authorization server metadata from a URL.
+ * Returns the metadata if it contains authorization_endpoint or token_endpoint.
+ * If the response is RFC 9728 protected resource metadata (has authorization_servers
+ * but no OAuth endpoints), follows the chain to each server's well-known endpoint.
  */
 async function fetchOAuthMetadata(url: string, signal: AbortSignal): Promise<Record<string, any> | null> {
   try {
     const response = await fetch(url, { signal });
     if (response.ok) {
       const metadata = await response.json();
-      // Validate it has at least authorization or token endpoint
+      // Direct hit: has OAuth authorization server endpoints
       if (metadata.authorization_endpoint || metadata.token_endpoint) {
         return metadata;
+      }
+      // RFC 9728 protected resource metadata: follow authorization_servers chain
+      if (metadata.authorization_servers && Array.isArray(metadata.authorization_servers)) {
+        for (const server of metadata.authorization_servers) {
+          try {
+            const asUrl = `${server.replace(/\/$/, '')}/.well-known/oauth-authorization-server`;
+            const asResponse = await fetch(asUrl, { signal: AbortSignal.timeout(5000) });
+            if (asResponse.ok) {
+              const asMetadata = await asResponse.json();
+              if (asMetadata.authorization_endpoint || asMetadata.token_endpoint) {
+                return asMetadata;
+              }
+            }
+          } catch {
+            // Try next authorization server
+          }
+        }
       }
     }
   } catch {
