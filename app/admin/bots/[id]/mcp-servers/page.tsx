@@ -113,6 +113,23 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
+  // Reset add-dialog state when closed so stale discovery/form data
+  // doesn't persist to the next open (e.g., "Auto-configured" showing
+  // for a new URL before discovery actually runs)
+  const handleAddDialogOpenChange = useCallback((open: boolean) => {
+    if (!open) {
+      setFormData(emptyForm);
+      setFormError(null);
+      setOauthDiscovery('idle');
+      setDiscoveredAuthUrl('');
+      setDiscoveredTokenUrl('');
+      setDiscoveredScopes(null);
+      setDiscoveryRegistration(null);
+      setDiscoveryAuthMethod(null);
+    }
+    setAddDialogOpen(open);
+  }, []);
+
   // Delete dialog state
   const [deleteServerId, setDeleteServerId] = useState<string | null>(null);
 
@@ -479,7 +496,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
           </div>
         </div>
 
-        <Dialog open={addDialogOpen} onOpenChange={setAddDialogOpen}>
+        <Dialog open={addDialogOpen} onOpenChange={handleAddDialogOpenChange}>
           <DialogTrigger asChild>
             <Button disabled={servers.length >= 5}>
               <Plus className="mr-2 h-4 w-4" /> Add Server
