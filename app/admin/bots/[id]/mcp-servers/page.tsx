@@ -121,6 +121,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
   const [discoveredAuthUrl, setDiscoveredAuthUrl] = useState('');
   const [discoveredTokenUrl, setDiscoveredTokenUrl] = useState('');
   const [discoveredScopes, setDiscoveredScopes] = useState<string[] | null>(null);
+  const [discoveryRegistration, setDiscoveryRegistration] = useState<'auto' | 'manual' | null>(null);
 
   // Trigger OAuth discovery when serverUrl + authType = oauth
   useEffect(() => {
@@ -129,6 +130,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
       setDiscoveredAuthUrl('');
       setDiscoveredTokenUrl('');
       setDiscoveredScopes(null);
+      setDiscoveryRegistration(null);
       return;
     }
     let cancelled = false;
@@ -150,8 +152,9 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
           setDiscoveredAuthUrl(data.authorizeUrl || '');
           setDiscoveredTokenUrl(data.tokenUrl || '');
           setDiscoveredScopes(data.scopesSupported || null);
+          setDiscoveryRegistration(data.registrationStatus || null);
           setOauthDiscovery('discovered');
-          // Auto-fill form with discovered URLs
+          // Auto-fill form with discovered endpoints + any registered credentials
           setFormData((prev) => ({
             ...prev,
             oauthAuthorizeUrl: prev.oauthAuthorizeUrl || data.authorizeUrl || '',
@@ -548,102 +551,118 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                     </div>
                   )}
 
-                  {oauthDiscovery === 'discovered' && (
+                  {oauthDiscovery === 'discovered' && discoveryRegistration === 'auto' && (
                     <>
                       <div className="flex items-center gap-2 text-sm text-emerald-600 dark:text-emerald-400 py-1">
                         <span className="h-2 w-2 rounded-full bg-emerald-500" />
-                        OAuth endpoints auto-discovered
+                        Auto-configured
+                        <span className="text-muted-foreground">— OAuth and credentials auto-discovered</span>
                       </div>
-                      {!discoveredAuthUrl && (
-                        <div className="grid gap-2">
-                          <Label htmlFor="oauthAuthorizeUrl">Authorize URL</Label>
-                          <Input
-                            id="oauthAuthorizeUrl"
-                            placeholder="https://app.provider.com/oauth/authorize"
-                            value={formData.oauthAuthorizeUrl || ''}
-                            onChange={(e) => setFormData({ ...formData, oauthAuthorizeUrl: e.target.value })}
-                          />
-                        </div>
-                      )}
-                      {!discoveredTokenUrl && (
-                        <div className="grid gap-2">
-                          <Label htmlFor="oauthTokenUrl">Token URL</Label>
-                          <Input
-                            id="oauthTokenUrl"
-                            placeholder="https://app.provider.com/oauth/token"
-                            value={formData.oauthTokenUrl || ''}
-                            onChange={(e) => setFormData({ ...formData, oauthTokenUrl: e.target.value })}
-                          />
-                        </div>
-                      )}
+
+                      <div className="grid gap-2">
+                        <Label htmlFor="oauthScopes">Scopes (optional)</Label>
+                        <Input
+                          id="oauthScopes"
+                          placeholder="read,write"
+                          value={formData.oauthScopes || ''}
+                          onChange={(e) => setFormData({ ...formData, oauthScopes: e.target.value })}
+                        />
+                      </div>
+                    </>
+                  )}
+
+                  {oauthDiscovery === 'discovered' && discoveryRegistration === 'manual' && (
+                    <>
+                      <div className="flex items-center gap-2 text-sm text-emerald-600 dark:text-emerald-400 py-1">
+                        <span className="h-2 w-2 rounded-full bg-emerald-500" />
+                        Endpoints discovered
+                        <span className="text-muted-foreground">— provide client credentials from your provider</span>
+                      </div>
+
+                      <div className="grid gap-2">
+                        <Label htmlFor="oauthClientId">Client ID</Label>
+                        <Input
+                          id="oauthClientId"
+                          placeholder="Client ID from the OAuth provider"
+                          value={formData.oauthClientId || ''}
+                          onChange={(e) => setFormData({ ...formData, oauthClientId: e.target.value })}
+                        />
+                      </div>
+                      <div className="grid gap-2">
+                        <Label htmlFor="oauthClientSecret">Client Secret</Label>
+                        <Input
+                          id="oauthClientSecret"
+                          type="password"
+                          placeholder="Client secret from the OAuth provider"
+                          value={formData.oauthClientSecret || ''}
+                          onChange={(e) => setFormData({ ...formData, oauthClientSecret: e.target.value })}
+                        />
+                      </div>
+                      <div className="grid gap-2">
+                        <Label htmlFor="oauthScopes">Scopes (optional)</Label>
+                        <Input
+                          id="oauthScopes"
+                          placeholder="read,write"
+                          value={formData.oauthScopes || ''}
+                          onChange={(e) => setFormData({ ...formData, oauthScopes: e.target.value })}
+                        />
+                      </div>
                     </>
                   )}
 
                   {oauthDiscovery === 'not_found' && (
-                    <div className="grid gap-2">
-                      <Label htmlFor="oauthAuthorizeUrl">Authorize URL</Label>
-                      <Input
-                        id="oauthAuthorizeUrl"
-                        placeholder="https://app.provider.com/oauth/authorize"
-                        value={formData.oauthAuthorizeUrl || ''}
-                        onChange={(e) => setFormData({ ...formData, oauthAuthorizeUrl: e.target.value })}
-                      />
-                    </div>
+                    <>
+                      <p className="text-sm text-muted-foreground py-1">
+                        Could not auto-discover OAuth endpoints. Enter the details from your provider manually.
+                      </p>
+                      <div className="grid gap-2">
+                        <Label htmlFor="oauthAuthorizeUrl">Authorize URL</Label>
+                        <Input
+                          id="oauthAuthorizeUrl"
+                          placeholder="https://app.provider.com/oauth/authorize"
+                          value={formData.oauthAuthorizeUrl || ''}
+                          onChange={(e) => setFormData({ ...formData, oauthAuthorizeUrl: e.target.value })}
+                        />
+                      </div>
+                      <div className="grid gap-2">
+                        <Label htmlFor="oauthTokenUrl">Token URL</Label>
+                        <Input
+                          id="oauthTokenUrl"
+                          placeholder="https://app.provider.com/oauth/token"
+                          value={formData.oauthTokenUrl || ''}
+                          onChange={(e) => setFormData({ ...formData, oauthTokenUrl: e.target.value })}
+                        />
+                      </div>
+                      <div className="grid gap-2">
+                        <Label htmlFor="oauthClientId">Client ID</Label>
+                        <Input
+                          id="oauthClientId"
+                          placeholder="Client ID from the OAuth provider"
+                          value={formData.oauthClientId || ''}
+                          onChange={(e) => setFormData({ ...formData, oauthClientId: e.target.value })}
+                        />
+                      </div>
+                      <div className="grid gap-2">
+                        <Label htmlFor="oauthClientSecret">Client Secret</Label>
+                        <Input
+                          id="oauthClientSecret"
+                          type="password"
+                          placeholder="Client secret from the OAuth provider"
+                          value={formData.oauthClientSecret || ''}
+                          onChange={(e) => setFormData({ ...formData, oauthClientSecret: e.target.value })}
+                        />
+                      </div>
+                      <div className="grid gap-2">
+                        <Label htmlFor="oauthScopes">Scopes (optional)</Label>
+                        <Input
+                          id="oauthScopes"
+                          placeholder="read,write"
+                          value={formData.oauthScopes || ''}
+                          onChange={(e) => setFormData({ ...formData, oauthScopes: e.target.value })}
+                        />
+                      </div>
+                    </>
                   )}
-
-                  {oauthDiscovery !== 'discovered' && (oauthDiscovery === 'not_found' || formData.oauthAuthorizeUrl || formData.oauthTokenUrl) && (
-                    <div className="grid gap-2">
-                      <Label htmlFor="oauthTokenUrl">Token URL</Label>
-                      <Input
-                        id="oauthTokenUrl"
-                        placeholder="https://app.provider.com/oauth/token"
-                        value={formData.oauthTokenUrl || ''}
-                        onChange={(e) => setFormData({ ...formData, oauthTokenUrl: e.target.value })}
-                      />
-                    </div>
-                  )}
-
-                  {(oauthDiscovery !== 'discovered' || !formData.oauthClientId) && (
-                    <div className="grid gap-2">
-                      <Label htmlFor="oauthClientId">Client ID</Label>
-                      <Input
-                        id="oauthClientId"
-                        placeholder="Client ID from the OAuth provider"
-                        value={formData.oauthClientId || ''}
-                        onChange={(e) => setFormData({ ...formData, oauthClientId: e.target.value })}
-                      />
-                    </div>
-                  )}
-
-                  {(oauthDiscovery !== 'discovered' || !formData.oauthClientSecret) && (
-                    <div className="grid gap-2">
-                      <Label htmlFor="oauthClientSecret">Client Secret</Label>
-                      <Input
-                        id="oauthClientSecret"
-                        type="password"
-                        placeholder="Client secret from the OAuth provider"
-                        value={formData.oauthClientSecret || ''}
-                        onChange={(e) => setFormData({ ...formData, oauthClientSecret: e.target.value })}
-                      />
-                    </div>
-                  )}
-
-                  <div className="grid gap-2">
-                    <Label htmlFor="oauthScopes">
-                      Scopes
-                      {discoveredScopes && (
-                        <span className="text-xs text-muted-foreground ml-2">
-                          (supported: {discoveredScopes.join(', ')})
-                        </span>
-                      )}
-                    </Label>
-                    <Input
-                      id="oauthScopes"
-                      placeholder={discoveredScopes ? discoveredScopes.join(', ') : 'read,write'}
-                      value={formData.oauthScopes || ''}
-                      onChange={(e) => setFormData({ ...formData, oauthScopes: e.target.value })}
-                    />
-                  </div>
                 </>
               )}
 
