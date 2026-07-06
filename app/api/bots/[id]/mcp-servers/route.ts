@@ -211,20 +211,34 @@ export async function GET(
 
     // Transform: remove authConfig from response for security,
     // except for internal bot-server calls authenticated via ADMIN_API_TOKEN
-    const transformed = servers.map((s) => ({
-      id: s.id,
-      botId: s.botId,
-      name: s.name,
-      serverUrl: s.serverUrl,
-      authType: s.authType,
-      ...(isAdminToken ? { authConfig: s.authConfig } : {}),
-      enabled: s.enabled,
-      headers: s.headers,
-      lastTestedAt: s.lastTestedAt,
-      lastTestResult: s.lastTestResult,
-      createdAt: s.createdAt,
-      updatedAt: s.updatedAt,
-    }));
+    // For OAuth servers, check if connected (has accessToken) without exposing credentials
+    const transformed = servers.map((s) => {
+      let oauthConnected = false;
+      if (s.authType === 'oauth' && s.authConfig) {
+        try {
+          const decrypted = decryptApiKey(s.authConfig);
+          const config = JSON.parse(decrypted);
+          oauthConnected = !!config.accessToken;
+        } catch {
+          // If decrypt fails, assume not connected
+        }
+      }
+      return {
+        id: s.id,
+        botId: s.botId,
+        name: s.name,
+        serverUrl: s.serverUrl,
+        authType: s.authType,
+        ...(isAdminToken ? { authConfig: s.authConfig } : {}),
+        oauthConnected,
+        enabled: s.enabled,
+        headers: s.headers,
+        lastTestedAt: s.lastTestedAt,
+        lastTestResult: s.lastTestResult,
+        createdAt: s.createdAt,
+        updatedAt: s.updatedAt,
+      };
+    });
 
     return NextResponse.json(transformed, { headers: corsHeaders(request) });
   } catch (error) {
