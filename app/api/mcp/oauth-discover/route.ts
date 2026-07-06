@@ -314,7 +314,7 @@ export async function GET(request: NextRequest) {
     // Parse both realm and resource_metadata (RFC 9728) formats.
     if (!metadata && wwwAuthenticateHeader) {
       const metadataUrl = parseWwwAuthenticate(wwwAuthenticateHeader);
-      if (metadataUrl) {
+      if (metadataUrl && isExternalUrl(metadataUrl)) {
         metadata = await fetchOAuthMetadata(metadataUrl, AbortSignal.timeout(5000));
         if (metadata) metadataSource = 'well_known';
       }
@@ -351,10 +351,11 @@ export async function GET(request: NextRequest) {
       try {
         const parsedRegistration = new URL(registrationEndpoint);
         if (metadataSource === 'well_known') {
-          // Trust registration endpoints from well-known metadata
+          // Trust registration endpoints from well-known metadata, but still
+          // validate they point to an external address (SSRF protection).
           // The Authorization Server may be on a different origin than the MCP server
-          // (e.g., Attio: MCP at mcp.attio.com, AS at app.attio.com)
-          registrationAllowed = true;
+          // (e.g., Attio: MCP at mcp.attio.com, AS at app.attio.com).
+          registrationAllowed = isExternalUrl(registrationEndpoint);
         } else {
           // For 401 body metadata, require same origin
           registrationAllowed = parsedRegistration.origin === parsedServerUrl.origin;
