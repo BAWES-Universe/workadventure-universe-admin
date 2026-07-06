@@ -403,11 +403,14 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
     };
   }, []);
 
-  // Close popup window after OAuth completes
+  // Close popup window after OAuth completes — only if this window
+  // was opened programmatically (window.opener is set), so we don't
+  // accidentally close the main admin page if someone navigates here
+  // with a stale ?oauth= param from a bookmark or shared link.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const oauthResult = params.get('oauth');
-    if (oauthResult === 'success' || oauthResult === 'error') {
+    if ((oauthResult === 'success' || oauthResult === 'error') && window.opener) {
       window.close();
     }
   }, []);
