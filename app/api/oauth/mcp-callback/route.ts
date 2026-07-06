@@ -104,7 +104,11 @@ export async function GET(request: NextRequest) {
       return new NextResponse('Invalid tokenUrl in authConfig — must be a valid, absolute URL', { status: 400 });
     }
     // SSRF protection: tokenUrl must point to an external address
-    const hostname = parsedTokenUrl.hostname.toLowerCase();
+    let hostname = parsedTokenUrl.hostname.toLowerCase();
+    // Strip brackets from IPv6 literals (Node's URL parser returns '[::1]' for IPv6)
+    if (hostname.startsWith('[') && hostname.endsWith(']')) {
+      hostname = hostname.slice(1, -1);
+    }
     const isPrivate =
       hostname === 'localhost' ||
       hostname === '::1' ||
@@ -120,7 +124,8 @@ export async function GET(request: NextRequest) {
       /^192\.168\.\d+\.\d+$/.test(hostname) ||
       /^169\.254\.\d+\.\d+$/.test(hostname) ||
       /^::ffff:(127\.\d+\.\d+\.\d+|0\.0\.0\.0|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+|169\.254\.\d+\.\d+)$/i.test(hostname) ||
-      /^f[cd][0-9a-f]{0,3}:/i.test(hostname);
+      /^f[cd][0-9a-f]{0,3}:/i.test(hostname) ||
+      /^fe[89a-b][0-9a-f]:/i.test(hostname);
     if (isPrivate) {
       console.error('[OAuthCallback] Blocked tokenUrl pointing to internal address:', oauthConfig.tokenUrl);
       if (redirectUrl) {

@@ -152,7 +152,7 @@ export async function GET(
         redirectUrl = `${requestOrigin}/admin/bots/${botId}`;
       }
     } else {
-      const origin = request.headers.get('origin') || process.env.CORS_ALLOWED_ORIGINS?.split(',')[0] || requestOrigin;
+      const origin = process.env.CORS_ALLOWED_ORIGINS?.split(',')[0] || requestOrigin;
       redirectUrl = `${origin}/admin/bots/${botId}`;
     }
 
