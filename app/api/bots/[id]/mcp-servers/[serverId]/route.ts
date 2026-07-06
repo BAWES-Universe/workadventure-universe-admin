@@ -320,6 +320,15 @@ export async function PATCH(
           const existingParsed = JSON.parse(existingDecrypted);
           const incomingParsed = JSON.parse(validatedData.authConfig);
           // Merge: incoming fields overlay existing (partial update supported)
+          // If OAuth endpoint URLs changed (switching providers), clear stale tokens
+          if (
+            (incomingParsed.authorizeUrl && incomingParsed.authorizeUrl !== existingParsed.authorizeUrl) ||
+            (incomingParsed.tokenUrl && incomingParsed.tokenUrl !== existingParsed.tokenUrl)
+          ) {
+            incomingParsed.accessToken = null;
+            incomingParsed.refreshToken = null;
+            incomingParsed.expiresAt = null;
+          }
           const merged = { ...existingParsed, ...incomingParsed };
           updateData.authConfig = encryptApiKey(JSON.stringify(merged));
         } else {
