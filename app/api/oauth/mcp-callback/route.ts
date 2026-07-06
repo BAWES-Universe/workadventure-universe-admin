@@ -197,7 +197,7 @@ async function exchangeCodeForTokens(
     body.set('client_id', clientId);
     // clientSecret is optional — public OAuth clients (PKCE) have no secret
     // Only send it if present; omitting it signals a public client per RFC 6749 §2.1
-    if (clientSecret !== null) {
+    if (clientSecret != null) {
       body.set('client_secret', clientSecret);
     }
     body.set('redirect_uri', redirectUri);
