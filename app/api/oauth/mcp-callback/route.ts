@@ -168,12 +168,19 @@ export async function GET(request: NextRequest) {
 
 /**
  * Parse the encrypted state token.
+ * Checks the `exp` claim (epoch seconds) and returns null if expired.
  */
 function parseStateToken(state: string | null): { botId: string; serverId: string; redirectUrl: string; codeVerifier?: string; redirectUri?: string } | null {
   if (!state) return null;
   try {
     const decrypted = decryptApiKey(state);
-    return JSON.parse(decrypted);
+    const parsed = JSON.parse(decrypted);
+    // Enforce state token freshness — reject if expired
+    if (parsed.exp && Date.now() > parsed.exp * 1000) {
+      console.error('[OAuthCallback] State token expired');
+      return null;
+    }
+    return parsed;
   } catch {
     return null;
   }

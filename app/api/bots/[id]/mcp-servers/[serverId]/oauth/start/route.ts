@@ -203,10 +203,12 @@ export async function GET(
     // Build state token: encrypted JSON with the full callback URI so the
     // callback endpoint can use the same redirect_uri for the token exchange
     // as was used in the authorization request (critical for OAuth compliance).
+    // Include an exp claim (10 minute expiry) to enforce state token freshness.
     const statePayload = JSON.stringify({
       botId, serverId, redirectUrl,
       codeVerifier, redirectUri,
       ts: Date.now(),
+      exp: Math.floor(Date.now() / 1000) + 600, // 10 minutes from now
     });
     const stateToken = encryptApiKey(statePayload);
 
