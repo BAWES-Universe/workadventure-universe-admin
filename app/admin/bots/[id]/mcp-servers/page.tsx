@@ -402,8 +402,9 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
     try {
       const { authenticatedFetch } = await import('@/lib/client-auth');
       const redirectUrl = window.location.href.split('?')[0].split('#')[0];
+      const callbackUrl = `${window.location.origin}/api/oauth/mcp-callback`;
       const response = await authenticatedFetch(
-        `/api/bots/${botId}/mcp-servers/${server.id}/oauth/start?redirectUrl=${encodeURIComponent(redirectUrl)}`,
+        `/api/bots/${botId}/mcp-servers/${server.id}/oauth/start?redirectUrl=${encodeURIComponent(redirectUrl)}&callbackUrl=${encodeURIComponent(callbackUrl)}`,
       );
 
       if (!response.ok) {

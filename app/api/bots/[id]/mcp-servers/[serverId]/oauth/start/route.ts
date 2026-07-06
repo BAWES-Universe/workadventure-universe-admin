@@ -171,10 +171,15 @@ export async function GET(
       .update(codeVerifier)
       .digest('base64url');
 
-    // Build state token: encrypted JSON with botId, serverId, redirectUrl, codeVerifier
+    // Build state token: encrypted JSON with the full callback URI so the
+    // callback endpoint can use the same redirect_uri for the token exchange
+    // as was used in the authorization request (critical for OAuth compliance).
+    const redirectUri = callbackParam
+      ? `${new URL(callbackParam).origin}/api/oauth/mcp-callback`
+      : `${process.env.ADMIN_API_URL || new URL(request.url).origin}/api/oauth/mcp-callback`;
     const statePayload = JSON.stringify({
       botId, serverId, redirectUrl,
-      codeVerifier,
+      codeVerifier, redirectUri,
       ts: Date.now(),
     });
     const stateToken = encryptApiKey(statePayload);

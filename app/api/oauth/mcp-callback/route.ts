@@ -31,12 +31,10 @@ export async function GET(request: NextRequest) {
     if (errorParam) {
       console.error('[OAuthCallback] Provider error:', errorParam);
       const errState = parseStateToken(state);
-      if (errState?.redirectUrl) {
-        return NextResponse.redirect(
-          new URL(errState.redirectUrl + (errState.redirectUrl.includes('?') ? '&' : '?') + 'oauth=error&message=' + encodeURIComponent(errorParam))
-        );
-      }
-      return new NextResponse(`OAuth authorization failed: ${errorParam}`, { status: 400 });
+      const errorOrigin = errState?.redirectUrl || new URL(request.url).origin;
+      return NextResponse.redirect(
+        new URL('/api/oauth/error?message=' + encodeURIComponent(errorParam), errorOrigin)
+      );
     }
 
     if (!code || !state) {
@@ -49,7 +47,7 @@ export async function GET(request: NextRequest) {
       return new NextResponse('Invalid state token', { status: 400 });
     }
 
-    const { botId, serverId, redirectUrl, codeVerifier } = stateData;
+    const { botId, serverId, redirectUrl, codeVerifier, redirectUri } = stateData;
 
     // Load the MCP server config to get OAuth provider config
     const server = await prisma.botMcpServer.findUnique({
@@ -61,7 +59,7 @@ export async function GET(request: NextRequest) {
       console.error('[OAuthCallback] Server not found or not OAuth type');
       if (redirectUrl) {
         return NextResponse.redirect(
-          new URL(redirectUrl + (redirectUrl.includes('?') ? '&' : '?') + 'oauth=error&message=server_not_found')
+          new URL('/api/oauth/error?message=server_not_found', redirectUrl)
         );
       }
       return new NextResponse('Server configuration not found', { status: 404 });
@@ -76,7 +74,7 @@ export async function GET(request: NextRequest) {
       console.error('[OAuthCallback] Failed to decrypt OAuth config');
       if (redirectUrl) {
         return NextResponse.redirect(
-          new URL(redirectUrl + (redirectUrl.includes('?') ? '&' : '?') + 'oauth=error&message=config_decrypt_failed')
+          new URL('/api/oauth/error?message=config_decrypt_failed', redirectUrl)
         );
       }
       return new NextResponse('Failed to decrypt OAuth configuration', { status: 500 });
@@ -86,7 +84,7 @@ export async function GET(request: NextRequest) {
       console.error('[OAuthCallback] Missing required OAuth config fields');
       if (redirectUrl) {
         return NextResponse.redirect(
-          new URL(redirectUrl + (redirectUrl.includes('?') ? '&' : '?') + 'oauth=error&message=missing_oauth_config')
+          new URL('/api/oauth/error?message=missing_oauth_config', redirectUrl)
         );
       }
       return new NextResponse('OAuth configuration missing required fields (clientId, tokenUrl)', { status: 400 });
@@ -99,20 +97,25 @@ export async function GET(request: NextRequest) {
       console.error('[OAuthCallback] Invalid tokenUrl in authConfig:', oauthConfig.tokenUrl);
       if (redirectUrl) {
         return NextResponse.redirect(
-          new URL(redirectUrl + (redirectUrl.includes('?') ? '&' : '?') + 'oauth=error&message=invalid_token_url')
+          new URL('/api/oauth/error?message=invalid_token_url', redirectUrl)
         );
       }
       return new NextResponse('Invalid tokenUrl in authConfig — must be a valid, absolute URL', { status: 400 });
     }
 
-    // Exchange authorization code for tokens at the provider's token endpoint
+    // Exchange authorization code for tokens at the provider's token endpoint.
+    // Use the redirectUri from the state token — it matches the one used in the
+    // authorization request, which is required by RFC 6749 §4.1.3.
+    // Fall back to constructing from request.url.origin for backward compatibility
+    // with state tokens created before redirectUri was stored.
     const callbackBase = process.env.ADMIN_API_URL || new URL(request.url).origin;
+    const tokenExchangeRedirectUri = redirectUri || `${callbackBase}/api/oauth/mcp-callback`;
     const tokenResponse = await exchangeCodeForTokens(
       oauthConfig.tokenUrl,
       code,
       oauthConfig.clientId,
       oauthConfig.clientSecret,
-      `${callbackBase}/api/oauth/mcp-callback`,
+      tokenExchangeRedirectUri,
       codeVerifier
     );
 
@@ -120,7 +123,7 @@ export async function GET(request: NextRequest) {
       console.error('[OAuthCallback] Token exchange failed');
       if (redirectUrl) {
         return NextResponse.redirect(
-          new URL(redirectUrl + (redirectUrl.includes('?') ? '&' : '?') + 'oauth=error&message=token_exchange_failed')
+          new URL('/api/oauth/error?message=token_exchange_failed', redirectUrl)
         );
       }
       return new NextResponse('Token exchange failed', { status: 502 });
@@ -166,7 +169,7 @@ export async function GET(request: NextRequest) {
 /**
  * Parse the encrypted state token.
  */
-function parseStateToken(state: string | null): { botId: string; serverId: string; redirectUrl: string; codeVerifier?: string } | null {
+function parseStateToken(state: string | null): { botId: string; serverId: string; redirectUrl: string; codeVerifier?: string; redirectUri?: string } | null {
   if (!state) return null;
   try {
     const decrypted = decryptApiKey(state);
