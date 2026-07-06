@@ -222,6 +222,35 @@ export async function PATCH(
     // Determine effective auth type after update (existing + incoming changes)
     const effectiveAuthType = validatedData.authType ?? existing.authType;
 
+    // If the effective auth type is OAuth and authConfig is being updated, validate required fields
+    // (This catches the case where authType is not in the request body but authConfig is being changed
+    // for an existing OAuth server — the Zod superRefine only runs when authType === 'oauth')
+    if (
+      effectiveAuthType === 'oauth' &&
+      validatedData.authConfig !== undefined &&
+      validatedData.authConfig !== null &&
+      validatedData.authConfig.trim()
+    ) {
+      let parsedConfig: Record<string, unknown>;
+      try {
+        parsedConfig = JSON.parse(validatedData.authConfig);
+      } catch {
+        return NextResponse.json(
+          { error: 'authConfig must be valid JSON for OAuth authentication' },
+          { status: 400, headers: corsHeaders(request) }
+        );
+      }
+      const requiredFields = ['clientId', 'clientSecret', 'authorizeUrl', 'tokenUrl'];
+      for (const field of requiredFields) {
+        if (!parsedConfig[field] || !parsedConfig[field].toString().trim()) {
+          return NextResponse.json(
+            { error: `OAuth '${field}' is required and must not be empty` },
+            { status: 400, headers: corsHeaders(request) }
+          );
+        }
+      }
+    }
+
     if (validatedData.authType !== undefined) {
       updateData.authType = validatedData.authType;
       if (validatedData.authType === 'none') {
