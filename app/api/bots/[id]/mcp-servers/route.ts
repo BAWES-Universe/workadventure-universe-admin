@@ -127,6 +127,27 @@ const createMcpServerSchema = z.object({
           return;
         }
       }
+      // Validate authorizeUrl and tokenUrl are valid, absolute URLs
+      for (const urlField of ['authorizeUrl', 'tokenUrl'] as const) {
+        try {
+          const parsedUrl = new URL(parsed[urlField]);
+          if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ['authConfig'],
+              message: `OAuth '${urlField}' must use http or https protocol`,
+            });
+            return;
+          }
+        } catch {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['authConfig'],
+            message: `OAuth '${urlField}' must be a valid, absolute URL`,
+          });
+          return;
+        }
+      }
       // If clientSecret is provided, it must be a non-empty string
       if (parsed.clientSecret !== undefined && parsed.clientSecret !== null) {
         if (typeof parsed.clientSecret !== 'string' || !parsed.clientSecret.toString().trim()) {

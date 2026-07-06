@@ -201,16 +201,24 @@ export async function GET(
     // Build state token: encrypted JSON with the full callback URI so the
     // callback endpoint can use the same redirect_uri for the token exchange
     // as was used in the authorization request (critical for OAuth compliance).
+    // Include an exp claim (10 minute expiry) to enforce state token freshness.
     const statePayload = JSON.stringify({
       botId, serverId, redirectUrl,
       codeVerifier, redirectUri,
       ts: Date.now(),
+      exp: Math.floor(Date.now() / 1000) + 600, // 10 minutes from now
     });
     const stateToken = encryptApiKey(statePayload);
 
     // Validate authorizeUrl before constructing the redirect
     try {
-      new URL(oauthConfig.authorizeUrl);
+      const parsedAuthUrl = new URL(oauthConfig.authorizeUrl);
+      if (parsedAuthUrl.protocol !== 'http:' && parsedAuthUrl.protocol !== 'https:') {
+        return NextResponse.json(
+          { error: 'Invalid authorizeUrl in authConfig — must use http or https protocol' },
+          { status: 400, headers: corsHeaders(request) }
+        );
+      }
     } catch {
       return NextResponse.json(
         { error: 'Invalid authorizeUrl in authConfig — must be a valid, absolute URL' },

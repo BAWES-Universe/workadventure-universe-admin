@@ -249,18 +249,19 @@ export async function PATCH(
       validatedData.authConfig !== null &&
       validatedData.authConfig.trim()
     ) {
-      // For existing OAuth servers, partial updates (e.g., { scopes: "..." }) are
-      // merged with the stored config — only validate fields that are present.
+      // Always parse the incoming authConfig — needed for field-level validation below.
+      let parsedConfig: Record<string, unknown>;
+      try {
+        parsedConfig = JSON.parse(validatedData.authConfig);
+      } catch {
+        return NextResponse.json(
+          { error: 'authConfig must be valid JSON for OAuth authentication' },
+          { status: 400, headers: corsHeaders(request) }
+        );
+      }
+
       if (!(existing.authType === 'oauth' && existing.authConfig)) {
-        let parsedConfig: Record<string, unknown>;
-        try {
-          parsedConfig = JSON.parse(validatedData.authConfig);
-        } catch {
-          return NextResponse.json(
-            { error: 'authConfig must be valid JSON for OAuth authentication' },
-            { status: 400, headers: corsHeaders(request) }
-          );
-        }
+        // Full replacement (non-OAuth→OAuth or first-time OAuth) — require all standard fields
         const requiredFields = ['clientId', 'authorizeUrl', 'tokenUrl'];
         for (const field of requiredFields) {
           if (!parsedConfig[field] || typeof parsedConfig[field] !== 'string' || !parsedConfig[field].toString().trim()) {
@@ -271,6 +272,62 @@ export async function PATCH(
           }
         }
         // clientSecret is optional — public OAuth clients (PKCE) have no secret
+        if (parsedConfig.clientSecret !== undefined && parsedConfig.clientSecret !== null) {
+          if (typeof parsedConfig.clientSecret !== 'string' || !parsedConfig.clientSecret.toString().trim()) {
+            return NextResponse.json(
+              { error: `OAuth 'clientSecret' must be a non-empty string if provided` },
+              { status: 400, headers: corsHeaders(request) }
+            );
+          }
+        }
+      } else {
+        // Partial update on existing OAuth server — validate only provided fields
+        if (parsedConfig.authorizeUrl !== undefined) {
+          if (typeof parsedConfig.authorizeUrl !== 'string' || !parsedConfig.authorizeUrl.toString().trim()) {
+            return NextResponse.json(
+              { error: `OAuth 'authorizeUrl' must be a non-empty string` },
+              { status: 400, headers: corsHeaders(request) }
+            );
+          }
+          try {
+            const url = new URL(parsedConfig.authorizeUrl as string);
+            if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+              throw new Error();
+            }
+          } catch {
+            return NextResponse.json(
+              { error: `OAuth 'authorizeUrl' must be a valid URL with http or https protocol` },
+              { status: 400, headers: corsHeaders(request) }
+            );
+          }
+        }
+        if (parsedConfig.tokenUrl !== undefined) {
+          if (typeof parsedConfig.tokenUrl !== 'string' || !parsedConfig.tokenUrl.toString().trim()) {
+            return NextResponse.json(
+              { error: `OAuth 'tokenUrl' must be a non-empty string` },
+              { status: 400, headers: corsHeaders(request) }
+            );
+          }
+          try {
+            const url = new URL(parsedConfig.tokenUrl as string);
+            if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+              throw new Error();
+            }
+          } catch {
+            return NextResponse.json(
+              { error: `OAuth 'tokenUrl' must be a valid URL with http or https protocol` },
+              { status: 400, headers: corsHeaders(request) }
+            );
+          }
+        }
+        if (parsedConfig.clientId !== undefined) {
+          if (typeof parsedConfig.clientId !== 'string' || !parsedConfig.clientId.toString().trim()) {
+            return NextResponse.json(
+              { error: `OAuth 'clientId' must be a non-empty string` },
+              { status: 400, headers: corsHeaders(request) }
+            );
+          }
+        }
         if (parsedConfig.clientSecret !== undefined && parsedConfig.clientSecret !== null) {
           if (typeof parsedConfig.clientSecret !== 'string' || !parsedConfig.clientSecret.toString().trim()) {
             return NextResponse.json(
@@ -320,6 +377,15 @@ export async function PATCH(
           const existingParsed = JSON.parse(existingDecrypted);
           const incomingParsed = JSON.parse(validatedData.authConfig);
           // Merge: incoming fields overlay existing (partial update supported)
+          // If OAuth endpoint URLs changed (switching providers), clear stale tokens
+          if (
+            (incomingParsed.authorizeUrl && incomingParsed.authorizeUrl !== existingParsed.authorizeUrl) ||
+            (incomingParsed.tokenUrl && incomingParsed.tokenUrl !== existingParsed.tokenUrl)
+          ) {
+            incomingParsed.accessToken = null;
+            incomingParsed.refreshToken = null;
+            incomingParsed.expiresAt = null;
+          }
           const merged = { ...existingParsed, ...incomingParsed };
           updateData.authConfig = encryptApiKey(JSON.stringify(merged));
         } else {

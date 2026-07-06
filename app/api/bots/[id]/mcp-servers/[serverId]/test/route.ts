@@ -280,6 +280,15 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
         // OAuth authConfig is JSON with an accessToken field
         try {
           const oauthConfig = JSON.parse(decrypted);
+          // Reject OAuth configs without a usable access token
+          if (!oauthConfig.accessToken) {
+            return {
+              success: false,
+              toolCount: 0,
+              toolNames: [],
+              error: 'No OAuth access token available — complete the OAuth flow first',
+            };
+          }
           authValue = oauthConfig.accessToken || null;
         } catch {
           return {

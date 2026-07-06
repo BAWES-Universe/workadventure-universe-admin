@@ -144,13 +144,16 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
   // Trigger OAuth discovery when serverUrl + authType = oauth
   // Debounce: only fire when user stops typing for 500ms
   useEffect(() => {
+    // Reset discovery state whenever serverUrl changes to avoid carrying
+    // stale OAuth endpoints from a previous URL (CodeRabbit Major)
+    setOauthDiscovery('idle');
+    setDiscoveredAuthUrl('');
+    setDiscoveredTokenUrl('');
+    setDiscoveredScopes(null);
+    setDiscoveryRegistration(null);
+    setDiscoveryAuthMethod(null);
+
     if (formData.authType !== 'oauth' || !formData.serverUrl.trim()) {
-      setOauthDiscovery('idle');
-      setDiscoveredAuthUrl('');
-      setDiscoveredTokenUrl('');
-      setDiscoveredScopes(null);
-      setDiscoveryRegistration(null);
-      setDiscoveryAuthMethod(null);
       return;
     }
     // Only trigger discovery if URL looks valid
@@ -162,7 +165,8 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
       setOauthDiscovery('discovering');
       try {
         const callbackUrl = `${window.location.origin}/api/oauth/mcp-callback`;
-        const res = await fetch(
+        const { authenticatedFetch } = await import('@/lib/client-auth');
+        const res = await authenticatedFetch(
           `/api/mcp/oauth-discover?serverUrl=${encodeURIComponent(formData.serverUrl)}&callbackUrl=${encodeURIComponent(callbackUrl)}`,
           { signal: abortController.signal }
         );
@@ -593,7 +597,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                         <Label htmlFor="oauthScopes">Scopes (optional)</Label>
                         <Input
                           id="oauthScopes"
-                          placeholder="read,write"
+                          placeholder="read write"
                           value={formData.oauthScopes || ''}
                           onChange={(e) => setFormData({ ...formData, oauthScopes: e.target.value })}
                         />
@@ -632,7 +636,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                         <Label htmlFor="oauthScopes">Scopes (optional)</Label>
                         <Input
                           id="oauthScopes"
-                          placeholder="read,write"
+                          placeholder="read write"
                           value={formData.oauthScopes || ''}
                           onChange={(e) => setFormData({ ...formData, oauthScopes: e.target.value })}
                         />
@@ -686,7 +690,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                         <Label htmlFor="oauthScopes">Scopes (optional)</Label>
                         <Input
                           id="oauthScopes"
-                          placeholder="read,write"
+                          placeholder="read write"
                           value={formData.oauthScopes || ''}
                           onChange={(e) => setFormData({ ...formData, oauthScopes: e.target.value })}
                         />
@@ -764,7 +768,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
             </div>
 
             <DialogFooter>
-              <Button variant="outline" onClick={() => setAddDialogOpen(false)}>
+              <Button variant="outline" onClick={() => handleAddDialogOpenChange(false)}>
                 Cancel
               </Button>
               <Button onClick={handleCreate} disabled={submitting || oauthDiscovery === 'discovering' || (formData.authType === 'oauth' && oauthDiscovery === 'idle') || !formData.name || !formData.serverUrl}>
