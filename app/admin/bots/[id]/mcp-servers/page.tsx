@@ -140,47 +140,48 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
     if (!/^https?:\/\/.+/i.test(formData.serverUrl.trim())) {
       return;
     }
-    const timer = setTimeout(() => {
-      let cancelled = false;
+    const abortController = new AbortController();
+    const timer = setTimeout(async () => {
       setOauthDiscovery('discovering');
-      (async () => {
-        try {
-          const callbackUrl = `${window.location.origin}/api/oauth/mcp-callback`;
-          const res = await fetch(
-            `/api/mcp/oauth-discover?serverUrl=${encodeURIComponent(formData.serverUrl)}&callbackUrl=${encodeURIComponent(callbackUrl)}`
-          );
-          if (cancelled) return;
-          if (!res.ok) {
-            setOauthDiscovery('not_found');
-            return;
-          }
-          const data = await res.json();
-          if (cancelled) return;
-          if (data.discovered) {
-            setDiscoveredAuthUrl(data.authorizeUrl || '');
-            setDiscoveredTokenUrl(data.tokenUrl || '');
-            setDiscoveredScopes(data.scopesSupported || null);
-            setDiscoveryRegistration(data.registrationStatus || null);
-            setDiscoveryAuthMethod(data.registeredAuthMethod || null);
-            setOauthDiscovery('discovered');
-            // Auto-fill form with discovered endpoints + any registered credentials
-            setFormData((prev) => ({
-              ...prev,
-              oauthAuthorizeUrl: prev.oauthAuthorizeUrl || data.authorizeUrl || '',
-              oauthTokenUrl: prev.oauthTokenUrl || data.tokenUrl || '',
-              oauthClientId: prev.oauthClientId || data.clientId || '',
-              oauthClientSecret: prev.oauthClientSecret || data.clientSecret || '',
-            }));
-          } else {
-            setOauthDiscovery('not_found');
-          }
-        } catch {
-          if (!cancelled) setOauthDiscovery('not_found');
+      try {
+        const callbackUrl = `${window.location.origin}/api/oauth/mcp-callback`;
+        const res = await fetch(
+          `/api/mcp/oauth-discover?serverUrl=${encodeURIComponent(formData.serverUrl)}&callbackUrl=${encodeURIComponent(callbackUrl)}`,
+          { signal: abortController.signal }
+        );
+        if (abortController.signal.aborted) return;
+        if (!res.ok) {
+          setOauthDiscovery('not_found');
+          return;
         }
-      })();
-      return () => { cancelled = true; };
+        const data = await res.json();
+        if (abortController.signal.aborted) return;
+        if (data.discovered) {
+          setDiscoveredAuthUrl(data.authorizeUrl || '');
+          setDiscoveredTokenUrl(data.tokenUrl || '');
+          setDiscoveredScopes(data.scopesSupported || null);
+          setDiscoveryRegistration(data.registrationStatus || null);
+          setDiscoveryAuthMethod(data.registeredAuthMethod || null);
+          setOauthDiscovery('discovered');
+          // Auto-fill form with discovered endpoints + any registered credentials
+          setFormData((prev) => ({
+            ...prev,
+            oauthAuthorizeUrl: prev.oauthAuthorizeUrl || data.authorizeUrl || '',
+            oauthTokenUrl: prev.oauthTokenUrl || data.tokenUrl || '',
+            oauthClientId: prev.oauthClientId || data.clientId || '',
+            oauthClientSecret: prev.oauthClientSecret || data.clientSecret || '',
+          }));
+        } else {
+          setOauthDiscovery('not_found');
+        }
+      } catch {
+        if (!abortController.signal.aborted) setOauthDiscovery('not_found');
+      }
     }, 500);
-    return () => clearTimeout(timer);
+    return () => {
+      clearTimeout(timer);
+      abortController.abort();
+    };
   }, [formData.serverUrl, formData.authType]);
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, { success: boolean; message: string }>>({});
@@ -249,11 +250,11 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
           authType: formData.authType,
           authConfig: formData.authType === 'oauth'
             ? JSON.stringify({
-                authorizeUrl: formData.oauthAuthorizeUrl?.trim(),
-                tokenUrl: formData.oauthTokenUrl?.trim(),
-                clientId: formData.oauthClientId?.trim(),
-                clientSecret: formData.oauthClientSecret?.trim(),
-                scopes: formData.oauthScopes?.trim(),
+                authorizeUrl: formData.oauthAuthorizeUrl?.trim() || null,
+                tokenUrl: formData.oauthTokenUrl?.trim() || null,
+                clientId: (discoveryRegistration === 'auto' && !formData.oauthClientId?.trim()) ? null : (formData.oauthClientId?.trim() || null),
+                clientSecret: (discoveryRegistration === 'auto' && !formData.oauthClientSecret?.trim()) ? null : (formData.oauthClientSecret?.trim() || null),
+                scopes: formData.oauthScopes?.trim() || null,
               })
             : formData.authConfig || null,
           headers: formData.headers.length > 0

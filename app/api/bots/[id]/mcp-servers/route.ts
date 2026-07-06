@@ -113,9 +113,10 @@ const createMcpServerSchema = z.object({
   }
   if (data.authType === 'oauth' && data.authConfig) {
     // Validate that the OAuth config contains required non-empty fields
+    // clientSecret is optional — public OAuth clients (PKCE) have no secret
     try {
       const parsed = JSON.parse(data.authConfig);
-      const required = ['clientId', 'clientSecret', 'authorizeUrl', 'tokenUrl'];
+      const required = ['clientId', 'authorizeUrl', 'tokenUrl'];
       for (const field of required) {
         if (!parsed[field] || !parsed[field].toString().trim()) {
           ctx.addIssue({
@@ -125,6 +126,15 @@ const createMcpServerSchema = z.object({
           });
           return;
         }
+      }
+      // If clientSecret is provided, it must be non-empty
+      if (parsed.clientSecret !== undefined && parsed.clientSecret !== null && !parsed.clientSecret.toString().trim()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['authConfig'],
+          message: `OAuth 'clientSecret' must not be empty if provided`,
+        });
+        return;
       }
     } catch {
       ctx.addIssue({
