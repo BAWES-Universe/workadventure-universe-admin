@@ -66,7 +66,7 @@ async function isAllowedServerIp(serverUrl: string): Promise<{ allowed: boolean;
     // Check IP literal hostnames directly (the hostname-pattern check above cannot
     // catch all private IPv6 ranges, so we must check them here too)
     if (isIP(hostname)) {
-      if (hostname === '::1' || hostname === '0.0.0.0') {
+      if (hostname === '::1' || hostname === '::' || hostname === '0.0.0.0') {
         return { allowed: false, error: `Server uses loopback address (${hostname})` };
       }
       if (/^127\./.test(hostname)) {
