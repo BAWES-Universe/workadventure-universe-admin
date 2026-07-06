@@ -157,6 +157,13 @@ export async function GET(
       redirectUrl = `${origin}/admin/bots/${botId}`;
     }
 
+    // Use the callback URL from the frontend if provided (must match what was
+    // registered during discovery). Falls back to ADMIN_API_URL / request origin.
+    const callbackParam = searchParams.get('callbackUrl');
+    const callbackBase = callbackParam
+      ? new URL(callbackParam).origin
+      : (process.env.ADMIN_API_URL || new URL(request.url).origin);
+
     // Generate PKCE code verifier and challenge (S256)
     const codeVerifier = crypto.randomBytes(32).toString('base64url');
     const codeChallenge = crypto
@@ -184,7 +191,6 @@ export async function GET(
 
     // Build authorize URL from the provider's configured endpoint
     const authorizeUrl = new URL(oauthConfig.authorizeUrl);
-    const callbackBase = process.env.ADMIN_API_URL || new URL(request.url).origin;
     authorizeUrl.searchParams.set('response_type', 'code');
     authorizeUrl.searchParams.set('client_id', oauthConfig.clientId);
     authorizeUrl.searchParams.set('redirect_uri', `${callbackBase}/api/oauth/mcp-callback`);
