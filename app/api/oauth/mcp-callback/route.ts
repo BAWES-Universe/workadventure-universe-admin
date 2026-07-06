@@ -112,6 +112,7 @@ export async function GET(request: NextRequest) {
     const isPrivate =
       hostname === 'localhost' ||
       hostname === '::1' ||
+      hostname === '::' ||
       hostname === '127.0.0.1' ||
       hostname === '0.0.0.0' ||
       hostname === '169.254.169.254' ||
