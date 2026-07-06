@@ -140,7 +140,6 @@ export async function GET(
       const allowedOrigins = [
         requestOrigin,
         ...(process.env.CORS_ALLOWED_ORIGINS || '').split(',').filter(Boolean),
-        ...(request.headers.get('origin') ? [request.headers.get('origin')!] : []),
       ];
       const isAllowed = allowedOrigins.some((origin) => {
         try {
@@ -153,7 +152,7 @@ export async function GET(
         redirectUrl = `${requestOrigin}/admin/bots/${botId}`;
       }
     } else {
-      const origin = request.headers.get('origin') || process.env.CORS_ALLOWED_ORIGINS?.split(',')[0] || requestOrigin;
+      const origin = process.env.CORS_ALLOWED_ORIGINS?.split(',')[0] || requestOrigin;
       redirectUrl = `${origin}/admin/bots/${botId}`;
     }
 
@@ -171,7 +170,6 @@ export async function GET(
         const allowedOrigins = [
           requestOrigin,
           ...(process.env.CORS_ALLOWED_ORIGINS || '').split(',').filter(Boolean),
-          ...(request.headers.get('origin') ? [request.headers.get('origin')!] : []),
         ];
         const isAllowed = allowedOrigins.some((origin) => parsed.origin === origin);
         if (!isAllowed) {
