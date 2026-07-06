@@ -1,6 +1,33 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getSessionUser } from '@/lib/auth-session';
 
 export const runtime = 'nodejs';
+
+// CORS headers
+function corsHeaders(request?: NextRequest) {
+  const origin = request?.headers?.get('origin');
+  if (!origin) {
+    return {
+      'Access-Control-Allow-Methods': 'GET, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    };
+  }
+  const trustedOrigins = (process.env.CORS_ALLOWED_ORIGINS || '').split(',').filter(Boolean);
+  const headers: Record<string, string> = {
+    'Access-Control-Allow-Methods': 'GET, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Vary': 'Origin',
+  };
+  if (trustedOrigins.includes(origin)) {
+    headers['Access-Control-Allow-Origin'] = origin;
+    headers['Access-Control-Allow-Credentials'] = 'true';
+  }
+  return headers;
+}
+
+export async function OPTIONS(request: NextRequest) {
+  return NextResponse.json({}, { headers: corsHeaders(request) });
+}
 
 // Block requests to private/internal networks (mirrors isAllowedServerUrl from MCP routes)
 function isExternalUrl(url: string): boolean {
@@ -152,7 +179,7 @@ export async function GET(request: NextRequest) {
     if (!serverUrl) {
       return NextResponse.json(
         { error: 'serverUrl query parameter is required' },
-        { status: 400 }
+        { status: 400, headers: corsHeaders(request) }
       );
     }
 
@@ -163,7 +190,7 @@ export async function GET(request: NextRequest) {
     } catch {
       return NextResponse.json(
         { error: 'Invalid serverUrl — must be a valid URL' },
-        { status: 400 }
+        { status: 400, headers: corsHeaders(request) }
       );
     }
 
@@ -173,7 +200,46 @@ export async function GET(request: NextRequest) {
     if (!isExternalUrl(serverUrl)) {
       return NextResponse.json(
         { error: 'Server URL must point to a public, external address' },
-        { status: 400 }
+        { status: 400, headers: corsHeaders(request) }
+      );
+    }
+
+    // Authenticate: require a valid session user or admin API token
+    const sessionUser = await getSessionUser(request);
+    let isAuthenticated = false;
+
+    if (sessionUser) {
+      isAuthenticated = true;
+    } else {
+      // Check for admin API token (Bearer header)
+      const authHeader = request.headers.get('authorization');
+      if (authHeader && authHeader.startsWith('Bearer ')) {
+        const token = authHeader.replace('Bearer ', '').trim();
+        if (token === process.env.ADMIN_API_TOKEN) {
+          isAuthenticated = true;
+        }
+      }
+      // Also check for session token query param (used by play server's BotApiService)
+      if (!isAuthenticated) {
+        const tokenParam = searchParams.get('_token');
+        if (tokenParam) {
+          // Validate the session token via getSessionUser with the token as a query param hint
+          // The token is already present in the URL, so try re-authentication
+          const retryUrl = new URL(request.url);
+          retryUrl.searchParams.set('_token', tokenParam);
+          const retryRequest = new NextRequest(retryUrl, request);
+          const retryUser = await getSessionUser(retryRequest);
+          if (retryUser) {
+            isAuthenticated = true;
+          }
+        }
+      }
+    }
+
+    if (!isAuthenticated) {
+      return NextResponse.json(
+        { error: 'Unauthorized' },
+        { status: 401, headers: corsHeaders(request) }
       );
     }
 
@@ -242,7 +308,7 @@ export async function GET(request: NextRequest) {
     }
 
     if (!metadata) {
-      return NextResponse.json({ discovered: false });
+      return NextResponse.json({ discovered: false }, { headers: corsHeaders(request) });
     }
 
     const authorizeUrl = metadata.authorization_endpoint || `${baseUrl}/authorize`;
@@ -324,9 +390,9 @@ export async function GET(request: NextRequest) {
       registrationStatus: registered ? 'auto' : 'manual',
       // Indicate whether the registered client has a secret (for UX — hide client_secret field if "none")
       registeredAuthMethod,
-    });
+    }, { headers: corsHeaders(request) });
   } catch (error) {
     console.error('[OAuthDiscover] Error:', error);
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500, headers: corsHeaders(request) });
   }
 }
