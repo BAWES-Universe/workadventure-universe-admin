@@ -160,9 +160,38 @@ export async function GET(
     // Use the callback URL from the frontend if provided (must match what was
     // registered during discovery). Falls back to ADMIN_API_URL / request origin.
     const callbackParam = searchParams.get('callbackUrl');
-    const callbackBase = callbackParam
-      ? new URL(callbackParam).origin
-      : (process.env.ADMIN_API_URL || new URL(request.url).origin);
+    let callbackBase: string;
+    let redirectUri: string;
+    if (callbackParam) {
+      try {
+        const parsed = new URL(callbackParam);
+        // Validate callbackUrl is external to prevent open redirect
+        // The OAuth provider will redirect the user's browser to this origin,
+        // so restrict it to allowed origins just like redirectUrl.
+        const allowedOrigins = [
+          requestOrigin,
+          ...(process.env.CORS_ALLOWED_ORIGINS || '').split(',').filter(Boolean),
+          ...(request.headers.get('origin') ? [request.headers.get('origin')!] : []),
+        ];
+        const isAllowed = allowedOrigins.some((origin) => parsed.origin === origin);
+        if (!isAllowed) {
+          return NextResponse.json(
+            { error: 'callbackUrl origin is not allowed' },
+            { status: 400, headers: corsHeaders(request) }
+          );
+        }
+        callbackBase = parsed.origin;
+        redirectUri = `${parsed.origin}/api/oauth/mcp-callback`;
+      } catch {
+        return NextResponse.json(
+          { error: 'callbackUrl must be a valid URL' },
+          { status: 400, headers: corsHeaders(request) }
+        );
+      }
+    } else {
+      callbackBase = process.env.ADMIN_API_URL || new URL(request.url).origin;
+      redirectUri = `${callbackBase}/api/oauth/mcp-callback`;
+    }
 
     // Generate PKCE code verifier and challenge (S256)
     const codeVerifier = crypto.randomBytes(32).toString('base64url');
@@ -174,9 +203,6 @@ export async function GET(
     // Build state token: encrypted JSON with the full callback URI so the
     // callback endpoint can use the same redirect_uri for the token exchange
     // as was used in the authorization request (critical for OAuth compliance).
-    const redirectUri = callbackParam
-      ? `${new URL(callbackParam).origin}/api/oauth/mcp-callback`
-      : `${process.env.ADMIN_API_URL || new URL(request.url).origin}/api/oauth/mcp-callback`;
     const statePayload = JSON.stringify({
       botId, serverId, redirectUrl,
       codeVerifier, redirectUri,

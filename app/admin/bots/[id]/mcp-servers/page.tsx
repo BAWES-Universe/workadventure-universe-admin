@@ -750,7 +750,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
               <Button variant="outline" onClick={() => setAddDialogOpen(false)}>
                 Cancel
               </Button>
-              <Button onClick={handleCreate} disabled={submitting || oauthDiscovery === 'discovering' || !formData.name || !formData.serverUrl}>
+              <Button onClick={handleCreate} disabled={submitting || oauthDiscovery === 'discovering' || (formData.authType === 'oauth' && oauthDiscovery === 'idle') || !formData.name || !formData.serverUrl}>
                 {submitting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
                 Add Server
               </Button>
