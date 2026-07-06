@@ -69,7 +69,62 @@ function extractOAuthMetadata(body: any): Record<string, any> | null {
     token_endpoint: tokenUrl,
     registration_endpoint: errorData.registration_endpoint || errorData.registrationEndpoint || null,
     scopes_supported: errorData.scopes_supported || null,
+    token_endpoint_auth_methods_supported: errorData.token_endpoint_auth_methods_supported || null,
   };
+}
+
+/**
+ * Parse a WWW-Authenticate header to extract OAuth metadata URLs.
+ * Handles both `realm` and `resource_metadata` (RFC 9728) parameter formats.
+ * Returns the URL to fetch for OAuth authorization server metadata, or null.
+ */
+function parseWwwAuthenticate(header: string): string | null {
+  // Try resource_metadata first (RFC 9728 — protected resource metadata)
+  const resourceMatch = header.match(/resource_metadata="([^"]+)"/);
+  if (resourceMatch) {
+    return resourceMatch[1];
+  }
+
+  // Fallback to realm (traditional OAuth)
+  const realmMatch = header.match(/realm="([^"]+)"/);
+  if (realmMatch) {
+    const realm = realmMatch[1].replace(/\/$/, '');
+    return `${realm}/.well-known/oauth-authorization-server`;
+  }
+
+  return null;
+}
+
+/**
+ * Fetch OAuth authorization server metadata from a URL.
+ */
+async function fetchOAuthMetadata(url: string, signal: AbortSignal): Promise<Record<string, any> | null> {
+  try {
+    const response = await fetch(url, { signal });
+    if (response.ok) {
+      const metadata = await response.json();
+      // Validate it has at least authorization or token endpoint
+      if (metadata.authorization_endpoint || metadata.token_endpoint) {
+        return metadata;
+      }
+    }
+  } catch {
+    // Not available
+  }
+  return null;
+}
+
+/**
+ * Map token_endpoint_auth_method to the value used in the registration request body.
+ * The spec says supported methods include: none, client_secret_basic, client_secret_post,
+ * private_key_jwt, etc.
+ */
+function getPreferredAuthMethod(supported: string[] | null): string {
+  if (!supported || supported.length === 0) return 'client_secret_basic';
+  if (supported.includes('none')) return 'none';
+  if (supported.includes('client_secret_post')) return 'client_secret_post';
+  if (supported.includes('client_secret_basic')) return 'client_secret_basic';
+  return supported[0];
 }
 
 /**
@@ -84,7 +139,8 @@ function extractOAuthMetadata(body: any): Record<string, any> | null {
  *   2. If the 401 body has no OAuth metadata, check WWW-Authenticate header
  *      and try .well-known fallback.
  *   3. If registration endpoint found, dynamically register to get
- *      client credentials.
+ *      client credentials (supports cross-origin registration endpoints
+ *      from well-known metadata).
  *   4. Return discovery results with registrationStatus flag.
  */
 export async function GET(request: NextRequest) {
@@ -121,9 +177,14 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    // Step 1: Connect to the MCP server with a JSON-RPC initialize request.
-    // If the server returns 401, the body should contain OAuth metadata.
+    // Track where metadata was sourced — well-known metadata is self-authenticating
+    // and its registration endpoints can be cross-origin from the MCP server
     let metadata: Record<string, any> | null = null;
+    let metadataSource: 'mcp_401' | 'well_known' | null = null;
+
+    // Step 1: Connect to the MCP server with a JSON-RPC initialize request.
+    // If the server returns 401, the body or headers may contain OAuth metadata.
+    let wwwAuthenticateHeader: string | null = null;
 
     try {
       const mcpResponse = await fetch(serverUrl, {
@@ -146,48 +207,38 @@ export async function GET(request: NextRequest) {
         signal: AbortSignal.timeout(8000),
       });
 
+      // Save WWW-Authenticate header regardless of how we got here
+      wwwAuthenticateHeader = mcpResponse.headers.get('WWW-Authenticate');
+
       if (mcpResponse.status === 401) {
         // Try to parse the 401 body for OAuth metadata
         try {
           const body = await mcpResponse.json();
           metadata = extractOAuthMetadata(body);
+          if (metadata) metadataSource = 'mcp_401';
         } catch {
           // Body wasn't JSON — check headers
         }
-
-        // Fallback: check WWW-Authenticate header
-        if (!metadata) {
-          const authHeader = mcpResponse.headers.get('WWW-Authenticate');
-          if (authHeader) {
-            // Some servers put the metadata endpoint URL in WWW-Authenticate
-            const realmMatch = authHeader.match(/realm="([^"]+)"/);
-            if (realmMatch) {
-              const metadataUrl = `${realmMatch[1].replace(/\/$/, '')}/.well-known/oauth-authorization-server`;
-              try {
-                const wkResponse = await fetch(metadataUrl, { signal: AbortSignal.timeout(5000) });
-                if (wkResponse.ok) metadata = await wkResponse.json();
-              } catch { /* ignore */ }
-            }
-          }
-        }
       }
     } catch {
-      // Server not reachable — will try .well-known fallback
+      // Server not reachable — try well-known fallback
     }
 
-    // Step 2: Fallback — try .well-known/oauth-authorization-server
-    if (!metadata) {
-      try {
-        const metadataUrl = `${baseUrl}/.well-known/oauth-authorization-server`;
-        const metadataResponse = await fetch(metadataUrl, {
-          signal: AbortSignal.timeout(5000),
-        });
-        if (metadataResponse.ok) {
-          metadata = await metadataResponse.json();
-        }
-      } catch {
-        // Not available
+    // Step 2: If the 401 body had no OAuth metadata, check WWW-Authenticate header.
+    // Parse both realm and resource_metadata (RFC 9728) formats.
+    if (!metadata && wwwAuthenticateHeader) {
+      const metadataUrl = parseWwwAuthenticate(wwwAuthenticateHeader);
+      if (metadataUrl) {
+        metadata = await fetchOAuthMetadata(metadataUrl, AbortSignal.timeout(5000));
+        if (metadata) metadataSource = 'well_known';
       }
+    }
+
+    // Step 3: Fallback — try baseUrl/.well-known/oauth-authorization-server
+    if (!metadata) {
+      const metadataUrl = `${baseUrl}/.well-known/oauth-authorization-server`;
+      metadata = await fetchOAuthMetadata(metadataUrl, AbortSignal.timeout(5000));
+      if (metadata) metadataSource = 'well_known';
     }
 
     if (!metadata) {
@@ -198,27 +249,55 @@ export async function GET(request: NextRequest) {
     const tokenUrl = metadata.token_endpoint || `${baseUrl}/token`;
     const registrationEndpoint = metadata.registration_endpoint || null;
     const scopesSupported = metadata.scopes_supported || null;
+    const authMethodsSupported = metadata.token_endpoint_auth_methods_supported || null;
 
-    // Step 3: Try dynamic client registration
+    // Step 4: Try dynamic client registration
     let clientId: string | null = null;
     let clientSecret: string | null = null;
     let registered = false;
+    let registeredAuthMethod: string | null = null;
 
     if (registrationEndpoint && callbackUrl) {
-      // SSRF protection: registration endpoint must belong to the same origin
+      // SSRF protection for registration endpoint:
+      // - Metadata from well-known is self-authenticating (served via HTTPS from the server's domain)
+      // - Metadata from 401 body must match the MCP server origin
+      let registrationAllowed = false;
       try {
         const parsedRegistration = new URL(registrationEndpoint);
-        if (parsedRegistration.origin === parsedServerUrl.origin) {
+        if (metadataSource === 'well_known') {
+          // Trust registration endpoints from well-known metadata
+          // The Authorization Server may be on a different origin than the MCP server
+          // (e.g., Attio: MCP at mcp.attio.com, AS at app.attio.com)
+          registrationAllowed = true;
+        } else {
+          // For 401 body metadata, require same origin
+          registrationAllowed = parsedRegistration.origin === parsedServerUrl.origin;
+        }
+      } catch {
+        registrationAllowed = false;
+      }
+
+      if (registrationAllowed) {
+        try {
+          const preferredAuthMethod = getPreferredAuthMethod(authMethodsSupported);
+
+          const registrationBody: Record<string, any> = {
+            client_name: 'Hermes Agent Bot',
+            redirect_uris: [callbackUrl],
+            grant_types: ['authorization_code'],
+            response_types: ['code'],
+          };
+
+          // For "none" auth method, don't include token_endpoint_auth_method
+          // (omitting it is equivalent). For other methods, set it explicitly.
+          if (preferredAuthMethod !== 'none') {
+            registrationBody.token_endpoint_auth_method = preferredAuthMethod;
+          }
+
           const registrationResponse = await fetch(registrationEndpoint, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              client_name: 'Hermes Agent Bot',
-              redirect_uris: [callbackUrl],
-              token_endpoint_auth_method: 'client_secret_basic',
-              grant_types: ['authorization_code'],
-              response_types: ['code'],
-            }),
+            body: JSON.stringify(registrationBody),
             signal: AbortSignal.timeout(10000),
           });
 
@@ -226,11 +305,12 @@ export async function GET(request: NextRequest) {
             const registration = await registrationResponse.json();
             clientId = registration.client_id || null;
             clientSecret = registration.client_secret || null;
-            registered = !!(clientId && clientSecret);
+            registered = !!(clientId);
+            registeredAuthMethod = preferredAuthMethod;
           }
+        } catch {
+          // Registration failed — manual credentials required
         }
-      } catch {
-        // Registration failed — manual credentials required
       }
     }
 
@@ -242,6 +322,8 @@ export async function GET(request: NextRequest) {
       clientId,
       clientSecret,
       registrationStatus: registered ? 'auto' : 'manual',
+      // Indicate whether the registered client has a secret (for UX — hide client_secret field if "none")
+      registeredAuthMethod,
     });
   } catch (error) {
     console.error('[OAuthDiscover] Error:', error);

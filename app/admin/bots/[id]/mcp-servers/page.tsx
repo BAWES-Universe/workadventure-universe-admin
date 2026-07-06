@@ -122,8 +122,10 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
   const [discoveredTokenUrl, setDiscoveredTokenUrl] = useState('');
   const [discoveredScopes, setDiscoveredScopes] = useState<string[] | null>(null);
   const [discoveryRegistration, setDiscoveryRegistration] = useState<'auto' | 'manual' | null>(null);
+  const [discoveryAuthMethod, setDiscoveryAuthMethod] = useState<string | null>(null);
 
   // Trigger OAuth discovery when serverUrl + authType = oauth
+  // Debounce: only fire when user stops typing for 500ms
   useEffect(() => {
     if (formData.authType !== 'oauth' || !formData.serverUrl.trim()) {
       setOauthDiscovery('idle');
@@ -131,45 +133,54 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
       setDiscoveredTokenUrl('');
       setDiscoveredScopes(null);
       setDiscoveryRegistration(null);
+      setDiscoveryAuthMethod(null);
       return;
     }
-    let cancelled = false;
-    setOauthDiscovery('discovering');
-    (async () => {
-      try {
-        const callbackUrl = `${window.location.origin}/api/oauth/mcp-callback`;
-        const res = await fetch(
-          `/api/mcp/oauth-discover?serverUrl=${encodeURIComponent(formData.serverUrl)}&callbackUrl=${encodeURIComponent(callbackUrl)}`
-        );
-        if (cancelled) return;
-        if (!res.ok) {
-          setOauthDiscovery('not_found');
-          return;
+    // Only trigger discovery if URL looks valid
+    if (!/^https?:\/\/.+/i.test(formData.serverUrl.trim())) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      let cancelled = false;
+      setOauthDiscovery('discovering');
+      (async () => {
+        try {
+          const callbackUrl = `${window.location.origin}/api/oauth/mcp-callback`;
+          const res = await fetch(
+            `/api/mcp/oauth-discover?serverUrl=${encodeURIComponent(formData.serverUrl)}&callbackUrl=${encodeURIComponent(callbackUrl)}`
+          );
+          if (cancelled) return;
+          if (!res.ok) {
+            setOauthDiscovery('not_found');
+            return;
+          }
+          const data = await res.json();
+          if (cancelled) return;
+          if (data.discovered) {
+            setDiscoveredAuthUrl(data.authorizeUrl || '');
+            setDiscoveredTokenUrl(data.tokenUrl || '');
+            setDiscoveredScopes(data.scopesSupported || null);
+            setDiscoveryRegistration(data.registrationStatus || null);
+            setDiscoveryAuthMethod(data.registeredAuthMethod || null);
+            setOauthDiscovery('discovered');
+            // Auto-fill form with discovered endpoints + any registered credentials
+            setFormData((prev) => ({
+              ...prev,
+              oauthAuthorizeUrl: prev.oauthAuthorizeUrl || data.authorizeUrl || '',
+              oauthTokenUrl: prev.oauthTokenUrl || data.tokenUrl || '',
+              oauthClientId: prev.oauthClientId || data.clientId || '',
+              oauthClientSecret: prev.oauthClientSecret || data.clientSecret || '',
+            }));
+          } else {
+            setOauthDiscovery('not_found');
+          }
+        } catch {
+          if (!cancelled) setOauthDiscovery('not_found');
         }
-        const data = await res.json();
-        if (cancelled) return;
-        if (data.discovered) {
-          setDiscoveredAuthUrl(data.authorizeUrl || '');
-          setDiscoveredTokenUrl(data.tokenUrl || '');
-          setDiscoveredScopes(data.scopesSupported || null);
-          setDiscoveryRegistration(data.registrationStatus || null);
-          setOauthDiscovery('discovered');
-          // Auto-fill form with discovered endpoints + any registered credentials
-          setFormData((prev) => ({
-            ...prev,
-            oauthAuthorizeUrl: prev.oauthAuthorizeUrl || data.authorizeUrl || '',
-            oauthTokenUrl: prev.oauthTokenUrl || data.tokenUrl || '',
-            oauthClientId: prev.oauthClientId || data.clientId || '',
-            oauthClientSecret: prev.oauthClientSecret || data.clientSecret || '',
-          }));
-        } else {
-          setOauthDiscovery('not_found');
-        }
-      } catch {
-        if (!cancelled) setOauthDiscovery('not_found');
-      }
-    })();
-    return () => { cancelled = true; };
+      })();
+      return () => { cancelled = true; };
+    }, 500);
+    return () => clearTimeout(timer);
   }, [formData.serverUrl, formData.authType]);
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, { success: boolean; message: string }>>({});
