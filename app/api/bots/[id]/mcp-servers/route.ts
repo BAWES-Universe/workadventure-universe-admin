@@ -128,6 +128,7 @@ const createMcpServerSchema = z.object({
         }
       }
       // Validate authorizeUrl and tokenUrl are valid, absolute URLs
+      // and do not point to internal/private addresses (SSRF prevention).
       for (const urlField of ['authorizeUrl', 'tokenUrl'] as const) {
         try {
           const parsedUrl = new URL(parsed[urlField]);
@@ -136,6 +137,14 @@ const createMcpServerSchema = z.object({
               code: z.ZodIssueCode.custom,
               path: ['authConfig'],
               message: `OAuth '${urlField}' must use http or https protocol`,
+            });
+            return;
+          }
+          if (!isAllowedServerUrl(parsed[urlField])) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ['authConfig'],
+              message: `OAuth '${urlField}' must not point to internal or private addresses`,
             });
             return;
           }

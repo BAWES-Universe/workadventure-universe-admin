@@ -132,6 +132,17 @@ const updateMcpServerSchema = z.object({
             return;
           }
         }
+        // SSRF: ensure OAuth URLs don't point to internal/private addresses
+        for (const urlField of ['authorizeUrl', 'tokenUrl'] as const) {
+          if (!isAllowedServerUrl(parsed[urlField])) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ['authConfig'],
+              message: `OAuth '${urlField}' must not point to internal or private addresses`,
+            });
+            return;
+          }
+        }
         // If clientSecret is provided, it must be a non-empty string
         if (parsed.clientSecret !== undefined && parsed.clientSecret !== null) {
           if (typeof parsed.clientSecret !== 'string' || !parsed.clientSecret.toString().trim()) {
@@ -271,6 +282,15 @@ export async function PATCH(
             );
           }
         }
+        // SSRF: ensure OAuth URLs don't point to internal/private addresses
+        for (const urlField of ['authorizeUrl', 'tokenUrl'] as const) {
+          if (!isAllowedServerUrl(parsedConfig[urlField] as string)) {
+            return NextResponse.json(
+              { error: `OAuth '${urlField}' must not point to internal or private addresses` },
+              { status: 400, headers: corsHeaders(request) }
+            );
+          }
+        }
         // clientSecret is optional — public OAuth clients (PKCE) have no secret
         if (parsedConfig.clientSecret !== undefined && parsedConfig.clientSecret !== null) {
           if (typeof parsedConfig.clientSecret !== 'string' || !parsedConfig.clientSecret.toString().trim()) {
@@ -300,6 +320,12 @@ export async function PATCH(
               { status: 400, headers: corsHeaders(request) }
             );
           }
+          if (!isAllowedServerUrl(parsedConfig.authorizeUrl as string)) {
+            return NextResponse.json(
+              { error: `OAuth 'authorizeUrl' must not point to internal or private addresses` },
+              { status: 400, headers: corsHeaders(request) }
+            );
+          }
         }
         if (parsedConfig.tokenUrl !== undefined) {
           if (typeof parsedConfig.tokenUrl !== 'string' || !parsedConfig.tokenUrl.toString().trim()) {
@@ -316,6 +342,12 @@ export async function PATCH(
           } catch {
             return NextResponse.json(
               { error: `OAuth 'tokenUrl' must be a valid URL with http or https protocol` },
+              { status: 400, headers: corsHeaders(request) }
+            );
+          }
+          if (!isAllowedServerUrl(parsedConfig.tokenUrl as string)) {
+            return NextResponse.json(
+              { error: `OAuth 'tokenUrl' must not point to internal or private addresses` },
               { status: 400, headers: corsHeaders(request) }
             );
           }
