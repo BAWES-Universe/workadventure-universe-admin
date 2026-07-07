@@ -61,14 +61,15 @@ export async function OPTIONS(request: NextRequest) {
 function isPrivateIp(ip: string): boolean {
   if (/^127\.\d+\.\d+\.\d+$/.test(ip)) return true;
   if (/^0\.0\.0\.0$/.test(ip)) return true;
+  if (ip === '::1') return true;                      // Loopback
   if (/^10\.\d+\.\d+\.\d+$/.test(ip)) return true;
   if (/^172\.(1[6-9]|2\d|3[01])\.\d+\.\d+$/.test(ip)) return true;
   if (/^192\.168\.\d+\.\d+$/.test(ip)) return true;
   if (/^169\.254\.\d+\.\d+$/.test(ip)) return true;
   if (ip === '169.254.169.254') return true;
-  if (/^f[cd][0-9a-f]{0,3}:/i.test(ip)) return true; // Unique-local / site-local IPv6
-  if (/^fe[89a-b][0-9a-f]:/i.test(ip)) return true;  // Link-local IPv6
-  if (/^::$/.test(ip)) return true;                    // Unspecified
+  if (/^f[cd][0-9a-f]{0,3}:/i.test(ip)) return true;
+  if (/^fe[89a-b][0-9a-f]:/i.test(ip)) return true;
+  if (/^::$/.test(ip)) return true;
   return false;
 }
 
