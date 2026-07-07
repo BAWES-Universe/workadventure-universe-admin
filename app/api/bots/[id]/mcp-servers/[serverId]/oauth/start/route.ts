@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
+import { getOAuthCallbackUrl, getOAuthCallbackBase, validateOAuthCallbackUrl } from '@/lib/oauth-callback';
 import crypto from 'crypto';
 
 export const runtime = 'nodejs';
@@ -158,16 +159,22 @@ export async function GET(
 
     // Callback URL is always the admin API's OAuth callback endpoint.
     // ADMIN_API_URL must be set to a browser-accessible URL (not an internal Docker hostname).
-    const rawAdminUrl = process.env.ADMIN_API_URL;
-    if (!rawAdminUrl) {
+    const callbackUrl = getOAuthCallbackUrl();
+    if (!callbackUrl) {
       return NextResponse.json(
         { error: 'ADMIN_API_URL environment variable is not configured' },
         { status: 500, headers: corsHeaders(request) }
       );
     }
-    const adminApiUrl = rawAdminUrl.replace(/\/+$/, '');
-    const callbackBase = adminApiUrl;
-    const redirectUri = `${callbackBase}/api/oauth/mcp-callback`;
+    const callbackValidation = validateOAuthCallbackUrl(callbackUrl);
+    if (callbackValidation) {
+      return NextResponse.json(
+        { error: callbackValidation },
+        { status: 500, headers: corsHeaders(request) }
+      );
+    }
+    const callbackBase = getOAuthCallbackBase()!;
+    const redirectUri = callbackUrl;
 
     // Generate PKCE code verifier and challenge (S256)
     const codeVerifier = crypto.randomBytes(32).toString('base64url');
