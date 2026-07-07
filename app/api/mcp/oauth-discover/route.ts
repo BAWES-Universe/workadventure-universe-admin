@@ -503,8 +503,26 @@ export async function GET(request: NextRequest) {
     let registeredAuthMethod: string | null = null;
 
     // Resolve callback URL: prefer the provided param, fall back to ADMIN_API_URL
+    const adminApiBase = process.env.ADMIN_API_URL ? process.env.ADMIN_API_URL.replace(/\/+$/, '') : null;
     const resolvedCallbackUrl = callbackUrl
-      || (process.env.ADMIN_API_URL ? `${process.env.ADMIN_API_URL}/api/oauth/mcp-callback` : null);
+      || (adminApiBase ? `${adminApiBase}/api/oauth/mcp-callback` : null);
+
+    if (!resolvedCallbackUrl && registrationEndpoint) {
+      // ADMIN_API_URL is required for dynamic registration when no callbackUrl was provided.
+      // Return an error instead of silently skipping registration, which would cause
+      // a confusing 500 error later in the start route.
+      return NextResponse.json({
+        discovered: true,
+        authorizeUrl,
+        tokenUrl,
+        scopesSupported,
+        clientId: null,
+        clientSecret: null,
+        registrationStatus: 'manual',
+        registeredAuthMethod: null,
+        error: 'ADMIN_API_URL environment variable is not configured — unable to register OAuth client',
+      }, { headers: corsHeaders(request) });
+    }
 
     if (registrationEndpoint && resolvedCallbackUrl) {
       // Validate callbackUrl before using it in registration

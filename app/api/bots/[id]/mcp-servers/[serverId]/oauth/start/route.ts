@@ -158,13 +158,14 @@ export async function GET(
 
     // Callback URL is always the admin API's OAuth callback endpoint.
     // ADMIN_API_URL must be set to a browser-accessible URL (not an internal Docker hostname).
-    const adminApiUrl = process.env.ADMIN_API_URL;
-    if (!adminApiUrl) {
+    const rawAdminUrl = process.env.ADMIN_API_URL;
+    if (!rawAdminUrl) {
       return NextResponse.json(
         { error: 'ADMIN_API_URL environment variable is not configured' },
         { status: 500, headers: corsHeaders(request) }
       );
     }
+    const adminApiUrl = rawAdminUrl.replace(/\/+$/, '');
     const callbackBase = adminApiUrl;
     const redirectUri = `${callbackBase}/api/oauth/mcp-callback`;
 

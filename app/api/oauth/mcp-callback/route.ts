@@ -132,7 +132,7 @@ export async function GET(request: NextRequest) {
     // authorization request, which is required by RFC 6749 §4.1.3.
     // Fall back to constructing from request.url.origin for backward compatibility
     // with state tokens created before redirectUri was stored.
-    const callbackBase = process.env.ADMIN_API_URL || new URL(request.url).origin;
+    const callbackBase = (process.env.ADMIN_API_URL || new URL(request.url).origin).replace(/\/+$/, '');
     const tokenExchangeRedirectUri = redirectUri || `${callbackBase}/api/oauth/mcp-callback`;
     const tokenResponse = await exchangeCodeForTokens(
       oauthConfig.tokenUrl,
