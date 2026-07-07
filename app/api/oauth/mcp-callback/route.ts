@@ -44,7 +44,11 @@ export async function GET(request: NextRequest) {
     // redirects — these pages are served by the admin API (orbit.bawes.net), not
     // the play/frontend origin (universe.bawes.net). Using redirectUrl (the play
     // domain) as the base would send the user's popup to a non-existent page.
-    const adminBase = getOAuthCallbackBase() || new URL(request.url).origin;
+    const callbackBase = getOAuthCallbackBase();
+    if (!callbackBase) {
+      return new NextResponse('ADMIN_API_URL environment variable is not configured', { status: 500 });
+    }
+    const adminBase = callbackBase;
 
     // Handle provider-level error (user denied, etc.)
     if (errorParam) {
