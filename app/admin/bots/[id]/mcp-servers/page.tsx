@@ -62,6 +62,7 @@ interface McpServer {
   name: string;
   serverUrl: string;
   authType: string;
+  oauthConnected?: boolean;
   enabled: boolean;
   headers?: Record<string, string>;
   lastTestedAt?: string | null;
@@ -902,7 +903,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                           <span className="ml-1">Test</span>
                         </Button>
 
-                        {server.authType === 'oauth' && (
+                        {server.authType === 'oauth' && !server.oauthConnected && (
                           <Button
                             variant="secondary"
                             size="sm"
@@ -915,6 +916,12 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                               <span className="text-xs">Connect with OAuth</span>
                             )}
                           </Button>
+                        )}
+
+                        {server.authType === 'oauth' && server.oauthConnected && (
+                          <span className="inline-flex items-center gap-1 px-2 py-1 text-xs text-green-400 bg-green-500/10 rounded font-semibold">
+                            Connected ✓
+                          </span>
                         )}
 
                         <AlertDialog>
