@@ -511,9 +511,9 @@ export async function GET(request: NextRequest) {
     const resolvedCallbackUrl = getOAuthCallbackUrl();
     const callbackValidation = resolvedCallbackUrl ? validateOAuthCallbackUrl(resolvedCallbackUrl) : null;
 
-    if (!resolvedCallbackUrl && registrationEndpoint) {
+    if (!resolvedCallbackUrl) {
       return NextResponse.json({
-        error: 'ADMIN_API_URL environment variable is not configured — unable to register OAuth client',
+        error: 'ADMIN_API_URL environment variable is not configured — OAuth flow cannot proceed',
       }, { status: 500, headers: corsHeaders(request) });
     }
 
