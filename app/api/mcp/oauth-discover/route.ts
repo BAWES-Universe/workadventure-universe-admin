@@ -517,7 +517,7 @@ export async function GET(request: NextRequest) {
       }, { status: 500, headers: corsHeaders(request) });
     }
 
-    if (callbackValidation && registrationEndpoint) {
+    if (callbackValidation) {
       return NextResponse.json({
         error: callbackValidation,
       }, { status: 500, headers: corsHeaders(request) });
