@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
+import { getOAuthCallbackUrl, getOAuthCallbackBase, validateOAuthCallbackUrl } from '@/lib/oauth-callback';
 import crypto from 'crypto';
 
 export const runtime = 'nodejs';
@@ -156,40 +157,24 @@ export async function GET(
       redirectUrl = `${origin}/admin/bots/${botId}`;
     }
 
-    // Use the callback URL from the frontend if provided (must match what was
-    // registered during discovery). Falls back to ADMIN_API_URL / request origin.
-    const callbackParam = searchParams.get('callbackUrl');
-    let callbackBase: string;
-    let redirectUri: string;
-    if (callbackParam) {
-      try {
-        const parsed = new URL(callbackParam);
-        // Validate callbackUrl is external to prevent open redirect
-        // The OAuth provider will redirect the user's browser to this origin,
-        // so restrict it to allowed origins just like redirectUrl.
-        const allowedOrigins = [
-          requestOrigin,
-          ...(process.env.CORS_ALLOWED_ORIGINS || '').split(',').filter(Boolean),
-        ];
-        const isAllowed = allowedOrigins.some((origin) => parsed.origin === origin);
-        if (!isAllowed) {
-          return NextResponse.json(
-            { error: 'callbackUrl origin is not allowed' },
-            { status: 400, headers: corsHeaders(request) }
-          );
-        }
-        callbackBase = parsed.origin;
-        redirectUri = `${parsed.origin}/api/oauth/mcp-callback`;
-      } catch {
-        return NextResponse.json(
-          { error: 'callbackUrl must be a valid URL' },
-          { status: 400, headers: corsHeaders(request) }
-        );
-      }
-    } else {
-      callbackBase = process.env.ADMIN_API_URL || new URL(request.url).origin;
-      redirectUri = `${callbackBase}/api/oauth/mcp-callback`;
+    // Callback URL is always the admin API's OAuth callback endpoint.
+    // ADMIN_API_URL must be set to a browser-accessible URL (not an internal Docker hostname).
+    const callbackUrl = getOAuthCallbackUrl();
+    if (!callbackUrl) {
+      return NextResponse.json(
+        { error: 'ADMIN_API_URL environment variable is not configured' },
+        { status: 500, headers: corsHeaders(request) }
+      );
     }
+    const callbackValidation = validateOAuthCallbackUrl(callbackUrl);
+    if (callbackValidation) {
+      return NextResponse.json(
+        { error: callbackValidation },
+        { status: 500, headers: corsHeaders(request) }
+      );
+    }
+    const callbackBase = getOAuthCallbackBase()!;
+    const redirectUri = callbackUrl;
 
     // Generate PKCE code verifier and challenge (S256)
     const codeVerifier = crypto.randomBytes(32).toString('base64url');

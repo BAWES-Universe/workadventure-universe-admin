@@ -165,10 +165,9 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
     const timer = setTimeout(async () => {
       setOauthDiscovery('discovering');
       try {
-        const callbackUrl = `${window.location.origin}/api/oauth/mcp-callback`;
         const { authenticatedFetch } = await import('@/lib/client-auth');
         const res = await authenticatedFetch(
-          `/api/mcp/oauth-discover?serverUrl=${encodeURIComponent(formData.serverUrl)}&callbackUrl=${encodeURIComponent(callbackUrl)}`,
+          `/api/mcp/oauth-discover?serverUrl=${encodeURIComponent(formData.serverUrl)}`,
           { signal: abortController.signal }
         );
         if (abortController.signal.aborted) return;
@@ -426,9 +425,8 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
     try {
       const { authenticatedFetch } = await import('@/lib/client-auth');
       const redirectUrl = window.location.href.split('?')[0].split('#')[0];
-      const callbackUrl = `${window.location.origin}/api/oauth/mcp-callback`;
       const response = await authenticatedFetch(
-        `/api/bots/${botId}/mcp-servers/${server.id}/oauth/start?redirectUrl=${encodeURIComponent(redirectUrl)}&callbackUrl=${encodeURIComponent(callbackUrl)}`,
+        `/api/bots/${botId}/mcp-servers/${server.id}/oauth/start?redirectUrl=${encodeURIComponent(redirectUrl)}`,
       );
 
       if (!response.ok) {

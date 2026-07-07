@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
+import { getOAuthCallbackUrl, getOAuthCallbackBase } from '@/lib/oauth-callback';
 
 export const runtime = 'nodejs';
 
@@ -132,7 +133,7 @@ export async function GET(request: NextRequest) {
     // authorization request, which is required by RFC 6749 §4.1.3.
     // Fall back to constructing from request.url.origin for backward compatibility
     // with state tokens created before redirectUri was stored.
-    const callbackBase = process.env.ADMIN_API_URL || new URL(request.url).origin;
+    const callbackBase = getOAuthCallbackBase() || new URL(request.url).origin;
     const tokenExchangeRedirectUri = redirectUri || `${callbackBase}/api/oauth/mcp-callback`;
     const tokenResponse = await exchangeCodeForTokens(
       oauthConfig.tokenUrl,

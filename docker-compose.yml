@@ -46,6 +46,7 @@ services:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://admin.bawes.localhost}
       NEXT_PUBLIC_ENABLE_MANUAL_LOGIN: ${NEXT_PUBLIC_ENABLE_MANUAL_LOGIN:-false}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      ADMIN_API_URL: ${ADMIN_API_URL:-http://admin.bawes.localhost:8321}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_BUCKET: ${AWS_BUCKET}
