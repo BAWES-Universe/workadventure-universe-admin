@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSessionUser } from '@/lib/auth-session';
+import { getOAuthCallbackUrl, validateOAuthCallbackUrl } from '@/lib/oauth-callback';
 import { resolve4, resolve6 } from 'dns/promises';
 
 export const runtime = 'nodejs';
@@ -318,10 +319,13 @@ function getPreferredAuthMethod(supported: string[] | null): string {
 }
 
 /**
- * GET /api/mcp/oauth-discover?serverUrl=<encoded>&callbackUrl=<encoded>
+ * GET /api/mcp/oauth-discover?serverUrl=<encoded>
  *
  * Discovers OAuth endpoints for an MCP server using the standard
  * MCP OAuth authorization flow.
+ *
+ * The callback URL is always derived from ADMIN_API_URL — the frontend
+ * does not and should not supply it as a query parameter.
  *
  * Flow:
  *   1. POST to the MCP server with a JSON-RPC initialize request.
@@ -337,7 +341,6 @@ export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
     const serverUrl = searchParams.get('serverUrl');
-    const callbackUrl = searchParams.get('callbackUrl');
 
     if (!serverUrl) {
       return NextResponse.json(
@@ -502,41 +505,25 @@ export async function GET(request: NextRequest) {
     let registered = false;
     let registeredAuthMethod: string | null = null;
 
-    // Resolve callback URL: prefer the provided param, fall back to ADMIN_API_URL
-    const adminApiBase = process.env.ADMIN_API_URL ? process.env.ADMIN_API_URL.replace(/\/+$/, '') : null;
-    const resolvedCallbackUrl = callbackUrl
-      || (adminApiBase ? `${adminApiBase}/api/oauth/mcp-callback` : null);
+    // Resolve callback URL from ADMIN_API_URL only.
+    // The frontend no longer sends a callbackUrl param — the admin API's own
+    // URL is always the correct callback target for OAuth redirects.
+    const resolvedCallbackUrl = getOAuthCallbackUrl();
+    const callbackValidation = resolvedCallbackUrl ? validateOAuthCallbackUrl(resolvedCallbackUrl) : null;
 
     if (!resolvedCallbackUrl && registrationEndpoint) {
-      // ADMIN_API_URL is required for dynamic registration when no callbackUrl was provided.
-      // Return a 500 so the frontend's !res.ok check catches it, rather than returning 200
-      // with discovered:true (which the frontend treats as success and ignores the error field).
       return NextResponse.json({
         error: 'ADMIN_API_URL environment variable is not configured — unable to register OAuth client',
       }, { status: 500, headers: corsHeaders(request) });
     }
 
-    if (registrationEndpoint && resolvedCallbackUrl) {
-      // Validate callbackUrl before using it in registration
-      try {
-        const parsedCallbackUrl = new URL(resolvedCallbackUrl);
-        if (!isExternalUrl(resolvedCallbackUrl)) {
-          throw new Error('callbackUrl must be a valid external URL');
-        }
-      } catch {
-        // Invalid or non-external callbackUrl — skip dynamic registration
-        console.error('[OAuthDiscover] Invalid or non-external callbackUrl:', resolvedCallbackUrl);
-        return NextResponse.json({
-          discovered: true,
-          authorizeUrl,
-          tokenUrl,
-          scopesSupported,
-          clientId: null,
-          clientSecret: null,
-          registrationStatus: 'manual',
-          registeredAuthMethod: null,
-        }, { headers: corsHeaders(request) });
-      }
+    if (callbackValidation && registrationEndpoint) {
+      return NextResponse.json({
+        error: callbackValidation,
+      }, { status: 500, headers: corsHeaders(request) });
+    }
+
+    if (registrationEndpoint && resolvedCallbackUrl && !callbackValidation) {
       // SSRF protection for registration endpoint:
       // - Metadata from well-known is self-authenticating (served via HTTPS from the server's domain)
       // - Metadata from 401 body must match the MCP server origin
