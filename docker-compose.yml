@@ -82,7 +82,7 @@ services:
       - "traefik.http.routers.admin-api-internal.service=admin-api"
       - "traefik.http.routers.admin-api-internal.priority=10"
       # Shared service configuration
-      - "traefik.http.services.admin-api.loadbalancer.server.port=3333"
+      - "traefik.http.services.admin-api.loadbalancer.server.url=http://admin-api-dev:3333"
       # Add timeout settings to prevent gateway timeouts
       - "traefik.http.services.admin-api.loadbalancer.responseForwarding.flushInterval=100ms"
 

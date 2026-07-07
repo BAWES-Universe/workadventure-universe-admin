@@ -66,7 +66,7 @@ async function isAllowedServerIp(serverUrl: string): Promise<{ allowed: boolean;
     // Check IP literal hostnames directly (the hostname-pattern check above cannot
     // catch all private IPv6 ranges, so we must check them here too)
     if (isIP(hostname)) {
-      if (hostname === '::1' || hostname === '0.0.0.0') {
+      if (hostname === '::1' || hostname === '::' || hostname === '0.0.0.0') {
         return { allowed: false, error: `Server uses loopback address (${hostname})` };
       }
       if (/^127\./.test(hostname)) {
@@ -275,7 +275,32 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
   let authValue: string | null = null;
   if (server.authConfig) {
     try {
-      authValue = decryptApiKey(server.authConfig);
+      const decrypted = decryptApiKey(server.authConfig);
+      if (server.authType === 'oauth') {
+        // OAuth authConfig is JSON with an accessToken field
+        try {
+          const oauthConfig = JSON.parse(decrypted);
+          // Reject OAuth configs without a usable access token
+          if (!oauthConfig.accessToken) {
+            return {
+              success: false,
+              toolCount: 0,
+              toolNames: [],
+              error: 'No OAuth access token available — complete the OAuth flow first',
+            };
+          }
+          authValue = oauthConfig.accessToken || null;
+        } catch {
+          return {
+            success: false,
+            toolCount: 0,
+            toolNames: [],
+            error: 'Invalid OAuth config — expected JSON with accessToken',
+          };
+        }
+      } else {
+        authValue = decrypted;
+      }
     } catch (error) {
       return {
         success: false,
@@ -291,7 +316,7 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
     'Content-Type': 'application/json',
     'Accept': 'application/json, text/event-stream',
   };
-  if (server.authType === 'bearer' && authValue) {
+  if ((server.authType === 'bearer' || server.authType === 'oauth') && authValue) {
     headers['Authorization'] = `Bearer ${authValue}`;
   } else if (server.authType === 'api-key' && authValue) {
     headers['X-API-Key'] = authValue;

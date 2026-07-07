@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
-import { encryptApiKey } from '@/lib/encryption';
+import { encryptApiKey, decryptApiKey } from '@/lib/encryption';
 import { z } from 'zod';
 
 export const runtime = 'nodejs';
@@ -90,8 +90,8 @@ const createMcpServerSchema = z.object({
     (url) => isAllowedServerUrl(url),
     { message: 'Server URL must not point to internal or private addresses' }
   ),
-  authType: z.enum(['none', 'bearer', 'api-key'], {
-    message: 'authType must be one of: none, bearer, api-key',
+  authType: z.enum(['none', 'bearer', 'api-key', 'oauth'], {
+    message: 'authType must be one of: none, bearer, api-key, oauth',
   }).default('none'),
   authConfig: z.string().trim().optional().nullable(),
   headers: z.record(z.string(), z.string()).refine(
@@ -103,12 +103,79 @@ const createMcpServerSchema = z.object({
   ).optional(),
   enabled: z.boolean().optional().default(true),
 }).superRefine((data, ctx) => {
-  if ((data.authType === 'bearer' || data.authType === 'api-key') && !data.authConfig) {
+  if ((data.authType === 'bearer' || data.authType === 'api-key' || data.authType === 'oauth') && !data.authConfig) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ['authConfig'],
       message: `authConfig is required when authType is '${data.authType}'`,
     });
+    return;
+  }
+  if (data.authType === 'oauth' && data.authConfig) {
+    // Validate that the OAuth config contains required non-empty fields
+    // clientSecret is optional — public OAuth clients (PKCE) have no secret
+    try {
+      const parsed = JSON.parse(data.authConfig);
+      const required = ['clientId', 'authorizeUrl', 'tokenUrl'];
+      for (const field of required) {
+        if (!parsed[field] || typeof parsed[field] !== 'string' || !parsed[field].toString().trim()) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['authConfig'],
+            message: `OAuth '${field}' is required and must be a non-empty string`,
+          });
+          return;
+        }
+      }
+      // Validate authorizeUrl and tokenUrl are valid, absolute URLs
+      // and do not point to internal/private addresses (SSRF prevention).
+      for (const urlField of ['authorizeUrl', 'tokenUrl'] as const) {
+        try {
+          const parsedUrl = new URL(parsed[urlField]);
+          if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ['authConfig'],
+              message: `OAuth '${urlField}' must use http or https protocol`,
+            });
+            return;
+          }
+          if (!isAllowedServerUrl(parsed[urlField])) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ['authConfig'],
+              message: `OAuth '${urlField}' must not point to internal or private addresses`,
+            });
+            return;
+          }
+        } catch {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['authConfig'],
+            message: `OAuth '${urlField}' must be a valid, absolute URL`,
+          });
+          return;
+        }
+      }
+      // If clientSecret is provided, it must be a non-empty string
+      if (parsed.clientSecret !== undefined && parsed.clientSecret !== null) {
+        if (typeof parsed.clientSecret !== 'string' || !parsed.clientSecret.toString().trim()) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['authConfig'],
+            message: `OAuth 'clientSecret' must be a non-empty string if provided`,
+          });
+          return;
+        }
+      }
+    } catch {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['authConfig'],
+        message: 'authConfig must be valid JSON for OAuth authentication',
+      });
+      return;
+    }
   }
 });
 
@@ -176,20 +243,34 @@ export async function GET(
 
     // Transform: remove authConfig from response for security,
     // except for internal bot-server calls authenticated via ADMIN_API_TOKEN
-    const transformed = servers.map((s) => ({
-      id: s.id,
-      botId: s.botId,
-      name: s.name,
-      serverUrl: s.serverUrl,
-      authType: s.authType,
-      ...(isAdminToken ? { authConfig: s.authConfig } : {}),
-      enabled: s.enabled,
-      headers: s.headers,
-      lastTestedAt: s.lastTestedAt,
-      lastTestResult: s.lastTestResult,
-      createdAt: s.createdAt,
-      updatedAt: s.updatedAt,
-    }));
+    // For OAuth servers, check if connected (has accessToken) without exposing credentials
+    const transformed = servers.map((s) => {
+      let oauthConnected = false;
+      if (s.authType === 'oauth' && s.authConfig) {
+        try {
+          const decrypted = decryptApiKey(s.authConfig);
+          const config = JSON.parse(decrypted);
+          oauthConnected = !!config.accessToken;
+        } catch {
+          // If decrypt fails, assume not connected
+        }
+      }
+      return {
+        id: s.id,
+        botId: s.botId,
+        name: s.name,
+        serverUrl: s.serverUrl,
+        authType: s.authType,
+        ...(isAdminToken ? { authConfig: s.authConfig } : {}),
+        oauthConnected,
+        enabled: s.enabled,
+        headers: s.headers,
+        lastTestedAt: s.lastTestedAt,
+        lastTestResult: s.lastTestResult,
+        createdAt: s.createdAt,
+        updatedAt: s.updatedAt,
+      };
+    });
 
     return NextResponse.json(transformed, { headers: corsHeaders(request) });
   } catch (error) {

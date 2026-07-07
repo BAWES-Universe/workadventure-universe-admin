@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -62,6 +62,7 @@ interface McpServer {
   name: string;
   serverUrl: string;
   authType: string;
+  oauthConnected?: boolean;
   enabled: boolean;
   headers?: Record<string, string>;
   lastTestedAt?: string | null;
@@ -77,6 +78,12 @@ interface McpServerFormData {
   authConfig: string;
   headers: { key: string; value: string }[];
   enabled: boolean;
+  // OAuth-specific fields (serialized into authConfig on save)
+  oauthAuthorizeUrl?: string;
+  oauthTokenUrl?: string;
+  oauthClientId?: string;
+  oauthClientSecret?: string;
+  oauthScopes?: string;
 }
 
 const emptyForm: McpServerFormData = {
@@ -86,6 +93,11 @@ const emptyForm: McpServerFormData = {
   authConfig: '',
   headers: [],
   enabled: true,
+  oauthAuthorizeUrl: '',
+  oauthTokenUrl: '',
+  oauthClientId: '',
+  oauthClientSecret: '',
+  oauthScopes: '',
 };
 
 export default function BotMcpServersPage({ params }: { params: Promise<{ id: string }> }) {
@@ -102,10 +114,97 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
+  // Reset add-dialog state when closed so stale discovery/form data
+  // doesn't persist to the next open (e.g., "Auto-configured" showing
+  // for a new URL before discovery actually runs)
+  const handleAddDialogOpenChange = useCallback((open: boolean) => {
+    if (!open) {
+      setFormData(emptyForm);
+      setFormError(null);
+      setOauthDiscovery('idle');
+      setDiscoveredAuthUrl('');
+      setDiscoveredTokenUrl('');
+      setDiscoveredScopes(null);
+      setDiscoveryRegistration(null);
+      setDiscoveryAuthMethod(null);
+    }
+    setAddDialogOpen(open);
+  }, []);
+
   // Delete dialog state
   const [deleteServerId, setDeleteServerId] = useState<string | null>(null);
 
-  // Test connection state
+  // OAuth discovery state
+  const [oauthDiscovery, setOauthDiscovery] = useState<'idle' | 'discovering' | 'discovered' | 'not_found'>('idle');
+  const [discoveredAuthUrl, setDiscoveredAuthUrl] = useState('');
+  const [discoveredTokenUrl, setDiscoveredTokenUrl] = useState('');
+  const [discoveredScopes, setDiscoveredScopes] = useState<string[] | null>(null);
+  const [discoveryRegistration, setDiscoveryRegistration] = useState<'auto' | 'manual' | null>(null);
+  const [discoveryAuthMethod, setDiscoveryAuthMethod] = useState<string | null>(null);
+
+  // Trigger OAuth discovery when serverUrl + authType = oauth
+  // Debounce: only fire when user stops typing for 500ms
+  useEffect(() => {
+    // Reset discovery state whenever serverUrl changes to avoid carrying
+    // stale OAuth endpoints from a previous URL (CodeRabbit Major)
+    setOauthDiscovery('idle');
+    setDiscoveredAuthUrl('');
+    setDiscoveredTokenUrl('');
+    setDiscoveredScopes(null);
+    setDiscoveryRegistration(null);
+    setDiscoveryAuthMethod(null);
+
+    if (formData.authType !== 'oauth' || !formData.serverUrl.trim()) {
+      return;
+    }
+    // Only trigger discovery if URL looks valid
+    if (!/^https?:\/\/.+/i.test(formData.serverUrl.trim())) {
+      return;
+    }
+    const abortController = new AbortController();
+    const timer = setTimeout(async () => {
+      setOauthDiscovery('discovering');
+      try {
+        const callbackUrl = `${window.location.origin}/api/oauth/mcp-callback`;
+        const { authenticatedFetch } = await import('@/lib/client-auth');
+        const res = await authenticatedFetch(
+          `/api/mcp/oauth-discover?serverUrl=${encodeURIComponent(formData.serverUrl)}&callbackUrl=${encodeURIComponent(callbackUrl)}`,
+          { signal: abortController.signal }
+        );
+        if (abortController.signal.aborted) return;
+        if (!res.ok) {
+          setOauthDiscovery('not_found');
+          return;
+        }
+        const data = await res.json();
+        if (abortController.signal.aborted) return;
+        if (data.discovered) {
+          setDiscoveredAuthUrl(data.authorizeUrl || '');
+          setDiscoveredTokenUrl(data.tokenUrl || '');
+          setDiscoveredScopes(data.scopesSupported || null);
+          setDiscoveryRegistration(data.registrationStatus || null);
+          setDiscoveryAuthMethod(data.registeredAuthMethod || null);
+          setOauthDiscovery('discovered');
+          // Auto-fill form with discovered endpoints + any registered credentials
+          setFormData((prev) => ({
+            ...prev,
+            oauthAuthorizeUrl: prev.oauthAuthorizeUrl || data.authorizeUrl || '',
+            oauthTokenUrl: prev.oauthTokenUrl || data.tokenUrl || '',
+            oauthClientId: prev.oauthClientId || data.clientId || '',
+            oauthClientSecret: prev.oauthClientSecret || data.clientSecret || '',
+          }));
+        } else {
+          setOauthDiscovery('not_found');
+        }
+      } catch {
+        if (!abortController.signal.aborted) setOauthDiscovery('not_found');
+      }
+    }, 500);
+    return () => {
+      clearTimeout(timer);
+      abortController.abort();
+    };
+  }, [formData.serverUrl, formData.authType]);
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, { success: boolean; message: string }>>({});
 
@@ -171,7 +270,15 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
           name: formData.name,
           serverUrl: formData.serverUrl,
           authType: formData.authType,
-          authConfig: formData.authConfig || null,
+          authConfig: formData.authType === 'oauth'
+            ? JSON.stringify({
+                authorizeUrl: formData.oauthAuthorizeUrl?.trim() || null,
+                tokenUrl: formData.oauthTokenUrl?.trim() || null,
+                clientId: (discoveryRegistration === 'auto' && !formData.oauthClientId?.trim()) ? null : (formData.oauthClientId?.trim() || null),
+                clientSecret: (discoveryRegistration === 'auto' && !formData.oauthClientSecret?.trim()) ? null : (formData.oauthClientSecret?.trim() || null),
+                scopes: formData.oauthScopes?.trim() || null,
+              })
+            : formData.authConfig || null,
           headers: formData.headers.length > 0
             ? Object.fromEntries(formData.headers.filter(h => h.key.trim()).map(h => [h.key.trim(), h.value]))
             : undefined,
@@ -189,8 +296,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
         return;
       }
 
-      setAddDialogOpen(false);
-      setFormData(emptyForm);
+      handleAddDialogOpenChange(false);
       await fetchServers();
     } catch (err) {
       setFormError(err instanceof Error ? err.message : 'An error occurred');
@@ -283,6 +389,83 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
     }
   }
 
+  // OAuth connect state
+  const [oauthConnectingId, setOauthConnectingId] = useState<string | null>(null);
+  const pollRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Clean up poll interval on unmount
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    };
+  }, []);
+
+  // Close popup window after OAuth completes — only if this window
+  // was opened programmatically (window.opener is set), so we don't
+  // accidentally close the main admin page if someone navigates here
+  // with a stale ?oauth= param from a bookmark or shared link.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const oauthResult = params.get('oauth');
+    if ((oauthResult === 'success' || oauthResult === 'error') && window.opener) {
+      window.close();
+    }
+  }, []);
+
+  async function handleOAuthConnect(server: { id: string; name: string }) {
+    // Clear any existing poll interval before starting a new one
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+    setOauthConnectingId(server.id);
+
+    try {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const redirectUrl = window.location.href.split('?')[0].split('#')[0];
+      const callbackUrl = `${window.location.origin}/api/oauth/mcp-callback`;
+      const response = await authenticatedFetch(
+        `/api/bots/${botId}/mcp-servers/${server.id}/oauth/start?redirectUrl=${encodeURIComponent(redirectUrl)}&callbackUrl=${encodeURIComponent(callbackUrl)}`,
+      );
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.error || 'Failed to start OAuth connection');
+      }
+
+      const data = await response.json();
+      const authorizeUrl = data.authorizeUrl;
+
+      // Open OAuth popup
+      const popup = window.open(authorizeUrl, 'oauth-popup', 'width=600,height=700');
+      if (!popup) {
+        throw new Error('Popup blocked. Please allow popups for this site.');
+      }
+
+      // Poll for popup close
+      pollRef.current = setInterval(async () => {
+        try {
+          if (popup.closed) {
+            if (pollRef.current) {
+              clearInterval(pollRef.current);
+              pollRef.current = null;
+            }
+            setOauthConnectingId(null);
+            await fetchServers();
+          }
+        } catch {
+          // Cross-origin errors during redirect
+        }
+      }, 500);
+    } catch (err) {
+      console.error('OAuth connection error:', err);
+      setOauthConnectingId(null);
+    }
+  }
+
   if (!authChecked || (loading && servers.length === 0)) {
     return (
       <div className="flex items-center justify-center min-h-[400px]">
@@ -320,7 +503,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
           </div>
         </div>
 
-        <Dialog open={addDialogOpen} onOpenChange={setAddDialogOpen}>
+        <Dialog open={addDialogOpen} onOpenChange={handleAddDialogOpenChange}>
           <DialogTrigger asChild>
             <Button disabled={servers.length >= 5}>
               <Plus className="mr-2 h-4 w-4" /> Add Server
@@ -374,11 +557,12 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                     <SelectItem value="none">None</SelectItem>
                     <SelectItem value="bearer">Bearer Token</SelectItem>
                     <SelectItem value="api-key">API Key</SelectItem>
+                    <SelectItem value="oauth">OAuth (Connect)</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
 
-              {formData.authType !== 'none' && (
+              {formData.authType !== 'none' && formData.authType !== 'oauth' && (
                 <div className="grid gap-2">
                   <Label htmlFor="authConfig">
                     {formData.authType === 'bearer' ? 'Bearer Token' : 'API Key'}
@@ -393,6 +577,130 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                     onChange={(e) => setFormData({ ...formData, authConfig: e.target.value })}
                   />
                 </div>
+              )}
+
+              {formData.authType === 'oauth' && (
+                <>
+                  {oauthDiscovery === 'discovering' && (
+                    <div className="flex items-center gap-2 text-sm text-muted-foreground py-2">
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      Discovering OAuth endpoints...
+                    </div>
+                  )}
+
+                  {oauthDiscovery === 'discovered' && discoveryRegistration === 'auto' && (
+                    <>
+                      <div className="flex items-center gap-2 text-sm text-emerald-600 dark:text-emerald-400 py-1">
+                        <span className="h-2 w-2 rounded-full bg-emerald-500" />
+                        Auto-configured
+                        <span className="text-muted-foreground">— OAuth and credentials auto-discovered</span>
+                      </div>
+
+                      <div className="grid gap-2">
+                        <Label htmlFor="oauthScopes">Scopes (optional)</Label>
+                        <Input
+                          id="oauthScopes"
+                          placeholder="read write"
+                          value={formData.oauthScopes || ''}
+                          onChange={(e) => setFormData({ ...formData, oauthScopes: e.target.value })}
+                        />
+                      </div>
+                    </>
+                  )}
+
+                  {oauthDiscovery === 'discovered' && discoveryRegistration === 'manual' && (
+                    <>
+                      <div className="flex items-center gap-2 text-sm text-emerald-600 dark:text-emerald-400 py-1">
+                        <span className="h-2 w-2 rounded-full bg-emerald-500" />
+                        Endpoints discovered
+                        <span className="text-muted-foreground">— provide client credentials from your provider</span>
+                      </div>
+
+                      <div className="grid gap-2">
+                        <Label htmlFor="oauthClientId">Client ID</Label>
+                        <Input
+                          id="oauthClientId"
+                          placeholder="Client ID from the OAuth provider"
+                          value={formData.oauthClientId || ''}
+                          onChange={(e) => setFormData({ ...formData, oauthClientId: e.target.value })}
+                        />
+                      </div>
+                      <div className="grid gap-2">
+                        <Label htmlFor="oauthClientSecret">Client Secret</Label>
+                        <Input
+                          id="oauthClientSecret"
+                          type="password"
+                          placeholder="Client secret from the OAuth provider"
+                          value={formData.oauthClientSecret || ''}
+                          onChange={(e) => setFormData({ ...formData, oauthClientSecret: e.target.value })}
+                        />
+                      </div>
+                      <div className="grid gap-2">
+                        <Label htmlFor="oauthScopes">Scopes (optional)</Label>
+                        <Input
+                          id="oauthScopes"
+                          placeholder="read write"
+                          value={formData.oauthScopes || ''}
+                          onChange={(e) => setFormData({ ...formData, oauthScopes: e.target.value })}
+                        />
+                      </div>
+                    </>
+                  )}
+
+                  {oauthDiscovery === 'not_found' && (
+                    <>
+                      <p className="text-sm text-muted-foreground py-1">
+                        Could not auto-discover OAuth endpoints. Enter the details from your provider manually.
+                      </p>
+                      <div className="grid gap-2">
+                        <Label htmlFor="oauthAuthorizeUrl">Authorize URL</Label>
+                        <Input
+                          id="oauthAuthorizeUrl"
+                          placeholder="https://app.provider.com/oauth/authorize"
+                          value={formData.oauthAuthorizeUrl || ''}
+                          onChange={(e) => setFormData({ ...formData, oauthAuthorizeUrl: e.target.value })}
+                        />
+                      </div>
+                      <div className="grid gap-2">
+                        <Label htmlFor="oauthTokenUrl">Token URL</Label>
+                        <Input
+                          id="oauthTokenUrl"
+                          placeholder="https://app.provider.com/oauth/token"
+                          value={formData.oauthTokenUrl || ''}
+                          onChange={(e) => setFormData({ ...formData, oauthTokenUrl: e.target.value })}
+                        />
+                      </div>
+                      <div className="grid gap-2">
+                        <Label htmlFor="oauthClientId">Client ID</Label>
+                        <Input
+                          id="oauthClientId"
+                          placeholder="Client ID from the OAuth provider"
+                          value={formData.oauthClientId || ''}
+                          onChange={(e) => setFormData({ ...formData, oauthClientId: e.target.value })}
+                        />
+                      </div>
+                      <div className="grid gap-2">
+                        <Label htmlFor="oauthClientSecret">Client Secret</Label>
+                        <Input
+                          id="oauthClientSecret"
+                          type="password"
+                          placeholder="Client secret from the OAuth provider"
+                          value={formData.oauthClientSecret || ''}
+                          onChange={(e) => setFormData({ ...formData, oauthClientSecret: e.target.value })}
+                        />
+                      </div>
+                      <div className="grid gap-2">
+                        <Label htmlFor="oauthScopes">Scopes (optional)</Label>
+                        <Input
+                          id="oauthScopes"
+                          placeholder="read write"
+                          value={formData.oauthScopes || ''}
+                          onChange={(e) => setFormData({ ...formData, oauthScopes: e.target.value })}
+                        />
+                      </div>
+                    </>
+                  )}
+                </>
               )}
 
               {/* Extra Headers */}
@@ -463,10 +771,10 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
             </div>
 
             <DialogFooter>
-              <Button variant="outline" onClick={() => setAddDialogOpen(false)}>
+              <Button variant="outline" onClick={() => handleAddDialogOpenChange(false)}>
                 Cancel
               </Button>
-              <Button onClick={handleCreate} disabled={submitting || !formData.name || !formData.serverUrl}>
+              <Button onClick={handleCreate} disabled={submitting || oauthDiscovery === 'discovering' || (formData.authType === 'oauth' && oauthDiscovery === 'idle') || !formData.name || !formData.serverUrl}>
                 {submitting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
                 Add Server
               </Button>
@@ -593,6 +901,27 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                           )}
                           <span className="ml-1">Test</span>
                         </Button>
+
+                        {server.authType === 'oauth' && !server.oauthConnected && (
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            onClick={() => handleOAuthConnect(server)}
+                            disabled={oauthConnectingId === server.id}
+                          >
+                            {oauthConnectingId === server.id ? (
+                              <Loader2 className="h-3 w-3 animate-spin" />
+                            ) : (
+                              <span className="text-xs">Connect with OAuth</span>
+                            )}
+                          </Button>
+                        )}
+
+                        {server.authType === 'oauth' && server.oauthConnected && (
+                          <span className="inline-flex items-center gap-1 px-2 py-1 text-xs text-green-400 bg-green-500/10 rounded font-semibold">
+                            Connected ✓
+                          </span>
+                        )}
 
                         <AlertDialog>
                           <AlertDialogTrigger asChild>
