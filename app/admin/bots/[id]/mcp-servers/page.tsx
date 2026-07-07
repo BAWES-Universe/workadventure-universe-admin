@@ -296,8 +296,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
         return;
       }
 
-      setAddDialogOpen(false);
-      setFormData(emptyForm);
+      handleAddDialogOpenChange(false);
       await fetchServers();
     } catch (err) {
       setFormError(err instanceof Error ? err.message : 'An error occurred');
