@@ -40,13 +40,17 @@ export async function GET(request: NextRequest) {
     const state = searchParams.get('state');
     const errorParam = searchParams.get('error');
 
+    // Always use the admin API base for /api/oauth/success and /api/oauth/error
+    // redirects — these pages are served by the admin API (orbit.bawes.net), not
+    // the play/frontend origin (universe.bawes.net). Using redirectUrl (the play
+    // domain) as the base would send the user's popup to a non-existent page.
+    const adminBase = getOAuthCallbackBase() || new URL(request.url).origin;
+
     // Handle provider-level error (user denied, etc.)
     if (errorParam) {
       console.error('[OAuthCallback] Provider error:', errorParam);
-      const errState = parseStateToken(state);
-      const errorOrigin = errState?.redirectUrl || new URL(request.url).origin;
       return NextResponse.redirect(
-        new URL('/api/oauth/error?message=' + encodeURIComponent(errorParam), errorOrigin)
+        new URL('/api/oauth/error?message=' + encodeURIComponent(errorParam), adminBase)
       );
     }
 
@@ -72,7 +76,7 @@ export async function GET(request: NextRequest) {
       console.error('[OAuthCallback] Server not found or not OAuth type');
       if (redirectUrl) {
         return NextResponse.redirect(
-          new URL('/api/oauth/error?message=server_not_found', redirectUrl)
+          new URL('/api/oauth/error?message=server_not_found', adminBase)
         );
       }
       return new NextResponse('Server configuration not found', { status: 404 });
@@ -87,7 +91,7 @@ export async function GET(request: NextRequest) {
       console.error('[OAuthCallback] Failed to decrypt OAuth config');
       if (redirectUrl) {
         return NextResponse.redirect(
-          new URL('/api/oauth/error?message=config_decrypt_failed', redirectUrl)
+          new URL('/api/oauth/error?message=config_decrypt_failed', adminBase)
         );
       }
       return new NextResponse('Failed to decrypt OAuth configuration', { status: 500 });
@@ -97,7 +101,7 @@ export async function GET(request: NextRequest) {
       console.error('[OAuthCallback] Missing required OAuth config fields');
       if (redirectUrl) {
         return NextResponse.redirect(
-          new URL('/api/oauth/error?message=missing_oauth_config', redirectUrl)
+          new URL('/api/oauth/error?message=missing_oauth_config', adminBase)
         );
       }
       return new NextResponse('OAuth configuration missing required fields (clientId, tokenUrl)', { status: 400 });
@@ -111,7 +115,7 @@ export async function GET(request: NextRequest) {
       console.error('[OAuthCallback] Invalid tokenUrl in authConfig:', oauthConfig.tokenUrl);
       if (redirectUrl) {
         return NextResponse.redirect(
-          new URL('/api/oauth/error?message=invalid_token_url', redirectUrl)
+          new URL('/api/oauth/error?message=invalid_token_url', adminBase)
         );
       }
       return new NextResponse('Invalid tokenUrl in authConfig — must be a valid, absolute URL', { status: 400 });
@@ -122,7 +126,7 @@ export async function GET(request: NextRequest) {
       console.error('[OAuthCallback] SSRF blocked — tokenUrl resolves to an internal/private address:', oauthConfig.tokenUrl);
       if (redirectUrl) {
         return NextResponse.redirect(
-          new URL('/api/oauth/error?message=ssrf_blocked', redirectUrl)
+          new URL('/api/oauth/error?message=ssrf_blocked', adminBase)
         );
       }
       return new NextResponse('Token exchange target is an internal/private address — SSRF blocked', { status: 400 });
@@ -148,7 +152,7 @@ export async function GET(request: NextRequest) {
       console.error('[OAuthCallback] Token exchange failed');
       if (redirectUrl) {
         return NextResponse.redirect(
-          new URL('/api/oauth/error?message=token_exchange_failed', redirectUrl)
+          new URL('/api/oauth/error?message=token_exchange_failed', adminBase)
         );
       }
       return new NextResponse('Token exchange failed', { status: 502 });
@@ -176,14 +180,12 @@ export async function GET(request: NextRequest) {
 
     console.log(`[OAuthCallback] Tokens stored for server ${serverId} (bot ${botId})`);
 
-    // Redirect to the success page instead of the game URL.
-    // Use redirectUrl from the state token (which is always the correct external
-    // origin — the user's browser URL at the time of OAuth start) rather than
-    // request.url.origin, which resolves to an internal Docker hostname in
-    // containerized environments. Resolving /api/oauth/success relative to
-    // redirectUrl gives the correct absolute URL in both dev and prod.
+    // Redirect to the success page served by the admin API.
+    // Use adminBase (derived from ADMIN_API_URL / request.url.origin) rather
+    // than redirectUrl — the success page is an admin API route (orbit.bawes.net),
+    // not a play/frontend route (universe.bawes.net).
     return NextResponse.redirect(
-      new URL('/api/oauth/success', redirectUrl)
+      new URL('/api/oauth/success', adminBase)
     );
   } catch (error) {
     console.error('[OAuthCallback] Error:', error);
