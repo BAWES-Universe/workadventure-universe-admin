@@ -509,19 +509,11 @@ export async function GET(request: NextRequest) {
 
     if (!resolvedCallbackUrl && registrationEndpoint) {
       // ADMIN_API_URL is required for dynamic registration when no callbackUrl was provided.
-      // Return an error instead of silently skipping registration, which would cause
-      // a confusing 500 error later in the start route.
+      // Return a 500 so the frontend's !res.ok check catches it, rather than returning 200
+      // with discovered:true (which the frontend treats as success and ignores the error field).
       return NextResponse.json({
-        discovered: true,
-        authorizeUrl,
-        tokenUrl,
-        scopesSupported,
-        clientId: null,
-        clientSecret: null,
-        registrationStatus: 'manual',
-        registeredAuthMethod: null,
         error: 'ADMIN_API_URL environment variable is not configured — unable to register OAuth client',
-      }, { headers: corsHeaders(request) });
+      }, { status: 500, headers: corsHeaders(request) });
     }
 
     if (registrationEndpoint && resolvedCallbackUrl) {
