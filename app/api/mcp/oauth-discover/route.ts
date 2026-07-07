@@ -359,15 +359,9 @@ export async function GET(request: NextRequest) {
 
     const baseUrl = `${parsedServerUrl.protocol}//${parsedServerUrl.host}`;
 
-    // SSRF protection
-    if (!isExternalUrl(serverUrl)) {
-      return NextResponse.json(
-        { error: 'Server URL must point to a public, external address' },
-        { status: 400, headers: corsHeaders(request) }
-      );
-    }
-
-    // Authenticate: require a valid session user or admin API token
+    // Authenticate: require a valid session user or admin API token.
+    // Do this BEFORE SSRF checks to prevent unauthenticated users from
+    // probing internal vs external URLs via response status codes.
     const sessionUser = await getSessionUser(request);
     let isAuthenticated = false;
 
@@ -403,6 +397,14 @@ export async function GET(request: NextRequest) {
       return NextResponse.json(
         { error: 'Unauthorized' },
         { status: 401, headers: corsHeaders(request) }
+      );
+    }
+
+    // SSRF protection
+    if (!isExternalUrl(serverUrl)) {
+      return NextResponse.json(
+        { error: 'Server URL must point to a public, external address' },
+        { status: 400, headers: corsHeaders(request) }
       );
     }
 
@@ -479,6 +481,20 @@ export async function GET(request: NextRequest) {
     const registrationEndpoint = metadata.registration_endpoint || null;
     const scopesSupported = metadata.scopes_supported || null;
     const authMethodsSupported = metadata.token_endpoint_auth_methods_supported || null;
+
+    // Validate discovered OAuth URLs are external before returning them.
+    // An attacker-controlled OAuth server could return internal URLs, which
+    // would later redirect the user's browser to internal services.
+    if (
+      (metadata.authorization_endpoint && !isExternalUrl(authorizeUrl)) ||
+      (metadata.token_endpoint && !isExternalUrl(tokenUrl))
+    ) {
+      console.warn(
+        '[OAuthDiscover] Rejecting discovered OAuth endpoints — ' +
+          `authorizeUrl or tokenUrl points to an internal address`
+      );
+      return NextResponse.json({ discovered: false }, { headers: corsHeaders(request) });
+    }
 
     // Step 4: Try dynamic client registration
     let clientId: string | null = null;
