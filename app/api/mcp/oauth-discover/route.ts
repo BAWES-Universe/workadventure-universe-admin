@@ -502,16 +502,20 @@ export async function GET(request: NextRequest) {
     let registered = false;
     let registeredAuthMethod: string | null = null;
 
-    if (registrationEndpoint && callbackUrl) {
+    // Resolve callback URL: prefer the provided param, fall back to ADMIN_API_URL
+    const resolvedCallbackUrl = callbackUrl
+      || (process.env.ADMIN_API_URL ? `${process.env.ADMIN_API_URL}/api/oauth/mcp-callback` : null);
+
+    if (registrationEndpoint && resolvedCallbackUrl) {
       // Validate callbackUrl before using it in registration
       try {
-        const parsedCallbackUrl = new URL(callbackUrl);
-        if (!isExternalUrl(callbackUrl)) {
+        const parsedCallbackUrl = new URL(resolvedCallbackUrl);
+        if (!isExternalUrl(resolvedCallbackUrl)) {
           throw new Error('callbackUrl must be a valid external URL');
         }
       } catch {
         // Invalid or non-external callbackUrl — skip dynamic registration
-        console.error('[OAuthDiscover] Invalid or non-external callbackUrl:', callbackUrl);
+        console.error('[OAuthDiscover] Invalid or non-external callbackUrl:', resolvedCallbackUrl);
         return NextResponse.json({
           discovered: true,
           authorizeUrl,
@@ -549,7 +553,7 @@ export async function GET(request: NextRequest) {
 
           const registrationBody: RegistrationBody = {
             client_name: 'Universe',
-            redirect_uris: [callbackUrl],
+            redirect_uris: [resolvedCallbackUrl!],
             grant_types: ['authorization_code'],
             response_types: ['code'],
           };
