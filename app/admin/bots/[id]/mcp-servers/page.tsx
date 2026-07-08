@@ -391,37 +391,41 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
 
   // OAuth connect state
   const [oauthConnectingId, setOauthConnectingId] = useState<string | null>(null);
-  const pollRef = useRef<NodeJS.Timeout | null>(null);
+  const popupRef = useRef<Window | null>(null);
+  const cleanupRef = useRef<(() => void) | null>(null);
 
-  // Clean up poll interval on unmount
+  // Clean up OAuth listeners on unmount
   useEffect(() => {
     return () => {
-      if (pollRef.current) {
-        clearInterval(pollRef.current);
-        pollRef.current = null;
+      if (cleanupRef.current) {
+        cleanupRef.current();
+        cleanupRef.current = null;
+      }
+      if (popupRef.current) {
+        popupRef.current.close();
+        popupRef.current = null;
       }
     };
   }, []);
 
-  // Close popup window after OAuth completes — only if this window
-  // was opened programmatically (window.opener is set), so we don't
-  // accidentally close the main admin page if someone navigates here
-  // with a stale ?oauth= param from a bookmark or shared link.
+  // Close popup window after OAuth completes. This page is only reached with
+  // ?oauth= params via the callback redirect — not from bookmarks or direct
+  // navigation — so window.close() is always safe here. Same-origin close
+  // works because the popup was opened by window.open() from this same domain.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const oauthResult = params.get('oauth');
-    if ((oauthResult === 'success' || oauthResult === 'error') && window.opener) {
+    if (oauthResult === 'success' || oauthResult === 'error') {
       window.close();
     }
   }, []);
 
   async function handleOAuthConnect(server: { id: string; name: string }) {
-    // Clear any existing poll interval before starting a new one
-    if (pollRef.current) {
-      clearInterval(pollRef.current);
-      pollRef.current = null;
-    }
     setOauthConnectingId(server.id);
+    if (popupRef.current) {
+      popupRef.current.close();
+      popupRef.current = null;
+    }
 
     try {
       const { authenticatedFetch } = await import('@/lib/client-auth');
@@ -443,22 +447,73 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
       if (!popup) {
         throw new Error('Popup blocked. Please allow popups for this site.');
       }
+      popupRef.current = popup;
 
-      // Poll for popup close
-      pollRef.current = setInterval(async () => {
+      // Clean up any previous listeners
+      if (cleanupRef.current) {
+        cleanupRef.current();
+        cleanupRef.current = null;
+      }
+
+      const handleOAuthComplete = () => {
+        if (cleanupRef.current) {
+          cleanupRef.current();
+          cleanupRef.current = null;
+        }
+        popupRef.current = null;
+        setOauthConnectingId(null);
+        fetchServers();
+      };
+
+      // Fast path: listen for postMessage from the OAuth success page.
+      // Same-origin (both admin API) — window.opener.postMessage works.
+      // Validate event.origin to prevent spoofing.
+      const adminOrigin = window.location.origin;
+      const messageHandler = (event: MessageEvent) => {
+        if (event.data?.type === 'oauth-success' && event.origin === adminOrigin) {
+          handleOAuthComplete();
+        }
+      };
+
+      // Poll the server for oauthConnected status.
+      // Reliable fallback for cross-origin flows where postMessage doesn't reach.
+      let pollInterval: NodeJS.Timeout | null = null;
+      const POLL_INTERVAL_MS = 2000;
+      const POLL_TIMEOUT_MS = 5 * 60 * 1000;
+      const pollStart = Date.now();
+
+      const pollServerStatus = async () => {
         try {
-          if (popup.closed) {
-            if (pollRef.current) {
-              clearInterval(pollRef.current);
-              pollRef.current = null;
-            }
+          const { authenticatedFetch } = await import('@/lib/client-auth');
+          const res = await authenticatedFetch(`/api/bots/${botId}/mcp-servers`);
+          if (!res.ok) return;
+          const freshServers = await res.json() as Array<{ id: string; oauthConnected?: boolean }>;
+          const srv = freshServers.find((s: { id: string }) => s.id === server.id);
+          if (srv?.oauthConnected) {
+            if (pollInterval) clearInterval(pollInterval);
+            handleOAuthComplete();
+          } else if (Date.now() - pollStart > POLL_TIMEOUT_MS) {
+            if (pollInterval) clearInterval(pollInterval);
             setOauthConnectingId(null);
-            await fetchServers();
+          } else if (popup.closed) {
+            if (pollInterval) clearInterval(pollInterval);
+            setOauthConnectingId(null);
           }
         } catch {
-          // Cross-origin errors during redirect
+          // Server error — retry next interval
         }
-      }, 500);
+      };
+
+      pollInterval = setInterval(pollServerStatus, POLL_INTERVAL_MS);
+
+      window.addEventListener('message', messageHandler);
+      cleanupRef.current = () => {
+        window.removeEventListener('message', messageHandler);
+        if (pollInterval) {
+          clearInterval(pollInterval);
+          pollInterval = null;
+        }
+      };
     } catch (err) {
       console.error('OAuth connection error:', err);
       setOauthConnectingId(null);

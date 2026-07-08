@@ -91,6 +91,18 @@ export async function GET() {
     </button>
   </div>
   <script>
+    // Notify the parent window (opener) that OAuth completed successfully.
+    // Works when the opener is same-origin (admin flow on orbit.bawes.net).
+    // For cross-origin (play flow on universe.bawes.net), window.opener is
+    // null and this is a no-op — the parent uses visibilitychange instead.
+    try {
+      if (window.opener) {
+        window.opener.postMessage({ type: 'oauth-success' }, '*');
+      }
+    } catch {
+      // Cross-origin — opener access blocked, fall through to window.close()
+    }
+
     var seconds = 5;
     var timerEl = document.getElementById('timer');
     var interval = setInterval(function() {
