@@ -495,9 +495,17 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
             handleOAuthComplete();
           } else if (Date.now() - pollStart > POLL_TIMEOUT_MS) {
             if (pollInterval) clearInterval(pollInterval);
+            if (cleanupRef.current) {
+              cleanupRef.current();
+              cleanupRef.current = null;
+            }
             setOauthConnectingId(null);
           } else if (popup.closed) {
             if (pollInterval) clearInterval(pollInterval);
+            if (cleanupRef.current) {
+              cleanupRef.current();
+              cleanupRef.current = null;
+            }
             setOauthConnectingId(null);
           }
         } catch {
