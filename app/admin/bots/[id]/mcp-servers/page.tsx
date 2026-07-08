@@ -504,7 +504,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
         }
       };
 
-      pollInterval = setInterval(pollServerStatus, POLL_INTERVAL_MS);
+      pollInterval = setInterval(() => void pollServerStatus(), POLL_INTERVAL_MS);
 
       window.addEventListener('message', messageHandler);
       cleanupRef.current = () => {
