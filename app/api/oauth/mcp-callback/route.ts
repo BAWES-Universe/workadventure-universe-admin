@@ -198,6 +198,10 @@ export async function GET(request: NextRequest) {
     // This ensures the popup navigates to the same origin as the page that
     // opened it (universe.bawes.net or orbit.bawes.net), so postMessage
     // and window.close() work reliably.
+    // NOTE: The callback route at /oauth-popup-callback is served by the
+    // Express server in the workadventure-universe repo (for play-domain
+    // origins) and by this Next.js route handler (for admin-domain origins).
+    // Both routes MUST be deployed together.
     return popupRedirect(openerBase, { oauth: 'success' });
   } catch (error) {
     console.error('[OAuthCallback] Error:', error);
