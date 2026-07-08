@@ -40,22 +40,45 @@ export async function GET(request: NextRequest) {
     const state = searchParams.get('state');
     const errorParam = searchParams.get('error');
 
-    // Always use the admin API base for /api/oauth/success and /api/oauth/error
-    // redirects — these pages are served by the admin API (orbit.bawes.net), not
-    // the play/frontend origin (universe.bawes.net). Using redirectUrl (the play
-    // domain) as the base would send the user's popup to a non-existent page.
+    // Redirect to the popup callback page on the opener's origin.
+    // The redirectUrl from the state token is the page that opened the popup
+    // (e.g. universe.bawes.net for play, orbit.bawes.net for admin).
+    // Using its origin ensures the callback page is same-origin with the opener,
+    // so postMessage and window.close() work correctly.
     const callbackBase = getOAuthCallbackBase();
     if (!callbackBase) {
       return new NextResponse('ADMIN_API_URL environment variable is not configured', { status: 500 });
     }
     const adminBase = callbackBase;
 
+    // Helper: build redirect to the OAuth popup callback page on the opener's origin
+    const popupRedirect = (base: string, params: Record<string, string>): NextResponse => {
+        return NextResponse.redirect(
+            new URL('/oauth-popup-callback.html?' + new URLSearchParams(params).toString(), base)
+        );
+    };
+
+    // Resolve the opener's origin — the page that opened the popup (play or admin domain)
+    const getOpenerBase = (rd: string | undefined): string =>
+      rd ? new URL(rd).origin : adminBase;
+
     // Handle provider-level error (user denied, etc.)
+    // State token may not be parsed yet at this point, fall back to adminBase.
     if (errorParam) {
       console.error('[OAuthCallback] Provider error:', errorParam);
-      return NextResponse.redirect(
-        new URL('/api/oauth/error?message=' + encodeURIComponent(errorParam), adminBase)
-      );
+      let errorBase = adminBase;
+      try {
+        const partialState = parseStateToken(state);
+        if (partialState?.redirectUrl) {
+          errorBase = new URL(partialState.redirectUrl).origin;
+        }
+      } catch {
+        // State isn't parseable — use adminBase fallback
+      }
+      return popupRedirect(errorBase, {
+        oauth: 'error',
+        message: errorParam,
+      });
     }
 
     if (!code || !state) {
@@ -69,6 +92,7 @@ export async function GET(request: NextRequest) {
     }
 
     const { botId, serverId, redirectUrl, codeVerifier, redirectUri } = stateData;
+    const openerBase = getOpenerBase(redirectUrl);
 
     // Load the MCP server config to get OAuth provider config
     const server = await prisma.botMcpServer.findUnique({
@@ -79,9 +103,7 @@ export async function GET(request: NextRequest) {
     if (!server || server.botId !== botId || server.authType !== 'oauth') {
       console.error('[OAuthCallback] Server not found or not OAuth type');
       if (redirectUrl) {
-        return NextResponse.redirect(
-          new URL('/api/oauth/error?message=server_not_found', adminBase)
-        );
+        return popupRedirect(openerBase, { oauth: 'error', message: 'server_not_found' });
       }
       return new NextResponse('Server configuration not found', { status: 404 });
     }
@@ -94,9 +116,7 @@ export async function GET(request: NextRequest) {
     } catch {
       console.error('[OAuthCallback] Failed to decrypt OAuth config');
       if (redirectUrl) {
-        return NextResponse.redirect(
-          new URL('/api/oauth/error?message=config_decrypt_failed', adminBase)
-        );
+        return popupRedirect(openerBase, { oauth: 'error', message: 'config_decrypt_failed' });
       }
       return new NextResponse('Failed to decrypt OAuth configuration', { status: 500 });
     }
@@ -104,9 +124,7 @@ export async function GET(request: NextRequest) {
     if (!oauthConfig.clientId || !oauthConfig.tokenUrl) {
       console.error('[OAuthCallback] Missing required OAuth config fields');
       if (redirectUrl) {
-        return NextResponse.redirect(
-          new URL('/api/oauth/error?message=missing_oauth_config', adminBase)
-        );
+        return popupRedirect(openerBase, { oauth: 'error', message: 'missing_oauth_config' });
       }
       return new NextResponse('OAuth configuration missing required fields (clientId, tokenUrl)', { status: 400 });
     }
@@ -118,9 +136,7 @@ export async function GET(request: NextRequest) {
     } catch {
       console.error('[OAuthCallback] Invalid tokenUrl in authConfig:', oauthConfig.tokenUrl);
       if (redirectUrl) {
-        return NextResponse.redirect(
-          new URL('/api/oauth/error?message=invalid_token_url', adminBase)
-        );
+        return popupRedirect(openerBase, { oauth: 'error', message: 'invalid_token_url' });
       }
       return new NextResponse('Invalid tokenUrl in authConfig — must be a valid, absolute URL', { status: 400 });
     }
@@ -129,9 +145,7 @@ export async function GET(request: NextRequest) {
     if (!isExternalUrl(parsedTokenUrl)) {
       console.error('[OAuthCallback] SSRF blocked — tokenUrl resolves to an internal/private address:', oauthConfig.tokenUrl);
       if (redirectUrl) {
-        return NextResponse.redirect(
-          new URL('/api/oauth/error?message=ssrf_blocked', adminBase)
-        );
+        return popupRedirect(openerBase, { oauth: 'error', message: 'ssrf_blocked' });
       }
       return new NextResponse('Token exchange target is an internal/private address — SSRF blocked', { status: 400 });
     }
@@ -153,9 +167,7 @@ export async function GET(request: NextRequest) {
     if (!tokenResponse) {
       console.error('[OAuthCallback] Token exchange failed');
       if (redirectUrl) {
-        return NextResponse.redirect(
-          new URL('/api/oauth/error?message=token_exchange_failed', adminBase)
-        );
+        return popupRedirect(openerBase, { oauth: 'error', message: 'token_exchange_failed' });
       }
       return new NextResponse('Token exchange failed', { status: 502 });
     }
@@ -182,13 +194,15 @@ export async function GET(request: NextRequest) {
 
     console.log(`[OAuthCallback] Tokens stored for server ${serverId} (bot ${botId})`);
 
-    // Redirect to the success page served by the admin API.
-    // Use adminBase (derived from ADMIN_API_URL / request.url.origin) rather
-    // than redirectUrl — the success page is an admin API route (orbit.bawes.net),
-    // not a play/frontend route (universe.bawes.net).
-    return NextResponse.redirect(
-      new URL('/api/oauth/success', adminBase)
-    );
+    // Redirect to the popup callback page on the opener's origin.
+    // This ensures the popup navigates to the same origin as the page that
+    // opened it (universe.bawes.net or orbit.bawes.net), so postMessage
+    // and window.close() work reliably.
+    // NOTE: The callback route at /oauth-popup-callback is served by the
+    // Express server in the workadventure-universe repo (for play-domain
+    // origins) and by this Next.js route handler (for admin-domain origins).
+    // Both routes MUST be deployed together.
+    return popupRedirect(openerBase, { oauth: 'success' });
   } catch (error) {
     console.error('[OAuthCallback] Error:', error);
     return new NextResponse('Internal server error', { status: 500 });
