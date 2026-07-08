@@ -3,7 +3,7 @@ import { NextResponse } from 'next/server';
 export const runtime = 'nodejs';
 
 /**
- * GET /oauth-popup-callback
+ * GET /oauth-popup-callback.html
  *
  * Minimal OAuth popup callback page served on both the play domain
  * (universe.bawes.net via Express) and the admin API domain
@@ -96,6 +96,10 @@ export async function GET(request: Request) {
     status: 200,
     headers: {
       'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      'Pragma': 'no-cache',
+      'Expires': '0',
+      'X-Content-Type-Options': 'nosniff',
     },
   });
 }
