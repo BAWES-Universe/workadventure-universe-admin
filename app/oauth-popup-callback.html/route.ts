@@ -62,6 +62,8 @@ export async function GET(request: Request) {
     <div class="icon ${isSuccess ? 'success' : 'error'}">${isSuccess ? '&#10003;' : '&#10005;'}</div>
     <h1>OAuth ${isSuccess ? 'Connected' : 'Failed'}</h1>
     <p>${isSuccess ? 'Successfully authenticated.' : escapeHtml(errorMessage)}</p>
+    <p id="oauth-countdown" style="margin-top: 1.5rem; font-size: 2rem; font-weight: 700; color: ${isSuccess ? '#10b981' : '#ef4444'};"></p>
+    <p style="margin-top: 0.25rem; font-size: 0.875rem; color: #6b7280;">This window will close automatically</p>
   </div>
   <script>
     var success = ${isSuccess};
@@ -69,13 +71,23 @@ export async function GET(request: Request) {
       if (window.opener) {
         window.opener.postMessage(
           { type: success ? 'oauth-success' : 'oauth-failure' },
-          '*'
+          window.location.origin
         );
       }
     } catch {
       // Cross-origin — opener may be null
     }
-    window.close();
+    var countdown = 5;
+    document.getElementById("oauth-countdown").textContent = countdown;
+    var countdownInterval = setInterval(function() {
+      countdown--;
+      if (countdown > 0) {
+        document.getElementById("oauth-countdown").textContent = countdown;
+      } else {
+        clearInterval(countdownInterval);
+        window.close();
+      }
+    }, 1000);
   </script>
 </body>
 </html>`;
