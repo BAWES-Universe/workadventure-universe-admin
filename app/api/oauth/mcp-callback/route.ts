@@ -53,9 +53,9 @@ export async function GET(request: NextRequest) {
 
     // Helper: build redirect to the OAuth popup callback page on the opener's origin
     const popupRedirect = (base: string, params: Record<string, string>): NextResponse => {
-      return NextResponse.redirect(
-        new URL('/oauth-popup-callback?' + new URLSearchParams(params).toString(), base)
-      );
+        return NextResponse.redirect(
+            new URL('/oauth-popup-callback.html?' + new URLSearchParams(params).toString(), base)
+        );
     };
 
     // Resolve the opener's origin — the page that opened the popup (play or admin domain)
