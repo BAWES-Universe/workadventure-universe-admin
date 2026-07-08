@@ -159,6 +159,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
     }
     // Only trigger discovery if URL looks valid
     if (!/^https?:\/\/.+/i.test(formData.serverUrl.trim())) {
+      setOauthDiscovery('not_found');
       return;
     }
     const abortController = new AbortController();
