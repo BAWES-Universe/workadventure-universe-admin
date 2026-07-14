@@ -62,7 +62,7 @@ export async function OPTIONS(request: NextRequest) {
 function isPrivateIp(ip: string): boolean {
   if (/^127\.\d+\.\d+\.\d+$/.test(ip)) return true;
   if (/^0\.0\.0\.0$/.test(ip)) return true;
-  if (ip === '::1') return true;                      // Loopback
+  if (ip === '::1') return true; // Loopback
   if (/^10\.\d+\.\d+\.\d+$/.test(ip)) return true;
   if (/^172\.(1[6-9]|2\d|3[01])\.\d+\.\d+$/.test(ip)) return true;
   if (/^192\.168\.\d+\.\d+$/.test(ip)) return true;
@@ -71,6 +71,28 @@ function isPrivateIp(ip: string): boolean {
   if (/^f[cd][0-9a-f]{0,3}:/i.test(ip)) return true;
   if (/^fe[89a-b][0-9a-f]:/i.test(ip)) return true;
   if (/^::$/.test(ip)) return true;
+  // IPv6-mapped IPv4 — handle both dot-decimal and hex forms
+  // Node.js URL constructor normalizes ::ffff:127.0.0.1 to ::ffff:7f00:1
+  if (/^::ffff:/i.test(ip)) {
+    const embedded = ip.replace(/^::ffff:/i, '');
+    // Dot-decimal: ::ffff:127.0.0.1
+    if (/^\d+\.\d+\.\d+\.\d+$/.test(embedded)) return isPrivateIp(embedded);
+    // Hex form: ::ffff:7f00:1 — parse back to dotted decimal
+    const parts = embedded.split(':');
+    if (parts.length === 2) {
+      const hexStr = parts.map((p: string) => p.padStart(4, '0')).join('');
+      const val = parseInt(hexStr, 16);
+      if (!isNaN(val)) {
+        const decoded = [
+          (val >>> 24) & 0xff,
+          (val >>> 16) & 0xff,
+          (val >>> 8) & 0xff,
+          val & 0xff,
+        ].join('.');
+        return isPrivateIp(decoded);
+      }
+    }
+  }
   return false;
 }
 
@@ -90,9 +112,8 @@ function isExternalUrl(url: string): boolean {
     if (hostname === 'localhost' || hostname === '::1') return false;
     if (/^127\.\d+\.\d+\.\d+$/.test(hostname)) return false;
     if (/^0\.0\.0\.0$/.test(hostname)) return false;
-    if (/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.test(hostname)) {
-      const ipv4 = hostname.replace(/^::ffff:/i, '');
-      if (isPrivateIp(ipv4)) return false;
+    if (/^::ffff:/i.test(hostname)) {
+      if (isPrivateIp(hostname)) return false;
     }
     if (/^10\.\d+\.\d+\.\d+$/.test(hostname)) return false;
     if (/^172\.(1[6-9]|2\d|3[01])\.\d+\.\d+$/.test(hostname)) return false;
@@ -119,7 +140,7 @@ function isExternalUrl(url: string): boolean {
  */
 async function resolveIsExternal(hostname: string): Promise<boolean> {
   // Skip DNS for literal IP addresses — already validated by isExternalUrl.
-  if (/^[\d.]+$/.test(hostname) || /^[0-9a-f:]+$/i.test(hostname) || hostname.startsWith('[')) {
+  if (/^[\d.]+$/.test(hostname) || (/^[0-9a-f:]+$/i.test(hostname) && hostname.includes(':')) || hostname.startsWith('[')) {
     return true;
   }
   let safe = true;
