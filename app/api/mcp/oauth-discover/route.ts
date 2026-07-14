@@ -140,7 +140,7 @@ function isExternalUrl(url: string): boolean {
  */
 async function resolveIsExternal(hostname: string): Promise<boolean> {
   // Skip DNS for literal IP addresses — already validated by isExternalUrl.
-  if (/^[\d.]+$/.test(hostname) || /^[0-9a-f:]+$/i.test(hostname) || hostname.startsWith('[')) {
+  if (/^[\d.]+$/.test(hostname) || (/^[0-9a-f:]+$/i.test(hostname) && hostname.includes(':')) || hostname.startsWith('[')) {
     return true;
   }
   let safe = true;
