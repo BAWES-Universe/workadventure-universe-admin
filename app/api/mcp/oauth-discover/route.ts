@@ -270,8 +270,12 @@ function extractOAuthMetadata(body: Record<string, unknown>): OAuthMetadata | nu
  * Returns the URL to fetch for OAuth authorization server metadata, or null.
  */
 function parseWwwAuthenticate(header: string): string | null {
-  // Try resource_metadata first (RFC 9728 — protected resource metadata)
-  let resourceMatch = header.match(/resource_metadata="([^"]+)"/);
+  // Try resource_metadata first (RFC 9728 — protected resource metadata).
+  // Anchor with (?:^|[\\s,]) to avoid matching inside another param value
+  // (e.g. `realm="resource_metadata=..."`) or a differently-named param.
+  // Allow optional whitespace around `=` and match case-insensitively
+  // (HTTP header names are case-insensitive per RFC 7230).
+  let resourceMatch = header.match(/(?:^|[\s,])resource_metadata\s*=\s*"([^"]+)"/i);
   if (resourceMatch) {
     return resourceMatch[1];
   }
@@ -279,7 +283,7 @@ function parseWwwAuthenticate(header: string): string | null {
   // Some MCP servers omit quotes around the URL.
   // Use [^\s,] to stop at whitespace or comma (RFC param separator),
   // avoiding capture of subsequent params like `, realm="api"`.
-  resourceMatch = header.match(/resource_metadata=([^\s,]+)/);
+  resourceMatch = header.match(/(?:^|[\s,])resource_metadata\s*=\s*([^\s,]+)/i);
   if (resourceMatch) {
     return resourceMatch[1];
   }
