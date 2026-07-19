@@ -276,8 +276,10 @@ function parseWwwAuthenticate(header: string): string | null {
     return resourceMatch[1];
   }
 
-  // Some MCP servers omit quotes around the URL
-  resourceMatch = header.match(/resource_metadata=(\S+)/);
+  // Some MCP servers omit quotes around the URL.
+  // Use [^\s,] to stop at whitespace or comma (RFC param separator),
+  // avoiding capture of subsequent params like `, realm="api"`.
+  resourceMatch = header.match(/resource_metadata=([^\s,]+)/);
   if (resourceMatch) {
     return resourceMatch[1];
   }
