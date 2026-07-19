@@ -271,7 +271,13 @@ function extractOAuthMetadata(body: Record<string, unknown>): OAuthMetadata | nu
  */
 function parseWwwAuthenticate(header: string): string | null {
   // Try resource_metadata first (RFC 9728 — protected resource metadata)
-  const resourceMatch = header.match(/resource_metadata="([^"]+)"/);
+  let resourceMatch = header.match(/resource_metadata="([^"]+)"/);
+  if (resourceMatch) {
+    return resourceMatch[1];
+  }
+
+  // Some MCP servers omit quotes around the URL
+  resourceMatch = header.match(/resource_metadata=(\S+)/);
   if (resourceMatch) {
     return resourceMatch[1];
   }
