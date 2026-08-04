@@ -12,6 +12,12 @@ import Link from 'next/link';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 import {
+  fromVisionMode,
+  isVisionCapableModel,
+  toVisionMode,
+  type VisionSupportMode,
+} from '@/lib/vision-models';
+import {
   AlertDialog,
   AlertDialogAction,
   AlertDialogCancel,
@@ -49,6 +55,7 @@ export default function EditProviderPage({ params }: { params: Promise<{ id: str
     temperature: '0.7',
     maxTokens: '500',
     supportsStreaming: true,
+    supportsVision: 'auto' as VisionSupportMode,
   });
 
   useEffect(() => {
@@ -91,6 +98,7 @@ export default function EditProviderPage({ params }: { params: Promise<{ id: str
         temperature: provider.temperature?.toString() || '0.7',
         maxTokens: provider.maxTokens?.toString() || '500',
         supportsStreaming: provider.supportsStreaming ?? true,
+        supportsVision: toVisionMode(provider.supportsVision),
       });
       setError(null);
     } catch (err) {
@@ -116,6 +124,7 @@ export default function EditProviderPage({ params }: { params: Promise<{ id: str
         temperature: formData.temperature ? parseFloat(formData.temperature) : 0.7,
         maxTokens: formData.maxTokens ? parseInt(formData.maxTokens) : 500,
         supportsStreaming: formData.supportsStreaming,
+        supportsVision: fromVisionMode(formData.supportsVision),
       };
 
       // Only include API key if user provided a new one
@@ -268,6 +277,40 @@ export default function EditProviderPage({ params }: { params: Promise<{ id: str
                   value={formData.model}
                   onChange={(e) => setFormData({ ...formData, model: e.target.value })}
                 />
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="supportsVision">Vision support</Label>
+                <Select
+                  value={formData.supportsVision}
+                  onValueChange={(value) =>
+                    setFormData({ ...formData, supportsVision: value as VisionSupportMode })
+                  }
+                >
+                  <SelectTrigger id="supportsVision">
+                    <SelectValue placeholder="Select vision support" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="auto">Auto (detect from model name)</SelectItem>
+                    <SelectItem value="vision">Force vision</SelectItem>
+                    <SelectItem value="text-only">Force text-only</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  {formData.supportsVision === 'auto' ? (
+                    isVisionCapableModel(formData.model) ? (
+                      <span className="text-emerald-600">
+                        ✓ Detected: vision-capable model
+                      </span>
+                    ) : (
+                      'Auto — unknown models default to text-only (safe)'
+                    )
+                  ) : formData.supportsVision === 'vision' ? (
+                    'Forced vision — override this only if the model name hides vision support (e.g. proxy-renamed models)'
+                  ) : (
+                    'Forced text-only — override this if the model name matches but the endpoint rejects images'
+                  )}
+                </p>
               </div>
 
               <div className="space-y-2">

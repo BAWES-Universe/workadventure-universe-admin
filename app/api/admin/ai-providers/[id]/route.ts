@@ -125,6 +125,9 @@ export async function PATCH(
     if (body.temperature !== undefined) updateData.temperature = body.temperature;
     if (body.maxTokens !== undefined) updateData.maxTokens = body.maxTokens;
     if (body.supportsStreaming !== undefined) updateData.supportsStreaming = body.supportsStreaming;
+    // Tri-state: null = auto-detect, true = force vision, false = force text-only
+    // Must use 'in' check so null (reset to auto) is persisted
+    if ('supportsVision' in body) updateData.supportsVision = body.supportsVision;
     if (body.settings !== undefined) updateData.settings = body.settings || {};
 
     // Handle API key encryption

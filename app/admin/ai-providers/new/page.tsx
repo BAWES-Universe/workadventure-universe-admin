@@ -11,6 +11,11 @@ import { AlertCircle, Loader2, ArrowLeft } from 'lucide-react';
 import Link from 'next/link';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
+import {
+  fromVisionMode,
+  isVisionCapableModel,
+  type VisionSupportMode,
+} from '@/lib/vision-models';
 
 const PROVIDER_TYPES = [
   { value: 'lmstudio', label: 'LMStudio' },
@@ -36,6 +41,7 @@ export default function NewProviderPage() {
     temperature: '0.7',
     maxTokens: '500',
     supportsStreaming: true,
+    supportsVision: 'auto' as VisionSupportMode,
   });
 
   async function handleSubmit(e: React.FormEvent) {
@@ -54,6 +60,7 @@ export default function NewProviderPage() {
           ...formData,
           temperature: formData.temperature ? parseFloat(formData.temperature) : 0.7,
           maxTokens: formData.maxTokens ? parseInt(formData.maxTokens) : 500,
+          supportsVision: fromVisionMode(formData.supportsVision),
         }),
       });
 
@@ -178,6 +185,40 @@ export default function NewProviderPage() {
                   onChange={(e) => setFormData({ ...formData, model: e.target.value })}
                   placeholder="e.g., gpt-4, claude-3-haiku"
                 />
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="supportsVision">Vision support</Label>
+                <Select
+                  value={formData.supportsVision}
+                  onValueChange={(value) =>
+                    setFormData({ ...formData, supportsVision: value as VisionSupportMode })
+                  }
+                >
+                  <SelectTrigger id="supportsVision">
+                    <SelectValue placeholder="Select vision support" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="auto">Auto (detect from model name)</SelectItem>
+                    <SelectItem value="vision">Force vision</SelectItem>
+                    <SelectItem value="text-only">Force text-only</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  {formData.supportsVision === 'auto' ? (
+                    isVisionCapableModel(formData.model) ? (
+                      <span className="text-emerald-600">
+                        ✓ Detected: vision-capable model
+                      </span>
+                    ) : (
+                      'Auto — unknown models default to text-only (safe)'
+                    )
+                  ) : formData.supportsVision === 'vision' ? (
+                    'Forced vision — override this only if the model name hides vision support (e.g. proxy-renamed models)'
+                  ) : (
+                    'Forced text-only — override this if the model name matches but the endpoint rejects images'
+                  )}
+                </p>
               </div>
 
               <div className="space-y-2">

@@ -45,6 +45,8 @@ const botConfigSchema = z.object({
   chatInstructions: z.string().optional().nullable(),
   movementInstructions: z.string().optional().nullable(),
   aiProviderRef: z.string().max(100, 'aiProviderRef must be at most 100 characters').optional().nullable(),
+  visionFallbackProviderRef: z.string().max(100, 'visionFallbackProviderRef must be at most 100 characters').optional().nullable(),
+  visionFallbackModel: z.string().max(255, 'visionFallbackModel must be at most 255 characters').optional().nullable(),
 });
 
 // Helper function to get user ID from various auth methods
@@ -363,6 +365,8 @@ export async function POST(request: NextRequest) {
       chatInstructions: validatedData.chatInstructions ?? null,
       movementInstructions: validatedData.movementInstructions ?? null,
       aiProviderRef: validatedData.aiProviderRef ?? null,
+      visionFallbackProviderRef: validatedData.visionFallbackProviderRef ?? null,
+      visionFallbackModel: validatedData.visionFallbackModel ?? null,
       updatedById: userId ?? null,
     };
 

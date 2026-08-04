@@ -63,6 +63,7 @@ export async function POST(request: NextRequest) {
       temperature,
       maxTokens,
       supportsStreaming = true,
+      supportsVision,
       settings = {},
     } = body;
 
@@ -104,6 +105,7 @@ export async function POST(request: NextRequest) {
         temperature: temperature !== undefined ? temperature : 0.7,
         maxTokens: maxTokens || 500,
         supportsStreaming,
+        supportsVision: supportsVision ?? null,
         settings: settings || {},
       },
     });

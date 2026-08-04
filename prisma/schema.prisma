@@ -401,6 +401,8 @@ model Bot {
   chatInstructions    String?  @map("chat_instructions")
   movementInstructions String?  @map("movement_instructions")
   aiProviderRef       String?  @map("ai_provider_ref") @db.VarChar(100)
+  visionFallbackProviderRef String? @map("vision_fallback_provider_ref") @db.VarChar(100)
+  visionFallbackModel String?  @map("vision_fallback_model") @db.VarChar(255)
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
   createdById         String?  @map("created_by_id")
@@ -448,6 +450,7 @@ model BotsAiProvider {
   temperature       Decimal? @db.Decimal(3, 2) @default(0.7)
   maxTokens         Int?     @map("max_tokens") @default(500)
   supportsStreaming Boolean  @default(true) @map("supports_streaming")
+  supportsVision    Boolean?  @map("supports_vision") // null=auto (regex), true=force vision, false=force text-only
   settings          Json?    @default("{}")
   tested            Boolean  @default(false)
   testedAt          DateTime? @map("tested_at")
