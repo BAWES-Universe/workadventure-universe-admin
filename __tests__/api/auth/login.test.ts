@@ -8,6 +8,13 @@ jest.mock('@/lib/oidc', () => ({
   validateAccessToken: jest.fn(),
 }));
 
+// Mock Redis-backed session store (not available in the test environment)
+jest.mock('@/lib/session-store', () => ({
+  sessionStore: {
+    createSession: jest.fn(async () => 'session-123'),
+  },
+}));
+
 // Mock Prisma
 jest.mock('@/lib/db', () => ({
   prisma: {
