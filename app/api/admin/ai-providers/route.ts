@@ -75,6 +75,18 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Validate supportsVision tri-state: null = auto-detect, true = force vision, false = force text-only
+    if (
+      supportsVision !== undefined &&
+      supportsVision !== null &&
+      typeof supportsVision !== 'boolean'
+    ) {
+      return NextResponse.json(
+        { error: 'supportsVision must be true, false, or null' },
+        { status: 400 }
+      );
+    }
+
     // Check if provider already exists
     const existing = await prisma.botsAiProvider.findUnique({
       where: { providerId },

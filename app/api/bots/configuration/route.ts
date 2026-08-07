@@ -45,8 +45,22 @@ const botConfigSchema = z.object({
   chatInstructions: z.string().optional().nullable(),
   movementInstructions: z.string().optional().nullable(),
   aiProviderRef: z.string().max(100, 'aiProviderRef must be at most 100 characters').optional().nullable(),
-  visionFallbackProviderRef: z.string().max(100, 'visionFallbackProviderRef must be at most 100 characters').optional().nullable(),
-  visionFallbackModel: z.string().max(255, 'visionFallbackModel must be at most 255 characters').optional().nullable(),
+  // Trim and normalize blank strings to null so persistence matches the null
+  // behavior expected by bot-config-helpers (blank fallback = no fallback)
+  visionFallbackProviderRef: z
+    .string()
+    .trim()
+    .max(100, 'visionFallbackProviderRef must be at most 100 characters')
+    .optional()
+    .nullable()
+    .transform((v) => v || null),
+  visionFallbackModel: z
+    .string()
+    .trim()
+    .max(255, 'visionFallbackModel must be at most 255 characters')
+    .optional()
+    .nullable()
+    .transform((v) => v || null),
 });
 
 // Helper function to get user ID from various auth methods
@@ -375,12 +389,21 @@ export async function POST(request: NextRequest) {
 
     if (validatedData.botId) {
       // Update existing bot
+      // Omitted vision fallback fields must NOT overwrite existing values;
+      // explicit null is the only way to clear them (undefined = Prisma "skip")
+      const updateData = {
+        ...data,
+        updatedAt: new Date(),
+        visionFallbackProviderRef:
+          'visionFallbackProviderRef' in body
+            ? data.visionFallbackProviderRef
+            : undefined,
+        visionFallbackModel:
+          'visionFallbackModel' in body ? data.visionFallbackModel : undefined,
+      };
       bot = await prisma.bot.update({
         where: { id: validatedData.botId },
-        data: {
-          ...data,
-          updatedAt: new Date(),
-        },
+        data: updateData,
         include: {
           room: {
             include: {
