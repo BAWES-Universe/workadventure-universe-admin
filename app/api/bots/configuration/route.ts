@@ -389,11 +389,17 @@ export async function POST(request: NextRequest) {
 
     if (validatedData.botId) {
       // Update existing bot
-      // Omitted vision fallback fields must NOT overwrite existing values;
+      // Omitted optional fields must NOT overwrite existing values;
       // explicit null is the only way to clear them (undefined = Prisma "skip")
       const updateData = {
         ...data,
         updatedAt: new Date(),
+        description: 'description' in body ? data.description : undefined,
+        chatInstructions:
+          'chatInstructions' in body ? data.chatInstructions : undefined,
+        movementInstructions:
+          'movementInstructions' in body ? data.movementInstructions : undefined,
+        aiProviderRef: 'aiProviderRef' in body ? data.aiProviderRef : undefined,
         visionFallbackProviderRef:
           'visionFallbackProviderRef' in body
             ? data.visionFallbackProviderRef

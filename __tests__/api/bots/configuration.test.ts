@@ -134,6 +134,51 @@ describe('/api/bots/configuration', () => {
       expect(data.visionFallbackModel).toBeUndefined();
     });
 
+    it('preserves legacy optional fields (description/chatInstructions/movementInstructions/aiProviderRef) when omitted', async () => {
+      const response = await POST(
+        configRequest({ ...validBody, botId: '00000000-0000-4000-8000-000000000001' })
+      );
+
+      expect(response.status).toBe(200);
+      const data = (prisma.bot.update as jest.Mock).mock.calls[0][0].data;
+      expect(data.description).toBeUndefined();
+      expect(data.chatInstructions).toBeUndefined();
+      expect(data.movementInstructions).toBeUndefined();
+      expect(data.aiProviderRef).toBeUndefined();
+    });
+
+    it('clears legacy optional fields on explicit null', async () => {
+      const response = await POST(
+        configRequest({
+          ...validBody,
+          botId: '00000000-0000-4000-8000-000000000001',
+          description: null,
+          aiProviderRef: null,
+        })
+      );
+
+      expect(response.status).toBe(200);
+      const data = (prisma.bot.update as jest.Mock).mock.calls[0][0].data;
+      expect(data.description).toBeNull();
+      expect(data.aiProviderRef).toBeNull();
+    });
+
+    it('persists provided legacy field values on update', async () => {
+      const response = await POST(
+        configRequest({
+          ...validBody,
+          botId: '00000000-0000-4000-8000-000000000001',
+          description: 'Updated description',
+          aiProviderRef: 'openai',
+        })
+      );
+
+      expect(response.status).toBe(200);
+      const data = (prisma.bot.update as jest.Mock).mock.calls[0][0].data;
+      expect(data.description).toBe('Updated description');
+      expect(data.aiProviderRef).toBe('openai');
+    });
+
     it('clears the setting on explicit null', async () => {
       const response = await POST(
         configRequest({
