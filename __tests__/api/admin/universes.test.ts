@@ -11,9 +11,14 @@ jest.mock('@/lib/db', () => ({
       create: jest.fn(),
       count: jest.fn(),
     },
+    favorite: {
+      groupBy: jest.fn(),
+    },
     user: {
       findUnique: jest.fn(),
     },
+    // Raw SQL used by the discover-scope aggregation path
+    $queryRaw: jest.fn(),
   },
 }));
 
@@ -45,6 +50,7 @@ describe('/api/admin/universes', () => {
 
       (prisma.universe.findMany as jest.Mock).mockResolvedValue(mockUniverses);
       (prisma.universe.count as jest.Mock).mockResolvedValue(1);
+      (prisma.favorite.groupBy as jest.Mock).mockResolvedValue([]);
 
       const request = new NextRequest('http://localhost:3333/api/admin/universes', {
         headers: {
