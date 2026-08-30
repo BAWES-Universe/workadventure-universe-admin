@@ -28,6 +28,8 @@ RUN rm -f next-env.d.ts || true
 # Accept NEXT_PUBLIC_PLAY_URL as build argument (with default fallback)
 ARG NEXT_PUBLIC_PLAY_URL=http://play.workadventure.localhost
 ENV NEXT_PUBLIC_PLAY_URL=$NEXT_PUBLIC_PLAY_URL
+ARG NEXT_PUBLIC_ALLOW_LEGACY_IFRAME_BOOTSTRAP=true
+ENV NEXT_PUBLIC_ALLOW_LEGACY_IFRAME_BOOTSTRAP=$NEXT_PUBLIC_ALLOW_LEGACY_IFRAME_BOOTSTRAP
 
 # DATABASE_URL is required during build for Prisma Client initialization
 # Use a dummy value since we're not connecting to a database during build
@@ -82,4 +84,3 @@ CMD ["npm", "start"]
 # Alternative: Use startup script to run migrations automatically before starting
 # Uncomment the line below and comment out the line above to enable automatic migrations
 # CMD ["sh", "scripts/start.sh"]
-

@@ -13,15 +13,12 @@ export async function POST(request: NextRequest) {
   // Get session ID and delete from store
   const sessionId = getSessionId(request);
   if (sessionId) {
-    // Only delete if it's a session ID (64 hex chars), not a token
-    if (sessionId.length === 64 && /^[0-9a-f]+$/.test(sessionId)) {
-      await sessionStore.deleteSession(sessionId);
-    }
+    await sessionStore.deleteSession(sessionId);
   }
   
   const response = NextResponse.json({ success: true });
   
-  // Clear session cookies
+  // Clear cookies used by earlier releases. V2 sessions are header-only.
   response.cookies.set('admin_session_id', '', {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
@@ -41,4 +38,3 @@ export async function POST(request: NextRequest) {
   
   return response;
 }
-

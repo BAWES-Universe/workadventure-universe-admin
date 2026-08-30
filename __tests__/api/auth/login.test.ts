@@ -11,7 +11,7 @@ jest.mock('@/lib/oidc', () => ({
 // Mock Redis-backed session store (not available in the test environment)
 jest.mock('@/lib/session-store', () => ({
   sessionStore: {
-    createSession: jest.fn(async () => 'session-123'),
+    createSession: jest.fn(async () => `orb_sess_v2_${'a'.repeat(64)}`),
   },
 }));
 
@@ -66,7 +66,9 @@ describe('/api/auth/login', () => {
     expect(response.status).toBe(200);
     expect(data.user).toBeDefined();
     expect(data.user.email).toBe('test@example.com');
-    expect(response.cookies.get('user_session')).toBeDefined();
+    expect(data.sessionId).toMatch(/^orb_sess_v2_[0-9a-f]{64}$/);
+    expect(data.sessionToken).toBeUndefined();
+    expect(response.cookies.get('user_session')?.value).toBe('');
   });
 
   it('should create new user if not exists', async () => {
@@ -140,4 +142,3 @@ describe('/api/auth/login', () => {
     expect(data.error).toContain('Access token required');
   });
 });
-
