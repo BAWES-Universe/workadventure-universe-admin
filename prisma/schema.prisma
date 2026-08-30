@@ -401,8 +401,6 @@ model Bot {
   chatInstructions    String?  @map("chat_instructions")
   movementInstructions String?  @map("movement_instructions")
   aiProviderRef       String?  @map("ai_provider_ref") @db.VarChar(100)
-  visionFallbackProviderRef String? @map("vision_fallback_provider_ref") @db.VarChar(100)
-  visionFallbackModel String?  @map("vision_fallback_model") @db.VarChar(255)
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
   createdById         String?  @map("created_by_id")
@@ -451,6 +449,8 @@ model BotsAiProvider {
   maxTokens         Int?     @map("max_tokens") @default(500)
   supportsStreaming Boolean  @default(true) @map("supports_streaming")
   supportsVision    Boolean?  @map("supports_vision") // null=auto (regex), true=force vision, false=force text-only
+  visionModel       String?   @map("vision_model") @db.VarChar(255) // model used when this provider describes images
+  defaultVision     Boolean   @default(false) @map("default_vision") // preferred vision provider when bots need image descriptions
   settings          Json?    @default("{}")
   tested            Boolean  @default(false)
   testedAt          DateTime? @map("tested_at")

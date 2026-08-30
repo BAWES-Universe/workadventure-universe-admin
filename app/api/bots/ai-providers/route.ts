@@ -55,6 +55,8 @@ export async function GET(request: NextRequest) {
         model: true,
         supportsStreaming: true,
         supportsVision: true,
+        visionModel: true,
+        defaultVision: true,
         // Do NOT return credentials or sensitive data
       },
       orderBy: {

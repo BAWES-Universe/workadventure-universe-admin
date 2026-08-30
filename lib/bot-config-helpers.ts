@@ -157,8 +157,6 @@ export async function transformBotToServerFormat(
     updatedAt: bot.updatedAt.toISOString(),
     // Always include these configuration fields - bot server needs them
     aiProviderRef: bot.aiProviderRef || null,
-    visionFallbackProviderRef: bot.visionFallbackProviderRef || null,
-    visionFallbackModel: bot.visionFallbackModel || null,
     chatInstructions: bot.chatInstructions || null,
     movementInstructions: bot.movementInstructions || null,
   };

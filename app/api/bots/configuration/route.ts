@@ -45,22 +45,6 @@ const botConfigSchema = z.object({
   chatInstructions: z.string().optional().nullable(),
   movementInstructions: z.string().optional().nullable(),
   aiProviderRef: z.string().max(100, 'aiProviderRef must be at most 100 characters').optional().nullable(),
-  // Trim and normalize blank strings to null so persistence matches the null
-  // behavior expected by bot-config-helpers (blank fallback = no fallback)
-  visionFallbackProviderRef: z
-    .string()
-    .trim()
-    .max(100, 'visionFallbackProviderRef must be at most 100 characters')
-    .optional()
-    .nullable()
-    .transform((v) => v || null),
-  visionFallbackModel: z
-    .string()
-    .trim()
-    .max(255, 'visionFallbackModel must be at most 255 characters')
-    .optional()
-    .nullable()
-    .transform((v) => v || null),
 });
 
 // Helper function to get user ID from various auth methods
@@ -379,8 +363,6 @@ export async function POST(request: NextRequest) {
       chatInstructions: validatedData.chatInstructions ?? null,
       movementInstructions: validatedData.movementInstructions ?? null,
       aiProviderRef: validatedData.aiProviderRef ?? null,
-      visionFallbackProviderRef: validatedData.visionFallbackProviderRef ?? null,
-      visionFallbackModel: validatedData.visionFallbackModel ?? null,
       updatedById: userId ?? null,
     };
 
@@ -400,12 +382,6 @@ export async function POST(request: NextRequest) {
         movementInstructions:
           'movementInstructions' in body ? data.movementInstructions : undefined,
         aiProviderRef: 'aiProviderRef' in body ? data.aiProviderRef : undefined,
-        visionFallbackProviderRef:
-          'visionFallbackProviderRef' in body
-            ? data.visionFallbackProviderRef
-            : undefined,
-        visionFallbackModel:
-          'visionFallbackModel' in body ? data.visionFallbackModel : undefined,
       };
       bot = await prisma.bot.update({
         where: { id: validatedData.botId },

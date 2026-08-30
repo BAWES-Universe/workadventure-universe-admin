@@ -53,6 +53,8 @@ export async function GET(
       maxTokens: provider.maxTokens,
       supportsStreaming: provider.supportsStreaming,
       supportsVision: provider.supportsVision, // null=auto, true=force vision, false=force text-only
+      visionModel: provider.visionModel,
+      defaultVision: provider.defaultVision,
       settings: provider.settings || {},
     });
   } catch (error: any) {

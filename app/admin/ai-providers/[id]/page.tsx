@@ -40,6 +40,8 @@ interface AiProvider {
   maxTokens: number | null;
   supportsStreaming: boolean;
   supportsVision: boolean | null;
+  visionModel: string | null;
+  defaultVision: boolean;
   settings: any;
   tested: boolean;
   testedAt: string | null;
@@ -257,6 +259,18 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
               <div>
                 <div className="text-sm font-medium text-muted-foreground">Model</div>
                 <div className="text-base">{provider.model}</div>
+              </div>
+            )}
+            {provider.visionModel && (
+              <div>
+                <div className="text-sm font-medium text-muted-foreground">Vision model</div>
+                <div className="text-base">{provider.visionModel}</div>
+              </div>
+            )}
+            {provider.defaultVision && (
+              <div>
+                <div className="text-sm font-medium text-muted-foreground">Default vision provider</div>
+                <div className="text-base text-emerald-600">Yes — used automatically to describe images</div>
               </div>
             )}
             {provider.temperature !== null && (

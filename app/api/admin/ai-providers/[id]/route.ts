@@ -136,6 +136,8 @@ export async function PATCH(
       }
       updateData.supportsVision = body.supportsVision;
     }
+    if (body.visionModel !== undefined) updateData.visionModel = body.visionModel || null;
+    if (body.defaultVision !== undefined) updateData.defaultVision = !!body.defaultVision;
     if (body.settings !== undefined) updateData.settings = body.settings || {};
 
     // Handle API key encryption

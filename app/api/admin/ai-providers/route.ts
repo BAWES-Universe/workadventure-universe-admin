@@ -64,6 +64,8 @@ export async function POST(request: NextRequest) {
       maxTokens,
       supportsStreaming = true,
       supportsVision,
+      visionModel,
+      defaultVision = false,
       settings = {},
     } = body;
 
@@ -118,6 +120,8 @@ export async function POST(request: NextRequest) {
         maxTokens: maxTokens || 500,
         supportsStreaming,
         supportsVision: supportsVision ?? null,
+        visionModel: visionModel || null,
+        defaultVision,
         settings: settings || {},
       },
     });

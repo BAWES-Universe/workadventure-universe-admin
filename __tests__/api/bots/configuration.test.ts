@@ -71,53 +71,29 @@ describe('/api/bots/configuration', () => {
     (prisma.bot.update as jest.Mock).mockResolvedValue({ id: 'bot-1', name: 'Test Bot' });
   });
 
-  describe('vision fallback normalization (create)', () => {
-    it('normalizes blank visionFallbackProviderRef/Model strings to null', async () => {
+  describe('legacy vision fallback fields (create)', () => {
+    it('ignores legacy visionFallbackProviderRef/Model fields — vision config is provider-level now', async () => {
       const response = await POST(
         configRequest({
           ...validBody,
-          visionFallbackProviderRef: '   ',
-          visionFallbackModel: '',
+          visionFallbackProviderRef: 'openai',
+          visionFallbackModel: 'gpt-4o',
         })
       );
 
       expect(response.status).toBe(201);
       const data = (prisma.bot.create as jest.Mock).mock.calls[0][0].data;
-      expect(data.visionFallbackProviderRef).toBeNull();
-      expect(data.visionFallbackModel).toBeNull();
+      expect(data.visionFallbackProviderRef).toBeUndefined();
+      expect(data.visionFallbackModel).toBeUndefined();
     });
 
-    it('trims and preserves non-blank values', async () => {
-      const response = await POST(
-        configRequest({
-          ...validBody,
-          visionFallbackProviderRef: '  openai  ',
-          visionFallbackModel: 'gpt-4o ',
-        })
-      );
-
-      expect(response.status).toBe(201);
-      const data = (prisma.bot.create as jest.Mock).mock.calls[0][0].data;
-      expect(data.visionFallbackProviderRef).toBe('openai');
-      expect(data.visionFallbackModel).toBe('gpt-4o');
-    });
-
-    it('persists null when the fields are omitted', async () => {
+    it('persists nothing extra when the legacy fields are omitted', async () => {
       const response = await POST(configRequest(validBody));
 
       expect(response.status).toBe(201);
       const data = (prisma.bot.create as jest.Mock).mock.calls[0][0].data;
-      expect(data.visionFallbackProviderRef).toBeNull();
-      expect(data.visionFallbackModel).toBeNull();
-    });
-
-    it('rejects non-string values for vision fallback fields', async () => {
-      const response = await POST(
-        configRequest({ ...validBody, visionFallbackProviderRef: 42 })
-      );
-
-      expect(response.status).toBe(400);
-      expect(prisma.bot.create).not.toHaveBeenCalled();
+      expect(data.visionFallbackProviderRef).toBeUndefined();
+      expect(data.visionFallbackModel).toBeUndefined();
     });
   });
 
@@ -179,23 +155,7 @@ describe('/api/bots/configuration', () => {
       expect(data.aiProviderRef).toBe('openai');
     });
 
-    it('clears the setting on explicit null', async () => {
-      const response = await POST(
-        configRequest({
-          ...validBody,
-          botId: '00000000-0000-4000-8000-000000000001',
-          visionFallbackProviderRef: null,
-          visionFallbackModel: null,
-        })
-      );
-
-      expect(response.status).toBe(200);
-      const data = (prisma.bot.update as jest.Mock).mock.calls[0][0].data;
-      expect(data.visionFallbackProviderRef).toBeNull();
-      expect(data.visionFallbackModel).toBeNull();
-    });
-
-    it('persists provided values on update', async () => {
+    it('ignores legacy vision fallback fields on update — vision config is provider-level now', async () => {
       const response = await POST(
         configRequest({
           ...validBody,
@@ -207,22 +167,7 @@ describe('/api/bots/configuration', () => {
 
       expect(response.status).toBe(200);
       const data = (prisma.bot.update as jest.Mock).mock.calls[0][0].data;
-      expect(data.visionFallbackProviderRef).toBe('openai');
-      expect(data.visionFallbackModel).toBe('gpt-4o');
-    });
-
-    it('normalizes blank strings to null on update too', async () => {
-      const response = await POST(
-        configRequest({
-          ...validBody,
-          botId: '00000000-0000-4000-8000-000000000001',
-          visionFallbackProviderRef: '   ',
-        })
-      );
-
-      expect(response.status).toBe(200);
-      const data = (prisma.bot.update as jest.Mock).mock.calls[0][0].data;
-      expect(data.visionFallbackProviderRef).toBeNull();
+      expect(data.visionFallbackProviderRef).toBeUndefined();
       expect(data.visionFallbackModel).toBeUndefined();
     });
   });

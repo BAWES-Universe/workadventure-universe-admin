@@ -11,6 +11,7 @@ import { AlertCircle, Loader2, ArrowLeft } from 'lucide-react';
 import Link from 'next/link';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
+import { Checkbox } from '@/components/ui/checkbox';
 import {
   fromVisionMode,
   isVisionCapableModel,
@@ -42,6 +43,8 @@ export default function NewProviderPage() {
     maxTokens: '500',
     supportsStreaming: true,
     supportsVision: 'auto' as VisionSupportMode,
+    visionModel: '',
+    defaultVision: false,
   });
 
   async function handleSubmit(e: React.FormEvent) {
@@ -61,6 +64,8 @@ export default function NewProviderPage() {
           temperature: formData.temperature ? parseFloat(formData.temperature) : 0.7,
           maxTokens: formData.maxTokens ? parseInt(formData.maxTokens) : 500,
           supportsVision: fromVisionMode(formData.supportsVision),
+          visionModel: formData.visionModel || null,
+          defaultVision: formData.defaultVision,
         }),
       });
 
@@ -218,6 +223,35 @@ export default function NewProviderPage() {
                   ) : (
                     'Forced text-only — override this if the model name matches but the endpoint rejects images'
                   )}
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="visionModel">Vision model</Label>
+                <Input
+                  id="visionModel"
+                  value={formData.visionModel}
+                  onChange={(e) => setFormData({ ...formData, visionModel: e.target.value })}
+                  placeholder="e.g., deepseek-v4-flash-vision-exp"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Model used when this provider describes images for bots. Leave empty to use the
+                  main model.
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <Checkbox
+                  id="defaultVision"
+                  checked={formData.defaultVision}
+                  onCheckedChange={(checked) =>
+                    setFormData({ ...formData, defaultVision: checked === true })
+                  }
+                />
+                <Label htmlFor="defaultVision">Default vision provider</Label>
+                <p className="text-xs text-muted-foreground">
+                  Bots whose main model can't see images automatically use this provider to describe
+                  them. Only one should be marked.
                 </p>
               </div>
 
