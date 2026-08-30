@@ -11,10 +11,9 @@ import { AlertCircle, Loader2, ArrowLeft, Trash2 } from 'lucide-react';
 import Link from 'next/link';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
-import { Checkbox } from '@/components/ui/checkbox';
+import { VisionConfigSection } from '../../components/VisionConfigSection';
 import {
   fromVisionMode,
-  isVisionCapableModel,
   toVisionMode,
   type VisionSupportMode,
 } from '@/lib/vision-models';
@@ -286,68 +285,15 @@ export default function EditProviderPage({ params }: { params: Promise<{ id: str
                 />
               </div>
 
-              <div className="space-y-2">
-                <Label htmlFor="supportsVision">Vision support</Label>
-                <Select
-                  value={formData.supportsVision}
-                  onValueChange={(value) =>
-                    setFormData({ ...formData, supportsVision: value as VisionSupportMode })
-                  }
-                >
-                  <SelectTrigger id="supportsVision">
-                    <SelectValue placeholder="Select vision support" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="auto">Auto (detect from model name)</SelectItem>
-                    <SelectItem value="vision">Force vision</SelectItem>
-                    <SelectItem value="text-only">Force text-only</SelectItem>
-                  </SelectContent>
-                </Select>
-                <p className="text-xs text-muted-foreground">
-                  {formData.supportsVision === 'auto' ? (
-                    isVisionCapableModel(formData.model) ? (
-                      <span className="text-emerald-600">
-                        ✓ Detected: vision-capable model
-                      </span>
-                    ) : (
-                      'Auto — unknown models default to text-only (safe)'
-                    )
-                  ) : formData.supportsVision === 'vision' ? (
-                    'Forced vision — override this only if the model name hides vision support (e.g. proxy-renamed models)'
-                  ) : (
-                    'Forced text-only — override this if the model name matches but the endpoint rejects images'
-                  )}
-                </p>
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="visionModel">Vision model</Label>
-                <Input
-                  id="visionModel"
-                  value={formData.visionModel}
-                  onChange={(e) => setFormData({ ...formData, visionModel: e.target.value })}
-                  placeholder="e.g., deepseek-v4-flash-vision-exp"
-                />
-                <p className="text-xs text-muted-foreground">
-                  Model used when this provider describes images for bots. Leave empty to use the
-                  main model.
-                </p>
-              </div>
-
-              <div className="flex items-center gap-2">
-                <Checkbox
-                  id="defaultVision"
-                  checked={formData.defaultVision}
-                  onCheckedChange={(checked) =>
-                    setFormData({ ...formData, defaultVision: checked === true })
-                  }
-                />
-                <Label htmlFor="defaultVision">Default vision provider</Label>
-                <p className="text-xs text-muted-foreground">
-                  Bots whose main model can't see images automatically use this provider to describe
-                  them. Only one should be marked.
-                </p>
-              </div>
+              <VisionConfigSection
+                value={{
+                  model: formData.model,
+                  supportsVision: formData.supportsVision,
+                  visionModel: formData.visionModel,
+                  defaultVision: formData.defaultVision,
+                }}
+                onChange={(patch) => setFormData({ ...formData, ...patch })}
+              />
 
               <div className="space-y-2">
                 <Label htmlFor="temperature">Temperature</Label>
