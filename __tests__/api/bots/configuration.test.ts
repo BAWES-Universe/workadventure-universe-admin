@@ -170,5 +170,39 @@ describe('/api/bots/configuration', () => {
       expect(data.visionFallbackProviderRef).toBeUndefined();
       expect(data.visionFallbackModel).toBeUndefined();
     });
+
+    it('preserves texture, enabled, and behaviorConfig when omitted from update', async () => {
+      const response = await POST(
+        configRequest({
+          ...validBody,
+          botId: '00000000-0000-4000-8000-000000000001',
+          // no characterTextureIds, no enabled, no behaviorConfig in body
+        })
+      );
+
+      expect(response.status).toBe(200);
+      const data = (prisma.bot.update as jest.Mock).mock.calls[0][0].data;
+      expect(data.characterTextureId).toBeUndefined();
+      expect(data.enabled).toBeUndefined();
+      expect(data.behaviorConfig).toBeUndefined();
+    });
+
+    it('clears texture on explicit empty array and applies provided enabled/behaviorConfig', async () => {
+      const response = await POST(
+        configRequest({
+          ...validBody,
+          botId: '00000000-0000-4000-8000-000000000001',
+          characterTextureIds: [],
+          enabled: false,
+          behaviorConfig: { assignedSpace: { center: { x: 5, y: 5 }, radius: 2 } },
+        })
+      );
+
+      expect(response.status).toBe(200);
+      const data = (prisma.bot.update as jest.Mock).mock.calls[0][0].data;
+      expect(data.characterTextureId).toBeNull();
+      expect(data.enabled).toBe(false);
+      expect(data.behaviorConfig.assignedSpace.radius).toBe(2);
+    });
   });
 });

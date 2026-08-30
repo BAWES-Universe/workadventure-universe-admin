@@ -376,6 +376,10 @@ export async function POST(request: NextRequest) {
       const updateData = {
         ...data,
         updatedAt: new Date(),
+        characterTextureId:
+          'characterTextureIds' in body ? data.characterTextureId : undefined,
+        enabled: 'enabled' in body ? data.enabled : undefined,
+        behaviorConfig: 'behaviorConfig' in body ? data.behaviorConfig : undefined,
         description: 'description' in body ? data.description : undefined,
         chatInstructions:
           'chatInstructions' in body ? data.chatInstructions : undefined,
