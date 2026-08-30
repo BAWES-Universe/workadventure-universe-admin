@@ -7,6 +7,7 @@ jest.mock('@/lib/db', () => ({
     bot: {
       create: jest.fn(),
       update: jest.fn(),
+      findUnique: jest.fn(),
     },
     user: {
       findFirst: jest.fn(),
@@ -69,6 +70,7 @@ describe('/api/bots/configuration', () => {
     jest.clearAllMocks();
     (prisma.bot.create as jest.Mock).mockResolvedValue({ id: 'bot-1', name: 'Test Bot' });
     (prisma.bot.update as jest.Mock).mockResolvedValue({ id: 'bot-1', name: 'Test Bot' });
+    (prisma.bot.findUnique as jest.Mock).mockResolvedValue({ behaviorConfig: null });
   });
 
   describe('legacy vision fallback fields (create)', () => {
@@ -203,6 +205,46 @@ describe('/api/bots/configuration', () => {
       expect(data.characterTextureId).toBeNull();
       expect(data.enabled).toBe(false);
       expect(data.behaviorConfig.assignedSpace.radius).toBe(2);
+    });
+
+    it('preserves existing assignedSpace when behaviorConfig omits it', async () => {
+      (prisma.bot.findUnique as jest.Mock).mockResolvedValueOnce({
+        behaviorConfig: {
+          assignedSpace: { center: { x: 9, y: 9 }, radius: 7 },
+          walkSpeed: 2,
+        },
+      });
+      const response = await POST(
+        configRequest({
+          ...validBody,
+          botId: '00000000-0000-4000-8000-000000000001',
+          behaviorConfig: { walkSpeed: 3 },
+        })
+      );
+
+      expect(response.status).toBe(200);
+      const data = (prisma.bot.update as jest.Mock).mock.calls[0][0].data;
+      expect(data.behaviorConfig.assignedSpace.radius).toBe(7); // preserved, not reset
+      expect(data.behaviorConfig.assignedSpace.center).toEqual({ x: 9, y: 9 });
+      expect(data.behaviorConfig.walkSpeed).toBe(3); // updated
+    });
+
+    it('applies explicit assignedSpace over the existing value', async () => {
+      (prisma.bot.findUnique as jest.Mock).mockResolvedValueOnce({
+        behaviorConfig: { assignedSpace: { center: { x: 9, y: 9 }, radius: 7 } },
+      });
+      const response = await POST(
+        configRequest({
+          ...validBody,
+          botId: '00000000-0000-4000-8000-000000000001',
+          behaviorConfig: { assignedSpace: { center: { x: 5, y: 5 }, radius: 2 } },
+        })
+      );
+
+      expect(response.status).toBe(200);
+      const data = (prisma.bot.update as jest.Mock).mock.calls[0][0].data;
+      expect(data.behaviorConfig.assignedSpace.radius).toBe(2);
+      expect(data.behaviorConfig.assignedSpace.center).toEqual({ x: 5, y: 5 });
     });
   });
 });
