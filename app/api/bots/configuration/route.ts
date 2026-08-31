@@ -339,6 +339,39 @@ export async function POST(request: NextRequest) {
         });
         return response;
       }
+
+      // IDOR guard: when updating an existing bot, the botId must belong to a
+      // room the user can manage. The roomUrl permission check above covers the
+      // DESTINATION room — without this, a user who manages room A could submit
+      // a botId from room B (CWE-639: authorization bypass via user-controlled
+      // key).
+      if (validatedData.botId) {
+        const existingBot = await prisma.bot.findUnique({
+          where: { id: validatedData.botId },
+          select: { roomId: true },
+        });
+        if (!existingBot) {
+          const response = NextResponse.json(
+            { error: 'Bot not found' },
+            { status: 404 }
+          );
+          Object.entries(corsHeaders()).forEach(([key, value]) => {
+            response.headers.set(key, value);
+          });
+          return response;
+        }
+        const hasExistingRoomPermission = await canManageBots(userId, existingBot.roomId);
+        if (!hasExistingRoomPermission) {
+          const response = NextResponse.json(
+            { error: 'You do not have permission to manage this bot' },
+            { status: 403 }
+          );
+          Object.entries(corsHeaders()).forEach(([key, value]) => {
+            response.headers.set(key, value);
+          });
+          return response;
+        }
+      }
     }
 
     // Prepare behaviorConfig with assignedSpace
