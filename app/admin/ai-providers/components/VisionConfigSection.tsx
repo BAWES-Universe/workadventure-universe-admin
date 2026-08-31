@@ -1,5 +1,6 @@
 'use client';
 
+import { useEffect } from 'react';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import {
@@ -41,6 +42,16 @@ export function VisionConfigSection({ value, onChange }: VisionConfigSectionProp
   const hasDescriptionModel = value.visionModel.trim().length > 0;
   const isVisionEligible = mainSeesImages || hasDescriptionModel;
   const descriptionModelNeeded = !mainSeesImages;
+
+  // A provider that can't see or describe images must never stay selected as
+  // the default vision provider. When eligibility flips to false, clear the
+  // flag in the form state so a save can't persist an inconsistent config
+  // (the checkbox is disabled but its value would otherwise survive).
+  useEffect(() => {
+    if (!isVisionEligible && value.defaultVision) {
+      onChange({ defaultVision: false });
+    }
+  }, [isVisionEligible, value.defaultVision, onChange]);
 
   return (
     <div className="space-y-4 rounded-lg border p-4">

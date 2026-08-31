@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { encryptApiKey } from '@/lib/encryption';
+import { isVisionEligible } from '@/lib/vision-models';
 
 /**
  * GET /api/admin/ai-providers/:id
@@ -137,8 +138,48 @@ export async function PATCH(
       updateData.supportsVision = body.supportsVision;
     }
     if (body.visionModel !== undefined) updateData.visionModel = body.visionModel || null;
-    if (body.defaultVision !== undefined) updateData.defaultVision = !!body.defaultVision;
+    // Strict boolean validation: a non-empty string like "false" is truthy and
+    // would silently select this provider as the default vision provider.
+    if (body.defaultVision !== undefined) {
+      if (typeof body.defaultVision !== 'boolean') {
+        return NextResponse.json(
+          { error: 'defaultVision must be a boolean' },
+          { status: 400 }
+        );
+      }
+      updateData.defaultVision = body.defaultVision;
+    }
     if (body.settings !== undefined) updateData.settings = body.settings || {};
+
+    // Invariant: defaultVision can only be true for a vision-eligible provider.
+    // Compute the merged eligibility (existing record + this request's changes)
+    // and either reject an explicit ineligible selection or clear a stale one.
+    const mergedModel = updateData.model !== undefined ? updateData.model : existing.model;
+    const mergedSupportsVision =
+      'supportsVision' in body ? updateData.supportsVision : existing.supportsVision;
+    const mergedVisionModel =
+      updateData.visionModel !== undefined ? updateData.visionModel : existing.visionModel;
+    const willBeEligible = isVisionEligible(
+      mergedModel ?? '',
+      mergedSupportsVision,
+      mergedVisionModel
+    );
+    const requestedDefault = body.defaultVision;
+    if (requestedDefault === true && !willBeEligible) {
+      return NextResponse.json(
+        { error: 'Cannot set defaultVision on a provider that is not vision-eligible' },
+        { status: 400 }
+      );
+    }
+    if (
+      !willBeEligible &&
+      existing.defaultVision &&
+      requestedDefault === undefined
+    ) {
+      // The provider lost eligibility in this request while still being the
+      // default — clear it so the config can never point at an ineligible provider.
+      updateData.defaultVision = false;
+    }
 
     // Handle API key encryption
     // If apiKey is provided and not empty, encrypt it

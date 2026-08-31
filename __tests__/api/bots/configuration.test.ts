@@ -1,6 +1,8 @@
 import { NextRequest } from 'next/server';
 import { POST } from '@/app/api/bots/configuration/route';
 import { prisma } from '@/lib/db';
+import { getSessionUser } from '@/lib/auth-session';
+import { canManageBots } from '@/lib/bot-permissions';
 
 jest.mock('@/lib/db', () => ({
   prisma: {
@@ -245,6 +247,60 @@ describe('/api/bots/configuration', () => {
       const data = (prisma.bot.update as jest.Mock).mock.calls[0][0].data;
       expect(data.behaviorConfig.assignedSpace.radius).toBe(2);
       expect(data.behaviorConfig.assignedSpace.center).toEqual({ x: 5, y: 5 });
+    });
+  });
+
+  describe('IDOR guard — cross-room bot update (session user path)', () => {
+    const botId = '00000000-0000-4000-8000-000000000002';
+
+    beforeEach(() => {
+      // Force the session-user auth path (not admin token): getSessionUser
+      // returns a user, so userId is set and isAdminToken is false.
+      (getSessionUser as jest.Mock).mockResolvedValue({
+        id: 'user-1',
+        email: 'user@bawes.net',
+      });
+      (canManageBots as jest.Mock).mockResolvedValue(true);
+    });
+
+    it('rejects updating a bot from a room the user cannot manage (403)', async () => {
+      // Destination room (room-123) is authorized; the bot actually lives in
+      // room-999 which the user does NOT manage → IDOR attempt must fail.
+      (prisma.bot.findUnique as jest.Mock).mockResolvedValueOnce({ roomId: 'room-999' });
+      (canManageBots as jest.Mock)
+        .mockResolvedValueOnce(true) // destination room check
+        .mockResolvedValueOnce(false); // existing room check
+
+      const response = await POST(
+        configRequest({ ...validBody, botId })
+      );
+
+      expect(response.status).toBe(403);
+      const data = await response.json();
+      expect(data.error).toContain('permission');
+      expect(prisma.bot.update).not.toHaveBeenCalled();
+    });
+
+    it('rejects when the bot does not exist (404)', async () => {
+      (prisma.bot.findUnique as jest.Mock).mockResolvedValueOnce(null);
+
+      const response = await POST(
+        configRequest({ ...validBody, botId })
+      );
+
+      expect(response.status).toBe(404);
+      expect(prisma.bot.update).not.toHaveBeenCalled();
+    });
+
+    it('allows updating a bot that lives in the same authorized room', async () => {
+      (prisma.bot.findUnique as jest.Mock).mockResolvedValueOnce({ roomId: 'room-123' });
+
+      const response = await POST(
+        configRequest({ ...validBody, botId })
+      );
+
+      expect(response.status).toBe(200);
+      expect(prisma.bot.update).toHaveBeenCalled();
     });
   });
 });

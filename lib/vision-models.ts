@@ -42,3 +42,16 @@ export function resolveVisionSupport(
   if (supportsVision === false) return false;
   return isVisionCapableModel(model || '');
 }
+
+/**
+ * Whether a provider is vision-eligible (can see images directly or has a
+ * declared image-description model). Shared by the provider editor UI and the
+ * admin API so `defaultVision` can never point at an ineligible provider.
+ */
+export function isVisionEligible(
+  model: string,
+  supportsVision: boolean | null | undefined,
+  visionModel: string | null | undefined
+): boolean {
+  return resolveVisionSupport(model, supportsVision) || !!visionModel?.trim();
+}

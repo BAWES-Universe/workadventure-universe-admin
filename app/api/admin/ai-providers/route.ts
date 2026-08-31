@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { encryptApiKey } from '@/lib/encryption';
+import { isVisionEligible } from '@/lib/vision-models';
 
 /**
  * GET /api/admin/ai-providers
@@ -98,6 +99,26 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         { error: 'Provider with this ID already exists' },
         { status: 409 }
+      );
+    }
+
+    // Strict boolean validation: a non-empty string like "false" is truthy and
+    // would silently select this provider as the default vision provider.
+    if (defaultVision !== undefined && typeof defaultVision !== 'boolean') {
+      return NextResponse.json(
+        { error: 'defaultVision must be a boolean' },
+        { status: 400 }
+      );
+    }
+
+    // Invariant: defaultVision can only be true for a vision-eligible provider.
+    if (
+      defaultVision === true &&
+      !isVisionEligible(model ?? '', supportsVision ?? null, visionModel ?? null)
+    ) {
+      return NextResponse.json(
+        { error: 'Cannot set defaultVision on a provider that is not vision-eligible' },
+        { status: 400 }
       );
     }
 
