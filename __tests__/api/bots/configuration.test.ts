@@ -175,7 +175,16 @@ describe('/api/bots/configuration', () => {
       expect(data.visionFallbackModel).toBeUndefined();
     });
 
-    it('preserves texture, enabled, and behaviorConfig when omitted from update', async () => {
+    it('preserves texture, enabled, and behaviorConfig values when omitted from update', async () => {
+      // Existing config must survive: merge keeps stored keys (walkSpeed,
+      // assignedSpace) while syncing the embedded behaviorType to the scalar.
+      (prisma.bot.findUnique as jest.Mock).mockResolvedValueOnce({
+        behaviorConfig: {
+          behaviorType: 'idle',
+          walkSpeed: 2,
+          assignedSpace: { center: { x: 9, y: 9 }, radius: 7 },
+        },
+      });
       const response = await POST(
         configRequest({
           ...validBody,
@@ -188,7 +197,35 @@ describe('/api/bots/configuration', () => {
       const data = (prisma.bot.update as jest.Mock).mock.calls[0][0].data;
       expect(data.characterTextureId).toBeUndefined();
       expect(data.enabled).toBeUndefined();
-      expect(data.behaviorConfig).toBeUndefined();
+      // Omitted behaviorConfig is merged, not reset: stored keys preserved
+      expect(data.behaviorConfig.walkSpeed).toBe(2);
+      expect(data.behaviorConfig.assignedSpace).toEqual({ center: { x: 9, y: 9 }, radius: 7 });
+      expect(data.behaviorConfig.behaviorType).toBe('idle'); // synced to scalar
+    });
+
+    it('syncs embedded behaviorConfig.behaviorType when behaviorType changes without behaviorConfig in the body', async () => {
+      // Scalar behaviorType is required, so it is always written — the JSON
+      // copy must follow or GET returns a divergent behavior type.
+      (prisma.bot.findUnique as jest.Mock).mockResolvedValueOnce({
+        behaviorConfig: {
+          behaviorType: 'idle',
+          walkSpeed: 2,
+          assignedSpace: { center: { x: 9, y: 9 }, radius: 7 },
+        },
+      });
+      const response = await POST(
+        configRequest({
+          ...validBody,
+          behaviorType: 'patrol', // changed scalar, NO behaviorConfig in body
+          botId: '00000000-0000-4000-8000-000000000001',
+        })
+      );
+
+      expect(response.status).toBe(200);
+      const data = (prisma.bot.update as jest.Mock).mock.calls[0][0].data;
+      expect(data.behaviorConfig.behaviorType).toBe('patrol'); // follows the scalar
+      expect(data.behaviorConfig.walkSpeed).toBe(2); // existing keys preserved
+      expect(data.behaviorConfig.assignedSpace).toEqual({ center: { x: 9, y: 9 }, radius: 7 });
     });
 
     it('clears texture on explicit empty array and applies provided enabled/behaviorConfig', async () => {

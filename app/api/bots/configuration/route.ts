@@ -420,12 +420,14 @@ export async function POST(request: NextRequest) {
           'movementInstructions' in body ? data.movementInstructions : undefined,
         aiProviderRef: 'aiProviderRef' in body ? data.aiProviderRef : undefined,
       };
-      // A behaviorConfig present in the body but WITHOUT assignedSpace must not
-      // reset the bot's room assignment. Prisma replaces JSON columns wholesale,
-      // so merge the provided config over the EXISTING one — keeping the current
-      // assignedSpace (and any other unmentioned keys) unless the request
-      // explicitly supplies a new assignedSpace.
-      if ('behaviorConfig' in body) {
+      // behaviorConfig merge (always, not only when provided): the JSON
+      // embeds behaviorType (required by the schema, always present in the
+      // request) — if we only merged when behaviorConfig was supplied, a
+      // request that changes behaviorType without behaviorConfig would leave
+      // the stored JSON's embedded behaviorType stale (divergent from the
+      // scalar column). Provided config still merges over the existing one;
+      // assignedSpace is preserved unless the request explicitly supplies it.
+      {
         const existing = await prisma.bot.findUnique({
           where: { id: validatedData.botId },
           select: { behaviorConfig: true },
