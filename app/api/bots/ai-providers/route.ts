@@ -52,7 +52,11 @@ export async function GET(request: NextRequest) {
         name: true,
         type: true,
         enabled: true,
+        model: true,
         supportsStreaming: true,
+        supportsVision: true,
+        visionModel: true,
+        defaultVision: true,
         // Do NOT return credentials or sensitive data
       },
       orderBy: {
