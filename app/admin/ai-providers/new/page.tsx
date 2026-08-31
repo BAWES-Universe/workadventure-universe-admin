@@ -11,6 +11,11 @@ import { AlertCircle, Loader2, ArrowLeft } from 'lucide-react';
 import Link from 'next/link';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
+import { VisionConfigSection } from '../components/VisionConfigSection';
+import {
+  fromVisionMode,
+  type VisionSupportMode,
+} from '@/lib/vision-models';
 
 const PROVIDER_TYPES = [
   { value: 'lmstudio', label: 'LMStudio' },
@@ -36,6 +41,9 @@ export default function NewProviderPage() {
     temperature: '0.7',
     maxTokens: '500',
     supportsStreaming: true,
+    supportsVision: 'auto' as VisionSupportMode,
+    visionModel: '',
+    defaultVision: false,
   });
 
   async function handleSubmit(e: React.FormEvent) {
@@ -54,6 +62,9 @@ export default function NewProviderPage() {
           ...formData,
           temperature: formData.temperature ? parseFloat(formData.temperature) : 0.7,
           maxTokens: formData.maxTokens ? parseInt(formData.maxTokens) : 500,
+          supportsVision: fromVisionMode(formData.supportsVision),
+          visionModel: formData.visionModel || null,
+          defaultVision: formData.defaultVision,
         }),
       });
 
@@ -179,6 +190,16 @@ export default function NewProviderPage() {
                   placeholder="e.g., gpt-4, claude-3-haiku"
                 />
               </div>
+
+              <VisionConfigSection
+                value={{
+                  model: formData.model,
+                  supportsVision: formData.supportsVision,
+                  visionModel: formData.visionModel,
+                  defaultVision: formData.defaultVision,
+                }}
+                onChange={(patch) => setFormData({ ...formData, ...patch })}
+              />
 
               <div className="space-y-2">
                 <Label htmlFor="temperature">Temperature</Label>

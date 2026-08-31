@@ -125,6 +125,19 @@ export async function PATCH(
     if (body.temperature !== undefined) updateData.temperature = body.temperature;
     if (body.maxTokens !== undefined) updateData.maxTokens = body.maxTokens;
     if (body.supportsStreaming !== undefined) updateData.supportsStreaming = body.supportsStreaming;
+    // Tri-state: null = auto-detect, true = force vision, false = force text-only
+    // Must use 'in' check so null (reset to auto) is persisted
+    if ('supportsVision' in body) {
+      if (body.supportsVision !== null && typeof body.supportsVision !== 'boolean') {
+        return NextResponse.json(
+          { error: 'supportsVision must be true, false, or null' },
+          { status: 400 }
+        );
+      }
+      updateData.supportsVision = body.supportsVision;
+    }
+    if (body.visionModel !== undefined) updateData.visionModel = body.visionModel || null;
+    if (body.defaultVision !== undefined) updateData.defaultVision = !!body.defaultVision;
     if (body.settings !== undefined) updateData.settings = body.settings || {};
 
     // Handle API key encryption

@@ -11,6 +11,12 @@ import { AlertCircle, Loader2, ArrowLeft, Trash2 } from 'lucide-react';
 import Link from 'next/link';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
+import { VisionConfigSection } from '../../components/VisionConfigSection';
+import {
+  fromVisionMode,
+  toVisionMode,
+  type VisionSupportMode,
+} from '@/lib/vision-models';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -49,6 +55,9 @@ export default function EditProviderPage({ params }: { params: Promise<{ id: str
     temperature: '0.7',
     maxTokens: '500',
     supportsStreaming: true,
+    supportsVision: 'auto' as VisionSupportMode,
+    visionModel: '',
+    defaultVision: false,
   });
 
   useEffect(() => {
@@ -91,6 +100,9 @@ export default function EditProviderPage({ params }: { params: Promise<{ id: str
         temperature: provider.temperature?.toString() || '0.7',
         maxTokens: provider.maxTokens?.toString() || '500',
         supportsStreaming: provider.supportsStreaming ?? true,
+        supportsVision: toVisionMode(provider.supportsVision),
+        visionModel: provider.visionModel || '',
+        defaultVision: provider.defaultVision || false,
       });
       setError(null);
     } catch (err) {
@@ -116,6 +128,9 @@ export default function EditProviderPage({ params }: { params: Promise<{ id: str
         temperature: formData.temperature ? parseFloat(formData.temperature) : 0.7,
         maxTokens: formData.maxTokens ? parseInt(formData.maxTokens) : 500,
         supportsStreaming: formData.supportsStreaming,
+        supportsVision: fromVisionMode(formData.supportsVision),
+        visionModel: formData.visionModel || null,
+        defaultVision: formData.defaultVision,
       };
 
       // Only include API key if user provided a new one
@@ -269,6 +284,16 @@ export default function EditProviderPage({ params }: { params: Promise<{ id: str
                   onChange={(e) => setFormData({ ...formData, model: e.target.value })}
                 />
               </div>
+
+              <VisionConfigSection
+                value={{
+                  model: formData.model,
+                  supportsVision: formData.supportsVision,
+                  visionModel: formData.visionModel,
+                  defaultVision: formData.defaultVision,
+                }}
+                onChange={(patch) => setFormData({ ...formData, ...patch })}
+              />
 
               <div className="space-y-2">
                 <Label htmlFor="temperature">Temperature</Label>

@@ -63,6 +63,9 @@ export async function POST(request: NextRequest) {
       temperature,
       maxTokens,
       supportsStreaming = true,
+      supportsVision,
+      visionModel,
+      defaultVision = false,
       settings = {},
     } = body;
 
@@ -70,6 +73,18 @@ export async function POST(request: NextRequest) {
     if (!providerId || !name || !type) {
       return NextResponse.json(
         { error: 'providerId, name, and type are required' },
+        { status: 400 }
+      );
+    }
+
+    // Validate supportsVision tri-state: null = auto-detect, true = force vision, false = force text-only
+    if (
+      supportsVision !== undefined &&
+      supportsVision !== null &&
+      typeof supportsVision !== 'boolean'
+    ) {
+      return NextResponse.json(
+        { error: 'supportsVision must be true, false, or null' },
         { status: 400 }
       );
     }
@@ -104,6 +119,9 @@ export async function POST(request: NextRequest) {
         temperature: temperature !== undefined ? temperature : 0.7,
         maxTokens: maxTokens || 500,
         supportsStreaming,
+        supportsVision: supportsVision ?? null,
+        visionModel: visionModel || null,
+        defaultVision,
         settings: settings || {},
       },
     });
