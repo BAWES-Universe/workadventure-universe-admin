@@ -412,7 +412,9 @@ export async function POST(request: NextRequest) {
         characterTextureId:
           'characterTextureIds' in body ? data.characterTextureId : undefined,
         enabled: 'enabled' in body ? data.enabled : undefined,
-        behaviorConfig: 'behaviorConfig' in body ? data.behaviorConfig : undefined,
+        // NOTE: no behaviorConfig conditional here — the merge block below
+        // unconditionally sets it (existing config + provided overrides +
+        // scalar behaviorType sync), so a conditional here would be dead code.
         description: 'description' in body ? data.description : undefined,
         chatInstructions:
           'chatInstructions' in body ? data.chatInstructions : undefined,
