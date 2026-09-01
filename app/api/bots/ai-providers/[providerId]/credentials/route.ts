@@ -52,6 +52,9 @@ export async function GET(
       temperature: provider.temperature ? Number(provider.temperature) : null,
       maxTokens: provider.maxTokens,
       supportsStreaming: provider.supportsStreaming,
+      supportsVision: provider.supportsVision, // null=auto, true=force vision, false=force text-only
+      visionModel: provider.visionModel,
+      defaultVision: provider.defaultVision,
       settings: provider.settings || {},
     });
   } catch (error: any) {

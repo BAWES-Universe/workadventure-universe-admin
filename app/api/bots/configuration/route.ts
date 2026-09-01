@@ -339,6 +339,39 @@ export async function POST(request: NextRequest) {
         });
         return response;
       }
+
+      // IDOR guard: when updating an existing bot, the botId must belong to a
+      // room the user can manage. The roomUrl permission check above covers the
+      // DESTINATION room — without this, a user who manages room A could submit
+      // a botId from room B (CWE-639: authorization bypass via user-controlled
+      // key).
+      if (validatedData.botId) {
+        const existingBot = await prisma.bot.findUnique({
+          where: { id: validatedData.botId },
+          select: { roomId: true },
+        });
+        if (!existingBot) {
+          const response = NextResponse.json(
+            { error: 'Bot not found' },
+            { status: 404 }
+          );
+          Object.entries(corsHeaders()).forEach(([key, value]) => {
+            response.headers.set(key, value);
+          });
+          return response;
+        }
+        const hasExistingRoomPermission = await canManageBots(userId, existingBot.roomId);
+        if (!hasExistingRoomPermission) {
+          const response = NextResponse.json(
+            { error: 'You do not have permission to manage this bot' },
+            { status: 403 }
+          );
+          Object.entries(corsHeaders()).forEach(([key, value]) => {
+            response.headers.set(key, value);
+          });
+          return response;
+        }
+      }
     }
 
     // Prepare behaviorConfig with assignedSpace
@@ -371,12 +404,50 @@ export async function POST(request: NextRequest) {
 
     if (validatedData.botId) {
       // Update existing bot
+      // Omitted optional fields must NOT overwrite existing values;
+      // explicit null is the only way to clear them (undefined = Prisma "skip")
+      const updateData = {
+        ...data,
+        updatedAt: new Date(),
+        characterTextureId:
+          'characterTextureIds' in body ? data.characterTextureId : undefined,
+        enabled: 'enabled' in body ? data.enabled : undefined,
+        // NOTE: no behaviorConfig conditional here — the merge block below
+        // unconditionally sets it (existing config + provided overrides +
+        // scalar behaviorType sync), so a conditional here would be dead code.
+        description: 'description' in body ? data.description : undefined,
+        chatInstructions:
+          'chatInstructions' in body ? data.chatInstructions : undefined,
+        movementInstructions:
+          'movementInstructions' in body ? data.movementInstructions : undefined,
+        aiProviderRef: 'aiProviderRef' in body ? data.aiProviderRef : undefined,
+      };
+      // behaviorConfig merge (always, not only when provided): the JSON
+      // embeds behaviorType (required by the schema, always present in the
+      // request) — if we only merged when behaviorConfig was supplied, a
+      // request that changes behaviorType without behaviorConfig would leave
+      // the stored JSON's embedded behaviorType stale (divergent from the
+      // scalar column). Provided config still merges over the existing one;
+      // assignedSpace is preserved unless the request explicitly supplies it.
+      {
+        const existing = await prisma.bot.findUnique({
+          where: { id: validatedData.botId },
+          select: { behaviorConfig: true },
+        });
+        const existingConfig = (existing?.behaviorConfig as Record<string, unknown> | null) || {};
+        const provided = (validatedData.behaviorConfig || {}) as Record<string, unknown>;
+        updateData.behaviorConfig = {
+          ...existingConfig,
+          ...provided,
+          behaviorType: validatedData.behaviorType,
+          assignedSpace:
+            provided.assignedSpace ??
+            existingConfig.assignedSpace ?? { center: { x: 0, y: 0 }, radius: 0 },
+        };
+      }
       bot = await prisma.bot.update({
         where: { id: validatedData.botId },
-        data: {
-          ...data,
-          updatedAt: new Date(),
-        },
+        data: updateData,
         include: {
           room: {
             include: {

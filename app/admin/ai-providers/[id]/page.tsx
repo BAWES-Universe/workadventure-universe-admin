@@ -8,6 +8,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { AlertCircle, Loader2, ArrowLeft, TestTube, Edit, CheckCircle2, XCircle } from 'lucide-react';
 import AuthLink from '@/app/admin/auth-link';
 import { Badge } from '@/components/ui/badge';
+import { isVisionCapableModel, resolveVisionSupport } from '@/lib/vision-models';
 
 interface Bot {
   id: string;
@@ -38,6 +39,9 @@ interface AiProvider {
   temperature: number | null;
   maxTokens: number | null;
   supportsStreaming: boolean;
+  supportsVision: boolean | null;
+  visionModel: string | null;
+  defaultVision: boolean;
   settings: any;
   tested: boolean;
   testedAt: string | null;
@@ -257,6 +261,18 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
                 <div className="text-base">{provider.model}</div>
               </div>
             )}
+            {provider.visionModel && (
+              <div>
+                <div className="text-sm font-medium text-muted-foreground">Vision model</div>
+                <div className="text-base">{provider.visionModel}</div>
+              </div>
+            )}
+            {provider.defaultVision && (
+              <div>
+                <div className="text-sm font-medium text-muted-foreground">Default vision provider</div>
+                <div className="text-base text-emerald-600">Yes — used automatically to describe images</div>
+              </div>
+            )}
             {provider.temperature !== null && (
               <div>
                 <div className="text-sm font-medium text-muted-foreground">Temperature</div>
@@ -273,6 +289,25 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
               <div className="text-sm font-medium text-muted-foreground">Supports Streaming</div>
               <div className="text-base">
                 {provider.supportsStreaming ? 'Yes' : 'No'}
+              </div>
+            </div>
+            <div>
+              <div className="text-sm font-medium text-muted-foreground">Vision</div>
+              <div className="text-base flex items-center gap-2">
+                {resolveVisionSupport(provider.model || '', provider.supportsVision) ? (
+                  <Badge variant="default">Vision-capable</Badge>
+                ) : (
+                  <Badge variant="secondary">Text-only</Badge>
+                )}
+                {provider.supportsVision === null ? (
+                  <span className="text-xs text-muted-foreground">
+                    (auto{provider.model && isVisionCapableModel(provider.model) ? ' — detected from model name' : ''})
+                  </span>
+                ) : (
+                  <span className="text-xs text-muted-foreground">
+                    (manually forced)
+                  </span>
+                )}
               </div>
             </div>
             <div>
