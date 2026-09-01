@@ -28,11 +28,18 @@ function sessionKey(sessionId: string): string {
 class SessionStore {
   private redisClient: RedisClient | null = null;
   private redisInitPromise: Promise<RedisClient | null> | null = null;
+  private lastRedisFailure: number | null = null;
+  private static readonly REDIS_RETRY_BACKOFF_MS = 5_000;
   private sessions = new Map<string, SessionData>();
 
   private async getRedisClient() {
     if (this.redisClient?.isReady) return this.redisClient;
     if (this.redisInitPromise) return this.redisInitPromise;
+    // Fail fast during a known outage instead of letting every concurrent
+    // request spawn its own connect attempt (retry storm against a down Redis).
+    if (this.lastRedisFailure && Date.now() - this.lastRedisFailure < SessionStore.REDIS_RETRY_BACKOFF_MS) {
+      throw new Error('Redis unavailable (recent connection failure)');
+    }
     this.redisInitPromise = (async () => {
       const redisUrl = process.env.REDIS_URL;
       if (!redisUrl) {
@@ -55,7 +62,15 @@ class SessionStore {
       }
       const client = redisClientModule.createClient({ url: redisUrl });
       client.on('error', (error: Error) => console.error('[SessionStore] Redis error:', error.message));
-      await client.connect();
+      try {
+        await client.connect();
+      } catch (error) {
+        this.lastRedisFailure = Date.now();
+        // Close the failed client so its background reconnect loop is not
+        // leaked; otherwise every failed attempt accumulates a retrying client.
+        await client.close().catch(() => undefined);
+        throw error;
+      }
       this.redisClient = client;
       return client;
     })();
