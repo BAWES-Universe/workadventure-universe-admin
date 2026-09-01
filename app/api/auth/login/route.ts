@@ -55,7 +55,7 @@ export async function POST(request: NextRequest) {
     });
     // Proactively erase legacy forgeable cookies during rollout.
     for (const cookieName of ['user_session', 'admin_session_id']) {
-      response.cookies.set(cookieName, '', { httpOnly: true, secure: true, sameSite: 'none', path: '/', maxAge: 0 });
+      response.cookies.set(cookieName, '', { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'none', path: '/', maxAge: 0 });
     }
     return response;
   } catch (error) {

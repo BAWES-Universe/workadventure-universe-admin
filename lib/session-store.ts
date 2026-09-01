@@ -42,6 +42,17 @@ class SessionStore {
         return null;
       }
       if (!redisClientModule) redisClientModule = await import('redis');
+      // Close any stale client that is no longer ready. node-redis keeps the
+      // old client reconnecting in the background, so replacing it without
+      // closing it would leak a live connection on every transient disconnect.
+      const staleClient = this.redisClient;
+      if (staleClient && !staleClient.isReady) {
+        try {
+          await staleClient.close();
+        } catch {
+          // already closed
+        }
+      }
       const client = redisClientModule.createClient({ url: redisUrl });
       client.on('error', (error: Error) => console.error('[SessionStore] Redis error:', error.message));
       await client.connect();
