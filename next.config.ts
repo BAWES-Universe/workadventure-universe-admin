@@ -1,5 +1,9 @@
 import type { NextConfig } from "next";
 import { withSentryConfig } from "@sentry/nextjs";
+import { getPlayOrigin } from "./lib/origin-policy";
+
+const playOrigin = getPlayOrigin();
+const frameAncestors = `frame-ancestors 'self' ${playOrigin};`;
 
 const nextConfig: NextConfig = {
   // Headers for security
@@ -62,7 +66,7 @@ const nextConfig: NextConfig = {
         headers: [
           {
             key: 'Content-Security-Policy',
-            value: "frame-ancestors 'self' http://play.workadventure.localhost https://play.workadventure.localhost http://play.bawes.localhost https://play.bawes.localhost http://play.bawes.net https://play.bawes.net *;",
+            value: frameAncestors,
           },
           // Explicitly remove X-Frame-Options by not setting it (Next.js won't add default if we define headers)
         ],
@@ -73,7 +77,7 @@ const nextConfig: NextConfig = {
         headers: [
           {
             key: 'Content-Security-Policy',
-            value: "frame-ancestors 'self' http://play.workadventure.localhost https://play.workadventure.localhost http://play.bawes.localhost https://play.bawes.localhost http://play.bawes.net https://play.bawes.net *;",
+            value: frameAncestors,
           },
         ],
       },

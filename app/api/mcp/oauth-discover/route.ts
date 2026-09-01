@@ -412,21 +412,6 @@ export async function GET(request: NextRequest) {
           isAuthenticated = true;
         }
       }
-      // Also check for session token query param (used by play server's BotApiService)
-      if (!isAuthenticated) {
-        const tokenParam = searchParams.get('_token');
-        if (tokenParam) {
-          // Validate the session token via getSessionUser with the token as a query param hint
-          // The token is already present in the URL, so try re-authentication
-          const retryUrl = new URL(request.url);
-          retryUrl.searchParams.set('_token', tokenParam);
-          const retryRequest = new NextRequest(retryUrl, request);
-          const retryUser = await getSessionUser(retryRequest);
-          if (retryUser) {
-            isAuthenticated = true;
-          }
-        }
-      }
     }
 
     if (!isAuthenticated) {

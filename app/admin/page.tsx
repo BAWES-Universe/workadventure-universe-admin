@@ -1,83 +1,17 @@
+'use client';
+
 import Link from 'next/link';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Globe, Users, FolderOpen, Home, Plus, MapPin } from 'lucide-react';
-import { prisma } from '@/lib/db';
 import { cn } from '@/lib/utils';
 import CurrentLocation from './components/current-location';
 import PendingInvitationsAlert from './components/pending-invitations-alert';
 import RecentlyVisited from './components/recently-visited';
+import { useAdminBootstrap } from './admin-bootstrap-context';
 
-async function getStats() {
-  const token = process.env.ADMIN_API_TOKEN;
-  // Use internal URL for server-side requests (avoid Traefik loop)
-  // In Docker, use localhost:3333 (Next.js dev server port, not Traefik port 8321)
-  const baseUrl = 'http://localhost:3333';
-  
-  try {
-    const [universes, worlds, rooms, users, defaultUniverse, defaultWorld, defaultRoom, systemUser] = await Promise.all([
-      fetch(`${baseUrl}/api/admin/universes?limit=1`, {
-        headers: { Authorization: `Bearer ${token}` },
-        cache: 'no-store',
-        // Add timeout to prevent hanging
-        signal: AbortSignal.timeout(5000),
-      }).then(r => r.json()).catch(() => ({ pagination: { total: 0 } })),
-      fetch(`${baseUrl}/api/admin/worlds?limit=1`, {
-        headers: { Authorization: `Bearer ${token}` },
-        cache: 'no-store',
-        signal: AbortSignal.timeout(5000),
-      }).then(r => r.json()).catch(() => ({ pagination: { total: 0 } })),
-      fetch(`${baseUrl}/api/admin/rooms?limit=1`, {
-        headers: { Authorization: `Bearer ${token}` },
-        cache: 'no-store',
-        signal: AbortSignal.timeout(5000),
-      }).then(r => r.json()).catch(() => ({ pagination: { total: 0 } })),
-      fetch(`${baseUrl}/api/admin/users?limit=1`, {
-        headers: { Authorization: `Bearer ${token}` },
-        cache: 'no-store',
-        signal: AbortSignal.timeout(5000),
-      }).then(r => r.json()).catch(() => ({ pagination: { total: 0 } })),
-      // Check if default/default/default items exist
-      prisma.universe.findUnique({ where: { slug: 'default' } }).catch(() => null),
-      prisma.world.findFirst({
-        where: {
-          slug: 'default',
-          universe: { slug: 'default' },
-        },
-      }).catch(() => null),
-      prisma.room.findFirst({
-        where: {
-          slug: 'default',
-          world: {
-            slug: 'default',
-            universe: { slug: 'default' },
-          },
-        },
-      }).catch(() => null),
-      prisma.user.findUnique({ where: { email: 'system@workadventure.local' } }).catch(() => null),
-    ]);
-    
-    const universeTotal = universes.pagination?.total || 0;
-    const worldTotal = worlds.pagination?.total || 0;
-    const roomTotal = rooms.pagination?.total || 0;
-    const userTotal = users.pagination?.total || 0;
-    
-    // Subtract 1 from each count if the default items exist
-    return {
-      universes: Math.max(0, universeTotal - (defaultUniverse ? 1 : 0)),
-      worlds: Math.max(0, worldTotal - (defaultWorld ? 1 : 0)),
-      rooms: Math.max(0, roomTotal - (defaultRoom ? 1 : 0)),
-      users: Math.max(0, userTotal - (systemUser ? 1 : 0)),
-    };
-  } catch (error) {
-    console.error('Error fetching stats:', error);
-    return { universes: 0, worlds: 0, rooms: 0, users: 0 };
-  }
-}
-
-
-export default async function AdminDashboard() {
-  const stats = await getStats();
+export default function AdminDashboard() {
+  const { stats } = useAdminBootstrap();
   
   return (
     <div className="space-y-8">
