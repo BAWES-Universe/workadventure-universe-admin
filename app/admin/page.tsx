@@ -6,7 +6,6 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Button } from '@/components/ui/button';
 import { Globe, Users, FolderOpen, Home, Plus } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { Spinner } from '@/components/ui/spinner';
 import { authenticatedFetch } from '@/lib/client-auth';
 import CurrentLocation from './components/current-location';
 import PendingInvitationsAlert from './components/pending-invitations-alert';
@@ -29,16 +28,11 @@ export default function AdminDashboard() {
       <CurrentLocation />
 
       {/* Discover / onboarding section — wait for stats before choosing a state
-          so the zero-default empty card never flashes before data arrives */}
+          so the zero-default empty card never flashes before data arrives.
+          Deliberately no text: the login gate already shows "Loading your orbit..",
+          so a second loading label would be a visible regression. */}
       {stats === null ? (
-        <Card className="border-dashed">
-          <CardHeader className="text-center pb-4">
-            <div className="mx-auto mb-4 flex h-20 w-20 items-center justify-center rounded-full bg-muted">
-              <Spinner className="size-8 text-muted-foreground" />
-            </div>
-            <CardTitle className="text-2xl">Loading your orbit..</CardTitle>
-          </CardHeader>
-        </Card>
+        <div className="h-64 animate-pulse rounded-xl bg-muted/50" aria-hidden="true" />
       ) : stats.universes === 0 ? (
         <Card className="border-dashed">
           <CardHeader className="text-center pb-4">
