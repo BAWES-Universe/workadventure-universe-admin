@@ -6,18 +6,19 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Button } from '@/components/ui/button';
 import { Globe, Users, FolderOpen, Home, Plus } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { Spinner } from '@/components/ui/spinner';
 import { authenticatedFetch } from '@/lib/client-auth';
 import CurrentLocation from './components/current-location';
 import PendingInvitationsAlert from './components/pending-invitations-alert';
 import RecentlyVisited from './components/recently-visited';
 
 export default function AdminDashboard() {
-  const [stats, setStats] = useState({ universes: 0, worlds: 0, rooms: 0, users: 0 });
+  const [stats, setStats] = useState<{ universes: number; worlds: number; rooms: number; users: number } | null>(null);
   useEffect(() => {
     void authenticatedFetch('/api/admin/dashboard-stats')
       .then((response) => response.ok ? response.json() : Promise.reject(new Error('stats failed')))
       .then(setStats)
-      .catch(() => undefined);
+      .catch(() => setStats({ universes: 0, worlds: 0, rooms: 0, users: 0 }));
   }, []);
   
   return (
@@ -27,8 +28,18 @@ export default function AdminDashboard() {
       {/* Current location at the top */}
       <CurrentLocation />
 
-      {/* Discover / onboarding section */}
-      {stats.universes === 0 ? (
+      {/* Discover / onboarding section — wait for stats before choosing a state
+          so the zero-default empty card never flashes before data arrives */}
+      {stats === null ? (
+        <Card className="border-dashed">
+          <CardHeader className="text-center pb-4">
+            <div className="mx-auto mb-4 flex h-20 w-20 items-center justify-center rounded-full bg-muted">
+              <Spinner className="size-8 text-muted-foreground" />
+            </div>
+            <CardTitle className="text-2xl">Loading your orbit..</CardTitle>
+          </CardHeader>
+        </Card>
+      ) : stats.universes === 0 ? (
         <Card className="border-dashed">
           <CardHeader className="text-center pb-4">
             <div className="mx-auto mb-4 flex h-20 w-20 items-center justify-center rounded-full bg-muted">
