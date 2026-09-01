@@ -11,7 +11,6 @@ import { Spinner } from '@/components/ui/spinner';
 import { getClientSessionId, storeClientSession } from '@/lib/client-auth';
 
 const ENABLE_MANUAL_LOGIN = process.env.NEXT_PUBLIC_ENABLE_MANUAL_LOGIN === 'true';
-const ALLOW_LEGACY_BOOTSTRAP = process.env.NEXT_PUBLIC_ALLOW_LEGACY_IFRAME_BOOTSTRAP === 'true';
 const PLAY_ORIGIN = new URL(process.env.NEXT_PUBLIC_PLAY_URL || 'http://play.workadventure.localhost').origin;
 const LOGOUT_SUPPRESSION_KEY = 'orbit_auth_suppressed';
 
@@ -86,21 +85,7 @@ export default function LoginPage() {
         setLoading(false);
       });
     } else {
-      const legacyToken = new URL(window.location.href).searchParams.get('accessToken');
-      if (legacyToken && ALLOW_LEGACY_BOOTSTRAP) {
-        // Compatibility is limited to the OIDC bootstrap. Unsigned sessions stay rejected.
-        const cleanUrl = new URL(window.location.href);
-        cleanUrl.searchParams.delete('accessToken');
-        window.history.replaceState({}, '', `${cleanUrl.pathname}${cleanUrl.search}`);
-        queueMicrotask(() => {
-          void exchangeToken(legacyToken).catch((cause) => {
-            setError(cause instanceof Error ? cause.message : 'Login failed');
-            setLoading(false);
-          });
-        });
-      } else {
-        queueMicrotask(beginIframeHandshake);
-      }
+      queueMicrotask(beginIframeHandshake);
     }
     return () => window.removeEventListener('message', onMessage);
   }, [beginIframeHandshake, exchangeToken]);
