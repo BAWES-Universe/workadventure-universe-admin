@@ -10,14 +10,31 @@ function response(body: unknown, status = 200) {
   return result;
 }
 
+/**
+ * Fail fast in production: the login origin check must never silently fall back
+ * to request.nextUrl.origin (which is the internal proxy URL behind Coolify and
+ * would reject every same-origin login POST). Require a real configured origin.
+ * Dev/test keep the per-request nextUrl fallback for direct access.
+ */
+function loginExpectedOrigin(request: NextRequest): string {
+  const configured = process.env.NEXT_PUBLIC_API_URL || process.env.ADMIN_API_URL;
+  const expected = resolveExpectedLoginOrigin(configured, '');
+  if (expected) {
+    return expected;
+  }
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('NEXT_PUBLIC_API_URL or ADMIN_API_URL must be set in production for login origin validation');
+  }
+  return request.nextUrl.origin;
+}
+
 export async function POST(request: NextRequest) {
   const origin = request.headers.get('origin');
   if (origin) {
+    // Computed before the try so a missing production config surfaces as a loud
+    // 500 with a clear message instead of a silent 403.
+    const expected = loginExpectedOrigin(request);
     try {
-      const expected = resolveExpectedLoginOrigin(
-        process.env.NEXT_PUBLIC_API_URL || process.env.ADMIN_API_URL,
-        request.nextUrl.origin
-      );
       if (new URL(origin).origin !== expected) return response({ error: 'Cross-origin login is not allowed' }, 403);
     } catch {
       return response({ error: 'Invalid origin' }, 403);
