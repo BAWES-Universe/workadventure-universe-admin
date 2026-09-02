@@ -91,3 +91,15 @@ describe('resolveExpectedLoginOrigin', () => {
     expect(resolveExpectedLoginOrigin('not a url', 'http://localhost:8321')).toBe('http://localhost:8321');
   });
 });
+
+describe('resolveExpectedLoginOrigin scheme guard', () => {
+  it('accepts http(s) configured origins, including internal dev hosts', () => {
+    expect(resolveExpectedLoginOrigin('http://admin.bawes.localhost:8321', 'http://fallback')).toBe('http://admin.bawes.localhost:8321');
+    expect(resolveExpectedLoginOrigin('https://orbit.bawes.net', 'http://fallback')).toBe('https://orbit.bawes.net');
+  });
+
+  it('rejects non-http(s) schemes and falls back', () => {
+    expect(resolveExpectedLoginOrigin('file:///etc/passwd', 'http://localhost:8321')).toBe('http://localhost:8321');
+    expect(resolveExpectedLoginOrigin('mailto:admin@bawes.net', 'http://localhost:8321')).toBe('http://localhost:8321');
+  });
+});
