@@ -13,6 +13,9 @@ export function getPlayOrigin(): string {
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     throw new Error('NEXT_PUBLIC_PLAY_URL must use http or https');
   }
+  if (process.env.NODE_ENV === 'production' && url.protocol !== 'https:') {
+    throw new Error('NEXT_PUBLIC_PLAY_URL must use https in production');
+  }
   return url.origin;
 }
 
