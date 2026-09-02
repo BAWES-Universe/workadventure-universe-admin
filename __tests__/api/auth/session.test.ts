@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import { OPTIONS, POST } from '@/app/api/auth/session/route';
 import { exchangeOidcAccessToken } from '@/lib/oidc-session-exchange';
+import { getPlayOrigin } from '@/lib/origin-policy';
 
 jest.mock('@/lib/oidc-session-exchange', () => ({
   exchangeOidcAccessToken: jest.fn(async () => ({ version: 2, sessionId: `orb_sess_v2_${'b'.repeat(64)}`, expiresAt: 123456 })),
@@ -41,5 +42,17 @@ describe('/api/auth/session CORS and transport', () => {
     expect(response.status).toBe(200);
     expect(exchangeOidcAccessToken).toHaveBeenCalledWith('oidc-token');
     expect(await response.json()).toEqual({ version: 2, sessionId: `orb_sess_v2_${'b'.repeat(64)}`, expiresAt: 123456 });
+  });
+
+  it('rejects a plaintext configured play origin in production', () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    process.env.NEXT_PUBLIC_PLAY_URL = 'http://play.example.com';
+
+    try {
+      expect(() => getPlayOrigin()).toThrow('NEXT_PUBLIC_PLAY_URL must use https in production');
+    } finally {
+      process.env.NODE_ENV = previousNodeEnv;
+    }
   });
 });

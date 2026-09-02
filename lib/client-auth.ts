@@ -18,7 +18,11 @@ export function getClientSessionId(): string | null {
 export function storeClientSession(sessionId: string, expiresAt?: number): void {
   if (!isOpaqueSessionId(sessionId)) throw new Error('Invalid Orbit session');
   window.sessionStorage.setItem(SESSION_STORAGE_KEY, sessionId);
-  if (expiresAt) window.sessionStorage.setItem(SESSION_EXPIRES_KEY, String(expiresAt));
+  if (expiresAt !== undefined) {
+    window.sessionStorage.setItem(SESSION_EXPIRES_KEY, String(expiresAt));
+  } else {
+    window.sessionStorage.removeItem(SESSION_EXPIRES_KEY);
+  }
   window.localStorage.removeItem('admin_session_id');
   window.localStorage.removeItem('admin_session_token');
   window.localStorage.removeItem('admin_session_expires');
