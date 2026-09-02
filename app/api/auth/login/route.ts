@@ -1,248 +1,37 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { validateAccessToken } from '@/lib/oidc';
-import { prisma } from '@/lib/db';
-import { sessionStore } from '@/lib/session-store';
+import { exchangeOidcAccessToken, SessionExchangeError } from '@/lib/oidc-session-exchange';
 
-// Ensure this route runs in Node.js runtime (not Edge) to support Redis and Prisma
 export const runtime = 'nodejs';
 
-// CORS headers helper
-function corsHeaders() {
-  return {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-    'Access-Control-Allow-Credentials': 'true',
-  };
+function response(body: unknown, status = 200) {
+  const result = NextResponse.json(body, { status });
+  result.headers.set('Cache-Control', 'no-store');
+  return result;
 }
 
-/**
- * OPTIONS /api/auth/login
- * Handle CORS preflight
- */
-export async function OPTIONS() {
-  return NextResponse.json({}, { headers: corsHeaders() });
-}
-
-/**
- * POST /api/auth/login
- * Login with OIDC access token
- */
 export async function POST(request: NextRequest) {
+  const origin = request.headers.get('origin');
+  if (origin) {
+    try {
+      if (new URL(origin).origin !== request.nextUrl.origin) return response({ error: 'Cross-origin login is not allowed' }, 403);
+    } catch {
+      return response({ error: 'Invalid origin' }, 403);
+    }
+  }
+
   try {
-    const body = await request.json();
-    const { accessToken } = body;
-
-    if (!accessToken) {
-      const response = NextResponse.json(
-        { error: 'Access token required' },
-        { status: 400 }
-      );
-      Object.entries(corsHeaders()).forEach(([key, value]) => {
-        response.headers.set(key, value);
-      });
-      return response;
+    const body: unknown = await request.json();
+    const accessToken = typeof body === 'object' && body !== null && 'accessToken' in body
+      ? (body as { accessToken?: unknown }).accessToken
+      : null;
+    if (typeof accessToken !== 'string' || !accessToken.trim()) {
+      return response({ error: 'Access token required' }, 400);
     }
-
-    // Validate OIDC token
-    const userInfo = await validateAccessToken(accessToken);
-    
-    if (!userInfo) {
-      const response = NextResponse.json(
-        { error: 'Invalid access token' },
-        { status: 401 }
-      );
-      Object.entries(corsHeaders()).forEach(([key, value]) => {
-        response.headers.set(key, value);
-      });
-      return response;
-    }
-
-    // Extract user identifier
-    const identifier = userInfo.sub || userInfo.email || 'unknown';
-    const email = userInfo.email || null;
-    const name = userInfo.name || userInfo.preferred_username || null;
-    
-    // Extract tags
-    let tags: string[] = [];
-    if (userInfo.tags) {
-      if (Array.isArray(userInfo.tags)) {
-        tags = userInfo.tags;
-      } else if (typeof userInfo.tags === 'string') {
-        try {
-          tags = JSON.parse(userInfo.tags);
-        } catch {
-          tags = [userInfo.tags];
-        }
-      }
-    }
-
-    // Find or create user in database
-    let user = await prisma.user.findFirst({
-      where: {
-        OR: [
-          { uuid: identifier },
-          { email: email || undefined },
-        ],
-      },
-    });
-
-    if (!user) {
-      // Create new user (authenticated users are not guests)
-      user = await prisma.user.create({
-        data: {
-          uuid: identifier,
-          email: email,
-          name: name,
-          isGuest: false, // Authenticated users are not guests
-        },
-      });
-    } else {
-      // Update existing user - mark as authenticated
-      user = await prisma.user.update({
-        where: { id: user.id },
-        data: {
-          email: email || user.email,
-          // Don't overwrite name — user may have customized it via save-name
-          // name: name || user.name,
-          isGuest: false, // User is authenticating, so they're not a guest
-        },
-      });
-    }
-
-    // Create session data with expiration
-    const now = Date.now();
-    const expiresAt = now + (7 * 24 * 60 * 60 * 1000); // 7 days
-    const sessionData = {
-      userId: user.id,
-      uuid: user.uuid,
-      email: user.email,
-      name: user.name,
-      tags,
-      createdAt: now,
-      expiresAt,
-    };
-
-    // Create session in server-side store (for server-side operations)
-    const sessionId = await sessionStore.createSession({
-      userId: user.id,
-      uuid: user.uuid,
-      email: user.email,
-      name: user.name,
-      tags,
-    });
-
-    // Encode session data as base64 for URL/cookie storage (fallback when store not available)
-    const sessionToken = Buffer.from(JSON.stringify(sessionData)).toString('base64');
-
-    // Return user info, session ID, and token (for iframe scenarios)
-    const response = NextResponse.json({
-      user: {
-        id: user.id,
-        uuid: user.uuid,
-        email: user.email,
-        name: user.name,
-        tags,
-      },
-      sessionId, // For server-side store lookup
-      sessionToken, // For cookie/URL fallback (base64 encoded session data)
-      expiresAt: sessionData.expiresAt,
-    });
-
-    // Set secure cookie with session data (middleware can parse this directly)
-    const isSecure = request.url.startsWith('https://') || process.env.NODE_ENV === 'production';
-    
-    // Store session data in cookie so middleware can validate without needing the store
-    // This works even if the in-memory store is not shared between processes
-    const sessionDataString = JSON.stringify(sessionData);
-    response.cookies.set('user_session', sessionDataString, {
-      httpOnly: true,
-      secure: isSecure,
-      sameSite: isSecure ? 'none' : 'lax',
-      path: '/',
-      maxAge: 60 * 60 * 24 * 7, // 7 days
-    });
-    
-    // Also set session ID cookie (for server-side store lookup when available)
-    response.cookies.set('admin_session_id', sessionId, {
-      httpOnly: true,
-      secure: isSecure,
-      sameSite: isSecure ? 'none' : 'lax',
-      path: '/',
-      maxAge: 60 * 60 * 24 * 7,
-    });
-    
-    if (process.env.NODE_ENV === 'development') {
-      console.log('[Login] Session created with ID:', sessionId.substring(0, 8) + '...');
-      console.log('[Login] Cookie set with sameSite:', isSecure ? 'none' : 'lax', 'secure:', isSecure);
-    }
-
-    // Add CORS headers
-    Object.entries(corsHeaders()).forEach(([key, value]) => {
-      response.headers.set(key, value);
-    });
-
-    return response;
+    return response(await exchangeOidcAccessToken(accessToken));
   } catch (error) {
-    console.error('Login error:', error);
-    const response = NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
-    Object.entries(corsHeaders()).forEach(([key, value]) => {
-      response.headers.set(key, value);
-    });
-    return response;
+    if (error instanceof SyntaxError) return response({ error: 'Invalid JSON body' }, 400);
+    if (error instanceof SessionExchangeError) return response({ error: error.message }, error.status);
+    console.error('[Login] Session exchange failed:', error);
+    return response({ error: 'Internal server error' }, 500);
   }
 }
-
-/**
- * GET /api/auth/me
- * Get current user from session
- */
-export async function GET(request: NextRequest) {
-  try {
-    const sessionCookie = request.cookies.get('user_session');
-    
-    if (!sessionCookie) {
-      return NextResponse.json(
-        { error: 'Not authenticated' },
-        { status: 401 }
-      );
-    }
-
-    const session = JSON.parse(sessionCookie.value);
-    
-    // Verify user still exists
-    const user = await prisma.user.findUnique({
-      where: { id: session.userId },
-      select: {
-        id: true,
-        uuid: true,
-        email: true,
-        name: true,
-      },
-    });
-
-    if (!user) {
-      return NextResponse.json(
-        { error: 'User not found' },
-        { status: 404 }
-      );
-    }
-
-    return NextResponse.json({
-      user: {
-        ...user,
-        tags: session.tags || [],
-      },
-    });
-  } catch (error) {
-    console.error('Get user error:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
-  }
-}
-
