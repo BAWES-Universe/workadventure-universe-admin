@@ -5,7 +5,9 @@ import { act, render, waitFor } from '@testing-library/react';
 import AdminShell from '@/app/admin/admin-shell';
 
 let mockPathname = '/admin';
-const mockAuthenticatedFetch = jest.fn(() => new Promise<Response>(() => undefined));
+const mockAuthenticatedFetch = jest.fn(
+  (_url: string, _options?: RequestInit) => new Promise<Response>(() => undefined)
+);
 const mockGetClientSessionId = jest.fn(() => `orb_sess_v2_${'a'.repeat(64)}`);
 
 jest.mock('next/navigation', () => ({
@@ -13,7 +15,7 @@ jest.mock('next/navigation', () => ({
 }));
 
 jest.mock('@/lib/client-auth', () => ({
-  authenticatedFetch: (...args: unknown[]) => mockAuthenticatedFetch(...args),
+  authenticatedFetch: (url: string, options?: RequestInit) => mockAuthenticatedFetch(url, options),
   getClientSessionId: () => mockGetClientSessionId(),
 }));
 
