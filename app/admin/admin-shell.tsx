@@ -31,16 +31,25 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
       return;
     }
 
+    const controller = new AbortController();
     const endpoint = pathname === '/admin' ? '/api/admin/bootstrap' : '/api/auth/me';
-    void authenticatedFetch(endpoint).then(async (response) => {
+    void authenticatedFetch(endpoint, { signal: controller.signal }).then(async (response) => {
+      if (controller.signal.aborted) return;
       if (response.status === 401) return loginRedirect();
       if (!response.ok) throw new Error('Unable to load your Orbit');
       const data = await response.json();
+      if (controller.signal.aborted) return;
       setBootstrap((current) => endpoint === '/api/admin/bootstrap'
         ? data as AdminBootstrap
         : { version: 1, user: data.user, stats: current?.stats ?? { universes: 0, worlds: 0, rooms: 0, users: 0 } });
       setLoadedPath(pathname);
-    }).catch((cause) => setError(cause instanceof Error ? cause.message : 'Unable to load your Orbit'));
+    }).catch((cause) => {
+      if (!controller.signal.aborted) {
+        setError(cause instanceof Error ? cause.message : 'Unable to load your Orbit');
+      }
+    });
+
+    return () => controller.abort();
   }, [attempt, pathname]);
 
   if (pathname === '/admin/login') return <main>{children}</main>;
