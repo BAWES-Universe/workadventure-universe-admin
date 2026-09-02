@@ -15,7 +15,12 @@ import { prisma } from './db';
 export function resolveExpectedLoginOrigin(configured: string | undefined, fallbackOrigin: string): string {
   if (configured) {
     try {
-      return new URL(configured).origin;
+      const parsed = new URL(configured);
+      // Only real http(s) origins can appear in a browser Origin header. Accepting
+      // file:, mailto:, or any other scheme would produce an origin nothing can match.
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        return parsed.origin;
+      }
     } catch {
       // fall through to fallback
     }

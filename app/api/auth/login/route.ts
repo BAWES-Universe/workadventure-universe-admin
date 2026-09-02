@@ -15,7 +15,7 @@ export async function POST(request: NextRequest) {
   if (origin) {
     try {
       const expected = resolveExpectedLoginOrigin(
-        process.env.ADMIN_API_URL || process.env.NEXT_PUBLIC_API_URL,
+        process.env.NEXT_PUBLIC_API_URL || process.env.ADMIN_API_URL,
         request.nextUrl.origin
       );
       if (new URL(origin).origin !== expected) return response({ error: 'Cross-origin login is not allowed' }, 403);
