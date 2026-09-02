@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { exchangeOidcAccessToken, SessionExchangeError } from '@/lib/oidc-session-exchange';
+import { resolveExpectedLoginOrigin } from '@/lib/auth';
 
 export const runtime = 'nodejs';
 
@@ -13,7 +14,11 @@ export async function POST(request: NextRequest) {
   const origin = request.headers.get('origin');
   if (origin) {
     try {
-      if (new URL(origin).origin !== request.nextUrl.origin) return response({ error: 'Cross-origin login is not allowed' }, 403);
+      const expected = resolveExpectedLoginOrigin(
+        process.env.ADMIN_API_URL || process.env.NEXT_PUBLIC_API_URL,
+        request.nextUrl.origin
+      );
+      if (new URL(origin).origin !== expected) return response({ error: 'Cross-origin login is not allowed' }, 403);
     } catch {
       return response({ error: 'Invalid origin' }, 403);
     }

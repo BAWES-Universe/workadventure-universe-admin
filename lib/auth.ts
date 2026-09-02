@@ -4,6 +4,26 @@ import { isSuperAdmin } from './super-admin';
 import { prisma } from './db';
 
 /**
+ * The origin that a same-origin login POST must carry.
+ *
+ * Next.js's `request.nextUrl.origin` is built from the internal URL the reverse
+ * proxy used to reach the app, which does NOT match the public origin (e.g.
+ * https://orbit.bawes.net) when deployed behind Coolify/Traefik. Origin checks
+ * must therefore anchor to the configured public origin and only fall back to
+ * `nextUrl` for direct (non-proxied) deployments such as local dev.
+ */
+export function resolveExpectedLoginOrigin(configured: string | undefined, fallbackOrigin: string): string {
+  if (configured) {
+    try {
+      return new URL(configured).origin;
+    } catch {
+      // fall through to fallback
+    }
+  }
+  return fallbackOrigin;
+}
+
+/**
  * Validates the Bearer token from the Authorization header
  */
 export function validateAdminToken(request: Request | NextRequest): boolean {

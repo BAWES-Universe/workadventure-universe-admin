@@ -109,12 +109,12 @@ export default function LoginPage() {
       <Card className="w-full max-w-md">
         <CardHeader>
           <CardTitle>{signedOut ? 'Signed out' : 'Sign in to Orbit'}</CardTitle>
-          <CardDescription>{signedOut ? 'Your Orbit session has been revoked.' : 'Waiting for WorkAdventure authentication.'}</CardDescription>
+          <CardDescription>{signedOut ? 'Your Orbit session has been revoked.' : 'Waiting for Universe authentication.'}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           {error && <Alert variant="destructive"><AlertCircle className="h-4 w-4" /><AlertTitle>Authentication failed</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
           <Button className="w-full" onClick={() => { setSignedOut(false); sessionStorage.removeItem(LOGOUT_SUPPRESSION_KEY); beginIframeHandshake(); }}>
-            Continue with WorkAdventure
+            Continue with Universe
           </Button>
           {ENABLE_MANUAL_LOGIN && (
             <form className="space-y-3 border-t pt-4" onSubmit={submitManual}>

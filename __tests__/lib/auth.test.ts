@@ -1,4 +1,4 @@
-import { validateAdminToken, requireAuth } from '@/lib/auth';
+import { validateAdminToken, requireAuth, resolveExpectedLoginOrigin } from '@/lib/auth';
 import { NextRequest } from 'next/server';
 
 describe('Auth', () => {
@@ -73,3 +73,21 @@ describe('Auth', () => {
   });
 });
 
+
+describe('resolveExpectedLoginOrigin', () => {
+  it('prefers the configured public origin (proxy-safe)', () => {
+    expect(resolveExpectedLoginOrigin('https://orbit.bawes.net', 'http://127.0.0.1:3000')).toBe('https://orbit.bawes.net');
+  });
+
+  it('normalizes trailing paths to a bare origin', () => {
+    expect(resolveExpectedLoginOrigin('https://orbit.bawes.net/admin', 'http://127.0.0.1:3000')).toBe('https://orbit.bawes.net');
+  });
+
+  it('falls back to nextUrl origin when nothing is configured (local dev)', () => {
+    expect(resolveExpectedLoginOrigin(undefined, 'http://localhost:8321')).toBe('http://localhost:8321');
+  });
+
+  it('falls back when the configured value is malformed', () => {
+    expect(resolveExpectedLoginOrigin('not a url', 'http://localhost:8321')).toBe('http://localhost:8321');
+  });
+});
