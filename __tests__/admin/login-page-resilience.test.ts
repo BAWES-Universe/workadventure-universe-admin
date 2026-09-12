@@ -109,4 +109,41 @@ describe('Admin login exchangeToken resilience contract', () => {
 
     expect(caughtMessage).toBe('Invalid authentication credentials');
   });
+
+  it('re-throws AbortError from response.json() without masking it as status error', async () => {
+    const abortErr = new Error('The user aborted a request.');
+    abortErr.name = 'AbortError';
+
+    const mockAbortingResponse = {
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw abortErr;
+      },
+    };
+
+    let caughtMessage = '';
+    try {
+      let data: any = null;
+      try {
+        data = await mockAbortingResponse.json();
+      } catch (e: unknown) {
+        if ((e instanceof DOMException && e.name === 'AbortError') || (e instanceof Error && (e.name === 'AbortError' || e.name === 'TimeoutError'))) {
+          throw e;
+        }
+        throw new Error(`Login request failed with status ${mockAbortingResponse.status}`);
+      }
+    } catch (cause: unknown) {
+      if (cause instanceof DOMException && cause.name === 'AbortError') {
+        caughtMessage = 'Login request timed out. Please try again.';
+      } else if (cause instanceof Error && (cause.name === 'AbortError' || cause.name === 'TimeoutError')) {
+        caughtMessage = 'Login request timed out. Please try again.';
+      } else {
+        caughtMessage = (cause as Error).message;
+      }
+    }
+
+    expect(caughtMessage).toBe('Login request timed out. Please try again.');
+  });
 });
+

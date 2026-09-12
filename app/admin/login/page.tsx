@@ -48,7 +48,10 @@ export default function LoginPage() {
       let data: any = null;
       try {
         data = await response.json();
-      } catch {
+      } catch (e: unknown) {
+        if ((e instanceof DOMException && e.name === 'AbortError') || (e instanceof Error && (e.name === 'AbortError' || e.name === 'TimeoutError'))) {
+          throw e;
+        }
         throw new Error(`Login request failed with status ${response.status}`);
       }
       if (!response.ok || !data || data.version !== 2 || !isOpaqueSessionId(data.sessionId) || !Number.isFinite(data.expiresAt)) {
