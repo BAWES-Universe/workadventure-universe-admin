@@ -35,19 +35,39 @@ export default function LoginPage() {
   const exchangeToken = useCallback(async (accessToken: string) => {
     setLoading(true);
     setError(null);
-    const response = await fetch('/api/auth/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'omit',
-      body: JSON.stringify({ accessToken }),
-    });
-    const data = await response.json();
-    if (!response.ok || data.version !== 2 || !isOpaqueSessionId(data.sessionId) || !Number.isFinite(data.expiresAt)) {
-      throw new Error(data.error || 'Invalid login response');
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
+    try {
+      const response = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'omit',
+        body: JSON.stringify({ accessToken }),
+        signal: controller.signal,
+      });
+      let data: any = null;
+      try {
+        data = await response.json();
+      } catch {
+        throw new Error(`Login request failed with status ${response.status}`);
+      }
+      if (!response.ok || !data || data.version !== 2 || !isOpaqueSessionId(data.sessionId) || !Number.isFinite(data.expiresAt)) {
+        throw new Error((data && typeof data.error === 'string') ? data.error : 'Invalid login response');
+      }
+      storeClientSession(data.sessionId, data.expiresAt);
+      sessionStorage.removeItem(LOGOUT_SUPPRESSION_KEY);
+      window.location.replace(getSafeRedirect());
+    } catch (cause: unknown) {
+      if (cause instanceof DOMException && cause.name === 'AbortError') {
+        throw new Error('Login request timed out. Please try again.');
+      }
+      if (cause instanceof Error && (cause.name === 'AbortError' || cause.name === 'TimeoutError')) {
+        throw new Error('Login request timed out. Please try again.');
+      }
+      throw cause;
+    } finally {
+      clearTimeout(timeoutId);
     }
-    storeClientSession(data.sessionId, data.expiresAt);
-    sessionStorage.removeItem(LOGOUT_SUPPRESSION_KEY);
-    window.location.replace(getSafeRedirect());
   }, []);
 
   const beginIframeHandshake = useCallback(() => {
