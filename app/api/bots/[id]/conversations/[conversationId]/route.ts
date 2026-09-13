@@ -9,8 +9,8 @@ export const runtime = 'nodejs';
  * OPTIONS /api/bots/:botId/conversations/:conversationId
  * Handle CORS preflight
  */
-export async function OPTIONS() {
-  return NextResponse.json({}, { headers: corsHeaders() });
+export async function OPTIONS(request: NextRequest) {
+  return NextResponse.json({}, { headers: corsHeaders(request) });
 }
 
 /**
@@ -50,7 +50,7 @@ export async function PUT(
     if (!messages || !Array.isArray(messages)) {
       return NextResponse.json(
         { error: 'Missing required field: messages' },
-        { status: 400, headers: corsHeaders() }
+        { status: 400, headers: corsHeaders(request) }
       );
     }
 
@@ -59,7 +59,7 @@ export async function PUT(
     if (isNaN(conversationIdNum)) {
       return NextResponse.json(
         { error: 'Invalid conversation ID' },
-        { status: 400, headers: corsHeaders() }
+        { status: 400, headers: corsHeaders(request) }
       );
     }
 
@@ -89,7 +89,7 @@ export async function PUT(
       
       return NextResponse.json(
         { error: 'Conversation not found' },
-        { status: 404, headers: corsHeaders() }
+        { status: 404, headers: corsHeaders(request) }
       );
     }
 
@@ -123,20 +123,20 @@ export async function PUT(
 
     return NextResponse.json(
       { status: 'updated' },
-      { headers: corsHeaders() }
+      { headers: corsHeaders(request) }
     );
   } catch (error: any) {
     if (error.message === 'Unauthorized: Invalid service token') {
       return NextResponse.json(
         { error: 'Unauthorized' },
-        { status: 401, headers: corsHeaders() }
+        { status: 401, headers: corsHeaders(request) }
       );
     }
 
     console.error('Error updating conversation:', error);
     return NextResponse.json(
       { error: 'Internal server error' },
-      { status: 500, headers: corsHeaders() }
+      { status: 500, headers: corsHeaders(request) }
     );
   }
 }

@@ -10,8 +10,8 @@ export const runtime = 'nodejs';
  * OPTIONS /api/bots/memory/:botId
  * Handle CORS preflight
  */
-export async function OPTIONS() {
-  return NextResponse.json({}, { headers: corsHeaders() });
+export async function OPTIONS(request: NextRequest) {
+  return NextResponse.json({}, { headers: corsHeaders(request) });
 }
 
 /**
@@ -72,19 +72,19 @@ export async function GET(
 
     return NextResponse.json(
       { memories },
-      { status: 200, headers: corsHeaders() }
+      { status: 200, headers: corsHeaders(request) }
     );
   } catch (error: unknown) {
     if (error instanceof Error && error.message?.includes('Unauthorized')) {
       return NextResponse.json(
         { error: 'Unauthorized', details: 'Invalid or missing token' },
-        { status: 401, headers: corsHeaders() }
+        { status: 401, headers: corsHeaders(request) }
       );
     }
     console.error('Error in GET /api/bots/memory/:botId:', error);
     return NextResponse.json(
       { error: 'Internal server error' },
-      { status: 500, headers: corsHeaders() }
+      { status: 500, headers: corsHeaders(request) }
     );
   }
 }
@@ -128,7 +128,7 @@ export async function POST(
     if (!memories && !body.emotions) {
       return NextResponse.json(
         { error: 'memories or emotions required' },
-        { status: 400, headers: corsHeaders() }
+        { status: 400, headers: corsHeaders(request) }
       );
     }
 
@@ -138,7 +138,7 @@ export async function POST(
         if (!memory.userUuid) {
           return NextResponse.json(
             { error: 'userUuid is required for each memory entry' },
-            { status: 400, headers: corsHeaders() }
+            { status: 400, headers: corsHeaders(request) }
           );
         }
       }
@@ -148,7 +148,7 @@ export async function POST(
     if (saveType === 'immediate' && body.emotions && !body.userUuid) {
       return NextResponse.json(
         { error: 'userUuid is required for immediate emotion updates' },
-        { status: 400, headers: corsHeaders() }
+        { status: 400, headers: corsHeaders(request) }
       );
     }
 
@@ -397,20 +397,20 @@ export async function POST(
 
     return NextResponse.json(
       { status: 'saved', saveType },
-      { headers: corsHeaders() }
+      { headers: corsHeaders(request) }
     );
   } catch (error: any) {
     if (error.message === 'Unauthorized: Invalid service token') {
       return NextResponse.json(
         { error: 'Unauthorized' },
-        { status: 401, headers: corsHeaders() }
+        { status: 401, headers: corsHeaders(request) }
       );
     }
 
     console.error('Error saving memory:', error);
     return NextResponse.json(
       { error: 'Internal server error' },
-      { status: 500, headers: corsHeaders() }
+      { status: 500, headers: corsHeaders(request) }
     );
   }
 }

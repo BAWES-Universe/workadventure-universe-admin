@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getSessionUser } from '@/lib/auth-session';
 import { getOAuthCallbackUrl, validateOAuthCallbackUrl } from '@/lib/oauth-callback';
+import { corsHeaders } from '@/lib/cors';
 import { resolve4, resolve6 } from 'dns/promises';
 
 export const runtime = 'nodejs';
@@ -28,27 +29,6 @@ interface RegistrationBody {
 // ---------------------------------------------------------------------------
 // CORS
 // ---------------------------------------------------------------------------
-
-function corsHeaders(request?: NextRequest) {
-  const origin = request?.headers?.get('origin');
-  if (!origin) {
-    return {
-      'Access-Control-Allow-Methods': 'GET, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-    };
-  }
-  const trustedOrigins = (process.env.CORS_ALLOWED_ORIGINS || '').split(',').filter(Boolean);
-  const headers: Record<string, string> = {
-    'Access-Control-Allow-Methods': 'GET, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-    'Vary': 'Origin',
-  };
-  if (trustedOrigins.includes(origin)) {
-    headers['Access-Control-Allow-Origin'] = origin;
-    headers['Access-Control-Allow-Credentials'] = 'true';
-  }
-  return headers;
-}
 
 export async function OPTIONS(request: NextRequest) {
   return NextResponse.json({}, { headers: corsHeaders(request) });

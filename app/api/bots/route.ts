@@ -5,27 +5,18 @@ import { prisma } from '@/lib/db';
 import { canManageBots } from '@/lib/bot-permissions';
 import { parsePlayUri } from '@/lib/utils';
 import { validateAccessToken } from '@/lib/oidc';
+import { corsHeaders } from '@/lib/cors';
 import { z } from 'zod';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Prisma
 export const runtime = 'nodejs';
 
-// CORS headers helper
-function corsHeaders() {
-  return {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, PUT, DELETE',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-    'Access-Control-Allow-Credentials': 'true',
-  };
-}
-
 /**
  * OPTIONS /api/bots
  * Handle CORS preflight
  */
-export async function OPTIONS() {
-  return NextResponse.json({}, { headers: corsHeaders() });
+export async function OPTIONS(request: NextRequest) {
+  return NextResponse.json({}, { headers: corsHeaders(request) });
 }
 
 // Validation schema for creating a bot
@@ -105,7 +96,7 @@ export async function GET(request: NextRequest) {
         { error: 'roomId query parameter is required' },
         { status: 400 }
       );
-      Object.entries(corsHeaders()).forEach(([key, value]) => {
+      Object.entries(corsHeaders(request)).forEach(([key, value]) => {
         response.headers.set(key, value);
       });
       return response;
@@ -151,7 +142,7 @@ export async function GET(request: NextRequest) {
             { error: 'Room not found' },
             { status: 404 }
           );
-          Object.entries(corsHeaders()).forEach(([key, value]) => {
+          Object.entries(corsHeaders(request)).forEach(([key, value]) => {
             response.headers.set(key, value);
           });
           return response;
@@ -163,7 +154,7 @@ export async function GET(request: NextRequest) {
           { error: 'Invalid playUri format. Expected UUID or playUri like http://play.workadventure.localhost/@/universe/world/room' },
           { status: 400 }
         );
-        Object.entries(corsHeaders()).forEach(([key, value]) => {
+        Object.entries(corsHeaders(request)).forEach(([key, value]) => {
           response.headers.set(key, value);
         });
         return response;
@@ -192,7 +183,7 @@ export async function GET(request: NextRequest) {
         { error: 'Room not found' },
         { status: 404 }
       );
-      Object.entries(corsHeaders()).forEach(([key, value]) => {
+      Object.entries(corsHeaders(request)).forEach(([key, value]) => {
         response.headers.set(key, value);
       });
       return response;
@@ -207,7 +198,7 @@ export async function GET(request: NextRequest) {
         { error: 'Unauthorized' },
         { status: 401 }
       );
-      Object.entries(corsHeaders()).forEach(([key, value]) => {
+      Object.entries(corsHeaders(request)).forEach(([key, value]) => {
         response.headers.set(key, value);
       });
       return response;
@@ -255,7 +246,7 @@ export async function GET(request: NextRequest) {
     const transformedBots = bots.map(transformBot);
 
     const response = NextResponse.json(transformedBots);
-    Object.entries(corsHeaders()).forEach(([key, value]) => {
+    Object.entries(corsHeaders(request)).forEach(([key, value]) => {
       response.headers.set(key, value);
     });
     return response;
@@ -265,7 +256,7 @@ export async function GET(request: NextRequest) {
         { error: 'Unauthorized' },
         { status: 401 }
       );
-      Object.entries(corsHeaders()).forEach(([key, value]) => {
+      Object.entries(corsHeaders(request)).forEach(([key, value]) => {
         response.headers.set(key, value);
       });
       return response;
@@ -275,7 +266,7 @@ export async function GET(request: NextRequest) {
       { error: 'Internal server error' },
       { status: 500 }
     );
-    Object.entries(corsHeaders()).forEach(([key, value]) => {
+    Object.entries(corsHeaders(request)).forEach(([key, value]) => {
       response.headers.set(key, value);
     });
     return response;
@@ -357,7 +348,7 @@ export async function POST(request: NextRequest) {
         { error: 'Unauthorized' },
         { status: 401 }
       );
-      Object.entries(corsHeaders()).forEach(([key, value]) => {
+      Object.entries(corsHeaders(request)).forEach(([key, value]) => {
         response.headers.set(key, value);
       });
       return response;
@@ -405,7 +396,7 @@ export async function POST(request: NextRequest) {
             { error: 'Room not found' },
             { status: 404 }
           );
-          Object.entries(corsHeaders()).forEach(([key, value]) => {
+          Object.entries(corsHeaders(request)).forEach(([key, value]) => {
             response.headers.set(key, value);
           });
           return response;
@@ -417,7 +408,7 @@ export async function POST(request: NextRequest) {
           { error: 'Invalid roomId format. Expected UUID or playUri like http://play.workadventure.localhost/@/universe/world/room' },
           { status: 400 }
         );
-        Object.entries(corsHeaders()).forEach(([key, value]) => {
+        Object.entries(corsHeaders(request)).forEach(([key, value]) => {
           response.headers.set(key, value);
         });
         return response;
@@ -434,7 +425,7 @@ export async function POST(request: NextRequest) {
         { error: 'Room not found' },
         { status: 404 }
       );
-      Object.entries(corsHeaders()).forEach(([key, value]) => {
+      Object.entries(corsHeaders(request)).forEach(([key, value]) => {
         response.headers.set(key, value);
       });
       return response;
@@ -448,7 +439,7 @@ export async function POST(request: NextRequest) {
           { error: 'You do not have permission to manage bots in this room' },
           { status: 403 }
         );
-        Object.entries(corsHeaders()).forEach(([key, value]) => {
+        Object.entries(corsHeaders(request)).forEach(([key, value]) => {
           response.headers.set(key, value);
         });
         return response;
@@ -507,7 +498,7 @@ export async function POST(request: NextRequest) {
     const transformedBot = transformBot(bot);
 
     const response = NextResponse.json(transformedBot, { status: 201 });
-    Object.entries(corsHeaders()).forEach(([key, value]) => {
+    Object.entries(corsHeaders(request)).forEach(([key, value]) => {
       response.headers.set(key, value);
     });
     return response;
@@ -520,7 +511,7 @@ export async function POST(request: NextRequest) {
         },
         { status: 400 }
       );
-      Object.entries(corsHeaders()).forEach(([key, value]) => {
+      Object.entries(corsHeaders(request)).forEach(([key, value]) => {
         response.headers.set(key, value);
       });
       return response;
@@ -530,7 +521,7 @@ export async function POST(request: NextRequest) {
         { error: 'Unauthorized' },
         { status: 401 }
       );
-      Object.entries(corsHeaders()).forEach(([key, value]) => {
+      Object.entries(corsHeaders(request)).forEach(([key, value]) => {
         response.headers.set(key, value);
       });
       return response;
@@ -540,7 +531,7 @@ export async function POST(request: NextRequest) {
       { error: 'Internal server error' },
       { status: 500 }
     );
-    Object.entries(corsHeaders()).forEach(([key, value]) => {
+    Object.entries(corsHeaders(request)).forEach(([key, value]) => {
       response.headers.set(key, value);
     });
     return response;
