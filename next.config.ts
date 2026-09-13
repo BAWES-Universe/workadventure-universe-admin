@@ -6,6 +6,9 @@ const playOrigin = getPlayOrigin();
 const frameAncestors = `frame-ancestors 'self' ${playOrigin};`;
 
 const nextConfig: NextConfig = {
+  env: {
+    RELEASE_VERSION: process.env.RELEASE_VERSION,
+  },
   // Headers for security
   async headers() {
     return [
