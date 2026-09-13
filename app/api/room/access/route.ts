@@ -318,14 +318,22 @@ export async function GET(request: NextRequest) {
       // Get play service URL for texture validation
       const playServiceUrl = process.env.PLAY_URL || 'http://play.workadventure.localhost';
       
+      const userContext = {
+        userId: user?.id || null,
+        membershipTags: (membership && 'tags' in membership && Array.isArray(membership.tags))
+          ? membership.tags
+          : [],
+        userEmail: user?.email || null,
+      };
+
       // Validate character textures — first try catalog, fall back to static JSON
       const textureValidation = await resolveTextureUrls(
-        prisma, textureIds, worldData.id, worldData.universeId, playServiceUrl
+        prisma, textureIds, worldData.id, worldData.universeId, playServiceUrl, userContext
       );
       
       // Validate companion texture if provided
       const companionValidation = await resolveCompanionTexture(
-        prisma, companionTextureId, worldData.id, worldData.universeId, playServiceUrl
+        prisma, companionTextureId, worldData.id, worldData.universeId, playServiceUrl, userContext
       );
       
       // If textures are invalid and we have stored avatar textures, use them as fallback
@@ -336,7 +344,7 @@ export async function GET(request: NextRequest) {
       // DB is the source of truth across devices and sessions
       if (avatar?.textureIds && avatar.textureIds.length > 0) {
         const dbTextures = await resolveTextureUrls(
-          prisma, avatar.textureIds, worldData.id, worldData.universeId, playServiceUrl
+          prisma, avatar.textureIds, worldData.id, worldData.universeId, playServiceUrl, userContext
         );
         if (dbTextures.valid) {
           finalTextures = dbTextures.textures;
@@ -353,7 +361,7 @@ export async function GET(request: NextRequest) {
       
       if ((!isCompanionValid || !companionTextureId) && avatar?.companionTextureId) {
         const fallbackCompanion = await resolveCompanionTexture(
-          prisma, avatar.companionTextureId, worldData.id, worldData.universeId, playServiceUrl
+          prisma, avatar.companionTextureId, worldData.id, worldData.universeId, playServiceUrl, userContext
         );
         if (fallbackCompanion.valid) {
           finalCompanionTexture = fallbackCompanion.texture;
