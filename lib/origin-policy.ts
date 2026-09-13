@@ -28,3 +28,20 @@ export function requestOrigin(request: Request): string | null {
     return null;
   }
 }
+
+export function getAllowedOrigins(): string[] {
+  try {
+    return [getPlayOrigin()];
+  } catch {
+    return [];
+  }
+}
+
+export function isAllowedOrigin(origin: string | null | undefined): boolean {
+  if (!origin) return false;
+  try {
+    return origin === getPlayOrigin();
+  } catch {
+    return false;
+  }
+}

@@ -6,26 +6,17 @@ import { canManageBots } from '@/lib/bot-permissions';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { validateAccessToken } from '@/lib/oidc';
 import { transformBotToServerFormat } from '@/lib/bot-config-helpers';
+import { corsHeaders } from '@/lib/cors';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Prisma
 export const runtime = 'nodejs';
-
-// CORS headers helper
-function corsHeaders() {
-  return {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, PUT, DELETE',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-    'Access-Control-Allow-Credentials': 'true',
-  };
-}
 
 /**
  * OPTIONS /api/bots/configuration/[botId]
  * Handle CORS preflight
  */
-export async function OPTIONS() {
-  return NextResponse.json({}, { headers: corsHeaders() });
+export async function OPTIONS(request: NextRequest) {
+  return NextResponse.json({}, { headers: corsHeaders(request) });
 }
 
 // Helper function to get user ID from various auth methods
@@ -143,7 +134,7 @@ export async function GET(
         { error: 'Bot not found' },
         { status: 404 }
       );
-      Object.entries(corsHeaders()).forEach(([key, value]) => {
+      Object.entries(corsHeaders(request)).forEach(([key, value]) => {
         response.headers.set(key, value);
       });
       return response;
@@ -159,7 +150,7 @@ export async function GET(
     const transformedBot = await transformBotToServerFormat(bot, includeSensitive, hasPermission);
 
     const response = NextResponse.json(transformedBot);
-    Object.entries(corsHeaders()).forEach(([key, value]) => {
+    Object.entries(corsHeaders(request)).forEach(([key, value]) => {
       response.headers.set(key, value);
     });
     return response;
@@ -169,7 +160,7 @@ export async function GET(
       { error: 'Internal server error' },
       { status: 500 }
     );
-    Object.entries(corsHeaders()).forEach(([key, value]) => {
+    Object.entries(corsHeaders(request)).forEach(([key, value]) => {
       response.headers.set(key, value);
     });
     return response;
@@ -193,7 +184,7 @@ export async function DELETE(
         { error: 'Unauthorized' },
         { status: 401 }
       );
-      Object.entries(corsHeaders()).forEach(([key, value]) => {
+      Object.entries(corsHeaders(request)).forEach(([key, value]) => {
         response.headers.set(key, value);
       });
       return response;
@@ -218,7 +209,7 @@ export async function DELETE(
         { error: 'Bot not found' },
         { status: 404 }
       );
-      Object.entries(corsHeaders()).forEach(([key, value]) => {
+      Object.entries(corsHeaders(request)).forEach(([key, value]) => {
         response.headers.set(key, value);
       });
       return response;
@@ -232,7 +223,7 @@ export async function DELETE(
           { error: 'You do not have permission to delete bots in this room' },
           { status: 403 }
         );
-        Object.entries(corsHeaders()).forEach(([key, value]) => {
+        Object.entries(corsHeaders(request)).forEach(([key, value]) => {
           response.headers.set(key, value);
         });
         return response;
@@ -246,7 +237,7 @@ export async function DELETE(
 
     // Return 204 No Content
     const response = new NextResponse(null, { status: 204 });
-    Object.entries(corsHeaders()).forEach(([key, value]) => {
+    Object.entries(corsHeaders(request)).forEach(([key, value]) => {
       response.headers.set(key, value);
     });
     return response;
@@ -256,7 +247,7 @@ export async function DELETE(
         { error: 'Unauthorized' },
         { status: 401 }
       );
-      Object.entries(corsHeaders()).forEach(([key, value]) => {
+      Object.entries(corsHeaders(request)).forEach(([key, value]) => {
         response.headers.set(key, value);
       });
       return response;
@@ -266,7 +257,7 @@ export async function DELETE(
       { error: 'Internal server error' },
       { status: 500 }
     );
-    Object.entries(corsHeaders()).forEach(([key, value]) => {
+    Object.entries(corsHeaders(request)).forEach(([key, value]) => {
       response.headers.set(key, value);
     });
     return response;

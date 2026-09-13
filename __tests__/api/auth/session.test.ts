@@ -46,13 +46,13 @@ describe('/api/auth/session CORS and transport', () => {
 
   it('rejects a plaintext configured play origin in production', () => {
     const previousNodeEnv = process.env.NODE_ENV;
-    process.env.NODE_ENV = 'production';
+    (process.env as any).NODE_ENV = 'production';
     process.env.NEXT_PUBLIC_PLAY_URL = 'http://play.example.com';
 
     try {
       expect(() => getPlayOrigin()).toThrow('NEXT_PUBLIC_PLAY_URL must use https in production');
     } finally {
-      process.env.NODE_ENV = previousNodeEnv;
+      (process.env as any).NODE_ENV = previousNodeEnv;
     }
   });
 });

@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { encryptApiKey, decryptApiKey } from '@/lib/encryption';
+import { corsHeaders } from '@/lib/cors';
 import { z } from 'zod';
 
 export const runtime = 'nodejs';
@@ -41,38 +42,6 @@ function isAllowedServerUrl(url: string): boolean {
   } catch {
     return false;
   }
-}
-
-// CORS headers — only echo origin with credentials for trusted origins
-function corsHeaders(request?: NextRequest) {
-  const origin = request?.headers?.get('origin');
-  if (!origin) {
-    // Same-origin request (no Origin header) — no CORS needed
-    return {
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, PUT, PATCH, DELETE',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-    };
-  }
-  // Only allow credentials for known admin/play domains.
-  // When CORS_ALLOWED_ORIGINS is unset, deny all cross-origin access (fail-closed).
-  const trustedOrigins = (process.env.CORS_ALLOWED_ORIGINS || '').split(',').filter(Boolean);
-  if (trustedOrigins.length === 0 || !trustedOrigins.includes(origin)) {
-    // No allowlist configured OR origin not in allowlist — deny cross-origin reads
-    return {
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, PUT, PATCH, DELETE',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-      'Vary': 'Origin',
-    };
-  }
-  // Trusted origin — echo with credentials
-  const headers: Record<string, string> = {
-    'Access-Control-Allow-Origin': origin,
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, PUT, PATCH, DELETE',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-    'Vary': 'Origin',
-  };
-  headers['Access-Control-Allow-Credentials'] = 'true';
-  return headers;
 }
 
 /**
