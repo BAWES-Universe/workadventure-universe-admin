@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { exchangeOidcAccessToken, SessionExchangeError } from '@/lib/oidc-session-exchange';
 import { resolveExpectedLoginOrigin } from '@/lib/auth';
+import { isAllowedLoginOrigin, isValidRedirectUri, getAllowedRedirectUris } from '../redirect-validator';
 
 export const runtime = 'nodejs';
 
@@ -28,22 +29,41 @@ function loginExpectedOrigin(request: NextRequest): string {
   return request.nextUrl.origin;
 }
 
+/**
+ * GET /api/auth/login
+ * Validates a redirect URI or returns allowed OIDC redirect URIs.
+ */
+export async function GET(request: NextRequest) {
+  const { searchParams } = new URL(request.url);
+  const redirectUri = searchParams.get('redirect_uri');
+  if (redirectUri) {
+    const valid = isValidRedirectUri(redirectUri);
+    return response({ redirect_uri: redirectUri, valid }, valid ? 200 : 400);
+  }
+  return response({ allowedRedirectUris: getAllowedRedirectUris() });
+}
+
 export async function POST(request: NextRequest) {
   const origin = request.headers.get('origin');
   if (origin) {
     // Computed before the try so a missing production config surfaces as a loud
     // 500 with a clear message instead of a silent 403.
     const expected = loginExpectedOrigin(request);
-    try {
-      if (new URL(origin).origin !== expected) return response({ error: 'Cross-origin login is not allowed' }, 403);
-    } catch {
-      return response({ error: 'Invalid origin' }, 403);
+    if (!isAllowedLoginOrigin(origin, expected)) {
+      return response({ error: 'Cross-origin login is not allowed' }, 403);
     }
   }
-
   try {
     const body: unknown = await request.json();
-    const accessToken = typeof body === 'object' && body !== null && 'accessToken' in body
+    const isObj = typeof body === 'object' && body !== null;
+
+    // Optional redirect_uri validation if provided by client
+    const redirectUri = isObj && 'redirect_uri' in body ? (body as { redirect_uri?: unknown }).redirect_uri : null;
+    if (typeof redirectUri === 'string' && redirectUri.trim() && !isValidRedirectUri(redirectUri)) {
+      return response({ error: 'Invalid redirect_uri' }, 400);
+    }
+
+    const accessToken = isObj && 'accessToken' in body
       ? (body as { accessToken?: unknown }).accessToken
       : null;
     if (typeof accessToken !== 'string' || !accessToken.trim()) {
