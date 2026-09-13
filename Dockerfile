@@ -29,6 +29,9 @@ RUN rm -f next-env.d.ts || true
 ARG NEXT_PUBLIC_PLAY_URL
 ENV NEXT_PUBLIC_PLAY_URL=$NEXT_PUBLIC_PLAY_URL
 
+ARG RELEASE_VERSION=
+ENV RELEASE_VERSION=$RELEASE_VERSION
+
 # DATABASE_URL is required during build for Prisma Client initialization
 # Use a dummy value since we're not connecting to a database during build
 RUN DATABASE_URL="postgresql://dummy:dummy@dummy:5432/dummy" npm run build
@@ -38,6 +41,9 @@ FROM node:20.19-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=3333
+
+ARG RELEASE_VERSION=
+ENV RELEASE_VERSION=$RELEASE_VERSION
 
 # Copy production dependencies (includes next and @prisma/client)
 COPY --from=deps /app/node_modules ./node_modules
