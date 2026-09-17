@@ -1,0 +1,42 @@
+name: Linear SH fixtures and disposable journal
+on:
+  pull_request:
+    branches: [develop]
+  push:
+    branches: [feat/linear-sh]
+permissions:
+  contents: read
+jobs:
+  fixtures:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: linear_sh
+          POSTGRES_PASSWORD: fixture
+          POSTGRES_DB: linear_sh_disposable
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U linear_sh -d linear_sh_disposable"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://linear_sh:fixture@127.0.0.1:5432/linear_sh_disposable
+      LINEAR_SH_ENABLED: 'false'
+      LINEAR_SH_WRITES_ENABLED: 'false'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npx prisma generate --schema=prisma/schema.prisma
+      - run: npx prisma validate --schema=prisma/schema.prisma
+      - run: npx jest __tests__/lib/ __tests__/api/bots/mcp-servers.test.ts --runInBand
+      - run: npx eslint lib/linear-sh app/api/linear-sh __tests__/lib/linear-sh*.test.ts __tests__/integration/linear-sh-journal.test.ts
+      - run: npx jest __tests__/integration/linear-sh-journal.test.ts --runInBand
+        env:
+          RUN_LINEAR_SH_DB_TESTS: '1'
+          LINEAR_SH_TEST_DATABASE_URL: postgresql://linear_sh:fixture@127.0.0.1:5432/linear_sh_disposable

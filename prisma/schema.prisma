@@ -416,6 +416,32 @@ model Bot {
 }
 
 // Bot MCP Servers
+// Linear SH confirmations are consumed durably BEFORE any external mutation.
+model LinearShOperation {
+  id             String   @id @default(uuid())
+  requestKey     String   @unique @map("request_key")
+  botId          String   @map("bot_id")
+  connectionId   String   @map("connection_id")
+  workspaceId    String   @map("workspace_id")
+  appActorId     String   @map("app_actor_id")
+  subject        String
+  accountId      String   @map("account_id")
+  linearUserId   String   @map("linear_user_id")
+  conversation   String
+  interactionId  String   @map("interaction_id")
+  payloadHash    String   @map("payload_hash")
+  payload        String   // encrypted exact confirmed payload, no credentials
+  status         String   @default("pending")
+  results        Json
+  expiresAt      DateTime @map("expires_at")
+  consumedAt     DateTime? @map("consumed_at")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  @@index([botId, subject, conversation, status])
+  @@map("linear_sh_operations")
+}
+
 model BotMcpServer {
   id          String   @id @default(uuid())
   botId       String   @map("bot_id")

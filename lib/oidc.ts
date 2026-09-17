@@ -61,7 +61,7 @@ export async function getOidcConfig(): Promise<Configuration> {
 /**
  * Validates an OIDC access token and returns user info
  */
-export async function validateAccessToken(token: string): Promise<UserInfoResponse | null> {
+export async function validateAccessToken(token: string, quiet = false): Promise<UserInfoResponse | null> {
   try {
     const config = await getOidcConfig();
     const module = await getOpenIdClientModule();
@@ -85,14 +85,14 @@ export async function validateAccessToken(token: string): Promise<UserInfoRespon
       }
     } catch (e) {
       // If we can't decode, use skipSubjectCheck
-      console.warn('Could not decode token to get subject, skipping subject check');
+      if (!quiet) console.warn('Could not decode token to get subject, skipping subject check');
     }
     
     // Fetch user info using the new v6 API
     const userInfo = await fetchUserInfo(config, token, subject);
     return userInfo;
   } catch (error) {
-    console.error('Token validation failed:', error);
+    if (!quiet) console.error('Token validation failed:', error);
     return null;
   }
 }

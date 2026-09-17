@@ -276,6 +276,12 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
   if (server.authConfig) {
     try {
       const decrypted = decryptApiKey(server.authConfig);
+      // Managed application secrets are never static bearer tokens. Test through the scoped service.
+      try {
+        if (JSON.parse(decrypted)?.linearSh) {
+          return { success: false, toolCount: 0, toolNames: [], error: 'Managed Linear SH connections require scoped read acceptance' };
+        }
+      } catch { /* Existing raw-token configurations retain their current behavior. */ }
       if (server.authType === 'oauth') {
         // OAuth authConfig is JSON with an accessToken field
         try {
