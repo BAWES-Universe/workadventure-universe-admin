@@ -189,6 +189,10 @@ export async function GET(
     // Include an exp claim (10 minute expiry) to enforce state token freshness.
     const statePayload = JSON.stringify({
       botId, serverId, redirectUrl,
+      // The resource this authorization request is addressed to, carried through to the
+      // token request. RFC 8707 requires both requests to name the same resource, and the
+      // row's serverUrl can be edited while the state is in flight (#188 review).
+      ...(server.serverUrl ? { resource: server.serverUrl } : {}),
       codeVerifier, redirectUri,
       ts: Date.now(),
       exp: Math.floor(Date.now() / 1000) + 600, // 10 minutes from now

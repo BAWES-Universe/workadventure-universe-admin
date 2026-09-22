@@ -256,3 +256,95 @@ describe('OAuth token request carries the RFC 8707 resource indicator', () => {
     expect(body.get('resource')).toBeNull();
   });
 });
+
+describe('the token resource is bound to the authorization, not re-read from the row', () => {
+  const stateWithResource = `enc:${JSON.stringify({
+    botId: BOT_ID,
+    serverId: SERVER_ID,
+    redirectUrl: `${ADMIN_BASE}/admin/bots/${BOT_ID}`,
+    codeVerifier: 'test-code-verifier',
+    redirectUri: `${ADMIN_BASE}/api/oauth/mcp-callback`,
+    resource: MCP_SERVER_URL,
+    exp: Math.floor(Date.now() / 1000) + 600,
+  })}`;
+
+  it('stores the resource in the state token it hands to the provider', async () => {
+    findUnique.mockResolvedValue({
+      id: SERVER_ID,
+      botId: BOT_ID,
+      authType: 'oauth',
+      authConfig: `enc:${JSON.stringify(providerConfig)}`,
+      serverUrl: MCP_SERVER_URL,
+      bot: { id: BOT_ID, createdById: 'user-1', name: 'Test bot' },
+    });
+
+    const response = await oauthStart(
+      new NextRequest(`${ADMIN_BASE}/api/bots/${BOT_ID}/mcp-servers/${SERVER_ID}/oauth/start`),
+      { params: Promise.resolve({ id: BOT_ID, serverId: SERVER_ID }) }
+    );
+
+    const { authorizeUrl } = await response.json();
+    const state = new URL(authorizeUrl).searchParams.get('state') as string;
+    const payload = JSON.parse(state.replace(/^enc:/, ''));
+
+    // Without this the token request could only re-read the row, and an edit during the
+    // state's ten-minute lifetime would leave the two requests naming different resources.
+    expect(payload.resource).toBe(MCP_SERVER_URL);
+  });
+
+  it('refuses the exchange when the row was repointed while the authorization was in flight', async () => {
+    findUnique.mockResolvedValue({
+      id: SERVER_ID,
+      botId: BOT_ID,
+      authType: 'oauth',
+      authConfig: `enc:${JSON.stringify(providerConfig)}`,
+      serverUrl: 'https://moved.example.com/mcp',
+    });
+    const fetchMock = jest.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const response = await oauthCallback(
+      new NextRequest(
+        `${ADMIN_BASE}/api/oauth/mcp-callback?code=auth-code-3&state=${encodeURIComponent(stateWithResource)}`
+      )
+    );
+
+    // Exchanging it would store a token addressed to the URL the flow was started for
+    // against a row that now names a different server: a connection that reports success
+    // and then 401s on its next use.
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
+    expect(response.status).toBe(307);
+    expect(response.headers.get('location')).toContain('message=server_url_changed');
+  });
+
+  it('exchanges against the state resource when the row still matches', async () => {
+    findUnique.mockResolvedValue({
+      id: SERVER_ID,
+      botId: BOT_ID,
+      authType: 'oauth',
+      authConfig: `enc:${JSON.stringify(providerConfig)}`,
+      serverUrl: MCP_SERVER_URL,
+    });
+    update.mockResolvedValue({ id: SERVER_ID });
+
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ access_token: 'access-1', expires_in: 3600 }),
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const response = await oauthCallback(
+      new NextRequest(
+        `${ADMIN_BASE}/api/oauth/mcp-callback?code=auth-code-4&state=${encodeURIComponent(stateWithResource)}`
+      )
+    );
+
+    const body = new URLSearchParams(fetchMock.mock.calls[0][1].body as string);
+    expect(body.get('resource')).toBe(MCP_SERVER_URL);
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(response.status).toBe(307);
+    expect(response.headers.get('location')).toContain('oauth=success');
+  });
+});
