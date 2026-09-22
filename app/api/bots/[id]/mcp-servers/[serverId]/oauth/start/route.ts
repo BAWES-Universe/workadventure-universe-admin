@@ -220,6 +220,17 @@ export async function GET(
     authorizeUrl.searchParams.set('state', stateToken);
     authorizeUrl.searchParams.set('code_challenge', codeChallenge);
     authorizeUrl.searchParams.set('code_challenge_method', 'S256');
+    // RFC 8707 resource indicator, addressed to this MCP server. MCP clients MUST
+    // send it on both the authorization request and the token request regardless
+    // of whether the authorization server supports it, and servers that enforce
+    // audience binding reject tokens that are not addressed to them (#185).
+    // The stored serverUrl is used verbatim: for every configured connection it is
+    // byte-identical to the canonical resource the server advertises.
+    // Guarded to match the token request: an empty value would emit `resource=`,
+    // which some authorization servers reject as malformed — worse than omitting it.
+    if (server.serverUrl) {
+      authorizeUrl.searchParams.set('resource', server.serverUrl);
+    }
 
     return NextResponse.json(
       { authorizeUrl: authorizeUrl.toString() },
