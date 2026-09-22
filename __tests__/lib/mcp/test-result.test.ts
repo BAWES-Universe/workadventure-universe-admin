@@ -1,11 +1,52 @@
 import {
   extractErrorCode,
   formatResultAge,
+  readBodyWithLimit,
   redactCredentialMaterial,
   summarizeTestResult,
   truncateDetail,
   type McpTestResult,
 } from '@/lib/mcp/test-result';
+
+describe('readBodyWithLimit', () => {
+  it('stops at the cap and cancels the rest of the stream', async () => {
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new TextEncoder().encode('x'.repeat(1024)));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+
+    const text = await readBodyWithLimit(new Response(stream), 4096);
+
+    // The cap bounds what is buffered, and cancelling stops the rest of the transfer
+    // rather than letting a streaming failure response drain into memory.
+    expect(text).toHaveLength(4096);
+    expect(cancelled).toBe(true);
+  });
+
+  it('returns the whole body when it fits under the cap', async () => {
+    const body = JSON.stringify({ error: 'invalid_token' });
+    expect(await readBodyWithLimit(new Response(body))).toBe(body);
+  });
+
+  it('returns an empty string for a response with no body', async () => {
+    expect(await readBodyWithLimit(new Response(null, { status: 401 }))).toBe('');
+  });
+
+  it('resolves instead of throwing when the stream fails mid-read', async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(new Error('connection reset'));
+      },
+    });
+
+    await expect(readBodyWithLimit(new Response(stream))).resolves.toBe('');
+  });
+});
 
 describe('redactCredentialMaterial', () => {
   it('redacts bearer tokens', () => {

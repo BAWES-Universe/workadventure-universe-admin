@@ -256,7 +256,15 @@ export async function GET(
           const config = JSON.parse(decrypted);
           oauthConnected = !!config.accessToken;
           if (typeof config.expiresAt === 'number' && Number.isFinite(config.expiresAt)) {
-            oauthExpiresAt = new Date(config.expiresAt * 1000).toISOString();
+            const expiresAt = new Date(config.expiresAt * 1000);
+            // A finite number is not necessarily a representable date. An out-of-range
+            // value made toISOString() throw, and the catch below swallows that while
+            // oauthConnected stays true — so the panel was told the connection is live
+            // with no expiry at all, which is the stale-as-healthy illusion this change
+            // exists to remove (#186 review).
+            if (!Number.isNaN(expiresAt.getTime())) {
+              oauthExpiresAt = expiresAt.toISOString();
+            }
           }
         } catch {
           // If decrypt fails, assume not connected

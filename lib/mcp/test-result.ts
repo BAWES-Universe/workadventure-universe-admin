@@ -80,6 +80,52 @@ export function truncateDetail(text: string | null | undefined, limit = MAX_DETA
 }
 
 /**
+ * Cap on how much of a failing server's response body is read at all (#186 review).
+ *
+ * `truncateDetail` caps what is *stored*; this caps what is *read*, so a broken or
+ * hostile endpoint that streams megabytes cannot be buffered in memory first. The
+ * request timeout bounds how long we wait, not how much arrives.
+ */
+export const MAX_ERROR_BODY_BYTES = 8 * 1024;
+
+/**
+ * Read at most `maxBytes` of a response body, then cancel the stream.
+ *
+ * Only for failure paths, where the body is wanted for its error code and nothing
+ * else. Success paths still read the whole body: the JSON-RPC / SSE payload has to be
+ * parsed, and a tool list is legitimately large.
+ */
+export async function readBodyWithLimit(
+  response: Response,
+  maxBytes: number = MAX_ERROR_BODY_BYTES
+): Promise<string> {
+  const stream = response.body;
+  if (!stream) return '';
+
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (total < maxBytes) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value?.length) continue;
+      const remaining = maxBytes - total;
+      chunks.push(value.length > remaining ? value.subarray(0, remaining) : value);
+      total += Math.min(value.length, remaining);
+    }
+  } catch {
+    // A stream that dies mid-read still yields what arrived before it did; the caller
+    // redacts and truncates whatever comes back.
+  } finally {
+    // Stop the transfer rather than letting the rest of the body drain.
+    await reader.cancel().catch(() => {});
+  }
+
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+/**
  * Pull the most useful error identifier out of a failing response body.
  * Handles the shapes seen in practice — `{"error":"invalid_token"}`,
  * `{"statusCode":401,"error":"Unauthorized","message":"…"}` — and falls back to

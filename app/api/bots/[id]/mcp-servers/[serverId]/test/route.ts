@@ -3,7 +3,7 @@ import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { decryptApiKey } from '@/lib/encryption';
-import { extractErrorCode, truncateDetail } from '@/lib/mcp/test-result';
+import { extractErrorCode, readBodyWithLimit, truncateDetail } from '@/lib/mcp/test-result';
 import { lookup } from 'dns/promises';
 import { isIP } from 'net';
 
@@ -315,7 +315,11 @@ async function describeFailure(
   wwwAuthenticate: string | null;
   errorBody: string | null;
 }> {
-  const rawBody = responseBody ?? (await response.text().catch(() => ''));
+  // Read through a byte cap: this is a server the operator configured but does not
+  // control, and a failing endpoint that streams megabytes would otherwise be buffered
+  // in full before truncateDetail ever sees it. Covers both failure call sites, the
+  // direct response and the followed redirect, which both land here without a body.
+  const rawBody = responseBody ?? (await readBodyWithLimit(response));
   const errorCode = extractErrorCode(rawBody);
   const statusText = response.statusText || '';
   return {
