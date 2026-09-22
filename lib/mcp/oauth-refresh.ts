@@ -40,7 +40,11 @@ export interface RefreshOutcome {
   status: RefreshStatus;
   /** Config as it should be used now (the refreshed one when status is 'refreshed'). */
   config: McpOAuthConfig | null;
-  /** Encrypted config to keep using. Already persisted whenever it changed. */
+  /**
+   * Encrypted config to keep using. It is the config that was persisted whenever one was
+   * written, and it always agrees with `config` and `status`: a terminal verdict never
+   * hands back the pre-verdict blob, whose dead access token would contradict it.
+   */
   authConfig: string | null;
   reason?: string;
 }
@@ -413,17 +417,38 @@ async function markTerminal(
   const marked = markReconnectRequired(config, reason, nowMs);
   try {
     const persisted = await persistIfUnchanged(serverId, encryptedConfig, marked);
-    if (!persisted.won) {
-      // Someone else wrote while we were in flight. If they stored a usable token
-      // (a human just reconnected), adopt it instead of persisting our verdict.
-      const current = await readStoredConfig(serverId).catch(() => null);
-      if (current && !!current.config.accessToken && !isAccessTokenStale(current.config, nowMs, 0)) {
-        return { status: 'refreshed', config: current.config, authConfig: current.encrypted };
-      }
+    if (persisted.won) {
+      // Hand back the blob that was actually written, never the one this call started
+      // from. A caller serves `authConfig` to the bot as its credentials while deriving
+      // "connected" from `config`, so returning the pre-verdict blob made one payload
+      // declare that a reconnect was required and carry the dead access token the bot
+      // would then present and get a 401 for (#190 review finding).
+      return { status: 'reconnect_required', config: marked, authConfig: persisted.authConfig, reason };
     }
+
+    // Someone else wrote while we were in flight. If they stored a usable token
+    // (a human just reconnected), adopt it instead of recording our verdict.
+    const current = await readStoredConfig(serverId).catch(() => null);
+    if (current && !!current.config.accessToken && !isAccessTokenStale(current.config, nowMs, 0)) {
+      return { status: 'refreshed', config: current.config, authConfig: current.encrypted };
+    }
+    // Their row holds no usable token either, so our verdict stays the honest answer and
+    // is what `config` reports below. Their token-bearing blob is deliberately not
+    // served: a caller would read it as a connected connection whose token just failed,
+    // which is the illusion this verdict exists to remove.
   } catch (error) {
     console.error('[OAuthRefresh] Failed to persist reconnect-required state:', error);
   }
 
-  return { status: 'reconnect_required', config: marked, authConfig: encryptedConfig, reason };
+  // Reached when the guarded write lost to a row holding nothing usable, or when it could
+  // not be made at all. Either way the verdict is served with a config that agrees with
+  // it, so no dead access token goes out beside "reconnect required". markTerminal is only
+  // reached once the stored token itself is unusable, so nothing that could still
+  // authenticate is discarded here.
+  return {
+    status: 'reconnect_required',
+    config: marked,
+    authConfig: encryptApiKey(JSON.stringify(marked)),
+    reason,
+  };
 }

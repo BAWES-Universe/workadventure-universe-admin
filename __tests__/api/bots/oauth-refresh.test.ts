@@ -331,6 +331,107 @@ describe('ensureFreshOAuthConfig', () => {
   });
 });
 
+describe('a terminal verdict and the credentials it hands back agree', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    updateMany.mockResolvedValue({ count: 1 });
+    findUnique.mockResolvedValue(null);
+  });
+
+  afterAll(() => {
+    global.fetch = originalFetch;
+  });
+
+  it('serves the config it wrote, not the pre-verdict blob with the dead token', async () => {
+    const fetchMock = jest.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const noRefresh = { ...expiredConfig, refreshToken: undefined };
+
+    const outcome = await ensureFreshOAuthConfig({
+      serverId: SERVER_ID,
+      authConfig: enc(noRefresh),
+      nowMs: NOW,
+    });
+
+    expect(outcome.status).toBe('reconnect_required');
+    // The caller serves `authConfig` to the bot as its credentials while deriving
+    // "connected" from `config`: returning the pre-verdict blob made one payload declare
+    // a reconnect was required and carry the dead access token the bot would present.
+    const served = dec(outcome.authConfig as string);
+    expect(served.accessToken).toBeUndefined();
+    expect(served.refreshToken).toBeUndefined();
+    expect(served.reconnectRequired.reason).toContain('no refresh token');
+    // Exactly what the guarded write persisted, and the same config the outcome reports.
+    expect(outcome.authConfig).toBe(updateMany.mock.calls[0][0].data.authConfig);
+    expect(served).toEqual(outcome.config);
+  });
+
+  it('adopts a live pair another writer stored instead of recording the verdict', async () => {
+    global.fetch = jest.fn() as unknown as typeof fetch;
+    const noRefresh = { ...expiredConfig, refreshToken: undefined };
+    updateMany.mockResolvedValue({ count: 0 }); // the verdict loses the compare-and-set
+    findUnique.mockResolvedValue({
+      authConfig: enc({
+        ...expiredConfig,
+        accessToken: 'access-just-authorized',
+        refreshToken: 'refresh-just-authorized',
+        expiresAt: nowSeconds + 3600,
+      }),
+    });
+
+    const outcome = await ensureFreshOAuthConfig({
+      serverId: SERVER_ID,
+      authConfig: enc(noRefresh),
+      nowMs: NOW,
+    });
+
+    // A human re-authorized while this call was in flight: their pair is the live one.
+    expect(outcome.status).toBe('refreshed');
+    expect(outcome.config?.accessToken).toBe('access-just-authorized');
+    expect(dec(outcome.authConfig as string).accessToken).toBe('access-just-authorized');
+  });
+
+  it("never serves another writer's dead token when the verdict cannot be persisted", async () => {
+    global.fetch = jest.fn() as unknown as typeof fetch;
+    const noRefresh = { ...expiredConfig, refreshToken: undefined };
+    updateMany.mockResolvedValue({ count: 0 });
+    findUnique.mockResolvedValue({
+      authConfig: enc({ ...expiredConfig, accessToken: 'dead-elsewhere' }),
+    });
+
+    const outcome = await ensureFreshOAuthConfig({
+      serverId: SERVER_ID,
+      authConfig: enc(noRefresh),
+      nowMs: NOW,
+    });
+
+    // `config` is what a caller reads to decide whether the connection is connected, so a
+    // token-bearing blob here would be reported as a live connection whose token just failed.
+    expect(outcome.status).toBe('reconnect_required');
+    const served = dec(outcome.authConfig as string);
+    expect(served.accessToken).toBeUndefined();
+    expect(served.reconnectRequired.reason).toContain('no refresh token');
+    expect(served).toEqual(outcome.config);
+  });
+
+  it('still serves a verdict consistent with itself when nothing could be written', async () => {
+    global.fetch = jest.fn() as unknown as typeof fetch;
+    const noRefresh = { ...expiredConfig, refreshToken: undefined };
+    updateMany.mockRejectedValue(new Error('database unavailable'));
+
+    const outcome = await ensureFreshOAuthConfig({
+      serverId: SERVER_ID,
+      authConfig: enc(noRefresh),
+      nowMs: NOW,
+    });
+
+    expect(outcome.status).toBe('reconnect_required');
+    const served = dec(outcome.authConfig as string);
+    expect(served.accessToken).toBeUndefined();
+    expect(served).toEqual(outcome.config);
+  });
+});
+
 describe('skew must not be conflated with expiry', () => {
   beforeEach(() => {
     jest.clearAllMocks();
