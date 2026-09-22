@@ -246,11 +246,18 @@ export async function GET(
     // For OAuth servers, check if connected (has accessToken) without exposing credentials
     const transformed = servers.map((s) => {
       let oauthConnected = false;
+      // The access token's expiry, exposed to the UI so a stored green result can
+      // be told apart from a live connection (#186). Not secret: it is a timestamp,
+      // and the token itself is never sent here.
+      let oauthExpiresAt: string | null = null;
       if (s.authType === 'oauth' && s.authConfig) {
         try {
           const decrypted = decryptApiKey(s.authConfig);
           const config = JSON.parse(decrypted);
           oauthConnected = !!config.accessToken;
+          if (typeof config.expiresAt === 'number' && Number.isFinite(config.expiresAt)) {
+            oauthExpiresAt = new Date(config.expiresAt * 1000).toISOString();
+          }
         } catch {
           // If decrypt fails, assume not connected
         }
@@ -263,6 +270,7 @@ export async function GET(
         authType: s.authType,
         ...(isAdminToken ? { authConfig: s.authConfig } : {}),
         oauthConnected,
+        oauthExpiresAt,
         enabled: s.enabled,
         headers: s.headers,
         lastTestedAt: s.lastTestedAt,
