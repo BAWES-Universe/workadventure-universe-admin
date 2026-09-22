@@ -15,6 +15,10 @@ interface OAuthConfig {
   accessToken?: string;
   refreshToken?: string;
   expiresAt?: number;
+  /** Advertised scopes recorded at connection time (#187). */
+  scopesSupported?: string[] | null;
+  /** Set by the refresh path when a human must re-authorize (#187). */
+  reconnectRequired?: { at: string; reason: string } | null;
 }
 
 /**
@@ -182,6 +186,9 @@ export async function GET(request: NextRequest) {
       accessToken: tokenResponse.access_token,
       refreshToken: tokenResponse.refresh_token || undefined,
       expiresAt: tokenResponse.expires_in ? Math.floor(Date.now() / 1000) + tokenResponse.expires_in : undefined,
+      scopesSupported: oauthConfig.scopesSupported ?? undefined,
+      // A fresh authorization clears any previous reconnect-required verdict.
+      reconnectRequired: undefined,
     };
 
     // Encrypt and save
