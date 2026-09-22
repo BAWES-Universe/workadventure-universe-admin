@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
+import { parseOAuthConfig } from '@/lib/mcp/oauth-token';
+import { ensureFreshOAuthConfig } from '@/lib/mcp/oauth-refresh';
 import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { encryptApiKey, decryptApiKey } from '@/lib/encryption';
@@ -244,33 +246,52 @@ export async function GET(
     // Transform: remove authConfig from response for security,
     // except for internal bot-server calls authenticated via ADMIN_API_TOKEN
     // For OAuth servers, check if connected (has accessToken) without exposing credentials
-    const transformed = servers.map((s) => {
-      let oauthConnected = false;
-      if (s.authType === 'oauth' && s.authConfig) {
-        try {
-          const decrypted = decryptApiKey(s.authConfig);
-          const config = JSON.parse(decrypted);
-          oauthConnected = !!config.accessToken;
-        } catch {
-          // If decrypt fails, assume not connected
+    const transformed = await Promise.all(
+      servers.map(async (s) => {
+        let oauthConnected = false;
+        let oauthReconnectReason: string | null = null;
+        let authConfigToServe = s.authConfig;
+        if (s.authType === 'oauth' && s.authConfig) {
+          try {
+            let config = parseOAuthConfig(decryptApiKey(s.authConfig));
+            // Internal callers (the bots) are handed the credentials, so this is where
+            // a token must be renewed before it is served. Admin reads only report
+            // state — they must not trigger a refresh on every page view (#187).
+            if (isAdminToken) {
+              const outcome = await ensureFreshOAuthConfig({
+                serverId: s.id,
+                authConfig: s.authConfig,
+                serverUrl: s.serverUrl,
+              });
+              if (outcome.authConfig) authConfigToServe = outcome.authConfig;
+              if (outcome.config) config = outcome.config;
+            }
+            oauthConnected = !!config?.accessToken;
+            oauthReconnectReason = config?.reconnectRequired?.reason ?? null;
+          } catch {
+            // If decrypt fails, assume not connected
+          }
         }
-      }
-      return {
-        id: s.id,
-        botId: s.botId,
-        name: s.name,
-        serverUrl: s.serverUrl,
-        authType: s.authType,
-        ...(isAdminToken ? { authConfig: s.authConfig } : {}),
-        oauthConnected,
-        enabled: s.enabled,
-        headers: s.headers,
-        lastTestedAt: s.lastTestedAt,
-        lastTestResult: s.lastTestResult,
-        createdAt: s.createdAt,
-        updatedAt: s.updatedAt,
-      };
-    });
+          return {
+            id: s.id,
+            botId: s.botId,
+            name: s.name,
+            serverUrl: s.serverUrl,
+            authType: s.authType,
+            ...(isAdminToken ? { authConfig: authConfigToServe } : {}),
+            oauthConnected,
+            // Set when refreshing is impossible and only a human can fix it (#187).
+            oauthReconnectRequired: !!oauthReconnectReason,
+            oauthReconnectReason,
+            enabled: s.enabled,
+            headers: s.headers,
+            lastTestedAt: s.lastTestedAt,
+            lastTestResult: s.lastTestResult,
+            createdAt: s.createdAt,
+            updatedAt: s.updatedAt,
+          };
+      })
+    );
 
     return NextResponse.json(transformed, { headers: corsHeaders(request) });
   } catch (error) {
