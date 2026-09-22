@@ -97,7 +97,7 @@ export async function GET(request: NextRequest) {
     // Load the MCP server config to get OAuth provider config
     const server = await prisma.botMcpServer.findUnique({
       where: { id: serverId },
-      select: { id: true, botId: true, authType: true, authConfig: true },
+      select: { id: true, botId: true, authType: true, authConfig: true, serverUrl: true },
     });
 
     if (!server || server.botId !== botId || server.authType !== 'oauth') {
@@ -161,7 +161,8 @@ export async function GET(request: NextRequest) {
       oauthConfig.clientId,
       oauthConfig.clientSecret ?? null,
       tokenExchangeRedirectUri,
-      codeVerifier
+      codeVerifier,
+      server.serverUrl
     );
 
     if (!tokenResponse) {
@@ -231,6 +232,12 @@ function parseStateToken(state: string | null): { botId: string; serverId: strin
 
 /**
  * Exchange an authorization code for tokens at the provider's token endpoint.
+ *
+ * `resource` is the RFC 8707 resource indicator (the MCP server's canonical URI,
+ * taken verbatim from the stored serverUrl). MCP clients MUST send it on the token
+ * request as well as the authorization request; authorization servers that bind
+ * the access token's audience to it will otherwise issue a token that the MCP
+ * server rejects with 401 invalid_token (#185).
  */
 async function exchangeCodeForTokens(
   tokenEndpoint: string,
@@ -238,7 +245,8 @@ async function exchangeCodeForTokens(
   clientId: string,
   clientSecret: string | null,
   redirectUri: string,
-  codeVerifier?: string
+  codeVerifier?: string,
+  resource?: string
 ): Promise<{ access_token: string; refresh_token?: string; expires_in?: number } | null> {
   try {
     const body = new URLSearchParams();
@@ -253,6 +261,9 @@ async function exchangeCodeForTokens(
     body.set('redirect_uri', redirectUri);
     if (codeVerifier) {
       body.set('code_verifier', codeVerifier);
+    }
+    if (resource) {
+      body.set('resource', resource);
     }
 
     const response = await fetch(tokenEndpoint, {
