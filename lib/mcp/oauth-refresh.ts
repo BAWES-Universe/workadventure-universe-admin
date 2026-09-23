@@ -311,6 +311,10 @@ async function performRefresh(
         Accept: 'application/json',
       },
       body: body.toString(),
+      // A redirect would carry the refresh token and client secret to a destination the
+      // check above never saw (a 307/308 re-sends the body), so it fails the request
+      // instead. It surfaces as a transport error: retryable, tokens kept (#193 review).
+      redirect: 'error',
       signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS),
     });
   } catch (error) {

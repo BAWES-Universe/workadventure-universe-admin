@@ -317,6 +317,10 @@ async function exchangeCodeForTokens(
         'Accept': 'application/json',
       },
       body: body.toString(),
+      // A redirect would carry the code and client secret to a destination the
+      // destination check never saw (a 307/308 re-sends the body), so it fails the
+      // exchange instead (#193 review).
+      redirect: 'error',
       signal: AbortSignal.timeout(15000),
     });
 
