@@ -4,6 +4,7 @@ import {
   isReconnectRequired,
   markReconnectRequired,
   needsRefresh,
+  normalizeExpiresIn,
   parseOAuthConfig,
   refreshBlockedReason,
   resolveRequestedScopes,
@@ -126,8 +127,49 @@ describe('applyRefreshResult', () => {
     expect(next.reconnectRequired).toBeUndefined();
   });
 
+  it('records no expiry when the response has no expires_in, instead of inheriting the stale one', () => {
+    // applyRefreshResult only runs once needsRefresh said yes, so config.expiresAt is
+    // already past or inside the skew: inheriting it would make the new token stale on
+    // arrival and send every later call back to the token endpoint (#190 review).
+    const next = applyRefreshResult(config({ expiresAt: nowSeconds - 60 }), { access_token: 'access-2' }, NOW);
+    expect(next.expiresAt).toBeNull();
+  });
+
+  it('ignores an unrepresentable expires_in rather than trusting it', () => {
+    const next = applyRefreshResult(
+      config({ expiresAt: nowSeconds - 60 }),
+      { access_token: 'access-2', expires_in: Number.NaN },
+      NOW
+    );
+    expect(next.expiresAt).toBeNull();
+  });
+
+  it('accepts a numeric-string expires_in', () => {
+    const next = applyRefreshResult(
+      config({ expiresAt: nowSeconds - 60 }),
+      { access_token: 'access-2', expires_in: '3600' as unknown as number },
+      NOW
+    );
+    expect(next.expiresAt).toBe(nowSeconds + 3600);
+  });
+
   it('refuses a response with no access token', () => {
     expect(() => applyRefreshResult(config(), {}, NOW)).toThrow(/no access_token/);
+  });
+});
+
+describe('normalizeExpiresIn', () => {
+  it('reads numbers and numeric strings, and nothing else', () => {
+    expect(normalizeExpiresIn(3600)).toBe(3600);
+    expect(normalizeExpiresIn('3600')).toBe(3600);
+    expect(normalizeExpiresIn(' 60 ')).toBe(60);
+    expect(normalizeExpiresIn('')).toBeUndefined();
+    expect(normalizeExpiresIn('soon')).toBeUndefined();
+    expect(normalizeExpiresIn(Number.POSITIVE_INFINITY)).toBeUndefined();
+    expect(normalizeExpiresIn(Number.NaN)).toBeUndefined();
+    expect(normalizeExpiresIn(null)).toBeUndefined();
+    expect(normalizeExpiresIn(undefined)).toBeUndefined();
+    expect(normalizeExpiresIn({ seconds: 60 })).toBeUndefined();
   });
 });
 

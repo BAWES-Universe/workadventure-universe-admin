@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
+import { normalizeExpiresIn } from '@/lib/mcp/oauth-token';
 import { getOAuthCallbackBase } from '@/lib/oauth-callback';
 
 export const runtime = 'nodejs';
@@ -293,7 +294,9 @@ async function exchangeCodeForTokens(
     return {
       access_token: data.access_token,
       refresh_token: data.refresh_token,
-      expires_in: data.expires_in,
+      // Normalized here, at the boundary: a numeric string would otherwise be concatenated
+      // onto the epoch second below and store a nonsense expiry (#190 review).
+      expires_in: normalizeExpiresIn(data.expires_in),
     };
   } catch (error) {
     console.error('[OAuthCallback] Token exchange fetch failed:', error);

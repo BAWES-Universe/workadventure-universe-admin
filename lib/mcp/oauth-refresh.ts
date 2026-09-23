@@ -28,6 +28,7 @@ import {
   isReconnectRequired,
   markReconnectRequired,
   needsRefresh,
+  normalizeExpiresIn,
   parseOAuthConfig,
   refreshBlockedReason,
   type McpOAuthConfig,
@@ -317,7 +318,9 @@ async function performRefresh(
   const tokenResponse: RefreshTokenResponse = {
     access_token: typeof parsedBody?.access_token === 'string' ? parsedBody.access_token : undefined,
     refresh_token: typeof parsedBody?.refresh_token === 'string' ? parsedBody.refresh_token : undefined,
-    expires_in: typeof parsedBody?.expires_in === 'number' ? parsedBody.expires_in : undefined,
+    // Numeric strings are common in the wild; dropping the duration would record no expiry
+    // and leave the new token never proactively refreshed (#190 review).
+    expires_in: normalizeExpiresIn(parsedBody?.expires_in),
   };
 
   if (!tokenResponse.access_token) {

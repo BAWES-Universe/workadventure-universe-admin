@@ -112,6 +112,71 @@ describe('/api/bots/[id]/mcp-servers', () => {
       expect(data[0].authConfig).toBeUndefined();
     });
 
+    it('reports a non-refreshable expired token as needing reconnection, with no stored marker', async () => {
+      // A panel read never refreshes, so nothing has written the marker yet. Deriving state
+      // from the stored marker alone showed this connection as "Connected" and hid the
+      // Reconnect action until a bot poll or Test run happened to write it (#190 review).
+      (prisma.botMcpServer.findMany as jest.Mock).mockResolvedValue([
+        {
+          id: 'srv-oauth-dead',
+          botId: MOCK_BOT_ID,
+          name: 'OAuth Server',
+          serverUrl: 'https://provider.example.com/mcp',
+          authType: 'oauth',
+          authConfig: `encrypted:${JSON.stringify({
+            clientId: 'client-1',
+            tokenUrl: 'https://provider.example.com/token',
+            accessToken: 'expired-token',
+            refreshToken: null,
+            expiresAt: Math.floor(Date.now() / 1000) - 3600,
+          })}`,
+          enabled: true,
+          createdAt: new Date('2025-01-01'),
+          updatedAt: new Date('2025-01-01'),
+        },
+      ]);
+
+      const request = new NextRequest(`http://localhost:3333/api/bots/${MOCK_BOT_ID}/mcp-servers`);
+      const response = await GET(request, { params: Promise.resolve({ id: MOCK_BOT_ID }) });
+      const data = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(data[0].oauthConnected).toBe(false);
+      expect(data[0].oauthReconnectRequired).toBe(true);
+      expect(data[0].oauthReconnectReason).toContain('cannot be renewed automatically');
+    });
+
+    it('still reports an expired but refreshable token as connected', async () => {
+      // The bot path renews this one on demand, so the panel should not demand a human.
+      (prisma.botMcpServer.findMany as jest.Mock).mockResolvedValue([
+        {
+          id: 'srv-oauth-live',
+          botId: MOCK_BOT_ID,
+          name: 'OAuth Server',
+          serverUrl: 'https://provider.example.com/mcp',
+          authType: 'oauth',
+          authConfig: `encrypted:${JSON.stringify({
+            clientId: 'client-1',
+            tokenUrl: 'https://provider.example.com/token',
+            accessToken: 'expired-token',
+            refreshToken: 'refresh-1',
+            expiresAt: Math.floor(Date.now() / 1000) - 3600,
+          })}`,
+          enabled: true,
+          createdAt: new Date('2025-01-01'),
+          updatedAt: new Date('2025-01-01'),
+        },
+      ]);
+
+      const request = new NextRequest(`http://localhost:3333/api/bots/${MOCK_BOT_ID}/mcp-servers`);
+      const response = await GET(request, { params: Promise.resolve({ id: MOCK_BOT_ID }) });
+      const data = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(data[0].oauthConnected).toBe(true);
+      expect(data[0].oauthReconnectRequired).toBe(false);
+    });
+
     it('should return 403 if user is not owner or super admin', async () => {
       (prisma.bot.findUnique as jest.Mock).mockResolvedValue({
         id: MOCK_BOT_ID,

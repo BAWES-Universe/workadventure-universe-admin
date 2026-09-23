@@ -577,11 +577,11 @@ describe('a successful exchange outranks a concurrent terminal verdict', () => {
     global.fetch = jest
       .fn()
       .mockResolvedValue(tokenResponse({ access_token: 'access-A', refresh_token: 'refresh-A' })) as unknown as typeof fetch;
-    updateMany.mockResolvedValue({ count: 0 });
-    findUnique.mockResolvedValue({
-      authConfig: enc(markReconnectRequired(expiredConfig, 'rejected', NOW)),
-    });
-    update.mockRejectedValue(new Error('database unavailable'));
+    // The guarded write itself throws, rather than losing the compare-and-set. This is the
+    // catch around the first persistIfUnchanged call; the count:0 variant below only
+    // re-covered the retry-exhaustion path, which the test above already pins (#190 review).
+    updateMany.mockRejectedValue(new Error('database unavailable'));
+    findUnique.mockResolvedValue({ authConfig: null });
 
     const outcome = await ensureFreshOAuthConfig({
       serverId: SERVER_ID,
@@ -592,6 +592,46 @@ describe('a successful exchange outranks a concurrent terminal verdict', () => {
     // Handing back tokens that are not in the row is the silent failure this guards.
     expect(outcome.status).toBe('unavailable');
     expect(outcome.reason).toContain('could not be stored');
+  });
+
+  it('honours a numeric-string expires_in from the provider', async () => {
+    global.fetch = jest
+      .fn()
+      .mockResolvedValue(
+        tokenResponse({ access_token: 'access-2', refresh_token: 'refresh-2', expires_in: '3600' })
+      ) as unknown as typeof fetch;
+    updateMany.mockResolvedValue({ count: 1 });
+
+    const outcome = await ensureFreshOAuthConfig({
+      serverId: SERVER_ID,
+      authConfig: enc(expiredConfig),
+      nowMs: NOW,
+    });
+
+    // Dropped, the duration records no expiry and the new token is never refreshed ahead
+    // of time (#190 review).
+    expect(outcome.status).toBe('refreshed');
+    expect(outcome.config?.expiresAt).toBe(nowSeconds + 3600);
+    expect(dec(updateMany.mock.calls[0][0].data.authConfig).expiresAt).toBe(nowSeconds + 3600);
+  });
+
+  it('records no expiry when the response omits expires_in, rather than the old expired one', async () => {
+    global.fetch = jest
+      .fn()
+      .mockResolvedValue(tokenResponse({ access_token: 'access-2', refresh_token: 'refresh-2' })) as unknown as typeof fetch;
+    updateMany.mockResolvedValue({ count: 1 });
+
+    const outcome = await ensureFreshOAuthConfig({
+      serverId: SERVER_ID,
+      authConfig: enc(expiredConfig),
+      nowMs: NOW,
+    });
+
+    // expiresAt here is already in the past (that is why we refreshed), so inheriting it
+    // would mark the brand-new token stale on arrival.
+    expect(outcome.status).toBe('refreshed');
+    expect(outcome.config?.expiresAt).toBeNull();
+    expect(dec(updateMany.mock.calls[0][0].data.authConfig).expiresAt).toBeNull();
   });
 
   it('keeps invalid_client retryable even when it arrives with a 401', async () => {

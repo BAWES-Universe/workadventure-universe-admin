@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
-import { parseOAuthConfig } from '@/lib/mcp/oauth-token';
+import { isReconnectRequired, parseOAuthConfig, refreshBlockedReason } from '@/lib/mcp/oauth-token';
 import { ensureFreshOAuthConfig } from '@/lib/mcp/oauth-refresh';
 import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
@@ -266,8 +266,16 @@ export async function GET(
               if (outcome.authConfig) authConfigToServe = outcome.authConfig;
               if (outcome.config) config = outcome.config;
             }
-            oauthConnected = !!config?.accessToken;
-            oauthReconnectReason = config?.reconnectRequired?.reason ?? null;
+            // A panel read never refreshes, so the stored marker alone is not enough: a
+            // connection whose token has expired and that has no refresh token is already
+            // beyond automatic recovery, and calling it connected hides the Reconnect
+            // action until some bot poll or Test run writes the marker. Ask the token
+            // rules directly instead (#190 review).
+            const needsHuman = !!config && !!config.accessToken && isReconnectRequired(config);
+            oauthConnected = !!config?.accessToken && !needsHuman;
+            oauthReconnectReason =
+              config?.reconnectRequired?.reason ??
+              (config && needsHuman ? refreshBlockedReason(config) : null);
           } catch {
             // If decrypt fails, assume not connected
           }

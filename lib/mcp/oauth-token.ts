@@ -107,6 +107,22 @@ export function isReconnectRequired(config: McpOAuthConfig, nowMs: number = Date
 }
 
 /**
+ * `expires_in` as a duration in seconds, whatever shape the provider sent it in.
+ *
+ * RFC 6749 defines it as a JSON number, but providers also send numeric strings. A
+ * dropped value is not neutral: both the authorization exchange and the refresh path
+ * treat a missing duration as "no expiry recorded" (#190 review).
+ */
+export function normalizeExpiresIn(value: unknown): number | undefined {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined;
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+}
+
+/**
  * Fold a successful refresh into the stored config.
  *
  * The rotated refresh token MUST be persisted: providers that rotate invalidate the
@@ -121,14 +137,18 @@ export function applyRefreshResult(
   if (!token.access_token) {
     throw new Error('Refresh response carried no access_token');
   }
+  const expiresIn = normalizeExpiresIn(token.expires_in);
   const next: McpOAuthConfig = {
     ...config,
     accessToken: token.access_token,
     refreshToken: token.refresh_token || config.refreshToken,
-    expiresAt:
-      typeof token.expires_in === 'number' && Number.isFinite(token.expires_in)
-        ? Math.floor(nowMs / 1000) + token.expires_in
-        : (config.expiresAt ?? null),
+    // A response with no duration records no expiry, rather than inheriting the old one.
+    // This only runs once `needsRefresh` said yes, so the previous expiry is already past
+    // or inside the skew: keeping it would mark the brand-new token stale on arrival, send
+    // every later call back to the token endpoint, and make a live pair another writer
+    // stored look unusable in `holdsUsablePair`. The contract here is that a token with no
+    // recorded expiry is usable (#190 review).
+    expiresAt: expiresIn === undefined ? null : Math.floor(nowMs / 1000) + expiresIn,
   };
   delete next.reconnectRequired;
   return next;
