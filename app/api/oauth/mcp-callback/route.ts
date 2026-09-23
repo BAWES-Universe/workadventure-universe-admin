@@ -229,13 +229,34 @@ export async function GET(request: NextRequest) {
       reconnectRequired: undefined,
     };
 
-    // Encrypt and save
-    const encryptedConfig = encryptApiKey(JSON.stringify(updatedOAuthConfig));
-
-    await prisma.botMcpServer.update({
-      where: { id: serverId },
-      data: { authConfig: encryptedConfig },
-    });
+    // Save only onto the connection this authorization was started for. The exchange
+    // takes seconds, and in that window the row can change (#193 review):
+    // - a token refresh or a settings save (scopes, say) that keeps the same server and
+    //   authorization server: the new tokens are carried onto what the row holds now;
+    // - the server URL, an endpoint or the client changed: these tokens are not that
+    //   connection's, so nothing is written and the login reports the change.
+    const stored = await storeAuthorizedTokens(server.id, server.serverUrl, server.authConfig!, updatedOAuthConfig);
+    if (stored === 'busy') {
+      // Every attempt lost to another write that kept this connection's settings: nothing
+      // changed that invalidates the login, the row was just being written at the time.
+      console.error('[OAuthCallback] Connection was being written concurrently; tokens not stored');
+      if (redirectUrl) {
+        return popupRedirect(openerBase, { oauth: 'error', message: 'connection_busy_try_again' });
+      }
+      return new NextResponse('This connection was being updated at the same time. Connect again.', {
+        status: 409,
+      });
+    }
+    if (stored === 'changed') {
+      console.error('[OAuthCallback] Connection changed while the authorization was in flight');
+      if (redirectUrl) {
+        return popupRedirect(openerBase, { oauth: 'error', message: 'connection_changed' });
+      }
+      return new NextResponse(
+        'This connection was changed while the authorization was in progress. Start the connection again.',
+        { status: 409 }
+      );
+    }
 
     console.log(`[OAuthCallback] Tokens stored for server ${serverId} (bot ${botId})`);
 
@@ -252,6 +273,57 @@ export async function GET(request: NextRequest) {
     console.error('[OAuthCallback] Error:', error);
     return new NextResponse('Internal server error', { status: 500 });
   }
+}
+
+const STORE_ATTEMPTS = 3;
+
+/**
+ * Write a fresh authorization's tokens, guarded on the row still being the connection
+ * the authorization was started for. `changed` when it no longer is; `busy` when every
+ * attempt lost to writes that kept it the same connection, so connecting again works.
+ */
+async function storeAuthorizedTokens(
+  serverId: string,
+  serverUrl: string,
+  expectedAuthConfig: string,
+  authorized: OAuthConfig
+): Promise<'stored' | 'changed' | 'busy'> {
+  let expected = expectedAuthConfig;
+  let toStore = authorized;
+  for (let attempt = 0; attempt < STORE_ATTEMPTS; attempt += 1) {
+    const result = await prisma.botMcpServer.updateMany({
+      where: { id: serverId, serverUrl, authConfig: expected },
+      data: { authConfig: encryptApiKey(JSON.stringify(toStore)) },
+    });
+    if (result.count === 1) return 'stored';
+
+    const row = await prisma.botMcpServer.findUnique({
+      where: { id: serverId },
+      select: { authType: true, authConfig: true, serverUrl: true },
+    });
+    if (!row || row.authType !== 'oauth' || !row.authConfig || row.serverUrl !== serverUrl) return 'changed';
+    let current: OAuthConfig;
+    try {
+      current = JSON.parse(decryptApiKey(row.authConfig)) as OAuthConfig;
+    } catch {
+      return 'changed';
+    }
+    const sameIssuer =
+      (current.tokenUrl ?? null) === (authorized.tokenUrl ?? null) &&
+      (current.authorizeUrl ?? null) === (authorized.authorizeUrl ?? null) &&
+      (current.clientId ?? null) === (authorized.clientId ?? null);
+    if (!sameIssuer) return 'changed';
+
+    expected = row.authConfig;
+    toStore = {
+      ...current,
+      accessToken: authorized.accessToken,
+      refreshToken: authorized.refreshToken,
+      expiresAt: authorized.expiresAt,
+      reconnectRequired: undefined,
+    };
+  }
+  return 'busy';
 }
 
 /**
