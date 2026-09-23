@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
+import { resolveRequestedScopes } from '@/lib/mcp/oauth-token';
 import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
@@ -104,7 +105,13 @@ export async function GET(
     }
 
     // Decrypt authConfig and extract OAuth provider config
-    let oauthConfig: { clientId?: string; clientSecret?: string; scopes?: string; authorizeUrl?: string };
+    let oauthConfig: {
+      clientId?: string;
+      clientSecret?: string;
+      scopes?: string;
+      authorizeUrl?: string;
+      scopesSupported?: string[] | null;
+    };
     try {
       const decrypted = decryptApiKey(server.authConfig!);
       oauthConfig = JSON.parse(decrypted);
@@ -189,6 +196,10 @@ export async function GET(
     // Include an exp claim (10 minute expiry) to enforce state token freshness.
     const statePayload = JSON.stringify({
       botId, serverId, redirectUrl,
+      // The resource this authorization request is addressed to, carried through to the
+      // token request. RFC 8707 requires both requests to name the same resource, and the
+      // row's serverUrl can be edited while the state is in flight (#188 review).
+      ...(server.serverUrl ? { resource: server.serverUrl } : {}),
       codeVerifier, redirectUri,
       ts: Date.now(),
       exp: Math.floor(Date.now() / 1000) + 600, // 10 minutes from now
@@ -216,10 +227,28 @@ export async function GET(
     authorizeUrl.searchParams.set('response_type', 'code');
     authorizeUrl.searchParams.set('client_id', oauthConfig.clientId);
     authorizeUrl.searchParams.set('redirect_uri', `${callbackBase}/api/oauth/mcp-callback`);
-    authorizeUrl.searchParams.set('scope', oauthConfig.scopes || '');
+    // `offline_access` is what asks a provider for a refresh token, and it is only
+    // ever requested from a server that advertises it — asking for an unpublished
+    // scope is a request the provider may reject. With no advertised list stored,
+    // the configured scopes are sent unchanged (#187).
+    authorizeUrl.searchParams.set(
+      'scope',
+      resolveRequestedScopes(oauthConfig.scopes, oauthConfig.scopesSupported) || ''
+    );
     authorizeUrl.searchParams.set('state', stateToken);
     authorizeUrl.searchParams.set('code_challenge', codeChallenge);
     authorizeUrl.searchParams.set('code_challenge_method', 'S256');
+    // RFC 8707 resource indicator, addressed to this MCP server. MCP clients MUST
+    // send it on both the authorization request and the token request regardless
+    // of whether the authorization server supports it, and servers that enforce
+    // audience binding reject tokens that are not addressed to them (#185).
+    // The stored serverUrl is used verbatim: for every configured connection it is
+    // byte-identical to the canonical resource the server advertises.
+    // Guarded to match the token request: an empty value would emit `resource=`,
+    // which some authorization servers reject as malformed — worse than omitting it.
+    if (server.serverUrl) {
+      authorizeUrl.searchParams.set('resource', server.serverUrl);
+    }
 
     return NextResponse.json(
       { authorizeUrl: authorizeUrl.toString() },

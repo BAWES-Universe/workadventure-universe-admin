@@ -194,6 +194,29 @@ async function getAuthorizedBot(botId: string, actorUserId: string): Promise<{ i
   return { id: bot.id };
 }
 
+/** How many times a save is re-merged onto a config that changed under it. */
+const SAVE_ATTEMPTS = 3;
+
+/**
+ * Overlay a saved OAuth config onto the stored one (a partial update such as scopes-only
+ * is supported). Changing either endpoint URL means switching providers, so the stored
+ * tokens are cleared rather than carried over.
+ */
+function mergeOAuthConfig(storedEncrypted: string, incomingRaw: string): string {
+  const existingParsed = JSON.parse(decryptApiKey(storedEncrypted));
+  const incomingParsed = JSON.parse(incomingRaw);
+  if (
+    (incomingParsed.authorizeUrl && incomingParsed.authorizeUrl !== existingParsed.authorizeUrl) ||
+    (incomingParsed.tokenUrl && incomingParsed.tokenUrl !== existingParsed.tokenUrl)
+  ) {
+    incomingParsed.accessToken = null;
+    incomingParsed.refreshToken = null;
+    incomingParsed.expiresAt = null;
+  }
+  const merged = { ...existingParsed, ...incomingParsed };
+  return encryptApiKey(JSON.stringify(merged));
+}
+
 /**
  * PATCH /api/bots/[id]/mcp-servers/[serverId]
  * Update an MCP server. Re-encrypts authConfig if changed.
@@ -246,6 +269,9 @@ export async function PATCH(
 
     // Build update data
     const updateData: Record<string, unknown> = {};
+    // Set when authConfig is a merge onto the stored OAuth config: the stored value it was
+    // merged from, which the write is then guarded on.
+    let mergedFrom: string | null = null;
     if (validatedData.name !== undefined) updateData.name = validatedData.name;
     if (validatedData.serverUrl !== undefined) updateData.serverUrl = validatedData.serverUrl;
     // Determine effective auth type after update (existing + incoming changes)
@@ -405,21 +431,8 @@ export async function PATCH(
         // For existing OAuth servers, merge partial updates with the stored config
         // (e.g., frontend sends { scopes: "new" }, merged with existing endpoints/tokens)
         if (existing.authConfig && existing.authType === 'oauth' && effectiveAuthType === 'oauth') {
-          const existingDecrypted = decryptApiKey(existing.authConfig);
-          const existingParsed = JSON.parse(existingDecrypted);
-          const incomingParsed = JSON.parse(validatedData.authConfig);
-          // Merge: incoming fields overlay existing (partial update supported)
-          // If OAuth endpoint URLs changed (switching providers), clear stale tokens
-          if (
-            (incomingParsed.authorizeUrl && incomingParsed.authorizeUrl !== existingParsed.authorizeUrl) ||
-            (incomingParsed.tokenUrl && incomingParsed.tokenUrl !== existingParsed.tokenUrl)
-          ) {
-            incomingParsed.accessToken = null;
-            incomingParsed.refreshToken = null;
-            incomingParsed.expiresAt = null;
-          }
-          const merged = { ...existingParsed, ...incomingParsed };
-          updateData.authConfig = encryptApiKey(JSON.stringify(merged));
+          updateData.authConfig = mergeOAuthConfig(existing.authConfig, validatedData.authConfig);
+          mergedFrom = existing.authConfig;
         } else {
           // Full replacement for non-OAuth or switching auth types
           updateData.authConfig = encryptApiKey(validatedData.authConfig);
@@ -447,10 +460,48 @@ export async function PATCH(
       }
     }
 
-    const updated = await prisma.botMcpServer.update({
-      where: { id: serverId },
-      data: updateData,
-    });
+    let updated;
+    if (mergedFrom !== null) {
+      // The merge started from the stored config as it was read, tokens included. A token
+      // refresh can store a new pair in the meantime (the bots poll this connection), and an
+      // unguarded write would put the old, possibly already spent, tokens back. So the write
+      // only lands if the stored config is still the one merged from; otherwise the save is
+      // merged again onto what is there now (#193 review).
+      let expected = mergedFrom;
+      let saved = false;
+      for (let attempt = 0; attempt < SAVE_ATTEMPTS; attempt += 1) {
+        const result = await prisma.botMcpServer.updateMany({
+          where: { id: serverId, authConfig: expected },
+          data: updateData,
+        });
+        if (result.count === 1) {
+          saved = true;
+          break;
+        }
+        const current = await prisma.botMcpServer.findUnique({
+          where: { id: serverId },
+          select: { authType: true, authConfig: true },
+        });
+        if (!current?.authConfig || current.authType !== 'oauth') break;
+        expected = current.authConfig;
+        updateData.authConfig = mergeOAuthConfig(current.authConfig, validatedData.authConfig as string);
+      }
+      if (!saved) {
+        return NextResponse.json(
+          { error: 'This connection was changed while it was being saved. Reload it and try again.' },
+          { status: 409, headers: corsHeaders(request) }
+        );
+      }
+      updated = await prisma.botMcpServer.findUnique({ where: { id: serverId } });
+      if (!updated) {
+        return NextResponse.json({ error: 'MCP server not found' }, { status: 404, headers: corsHeaders(request) });
+      }
+    } else {
+      updated = await prisma.botMcpServer.update({
+        where: { id: serverId },
+        data: updateData,
+      });
+    }
 
     return NextResponse.json({
       id: updated.id,

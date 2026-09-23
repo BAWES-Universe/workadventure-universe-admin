@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
+import { normalizeExpiresIn } from '@/lib/mcp/oauth-token';
+import { checkOutboundUrl } from '@/lib/mcp/outbound-guard';
 import { getOAuthCallbackBase } from '@/lib/oauth-callback';
 
 export const runtime = 'nodejs';
@@ -15,6 +17,10 @@ interface OAuthConfig {
   accessToken?: string;
   refreshToken?: string;
   expiresAt?: number;
+  /** Advertised scopes recorded at connection time (#187). */
+  scopesSupported?: string[] | null;
+  /** Set by the refresh path when a human must re-authorize (#187). */
+  reconnectRequired?: { at: string; reason: string } | null;
 }
 
 /**
@@ -91,13 +97,13 @@ export async function GET(request: NextRequest) {
       return new NextResponse('Invalid state token', { status: 400 });
     }
 
-    const { botId, serverId, redirectUrl, codeVerifier, redirectUri } = stateData;
+    const { botId, serverId, redirectUrl, codeVerifier, redirectUri, resource } = stateData;
     const openerBase = getOpenerBase(redirectUrl);
 
     // Load the MCP server config to get OAuth provider config
     const server = await prisma.botMcpServer.findUnique({
       where: { id: serverId },
-      select: { id: true, botId: true, authType: true, authConfig: true },
+      select: { id: true, botId: true, authType: true, authConfig: true, serverUrl: true },
     });
 
     if (!server || server.botId !== botId || server.authType !== 'oauth') {
@@ -106,6 +112,29 @@ export async function GET(request: NextRequest) {
         return popupRedirect(openerBase, { oauth: 'error', message: 'server_not_found' });
       }
       return new NextResponse('Server configuration not found', { status: 404 });
+    }
+
+    // The resource for the token request comes from the state token, not from the row.
+    // RFC 8707 requires the authorization request and the token request to name the same
+    // resource, and the row's serverUrl is editable while the state lives (ten minutes):
+    // re-reading it here is what let the two requests disagree (#188 review). An absent
+    // resource means a state token minted before it was stored, where the row is still
+    // the only value available.
+    //
+    // When they disagree the authorization is no longer coherent: exchanging it would
+    // store a token bound to the URL the flow was started for against a row that now
+    // names a different server, i.e. a connection that reports success and then 401s.
+    // Refuse it and ask for a fresh authorization instead.
+    const tokenResource = resource ?? server.serverUrl ?? undefined;
+    if (resource && resource !== server.serverUrl) {
+      console.error('[OAuthCallback] serverUrl changed while the authorization was in flight');
+      if (redirectUrl) {
+        return popupRedirect(openerBase, { oauth: 'error', message: 'server_url_changed' });
+      }
+      return new NextResponse(
+        'The MCP server URL changed while this authorization was in progress. Start the connection again.',
+        { status: 409 }
+      );
     }
 
     // Decrypt OAuth config to get client credentials and token endpoint
@@ -150,6 +179,18 @@ export async function GET(request: NextRequest) {
       return new NextResponse('Token exchange target is an internal/private address — SSRF blocked', { status: 400 });
     }
 
+    // Same destination check as the connection test, including DNS resolution: the
+    // hostname check above cannot see a public name that resolves to a private address,
+    // and this request carries the authorization code and the client secret.
+    const tokenDestination = await checkOutboundUrl(oauthConfig.tokenUrl);
+    if (!tokenDestination.allowed) {
+      console.error('[OAuthCallback] SSRF blocked — tokenUrl failed the destination check:', tokenDestination.error);
+      if (redirectUrl) {
+        return popupRedirect(openerBase, { oauth: 'error', message: 'ssrf_blocked' });
+      }
+      return new NextResponse('Token exchange target is an internal/private address — SSRF blocked', { status: 400 });
+    }
+
     // Exchange authorization code for tokens at the provider's token endpoint.
     // Use the redirectUri from the state token — it matches the one used in the
     // authorization request, which is required by RFC 6749 §4.1.3.
@@ -161,7 +202,8 @@ export async function GET(request: NextRequest) {
       oauthConfig.clientId,
       oauthConfig.clientSecret ?? null,
       tokenExchangeRedirectUri,
-      codeVerifier
+      codeVerifier,
+      tokenResource
     );
 
     if (!tokenResponse) {
@@ -182,15 +224,39 @@ export async function GET(request: NextRequest) {
       accessToken: tokenResponse.access_token,
       refreshToken: tokenResponse.refresh_token || undefined,
       expiresAt: tokenResponse.expires_in ? Math.floor(Date.now() / 1000) + tokenResponse.expires_in : undefined,
+      scopesSupported: oauthConfig.scopesSupported ?? undefined,
+      // A fresh authorization clears any previous reconnect-required verdict.
+      reconnectRequired: undefined,
     };
 
-    // Encrypt and save
-    const encryptedConfig = encryptApiKey(JSON.stringify(updatedOAuthConfig));
-
-    await prisma.botMcpServer.update({
-      where: { id: serverId },
-      data: { authConfig: encryptedConfig },
-    });
+    // Save only onto the connection this authorization was started for. The exchange
+    // takes seconds, and in that window the row can change (#193 review):
+    // - a token refresh or a settings save (scopes, say) that keeps the same server and
+    //   authorization server: the new tokens are carried onto what the row holds now;
+    // - the server URL, an endpoint or the client changed: these tokens are not that
+    //   connection's, so nothing is written and the login reports the change.
+    const stored = await storeAuthorizedTokens(server.id, server.serverUrl, server.authConfig!, updatedOAuthConfig);
+    if (stored === 'busy') {
+      // Every attempt lost to another write that kept this connection's settings: nothing
+      // changed that invalidates the login, the row was just being written at the time.
+      console.error('[OAuthCallback] Connection was being written concurrently; tokens not stored');
+      if (redirectUrl) {
+        return popupRedirect(openerBase, { oauth: 'error', message: 'connection_busy_try_again' });
+      }
+      return new NextResponse('This connection was being updated at the same time. Connect again.', {
+        status: 409,
+      });
+    }
+    if (stored === 'changed') {
+      console.error('[OAuthCallback] Connection changed while the authorization was in flight');
+      if (redirectUrl) {
+        return popupRedirect(openerBase, { oauth: 'error', message: 'connection_changed' });
+      }
+      return new NextResponse(
+        'This connection was changed while the authorization was in progress. Start the connection again.',
+        { status: 409 }
+      );
+    }
 
     console.log(`[OAuthCallback] Tokens stored for server ${serverId} (bot ${botId})`);
 
@@ -209,11 +275,62 @@ export async function GET(request: NextRequest) {
   }
 }
 
+const STORE_ATTEMPTS = 3;
+
+/**
+ * Write a fresh authorization's tokens, guarded on the row still being the connection
+ * the authorization was started for. `changed` when it no longer is; `busy` when every
+ * attempt lost to writes that kept it the same connection, so connecting again works.
+ */
+async function storeAuthorizedTokens(
+  serverId: string,
+  serverUrl: string,
+  expectedAuthConfig: string,
+  authorized: OAuthConfig
+): Promise<'stored' | 'changed' | 'busy'> {
+  let expected = expectedAuthConfig;
+  let toStore = authorized;
+  for (let attempt = 0; attempt < STORE_ATTEMPTS; attempt += 1) {
+    const result = await prisma.botMcpServer.updateMany({
+      where: { id: serverId, serverUrl, authConfig: expected },
+      data: { authConfig: encryptApiKey(JSON.stringify(toStore)) },
+    });
+    if (result.count === 1) return 'stored';
+
+    const row = await prisma.botMcpServer.findUnique({
+      where: { id: serverId },
+      select: { authType: true, authConfig: true, serverUrl: true },
+    });
+    if (!row || row.authType !== 'oauth' || !row.authConfig || row.serverUrl !== serverUrl) return 'changed';
+    let current: OAuthConfig;
+    try {
+      current = JSON.parse(decryptApiKey(row.authConfig)) as OAuthConfig;
+    } catch {
+      return 'changed';
+    }
+    const sameIssuer =
+      (current.tokenUrl ?? null) === (authorized.tokenUrl ?? null) &&
+      (current.authorizeUrl ?? null) === (authorized.authorizeUrl ?? null) &&
+      (current.clientId ?? null) === (authorized.clientId ?? null);
+    if (!sameIssuer) return 'changed';
+
+    expected = row.authConfig;
+    toStore = {
+      ...current,
+      accessToken: authorized.accessToken,
+      refreshToken: authorized.refreshToken,
+      expiresAt: authorized.expiresAt,
+      reconnectRequired: undefined,
+    };
+  }
+  return 'busy';
+}
+
 /**
  * Parse the encrypted state token.
  * Checks the `exp` claim (epoch seconds) and returns null if expired.
  */
-function parseStateToken(state: string | null): { botId: string; serverId: string; redirectUrl: string; codeVerifier?: string; redirectUri?: string } | null {
+function parseStateToken(state: string | null): { botId: string; serverId: string; redirectUrl: string; codeVerifier?: string; redirectUri?: string; resource?: string } | null {
   if (!state) return null;
   try {
     const decrypted = decryptApiKey(state);
@@ -231,6 +348,12 @@ function parseStateToken(state: string | null): { botId: string; serverId: strin
 
 /**
  * Exchange an authorization code for tokens at the provider's token endpoint.
+ *
+ * `resource` is the RFC 8707 resource indicator (the MCP server's canonical URI,
+ * taken verbatim from the stored serverUrl). MCP clients MUST send it on the token
+ * request as well as the authorization request; authorization servers that bind
+ * the access token's audience to it will otherwise issue a token that the MCP
+ * server rejects with 401 invalid_token (#185).
  */
 async function exchangeCodeForTokens(
   tokenEndpoint: string,
@@ -238,7 +361,8 @@ async function exchangeCodeForTokens(
   clientId: string,
   clientSecret: string | null,
   redirectUri: string,
-  codeVerifier?: string
+  codeVerifier?: string,
+  resource?: string
 ): Promise<{ access_token: string; refresh_token?: string; expires_in?: number } | null> {
   try {
     const body = new URLSearchParams();
@@ -254,6 +378,9 @@ async function exchangeCodeForTokens(
     if (codeVerifier) {
       body.set('code_verifier', codeVerifier);
     }
+    if (resource) {
+      body.set('resource', resource);
+    }
 
     const response = await fetch(tokenEndpoint, {
       method: 'POST',
@@ -262,6 +389,10 @@ async function exchangeCodeForTokens(
         'Accept': 'application/json',
       },
       body: body.toString(),
+      // A redirect would carry the code and client secret to a destination the
+      // destination check never saw (a 307/308 re-sends the body), so it fails the
+      // exchange instead (#193 review).
+      redirect: 'error',
       signal: AbortSignal.timeout(15000),
     });
 
@@ -286,7 +417,9 @@ async function exchangeCodeForTokens(
     return {
       access_token: data.access_token,
       refresh_token: data.refresh_token,
-      expires_in: data.expires_in,
+      // Normalized here, at the boundary: a numeric string would otherwise be concatenated
+      // onto the epoch second below and store a nonsense expiry (#190 review).
+      expires_in: normalizeExpiresIn(data.expires_in),
     };
   } catch (error) {
     console.error('[OAuthCallback] Token exchange fetch failed:', error);

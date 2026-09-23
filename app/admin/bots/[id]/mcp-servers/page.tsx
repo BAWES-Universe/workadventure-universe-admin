@@ -33,6 +33,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { summarizeTestResult, type McpTestResult } from '@/lib/mcp/test-result';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -63,10 +64,15 @@ interface McpServer {
   serverUrl: string;
   authType: string;
   oauthConnected?: boolean;
+  /** True when refreshing is impossible and only a human re-authorization can fix it. */
+  oauthReconnectRequired?: boolean;
+  oauthReconnectReason?: string | null;
+  /** Access-token expiry (ISO). Absent for non-OAuth and for configs predating expiry capture. */
+  oauthExpiresAt?: string | null;
   enabled: boolean;
   headers?: Record<string, string>;
   lastTestedAt?: string | null;
-  lastTestResult?: { success: boolean; toolCount: number; toolNames: string[]; error: string | null } | null;
+  lastTestResult?: McpTestResult | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -206,7 +212,9 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
     };
   }, [formData.serverUrl, formData.authType]);
   const [testingId, setTestingId] = useState<string | null>(null);
-  const [testResults, setTestResults] = useState<Record<string, { success: boolean; message: string }>>({});
+  const [testResults, setTestResults] = useState<
+    Record<string, { result: McpTestResult; testedAt: Date }>
+  >({});
 
   useEffect(() => {
     async function init() {
@@ -277,6 +285,10 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                 clientId: (discoveryRegistration === 'auto' && !formData.oauthClientId?.trim()) ? null : (formData.oauthClientId?.trim() || null),
                 clientSecret: (discoveryRegistration === 'auto' && !formData.oauthClientSecret?.trim()) ? null : (formData.oauthClientSecret?.trim() || null),
                 scopes: formData.oauthScopes?.trim() || null,
+                // What the authorization server says it publishes. Recorded so the
+                // authorize request can ask for `offline_access` only when the server
+                // actually offers it (#187).
+                scopesSupported: discoveredScopes && discoveredScopes.length > 0 ? discoveredScopes : undefined,
               })
             : formData.authConfig || null,
           headers: formData.headers.length > 0
@@ -342,9 +354,14 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
     }
   }
 
+  // Bumped for a server when it is reconnected. A test started before the reconnect
+  // describes the old authorization, so its result is discarded when it lands (#193 review).
+  const testGenerationRef = useRef<Record<string, number>>({});
+
   async function handleTestConnection(server: McpServer) {
     setTestingId(server.id);
-    setTestResults((prev) => ({ ...prev, [server.id]: { success: false, message: 'Testing...' } }));
+    const generation = testGenerationRef.current[server.id] ?? 0;
+    const isCurrent = () => (testGenerationRef.current[server.id] ?? 0) === generation;
 
     try {
       const { authenticatedFetch } = await import('@/lib/client-auth');
@@ -359,29 +376,41 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
 
       const data = await response.json();
 
-      if (data.success) {
-        setTestResults((prev) => ({
-          ...prev,
-          [server.id]: {
+      // Keep the failure detail the API captured (error code, WWW-Authenticate)
+      // so the row shows the cause immediately, not just the status text (#186).
+      const result: McpTestResult = data.success
+        ? {
             success: true,
-            message: `Connected — ${data.toolCount} tool${data.toolCount !== 1 ? 's' : ''} available${data.toolNames?.length ? ': ' + data.toolNames.join(', ') : ''}.`,
-          },
-        }));
-      } else {
-        setTestResults((prev) => ({
-          ...prev,
-          [server.id]: {
+            toolCount: data.toolCount ?? 0,
+            toolNames: data.toolNames ?? [],
+          }
+        : {
             success: false,
-            message: data.error || 'Connection failed',
-          },
-        }));
+            toolCount: 0,
+            toolNames: [],
+            error: data.error || 'Connection failed',
+            status: data.status ?? null,
+            statusText: data.statusText ?? null,
+            errorCode: data.errorCode ?? null,
+            wwwAuthenticate: data.wwwAuthenticate ?? null,
+            errorBody: data.errorBody ?? null,
+          };
+
+      if (isCurrent()) {
+        setTestResults((prev) => ({ ...prev, [server.id]: { result, testedAt: new Date() } }));
       }
     } catch (err) {
+      if (!isCurrent()) return;
       setTestResults((prev) => ({
         ...prev,
         [server.id]: {
-          success: false,
-          message: err instanceof Error ? err.message : 'Connection failed',
+          result: {
+            success: false,
+            toolCount: 0,
+            toolNames: [],
+            error: err instanceof Error ? err.message : 'Connection failed',
+          },
+          testedAt: new Date(),
         },
       }));
     } finally {
@@ -453,6 +482,16 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
               pollRef.current = null;
             }
             setOauthConnectingId(null);
+            // A test run before the reconnect describes the old authorization. Drop it so
+            // the row is shown from the reloaded state, not a stale live result (#193 review).
+            // A test still in flight is from before the reconnect too, so its result is
+            // discarded when it lands.
+            testGenerationRef.current[server.id] = (testGenerationRef.current[server.id] ?? 0) + 1;
+            setTestResults((prev) => {
+              const next = { ...prev };
+              delete next[server.id];
+              return next;
+            });
             await fetchServers();
           }
         } catch {
@@ -859,30 +898,54 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                       </div>
                     </TableCell>
                     <TableCell>
-                      {testResults[server.id] ? (
-                        <span
-                          className={`text-xs ${
-                            testResults[server.id].success
-                              ? 'text-green-600'
-                              : 'text-red-600'
-                          }`}
-                        >
-                          {testResults[server.id].message}
-                        </span>
-                      ) : server.lastTestResult ? (
-                        <span
-                          className={`text-xs ${
-                            server.lastTestResult.success
-                              ? 'text-green-600'
-                              : 'text-red-600'
-                          }`}
-                        >
-                          {server.lastTestResult.success
-                            ? `Connected — ${server.lastTestResult.toolCount} tool${server.lastTestResult.toolCount !== 1 ? 's' : ''}`
-                            : server.lastTestResult.error || 'Failed'}
-                        </span>
+                      {testingId === server.id ? (
+                        <span className="text-xs text-muted-foreground">Testing…</span>
                       ) : (
-                        <span className="text-xs text-muted-foreground">N/A</span>
+                        (() => {
+                          const live = testResults[server.id];
+                          const summary = summarizeTestResult(
+                            live ? live.result : server.lastTestResult,
+                            {
+                              testedAt: live ? live.testedAt : server.lastTestedAt,
+                              // A stored result is judged against the connection's token state:
+                              // an expired but renewable token is flagged without a re-authorize
+                              // prompt, and a recorded verdict (which clears the expiry) is never
+                              // shown as green. A test run just now is newer than that state,
+                              // which is not reloaded after a test (a test can renew the token),
+                              // so it is shown as it came back.
+                              oauthExpiresAt: live ? null : server.oauthExpiresAt,
+                              reconnectRequired: live ? undefined : server.oauthReconnectRequired,
+                            }
+                          );
+                          // A live success names the tools inline; a stored one does not.
+                          const detail =
+                            live && live.result.success && live.result.toolNames.length > 0
+                              ? `${summary.detail ?? `tested ${'just now'}`} · ${live.result.toolNames.join(', ')}`
+                              : summary.detail;
+                          const toneClass =
+                            summary.tone === 'ok'
+                              ? 'text-green-600'
+                              : summary.tone === 'stale'
+                                ? 'text-amber-600'
+                                : summary.tone === 'error'
+                                  ? 'text-red-600'
+                                  : 'text-muted-foreground';
+                          return (
+                            <div className="flex flex-col gap-0.5">
+                              <span className={`text-xs ${toneClass}`} title={detail}>
+                                {summary.label}
+                              </span>
+                              {detail && (
+                                <span
+                                  className="text-[10px] text-muted-foreground break-all"
+                                  title={detail}
+                                >
+                                  {detail}
+                                </span>
+                              )}
+                            </div>
+                          );
+                        })()
                       )}
                     </TableCell>
                     <TableCell className="text-right">
@@ -911,9 +974,20 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                             {oauthConnectingId === server.id ? (
                               <Loader2 className="h-3 w-3 animate-spin" />
                             ) : (
-                              <span className="text-xs">Connect with OAuth</span>
+                              <span className="text-xs">
+                                {server.oauthReconnectRequired ? 'Reconnect' : 'Connect with OAuth'}
+                              </span>
                             )}
                           </Button>
+                        )}
+
+                        {server.authType === 'oauth' && server.oauthReconnectRequired && server.oauthReconnectReason && (
+                          <span
+                            className="max-w-[240px] text-[10px] text-amber-600"
+                            title={server.oauthReconnectReason}
+                          >
+                            {server.oauthReconnectReason}
+                          </span>
                         )}
 
                         {server.authType === 'oauth' && server.oauthConnected && (
