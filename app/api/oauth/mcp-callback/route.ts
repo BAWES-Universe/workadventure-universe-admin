@@ -96,13 +96,13 @@ export async function GET(request: NextRequest) {
       return new NextResponse('Invalid state token', { status: 400 });
     }
 
-    const { botId, serverId, redirectUrl, codeVerifier, redirectUri } = stateData;
+    const { botId, serverId, redirectUrl, codeVerifier, redirectUri, resource } = stateData;
     const openerBase = getOpenerBase(redirectUrl);
 
     // Load the MCP server config to get OAuth provider config
     const server = await prisma.botMcpServer.findUnique({
       where: { id: serverId },
-      select: { id: true, botId: true, authType: true, authConfig: true },
+      select: { id: true, botId: true, authType: true, authConfig: true, serverUrl: true },
     });
 
     if (!server || server.botId !== botId || server.authType !== 'oauth') {
@@ -111,6 +111,29 @@ export async function GET(request: NextRequest) {
         return popupRedirect(openerBase, { oauth: 'error', message: 'server_not_found' });
       }
       return new NextResponse('Server configuration not found', { status: 404 });
+    }
+
+    // The resource for the token request comes from the state token, not from the row.
+    // RFC 8707 requires the authorization request and the token request to name the same
+    // resource, and the row's serverUrl is editable while the state lives (ten minutes):
+    // re-reading it here is what let the two requests disagree (#188 review). An absent
+    // resource means a state token minted before it was stored, where the row is still
+    // the only value available.
+    //
+    // When they disagree the authorization is no longer coherent: exchanging it would
+    // store a token bound to the URL the flow was started for against a row that now
+    // names a different server, i.e. a connection that reports success and then 401s.
+    // Refuse it and ask for a fresh authorization instead.
+    const tokenResource = resource ?? server.serverUrl ?? undefined;
+    if (resource && resource !== server.serverUrl) {
+      console.error('[OAuthCallback] serverUrl changed while the authorization was in flight');
+      if (redirectUrl) {
+        return popupRedirect(openerBase, { oauth: 'error', message: 'server_url_changed' });
+      }
+      return new NextResponse(
+        'The MCP server URL changed while this authorization was in progress. Start the connection again.',
+        { status: 409 }
+      );
     }
 
     // Decrypt OAuth config to get client credentials and token endpoint
@@ -166,7 +189,8 @@ export async function GET(request: NextRequest) {
       oauthConfig.clientId,
       oauthConfig.clientSecret ?? null,
       tokenExchangeRedirectUri,
-      codeVerifier
+      codeVerifier,
+      tokenResource
     );
 
     if (!tokenResponse) {
@@ -221,7 +245,7 @@ export async function GET(request: NextRequest) {
  * Parse the encrypted state token.
  * Checks the `exp` claim (epoch seconds) and returns null if expired.
  */
-function parseStateToken(state: string | null): { botId: string; serverId: string; redirectUrl: string; codeVerifier?: string; redirectUri?: string } | null {
+function parseStateToken(state: string | null): { botId: string; serverId: string; redirectUrl: string; codeVerifier?: string; redirectUri?: string; resource?: string } | null {
   if (!state) return null;
   try {
     const decrypted = decryptApiKey(state);
@@ -239,6 +263,12 @@ function parseStateToken(state: string | null): { botId: string; serverId: strin
 
 /**
  * Exchange an authorization code for tokens at the provider's token endpoint.
+ *
+ * `resource` is the RFC 8707 resource indicator (the MCP server's canonical URI,
+ * taken verbatim from the stored serverUrl). MCP clients MUST send it on the token
+ * request as well as the authorization request; authorization servers that bind
+ * the access token's audience to it will otherwise issue a token that the MCP
+ * server rejects with 401 invalid_token (#185).
  */
 async function exchangeCodeForTokens(
   tokenEndpoint: string,
@@ -246,7 +276,8 @@ async function exchangeCodeForTokens(
   clientId: string,
   clientSecret: string | null,
   redirectUri: string,
-  codeVerifier?: string
+  codeVerifier?: string,
+  resource?: string
 ): Promise<{ access_token: string; refresh_token?: string; expires_in?: number } | null> {
   try {
     const body = new URLSearchParams();
@@ -261,6 +292,9 @@ async function exchangeCodeForTokens(
     body.set('redirect_uri', redirectUri);
     if (codeVerifier) {
       body.set('code_verifier', codeVerifier);
+    }
+    if (resource) {
+      body.set('resource', resource);
     }
 
     const response = await fetch(tokenEndpoint, {

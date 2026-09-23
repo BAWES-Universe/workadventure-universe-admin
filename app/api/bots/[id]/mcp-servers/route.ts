@@ -250,6 +250,10 @@ export async function GET(
       servers.map(async (s) => {
         let oauthConnected = false;
         let oauthReconnectReason: string | null = null;
+        // The access token's expiry, exposed to the UI so a stored green result can
+        // be told apart from a live connection (#186). Not secret: it is a timestamp,
+        // and the token itself is never sent here.
+        let oauthExpiresAt: string | null = null;
         let authConfigToServe = s.authConfig;
         if (s.authType === 'oauth' && s.authConfig) {
           try {
@@ -276,6 +280,15 @@ export async function GET(
             oauthReconnectReason =
               config?.reconnectRequired?.reason ??
               (config && needsHuman ? refreshBlockedReason(config) : null);
+            if (typeof config?.expiresAt === 'number' && Number.isFinite(config.expiresAt)) {
+              const expiresAt = new Date(config.expiresAt * 1000);
+              // A finite number is not necessarily a representable date. An out-of-range
+              // value made toISOString() throw into the catch below while oauthConnected
+              // was already set, reporting a live connection with no expiry (#186 review).
+              if (!Number.isNaN(expiresAt.getTime())) {
+                oauthExpiresAt = expiresAt.toISOString();
+              }
+            }
           } catch {
             // If decrypt fails, assume not connected
           }
@@ -288,6 +301,7 @@ export async function GET(
             authType: s.authType,
             ...(isAdminToken ? { authConfig: authConfigToServe } : {}),
             oauthConnected,
+            oauthExpiresAt,
             // Set when refreshing is impossible and only a human can fix it (#187).
             oauthReconnectRequired: !!oauthReconnectReason,
             oauthReconnectReason,

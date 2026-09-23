@@ -33,6 +33,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { summarizeTestResult, type McpTestResult } from '@/lib/mcp/test-result';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -66,10 +67,12 @@ interface McpServer {
   /** True when refreshing is impossible and only a human re-authorization can fix it. */
   oauthReconnectRequired?: boolean;
   oauthReconnectReason?: string | null;
+  /** Access-token expiry (ISO). Absent for non-OAuth and for configs predating expiry capture. */
+  oauthExpiresAt?: string | null;
   enabled: boolean;
   headers?: Record<string, string>;
   lastTestedAt?: string | null;
-  lastTestResult?: { success: boolean; toolCount: number; toolNames: string[]; error: string | null } | null;
+  lastTestResult?: McpTestResult | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -209,7 +212,9 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
     };
   }, [formData.serverUrl, formData.authType]);
   const [testingId, setTestingId] = useState<string | null>(null);
-  const [testResults, setTestResults] = useState<Record<string, { success: boolean; message: string }>>({});
+  const [testResults, setTestResults] = useState<
+    Record<string, { result: McpTestResult; testedAt: Date }>
+  >({});
 
   useEffect(() => {
     async function init() {
@@ -351,7 +356,6 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
 
   async function handleTestConnection(server: McpServer) {
     setTestingId(server.id);
-    setTestResults((prev) => ({ ...prev, [server.id]: { success: false, message: 'Testing...' } }));
 
     try {
       const { authenticatedFetch } = await import('@/lib/client-auth');
@@ -366,29 +370,38 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
 
       const data = await response.json();
 
-      if (data.success) {
-        setTestResults((prev) => ({
-          ...prev,
-          [server.id]: {
+      // Keep the failure detail the API captured (error code, WWW-Authenticate)
+      // so the row shows the cause immediately, not just the status text (#186).
+      const result: McpTestResult = data.success
+        ? {
             success: true,
-            message: `Connected — ${data.toolCount} tool${data.toolCount !== 1 ? 's' : ''} available${data.toolNames?.length ? ': ' + data.toolNames.join(', ') : ''}.`,
-          },
-        }));
-      } else {
-        setTestResults((prev) => ({
-          ...prev,
-          [server.id]: {
+            toolCount: data.toolCount ?? 0,
+            toolNames: data.toolNames ?? [],
+          }
+        : {
             success: false,
-            message: data.error || 'Connection failed',
-          },
-        }));
-      }
+            toolCount: 0,
+            toolNames: [],
+            error: data.error || 'Connection failed',
+            status: data.status ?? null,
+            statusText: data.statusText ?? null,
+            errorCode: data.errorCode ?? null,
+            wwwAuthenticate: data.wwwAuthenticate ?? null,
+            errorBody: data.errorBody ?? null,
+          };
+
+      setTestResults((prev) => ({ ...prev, [server.id]: { result, testedAt: new Date() } }));
     } catch (err) {
       setTestResults((prev) => ({
         ...prev,
         [server.id]: {
-          success: false,
-          message: err instanceof Error ? err.message : 'Connection failed',
+          result: {
+            success: false,
+            toolCount: 0,
+            toolNames: [],
+            error: err instanceof Error ? err.message : 'Connection failed',
+          },
+          testedAt: new Date(),
         },
       }));
     } finally {
@@ -866,30 +879,47 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                       </div>
                     </TableCell>
                     <TableCell>
-                      {testResults[server.id] ? (
-                        <span
-                          className={`text-xs ${
-                            testResults[server.id].success
-                              ? 'text-green-600'
-                              : 'text-red-600'
-                          }`}
-                        >
-                          {testResults[server.id].message}
-                        </span>
-                      ) : server.lastTestResult ? (
-                        <span
-                          className={`text-xs ${
-                            server.lastTestResult.success
-                              ? 'text-green-600'
-                              : 'text-red-600'
-                          }`}
-                        >
-                          {server.lastTestResult.success
-                            ? `Connected — ${server.lastTestResult.toolCount} tool${server.lastTestResult.toolCount !== 1 ? 's' : ''}`
-                            : server.lastTestResult.error || 'Failed'}
-                        </span>
+                      {testingId === server.id ? (
+                        <span className="text-xs text-muted-foreground">Testing…</span>
                       ) : (
-                        <span className="text-xs text-muted-foreground">N/A</span>
+                        (() => {
+                          const live = testResults[server.id];
+                          const summary = summarizeTestResult(
+                            live ? live.result : server.lastTestResult,
+                            {
+                              testedAt: live ? live.testedAt : server.lastTestedAt,
+                              oauthExpiresAt: server.oauthExpiresAt,
+                            }
+                          );
+                          // A live success names the tools inline; a stored one does not.
+                          const detail =
+                            live && live.result.success && live.result.toolNames.length > 0
+                              ? `${summary.detail ?? `tested ${'just now'}`} · ${live.result.toolNames.join(', ')}`
+                              : summary.detail;
+                          const toneClass =
+                            summary.tone === 'ok'
+                              ? 'text-green-600'
+                              : summary.tone === 'stale'
+                                ? 'text-amber-600'
+                                : summary.tone === 'error'
+                                  ? 'text-red-600'
+                                  : 'text-muted-foreground';
+                          return (
+                            <div className="flex flex-col gap-0.5">
+                              <span className={`text-xs ${toneClass}`} title={detail}>
+                                {summary.label}
+                              </span>
+                              {detail && (
+                                <span
+                                  className="text-[10px] text-muted-foreground break-all"
+                                  title={detail}
+                                >
+                                  {detail}
+                                </span>
+                              )}
+                            </div>
+                          );
+                        })()
                       )}
                     </TableCell>
                     <TableCell className="text-right">
