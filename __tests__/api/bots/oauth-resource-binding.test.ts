@@ -3,6 +3,7 @@ import { GET as oauthStart } from '@/app/api/bots/[id]/mcp-servers/[serverId]/oa
 import { GET as oauthCallback } from '@/app/api/oauth/mcp-callback/route';
 import { prisma } from '@/lib/db';
 import * as authSession from '@/lib/auth-session';
+import { checkOutboundUrl } from '@/lib/mcp/outbound-guard';
 
 /**
  * RFC 8707 resource indicator (#185).
@@ -47,6 +48,11 @@ jest.mock('@/lib/encryption', () => ({
   decryptApiKey: (value: string) => value.replace(/^enc:/, ''),
 }));
 
+// The destination check resolves DNS; tests decide its verdict instead.
+jest.mock('@/lib/mcp/outbound-guard', () => ({
+  checkOutboundUrl: jest.fn(),
+}));
+
 const ADMIN_BASE = 'https://admin.example.com';
 const MCP_SERVER_URL = 'https://mcp.example.com/mcp';
 const TOKEN_URL = 'https://auth.example.com/oauth2/token';
@@ -64,6 +70,7 @@ const providerConfig = {
 const getSessionUser = authSession.getSessionUser as jest.Mock;
 const findUnique = prisma.botMcpServer.findUnique as jest.Mock;
 const update = prisma.botMcpServer.update as jest.Mock;
+const outboundCheck = checkOutboundUrl as jest.Mock;
 
 const originalEnv = process.env;
 const originalFetch = global.fetch;
@@ -76,6 +83,7 @@ beforeEach(() => {
     CORS_ALLOWED_ORIGINS: ADMIN_BASE,
   };
   getSessionUser.mockResolvedValue({ id: 'user-1' });
+  outboundCheck.mockResolvedValue({ allowed: true });
 });
 
 afterAll(() => {
@@ -345,6 +353,68 @@ describe('the token resource is bound to the authorization, not re-read from the
     expect(body.get('resource')).toBe(MCP_SERVER_URL);
     expect(update).toHaveBeenCalledTimes(1);
     expect(response.status).toBe(307);
+    expect(response.headers.get('location')).toContain('oauth=success');
+  });
+});
+
+describe('the code exchange applies the DNS-aware destination check', () => {
+  const stateToken = `enc:${JSON.stringify({
+    botId: BOT_ID,
+    serverId: SERVER_ID,
+    redirectUrl: `${ADMIN_BASE}/admin/bots/${BOT_ID}`,
+    codeVerifier: 'test-code-verifier',
+    redirectUri: `${ADMIN_BASE}/api/oauth/mcp-callback`,
+    resource: MCP_SERVER_URL,
+    exp: Math.floor(Date.now() / 1000) + 600,
+  })}`;
+
+  beforeEach(() => {
+    findUnique.mockResolvedValue({
+      id: SERVER_ID,
+      botId: BOT_ID,
+      authType: 'oauth',
+      authConfig: `enc:${JSON.stringify(providerConfig)}`,
+      serverUrl: MCP_SERVER_URL,
+    });
+    update.mockResolvedValue({ id: SERVER_ID });
+  });
+
+  it('refuses to send the code and client secret to a token endpoint that fails the check', async () => {
+    // A public hostname that resolves to a private address passes the hostname-only check
+    // this route already had; the DNS step is what catches it (#193 review).
+    outboundCheck.mockResolvedValue({ allowed: false, error: 'Server resolves to private IP range (10.x.x.x)' });
+    const fetchMock = jest.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const response = await oauthCallback(
+      new NextRequest(
+        `${ADMIN_BASE}/api/oauth/mcp-callback?code=auth-code-5&state=${encodeURIComponent(stateToken)}`
+      )
+    );
+
+    expect(outboundCheck).toHaveBeenCalledWith(TOKEN_URL);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
+    expect(response.status).toBe(307);
+    expect(response.headers.get('location')).toContain('message=ssrf_blocked');
+  });
+
+  it('checks the token endpoint before exchanging when it passes', async () => {
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ access_token: 'access-1', refresh_token: 'refresh-1', expires_in: 3600 }),
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const response = await oauthCallback(
+      new NextRequest(
+        `${ADMIN_BASE}/api/oauth/mcp-callback?code=auth-code-6&state=${encodeURIComponent(stateToken)}`
+      )
+    );
+
+    expect(outboundCheck).toHaveBeenCalledWith(TOKEN_URL);
+    expect(outboundCheck.mock.invocationCallOrder[0]).toBeLessThan(fetchMock.mock.invocationCallOrder[0]);
     expect(response.headers.get('location')).toContain('oauth=success');
   });
 });

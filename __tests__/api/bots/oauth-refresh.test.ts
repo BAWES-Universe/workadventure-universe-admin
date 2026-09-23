@@ -1,5 +1,6 @@
 import { ensureFreshOAuthConfig } from '@/lib/mcp/oauth-refresh';
 import { markReconnectRequired } from '@/lib/mcp/oauth-token';
+import { checkOutboundUrl } from '@/lib/mcp/outbound-guard';
 import { prisma } from '@/lib/db';
 
 /**
@@ -28,6 +29,11 @@ jest.mock('@/lib/encryption', () => ({
   decryptApiKey: (value: string) => value.replace(/^enc:/, ''),
 }));
 
+// The destination check resolves DNS; tests decide its verdict instead.
+jest.mock('@/lib/mcp/outbound-guard', () => ({
+  checkOutboundUrl: jest.fn(),
+}));
+
 const NOW = new Date('2026-09-22T12:00:00Z').getTime();
 const nowSeconds = Math.floor(NOW / 1000);
 const SERVER_ID = 'server-789';
@@ -49,6 +55,7 @@ const expiredConfig = {
 const updateMany = prisma.botMcpServer.updateMany as jest.Mock;
 const update = prisma.botMcpServer.update as jest.Mock;
 const findUnique = prisma.botMcpServer.findUnique as jest.Mock;
+const outboundCheck = checkOutboundUrl as jest.Mock;
 const originalFetch = global.fetch;
 
 function tokenResponse(body: Record<string, unknown>, status = 200) {
@@ -71,6 +78,7 @@ describe('ensureFreshOAuthConfig', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     updateMany.mockResolvedValue({ count: 1 });
+    outboundCheck.mockResolvedValue({ allowed: true });
   });
 
   afterAll(() => {
@@ -161,7 +169,10 @@ describe('ensureFreshOAuthConfig', () => {
     expect(updateMany).toHaveBeenCalledTimes(1);
   });
 
-  it('marks a 401 from the token endpoint as terminal', async () => {
+  it('keeps a 401 with no error code retryable, and keeps the tokens', async () => {
+    // RFC 6749 §5.2 uses 401 for client-authentication failure, and a proxy in front of
+    // the provider can answer 401 too. Neither proves the refresh token is dead, and a
+    // terminal verdict would delete it for good (#193 review).
     global.fetch = jest.fn().mockResolvedValue(tokenResponse({}, 401)) as unknown as typeof fetch;
 
     const outcome = await ensureFreshOAuthConfig({
@@ -170,7 +181,64 @@ describe('ensureFreshOAuthConfig', () => {
       nowMs: NOW,
     });
 
-    expect(outcome.status).toBe('reconnect_required');
+    expect(outcome.status).toBe('unavailable');
+    expect(outcome.reason).toContain('HTTP 401');
+    expect(updateMany).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('keeps an HTML 401 from a proxy retryable', async () => {
+    global.fetch = jest.fn().mockResolvedValue(
+      new Response('<html><body>401 Authorization Required</body></html>', {
+        status: 401,
+        headers: { 'content-type': 'text/html' },
+      })
+    ) as unknown as typeof fetch;
+
+    const outcome = await ensureFreshOAuthConfig({
+      serverId: SERVER_ID,
+      authConfig: enc(expiredConfig),
+      nowMs: NOW,
+    });
+
+    expect(outcome.status).toBe('unavailable');
+    expect(updateMany).not.toHaveBeenCalled();
+  });
+
+  it('does not send the refresh token to a destination that fails the outbound check', async () => {
+    outboundCheck.mockResolvedValue({ allowed: false, error: 'Server resolves to private IP range (10.x.x.x)' });
+    const fetchMock = jest.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const outcome = await ensureFreshOAuthConfig({
+      serverId: SERVER_ID,
+      authConfig: enc(expiredConfig),
+      nowMs: NOW,
+    });
+
+    expect(outboundCheck).toHaveBeenCalledWith(TOKEN_URL);
+    expect(fetchMock).not.toHaveBeenCalled();
+    // Not the refresh token's fault: nothing is deleted or marked for a human.
+    expect(outcome.status).toBe('unavailable');
+    expect(outcome.reason).toContain('not an allowed destination');
+    expect(updateMany).not.toHaveBeenCalled();
+  });
+
+  it('checks the token endpoint before every refresh request', async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValue(tokenResponse({ access_token: 'access-2', refresh_token: 'refresh-2', expires_in: 3600 }));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const outcome = await ensureFreshOAuthConfig({
+      serverId: SERVER_ID,
+      authConfig: enc(expiredConfig),
+      nowMs: NOW,
+    });
+
+    expect(outcome.status).toBe('refreshed');
+    expect(outboundCheck).toHaveBeenCalledWith(TOKEN_URL);
+    expect(outboundCheck.mock.invocationCallOrder[0]).toBeLessThan(fetchMock.mock.invocationCallOrder[0]);
   });
 
   it('leaves the connection retryable when the failure is ours or transient', async () => {
