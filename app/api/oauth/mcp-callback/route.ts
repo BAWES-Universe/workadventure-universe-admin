@@ -229,13 +229,23 @@ export async function GET(request: NextRequest) {
       reconnectRequired: undefined,
     };
 
-    // Encrypt and save
-    const encryptedConfig = encryptApiKey(JSON.stringify(updatedOAuthConfig));
-
-    await prisma.botMcpServer.update({
-      where: { id: serverId },
-      data: { authConfig: encryptedConfig },
-    });
+    // Save only onto the connection this authorization was started for. The exchange
+    // takes seconds, and in that window the row can change (#193 review):
+    // - a token refresh or a settings save (scopes, say) that keeps the same server and
+    //   authorization server: the new tokens are carried onto what the row holds now;
+    // - the server URL, an endpoint or the client changed: these tokens are not that
+    //   connection's, so nothing is written and the login reports the change.
+    const stored = await storeAuthorizedTokens(server.id, server.serverUrl, server.authConfig!, updatedOAuthConfig);
+    if (!stored) {
+      console.error('[OAuthCallback] Connection changed while the authorization was in flight');
+      if (redirectUrl) {
+        return popupRedirect(openerBase, { oauth: 'error', message: 'connection_changed' });
+      }
+      return new NextResponse(
+        'This connection was changed while the authorization was in progress. Start the connection again.',
+        { status: 409 }
+      );
+    }
 
     console.log(`[OAuthCallback] Tokens stored for server ${serverId} (bot ${botId})`);
 
@@ -252,6 +262,56 @@ export async function GET(request: NextRequest) {
     console.error('[OAuthCallback] Error:', error);
     return new NextResponse('Internal server error', { status: 500 });
   }
+}
+
+const STORE_ATTEMPTS = 3;
+
+/**
+ * Write a fresh authorization's tokens, guarded on the row still being the connection
+ * the authorization was started for. Returns false when it no longer is.
+ */
+async function storeAuthorizedTokens(
+  serverId: string,
+  serverUrl: string,
+  expectedAuthConfig: string,
+  authorized: OAuthConfig
+): Promise<boolean> {
+  let expected = expectedAuthConfig;
+  let toStore = authorized;
+  for (let attempt = 0; attempt < STORE_ATTEMPTS; attempt += 1) {
+    const result = await prisma.botMcpServer.updateMany({
+      where: { id: serverId, serverUrl, authConfig: expected },
+      data: { authConfig: encryptApiKey(JSON.stringify(toStore)) },
+    });
+    if (result.count === 1) return true;
+
+    const row = await prisma.botMcpServer.findUnique({
+      where: { id: serverId },
+      select: { authType: true, authConfig: true, serverUrl: true },
+    });
+    if (!row || row.authType !== 'oauth' || !row.authConfig || row.serverUrl !== serverUrl) return false;
+    let current: OAuthConfig;
+    try {
+      current = JSON.parse(decryptApiKey(row.authConfig)) as OAuthConfig;
+    } catch {
+      return false;
+    }
+    const sameIssuer =
+      (current.tokenUrl ?? null) === (authorized.tokenUrl ?? null) &&
+      (current.authorizeUrl ?? null) === (authorized.authorizeUrl ?? null) &&
+      (current.clientId ?? null) === (authorized.clientId ?? null);
+    if (!sameIssuer) return false;
+
+    expected = row.authConfig;
+    toStore = {
+      ...current,
+      accessToken: authorized.accessToken,
+      refreshToken: authorized.refreshToken,
+      expiresAt: authorized.expiresAt,
+      reconnectRequired: undefined,
+    };
+  }
+  return false;
 }
 
 /**

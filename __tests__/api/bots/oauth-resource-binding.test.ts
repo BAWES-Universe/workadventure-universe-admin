@@ -23,6 +23,7 @@ jest.mock('@/lib/db', () => ({
     botMcpServer: {
       findUnique: jest.fn(),
       update: jest.fn(),
+      updateMany: jest.fn(),
     },
     bot: {
       findUnique: jest.fn(),
@@ -69,7 +70,7 @@ const providerConfig = {
 
 const getSessionUser = authSession.getSessionUser as jest.Mock;
 const findUnique = prisma.botMcpServer.findUnique as jest.Mock;
-const update = prisma.botMcpServer.update as jest.Mock;
+const update = prisma.botMcpServer.updateMany as jest.Mock;
 const outboundCheck = checkOutboundUrl as jest.Mock;
 
 const originalEnv = process.env;
@@ -197,7 +198,7 @@ describe('OAuth token request carries the RFC 8707 resource indicator', () => {
       authConfig: `enc:${JSON.stringify(providerConfig)}`,
       serverUrl: MCP_SERVER_URL,
     });
-    update.mockResolvedValue({ id: SERVER_ID });
+    update.mockResolvedValue({ count: 1 });
 
     const fetchMock = jest.fn().mockResolvedValue({
       ok: true,
@@ -246,7 +247,7 @@ describe('OAuth token request carries the RFC 8707 resource indicator', () => {
       authConfig: `enc:${JSON.stringify(providerConfig)}`,
       serverUrl: '',
     });
-    update.mockResolvedValue({ id: SERVER_ID });
+    update.mockResolvedValue({ count: 1 });
 
     const fetchMock = jest.fn().mockResolvedValue({
       ok: true,
@@ -334,7 +335,7 @@ describe('the token resource is bound to the authorization, not re-read from the
       authConfig: `enc:${JSON.stringify(providerConfig)}`,
       serverUrl: MCP_SERVER_URL,
     });
-    update.mockResolvedValue({ id: SERVER_ID });
+    update.mockResolvedValue({ count: 1 });
 
     const fetchMock = jest.fn().mockResolvedValue({
       ok: true,
@@ -376,7 +377,7 @@ describe('the code exchange applies the DNS-aware destination check', () => {
       authConfig: `enc:${JSON.stringify(providerConfig)}`,
       serverUrl: MCP_SERVER_URL,
     });
-    update.mockResolvedValue({ id: SERVER_ID });
+    update.mockResolvedValue({ count: 1 });
   });
 
   it('refuses to send the code and client secret to a token endpoint that fails the check', async () => {
@@ -418,5 +419,92 @@ describe('the code exchange applies the DNS-aware destination check', () => {
     // A redirect would carry the code and client secret past the check (#193 review).
     expect(fetchMock.mock.calls[0][1].redirect).toBe('error');
     expect(response.headers.get('location')).toContain('oauth=success');
+  });
+});
+
+describe('the login stores its tokens only on the connection it was started for', () => {
+  // The code exchange takes seconds; a refresh or a settings save can land meanwhile
+  // (#193 review).
+  const stateToken = `enc:${JSON.stringify({
+    botId: BOT_ID,
+    serverId: SERVER_ID,
+    redirectUrl: `${ADMIN_BASE}/admin/bots/${BOT_ID}`,
+    codeVerifier: 'test-code-verifier',
+    redirectUri: `${ADMIN_BASE}/api/oauth/mcp-callback`,
+    resource: MCP_SERVER_URL,
+    exp: Math.floor(Date.now() / 1000) + 600,
+  })}`;
+  const startedFrom = `enc:${JSON.stringify(providerConfig)}`;
+  const row = (authConfig: string, serverUrl = MCP_SERVER_URL) => ({
+    id: SERVER_ID,
+    botId: BOT_ID,
+    authType: 'oauth',
+    authConfig,
+    serverUrl,
+  });
+
+  function callback() {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ access_token: 'access-new', refresh_token: 'refresh-new', expires_in: 3600 }),
+    }) as unknown as typeof fetch;
+    return oauthCallback(
+      new NextRequest(`${ADMIN_BASE}/api/oauth/mcp-callback?code=auth-code-1&state=${encodeURIComponent(stateToken)}`)
+    );
+  }
+
+  it('guards the write on the server URL and settings it read', async () => {
+    findUnique.mockResolvedValueOnce(row(startedFrom));
+    update.mockResolvedValueOnce({ count: 1 });
+
+    const response = await callback();
+
+    expect(update.mock.calls[0][0].where).toEqual({
+      id: SERVER_ID,
+      serverUrl: MCP_SERVER_URL,
+      authConfig: startedFrom,
+    });
+    expect(response.headers.get('location')).toContain('oauth=success');
+  });
+
+  it('carries the new tokens onto a settings save that landed meanwhile', async () => {
+    const saved = `enc:${JSON.stringify({ ...providerConfig, scopes: 'openid mcp mcp:write', accessToken: 'access-old' })}`;
+    findUnique.mockResolvedValueOnce(row(startedFrom)).mockResolvedValueOnce(row(saved));
+    update.mockResolvedValueOnce({ count: 0 }).mockResolvedValueOnce({ count: 1 });
+
+    const response = await callback();
+
+    expect(update).toHaveBeenCalledTimes(2);
+    expect(update.mock.calls[1][0].where).toEqual({ id: SERVER_ID, serverUrl: MCP_SERVER_URL, authConfig: saved });
+    const written = JSON.parse((update.mock.calls[1][0].data.authConfig as string).replace(/^enc:/, ''));
+    expect(written.scopes).toBe('openid mcp mcp:write');
+    expect(written.accessToken).toBe('access-new');
+    expect(written.refreshToken).toBe('refresh-new');
+    expect(response.headers.get('location')).toContain('oauth=success');
+  });
+
+  it('reports the change instead of success when the server URL changed meanwhile', async () => {
+    findUnique
+      .mockResolvedValueOnce(row(startedFrom))
+      .mockResolvedValueOnce(row(startedFrom, 'https://other-mcp.example.com/mcp'));
+    update.mockResolvedValueOnce({ count: 0 });
+
+    const response = await callback();
+
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(response.headers.get('location')).toContain('message=connection_changed');
+    expect(response.headers.get('location')).not.toContain('oauth=success');
+  });
+
+  it('reports the change when the token endpoint or client changed meanwhile', async () => {
+    const otherClient = `enc:${JSON.stringify({ ...providerConfig, clientId: 'client-xyz' })}`;
+    findUnique.mockResolvedValueOnce(row(startedFrom)).mockResolvedValueOnce(row(otherClient));
+    update.mockResolvedValueOnce({ count: 0 });
+
+    const response = await callback();
+
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(response.headers.get('location')).toContain('message=connection_changed');
   });
 });

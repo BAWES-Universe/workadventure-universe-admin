@@ -354,8 +354,14 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
     }
   }
 
+  // Bumped for a server when it is reconnected. A test started before the reconnect
+  // describes the old authorization, so its result is discarded when it lands (#193 review).
+  const testGenerationRef = useRef<Record<string, number>>({});
+
   async function handleTestConnection(server: McpServer) {
     setTestingId(server.id);
+    const generation = testGenerationRef.current[server.id] ?? 0;
+    const isCurrent = () => (testGenerationRef.current[server.id] ?? 0) === generation;
 
     try {
       const { authenticatedFetch } = await import('@/lib/client-auth');
@@ -390,8 +396,11 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
             errorBody: data.errorBody ?? null,
           };
 
-      setTestResults((prev) => ({ ...prev, [server.id]: { result, testedAt: new Date() } }));
+      if (isCurrent()) {
+        setTestResults((prev) => ({ ...prev, [server.id]: { result, testedAt: new Date() } }));
+      }
     } catch (err) {
+      if (!isCurrent()) return;
       setTestResults((prev) => ({
         ...prev,
         [server.id]: {
@@ -475,6 +484,9 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
             setOauthConnectingId(null);
             // A test run before the reconnect describes the old authorization. Drop it so
             // the row is shown from the reloaded state, not a stale live result (#193 review).
+            // A test still in flight is from before the reconnect too, so its result is
+            // discarded when it lands.
+            testGenerationRef.current[server.id] = (testGenerationRef.current[server.id] ?? 0) + 1;
             setTestResults((prev) => {
               const next = { ...prev };
               delete next[server.id];

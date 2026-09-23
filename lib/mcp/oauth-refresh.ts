@@ -398,9 +398,17 @@ async function performRefresh(
   if (!persisted.won) {
     let current = await readStoredConfig(serverId).catch(() => null);
 
+    // Only a pair another writer stored counts. A row that still holds the pair this
+    // refresh started from lost the race to something else (a settings save, say), and
+    // that pair's refresh token may be the one we just spent: adopting it would drop
+    // the pair we were issued and leave the connection unable to refresh (#193 review).
     const holdsUsablePair = (
       stored: { encrypted: string; config: McpOAuthConfig } | null
-    ): boolean => !!stored && !!stored.config.accessToken && !isAccessTokenStale(stored.config, nowMs, 0);
+    ): boolean =>
+      !!stored &&
+      !!stored.config.accessToken &&
+      !isAccessTokenStale(stored.config, nowMs, 0) &&
+      (stored.config.accessToken !== config.accessToken || stored.config.refreshToken !== config.refreshToken);
 
     // Another writer stored a live pair while we were in flight: theirs is the token
     // the provider considers current, so adopt it.

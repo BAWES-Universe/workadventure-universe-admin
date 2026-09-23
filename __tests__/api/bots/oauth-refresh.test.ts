@@ -789,6 +789,35 @@ describe('a settings save that lands during a refresh is not reverted', () => {
     expect(outcome.config?.scopes).toBe('mcp:read mcp:write');
   });
 
+  it('stores its new pair when the row still holds the pair it started from', async () => {
+    global.fetch = jest
+      .fn()
+      .mockResolvedValue(
+        tokenResponse({ access_token: 'access-A', refresh_token: 'refresh-A', expires_in: 3600 })
+      ) as unknown as typeof fetch;
+    // Inside the refresh window but not yet expired: the refresh starts, and a save that
+    // kept the same tokens lands. The row's pair is live, but it is ours, and its refresh
+    // token is the one just spent. Adopting it would drop the pair we were issued.
+    const nearExpiry = { ...expiredConfig, accessToken: 'access-0', expiresAt: nowSeconds + 120 };
+    const edited = enc({ ...nearExpiry, scopes: 'mcp:read mcp:write' });
+    updateMany.mockResolvedValueOnce({ count: 0 }).mockResolvedValueOnce({ count: 1 });
+    findUnique.mockResolvedValue({ authConfig: edited });
+
+    const outcome = await ensureFreshOAuthConfig({
+      serverId: SERVER_ID,
+      authConfig: enc(nearExpiry),
+      nowMs: NOW,
+    });
+
+    expect(outcome.status).toBe('refreshed');
+    expect(updateMany).toHaveBeenCalledTimes(2);
+    const written = dec(updateMany.mock.calls[1][0].data.authConfig);
+    expect(written.accessToken).toBe('access-A');
+    expect(written.refreshToken).toBe('refresh-A');
+    expect(written.scopes).toBe('mcp:read mcp:write');
+    expect(outcome.config?.accessToken).toBe('access-A');
+  });
+
   it('keeps the refresh token it used when the provider does not rotate and the row holds a marker', async () => {
     global.fetch = jest
       .fn()
