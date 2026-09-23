@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
+import { resolveRequestedScopes } from '@/lib/mcp/oauth-token';
 import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
@@ -104,7 +105,13 @@ export async function GET(
     }
 
     // Decrypt authConfig and extract OAuth provider config
-    let oauthConfig: { clientId?: string; clientSecret?: string; scopes?: string; authorizeUrl?: string };
+    let oauthConfig: {
+      clientId?: string;
+      clientSecret?: string;
+      scopes?: string;
+      authorizeUrl?: string;
+      scopesSupported?: string[] | null;
+    };
     try {
       const decrypted = decryptApiKey(server.authConfig!);
       oauthConfig = JSON.parse(decrypted);
@@ -220,7 +227,14 @@ export async function GET(
     authorizeUrl.searchParams.set('response_type', 'code');
     authorizeUrl.searchParams.set('client_id', oauthConfig.clientId);
     authorizeUrl.searchParams.set('redirect_uri', `${callbackBase}/api/oauth/mcp-callback`);
-    authorizeUrl.searchParams.set('scope', oauthConfig.scopes || '');
+    // `offline_access` is what asks a provider for a refresh token, and it is only
+    // ever requested from a server that advertises it — asking for an unpublished
+    // scope is a request the provider may reject. With no advertised list stored,
+    // the configured scopes are sent unchanged (#187).
+    authorizeUrl.searchParams.set(
+      'scope',
+      resolveRequestedScopes(oauthConfig.scopes, oauthConfig.scopesSupported) || ''
+    );
     authorizeUrl.searchParams.set('state', stateToken);
     authorizeUrl.searchParams.set('code_challenge', codeChallenge);
     authorizeUrl.searchParams.set('code_challenge_method', 'S256');

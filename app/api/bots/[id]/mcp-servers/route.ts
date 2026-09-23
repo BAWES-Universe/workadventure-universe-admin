@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
+import { isReconnectRequired, parseOAuthConfig, refreshBlockedReason } from '@/lib/mcp/oauth-token';
+import { ensureFreshOAuthConfig } from '@/lib/mcp/oauth-refresh';
 import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { encryptApiKey, decryptApiKey } from '@/lib/encryption';
@@ -244,49 +246,74 @@ export async function GET(
     // Transform: remove authConfig from response for security,
     // except for internal bot-server calls authenticated via ADMIN_API_TOKEN
     // For OAuth servers, check if connected (has accessToken) without exposing credentials
-    const transformed = servers.map((s) => {
-      let oauthConnected = false;
-      // The access token's expiry, exposed to the UI so a stored green result can
-      // be told apart from a live connection (#186). Not secret: it is a timestamp,
-      // and the token itself is never sent here.
-      let oauthExpiresAt: string | null = null;
-      if (s.authType === 'oauth' && s.authConfig) {
-        try {
-          const decrypted = decryptApiKey(s.authConfig);
-          const config = JSON.parse(decrypted);
-          oauthConnected = !!config.accessToken;
-          if (typeof config.expiresAt === 'number' && Number.isFinite(config.expiresAt)) {
-            const expiresAt = new Date(config.expiresAt * 1000);
-            // A finite number is not necessarily a representable date. An out-of-range
-            // value made toISOString() throw, and the catch below swallows that while
-            // oauthConnected stays true — so the panel was told the connection is live
-            // with no expiry at all, which is the stale-as-healthy illusion this change
-            // exists to remove (#186 review).
-            if (!Number.isNaN(expiresAt.getTime())) {
-              oauthExpiresAt = expiresAt.toISOString();
+    const transformed = await Promise.all(
+      servers.map(async (s) => {
+        let oauthConnected = false;
+        let oauthReconnectReason: string | null = null;
+        // The access token's expiry, exposed to the UI so a stored green result can
+        // be told apart from a live connection (#186). Not secret: it is a timestamp,
+        // and the token itself is never sent here.
+        let oauthExpiresAt: string | null = null;
+        let authConfigToServe = s.authConfig;
+        if (s.authType === 'oauth' && s.authConfig) {
+          try {
+            let config = parseOAuthConfig(decryptApiKey(s.authConfig));
+            // Internal callers (the bots) are handed the credentials, so this is where
+            // a token must be renewed before it is served. Admin reads only report
+            // state — they must not trigger a refresh on every page view (#187).
+            if (isAdminToken) {
+              const outcome = await ensureFreshOAuthConfig({
+                serverId: s.id,
+                authConfig: s.authConfig,
+                serverUrl: s.serverUrl,
+              });
+              if (outcome.authConfig) authConfigToServe = outcome.authConfig;
+              if (outcome.config) config = outcome.config;
             }
+            // A panel read never refreshes, so the stored marker alone is not enough: a
+            // connection whose token has expired and that has no refresh token is already
+            // beyond automatic recovery, and calling it connected hides the Reconnect
+            // action until some bot poll or Test run writes the marker. Ask the token
+            // rules directly instead (#190 review).
+            const needsHuman = !!config && !!config.accessToken && isReconnectRequired(config);
+            oauthConnected = !!config?.accessToken && !needsHuman;
+            oauthReconnectReason =
+              config?.reconnectRequired?.reason ??
+              (config && needsHuman ? refreshBlockedReason(config) : null);
+            if (typeof config?.expiresAt === 'number' && Number.isFinite(config.expiresAt)) {
+              const expiresAt = new Date(config.expiresAt * 1000);
+              // A finite number is not necessarily a representable date. An out-of-range
+              // value made toISOString() throw into the catch below while oauthConnected
+              // was already set, reporting a live connection with no expiry (#186 review).
+              if (!Number.isNaN(expiresAt.getTime())) {
+                oauthExpiresAt = expiresAt.toISOString();
+              }
+            }
+          } catch {
+            // If decrypt fails, assume not connected
           }
-        } catch {
-          // If decrypt fails, assume not connected
         }
-      }
-      return {
-        id: s.id,
-        botId: s.botId,
-        name: s.name,
-        serverUrl: s.serverUrl,
-        authType: s.authType,
-        ...(isAdminToken ? { authConfig: s.authConfig } : {}),
-        oauthConnected,
-        oauthExpiresAt,
-        enabled: s.enabled,
-        headers: s.headers,
-        lastTestedAt: s.lastTestedAt,
-        lastTestResult: s.lastTestResult,
-        createdAt: s.createdAt,
-        updatedAt: s.updatedAt,
-      };
-    });
+          return {
+            id: s.id,
+            botId: s.botId,
+            name: s.name,
+            serverUrl: s.serverUrl,
+            authType: s.authType,
+            ...(isAdminToken ? { authConfig: authConfigToServe } : {}),
+            oauthConnected,
+            oauthExpiresAt,
+            // Set when refreshing is impossible and only a human can fix it (#187).
+            oauthReconnectRequired: !!oauthReconnectReason,
+            oauthReconnectReason,
+            enabled: s.enabled,
+            headers: s.headers,
+            lastTestedAt: s.lastTestedAt,
+            lastTestResult: s.lastTestResult,
+            createdAt: s.createdAt,
+            updatedAt: s.updatedAt,
+          };
+      })
+    );
 
     return NextResponse.json(transformed, { headers: corsHeaders(request) });
   } catch (error) {

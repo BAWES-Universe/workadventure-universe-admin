@@ -64,6 +64,9 @@ interface McpServer {
   serverUrl: string;
   authType: string;
   oauthConnected?: boolean;
+  /** True when refreshing is impossible and only a human re-authorization can fix it. */
+  oauthReconnectRequired?: boolean;
+  oauthReconnectReason?: string | null;
   /** Access-token expiry (ISO). Absent for non-OAuth and for configs predating expiry capture. */
   oauthExpiresAt?: string | null;
   enabled: boolean;
@@ -282,6 +285,10 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                 clientId: (discoveryRegistration === 'auto' && !formData.oauthClientId?.trim()) ? null : (formData.oauthClientId?.trim() || null),
                 clientSecret: (discoveryRegistration === 'auto' && !formData.oauthClientSecret?.trim()) ? null : (formData.oauthClientSecret?.trim() || null),
                 scopes: formData.oauthScopes?.trim() || null,
+                // What the authorization server says it publishes. Recorded so the
+                // authorize request can ask for `offline_access` only when the server
+                // actually offers it (#187).
+                scopesSupported: discoveredScopes && discoveredScopes.length > 0 ? discoveredScopes : undefined,
               })
             : formData.authConfig || null,
           headers: formData.headers.length > 0
@@ -941,9 +948,20 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                             {oauthConnectingId === server.id ? (
                               <Loader2 className="h-3 w-3 animate-spin" />
                             ) : (
-                              <span className="text-xs">Connect with OAuth</span>
+                              <span className="text-xs">
+                                {server.oauthReconnectRequired ? 'Reconnect' : 'Connect with OAuth'}
+                              </span>
                             )}
                           </Button>
+                        )}
+
+                        {server.authType === 'oauth' && server.oauthReconnectRequired && server.oauthReconnectReason && (
+                          <span
+                            className="max-w-[240px] text-[10px] text-amber-600"
+                            title={server.oauthReconnectReason}
+                          >
+                            {server.oauthReconnectReason}
+                          </span>
                         )}
 
                         {server.authType === 'oauth' && server.oauthConnected && (

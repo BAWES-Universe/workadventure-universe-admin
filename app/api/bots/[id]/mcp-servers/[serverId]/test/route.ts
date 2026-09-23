@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { decryptApiKey } from '@/lib/encryption';
+import { ensureFreshOAuthConfig } from '@/lib/mcp/oauth-refresh';
 import { extractErrorCode, readBodyWithLimit, truncateDetail } from '@/lib/mcp/test-result';
 import { lookup } from 'dns/promises';
 import { isIP } from 'net';
@@ -365,7 +366,7 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
               success: false,
               toolCount: 0,
               toolNames: [],
-              error: 'No OAuth access token available — complete the OAuth flow first',
+              error: 'Reconnect required: no OAuth access token is stored for this connection.',
             };
           }
           authValue = oauthConfig.accessToken || null;
@@ -690,12 +691,37 @@ export async function POST(
 
     // lastTestedAt and lastTestResult are persisted below.
 
-    const result = await testMcpConnection({
-      serverUrl: server.serverUrl,
-      authType: server.authType,
-      authConfig: server.authConfig,
-      headers: server.headers as Record<string, string> | null,
-    });
+    // Renew the access token before testing (#187). A connection whose token has
+    // expired is tested — and reported — on a live token, and a connection that
+    // cannot be renewed reports that, instead of failing with a bare 401 that says
+    // nothing about the fix.
+    let authConfigForTest = server.authConfig;
+    let reconnectReason: string | null = null;
+    if (server.authType === 'oauth' && server.authConfig) {
+      const outcome = await ensureFreshOAuthConfig({
+        serverId,
+        authConfig: server.authConfig,
+        serverUrl: server.serverUrl,
+      });
+      if (outcome.authConfig) authConfigForTest = outcome.authConfig;
+      if (outcome.status === 'reconnect_required') {
+        reconnectReason = outcome.reason ?? 'the stored credentials are no longer usable';
+      }
+    }
+
+    const result = reconnectReason
+      ? {
+          success: false as const,
+          toolCount: 0,
+          toolNames: [] as string[],
+          error: `Reconnect required: ${reconnectReason}`,
+        }
+      : await testMcpConnection({
+          serverUrl: server.serverUrl,
+          authType: server.authType,
+          authConfig: authConfigForTest,
+          headers: server.headers as Record<string, string> | null,
+        });
 
     // Persist test result to DB (fire-and-forget — non-blocking)
     try {

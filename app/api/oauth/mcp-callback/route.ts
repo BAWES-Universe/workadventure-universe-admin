@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
+import { normalizeExpiresIn } from '@/lib/mcp/oauth-token';
 import { getOAuthCallbackBase } from '@/lib/oauth-callback';
 
 export const runtime = 'nodejs';
@@ -15,6 +16,10 @@ interface OAuthConfig {
   accessToken?: string;
   refreshToken?: string;
   expiresAt?: number;
+  /** Advertised scopes recorded at connection time (#187). */
+  scopesSupported?: string[] | null;
+  /** Set by the refresh path when a human must re-authorize (#187). */
+  reconnectRequired?: { at: string; reason: string } | null;
 }
 
 /**
@@ -206,6 +211,9 @@ export async function GET(request: NextRequest) {
       accessToken: tokenResponse.access_token,
       refreshToken: tokenResponse.refresh_token || undefined,
       expiresAt: tokenResponse.expires_in ? Math.floor(Date.now() / 1000) + tokenResponse.expires_in : undefined,
+      scopesSupported: oauthConfig.scopesSupported ?? undefined,
+      // A fresh authorization clears any previous reconnect-required verdict.
+      reconnectRequired: undefined,
     };
 
     // Encrypt and save
@@ -320,7 +328,9 @@ async function exchangeCodeForTokens(
     return {
       access_token: data.access_token,
       refresh_token: data.refresh_token,
-      expires_in: data.expires_in,
+      // Normalized here, at the boundary: a numeric string would otherwise be concatenated
+      // onto the epoch second below and store a nonsense expiry (#190 review).
+      expires_in: normalizeExpiresIn(data.expires_in),
     };
   } catch (error) {
     console.error('[OAuthCallback] Token exchange fetch failed:', error);
