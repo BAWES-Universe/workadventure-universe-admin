@@ -508,3 +508,44 @@ describe('the login stores its tokens only on the connection it was started for'
     expect(response.headers.get('location')).toContain('message=connection_changed');
   });
 });
+
+describe('a login that keeps losing to concurrent writes', () => {
+  const stateToken = `enc:${JSON.stringify({
+    botId: BOT_ID,
+    serverId: SERVER_ID,
+    redirectUrl: `${ADMIN_BASE}/admin/bots/${BOT_ID}`,
+    codeVerifier: 'test-code-verifier',
+    redirectUri: `${ADMIN_BASE}/api/oauth/mcp-callback`,
+    resource: MCP_SERVER_URL,
+    exp: Math.floor(Date.now() / 1000) + 600,
+  })}`;
+  const row = (authConfig: string) => ({
+    id: SERVER_ID,
+    botId: BOT_ID,
+    authType: 'oauth',
+    authConfig,
+    serverUrl: MCP_SERVER_URL,
+  });
+
+  it('asks to connect again instead of reporting that the connection changed', async () => {
+    // Same server and issuer every time, only the tokens keep moving (#198 review).
+    let n = 0;
+    findUnique.mockImplementation(async () =>
+      row(`enc:${JSON.stringify({ ...providerConfig, accessToken: `access-${n++}` })}`)
+    );
+    update.mockResolvedValue({ count: 0 });
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ access_token: 'access-new', refresh_token: 'refresh-new', expires_in: 3600 }),
+    }) as unknown as typeof fetch;
+
+    const response = await oauthCallback(
+      new NextRequest(`${ADMIN_BASE}/api/oauth/mcp-callback?code=auth-code-1&state=${encodeURIComponent(stateToken)}`)
+    );
+
+    expect(update).toHaveBeenCalledTimes(3);
+    expect(response.headers.get('location')).toContain('message=connection_busy_try_again');
+    expect(response.headers.get('location')).not.toContain('connection_changed');
+  });
+});
