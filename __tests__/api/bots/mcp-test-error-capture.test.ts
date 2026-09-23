@@ -180,6 +180,59 @@ describe('MCP connection test: failure detail is captured, not discarded', () =>
     expect((storedResult().wwwAuthenticate as string).length).toBeLessThanOrEqual(301);
   });
 
+  it('redacts and caps the stored statusText', async () => {
+    // The reason phrase is chosen by the configured endpoint: it can echo credential
+    // material there, and it can be unbounded. Every other stored field already goes
+    // through redact-then-truncate; this one was copied straight into the stored result
+    // and into the error message the panel shows.
+    const hostileStatusText = `access_token="super-secret-value" ${'x'.repeat(400)}`;
+
+    global.fetch = jest.fn().mockResolvedValue(
+      new Response(JSON.stringify({ error: 'invalid_token' }), {
+        status: 401,
+        statusText: hostileStatusText,
+      })
+    ) as unknown as typeof fetch;
+
+    const body = await (await postTest()).json();
+
+    expect(body.statusText).not.toContain('super-secret-value');
+    expect(body.statusText).toContain('[redacted]');
+    expect((body.statusText as string).length).toBeLessThanOrEqual(301); // cap + ellipsis
+    expect(body.statusText.endsWith('…')).toBe(true);
+    // The displayed message embeds the sanitised value: it must not leak either.
+    expect(body.error).toContain('HTTP 401');
+    expect(body.error).not.toContain('super-secret-value');
+
+    const persisted = storedResult();
+    expect(persisted.statusText).not.toContain('super-secret-value');
+    expect(JSON.stringify(persisted)).not.toContain('super-secret-value');
+    expect((persisted.statusText as string).length).toBeLessThanOrEqual(301);
+  });
+
+  it('sanitises the statusText stored when a redirect carries no Location header', async () => {
+    // Second write site for the same field, and the one that never reaches
+    // describeFailure: it has to sanitise its own copy.
+    global.fetch = jest.fn().mockResolvedValue(
+      new Response(null, {
+        status: 302,
+        statusText: `refresh_token="super-secret-value" ${'y'.repeat(400)}`,
+      })
+    ) as unknown as typeof fetch;
+
+    const body = await (await postTest()).json();
+
+    expect(body.success).toBe(false);
+    expect(body.error).toContain('missing Location header');
+    expect(body.statusText).not.toContain('super-secret-value');
+    expect((body.statusText as string).length).toBeLessThanOrEqual(301);
+    expect(body.statusText.endsWith('…')).toBe(true);
+
+    const persisted = storedResult();
+    expect(persisted.statusText).not.toContain('super-secret-value');
+    expect(JSON.stringify(persisted)).not.toContain('super-secret-value');
+  });
+
   it('records success without failure detail', async () => {
     const fetchMock = jest.fn(async (_url: string, init: RequestInit) => {
       const payload = JSON.parse(String(init.body)) as { method?: string };

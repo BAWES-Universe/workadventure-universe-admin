@@ -321,7 +321,11 @@ async function describeFailure(
   // direct response and the followed redirect, which both land here without a body.
   const rawBody = responseBody ?? (await readBodyWithLimit(response));
   const errorCode = extractErrorCode(rawBody);
-  const statusText = response.statusText || '';
+  // The reason phrase is chosen by the server, so it is stored text like any other and
+  // goes through the same redact-then-truncate as the body and the challenge header: an
+  // endpoint can echo credential material there, and it can be arbitrarily long. This
+  // also sanitises the value embedded in `error`, which is what the panel displays.
+  const statusText = truncateDetail(response.statusText) || '';
   return {
     success: false,
     error: `HTTP ${response.status}${statusText ? `: ${statusText}` : ''}${errorCode ? ` \u2014 ${errorCode}` : ''}`,
@@ -498,7 +502,9 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
             success: false,
             error: 'Redirect response missing Location header',
             status: res.status,
-            statusText: res.statusText,
+            // Second write site for this field, and the one that does not pass through
+            // describeFailure: sanitise it here too rather than storing the raw phrase.
+            statusText: truncateDetail(res.statusText) ?? undefined,
             errorCode: null,
             wwwAuthenticate: null,
             errorBody: null,
