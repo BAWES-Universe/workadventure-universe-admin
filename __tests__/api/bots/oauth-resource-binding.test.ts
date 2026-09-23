@@ -415,6 +415,8 @@ describe('the code exchange applies the DNS-aware destination check', () => {
 
     expect(outboundCheck).toHaveBeenCalledWith(TOKEN_URL);
     expect(outboundCheck.mock.invocationCallOrder[0]).toBeLessThan(fetchMock.mock.invocationCallOrder[0]);
+    // A redirect would carry the code and client secret past the check (#193 review).
+    expect(fetchMock.mock.calls[0][1].redirect).toBe('error');
     expect(response.headers.get('location')).toContain('oauth=success');
   });
 });

@@ -9,6 +9,22 @@
 import { lookup } from 'dns/promises';
 import { isIP } from 'net';
 
+/**
+ * The IPv4 address inside an IPv4-mapped IPv6 address, in either spelling:
+ * `::ffff:127.0.0.1`, or `::ffff:7f00:1`, which is how `new URL()` and DNS lookups
+ * canonicalise it. Returns null for anything else. Without the hex form, a mapped
+ * loopback or metadata address passed every IPv4 check below (#193 review).
+ */
+function mappedIpv4(ip: string): string | null {
+  const dotted = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/i.exec(ip);
+  if (dotted) return dotted[1];
+  const hex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(ip);
+  if (!hex) return null;
+  const hi = parseInt(hex[1], 16);
+  const lo = parseInt(hex[2], 16);
+  return `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`;
+}
+
 // Reject MCP server URLs that point to internal infrastructure (SSRF prevention)
 export function isAllowedServerUrl(url: string): boolean {
   try {
@@ -22,9 +38,11 @@ export function isAllowedServerUrl(url: string): boolean {
     if (cleanHostname === 'localhost' || cleanHostname === '::1') return false;
     if (/^127\.\d+\.\d+\.\d+$/.test(cleanHostname)) return false;    // 127.0.0.0/8 loopback
     if (/^0\.0\.0\.0$/.test(cleanHostname)) return false;
-    // Handle IPv4-mapped IPv6 addresses (::ffff:127.0.0.1, etc.)
-    if (/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.test(cleanHostname)) {
-      const ipv4 = cleanHostname.replace(/^::ffff:/i, '');
+    // Handle IPv4-mapped IPv6 addresses (::ffff:127.0.0.1, ::ffff:7f00:1, etc.). One that
+    // cannot be decoded is refused rather than let through unchecked.
+    if (/^::ffff:/i.test(cleanHostname)) {
+      const ipv4 = mappedIpv4(cleanHostname);
+      if (ipv4 === null) return false;
       if (/^127\.\d+\.\d+\.\d+$/.test(ipv4) || ipv4 === '0.0.0.0') return false;
       if (/^10\.\d+\.\d+\.\d+$/.test(ipv4) || /^172\.(1[6-9]|2\d|3[01])\.\d+\.\d+$/.test(ipv4)) return false;
       if (/^192\.168\.\d+\.\d+$/.test(ipv4) || /^169\.254\.\d+\.\d+$/.test(ipv4)) return false;
@@ -75,7 +93,10 @@ export async function isAllowedServerIp(serverUrl: string): Promise<{ allowed: b
       }
       // Handle IPv4-mapped IPv6 (::ffff:127.0.0.1, ::ffff:10.0.0.1, etc.)
       if (/^::ffff:/i.test(hostname)) {
-        const ipv4 = hostname.replace(/^::ffff:/i, '');
+        const ipv4 = mappedIpv4(hostname);
+        if (ipv4 === null) {
+          return { allowed: false, error: `Server uses an IPv4-mapped IPv6 address that could not be checked (${hostname})` };
+        }
         if (/^127\./.test(ipv4) || ipv4 === '0.0.0.0') {
           return { allowed: false, error: `Server uses loopback address via IPv4-mapped IPv6 (${hostname})` };
         }
@@ -129,7 +150,10 @@ export async function isAllowedServerIp(serverUrl: string): Promise<{ allowed: b
       }
       // Handle IPv4-mapped IPv6 in DNS results
       if (/^::ffff:/i.test(ip)) {
-        const ipv4 = ip.replace(/^::ffff:/i, '');
+        const ipv4 = mappedIpv4(ip);
+        if (ipv4 === null) {
+          return { allowed: false, error: `Server resolves to an IPv4-mapped IPv6 address that could not be checked (${ip})` };
+        }
         if (/^127\./.test(ipv4) || ipv4 === '0.0.0.0') {
           return { allowed: false, error: `Server resolves to loopback via IPv4-mapped IPv6 (${ip})` };
         }

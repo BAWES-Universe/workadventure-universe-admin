@@ -473,6 +473,13 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
               pollRef.current = null;
             }
             setOauthConnectingId(null);
+            // A test run before the reconnect describes the old authorization. Drop it so
+            // the row is shown from the reloaded state, not a stale live result (#193 review).
+            setTestResults((prev) => {
+              const next = { ...prev };
+              delete next[server.id];
+              return next;
+            });
             await fetchServers();
           }
         } catch {

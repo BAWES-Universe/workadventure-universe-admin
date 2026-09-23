@@ -224,6 +224,23 @@ describe('ensureFreshOAuthConfig', () => {
     expect(updateMany).not.toHaveBeenCalled();
   });
 
+  it('refuses to follow a redirect from the token endpoint, and keeps the tokens', async () => {
+    // A 307/308 would re-send the refresh token and client secret to a destination the
+    // outbound check never saw (#193 review). fetch rejects the redirect instead.
+    const fetchMock = jest.fn().mockRejectedValue(new TypeError('fetch failed: unexpected redirect'));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const outcome = await ensureFreshOAuthConfig({
+      serverId: SERVER_ID,
+      authConfig: enc(expiredConfig),
+      nowMs: NOW,
+    });
+
+    expect(fetchMock.mock.calls[0][1].redirect).toBe('error');
+    expect(outcome.status).toBe('unavailable');
+    expect(updateMany).not.toHaveBeenCalled();
+  });
+
   it('checks the token endpoint before every refresh request', async () => {
     const fetchMock = jest
       .fn()
