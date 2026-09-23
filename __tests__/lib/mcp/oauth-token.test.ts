@@ -166,8 +166,19 @@ describe('resolveRequestedScopes', () => {
     expect(resolveRequestedScopes('mcp offline_access', ['mcp', OFFLINE_ACCESS_SCOPE])).toBe('mcp offline_access');
   });
 
-  it('handles absent and comma-separated scopes', () => {
-    expect(resolveRequestedScopes(null, ['mcp'])).toBeNull();
+  it('requests the advertised scopes when none are configured', () => {
+    // A connection created through the panel stores `scopes: null` when the optional
+    // Scopes field is left empty, next to the discovered `scopesSupported`. Returning
+    // only `offline_access` there asked for the refresh scope and dropped every
+    // functional one, so the granted token could not call anything (#190 review).
+    expect(resolveRequestedScopes(null, ['mcp'])).toBe('mcp');
+    expect(resolveRequestedScopes('', ['openid', 'mcp:read', OFFLINE_ACCESS_SCOPE])).toBe(
+      'openid mcp:read offline_access'
+    );
+    expect(resolveRequestedScopes(undefined, ['mcp', 'admin'])).toBe('mcp admin');
+  });
+
+  it('handles comma-separated scopes', () => {
     expect(resolveRequestedScopes('mcp,openid', ['mcp', 'openid'])).toBe('mcp openid');
   });
 });

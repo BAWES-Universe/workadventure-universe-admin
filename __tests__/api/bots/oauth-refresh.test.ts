@@ -518,6 +518,61 @@ describe('a successful exchange outranks a concurrent terminal verdict', () => {
     expect(dec(updateMany.mock.calls[1][0].data.authConfig).accessToken).toBe('access-A');
   });
 
+  it('re-offers its pair through a guarded write, never a blind one', async () => {
+    global.fetch = jest
+      .fn()
+      .mockResolvedValue(tokenResponse({ access_token: 'access-A', refresh_token: 'refresh-A' })) as unknown as typeof fetch;
+    // Our guarded write keeps losing: the row holds a terminal verdict and our CAS
+    // against it never lands.
+    updateMany.mockResolvedValue({ count: 0 });
+    findUnique.mockResolvedValue({ authConfig: enc(markReconnectRequired(expiredConfig, 'rejected', NOW)) });
+
+    const outcome = await ensureFreshOAuthConfig({
+      serverId: SERVER_ID,
+      authConfig: enc(expiredConfig),
+      nowMs: NOW,
+    });
+
+    // A blind write here would clobber a pair another process stored in the window
+    // between the read and the write — and against a rotating provider that pair is the
+    // only one still valid, so the connection would never refresh again.
+    expect(update).not.toHaveBeenCalled();
+    expect(updateMany.mock.calls.length).toBeGreaterThan(1);
+    for (const [args] of updateMany.mock.calls) {
+      expect(args.where).toEqual({ id: SERVER_ID, authConfig: expect.any(String) });
+    }
+    expect(outcome.status).toBe('unavailable');
+    expect(outcome.reason).toContain('could not be stored');
+  });
+
+  it('adopts a pair that lands while it is retrying, instead of storing its own', async () => {
+    global.fetch = jest
+      .fn()
+      .mockResolvedValue(tokenResponse({ access_token: 'access-A', refresh_token: 'refresh-A' })) as unknown as typeof fetch;
+    updateMany.mockResolvedValue({ count: 0 });
+    const freshPair = enc({
+      ...expiredConfig,
+      accessToken: 'access-C',
+      refreshToken: 'refresh-C',
+      expiresAt: nowSeconds + 3600,
+    });
+    findUnique
+      .mockResolvedValueOnce({ authConfig: enc(markReconnectRequired(expiredConfig, 'rejected', NOW)) }) // read: nothing usable
+      .mockResolvedValue({ authConfig: freshPair }); // a third writer lands a live pair
+
+    const outcome = await ensureFreshOAuthConfig({
+      serverId: SERVER_ID,
+      authConfig: enc(expiredConfig),
+      nowMs: NOW,
+    });
+
+    // The live pair wins: the row's token is the one the provider considers current.
+    expect(outcome.status).toBe('refreshed');
+    expect(outcome.config?.accessToken).toBe('access-C');
+    expect(outcome.authConfig).toBe(freshPair);
+    expect(update).not.toHaveBeenCalled();
+  });
+
   it('never reports refreshed when the pair it holds could not be stored', async () => {
     global.fetch = jest
       .fn()

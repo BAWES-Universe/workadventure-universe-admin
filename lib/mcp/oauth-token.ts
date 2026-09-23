@@ -164,6 +164,12 @@ export function markReconnectRequired(
  * unpublished scope is a request the provider is entitled to reject. When we know
  * nothing about the server's published scopes, what is configured is sent unchanged:
  * guessing either way is worse than passing through what a human configured.
+ *
+ * When nothing is configured but the server does advertise its scopes, those are what
+ * get requested. Falling back to `offline_access` alone would ask for the refresh scope
+ * and drop every functional scope, so the token comes back unable to call anything —
+ * and that is the state every connection created through the panel starts in, because
+ * the Scopes field is optional and is not pre-filled from discovery (#190 review).
  */
 export function resolveRequestedScopes(
   storedScopes: string | null | undefined,
@@ -179,7 +185,8 @@ export function resolveRequestedScopes(
   }
 
   const advertisedSet = new Set(advertised.map((s) => s.trim()).filter(Boolean));
-  const requested = stored.filter((s) => s !== OFFLINE_ACCESS_SCOPE);
+  const base = stored.length > 0 ? stored : Array.from(advertisedSet);
+  const requested = base.filter((s) => s !== OFFLINE_ACCESS_SCOPE);
   if (advertisedSet.has(OFFLINE_ACCESS_SCOPE)) {
     requested.push(OFFLINE_ACCESS_SCOPE);
   }

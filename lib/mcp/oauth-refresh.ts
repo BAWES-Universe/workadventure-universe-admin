@@ -51,6 +51,12 @@ export interface RefreshOutcome {
 
 export const REFRESH_TIMEOUT_MS = 10_000;
 
+/**
+ * How many times a refreshed pair is re-offered against the row as it changes under us.
+ * Bounded so a connection being written by a loop of callers cannot spin here.
+ */
+const STORE_ATTEMPTS = 3;
+
 /** Refresh-token errors that mean the token itself is dead, not our request. */
 const TERMINAL_REFRESH_ERROR_CODES = new Set(['invalid_grant', 'invalid_token']);
 
@@ -125,25 +131,6 @@ async function persistIfUnchanged(
     data: { authConfig },
   });
   return { won: result.count === 1, authConfig };
-}
-
-/**
- * Last-resort write, used only when a guarded write keeps losing and the row is known
- * to hold no usable access token. Deliberately unconditional: the caller has already
- * established there is nothing live to clobber.
- */
-async function writeConfigUnconditionally(
-  serverId: string,
-  config: McpOAuthConfig
-): Promise<string | null> {
-  try {
-    const authConfig = encryptApiKey(JSON.stringify(config));
-    await prisma.botMcpServer.update({ where: { id: serverId }, data: { authConfig } });
-    return authConfig;
-  } catch (error) {
-    console.error('[OAuthRefresh] Failed to store the refreshed token:', error);
-    return null;
-  }
 }
 
 async function readStoredConfig(
@@ -377,30 +364,34 @@ async function performRefresh(
     // connection is alive, while a rejection only proves that one refresh token was
     // spent — exactly what happens when a concurrent caller rotates it first. Writing
     // the pair we hold over the marker is what keeps the connection alive.
-    if (current) {
-      const guarded = await persistIfUnchanged(serverId, current.encrypted, updated).catch(() => null);
-      if (guarded?.won) {
-        return { status: 'refreshed', config: updated, authConfig: guarded.authConfig };
+    //
+    // Every attempt is guarded against the value read immediately before it. A blind
+    // write would clobber whatever another process stored in the window since that read,
+    // and against a rotating provider the loser's pair is the spent one: overwriting the
+    // winner's live pair with it would leave the connection unable to refresh at all
+    // (#190 review).
+    for (let attempt = 0; attempt < STORE_ATTEMPTS; attempt += 1) {
+      const stored = await persistIfUnchanged(serverId, current?.encrypted ?? encryptedConfig, updated).catch(
+        () => null
+      );
+      if (stored?.won) {
+        return { status: 'refreshed', config: updated, authConfig: stored.authConfig };
       }
+
       current = await readStoredConfig(serverId).catch(() => null);
       if (holdsUsablePair(current)) {
         return { status: 'refreshed', config: current!.config, authConfig: current!.encrypted };
       }
     }
 
-    const written = await writeConfigUnconditionally(serverId, updated);
-    if (written) {
-      return { status: 'refreshed', config: updated, authConfig: written };
-    }
-
-    // It could not be stored, so it must not be handed out, and the status must not
-    // claim a success whose tokens are not the ones in the row.
+    // The row kept changing under us and holds nothing usable. Hand back what it holds
+    // rather than overwriting a value we cannot see, and let the next request try again.
     return {
       status: 'unavailable',
       config: current?.config ?? config,
       authConfig: current?.encrypted ?? encryptedConfig,
       reason:
-        'The refreshed token could not be stored because this connection was being written concurrently. Reconnect to authorize it again.',
+        'The refreshed token could not be stored because this connection was being written concurrently. Retry, or reconnect to authorize it again.',
     };
   }
 
