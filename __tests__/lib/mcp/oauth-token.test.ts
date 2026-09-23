@@ -208,16 +208,24 @@ describe('resolveRequestedScopes', () => {
     expect(resolveRequestedScopes('mcp offline_access', ['mcp', OFFLINE_ACCESS_SCOPE])).toBe('mcp offline_access');
   });
 
-  it('requests the advertised scopes when none are configured', () => {
-    // A connection created through the panel stores `scopes: null` when the optional
-    // Scopes field is left empty, next to the discovered `scopesSupported`. Returning
-    // only `offline_access` there asked for the refresh scope and dropped every
-    // functional one, so the granted token could not call anything (#190 review).
-    expect(resolveRequestedScopes(null, ['mcp'])).toBe('mcp');
-    expect(resolveRequestedScopes('', ['openid', 'mcp:read', OFFLINE_ACCESS_SCOPE])).toBe(
-      'openid mcp:read offline_access'
-    );
-    expect(resolveRequestedScopes(undefined, ['mcp', 'admin'])).toBe('mcp admin');
+  it('sends no scope when none are configured, whatever the server advertises', () => {
+    // A connection made by pasting a URL and logging in stores `scopes: null` next to the
+    // discovered `scopesSupported`. Sending no scope lets the provider apply its defaults,
+    // which is what this did before; sending the advertised set would ask for everything
+    // the authorization server publishes, which can be broader than this MCP server needs
+    // (#190 review).
+    expect(resolveRequestedScopes(null, ['mcp'])).toBeNull();
+    expect(resolveRequestedScopes('', ['openid', 'mcp:read', OFFLINE_ACCESS_SCOPE])).toBeNull();
+    expect(resolveRequestedScopes(undefined, ['mcp', 'admin'])).toBeNull();
+    expect(resolveRequestedScopes(null, null)).toBeNull();
+  });
+
+  it('sends exactly the configured scopes, never the wider advertised list', () => {
+    // The advertised list is what the authorization server *can* grant; the configured list
+    // is what this connection needs. A configured connection keeps sending only that.
+    expect(
+      resolveRequestedScopes('mcp:read', ['openid', 'mcp:read', 'mcp:write', 'admin', OFFLINE_ACCESS_SCOPE])
+    ).toBe('mcp:read offline_access');
   });
 
   it('handles comma-separated scopes', () => {

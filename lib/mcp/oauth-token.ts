@@ -179,17 +179,20 @@ export function markReconnectRequired(
 /**
  * Work out the scope string to send on the authorization request.
  *
- * `offline_access` is the scope that asks a provider for a refresh token, and it must
- * only ever be requested from a server that advertises it — asking for an
- * unpublished scope is a request the provider is entitled to reject. When we know
- * nothing about the server's published scopes, what is configured is sent unchanged:
- * guessing either way is worse than passing through what a human configured.
+ * Nothing configured means no scope parameter at all, exactly as before: the provider then
+ * applies its own defaults. That is how most connections here are made — paste the URL, log
+ * in — and it stays that way. Requesting everything in the authorization server's
+ * `scopes_supported` instead asks for more than this MCP server needs, and a provider may
+ * refuse the extra grants or hand over more access than intended. Requesting
+ * `offline_access` alone, which is what the empty case used to produce, asks for the refresh
+ * scope and drops every functional one (#190 review).
  *
- * When nothing is configured but the server does advertise its scopes, those are what
- * get requested. Falling back to `offline_access` alone would ask for the refresh scope
- * and drop every functional scope, so the token comes back unable to call anything —
- * and that is the state every connection created through the panel starts in, because
- * the Scopes field is optional and is not pre-filled from discovery (#190 review).
+ * `offline_access` is the scope that asks a provider for a refresh token, and it must only
+ * ever be requested from a server that advertises it — asking for an unpublished scope is a
+ * request the provider is entitled to reject. Configured scopes are otherwise sent exactly as
+ * the operator wrote them, and when we know nothing about the server's published scopes they
+ * are sent unchanged: guessing either way is worse than passing through what a human
+ * configured.
  */
 export function resolveRequestedScopes(
   storedScopes: string | null | undefined,
@@ -200,13 +203,16 @@ export function resolveRequestedScopes(
     .map((s) => s.trim())
     .filter(Boolean);
 
+  if (stored.length === 0) {
+    return null;
+  }
+
   if (!advertised || advertised.length === 0) {
-    return stored.length > 0 ? stored.join(' ') : null;
+    return stored.join(' ');
   }
 
   const advertisedSet = new Set(advertised.map((s) => s.trim()).filter(Boolean));
-  const base = stored.length > 0 ? stored : Array.from(advertisedSet);
-  const requested = base.filter((s) => s !== OFFLINE_ACCESS_SCOPE);
+  const requested = stored.filter((s) => s !== OFFLINE_ACCESS_SCOPE);
   if (advertisedSet.has(OFFLINE_ACCESS_SCOPE)) {
     requested.push(OFFLINE_ACCESS_SCOPE);
   }
