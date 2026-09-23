@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { decryptApiKey } from '@/lib/encryption';
+import { extractErrorCode, readBodyWithLimit, truncateDetail } from '@/lib/mcp/test-result';
 import { lookup } from 'dns/promises';
 import { isIP } from 'net';
 
@@ -270,7 +271,85 @@ async function parseMcpResponseBody(response: Response): Promise<Record<string, 
   return JSON.parse(text) as Record<string, unknown>;
 }
 
-async function testMcpConnection(server: { serverUrl: string; authType: string; authConfig: string | null; headers?: Record<string, string> | null }): Promise<{ success: boolean; toolCount: number; toolNames: string[]; error?: string }> {
+/** Diagnostic fields carried from a failing HTTP response into the stored result. */
+interface McpTestFailureDetail {
+  status?: number;
+  statusText?: string;
+  errorCode?: string | null;
+  wwwAuthenticate?: string | null;
+  errorBody?: string | null;
+}
+
+/**
+ * Normalise captured failure detail for storage. Nullable rather than absent so a
+ * result stored before this change still renders (see lib/mcp/test-result).
+ */
+function failureFields(source: McpTestFailureDetail) {
+  return {
+    status: source.status ?? null,
+    statusText: source.statusText ?? null,
+    errorCode: source.errorCode ?? null,
+    wwwAuthenticate: source.wwwAuthenticate ?? null,
+    errorBody: source.errorBody ?? null,
+  };
+}
+
+/**
+ * Build the failure payload for a response we could not use.
+ *
+ * A status text alone ("Unauthorized") never names the cause. The response body
+ * carries the error code (e.g. `invalid_token`) and the WWW-Authenticate header
+ * points at the resource-metadata document that explains the rejection. Both are
+ * captured here — redacted and truncated — so the stored result can be diagnosed
+ * later without reproducing the failure.
+ */
+async function describeFailure(
+  response: Response,
+  responseBody?: string
+): Promise<{
+  success: false;
+  error: string;
+  status: number;
+  statusText: string;
+  errorCode: string | null;
+  wwwAuthenticate: string | null;
+  errorBody: string | null;
+}> {
+  // Read through a byte cap: this is a server the operator configured but does not
+  // control, and a failing endpoint that streams megabytes would otherwise be buffered
+  // in full before truncateDetail ever sees it. Covers both failure call sites, the
+  // direct response and the followed redirect, which both land here without a body.
+  const rawBody = responseBody ?? (await readBodyWithLimit(response));
+  const errorCode = extractErrorCode(rawBody);
+  // The reason phrase is chosen by the server, so it is stored text like any other and
+  // goes through the same redact-then-truncate as the body and the challenge header: an
+  // endpoint can echo credential material there, and it can be arbitrarily long. This
+  // also sanitises the value embedded in `error`, which is what the panel displays.
+  const statusText = truncateDetail(response.statusText) || '';
+  return {
+    success: false,
+    error: `HTTP ${response.status}${statusText ? `: ${statusText}` : ''}${errorCode ? ` \u2014 ${errorCode}` : ''}`,
+    status: response.status,
+    statusText,
+    errorCode,
+    // Redact-then-truncate, like the body: the stored field is documented as redacted
+    // and, unlike the body, it previously had no length cap either.
+    wwwAuthenticate: truncateDetail(response.headers.get('www-authenticate')),
+    errorBody: truncateDetail(rawBody),
+  };
+}
+
+async function testMcpConnection(server: { serverUrl: string; authType: string; authConfig: string | null; headers?: Record<string, string> | null }): Promise<{
+  success: boolean;
+  toolCount: number;
+  toolNames: string[];
+  error?: string;
+  status?: number | null;
+  statusText?: string | null;
+  errorCode?: string | null;
+  wwwAuthenticate?: string | null;
+  errorBody?: string | null;
+}> {
   // Decrypt authConfig if present
   let authValue: string | null = null;
   if (server.authConfig) {
@@ -401,6 +480,11 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
       data?: Record<string, unknown>;
       headers?: Record<string, string>;
       error?: string;
+      status?: number;
+      statusText?: string;
+      errorCode?: string | null;
+      wwwAuthenticate?: string | null;
+      errorBody?: string | null;
     }> {
       const res = await fetch(server.serverUrl, {
         method: 'POST',
@@ -414,7 +498,17 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
       if (res.status >= 300 && res.status < 400) {
         const location = res.headers.get('location');
         if (!location) {
-          return { success: false, error: 'Redirect response missing Location header' };
+          return {
+            success: false,
+            error: 'Redirect response missing Location header',
+            status: res.status,
+            // Second write site for this field, and the one that does not pass through
+            // describeFailure: sanitise it here too rather than storing the raw phrase.
+            statusText: truncateDetail(res.statusText) ?? undefined,
+            errorCode: null,
+            wwwAuthenticate: null,
+            errorBody: null,
+          };
         }
         const redirectUrl = new URL(location, server.serverUrl).toString();
         const followed = await followRedirect(redirectUrl, withoutAuth(headers), body).catch((err: unknown) => {
@@ -422,7 +516,7 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
           return new Response(null, { status: 502, statusText: msg });
         });
         if (!followed.ok) {
-          return { success: false, error: `HTTP ${followed.status}: ${followed.statusText}` };
+          return await describeFailure(followed);
         }
         const resHeaders: Record<string, string> = {};
         followed.headers.forEach((v: string, k: string) => { resHeaders[k] = v; });
@@ -430,7 +524,7 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
       }
 
       if (!res.ok) {
-        return { success: false, error: `HTTP ${res.status}: ${res.statusText}` };
+        return await describeFailure(res);
       }
 
       const resHeaders: Record<string, string> = {};
@@ -461,6 +555,7 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
         toolCount: 0,
         toolNames: [],
         error: `Initialize failed: ${initResult.error}`,
+        ...failureFields(initResult),
       };
     }
 
@@ -470,6 +565,7 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
         toolCount: 0,
         toolNames: [],
         error: `Initialize error: ${(initResult.data.error as { message?: string })?.message || JSON.stringify(initResult.data.error)}`,
+        ...failureFields(initResult),
       };
     }
 
@@ -499,6 +595,7 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
         toolCount: 0,
         toolNames: [],
         error: resultResponse.error,
+        ...failureFields(resultResponse),
       };
     }
 
@@ -510,6 +607,7 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
         toolCount: 0,
         toolNames: [],
         error: `MCP error: ${(data.error as { message?: string })?.message || JSON.stringify(data.error)}`,
+        ...failureFields(resultResponse),
       };
     }
 
@@ -590,8 +688,7 @@ export async function POST(
       return NextResponse.json({ error: 'MCP server not found' }, { status: 404, headers: corsHeaders(request) });
     }
 
-    // TODO: Flag this bot as having had its MCP server tested?
-    // Could add `lastTestedAt` to the schema for observability
+    // lastTestedAt and lastTestResult are persisted below.
 
     const result = await testMcpConnection({
       serverUrl: server.serverUrl,
@@ -611,6 +708,13 @@ export async function POST(
             toolCount: result.toolCount,
             toolNames: result.toolNames,
             error: result.error || null,
+            // Captured from the failure path (#186) so a stored result names the
+            // cause instead of only the status text.
+            status: result.status ?? null,
+            statusText: result.statusText ?? null,
+            errorCode: result.errorCode ?? null,
+            wwwAuthenticate: result.wwwAuthenticate ?? null,
+            errorBody: result.errorBody ?? null,
           },
         },
       });
