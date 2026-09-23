@@ -70,7 +70,10 @@ const providerConfig = {
 
 const getSessionUser = authSession.getSessionUser as jest.Mock;
 const findUnique = prisma.botMcpServer.findUnique as jest.Mock;
+// The callback's token write is guarded (`updateMany`); the plain `update` must stay unused,
+// or an unguarded write could come back without any test noticing (#198 review).
 const update = prisma.botMcpServer.updateMany as jest.Mock;
+const plainUpdate = prisma.botMcpServer.update as jest.Mock;
 const outboundCheck = checkOutboundUrl as jest.Mock;
 
 const originalEnv = process.env;
@@ -226,6 +229,7 @@ describe('OAuth token request carries the RFC 8707 resource indicator', () => {
 
     // The flow still completes: tokens persisted, endpoints preserved.
     expect(update).toHaveBeenCalledTimes(1);
+    expect(plainUpdate).not.toHaveBeenCalled();
     const persisted = JSON.parse(
       (update.mock.calls[0][0].data.authConfig as string).replace(/^enc:/, '')
     );
@@ -465,6 +469,7 @@ describe('the login stores its tokens only on the connection it was started for'
       serverUrl: MCP_SERVER_URL,
       authConfig: startedFrom,
     });
+    expect(plainUpdate).not.toHaveBeenCalled();
     expect(response.headers.get('location')).toContain('oauth=success');
   });
 
@@ -481,6 +486,7 @@ describe('the login stores its tokens only on the connection it was started for'
     expect(written.scopes).toBe('openid mcp mcp:write');
     expect(written.accessToken).toBe('access-new');
     expect(written.refreshToken).toBe('refresh-new');
+    expect(plainUpdate).not.toHaveBeenCalled();
     expect(response.headers.get('location')).toContain('oauth=success');
   });
 
@@ -545,6 +551,7 @@ describe('a login that keeps losing to concurrent writes', () => {
     );
 
     expect(update).toHaveBeenCalledTimes(3);
+    expect(plainUpdate).not.toHaveBeenCalled();
     expect(response.headers.get('location')).toContain('message=connection_busy_try_again');
     expect(response.headers.get('location')).not.toContain('connection_changed');
   });
