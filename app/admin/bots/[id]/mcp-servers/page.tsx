@@ -888,7 +888,14 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                             live ? live.result : server.lastTestResult,
                             {
                               testedAt: live ? live.testedAt : server.lastTestedAt,
-                              oauthExpiresAt: server.oauthExpiresAt,
+                              // A stored result is judged against the connection's token state:
+                              // an expired but renewable token is flagged without a re-authorize
+                              // prompt, and a recorded verdict (which clears the expiry) is never
+                              // shown as green. A test run just now is newer than that state,
+                              // which is not reloaded after a test (a test can renew the token),
+                              // so it is shown as it came back.
+                              oauthExpiresAt: live ? null : server.oauthExpiresAt,
+                              reconnectRequired: live ? undefined : server.oauthReconnectRequired,
                             }
                           );
                           // A live success names the tools inline; a stored one does not.

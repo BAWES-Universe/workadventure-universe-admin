@@ -174,6 +174,62 @@ describe('summarizeTestResult', () => {
     expect(summary.detail).toContain('re-authorize');
   });
 
+  it('flags a renewable expired token without asking a human to re-authorize', () => {
+    // The panel never refreshes, so a connection with a refresh token can sit expired
+    // between bot polls. It is still flagged, but "re-authorize" would be wrong advice
+    // for a token the next use renews (#193 review).
+    const result: McpTestResult = { success: true, toolCount: 37, toolNames: [] };
+    const summary = summarizeTestResult(result, {
+      testedAt: '2026-09-22T09:00:00Z',
+      oauthExpiresAt: '2026-09-22T11:00:00Z',
+      reconnectRequired: false,
+      now,
+    });
+    expect(summary.tone).toBe('stale');
+    expect(summary.detail).toContain('token expired');
+    expect(summary.detail).toContain('renewed automatically');
+    expect(summary.detail).not.toContain('re-authorize');
+  });
+
+  it('never shows a stored success as green once a reconnect is required', () => {
+    // Recording the verdict clears the stored expiry, so the expiry alone would show this
+    // old success green right next to the Reconnect action (#193 review).
+    const result: McpTestResult = { success: true, toolCount: 6, toolNames: [] };
+    const summary = summarizeTestResult(result, {
+      testedAt: '2026-09-20T10:00:00Z',
+      oauthExpiresAt: null,
+      reconnectRequired: true,
+      now,
+    });
+    expect(summary.tone).toBe('stale');
+    expect(summary.detail).toContain('reconnect required');
+    expect(summary.detail).toContain('re-authorize');
+  });
+
+  it('keeps the expiry in the message when a reconnect is required and it is known', () => {
+    const result: McpTestResult = { success: true, toolCount: 6, toolNames: [] };
+    const summary = summarizeTestResult(result, {
+      testedAt: '2026-09-20T10:00:00Z',
+      oauthExpiresAt: '2026-09-21T10:00:00Z',
+      reconnectRequired: true,
+      now,
+    });
+    expect(summary.tone).toBe('stale');
+    expect(summary.detail).toContain('token expired 2026-09-21 10:00Z');
+    expect(summary.detail).toContain('re-authorize');
+  });
+
+  it('stays green for a valid token when no reconnect is required', () => {
+    const result: McpTestResult = { success: true, toolCount: 2, toolNames: [] };
+    const summary = summarizeTestResult(result, {
+      testedAt: '2026-09-22T11:00:00Z',
+      oauthExpiresAt: '2026-09-22T13:00:00Z',
+      reconnectRequired: false,
+      now,
+    });
+    expect(summary.tone).toBe('ok');
+  });
+
   it('stays green while the stored token is still valid', () => {
     const result: McpTestResult = { success: true, toolCount: 2, toolNames: [] };
     const summary = summarizeTestResult(result, {

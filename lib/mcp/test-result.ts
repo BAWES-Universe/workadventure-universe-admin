@@ -190,12 +190,19 @@ function shortTimestamp(value: Date): string {
  * A connection whose stored access token has expired is never shown as plainly
  * green, however green the stored result is: that is exactly the illusion that
  * let four dead connections look healthy for two months.
+ *
+ * `reconnectRequired` is the connection's own verdict, when the caller has it. `true`
+ * means only a human can fix it, whatever the expiry says: a recorded verdict clears
+ * the stored expiry, so the expiry alone cannot show it. `false` means the connection
+ * can still renew itself, so an expired token is flagged without asking a human to act.
+ * Left out, an expired token keeps the original re-authorize wording.
  */
 export function summarizeTestResult(
   result: McpTestResult | null | undefined,
   opts: {
     testedAt?: string | Date | null;
     oauthExpiresAt?: string | null;
+    reconnectRequired?: boolean;
     now?: Date;
   } = {}
 ): TestResultSummary {
@@ -209,13 +216,22 @@ export function summarizeTestResult(
 
   if (result.success) {
     const label = `Connected — ${result.toolCount} tool${result.toolCount !== 1 ? 's' : ''}`;
+    const lastTested = age ? ` (last tested ${age})` : '';
+    if (opts.reconnectRequired === true) {
+      return {
+        tone: 'stale',
+        label,
+        detail: `${tokenExpired ? `token expired ${shortTimestamp(expiry!)}` : 'reconnect required'} — re-authorize to reconnect${lastTested}`,
+      };
+    }
     if (tokenExpired) {
       return {
         tone: 'stale',
         label,
-        detail: `token expired ${shortTimestamp(expiry!)} — re-authorize to reconnect${
-          age ? ` (last tested ${age})` : ''
-        }`,
+        detail:
+          opts.reconnectRequired === false
+            ? `token expired ${shortTimestamp(expiry!)} — renewed automatically on next use${lastTested}`
+            : `token expired ${shortTimestamp(expiry!)} — re-authorize to reconnect${lastTested}`,
       };
     }
     return { tone: 'ok', label, detail: age ? `tested ${age}` : undefined };

@@ -1,5 +1,6 @@
 import { ensureFreshOAuthConfig } from '@/lib/mcp/oauth-refresh';
 import { markReconnectRequired } from '@/lib/mcp/oauth-token';
+import { checkOutboundUrl } from '@/lib/mcp/outbound-guard';
 import { prisma } from '@/lib/db';
 
 /**
@@ -28,6 +29,11 @@ jest.mock('@/lib/encryption', () => ({
   decryptApiKey: (value: string) => value.replace(/^enc:/, ''),
 }));
 
+// The destination check resolves DNS; tests decide its verdict instead.
+jest.mock('@/lib/mcp/outbound-guard', () => ({
+  checkOutboundUrl: jest.fn(),
+}));
+
 const NOW = new Date('2026-09-22T12:00:00Z').getTime();
 const nowSeconds = Math.floor(NOW / 1000);
 const SERVER_ID = 'server-789';
@@ -49,6 +55,7 @@ const expiredConfig = {
 const updateMany = prisma.botMcpServer.updateMany as jest.Mock;
 const update = prisma.botMcpServer.update as jest.Mock;
 const findUnique = prisma.botMcpServer.findUnique as jest.Mock;
+const outboundCheck = checkOutboundUrl as jest.Mock;
 const originalFetch = global.fetch;
 
 function tokenResponse(body: Record<string, unknown>, status = 200) {
@@ -71,6 +78,7 @@ describe('ensureFreshOAuthConfig', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     updateMany.mockResolvedValue({ count: 1 });
+    outboundCheck.mockResolvedValue({ allowed: true });
   });
 
   afterAll(() => {
@@ -161,7 +169,10 @@ describe('ensureFreshOAuthConfig', () => {
     expect(updateMany).toHaveBeenCalledTimes(1);
   });
 
-  it('marks a 401 from the token endpoint as terminal', async () => {
+  it('keeps a 401 with no error code retryable, and keeps the tokens', async () => {
+    // RFC 6749 §5.2 uses 401 for client-authentication failure, and a proxy in front of
+    // the provider can answer 401 too. Neither proves the refresh token is dead, and a
+    // terminal verdict would delete it for good (#193 review).
     global.fetch = jest.fn().mockResolvedValue(tokenResponse({}, 401)) as unknown as typeof fetch;
 
     const outcome = await ensureFreshOAuthConfig({
@@ -170,7 +181,64 @@ describe('ensureFreshOAuthConfig', () => {
       nowMs: NOW,
     });
 
-    expect(outcome.status).toBe('reconnect_required');
+    expect(outcome.status).toBe('unavailable');
+    expect(outcome.reason).toContain('HTTP 401');
+    expect(updateMany).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('keeps an HTML 401 from a proxy retryable', async () => {
+    global.fetch = jest.fn().mockResolvedValue(
+      new Response('<html><body>401 Authorization Required</body></html>', {
+        status: 401,
+        headers: { 'content-type': 'text/html' },
+      })
+    ) as unknown as typeof fetch;
+
+    const outcome = await ensureFreshOAuthConfig({
+      serverId: SERVER_ID,
+      authConfig: enc(expiredConfig),
+      nowMs: NOW,
+    });
+
+    expect(outcome.status).toBe('unavailable');
+    expect(updateMany).not.toHaveBeenCalled();
+  });
+
+  it('does not send the refresh token to a destination that fails the outbound check', async () => {
+    outboundCheck.mockResolvedValue({ allowed: false, error: 'Server resolves to private IP range (10.x.x.x)' });
+    const fetchMock = jest.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const outcome = await ensureFreshOAuthConfig({
+      serverId: SERVER_ID,
+      authConfig: enc(expiredConfig),
+      nowMs: NOW,
+    });
+
+    expect(outboundCheck).toHaveBeenCalledWith(TOKEN_URL);
+    expect(fetchMock).not.toHaveBeenCalled();
+    // Not the refresh token's fault: nothing is deleted or marked for a human.
+    expect(outcome.status).toBe('unavailable');
+    expect(outcome.reason).toContain('not an allowed destination');
+    expect(updateMany).not.toHaveBeenCalled();
+  });
+
+  it('checks the token endpoint before every refresh request', async () => {
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValue(tokenResponse({ access_token: 'access-2', refresh_token: 'refresh-2', expires_in: 3600 }));
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const outcome = await ensureFreshOAuthConfig({
+      serverId: SERVER_ID,
+      authConfig: enc(expiredConfig),
+      nowMs: NOW,
+    });
+
+    expect(outcome.status).toBe('refreshed');
+    expect(outboundCheck).toHaveBeenCalledWith(TOKEN_URL);
+    expect(outboundCheck.mock.invocationCallOrder[0]).toBeLessThan(fetchMock.mock.invocationCallOrder[0]);
   });
 
   it('leaves the connection retryable when the failure is ours or transient', async () => {
@@ -334,6 +402,7 @@ describe('ensureFreshOAuthConfig', () => {
 describe('a terminal verdict and the credentials it hands back agree', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    outboundCheck.mockResolvedValue({ allowed: true });
     updateMany.mockResolvedValue({ count: 1 });
     findUnique.mockResolvedValue(null);
   });
@@ -435,6 +504,7 @@ describe('a terminal verdict and the credentials it hands back agree', () => {
 describe('skew must not be conflated with expiry', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    outboundCheck.mockResolvedValue({ allowed: true });
     updateMany.mockResolvedValue({ count: 1 });
   });
 
@@ -484,6 +554,7 @@ describe('skew must not be conflated with expiry', () => {
 describe('a successful exchange outranks a concurrent terminal verdict', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    outboundCheck.mockResolvedValue({ allowed: true });
   });
 
   it('keeps the pair it holds when the losing writer finds a reconnect-required marker', async () => {
@@ -664,3 +735,114 @@ describe('a successful exchange outranks a concurrent terminal verdict', () => {
     expect(outcome.status).toBe('reconnect_required');
   });
 });
+
+describe('a settings save that lands during a refresh is not reverted', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    outboundCheck.mockResolvedValue({ allowed: true });
+  });
+
+  // The refresh reads the config, spends a few seconds at the token endpoint, and then
+  // writes. A save of the connection's settings can land in between (#193 review).
+
+  it('keeps an edit to the scopes and adds the refreshed tokens to it', async () => {
+    global.fetch = jest
+      .fn()
+      .mockResolvedValue(
+        tokenResponse({ access_token: 'access-A', refresh_token: 'refresh-A', expires_in: 3600 })
+      ) as unknown as typeof fetch;
+    // The save kept the (expired) tokens and changed the scopes, so the row holds no
+    // usable pair to adopt and the first guarded write loses to it.
+    const edited = enc({ ...expiredConfig, scopes: 'mcp:read mcp:write' });
+    updateMany.mockResolvedValueOnce({ count: 0 }).mockResolvedValueOnce({ count: 1 });
+    findUnique.mockResolvedValue({ authConfig: edited });
+
+    const outcome = await ensureFreshOAuthConfig({
+      serverId: SERVER_ID,
+      authConfig: enc(expiredConfig),
+      nowMs: NOW,
+    });
+
+    expect(outcome.status).toBe('refreshed');
+    expect(updateMany.mock.calls[1][0].where).toEqual({ id: SERVER_ID, authConfig: edited });
+    const written = dec(updateMany.mock.calls[1][0].data.authConfig);
+    expect(written.scopes).toBe('mcp:read mcp:write');
+    expect(written.accessToken).toBe('access-A');
+    expect(written.refreshToken).toBe('refresh-A');
+    expect(outcome.config?.scopes).toBe('mcp:read mcp:write');
+  });
+
+  it('keeps the refresh token it used when the provider does not rotate and the row holds a marker', async () => {
+    global.fetch = jest
+      .fn()
+      .mockResolvedValue(tokenResponse({ access_token: 'access-A', expires_in: 3600 })) as unknown as typeof fetch;
+    // The marker has its tokens cleared, so the refresh token has to come from the pair
+    // this refresh holds, not from the row it is written onto.
+    updateMany.mockResolvedValueOnce({ count: 0 }).mockResolvedValueOnce({ count: 1 });
+    findUnique.mockResolvedValue({ authConfig: enc(markReconnectRequired(expiredConfig, 'rejected', NOW)) });
+
+    const outcome = await ensureFreshOAuthConfig({
+      serverId: SERVER_ID,
+      authConfig: enc(expiredConfig),
+      nowMs: NOW,
+    });
+
+    expect(outcome.status).toBe('refreshed');
+    const written = dec(updateMany.mock.calls[1][0].data.authConfig);
+    expect(written.refreshToken).toBe('refresh-1');
+    expect(written.reconnectRequired).toBeUndefined();
+  });
+
+  it('writes nothing when the save pointed the connection at a different token endpoint', async () => {
+    global.fetch = jest
+      .fn()
+      .mockResolvedValue(
+        tokenResponse({ access_token: 'access-A', refresh_token: 'refresh-A', expires_in: 3600 })
+      ) as unknown as typeof fetch;
+    // Changing an endpoint clears the tokens on save; a pair from the old provider must
+    // not be put back onto the new settings.
+    const repointed = enc({
+      ...expiredConfig,
+      tokenUrl: 'https://other-auth.example.com/token',
+      accessToken: null,
+      refreshToken: null,
+      expiresAt: null,
+    });
+    updateMany.mockResolvedValue({ count: 0 });
+    findUnique.mockResolvedValue({ authConfig: repointed });
+
+    const outcome = await ensureFreshOAuthConfig({
+      serverId: SERVER_ID,
+      authConfig: enc(expiredConfig),
+      nowMs: NOW,
+    });
+
+    expect(outcome.status).toBe('unavailable');
+    expect(outcome.reason).toContain('settings were changed');
+    expect(outcome.authConfig).toBe(repointed);
+    // Only the first guarded write was attempted; nothing was written over the save.
+    expect(updateMany).toHaveBeenCalledTimes(1);
+  });
+
+  it('writes nothing when the save changed the client', async () => {
+    global.fetch = jest
+      .fn()
+      .mockResolvedValue(
+        tokenResponse({ access_token: 'access-A', refresh_token: 'refresh-A', expires_in: 3600 })
+      ) as unknown as typeof fetch;
+    const reclient = enc({ ...expiredConfig, clientId: 'client-new' });
+    updateMany.mockResolvedValue({ count: 0 });
+    findUnique.mockResolvedValue({ authConfig: reclient });
+
+    const outcome = await ensureFreshOAuthConfig({
+      serverId: SERVER_ID,
+      authConfig: enc(expiredConfig),
+      nowMs: NOW,
+    });
+
+    expect(outcome.status).toBe('unavailable');
+    expect(outcome.config?.clientId).toBe('client-new');
+    expect(updateMany).toHaveBeenCalledTimes(1);
+  });
+});
+

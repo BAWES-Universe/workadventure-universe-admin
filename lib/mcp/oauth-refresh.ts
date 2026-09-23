@@ -34,6 +34,7 @@ import {
   type McpOAuthConfig,
   type RefreshTokenResponse,
 } from '@/lib/mcp/oauth-token';
+import { checkOutboundUrl } from '@/lib/mcp/outbound-guard';
 
 export type RefreshStatus = 'fresh' | 'refreshed' | 'reconnect_required' | 'unavailable';
 
@@ -132,6 +133,35 @@ async function persistIfUnchanged(
     data: { authConfig },
   });
   return { won: result.count === 1, authConfig };
+}
+
+/**
+ * A refreshed pair carried onto the settings the row holds now. Only the token fields
+ * come from the refresh; everything else (scopes, client secret, the advertised scope
+ * snapshot, ...) belongs to whoever saved the connection last.
+ */
+function withRefreshedTokens(base: McpOAuthConfig, refreshed: McpOAuthConfig): McpOAuthConfig {
+  const next: McpOAuthConfig = {
+    ...base,
+    accessToken: refreshed.accessToken,
+    refreshToken: refreshed.refreshToken,
+    expiresAt: refreshed.expiresAt,
+  };
+  delete next.reconnectRequired;
+  return next;
+}
+
+/**
+ * Same authorization server and client, so a pair issued under one config is valid under
+ * the other. Editing either endpoint URL clears the stored tokens on purpose, and a pair
+ * issued to a different client is not the new client's.
+ */
+function sameIssuer(a: McpOAuthConfig, b: McpOAuthConfig): boolean {
+  return (
+    (a.tokenUrl ?? null) === (b.tokenUrl ?? null) &&
+    (a.authorizeUrl ?? null) === (b.authorizeUrl ?? null) &&
+    (a.clientId ?? null) === (b.clientId ?? null)
+  );
 }
 
 async function readStoredConfig(
@@ -248,6 +278,20 @@ async function performRefresh(
     );
   }
 
+  // The token endpoint receives the refresh token and the client secret, so it gets the
+  // same destination check as the connection test, including DNS resolution: the
+  // save-time check only looks at the hostname. A blocked destination is not the refresh
+  // token's fault, so the tokens are kept and nothing is marked for a human.
+  const destination = await checkOutboundUrl(config.tokenUrl);
+  if (!destination.allowed) {
+    return {
+      status: 'unavailable',
+      config,
+      authConfig: encryptedConfig,
+      reason: `The token endpoint is not an allowed destination (${destination.error ?? 'blocked'}).`,
+    };
+  }
+
   const body = new URLSearchParams();
   body.set('grant_type', 'refresh_token');
   body.set('refresh_token', refreshToken);
@@ -284,16 +328,14 @@ async function performRefresh(
   const errorCode = extractTokenErrorCode(parsedBody);
 
   if (!response.ok) {
-    // Terminal means the refresh token itself is dead: `invalid_grant` is the
-    // specified code for invalid/expired/revoked, `invalid_token` says the same, and a
-    // bare 401 carries no code to consult. Everything else — `invalid_client`,
-    // `invalid_request`, a 5xx — says our request or the client registration is the
-    // problem, which a human re-authorizing would not fix, so it stays retryable. The
-    // code is consulted before the status, so an `invalid_client` sent with a 401 is
-    // not classified terminal by accident.
-    const isTerminal =
-      (errorCode !== null && TERMINAL_REFRESH_ERROR_CODES.has(errorCode)) ||
-      (response.status === 401 && errorCode === null);
+    // Terminal means the refresh token itself is dead, and only a parsed error code can
+    // say that: `invalid_grant` is the specified code for invalid/expired/revoked, and
+    // `invalid_token` says the same. Everything else stays retryable, because a terminal
+    // verdict deletes the stored tokens and only a human can bring them back. That
+    // includes a bare 401 with no code: RFC 6749 §5.2 uses 401 for client-authentication
+    // failure (`invalid_client`), and a proxy or firewall in front of the provider can
+    // answer 401 with an HTML page. Neither proves the refresh token is dead.
+    const isTerminal = errorCode !== null && TERMINAL_REFRESH_ERROR_CODES.has(errorCode);
     if (!isTerminal) {
       return {
         status: 'unavailable',
@@ -373,12 +415,28 @@ async function performRefresh(
     // and against a rotating provider the loser's pair is the spent one: overwriting the
     // winner's live pair with it would leave the connection unable to refresh at all
     // (#190 review).
+    //
+    // What is written is our pair carried onto the settings the row holds now, not the
+    // settings this refresh started from: otherwise a concurrent save of the connection
+    // (its scopes, say) would be reverted. If that save changed the authorization server
+    // or the client, our pair is not theirs, so nothing is written and the saved settings
+    // stand (#193 review).
     for (let attempt = 0; attempt < STORE_ATTEMPTS; attempt += 1) {
-      const stored = await persistIfUnchanged(serverId, current?.encrypted ?? encryptedConfig, updated).catch(
+      if (current && !sameIssuer(current.config, config)) {
+        return {
+          status: 'unavailable',
+          config: current.config,
+          authConfig: current.encrypted,
+          reason:
+            "This connection's OAuth settings were changed while it was being refreshed, so the new settings were kept. Reconnect to authorize them.",
+        };
+      }
+      const toStore = current ? withRefreshedTokens(current.config, updated) : updated;
+      const stored = await persistIfUnchanged(serverId, current?.encrypted ?? encryptedConfig, toStore).catch(
         () => null
       );
       if (stored?.won) {
-        return { status: 'refreshed', config: updated, authConfig: stored.authConfig };
+        return { status: 'refreshed', config: toStore, authConfig: stored.authConfig };
       }
 
       current = await readStoredConfig(serverId).catch(() => null);

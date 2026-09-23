@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
 import { normalizeExpiresIn } from '@/lib/mcp/oauth-token';
+import { checkOutboundUrl } from '@/lib/mcp/outbound-guard';
 import { getOAuthCallbackBase } from '@/lib/oauth-callback';
 
 export const runtime = 'nodejs';
@@ -172,6 +173,18 @@ export async function GET(request: NextRequest) {
     // SSRF protection: reject tokenUrl pointing to internal/private hosts
     if (!isExternalUrl(parsedTokenUrl)) {
       console.error('[OAuthCallback] SSRF blocked — tokenUrl resolves to an internal/private address:', oauthConfig.tokenUrl);
+      if (redirectUrl) {
+        return popupRedirect(openerBase, { oauth: 'error', message: 'ssrf_blocked' });
+      }
+      return new NextResponse('Token exchange target is an internal/private address — SSRF blocked', { status: 400 });
+    }
+
+    // Same destination check as the connection test, including DNS resolution: the
+    // hostname check above cannot see a public name that resolves to a private address,
+    // and this request carries the authorization code and the client secret.
+    const tokenDestination = await checkOutboundUrl(oauthConfig.tokenUrl);
+    if (!tokenDestination.allowed) {
+      console.error('[OAuthCallback] SSRF blocked — tokenUrl failed the destination check:', tokenDestination.error);
       if (redirectUrl) {
         return popupRedirect(openerBase, { oauth: 'error', message: 'ssrf_blocked' });
       }
