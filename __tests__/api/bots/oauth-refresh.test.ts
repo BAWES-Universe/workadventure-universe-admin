@@ -402,6 +402,7 @@ describe('ensureFreshOAuthConfig', () => {
 describe('a terminal verdict and the credentials it hands back agree', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    outboundCheck.mockResolvedValue({ allowed: true });
     updateMany.mockResolvedValue({ count: 1 });
     findUnique.mockResolvedValue(null);
   });
@@ -503,6 +504,7 @@ describe('a terminal verdict and the credentials it hands back agree', () => {
 describe('skew must not be conflated with expiry', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    outboundCheck.mockResolvedValue({ allowed: true });
     updateMany.mockResolvedValue({ count: 1 });
   });
 
@@ -552,6 +554,7 @@ describe('skew must not be conflated with expiry', () => {
 describe('a successful exchange outranks a concurrent terminal verdict', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    outboundCheck.mockResolvedValue({ allowed: true });
   });
 
   it('keeps the pair it holds when the losing writer finds a reconnect-required marker', async () => {
@@ -732,3 +735,114 @@ describe('a successful exchange outranks a concurrent terminal verdict', () => {
     expect(outcome.status).toBe('reconnect_required');
   });
 });
+
+describe('a settings save that lands during a refresh is not reverted', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    outboundCheck.mockResolvedValue({ allowed: true });
+  });
+
+  // The refresh reads the config, spends a few seconds at the token endpoint, and then
+  // writes. A save of the connection's settings can land in between (#193 review).
+
+  it('keeps an edit to the scopes and adds the refreshed tokens to it', async () => {
+    global.fetch = jest
+      .fn()
+      .mockResolvedValue(
+        tokenResponse({ access_token: 'access-A', refresh_token: 'refresh-A', expires_in: 3600 })
+      ) as unknown as typeof fetch;
+    // The save kept the (expired) tokens and changed the scopes, so the row holds no
+    // usable pair to adopt and the first guarded write loses to it.
+    const edited = enc({ ...expiredConfig, scopes: 'mcp:read mcp:write' });
+    updateMany.mockResolvedValueOnce({ count: 0 }).mockResolvedValueOnce({ count: 1 });
+    findUnique.mockResolvedValue({ authConfig: edited });
+
+    const outcome = await ensureFreshOAuthConfig({
+      serverId: SERVER_ID,
+      authConfig: enc(expiredConfig),
+      nowMs: NOW,
+    });
+
+    expect(outcome.status).toBe('refreshed');
+    expect(updateMany.mock.calls[1][0].where).toEqual({ id: SERVER_ID, authConfig: edited });
+    const written = dec(updateMany.mock.calls[1][0].data.authConfig);
+    expect(written.scopes).toBe('mcp:read mcp:write');
+    expect(written.accessToken).toBe('access-A');
+    expect(written.refreshToken).toBe('refresh-A');
+    expect(outcome.config?.scopes).toBe('mcp:read mcp:write');
+  });
+
+  it('keeps the refresh token it used when the provider does not rotate and the row holds a marker', async () => {
+    global.fetch = jest
+      .fn()
+      .mockResolvedValue(tokenResponse({ access_token: 'access-A', expires_in: 3600 })) as unknown as typeof fetch;
+    // The marker has its tokens cleared, so the refresh token has to come from the pair
+    // this refresh holds, not from the row it is written onto.
+    updateMany.mockResolvedValueOnce({ count: 0 }).mockResolvedValueOnce({ count: 1 });
+    findUnique.mockResolvedValue({ authConfig: enc(markReconnectRequired(expiredConfig, 'rejected', NOW)) });
+
+    const outcome = await ensureFreshOAuthConfig({
+      serverId: SERVER_ID,
+      authConfig: enc(expiredConfig),
+      nowMs: NOW,
+    });
+
+    expect(outcome.status).toBe('refreshed');
+    const written = dec(updateMany.mock.calls[1][0].data.authConfig);
+    expect(written.refreshToken).toBe('refresh-1');
+    expect(written.reconnectRequired).toBeUndefined();
+  });
+
+  it('writes nothing when the save pointed the connection at a different token endpoint', async () => {
+    global.fetch = jest
+      .fn()
+      .mockResolvedValue(
+        tokenResponse({ access_token: 'access-A', refresh_token: 'refresh-A', expires_in: 3600 })
+      ) as unknown as typeof fetch;
+    // Changing an endpoint clears the tokens on save; a pair from the old provider must
+    // not be put back onto the new settings.
+    const repointed = enc({
+      ...expiredConfig,
+      tokenUrl: 'https://other-auth.example.com/token',
+      accessToken: null,
+      refreshToken: null,
+      expiresAt: null,
+    });
+    updateMany.mockResolvedValue({ count: 0 });
+    findUnique.mockResolvedValue({ authConfig: repointed });
+
+    const outcome = await ensureFreshOAuthConfig({
+      serverId: SERVER_ID,
+      authConfig: enc(expiredConfig),
+      nowMs: NOW,
+    });
+
+    expect(outcome.status).toBe('unavailable');
+    expect(outcome.reason).toContain('settings were changed');
+    expect(outcome.authConfig).toBe(repointed);
+    // Only the first guarded write was attempted; nothing was written over the save.
+    expect(updateMany).toHaveBeenCalledTimes(1);
+  });
+
+  it('writes nothing when the save changed the client', async () => {
+    global.fetch = jest
+      .fn()
+      .mockResolvedValue(
+        tokenResponse({ access_token: 'access-A', refresh_token: 'refresh-A', expires_in: 3600 })
+      ) as unknown as typeof fetch;
+    const reclient = enc({ ...expiredConfig, clientId: 'client-new' });
+    updateMany.mockResolvedValue({ count: 0 });
+    findUnique.mockResolvedValue({ authConfig: reclient });
+
+    const outcome = await ensureFreshOAuthConfig({
+      serverId: SERVER_ID,
+      authConfig: enc(expiredConfig),
+      nowMs: NOW,
+    });
+
+    expect(outcome.status).toBe('unavailable');
+    expect(outcome.config?.clientId).toBe('client-new');
+    expect(updateMany).toHaveBeenCalledTimes(1);
+  });
+});
+

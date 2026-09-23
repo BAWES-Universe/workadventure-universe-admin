@@ -135,6 +135,35 @@ async function persistIfUnchanged(
   return { won: result.count === 1, authConfig };
 }
 
+/**
+ * A refreshed pair carried onto the settings the row holds now. Only the token fields
+ * come from the refresh; everything else (scopes, client secret, the advertised scope
+ * snapshot, ...) belongs to whoever saved the connection last.
+ */
+function withRefreshedTokens(base: McpOAuthConfig, refreshed: McpOAuthConfig): McpOAuthConfig {
+  const next: McpOAuthConfig = {
+    ...base,
+    accessToken: refreshed.accessToken,
+    refreshToken: refreshed.refreshToken,
+    expiresAt: refreshed.expiresAt,
+  };
+  delete next.reconnectRequired;
+  return next;
+}
+
+/**
+ * Same authorization server and client, so a pair issued under one config is valid under
+ * the other. Editing either endpoint URL clears the stored tokens on purpose, and a pair
+ * issued to a different client is not the new client's.
+ */
+function sameIssuer(a: McpOAuthConfig, b: McpOAuthConfig): boolean {
+  return (
+    (a.tokenUrl ?? null) === (b.tokenUrl ?? null) &&
+    (a.authorizeUrl ?? null) === (b.authorizeUrl ?? null) &&
+    (a.clientId ?? null) === (b.clientId ?? null)
+  );
+}
+
 async function readStoredConfig(
   serverId: string
 ): Promise<{ encrypted: string; config: McpOAuthConfig } | null> {
@@ -386,12 +415,28 @@ async function performRefresh(
     // and against a rotating provider the loser's pair is the spent one: overwriting the
     // winner's live pair with it would leave the connection unable to refresh at all
     // (#190 review).
+    //
+    // What is written is our pair carried onto the settings the row holds now, not the
+    // settings this refresh started from: otherwise a concurrent save of the connection
+    // (its scopes, say) would be reverted. If that save changed the authorization server
+    // or the client, our pair is not theirs, so nothing is written and the saved settings
+    // stand (#193 review).
     for (let attempt = 0; attempt < STORE_ATTEMPTS; attempt += 1) {
-      const stored = await persistIfUnchanged(serverId, current?.encrypted ?? encryptedConfig, updated).catch(
+      if (current && !sameIssuer(current.config, config)) {
+        return {
+          status: 'unavailable',
+          config: current.config,
+          authConfig: current.encrypted,
+          reason:
+            "This connection's OAuth settings were changed while it was being refreshed, so the new settings were kept. Reconnect to authorize them.",
+        };
+      }
+      const toStore = current ? withRefreshedTokens(current.config, updated) : updated;
+      const stored = await persistIfUnchanged(serverId, current?.encrypted ?? encryptedConfig, toStore).catch(
         () => null
       );
       if (stored?.won) {
-        return { status: 'refreshed', config: updated, authConfig: stored.authConfig };
+        return { status: 'refreshed', config: toStore, authConfig: stored.authConfig };
       }
 
       current = await readStoredConfig(serverId).catch(() => null);
