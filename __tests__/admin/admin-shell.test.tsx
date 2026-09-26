@@ -37,6 +37,11 @@ jest.mock('@/app/admin/components/conditional-content', () => ({
   default: ({ children }: { children: React.ReactNode }) => children,
 }));
 
+jest.mock('@/app/admin/components/orbit-bridge', () => ({
+  __esModule: true,
+  default: () => null,
+}));
+
 jest.mock('@/app/admin/admin-bootstrap-context', () => ({
   AdminBootstrapProvider: ({ children }: { children: React.ReactNode }) => children,
 }));

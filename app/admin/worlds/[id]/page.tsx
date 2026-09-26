@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { useRouter, useParams } from 'next/navigation';
+import { useRouter, useParams, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -99,6 +99,7 @@ export default function WorldDetailPage() {
   const router = useRouter();
   const params = useParams();
   const id = params.id as string;
+  const searchParams = useSearchParams();
   
   const [world, setWorld] = useState<World | null>(null);
   const [loading, setLoading] = useState(true);
@@ -110,7 +111,10 @@ export default function WorldDetailPage() {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [currentUser, setCurrentUser] = useState<any>(null);
-  const [activeTab, setActiveTab] = useState<'details' | 'analytics' | 'members'>('details');
+  // The game can open Orbit straight on a world's members (`?tab=members`, see lib/orbit-bridge.ts).
+  const [activeTab, setActiveTab] = useState<'details' | 'analytics' | 'members'>(
+    searchParams.get('tab') === 'members' ? 'members' : 'details',
+  );
   const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
   const [visitorsPage, setVisitorsPage] = useState(1);
   const visitorsPerPage = 10;
