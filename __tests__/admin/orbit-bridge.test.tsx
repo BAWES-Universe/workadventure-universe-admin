@@ -2,7 +2,6 @@
 
 import React from 'react';
 import { act, render, waitFor } from '@testing-library/react';
-import { REMEMBERED_PAGE_KEY } from '@/lib/orbit-bridge';
 
 const GAME = 'https://play.example.test';
 const mockPush = jest.fn();
@@ -10,7 +9,6 @@ const mockRefresh = jest.fn();
 const mockFetch = jest.fn();
 
 jest.mock('next/navigation', () => ({
-  usePathname: () => '/admin',
   useRouter: () => ({ push: mockPush, refresh: mockRefresh }),
 }));
 jest.mock('@/lib/play-origin', () => ({
@@ -110,16 +108,5 @@ describe('OrbitBridge', () => {
     expect(heard).toHaveBeenCalledTimes(1);
     expect(posted).toContainEqual(expect.objectContaining({ requestId: 'r2', ok: true }));
     window.removeEventListener('orbit:refresh', heard);
-  });
-
-  it('forgets the remembered page when the game starts a new visit', () => {
-    window.sessionStorage.setItem('orbit_bridge_room_revision', otherRevision);
-    window.sessionStorage.setItem(REMEMBERED_PAGE_KEY, JSON.stringify({ roomRevision: otherRevision, path: '/admin/stars' }));
-    window.history.pushState({}, '', '/admin/universes');
-    render(<OrbitBridge onRefresh={jest.fn()} />);
-    init(revision);
-    const remembered = JSON.parse(window.sessionStorage.getItem(REMEMBERED_PAGE_KEY) ?? 'null');
-    // The previous visit's page is gone; this visit remembers where Orbit is now.
-    expect(remembered).toEqual({ roomRevision: revision, path: '/admin/universes' });
   });
 });

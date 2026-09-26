@@ -1,12 +1,4 @@
-/** @jest-environment jsdom */
-import {
-  REMEMBERED_PAGE_KEY,
-  forgetRememberedPage,
-  parseBridgeMessage,
-  rememberPage,
-  rememberedPageFor,
-  roomRevisionFromUrl,
-} from '@/lib/orbit-bridge';
+import { parseBridgeMessage } from '@/lib/orbit-bridge';
 
 const GAME = 'https://play.example.test';
 const parent = {} as Window;
@@ -50,37 +42,5 @@ describe('parseBridgeMessage', () => {
     expect(parseBridgeMessage({ origin: GAME, source: parent, data: { type: 'orbit-event', version: 1, requestId: 'r', roomRevision: revision, topic: 'grant-xp' } }, expected)).toBeNull();
     expect(parseBridgeMessage({ origin: GAME, source: parent, data: { type: 'orbit-close', version: 1 } }, expected)).toBeNull();
     expect(parseBridgeMessage({ origin: GAME, source: parent, data: 'orbit-navigate' }, expected)).toBeNull();
-  });
-});
-
-describe('remembered page', () => {
-  beforeEach(() => window.sessionStorage.clear());
-
-  it('is kept for the same room revision only', () => {
-    rememberPage(window.sessionStorage, revision, '/admin/universes');
-    expect(rememberedPageFor(window.sessionStorage, revision)).toBe('/admin/universes');
-    expect(rememberedPageFor(window.sessionStorage, 'rev-bbbbbbbbbbbbbbbb')).toBeNull();
-    expect(rememberedPageFor(window.sessionStorage, null)).toBeNull();
-  });
-
-  it('never remembers the login page or anything outside Orbit', () => {
-    rememberPage(window.sessionStorage, revision, '/admin/login?redirect=/admin');
-    expect(window.sessionStorage.getItem(REMEMBERED_PAGE_KEY)).toBeNull();
-    rememberPage(window.sessionStorage, revision, 'https://evil.example.test/admin');
-    expect(window.sessionStorage.getItem(REMEMBERED_PAGE_KEY)).toBeNull();
-  });
-
-  it('ignores a tampered value and can be forgotten', () => {
-    window.sessionStorage.setItem(REMEMBERED_PAGE_KEY, JSON.stringify({ roomRevision: revision, path: '//evil.example.test' }));
-    expect(rememberedPageFor(window.sessionStorage, revision)).toBeNull();
-    rememberPage(window.sessionStorage, revision, '/admin/stars');
-    forgetRememberedPage(window.sessionStorage);
-    expect(rememberedPageFor(window.sessionStorage, revision)).toBeNull();
-  });
-
-  it('reads the room revision the game put on the login URL', () => {
-    expect(roomRevisionFromUrl(new URL(`https://orbit.example.test/admin/login?rev=${revision}`))).toBe(revision);
-    expect(roomRevisionFromUrl(new URL('https://orbit.example.test/admin/login?rev=short'))).toBeNull();
-    expect(roomRevisionFromUrl(new URL('https://orbit.example.test/admin/login'))).toBeNull();
   });
 });

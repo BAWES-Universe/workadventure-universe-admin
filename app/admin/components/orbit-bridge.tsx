@@ -1,24 +1,19 @@
 'use client';
 
 import { useEffect, useRef } from 'react';
-import { usePathname, useRouter } from 'next/navigation';
+import { useRouter } from 'next/navigation';
 import { authenticatedFetch } from '@/lib/client-auth';
 import { PLAY_ORIGIN, isInsideFrame } from '@/lib/play-origin';
 import {
   ORBIT_BRIDGE_CAPABILITIES,
   ORBIT_BRIDGE_VERSION,
   ORBIT_HOME_PATH,
-  forgetRememberedPage,
   parseBridgeMessage,
-  rememberPage,
   type OrbitBridgeAck,
   type OrbitBridgeAckError,
   type OrbitBridgeReady,
   type OrbitEventTopic,
 } from '@/lib/orbit-bridge';
-
-/** The room revision of the game visit this tab last heard from (a new one clears the remembered page). */
-const ROOM_REVISION_KEY = 'orbit_bridge_room_revision';
 
 /** Fired on `window` when the game says something changed, for pages that keep their own data. */
 export const ORBIT_REFRESH_EVENT = 'orbit:refresh';
@@ -44,7 +39,6 @@ async function resolvePage(intent: string, params: Record<string, string> | unde
  */
 export default function OrbitBridge({ onRefresh }: { onRefresh: () => void }) {
   const router = useRouter();
-  const pathname = usePathname();
   const roomRevision = useRef<string | null>(null);
   const onRefreshRef = useRef(onRefresh);
   useEffect(() => {
@@ -69,12 +63,7 @@ export default function OrbitBridge({ onRefresh }: { onRefresh: () => void }) {
       if (!parsed) return;
 
       if (parsed.kind === 'init') {
-        const revision = parsed.message.roomRevision;
-        // A new room revision is a new visit (another room, or a reconnect): the old remembered page no longer applies.
-        if (window.sessionStorage.getItem(ROOM_REVISION_KEY) !== revision) forgetRememberedPage(window.sessionStorage);
-        window.sessionStorage.setItem(ROOM_REVISION_KEY, revision);
-        roomRevision.current = revision;
-        rememberPage(window.sessionStorage, revision, `${window.location.pathname}${window.location.search}`);
+        roomRevision.current = parsed.message.roomRevision;
         return;
       }
 
@@ -106,12 +95,6 @@ export default function OrbitBridge({ onRefresh }: { onRefresh: () => void }) {
     post({ type: 'orbit-bridge-ready', version: ORBIT_BRIDGE_VERSION, capabilities: ORBIT_BRIDGE_CAPABILITIES });
     return () => window.removeEventListener('message', onMessage);
   }, [router]);
-
-  // Remember the page shown, for this visit, so reopening Orbit lands here.
-  useEffect(() => {
-    if (roomRevision.current === null) return;
-    rememberPage(window.sessionStorage, roomRevision.current, `${window.location.pathname}${window.location.search}`);
-  }, [pathname]);
 
   return null;
 }

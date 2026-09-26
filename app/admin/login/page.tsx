@@ -10,7 +10,6 @@ import { AlertCircle } from 'lucide-react';
 import { Spinner } from '@/components/ui/spinner';
 import { adoptHandshakeSession, isOpaqueSessionId, purgeAccountState } from '@/lib/client-auth';
 import { PLAY_ORIGIN, PLAY_URL, isInsideFrame } from '@/lib/play-origin';
-import { rememberedPageFor, roomRevisionFromUrl } from '@/lib/orbit-bridge';
 
 const ENABLE_MANUAL_LOGIN = process.env.NODE_ENV !== 'production' && process.env.NEXT_PUBLIC_ENABLE_MANUAL_LOGIN === 'true';
 const LOGOUT_SUPPRESSION_KEY = 'orbit_auth_suppressed';
@@ -31,14 +30,9 @@ async function fetchSessionUserUuid(sessionId: string): Promise<string | null> {
 
 type AuthMessage = { type: 'orbit-auth-token-v2'; version: 2; nonce: string; accessToken: string };
 
-/**
- * Where to land after signing in: the page the game asked for (`redirect`), else the page Orbit last showed during
- * this room visit (the remembered page, see lib/orbit-bridge.ts), else Orbit's home.
- */
 function getSafeRedirect(): string {
-  const url = new URL(window.location.href);
-  const requested = url.searchParams.get('redirect');
-  if (!requested) return rememberedPageFor(window.sessionStorage, roomRevisionFromUrl(url)) ?? '/admin';
+  const requested = new URL(window.location.href).searchParams.get('redirect');
+  if (!requested) return '/admin';
   const target = new URL(requested, window.location.origin);
   if (target.origin !== window.location.origin ||
       (target.pathname !== '/admin' && !target.pathname.startsWith('/admin/'))) return '/admin';
