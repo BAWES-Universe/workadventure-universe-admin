@@ -1,8 +1,9 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { useRouter, useParams } from 'next/navigation';
+import { useRouter, useParams, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
+import VisitPlaceButton from '../../components/visit-place-button';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -99,6 +100,7 @@ export default function WorldDetailPage() {
   const router = useRouter();
   const params = useParams();
   const id = params.id as string;
+  const searchParams = useSearchParams();
   
   const [world, setWorld] = useState<World | null>(null);
   const [loading, setLoading] = useState(true);
@@ -110,7 +112,10 @@ export default function WorldDetailPage() {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [currentUser, setCurrentUser] = useState<any>(null);
-  const [activeTab, setActiveTab] = useState<'details' | 'analytics' | 'members'>('details');
+  // The game can open Orbit straight on a world's members (`?tab=members`, see lib/orbit-bridge.ts).
+  const [activeTab, setActiveTab] = useState<'details' | 'analytics' | 'members'>(
+    searchParams.get('tab') === 'members' ? 'members' : 'details',
+  );
   const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
   const [visitorsPage, setVisitorsPage] = useState(1);
   const visitorsPerPage = 10;
@@ -400,12 +405,15 @@ export default function WorldDetailPage() {
               Slug: <code className="bg-muted px-1.5 py-0.5 rounded text-sm">{world.slug}</code>
             </span>
           </p>
-          {!isEditing && world.canEdit === true && (
-            <Button variant="outline" onClick={() => setIsEditing(true)}>
-              <Edit className="mr-2 h-4 w-4" />
-              Edit
-            </Button>
-          )}
+          <div className="flex items-start gap-2">
+            {!isEditing && <VisitPlaceButton worldId={world.id} />}
+            {!isEditing && world.canEdit === true && (
+              <Button variant="outline" onClick={() => setIsEditing(true)}>
+                <Edit className="mr-2 h-4 w-4" />
+                Edit
+              </Button>
+            )}
+          </div>
         </div>
       </div>
 

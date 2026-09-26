@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
+import VisitPlaceButton from '../../components/visit-place-button';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -370,12 +371,15 @@ export default function UniverseDetailPage() {
               Slug: <code className="bg-muted px-1.5 py-0.5 rounded text-sm">{universe.slug}</code>
             </span>
           </p>
-          {!isEditing && universe.canEdit === true && (
-            <Button variant="outline" size="sm" onClick={() => setIsEditing(true)}>
-              <Edit className="mr-2 h-4 w-4" />
-              Edit
-            </Button>
-          )}
+          <div className="flex items-start gap-2">
+            {!isEditing && <VisitPlaceButton universeId={universe.id} />}
+            {!isEditing && universe.canEdit === true && (
+              <Button variant="outline" size="sm" onClick={() => setIsEditing(true)}>
+                <Edit className="mr-2 h-4 w-4" />
+                Edit
+              </Button>
+            )}
+          </div>
         </div>
       </div>
 

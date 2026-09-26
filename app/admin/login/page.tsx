@@ -9,21 +9,13 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { AlertCircle } from 'lucide-react';
 import { Spinner } from '@/components/ui/spinner';
 import { adoptHandshakeSession, isOpaqueSessionId, purgeAccountState } from '@/lib/client-auth';
+import { PLAY_ORIGIN, PLAY_URL, isInsideFrame } from '@/lib/play-origin';
+import { rememberedPageFor, roomRevisionFromUrl } from '@/lib/orbit-bridge';
 
 const ENABLE_MANUAL_LOGIN = process.env.NODE_ENV !== 'production' && process.env.NEXT_PUBLIC_ENABLE_MANUAL_LOGIN === 'true';
-const PLAY_URL = process.env.NEXT_PUBLIC_PLAY_URL || (process.env.NODE_ENV !== 'production' ? 'http://play.workadventure.localhost' : (() => { throw new Error('NEXT_PUBLIC_PLAY_URL is required in production'); })());
-const PLAY_ORIGIN = new URL(PLAY_URL).origin;
 const LOGOUT_SUPPRESSION_KEY = 'orbit_auth_suppressed';
 /** How long to wait for the game to answer the handshake before showing the "runs inside Universe" line. */
 const HANDSHAKE_TIMEOUT_MS = 10_000;
-
-function isInsideFrame(): boolean {
-  try {
-    return window.self !== window.top;
-  } catch {
-    return true;
-  }
-}
 
 /** Who the freshly exchanged session belongs to; null when it cannot be confirmed. */
 async function fetchSessionUserUuid(sessionId: string): Promise<string | null> {
@@ -39,9 +31,14 @@ async function fetchSessionUserUuid(sessionId: string): Promise<string | null> {
 
 type AuthMessage = { type: 'orbit-auth-token-v2'; version: 2; nonce: string; accessToken: string };
 
+/**
+ * Where to land after signing in: the page the game asked for (`redirect`), else the page Orbit last showed during
+ * this room visit (the remembered page, see lib/orbit-bridge.ts), else Orbit's home.
+ */
 function getSafeRedirect(): string {
-  const requested = new URL(window.location.href).searchParams.get('redirect');
-  if (!requested) return '/admin';
+  const url = new URL(window.location.href);
+  const requested = url.searchParams.get('redirect');
+  if (!requested) return rememberedPageFor(window.sessionStorage, roomRevisionFromUrl(url)) ?? '/admin';
   const target = new URL(requested, window.location.origin);
   if (target.origin !== window.location.origin ||
       (target.pathname !== '/admin' && !target.pathname.startsWith('/admin/'))) return '/admin';

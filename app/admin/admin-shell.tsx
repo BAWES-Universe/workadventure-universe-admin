@@ -8,6 +8,7 @@ import { Spinner } from '@/components/ui/spinner';
 import ConditionalNav from './components/conditional-nav';
 import ConditionalContent from './components/conditional-content';
 import { AdminBootstrapProvider, type AdminBootstrap } from './admin-bootstrap-context';
+import OrbitBridge from './components/orbit-bridge';
 
 function loginRedirect() {
   const redirect = `${window.location.pathname}${window.location.search}`;
@@ -53,8 +54,10 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
   }, [attempt, pathname]);
 
   if (pathname === '/admin/login') return <main>{children}</main>;
-  if (error) return <div className="min-h-screen flex flex-col gap-4 items-center justify-center"><p>{error}</p><Button onClick={load}>Try again</Button></div>;
-  if (!bootstrap || loadedPath !== pathname) return <div className="min-h-screen flex items-center justify-center"><div className="text-center"><Spinner className="size-8 mx-auto mb-4" /><p>Loading your orbit..</p></div></div>;
+  // The bridge to the game starts once signed in, and keeps its place across page loads (same slot in every branch).
+  const bridge = bootstrap ? <OrbitBridge onRefresh={load} /> : null;
+  if (error) return <>{bridge}<div className="min-h-screen flex flex-col gap-4 items-center justify-center"><p>{error}</p><Button onClick={load}>Try again</Button></div></>;
+  if (!bootstrap || loadedPath !== pathname) return <>{bridge}<div className="min-h-screen flex items-center justify-center"><div className="text-center"><Spinner className="size-8 mx-auto mb-4" /><p>Loading your orbit..</p></div></div></>;
 
-  return <AdminBootstrapProvider value={bootstrap}><div className="min-h-screen bg-background"><ConditionalNav user={bootstrap.user} /><ConditionalContent>{children}</ConditionalContent></div></AdminBootstrapProvider>;
+  return <>{bridge}<AdminBootstrapProvider value={bootstrap}><div className="min-h-screen bg-background"><ConditionalNav user={bootstrap.user} /><ConditionalContent>{children}</ConditionalContent></div></AdminBootstrapProvider></>;
 }
