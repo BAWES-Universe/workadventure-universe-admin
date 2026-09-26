@@ -168,3 +168,22 @@ export function unauthorizedResponse(headers?: HeadersInit) {
 export function forbiddenResponse(headers?: HeadersInit) {
   return NextResponse.json({ error: 'Forbidden' }, { status: 403, headers });
 }
+
+/**
+ * Guard for routes that read one bot's data (conversations, memory, metrics,
+ * emotions). Returns an error response when the viewer may not read it, or
+ * null when they may: privileged viewers and managers of the bot's room.
+ * A bot that does not exist is reported as forbidden so the response does
+ * not reveal whether it exists.
+ */
+export async function botReadDenied(
+  request: NextRequest,
+  botId: string,
+  headers?: HeadersInit,
+): Promise<NextResponse | null> {
+  const viewer = await getViewer(request);
+  if (!viewer) return unauthorizedResponse(headers);
+  if (isPrivileged(viewer)) return null;
+  if (viewer.kind === 'user' && (await canManageBot(viewer.user.id, botId))) return null;
+  return forbiddenResponse(headers);
+}

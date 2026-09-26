@@ -27,6 +27,7 @@ jest.mock('@/lib/db', () => ({
       findFirst: jest.fn(),
       deleteMany: jest.fn(),
     },
+    botsMemory: { findMany: jest.fn() },
   },
 }));
 
@@ -51,6 +52,8 @@ import { GET as universeAnalytics } from '@/app/api/admin/analytics/universes/[i
 import { DELETE as cleanupAllConversations } from '@/app/api/bots/conversations/cleanup/route';
 import { GET as databaseStats } from '@/app/api/bots/database/stats/route';
 import { DELETE as cleanupBotConversations } from '@/app/api/bots/[id]/conversations/cleanup/route';
+import { GET as readBotConversations } from '@/app/api/bots/[id]/conversations/route';
+import { GET as readBotMemory } from '@/app/api/bots/memory/[id]/route';
 
 const db = prisma as unknown as Record<string, Record<string, jest.Mock>>;
 
@@ -365,5 +368,44 @@ describe('bot data cleanup', () => {
     );
     expect(other.status).toBe(403);
     expect(db.botsConversation.deleteMany).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('reading one bot\'s data', () => {
+  beforeEach(() => {
+    db.bot.findUnique.mockImplementation(async (args: MockArgs) =>
+      ({ 'bot-mine': { roomId: 'room-mine' }, 'bot-other': { roomId: 'room-other' } } as Record<string, { roomId: string }>)[args.where.id] ?? null,
+    );
+    (canManageBots as jest.Mock).mockImplementation(async (userId: string, roomId: string) =>
+      userId === 'u-alice' && roomId === 'room-mine',
+    );
+    db.botsConversation.findMany.mockResolvedValue([]);
+    db.botsConversation.count.mockResolvedValue(0);
+    db.botsMemory.findMany.mockResolvedValue([]);
+  });
+
+  it('a signed-in user cannot read conversations of a bot in a room they do not manage', async () => {
+    const res = await readBotConversations(req('/api/bots/bot-other/conversations', 'alice'), params('bot-other'));
+    expect(res.status).toBe(403);
+    expect(db.botsConversation.findMany).not.toHaveBeenCalled();
+  });
+
+  it('a bot manager can read their own bot\'s conversations', async () => {
+    const res = await readBotConversations(req('/api/bots/bot-mine/conversations', 'alice'), params('bot-mine'));
+    expect(res.status).not.toBe(403);
+    expect(res.status).not.toBe(401);
+  });
+
+  it('a signed-in user cannot read memory of a bot in a room they do not manage', async () => {
+    const res = await readBotMemory(req('/api/bots/memory/bot-other', 'alice'), params('bot-other'));
+    expect(res.status).toBe(403);
+    expect(db.botsMemory.findMany).not.toHaveBeenCalled();
+  });
+
+  it('a super admin can read any bot\'s memory; an anonymous caller gets 401', async () => {
+    const root = await readBotMemory(req('/api/bots/memory/bot-other', 'root'), params('bot-other'));
+    expect(root.status).toBe(200);
+    const anon = await readBotMemory(req('/api/bots/memory/bot-other'), params('bot-other'));
+    expect(anon.status).toBe(401);
   });
 });
