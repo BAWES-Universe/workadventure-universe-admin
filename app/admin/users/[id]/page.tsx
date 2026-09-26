@@ -78,9 +78,10 @@ interface User {
   id: string;
   uuid: string;
   name: string | null;
-  email: string | null;
-  matrixChatId: string | null;
-  lastIpAddress: string | null;
+  // Contact fields are omitted unless the viewer may see them.
+  email?: string | null;
+  matrixChatId?: string | null;
+  lastIpAddress?: string | null;
   isGuest: boolean;
   createdAt: string;
   updatedAt: string;
@@ -107,6 +108,8 @@ export default function UserDetailPage() {
   const [accessHistory, setAccessHistory] = useState<any>(null);
   const [accessHistoryLoading, setAccessHistoryLoading] = useState(true);
   const [accessHistoryPage, setAccessHistoryPage] = useState(1);
+  // Access history is only available to the user themselves and super admins.
+  const [accessHistoryHidden, setAccessHistoryHidden] = useState(false);
   const [currentUser, setCurrentUser] = useState<any>(null);
   const [isSuperAdmin, setIsSuperAdmin] = useState(false);
   const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
@@ -203,11 +206,19 @@ export default function UserDetailPage() {
       const { authenticatedFetch } = await import('@/lib/client-auth');
       const response = await authenticatedFetch(`/api/admin/analytics/users/${id}?page=${page}&limit=10`);
 
+      if (response.status === 403) {
+        setAccessHistoryHidden(true);
+        setAccessHistory(null);
+        setActiveTab((tab) => (tab === 'access-history' ? 'details' : tab));
+        return;
+      }
+
       if (!response.ok) {
         throw new Error('Failed to fetch access history');
       }
 
       const data = await response.json();
+      setAccessHistoryHidden(false);
       setAccessHistory(data);
     } catch (err) {
       console.error('Failed to fetch access history:', err);
@@ -502,6 +513,7 @@ export default function UserDetailPage() {
               </Badge>
             )}
           </button>
+          {!accessHistoryHidden && (
           <button
             onClick={() => setActiveTab('access-history')}
             className={`py-3 sm:py-4 px-1 border-b-2 font-medium text-xs sm:text-sm flex items-center gap-1.5 sm:gap-2 transition-colors ${
@@ -518,6 +530,7 @@ export default function UserDetailPage() {
               </Badge>
             )}
           </button>
+          )}
         </nav>
       </div>
 
@@ -1006,7 +1019,7 @@ export default function UserDetailPage() {
         </>
       )}
 
-      {activeTab === 'access-history' && (
+      {activeTab === 'access-history' && !accessHistoryHidden && (
         <>
           {accessHistoryLoading ? (
             <div className="flex items-center justify-center py-12">

@@ -1,24 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { requireAuth } from '@/lib/auth';
+import { getViewer, isPrivileged, viewerUserId, unauthorizedResponse, forbiddenResponse } from '@/lib/access-scope';
 import { prisma } from '@/lib/db';
 
 export async function GET(request: NextRequest) {
   try {
-    // Check if using admin token or session
-    const authHeader = request.headers.get('authorization');
-    const isAdminToken = authHeader?.startsWith('Bearer ') && 
-      authHeader.replace('Bearer ', '').trim() === process.env.ADMIN_API_TOKEN;
-    
-    if (!isAdminToken) {
-      // Try to get user from session
-      const { getSessionUser } = await import('@/lib/auth-session');
-      const sessionUser = await getSessionUser(request);
-      if (!sessionUser) {
-        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-      }
-    } else {
-      // Admin token - require it
-      requireAuth(request);
+    const viewer = await getViewer(request);
+    if (!viewer) {
+      return unauthorizedResponse();
     }
     
     const { searchParams } = new URL(request.url);
@@ -28,6 +16,13 @@ export async function GET(request: NextRequest) {
     const userId = searchParams.get('userId');
     const startDate = searchParams.get('startDate');
     const endDate = searchParams.get('endDate');
+    
+    // Filtering by a person is limited to that person and privileged viewers.
+    // The response carries only aggregate counts, so scope filters stay open
+    // to any signed-in viewer.
+    if (userId && !isPrivileged(viewer) && viewerUserId(viewer) !== userId) {
+      return forbiddenResponse();
+    }
     
     // Build where clause
     const where: any = {};
