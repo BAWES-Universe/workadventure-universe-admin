@@ -3,7 +3,6 @@
 import { useState, useEffect } from 'react';
 import { useRouter, useParams, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
-import VisitPlaceButton from '../../components/visit-place-button';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -405,15 +404,12 @@ export default function WorldDetailPage() {
               Slug: <code className="bg-muted px-1.5 py-0.5 rounded text-sm">{world.slug}</code>
             </span>
           </p>
-          <div className="flex items-start gap-2">
-            {!isEditing && <VisitPlaceButton worldId={world.id} />}
-            {!isEditing && world.canEdit === true && (
-              <Button variant="outline" onClick={() => setIsEditing(true)}>
-                <Edit className="mr-2 h-4 w-4" />
-                Edit
-              </Button>
-            )}
-          </div>
+          {!isEditing && world.canEdit === true && (
+            <Button variant="outline" onClick={() => setIsEditing(true)}>
+              <Edit className="mr-2 h-4 w-4" />
+              Edit
+            </Button>
+          )}
         </div>
       </div>
 
