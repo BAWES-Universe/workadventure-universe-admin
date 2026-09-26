@@ -8,11 +8,34 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { AlertCircle } from 'lucide-react';
 import { Spinner } from '@/components/ui/spinner';
-import { getClientSessionId, isOpaqueSessionId, storeClientSession } from '@/lib/client-auth';
+import { adoptHandshakeSession, isOpaqueSessionId, purgeAccountState } from '@/lib/client-auth';
 
 const ENABLE_MANUAL_LOGIN = process.env.NODE_ENV !== 'production' && process.env.NEXT_PUBLIC_ENABLE_MANUAL_LOGIN === 'true';
-const PLAY_ORIGIN = new URL(process.env.NEXT_PUBLIC_PLAY_URL || (process.env.NODE_ENV !== 'production' ? 'http://play.workadventure.localhost' : (() => { throw new Error('NEXT_PUBLIC_PLAY_URL is required in production'); })())).origin;
+const PLAY_URL = process.env.NEXT_PUBLIC_PLAY_URL || (process.env.NODE_ENV !== 'production' ? 'http://play.workadventure.localhost' : (() => { throw new Error('NEXT_PUBLIC_PLAY_URL is required in production'); })());
+const PLAY_ORIGIN = new URL(PLAY_URL).origin;
 const LOGOUT_SUPPRESSION_KEY = 'orbit_auth_suppressed';
+/** How long to wait for the game to answer the handshake before showing the "runs inside Universe" line. */
+const HANDSHAKE_TIMEOUT_MS = 10_000;
+
+function isInsideFrame(): boolean {
+  try {
+    return window.self !== window.top;
+  } catch {
+    return true;
+  }
+}
+
+/** Who the freshly exchanged session belongs to; null when it cannot be confirmed. */
+async function fetchSessionUserUuid(sessionId: string): Promise<string | null> {
+  try {
+    const response = await fetch('/api/auth/me', { headers: { Authorization: `Bearer ${sessionId}` }, credentials: 'omit' });
+    if (!response.ok) return null;
+    const data = await response.json();
+    return typeof data?.user?.uuid === 'string' && data.user.uuid ? data.user.uuid : null;
+  } catch {
+    return null;
+  }
+}
 
 type AuthMessage = { type: 'orbit-auth-token-v2'; version: 2; nonce: string; accessToken: string };
 
@@ -30,7 +53,9 @@ export default function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [manualToken, setManualToken] = useState('');
   const [signedOut, setSignedOut] = useState(false);
+  const [outsideUniverse, setOutsideUniverse] = useState(false);
   const activeNonce = useRef<string | null>(null);
+  const handshakeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const exchangeToken = useCallback(async (accessToken: string) => {
     setLoading(true);
@@ -45,18 +70,31 @@ export default function LoginPage() {
     if (!response.ok || data.version !== 2 || !isOpaqueSessionId(data.sessionId) || !Number.isFinite(data.expiresAt)) {
       throw new Error(data.error || 'Invalid login response');
     }
-    storeClientSession(data.sessionId, data.expiresAt);
+    // The stored session is never reused: the game's handshake decides who is
+    // signed in, and caches from a different (or unknown) account are dropped.
+    adoptHandshakeSession({ sessionId: data.sessionId, expiresAt: data.expiresAt, userUuid: await fetchSessionUserUuid(data.sessionId) });
     sessionStorage.removeItem(LOGOUT_SUPPRESSION_KEY);
     window.location.replace(getSafeRedirect());
   }, []);
 
   const beginIframeHandshake = useCallback(() => {
-    if (window.self === window.top) {
+    if (!isInsideFrame()) {
+      setOutsideUniverse(true);
       setLoading(false);
       return;
     }
     const nonce = crypto.randomUUID();
     activeNonce.current = nonce;
+    setOutsideUniverse(false);
+    if (handshakeTimer.current) clearTimeout(handshakeTimer.current);
+    handshakeTimer.current = setTimeout(() => {
+      if (activeNonce.current !== nonce) return;
+      // No answer from the game: nothing here can say who is signed in, so keep nothing.
+      activeNonce.current = null;
+      purgeAccountState();
+      setOutsideUniverse(true);
+      setLoading(false);
+    }, HANDSHAKE_TIMEOUT_MS);
     window.parent.postMessage({ type: 'orbit-auth-ready-v2', version: 2, nonce }, PLAY_ORIGIN);
     setLoading(true);
   }, []);
@@ -68,6 +106,7 @@ export default function LoginPage() {
       if (message.type !== 'orbit-auth-token-v2' || message.version !== 2 ||
           message.nonce !== activeNonce.current || typeof message.accessToken !== 'string') return;
       activeNonce.current = null;
+      if (handshakeTimer.current) clearTimeout(handshakeTimer.current);
       void exchangeToken(message.accessToken).catch((cause) => {
         setError(cause instanceof Error ? cause.message : 'Login failed');
         setLoading(false);
@@ -75,13 +114,9 @@ export default function LoginPage() {
     };
     window.addEventListener('message', onMessage);
 
-    // Existing v2 sessions survive iframe reloads without cookies.
-    const sessionId = getClientSessionId();
-    if (sessionId) {
-      fetch('/api/auth/me', { headers: { Authorization: `Bearer ${sessionId}` }, credentials: 'omit' })
-        .then((response) => response.ok ? window.location.replace(getSafeRedirect()) : beginIframeHandshake())
-        .catch(beginIframeHandshake);
-    } else if (sessionStorage.getItem(LOGOUT_SUPPRESSION_KEY) === 'true') {
+    // A stored session is never trusted on its own: the game may be signed in as
+    // someone else in this tab. Opened outside the game, nothing is fetched or reused.
+    if (isInsideFrame() && sessionStorage.getItem(LOGOUT_SUPPRESSION_KEY) === 'true') {
       queueMicrotask(() => {
         setSignedOut(true);
         setLoading(false);
@@ -89,7 +124,10 @@ export default function LoginPage() {
     } else {
       queueMicrotask(beginIframeHandshake);
     }
-    return () => window.removeEventListener('message', onMessage);
+    return () => {
+      window.removeEventListener('message', onMessage);
+      if (handshakeTimer.current) clearTimeout(handshakeTimer.current);
+    };
   }, [beginIframeHandshake, exchangeToken]);
 
   const submitManual = (event: FormEvent) => {
@@ -104,6 +142,26 @@ export default function LoginPage() {
     return <div className="min-h-screen flex items-center justify-center bg-background"><div className="text-center"><Spinner className="size-8 mx-auto mb-4" /><p>Loading your orbit..</p></div></div>;
   }
 
+  const manualForm = ENABLE_MANUAL_LOGIN && (
+    <form className="space-y-3 border-t pt-4" onSubmit={submitManual}>
+      <Label htmlFor="accessToken">Development OIDC token</Label>
+      <Input id="accessToken" value={manualToken} onChange={(event) => setManualToken(event.target.value)} required />
+      <Button type="submit" variant="secondary" className="w-full">Development sign in</Button>
+    </form>
+  );
+
+  if (outsideUniverse) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background p-4">
+        <div className="w-full max-w-md space-y-4 text-center">
+          <p>Orbit runs inside Universe. <a className="underline" href={PLAY_URL} target="_top" rel="noopener">Open Universe</a></p>
+          {isInsideFrame() && <Button className="w-full" onClick={beginIframeHandshake}>Try again</Button>}
+          {manualForm}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen flex items-center justify-center bg-background p-4">
       <Card className="w-full max-w-md">
@@ -116,13 +174,7 @@ export default function LoginPage() {
           <Button className="w-full" onClick={() => { setSignedOut(false); sessionStorage.removeItem(LOGOUT_SUPPRESSION_KEY); beginIframeHandshake(); }}>
             Continue with Universe
           </Button>
-          {ENABLE_MANUAL_LOGIN && (
-            <form className="space-y-3 border-t pt-4" onSubmit={submitManual}>
-              <Label htmlFor="accessToken">Development OIDC token</Label>
-              <Input id="accessToken" value={manualToken} onChange={(event) => setManualToken(event.target.value)} required />
-              <Button type="submit" variant="secondary" className="w-full">Development sign in</Button>
-            </form>
-          )}
+          {manualForm}
         </CardContent>
       </Card>
     </div>

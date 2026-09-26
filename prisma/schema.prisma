@@ -40,8 +40,25 @@ model User {
   botMemories      BotsMemory[]
   avatarGrants     UserAvatarGrant[]
   avatarSetAuditLogs AvatarSetAuditLog[]
+  preferences      UserPreference[]
 
   @@map("users")
+}
+
+// Per-user Orbit preferences (intro seen, dismissed guidance, declined invitations).
+// Keys are allowlisted in lib/user-preferences.ts.
+model UserPreference {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  key       String
+  value     Json
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, key])
+  @@map("user_preferences")
 }
 
 // Universes
