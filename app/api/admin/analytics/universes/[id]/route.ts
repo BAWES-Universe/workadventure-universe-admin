@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { requireAuth } from '@/lib/auth';
+import { getViewer, accessDetailFor, detailForRecord, redactAccess, unauthorizedResponse } from '@/lib/access-scope';
 import { prisma } from '@/lib/db';
 
 export async function GET(
@@ -7,21 +7,9 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    // Check if using admin token or session
-    const authHeader = request.headers.get('authorization');
-    const isAdminToken = authHeader?.startsWith('Bearer ') && 
-      authHeader.replace('Bearer ', '').trim() === process.env.ADMIN_API_TOKEN;
-    
-    if (!isAdminToken) {
-      // Try to get user from session
-      const { getSessionUser } = await import('@/lib/auth-session');
-      const sessionUser = await getSessionUser(request);
-      if (!sessionUser) {
-        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-      }
-    } else {
-      // Admin token - require it
-      requireAuth(request);
+    const viewer = await getViewer(request);
+    if (!viewer) {
+      return unauthorizedResponse();
     }
     
     const { id } = await params;
@@ -124,29 +112,31 @@ export async function GET(
     
     // Get last visited by current user (if session user exists)
     let lastVisitedByUser = null;
-    if (!isAdminToken) {
-      const { getSessionUser } = await import('@/lib/auth-session');
-      const sessionUser = await getSessionUser(request);
-      if (sessionUser) {
-        const userAccess = await prisma.roomAccess.findFirst({
-          where: {
-            universeId: id,
-            OR: [
-              { userId: sessionUser.id },
-              { userUuid: sessionUser.uuid },
-            ],
-          },
-          orderBy: { accessedAt: 'desc' },
-        });
-        if (userAccess) {
-          lastVisitedByUser = {
-            accessedAt: userAccess.accessedAt,
-            userId: userAccess.userId,
-            userUuid: userAccess.userUuid,
-          };
-        }
+    if (viewer.kind === 'user') {
+      const sessionUser = viewer.user;
+      const userAccess = await prisma.roomAccess.findFirst({
+        where: {
+          universeId: id,
+          OR: [
+            { userId: sessionUser.id },
+            { userUuid: sessionUser.uuid },
+          ],
+        },
+        orderBy: { accessedAt: 'desc' },
+      });
+      if (userAccess) {
+        lastVisitedByUser = {
+          accessedAt: userAccess.accessedAt,
+          userId: userAccess.userId,
+          userUuid: userAccess.userUuid,
+        };
       }
     }
+    
+    // Per-visitor detail depends on the viewer: privileged viewers see
+    // everything, managers of this scope see who visited (without email or
+    // IP address), everyone else only when and where visits happened.
+    const detail = await accessDetailFor(viewer, { universeId: id });
     
     // Get last visited overall (most recent access by anyone)
     const lastVisitedOverall = await prisma.roomAccess.findFirst({
@@ -167,14 +157,14 @@ export async function GET(
       uniqueIPs: uniqueIps.length,
       mostActiveWorld,
       lastVisitedByUser,
-      lastVisitedOverall: lastVisitedOverall ? {
+      lastVisitedOverall: lastVisitedOverall ? redactAccess({
         accessedAt: lastVisitedOverall.accessedAt,
         userId: lastVisitedOverall.userId,
         userUuid: lastVisitedOverall.userUuid,
         userName: lastVisitedOverall.userName,
         userEmail: lastVisitedOverall.userEmail,
-      } : null,
-      recentActivity: recentActivity.map(access => ({
+      }, detailForRecord(viewer, lastVisitedOverall, detail)) : null,
+      recentActivity: recentActivity.map(access => redactAccess({
         id: access.id,
         accessedAt: access.accessedAt,
         userId: access.userId,
@@ -189,7 +179,7 @@ export async function GET(
         world: access.world,
         room: access.room,
         playUri: access.playUri,
-      })),
+      }, detailForRecord(viewer, access, detail))),
       pagination: {
         page,
         limit,

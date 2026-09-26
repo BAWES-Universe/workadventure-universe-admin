@@ -1,42 +1,45 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { requireAuth } from '@/lib/auth';
+import { getViewer, isPrivileged, unauthorizedResponse } from '@/lib/access-scope';
 import { prisma } from '@/lib/db';
+
+const SYSTEM_USER_EMAIL = 'system@workadventure.local';
 
 // GET /api/admin/users - List all users
 export async function GET(request: NextRequest) {
   try {
-    // Check if using admin token or session
-    const authHeader = request.headers.get('authorization');
-    const isAdminToken = authHeader?.startsWith('Bearer ') && 
-      authHeader.replace('Bearer ', '').trim() === process.env.ADMIN_API_TOKEN;
-    
-    if (!isAdminToken) {
-      // Try to get user from session
-      const { getSessionUser } = await import('@/lib/auth-session');
-      const sessionUser = await getSessionUser(request);
-      if (!sessionUser) {
-        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-      }
-      // Session users can also view users list
-    } else {
-      // Admin token - require it
-      requireAuth(request);
+    const viewer = await getViewer(request);
+    if (!viewer) {
+      return unauthorizedResponse();
     }
+    // Email addresses are only visible to, and searchable by, privileged viewers.
+    const canSeeEmail = isPrivileged(viewer);
     
     const { searchParams } = new URL(request.url);
     const page = parseInt(searchParams.get('page') || '1');
     const limit = parseInt(searchParams.get('limit') || '50');
     const search = searchParams.get('search') || '';
     
-    const where = search
+    const searchWhere = search
       ? {
           OR: [
             { name: { contains: search, mode: 'insensitive' as const } },
-            { email: { contains: search, mode: 'insensitive' as const } },
+            ...(canSeeEmail
+              ? [{ email: { contains: search, mode: 'insensitive' as const } }]
+              : []),
             { uuid: { contains: search, mode: 'insensitive' as const } },
           ],
         }
       : {};
+    // Viewers who cannot see emails cannot tell the internal system account
+    // apart by its address, so it is left out of their list server-side.
+    const where = canSeeEmail
+      ? searchWhere
+      : {
+          AND: [
+            searchWhere,
+            { OR: [{ email: null }, { email: { not: SYSTEM_USER_EMAIL } }] },
+          ],
+        };
     
     // First get all users matching the search
     const allUsers = await prisma.user.findMany({
@@ -44,7 +47,7 @@ export async function GET(request: NextRequest) {
       select: {
         id: true,
         uuid: true,
-        email: true,
+        email: canSeeEmail,
         name: true,
         isGuest: true,
         createdAt: true,

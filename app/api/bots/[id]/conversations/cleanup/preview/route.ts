@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
-import { requireAdminAuth } from '@/lib/admin-auth';
+import { getViewer, isPrivileged, canManageBot, unauthorizedResponse, forbiddenResponse } from '@/lib/access-scope';
 import { corsHeaders } from '@/lib/cors';
 
 export const runtime = 'nodejs';
@@ -28,9 +28,21 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    await requireAdminAuth(request);
+    const viewer = await getViewer(request);
+    if (!viewer) {
+      return unauthorizedResponse(corsHeaders());
+    }
 
     const { id: botId } = await params;
+
+    // Privileged viewers, or managers of the bot's room.
+    if (
+      !isPrivileged(viewer) &&
+      !(viewer.kind === 'user' && (await canManageBot(viewer.user.id, botId)))
+    ) {
+      return forbiddenResponse(corsHeaders());
+    }
+
     const { searchParams } = new URL(request.url);
 
     const olderThanDays = searchParams.get('olderThanDays');

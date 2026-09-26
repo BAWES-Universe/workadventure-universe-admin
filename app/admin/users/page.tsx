@@ -13,7 +13,8 @@ interface User {
   id: string;
   uuid: string;
   name: string | null;
-  email: string | null;
+  // Omitted by the API unless the viewer may see email addresses.
+  email?: string | null;
   isGuest: boolean;
   createdAt: string;
   totalAccesses?: number;
@@ -232,9 +233,11 @@ export default function UsersPage() {
                         <h3 className="truncate text-base font-semibold leading-tight">
                           {nameOrEmail}
                         </h3>
-                        <p className="truncate text-xs text-muted-foreground">
-                          {user.email || 'No email'}
-                        </p>
+                        {user.email !== undefined && (
+                          <p className="truncate text-xs text-muted-foreground">
+                            {user.email || 'No email'}
+                          </p>
+                        )}
                       </div>
                     </div>
 
