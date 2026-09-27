@@ -238,6 +238,29 @@ describe('Public and Featured', () => {
   });
 });
 
+describe('New room waits for its world', () => {
+  it('shows no map or form while your worlds load, nor after they fail', async () => {
+    fetchMock.mockImplementation((url: string) =>
+      url === '/api/auth/me' ? ok({ user: { id: 'me' } }) : Promise.resolve({ ok: false, status: 503, json: () => Promise.resolve({}) }),
+    );
+    render(<NewRoomPage />);
+    expect(screen.queryByText('Map')).toBeNull();
+    expect(await screen.findByRole('button', { name: /try again/i })).toBeTruthy();
+    expect(screen.queryByText('Map')).toBeNull();
+    expect(screen.queryByLabelText(/Name/)).toBeNull();
+  });
+
+  it('offers a retry when the world in the address cannot be loaded', async () => {
+    search = new URLSearchParams('worldId=w1');
+    fetchMock.mockImplementation((url: string) =>
+      url === '/api/auth/me' ? ok({ user: { id: 'me' } }) : Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve({}) }),
+    );
+    render(<NewRoomPage />);
+    expect(await screen.findByRole('button', { name: /try again/i })).toBeTruthy();
+    expect(screen.queryByLabelText(/Name/)).toBeNull();
+  });
+});
+
 describe('Creation drafts', () => {
   const WORLD = { id: 'w1', name: 'Office', slug: 'office', universe: { id: 'ua', name: 'Alpha', slug: 'alpha' } };
 
