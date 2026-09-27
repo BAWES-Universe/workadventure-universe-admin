@@ -80,7 +80,7 @@ export default function LoginPage() {
         }
         setError(
           renewalTried.current && /expired/i.test(reason)
-            ? 'Your Universe sign-in has expired. Refresh the page to sign in again.'
+            ? 'Universe couldn\'t sign you in to Orbit. Select Continue with Universe to try again.'
             : reason,
         );
         setLoading(false);
