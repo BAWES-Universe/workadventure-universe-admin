@@ -65,7 +65,7 @@ function renderHTML(data: { name?: string; bio?: string; links: Array<{ label: s
     :root { color-scheme: dark; }
     html, body { background: ${isEmbedded ? 'transparent' : '#0f172a'}; }
     body { font-family: Inter, system-ui, -apple-system, 'Segoe UI', sans-serif; color: #fff; -webkit-font-smoothing: antialiased; }
-    .profile { display: grid; gap: 14px; ${isEmbedded ? 'padding: 4px 16px 18px;' : 'max-width: 28rem; margin: 0 auto; padding: 32px 20px;'} }
+    .profile { display: grid; gap: 14px; ${isEmbedded ? 'padding: 18px 16px;' : 'max-width: 28rem; margin: 0 auto; padding: 32px 20px;'} }
     h1 { font-size: 22px; font-weight: 700; letter-spacing: -0.01em; }
     .bio { font-size: 15px; line-height: 1.5; color: rgb(255 255 255 / 0.82); white-space: pre-wrap; overflow-wrap: anywhere; ${isEmbedded ? 'text-align: center;' : ''} }
     .links { display: grid; gap: 8px; }
