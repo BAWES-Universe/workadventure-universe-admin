@@ -251,12 +251,13 @@ a[href] {
 @utility orbit-rise {
   animation: orbit-rise var(--duration-slow) var(--ease-out) both;
 }
+/* The colour of the card that will replace it, with a faint light passing over, never a grey block. */
 @utility orbit-skeleton {
   background: linear-gradient(
     100deg,
-    hsl(var(--muted)) 20%,
-    hsl(var(--surface-elevated)) 45%,
-    hsl(var(--muted)) 70%
+    hsl(var(--card)) 20%,
+    color-mix(in oklab, hsl(var(--card)), hsl(var(--foreground)) 5%) 45%,
+    hsl(var(--card)) 70%
   );
   background-size: 200% 100%;
   animation: orbit-shimmer 1.6s linear infinite;
@@ -407,8 +408,10 @@ a[href] {
    bar as a strip instead of at the bottom. */
 @media (hover: hover) and (pointer: fine) and (min-width: 430px) and (max-width: 1023px) {
   .orbit-dock { position: sticky; top: var(--topbar-height); bottom: auto; border-top: 0; border-bottom: 1px solid hsl(var(--border) / .6); padding-bottom: 0 !important; }
-  .orbit-dock > div { height: 2.75rem !important; }
-  .orbit-dock a { flex-direction: row; gap: 6px; font-size: 12px; }
+  /* The menu's own You · Orbit · Space buttons are 44px: the strip matches them. */
+  .orbit-dock > div { height: 3.75rem !important; }
+  .orbit-dock-pill { top: 0.5rem !important; bottom: 0.5rem !important; }
+  .orbit-dock a { flex-direction: row; gap: 7px; font-size: 14px; }
   .orbit-dock a svg { width: 18px; height: 18px; }
   .orbit-dock-space { padding-bottom: 2rem !important; }
 }

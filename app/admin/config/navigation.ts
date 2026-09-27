@@ -1,5 +1,4 @@
 import {
-  Palette,
   Orbit,
   Telescope,
   Sparkles,
@@ -59,7 +58,6 @@ export const NAV_ITEMS: NavItem[] = [
   { href: '/admin/users', label: 'People', icon: Users, group: 'discover' },
 
   // Admin section (super admin only)
-  { href: '/admin/style', label: 'Orbit style', icon: Palette, requiresSuperAdmin: true, group: 'admin' },
   { href: '/admin/avatars', label: 'Avatar sets', icon: Layers, requiresSuperAdmin: true, group: 'admin' },
   { href: '/admin/bots', label: 'Bots', icon: Bot, requiresSuperAdmin: true, group: 'admin' },
   { href: '/admin/ai-providers', label: 'AI providers', icon: Bot, requiresSuperAdmin: true, group: 'admin' },
