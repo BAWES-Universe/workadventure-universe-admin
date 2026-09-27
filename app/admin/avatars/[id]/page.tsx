@@ -92,6 +92,8 @@ export default function AvatarSetDetailPage() {
   const [accessChecking, setAccessChecking] = useState(false);
   const [accessUsers, setAccessUsers] = useState<Array<{ id: string; name: string | null; email: string | null; uuid: string }>>([]);
   const [accessWorlds, setAccessWorlds] = useState<Array<{ id: string; name: string; slug: string; universe: { name: string } }>>([]);
+  // Each list of the access check: not asked yet, on its way, in, or failed (with a retry).
+  const [accessLists, setAccessLists] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [accessSearchUser, setAccessSearchUser] = useState('');
   const [accessSearchWorld, setAccessSearchWorld] = useState('');
   const [collapsedLayers, setCollapsedLayers] = useState<Record<string, boolean>>({});
@@ -443,21 +445,29 @@ export default function AvatarSetDetailPage() {
     layersByType[l.layer].push(l);
   }
 
+  const loadAccessLists = async () => {
+    setAccessLists('loading');
+    const { authenticatedFetch } = await import('@/lib/client-auth');
+    try {
+      const [u, w] = await Promise.all([
+        authenticatedFetch('/api/admin/users?limit=200'),
+        authenticatedFetch('/api/admin/worlds?limit=200'),
+      ]);
+      if (!u.ok || !w.ok) throw new Error('Unable to load people or worlds');
+      // Each body is read once: the lists come as { users } / { worlds }, or as a bare array.
+      const users = await u.json();
+      const worlds = await w.json();
+      setAccessUsers(Array.isArray(users) ? users : users.users ?? []);
+      setAccessWorlds(Array.isArray(worlds) ? worlds : worlds.worlds ?? []);
+      setAccessLists('ready');
+    } catch {
+      setAccessLists('error');
+    }
+  };
+
   const setTab = (v: string) => {
     setActiveTab(v);
-    if (v === 'access' && accessUsers.length === 0) {
-      (async () => {
-        const { authenticatedFetch } = await import('@/lib/client-auth');
-        try {
-          const u = await authenticatedFetch('/api/admin/users?limit=200');
-          if (u.ok) setAccessUsers((await u.json()).users || await u.json());
-        } catch {}
-        try {
-          const w = await authenticatedFetch('/api/admin/worlds?limit=200');
-          if (w.ok) setAccessWorlds((await w.json()).worlds || await w.json());
-        } catch {}
-      })();
-    }
+    if (v === 'access' && (accessLists === 'idle' || accessLists === 'error')) void loadAccessLists();
   };
 
   const tabTrigger = 'min-h-11 shrink-0 rounded-lg px-3 data-[state=active]:bg-card';
@@ -1092,7 +1102,8 @@ export default function AvatarSetDetailPage() {
                         {u.name || 'No name'} {u.email ? <span className="text-muted-foreground">{`<${u.email}>`}</span> : ''}
                       </button>
                     ))}
-                  {accessUsers.length === 0 && <p className="p-2 text-xs text-muted-foreground">Loading people...</p>}
+                  {accessLists === 'loading' && <p className="p-2 text-xs text-muted-foreground">Loading people…</p>}
+                  {accessLists === 'ready' && accessUsers.length === 0 && <p className="p-2 text-xs text-muted-foreground">No people yet.</p>}
                 </div>
               </div>
               <div className="min-w-0 space-y-2">
@@ -1119,10 +1130,16 @@ export default function AvatarSetDetailPage() {
                         {w.universe?.name || '?'} › {w.name} <span className="text-muted-foreground">({w.slug})</span>
                       </button>
                     ))}
-                  {accessWorlds.length === 0 && <p className="p-2 text-xs text-muted-foreground">Loading worlds...</p>}
+                  {accessLists === 'loading' && <p className="p-2 text-xs text-muted-foreground">Loading worlds…</p>}
+                  {accessLists === 'ready' && accessWorlds.length === 0 && <p className="p-2 text-xs text-muted-foreground">No worlds yet.</p>}
                 </div>
               </div>
             </div>
+            {accessLists === 'error' && (
+              <div className="mt-3">
+                <LoadError label="people and worlds" retry={() => void loadAccessLists()} />
+              </div>
+            )}
             <div className="mt-4 flex justify-end">
               <Button className="h-11" variant="outline" onClick={handleAccessCheck} disabled={accessChecking || !accessUserId || !accessWorldId}>
                 {accessChecking ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
