@@ -1,8 +1,8 @@
 /* What's yours on You (see yours.tsx). Colour comes only from kinds and each universe's own colour. */
 .yours { display: grid; gap: 30px; min-width: 0; }
 .yours > section { min-width: 0; }
-.rows, .invitations { display: grid; gap: 2px; }
-.invitations { margin-bottom: 10px; padding: 4px; border: 1px solid rgb(245 158 11 / 0.3); border-radius: 16px; background: rgb(245 158 11 / 0.05); }
+.rows, .invitations { display: grid; }
+.invitations { margin-bottom: 8px; }
 .invitationLine { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px; color: hsl(var(--muted-foreground)); }
 .error { padding: 8px 12px; font-size: 12px; color: hsl(var(--destructive)); }
 .more { display: inline-flex; align-items: center; gap: 6px; min-height: 40px; margin-top: 8px; font-size: 12px; font-weight: 600; color: hsl(var(--muted-foreground)); }

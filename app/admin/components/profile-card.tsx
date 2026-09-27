@@ -167,24 +167,21 @@ export function ProfileCard({
   const empty = !saved.bio && saved.links.length === 0;
 
   return (
-    <section className={styles.card} aria-labelledby={headingId} data-testid="profile-card">
-      <div className={styles.banner} aria-hidden="true" />
-      <div className={styles.identity}>
-        <WokaAvatar layers={woka} name={saved.name || user.name || ''} />
-        <div className={styles.who}>
-          <h1 id={headingId} className="orbit-display">
-            {saved.name || user.name || 'You'}
-          </h1>
-          {stats}
-        </div>
-        {status === 'ready' && !editing && !empty && (
+    <ProfileFrame
+      headingId={headingId}
+      layers={woka}
+      name={saved.name || user.name || ''}
+      stats={stats}
+      action={
+        status === 'ready' && !editing && !empty ? (
           <Button variant="outline" onClick={() => setEditing(true)} className="h-10 shrink-0 gap-2">
             <Pencil size={15} aria-hidden="true" />
             Edit profile
           </Button>
-        )}
-      </div>
-
+        ) : undefined
+      }
+      testId="profile-card"
+    >
       {status === 'loading' && (
         <p className={styles.status} role="status">
           Loading your profile…
@@ -300,7 +297,7 @@ export function ProfileCard({
           </div>
         </form>
       )}
-    </section>
+    </ProfileFrame>
   );
 }
 
@@ -344,5 +341,44 @@ export function ProfileLinks({ links }: { links: ProfileLink[] }) {
         </li>
       ))}
     </ul>
+  );
+}
+
+/**
+ * A person's profile card: a starry banner, their Woka, their name and what they own and belong to, then whatever
+ * the page adds (bio, links, an edit form). The same on You and on anyone's page.
+ */
+export function ProfileFrame({
+  headingId,
+  layers,
+  name,
+  stats,
+  action,
+  testId,
+  children,
+}: {
+  headingId: string;
+  layers: string[];
+  name: string;
+  stats?: ReactNode;
+  action?: ReactNode;
+  testId?: string;
+  children?: ReactNode;
+}) {
+  return (
+    <section className={styles.card} aria-labelledby={headingId} data-testid={testId}>
+      <div className={styles.banner} aria-hidden="true" />
+      <div className={styles.identity}>
+        <WokaAvatar layers={layers} name={name} />
+        <div className={styles.who}>
+          <h1 id={headingId} className="orbit-display">
+            {name || 'You'}
+          </h1>
+          {stats}
+        </div>
+        {action}
+      </div>
+      {children}
+    </section>
   );
 }

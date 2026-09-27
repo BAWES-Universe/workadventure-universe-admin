@@ -576,7 +576,7 @@ export default function UniverseDetailPage() {
                       return (
                         <div
                           key={access.id}
-                          className="flex min-w-0 items-start gap-3 rounded-2xl border border-border p-3"
+                          className="flex min-w-0 items-start gap-3 rounded-[18px] border border-border bg-card p-3"
                         >
                           <KindIcon kind="people" size="sm" />
                           <div className="min-w-0 flex-1 space-y-1">

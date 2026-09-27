@@ -106,7 +106,7 @@ const tabClass = (active: boolean) =>
 /** A visitor without an account: the same look as a row, with nothing to open. */
 function StaticRow({ title, context, meta }: { title: string; context?: ReactNode; meta?: ReactNode }) {
   return (
-    <div className="flex min-h-[68px] items-center gap-3 rounded-[14px] px-3.5 py-3">
+    <div className="flex min-h-[68px] items-center gap-3 rounded-[18px] border border-border bg-card px-3.5 py-3 [&+&]:mt-2">
       <KindIcon kind="people" />
       <div className="grid min-w-0 flex-1 gap-[3px]">
         <strong className="text-sm font-semibold leading-snug [overflow-wrap:anywhere]">{title}</strong>

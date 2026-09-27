@@ -283,6 +283,7 @@ function Invitations({
             key={invitation.id}
             href={`/admin/worlds/${invitation.world.id}`}
             kind="world"
+            tone="waiting"
             title={invitation.world.name}
             context={
               <span className={styles.invitationLine}>

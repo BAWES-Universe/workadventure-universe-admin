@@ -18,8 +18,12 @@
 .pill[data-status='waiting'] .statusDot { background: var(--status-waiting); }
 
 /* Rows and cards: the whole thing is one link (the stretched ::after); `trailing` sits above it. */
-.row { position: relative; display: flex; align-items: center; gap: 12px; min-height: 68px; padding: 12px 14px; border-radius: 14px; transition: background 160ms; }
-.row + .row { margin-top: 2px; }
+/* Every item in a list is a card: a compact one (a row) or a full one with a description. Same surface, border, radius. */
+.row { position: relative; display: flex; align-items: center; gap: 12px; min-height: 68px; padding: 12px 14px; border: 1px solid hsl(var(--border)); border-radius: 18px; background: hsl(var(--card)); transition: border-color 160ms, transform 160ms; }
+.row + .row { margin-top: 8px; }
+.row:hover { border-color: hsl(var(--foreground) / 0.22); }
+a.row:hover, .row:has(> .rowText > .stretched):hover { transform: translateY(-1px); }
+.row[data-tone='waiting'] { border-color: rgb(245 158 11 / 0.45); background: linear-gradient(135deg, rgb(245 158 11 / 0.08), transparent 60%), hsl(var(--card)); }
 .rowText { display: grid; gap: 3px; min-width: 0; flex: 1; }
 .rowText > .stretched strong, .card h3 { font-size: 14px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
 .stretched { color: inherit; outline: none; }
@@ -72,7 +76,7 @@ a.empty:hover::before { opacity: 1 !important; }
 .figure span { font-size: 11px; color: hsl(var(--muted-foreground)); }
 
 @media (prefers-reduced-motion: reduce) {
-  .card, .card:hover { transform: none; }
+  .card, .card:hover, .row, .row:hover { transform: none; }
 }
 
 .loadingRows { display: grid; gap: 8px; }

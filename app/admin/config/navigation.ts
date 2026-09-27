@@ -56,7 +56,7 @@ export const NAV_ITEMS: NavItem[] = [
   { href: '/admin/discover/universes', label: 'Universes', icon: Sparkles, group: 'discover' },
   { href: '/admin/discover/worlds', label: 'Worlds', icon: Earth, group: 'discover' },
   { href: '/admin/discover/rooms', label: 'Rooms', icon: DoorOpen, group: 'discover' },
-  { href: '/admin/users', label: 'Users', icon: Users, group: 'discover' },
+  { href: '/admin/users', label: 'People', icon: Users, group: 'discover' },
 
   // Admin section (super admin only)
   { href: '/admin/style', label: 'Orbit Style', icon: Palette, requiresSuperAdmin: true, group: 'admin' },

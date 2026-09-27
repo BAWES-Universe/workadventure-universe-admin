@@ -17,7 +17,7 @@ import {
   VisitLine,
   count,
 } from '../../components/ds';
-import { ProfileLinks, WokaAvatar } from '../../components/profile-card';
+import { ProfileFrame, ProfileLinks, WokaAvatar } from '../../components/profile-card';
 import InviteToWorldDialog from '../../components/invite-to-world-dialog';
 
 interface WorldMembership {
@@ -424,28 +424,29 @@ export default function UserDetailPage() {
 
   return (
     <div className="grid min-w-0 gap-7">
-      <section className="grid min-w-0 gap-4 rounded-2xl border border-border bg-card p-4 sm:p-5" aria-labelledby="person-name" data-testid="person-card">
-        <div className="flex min-w-0 flex-wrap items-center gap-4">
-          <WokaAvatar layers={user.woka ?? []} name={name} />
-          <div className="grid min-w-0 flex-1 gap-1">
-            <h1 id="person-name" className="orbit-display text-2xl font-semibold leading-tight [overflow-wrap:anywhere]">
-              {name}
-            </h1>
-            <StatLine
-              items={[
-                user.ownedUniverses.length ? `Owns ${count(user.ownedUniverses.length, 'universe')}` : null,
-                user.worldMemberships.length ? `Member of ${count(user.worldMemberships.length, 'world')}` : null,
-                user.isGuest && 'Guest',
-              ]}
-            />
-          </div>
-          {canInvite && (
+      <ProfileFrame
+        headingId="person-name"
+        layers={user.woka ?? []}
+        name={name}
+        testId="person-card"
+        stats={
+          <StatLine
+            items={[
+              user.ownedUniverses.length ? `Owns ${count(user.ownedUniverses.length, 'universe')}` : null,
+              user.worldMemberships.length ? `Member of ${count(user.worldMemberships.length, 'world')}` : null,
+              user.isGuest && 'Guest',
+            ]}
+          />
+        }
+        action={
+          canInvite ? (
             <Button onClick={() => setInviteDialogOpen(true)} className="h-10 shrink-0 gap-2 px-4">
               <UserPlus size={15} aria-hidden="true" />
               Invite to a world
             </Button>
-          )}
-        </div>
+          ) : undefined
+        }
+      >
         {bio || links.length > 0 ? (
           <div className="grid min-w-0 gap-3">
             {bio && <p className="whitespace-pre-line text-sm leading-relaxed [overflow-wrap:anywhere]">{bio}</p>}
@@ -454,7 +455,7 @@ export default function UserDetailPage() {
         ) : (
           <p className="text-sm text-muted-foreground">{isSelf ? 'You haven’t written a profile yet.' : `${name} hasn’t written a profile yet.`}</p>
         )}
-      </section>
+      </ProfileFrame>
 
       {error && (
         <p className="text-sm text-muted-foreground" role="alert">

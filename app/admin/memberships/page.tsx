@@ -288,6 +288,7 @@ export default function MyMembershipsPage() {
                       key={invitation.id}
                       href={`/admin/worlds/${invitation.world.id}`}
                       kind="world"
+                      tone="waiting"
                       title={invitation.world.name}
                       context={
                         <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
@@ -329,7 +330,7 @@ export default function MyMembershipsPage() {
             className="grid min-w-0 gap-2"
             {...(invitations.length > 0 ? { 'aria-labelledby': 'memberships-heading' } : { 'aria-label': 'Your worlds' })}
           >
-            {invitations.length > 0 && <SectionHeader id="memberships-heading" title="Your worlds" count={memberships.length} />}
+            {invitations.length > 0 && <SectionHeader id="memberships-heading" title="Worlds" count={memberships.length} />}
             {memberships.length === 0 ? (
               <EmptyCard
                 kind="world"

@@ -166,10 +166,13 @@ export function EntityRow({
   aside,
   trailing,
   leading,
+  tone,
   testId,
 }: {
   href: string;
   kind: Kind;
+  /** An item waiting for you (an invitation): an amber card. */
+  tone?: 'waiting';
   universeId?: string | null;
   title: string;
   context?: ReactNode;
@@ -186,6 +189,7 @@ export function EntityRow({
     <div
       className={cn(styles.row, 'orbit-kind-wash')}
       data-kind={kind}
+      data-tone={tone}
       style={kind === 'universe' ? hueStyle(universeId) : undefined}
       data-testid={testId}
     >

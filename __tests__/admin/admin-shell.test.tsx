@@ -258,7 +258,7 @@ describe('AdminShell', () => {
     for (const label of ['Avatar Sets', 'Bots', 'AI Providers', 'AI Usage', 'Bot Database', 'MCP Servers']) {
       expect(menu.textContent).toContain(label);
     }
-    for (const label of ['My Universes', 'My Stars', 'My Memberships', 'My Profile', 'Room Templates', 'Users']) {
+    for (const label of ['My Universes', 'My Stars', 'My Memberships', 'My Profile', 'Room Templates', 'People']) {
       expect(menu.textContent).toContain(label);
     }
     // The account, theme and sign-out live on You, not in the menu.
