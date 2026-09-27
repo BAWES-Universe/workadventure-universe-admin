@@ -1,7 +1,7 @@
 /** @jest-environment jsdom */
 
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import HerePanel from '@/app/admin/components/here-panel';
 import RecentlyVisited from '@/app/admin/components/recently-visited';
 import { WorkAdventureContext } from '@/app/admin/workadventure-context';
@@ -57,9 +57,13 @@ const responses: Record<string, unknown> = {
   },
 };
 
+/** Paths that answer 500 until cleared: a server failure, not a missing room. */
+const failing = new Set<string>();
+
 jest.mock('@/lib/client-auth', () => ({
   authenticatedFetch: async (url: string) => {
     const path = url.split('?')[0];
+    if (failing.has(path)) return { ok: false, status: 500, json: async () => ({}) } as Response;
     const body = isSummariesUrl(url) ? summariesBody(url, (id) => analytics[id]) : responses[path];
     return { ok: body !== undefined, status: body ? 200 : 404, json: async () => body } as Response;
   },
@@ -126,5 +130,20 @@ describe('Home rooms keep their numbers', () => {
     const expected = localHourFromUtc(16);
     expect(localPeakHour([{ hour: 16, count: 40 }, { hour: 9, count: 2 }])).toBe(expected);
     expect(localPeakHour([])).toBeNull();
+  });
+});
+
+describe('Where you are, when it fails', () => {
+  afterEach(() => failing.clear());
+
+  it('Try again clears the failure at once, then shows the room', async () => {
+    failing.add('/api/admin/rooms/from-play-uri');
+    render(inGame(<HerePanel />));
+    const retry = await screen.findByRole('button', { name: 'Try again' });
+    expect(screen.getByText('No room information available')).toBeTruthy();
+    failing.clear();
+    fireEvent.click(retry);
+    expect(screen.queryByText('No room information available')).toBeNull();
+    expect(await screen.findByText('Headquarters')).toBeTruthy();
   });
 });

@@ -30,8 +30,9 @@ export function BottomNav() {
         {activeIndex >= 0 && (
           <span
             aria-hidden="true"
-            className="pointer-events-none absolute inset-y-2 left-0 rounded-2xl bg-accent transition-transform"
+            className="orbit-dock-pill pointer-events-none absolute inset-y-2 left-0 rounded-2xl transition-transform"
             style={{
+              backgroundImage: 'var(--brand-gradient)',
               width: `calc(100% / ${slots})`,
               transform: `translateX(${activeIndex * 100}%)`,
               transitionDuration: 'var(--duration-slow)',
@@ -49,7 +50,7 @@ export function BottomNav() {
               aria-current={active ? 'page' : undefined}
               className={cn(
                 'orbit-press relative z-10 flex flex-col items-center justify-center gap-1 rounded-2xl text-[11px] font-medium transition-colors',
-                active ? 'text-accent-foreground' : 'text-muted-foreground hover:text-foreground',
+                active ? 'text-white' : 'text-muted-foreground hover:text-foreground',
               )}
             >
               <Icon className={cn('h-[22px] w-[22px] transition-transform', active && 'scale-110')} strokeWidth={active ? 2.4 : 2} aria-hidden="true" />

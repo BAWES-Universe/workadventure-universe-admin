@@ -11,6 +11,7 @@ jest.mock('@/lib/db', () => ({
     room: { findUnique: jest.fn() },
     worldMember: { findFirst: jest.fn() },
     roomAccess: { count: jest.fn(), findMany: jest.fn(), findFirst: jest.fn(), groupBy: jest.fn() },
+    $queryRaw: jest.fn(),
   },
 }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
@@ -47,10 +48,16 @@ beforeEach(() => {
     return SESSIONS[name] ?? null;
   });
   db.roomAccess.count.mockResolvedValue(3);
+  // The database's count per UTC hour for TIMES, in no particular order.
+  (db.$queryRaw as unknown as jest.Mock).mockResolvedValue([
+    { hour: 9, count: 1 },
+    { hour: 16, count: 2 },
+  ]);
   db.roomAccess.groupBy.mockResolvedValue([]);
   db.roomAccess.findMany.mockImplementation(async (args: { distinct?: unknown; select?: Record<string, unknown> }) => {
     if (args?.distinct) return [];
-    if (args?.select && Object.keys(args.select).join() === 'accessedAt') return TIMES;
+    // Loading every access just for the peak is what the route must not do.
+    if (args?.select && Object.keys(args.select).join() === 'accessedAt') throw new Error('loaded every access row');
     return [];
   });
   db.roomAccess.findFirst.mockImplementation(async (args: { where: { OR?: unknown } }) =>
@@ -78,8 +85,10 @@ describe.each([
     expect(bob.youWereLast).toBe(true);
   });
 
-  it('returns every access bucketed by UTC hour, busiest first', async () => {
+  it('returns every access bucketed by UTC hour, busiest first, counted in the database', async () => {
     const body = await (await GET(req(`/api/admin/analytics/${kind}/x`, 'alice'), params('x'))).json();
+    const sql = ((db.$queryRaw as unknown as jest.Mock).mock.calls[0][0] as TemplateStringsArray).join('?');
+    expect(sql).toMatch(/GROUP BY/);
     expect(body.peakTimes).toEqual([
       { hour: 16, count: 2 },
       { hour: 9, count: 1 },

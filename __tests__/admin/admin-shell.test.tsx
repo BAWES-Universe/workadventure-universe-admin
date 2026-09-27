@@ -52,7 +52,14 @@ jest.mock('@/lib/orbit-frame', () => ({
   isInsideFrame: () => true,
   postToGame: jest.fn(),
 }));
-jest.mock('@/app/admin/components/orbit-bridge', () => ({ __esModule: true, default: () => null }));
+let mockOnRefresh: (() => void) | null = null;
+jest.mock('@/app/admin/components/orbit-bridge', () => ({
+  __esModule: true,
+  default: ({ onRefresh }: { onRefresh: () => void }) => {
+    mockOnRefresh = onRefresh;
+    return null;
+  },
+}));
 jest.mock('@/app/admin/workadventure-provider', () => ({
   __esModule: true,
   default: ({ children }: { children: React.ReactNode }) => (
@@ -231,6 +238,55 @@ describe('AdminShell', () => {
     await waitFor(() => expect(mockAuthenticatedFetch).toHaveBeenCalledTimes(2));
     await act(async () => answerLast());
     expect(await screen.findByText('page content')).toBeTruthy();
+  });
+
+  it('keeps asking for fresh numbers after the game’s refresh fails, until they arrive', async () => {
+    const view = await renderShell('/admin/worlds/w1');
+    act(() => mockOnRefresh?.());
+    await waitFor(() => expect(mockAuthenticatedFetch).toHaveBeenCalledTimes(2));
+    expect(mockAuthenticatedFetch.mock.calls[1][0]).toBe('/api/admin/bootstrap');
+    await act(async () => answerLast({}, 500));
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(mockAuthenticatedFetch).toHaveBeenCalledTimes(3));
+    expect(mockAuthenticatedFetch.mock.calls[2][0]).toBe('/api/admin/bootstrap');
+    await act(async () => answerLast());
+    await screen.findByText('page content');
+    // Answered: the next inner page only re-checks the session.
+    act(() => {
+      mockPathname = '/admin/bots';
+      view.rerender(
+        <AdminShell>
+          <div>page content</div>
+        </AdminShell>,
+      );
+    });
+    await waitFor(() => expect(mockAuthenticatedFetch).toHaveBeenCalledTimes(4));
+    expect(mockAuthenticatedFetch.mock.calls[3][0]).toBe('/api/auth/me');
+  });
+
+  it('drops a failed load’s error as soon as you go to another page', async () => {
+    const view = await renderShell('/admin/worlds/w1');
+    act(() => {
+      mockPathname = '/admin/bots';
+      view.rerender(
+        <AdminShell>
+          <div>page content</div>
+        </AdminShell>,
+      );
+    });
+    await act(async () => answerLast({}, 500));
+    expect(await screen.findByRole('button', { name: 'Retry' })).toBeTruthy();
+    act(() => {
+      mockPathname = '/admin/avatars';
+      view.rerender(
+        <AdminShell>
+          <div>page content</div>
+        </AdminShell>,
+      );
+    });
+    // The new page's load is under way: the last page's error is gone at once.
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+    await waitFor(() => expect(mockAuthenticatedFetch).toHaveBeenCalledTimes(3));
   });
 
   it('Escape closes only the top layer: a dialog first, an edited field next, Orbit last', async () => {

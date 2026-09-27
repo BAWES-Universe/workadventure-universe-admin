@@ -135,9 +135,12 @@ beforeEach(() => {
 
   db.user.findMany.mockImplementation(async (args: MockArgs) => USER_ROWS.map((u) => applySelect(u, args?.select)));
   db.user.count.mockResolvedValue(USER_ROWS.length);
-  (prisma.$queryRaw as unknown as jest.Mock).mockResolvedValue(
-    USER_ROWS.map((u) => ({ id: u.id, last_accessed: null, total_accesses: BigInt(0) })),
-  );
+  // One raw-SQL mock for two callers: peak hours (counted in the database, none here) and People's page query.
+  (prisma.$queryRaw as unknown as jest.Mock).mockImplementation(async (query: { sql?: string; strings?: string[] }) => {
+    const text = query.sql ?? query.strings?.join('?') ?? '';
+    if (text.includes('EXTRACT(HOUR')) return [];
+    return USER_ROWS.map((u) => ({ id: u.id, last_accessed: null, total_accesses: BigInt(0) }));
+  });
   db.user.findUnique.mockImplementation(async (args: MockArgs) => {
     const row = {
       ...USER_ROWS[0],

@@ -137,14 +137,11 @@ function NewWorldPageContent() {
         try {
           const { authenticatedFetch } = await import('@/lib/client-auth');
           const universeResponse = await authenticatedFetch(`/api/admin/universes/${universeIdParam}`);
-          if (universeResponse.ok) {
-            const universe = await universeResponse.json();
-            setUniverses([universe]);
-          }
+          if (!universeResponse.ok) throw new Error('Failed to load universe');
+          setUniverses([await universeResponse.json()]);
           setUniversesStatus('ready');
         } catch {
-          setError('Failed to load universe');
-          setUniversesStatus('ready');
+          setUniversesStatus('error');
         }
       } else {
         setUniversesStatus('error');
@@ -227,12 +224,19 @@ function NewWorldPageContent() {
         </Alert>
       )}
 
-      {universeIdParam && !selectedUniverse && (
-        <Alert>
+      {universeIdParam && universesStatus === 'loading' && <LoadingRows label="the universe" rows={1} />}
+      {universeIdParam && universesStatus === 'error' && <LoadError label="the universe" retry={fetchUniverses} />}
+      {/* Loaded, but not one of yours: say so instead of waiting for it forever. */}
+      {universeIdParam && universesStatus === 'ready' && !selectedUniverse && (
+        <Alert data-testid="universe-not-yours">
           <AlertTriangle className="h-4 w-4" />
-          <AlertTitle>Loading</AlertTitle>
+          <AlertTitle>You can’t add worlds to this universe</AlertTitle>
           <AlertDescription>
-            Loading universe information...
+            Worlds go in universes you own.{' '}
+            <Link href="/admin/worlds/new" className="font-medium underline underline-offset-2">
+              Choose one of yours
+            </Link>
+            .
           </AlertDescription>
         </Alert>
       )}
@@ -250,7 +254,8 @@ function NewWorldPageContent() {
         />
       )}
 
-      {!noUniverse && (
+      {/* The form only once there is a universe it can go in: not while loading, after a failure, or for one that isn't yours. */}
+      {universesStatus === 'ready' && (universeIdParam ? Boolean(selectedUniverse) : !noUniverse) && (
         <Card>
           <CardContent className="p-4 sm:p-6">
             <form onSubmit={handleSubmit} className="space-y-6">

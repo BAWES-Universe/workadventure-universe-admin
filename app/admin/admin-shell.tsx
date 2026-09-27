@@ -36,17 +36,19 @@ function loginRedirect() {
 export default function AdminShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [bootstrap, setBootstrap] = useState<AdminBootstrap | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // An error belongs to the request that failed: another page or another try hides it at once.
+  const [failure, setFailure] = useState<{ message: string; request: string } | null>(null);
   const [attempt, setAttempt] = useState(0);
   const [view, setView] = useState<OrbitView>('compact');
   const hasBootstrap = bootstrap !== null;
 
+  const request = `${attempt}|${pathname}`;
+  const error = failure?.request === request ? failure.message : null;
   // Trying again shows the loader, not the last error, until the answer comes.
   const load = useCallback(() => {
-    setError(null);
     setAttempt((value) => value + 1);
   }, []);
-  // Set when the game says something changed: the next load brings fresh numbers wherever you are.
+  // Set when the game says something changed: loads bring fresh numbers wherever you are until one arrives.
   const wantBootstrap = useRef(false);
   const refreshFromGame = useCallback(() => {
     wantBootstrap.current = true;
@@ -65,7 +67,6 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
     // only the session is re-checked.
     const rootPage = pathname === '/admin' || pathname === '/admin/you' || pathname === '/admin/space';
     const endpoint = !hasBootstrap || rootPage || wantBootstrap.current ? '/api/admin/bootstrap' : '/api/auth/me';
-    wantBootstrap.current = false;
     void authenticatedFetch(endpoint, { signal: controller.signal })
       .then(async (response) => {
         if (controller.signal.aborted) return;
@@ -73,7 +74,9 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
         if (!response.ok) throw new Error('Unable to load your Orbit');
         const data = await response.json();
         if (controller.signal.aborted) return;
-        setError(null);
+        // Only fresh numbers answer the game's ask; a failed or abandoned load leaves it for the next one.
+        if (endpoint === '/api/admin/bootstrap') wantBootstrap.current = false;
+        setFailure(null);
         setBootstrap((current) =>
           endpoint === '/api/admin/bootstrap'
             ? (data as AdminBootstrap)
@@ -87,7 +90,7 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
       })
       .catch((cause) => {
         if (!controller.signal.aborted) {
-          setError(cause instanceof Error ? cause.message : 'Unable to load your Orbit');
+          setFailure({ message: cause instanceof Error ? cause.message : 'Unable to load your Orbit', request });
         }
       });
 

@@ -66,9 +66,10 @@ export function Sidebar({ user }: { user: NavUser }) {
                   href={item.href}
                   aria-current={active ? 'page' : undefined}
                   className={cn(
-                    'orbit-press flex h-10 items-center gap-3 rounded-xl px-3 text-sm font-medium transition-colors',
-                    active ? 'bg-accent text-accent-foreground' : 'text-muted-foreground hover:bg-muted hover:text-foreground',
+                    'orbit-press flex h-11 items-center gap-3 rounded-xl px-3 text-sm font-medium transition-colors',
+                    active ? 'text-white' : 'text-muted-foreground hover:bg-muted hover:text-foreground',
                   )}
+                  style={active ? { backgroundImage: 'var(--brand-gradient)' } : undefined}
                 >
                   <Icon className="h-[18px] w-[18px]" strokeWidth={active ? 2.4 : 2} aria-hidden="true" />
                   {item.label}

@@ -4,7 +4,7 @@
 .card:focus-within, .card:hover { border-color: color-mix(in srgb, var(--signal-accent) 44%, transparent); }
 .card a:focus-visible, .card button:focus-visible, .card summary:focus-visible, .notice a:focus-visible, .notice button:focus-visible { outline: 2px solid var(--signal-accent); outline-offset: 3px; border-radius: 3px; }
 .current { padding: 17px 18px 14px; border-radius: 18px; background: linear-gradient(118deg, hsl(var(--card)) 20%, var(--signal-wash)), hsl(var(--card)); }
-.current::before { content: ''; pointer-events: none; position: absolute; z-index: -1; width: 68%; height: 160px; right: 0; top: 0; background-image: radial-gradient(var(--signal-accent) .65px, transparent .8px); background-size: 26px 26px; opacity: .18; mask-image: linear-gradient(100deg, transparent, #000); }
+.current::after { content: ''; pointer-events: none; position: absolute; z-index: -1; width: 68%; height: 160px; right: 0; top: 0; background-image: radial-gradient(var(--signal-accent) .65px, transparent .8px); background-size: 26px 26px; opacity: .18; mask-image: linear-gradient(100deg, transparent, #000); }
 .cardTop { display: flex; align-items: center; gap: 8px; min-height: 16px; }
 .eyebrow { display: inline-flex; align-items: center; gap: 7px; color: var(--signal-accent); font-size: 10px; font-weight: 650; letter-spacing: .13em; text-transform: uppercase; }
 .presence { width: 6px; height: 6px; border-radius: 50%; background: var(--status-live); box-shadow: 0 0 0 4px rgb(34 197 94 / .18); }
@@ -68,7 +68,11 @@
 .notice p { color: hsl(var(--muted-foreground)); font-size: 12px; line-height: 1.6; }
 .notice .detailsLink { color: var(--signal-accent); }
 .roomUri { overflow-wrap: anywhere; font-family: var(--font-mono); font-size: 10px !important; }
-.skeleton { height: 170px; border-radius: 18px; background: var(--signal-wash); border: 1px solid var(--signal-line); }
+/* The card's own colours while it loads, with a faint light passing over. */
+.skeleton { position: relative; overflow: hidden; height: 170px; border-radius: 18px; background: linear-gradient(118deg, hsl(var(--card)) 20%, var(--signal-wash)), hsl(var(--card)); border: 1px solid var(--signal-line); }
+.skeleton::after { content: ''; position: absolute; inset: 0; background: linear-gradient(100deg, transparent 20%, color-mix(in oklab, hsl(var(--foreground)) 5%, transparent) 45%, transparent 70%); background-size: 200% 100%; animation: shimmer 1.6s linear infinite; }
+@keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) { .skeleton::after { animation: none; } }
 .previousStatus { padding-left: 22px; color: hsl(var(--muted-foreground)); font-size: 11px; }
 @container (min-width: 430px) {
   .current { padding: 18px 21px 0; }

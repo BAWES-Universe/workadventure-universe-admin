@@ -262,6 +262,10 @@ describe('The invitations card on Orbit', () => {
     const line = await screen.findByTestId('pending-invitations-error');
     routeList([listed('i1', 'Studio')]);
     fireEvent.click(within(line).getByRole('button', { name: 'Try again' }));
+    // The error goes at once and says it is checking, until the answer comes.
+    expect(screen.queryByTestId('pending-invitations-error')).toBeNull();
+    expect(screen.getByTestId('pending-invitations-retrying').textContent).toContain('Checking your invitations');
     expect(await screen.findByTestId('pending-invitations')).toBeTruthy();
+    expect(screen.queryByTestId('pending-invitations-retrying')).toBeNull();
   });
 });

@@ -40,32 +40,43 @@ function escapeHtml(text: string | null | undefined): string {
     .replace(/'/g, '&#039;');
 }
 
+const LINK_ICON = `<svg class="link-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>`;
+
+/**
+ * Someone's profile: their words and links. Embedded (the game's card under their avatar and name), it sits straight
+ * on the game's dark panel with no name of its own and no page colour: it declares a dark scheme, as the panel is,
+ * so the browser never paints the frame white behind it. On its own it is a small dark page with the name.
+ */
 function renderHTML(data: { name?: string; bio?: string; links: Array<{ label: string; url: string }> }, isEmbedded: boolean) {
   const name = escapeHtml(data.name);
   const bio = escapeHtml(data.bio);
-  
+  const links = data.links ?? [];
+  const empty = !data.bio && links.length === 0;
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="color-scheme" content="dark"/>
   <title>${name || 'Profile'}</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: system-ui, -apple-system, sans-serif; background: ${isEmbedded ? 'transparent' : '#111827'}; color: white; }
-    .container { min-height: 100vh; padding: 1.5rem; }
-    .card { max-width: 28rem; margin: 0 auto; background: #1f2937; border-radius: 0.5rem; padding: 1.5rem; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1); }
-    h1 { font-size: 1.5rem; font-weight: bold; margin-bottom: 1rem; }
-    .bio { margin-bottom: 1.5rem; color: #d1d5db; white-space: pre-wrap; }
-    .links { margin-top: 1.5rem; }
-    .links-title { font-size: 0.875rem; font-weight: 600; color: #9ca3af; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.75rem; }
-    .link-item { display: block; width: 100%; background: #374151; border-radius: 0.5rem; padding: 0.75rem 1rem; margin-bottom: 0.75rem; transition: background 0.2s; text-decoration: none; color: white; }
-    .link-item:hover { background: #4b5563; }
-    .link-content { display: flex; align-items: center; justify-content: space-between; }
-    .link-label { font-weight: 500; }
-    .link-icon { width: 1rem; height: 1rem; color: #9ca3af; }
-    .empty { color: #6b7280; text-align: center; padding: 2rem 0; }
-    .loading, .error { min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+    :root { color-scheme: dark; }
+    html, body { background: ${isEmbedded ? 'transparent' : '#0f172a'}; }
+    body { font-family: Inter, system-ui, -apple-system, 'Segoe UI', sans-serif; color: #fff; -webkit-font-smoothing: antialiased; }
+    .profile { display: grid; gap: 14px; ${isEmbedded ? 'padding: 18px 16px;' : 'max-width: 28rem; margin: 0 auto; padding: 32px 20px;'} }
+    h1 { font-size: 22px; font-weight: 700; letter-spacing: -0.01em; }
+    .bio { font-size: 15px; line-height: 1.5; color: rgb(255 255 255 / 0.82); white-space: pre-wrap; overflow-wrap: anywhere; ${isEmbedded ? 'text-align: center;' : ''} }
+    .links { display: grid; gap: 8px; }
+    .links-title { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: rgb(255 255 255 / 0.55); }
+    .link-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 44px; padding: 10px 14px; border-radius: 12px; background: rgb(255 255 255 / 0.08); border: 1px solid rgb(255 255 255 / 0.1); color: #fff; text-decoration: none; font-size: 15px; font-weight: 500; transition: background 160ms, border-color 160ms; }
+    .link-item:hover { background: rgb(255 255 255 / 0.14); border-color: rgb(255 255 255 / 0.18); }
+    .link-item:focus-visible { outline: 2px solid #8b5cf6; outline-offset: 2px; }
+    .link-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .link-icon { flex: none; width: 16px; height: 16px; color: rgb(255 255 255 / 0.6); }
+    .empty { font-size: 14px; color: rgb(255 255 255 / 0.55); text-align: center; }
+    @media (prefers-reduced-motion: reduce) { .link-item { transition: none; } }
   </style>
   ${isEmbedded ? `
   <script>
@@ -75,14 +86,14 @@ function renderHTML(data: { name?: string; bio?: string; links: Array<{ label: s
       const width = document.body.scrollWidth;
       window.parent.postMessage({ type: 'cvIframeSize', data: { h: height, w: width } }, '*');
     }
-    
+
     function initResizeObserver() {
       if (!document.body) {
         // Wait for body to be available
         setTimeout(initResizeObserver, 10);
         return;
       }
-      
+
       try {
         const observer = new ResizeObserver(notifySize);
         observer.observe(document.body);
@@ -94,42 +105,34 @@ function renderHTML(data: { name?: string; bio?: string; links: Array<{ label: s
         setTimeout(notifySize, 100);
       }
     }
-    
+
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', initResizeObserver);
     } else {
       initResizeObserver();
     }
-    
+
     window.addEventListener('load', notifySize);
   </script>
   ` : ''}
 </head>
 <body>
-  <div class="container">
-    <div class="card">
-      ${name ? `<h1>${name}</h1>` : ''}
-      ${bio ? `<div class="bio">${bio}</div>` : ''}
-      ${data.links && data.links.length > 0 ? `
-        <div class="links">
-          <div class="links-title">Links</div>
-          ${data.links.map(link => `
-            <a href="${escapeHtml(link.url)}" target="_blank" rel="noopener noreferrer" class="link-item">
-              <div class="link-content">
-                <span class="link-label">${escapeHtml(link.label)}</span>
-                <svg class="link-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
-                </svg>
-              </div>
-            </a>
-          `).join('')}
-        </div>
-      ` : ''}
-      ${!data.bio && (!data.links || data.links.length === 0) ? `
-        <div class="empty">No profile yet.</div>
-      ` : ''}
-    </div>
-  </div>
+  <main class="profile">
+    ${!isEmbedded && name ? `<h1>${name}</h1>` : ''}
+    ${bio ? `<p class="bio">${bio}</p>` : ''}
+    ${links.length > 0 ? `
+      <nav class="links" aria-label="Links">
+        ${isEmbedded ? '' : '<p class="links-title">Links</p>'}
+        ${links.map((link) => `
+          <a href="${escapeHtml(link.url)}" target="_blank" rel="noopener noreferrer" class="link-item">
+            <span class="link-label">${escapeHtml(link.label)}</span>
+            ${LINK_ICON}
+          </a>
+        `).join('')}
+      </nav>
+    ` : ''}
+    ${empty ? '<p class="empty">No profile yet.</p>' : ''}
+  </main>
 </body>
 </html>`;
 }

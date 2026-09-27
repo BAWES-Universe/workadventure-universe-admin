@@ -57,6 +57,8 @@ export default function PendingInvitationsAlert() {
   const [dismissedIds, setDismissedIds] = useState<string[] | null>(null);
   const [failed, setFailed] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  /** Try again was pressed and its answer hasn't come: say so instead of leaving the error up. */
+  const [retrying, setRetrying] = useState(false);
   /** The inviter's Woka, for the one invitation shown on its own. */
   const [wokas, setWokas] = useState<Record<string, string[]>>({});
   const [declineError, setDeclineError] = useState<string | null>(null);
@@ -73,6 +75,7 @@ export default function PendingInvitationsAlert() {
       readDismissed(),
     ]).then(([list, dismissed]) => {
       if (cancelled) return;
+      setRetrying(false);
       setFailed(!list);
       if (!list) return;
       setInvitations(list);
@@ -104,8 +107,19 @@ export default function PendingInvitationsAlert() {
     };
   }, [single, wokas]);
 
-  const retry = useCallback(() => setAttempt((value) => value + 1), []);
+  const retry = useCallback(() => {
+    setFailed(false);
+    setRetrying(true);
+    setAttempt((value) => value + 1);
+  }, []);
 
+  if (retrying) {
+    return (
+      <p role="status" className="text-sm text-muted-foreground" data-testid="pending-invitations-retrying">
+        Checking your invitations…
+      </p>
+    );
+  }
   if (failed) {
     return (
       <div role="alert" className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground" data-testid="pending-invitations-error">
