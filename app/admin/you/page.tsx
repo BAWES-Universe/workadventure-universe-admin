@@ -1,6 +1,6 @@
 'use client';
 
-import { Suspense, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useAdminBootstrap } from '../admin-bootstrap-context';
 import { StatLine, count } from '../components/ds';
@@ -24,20 +24,22 @@ export default function YouPage() {
 
 function You() {
   const { user, mine } = useAdminBootstrap();
-  // `?edit=profile` (Get started's "Set up your profile") opens the profile ready to edit; anything else shows it.
+  // `?edit=profile` (the game's "Edit my profile" and Get started's "Set up your profile") opens the profile ready to
+  // edit; the menu's Profile just shows it.
   const editProfile = useSearchParams().get('edit') === 'profile';
   const router = useRouter();
   const [profileComplete, setProfileComplete] = useState<boolean | null>(null);
+  // The card keeps the form open once asked; the address drops the ask at once, so Back, a reload or a later visit
+  // shows the profile, never the form you didn't ask for.
+  useEffect(() => {
+    if (editProfile) router.replace('/admin/you', { scroll: false });
+  }, [editProfile, router]);
   return (
     <div className={styles.page}>
       <ProfileCard
         user={user}
         startEditing={editProfile}
         onLoaded={setProfileComplete}
-        // The intent is used up once editing ends, so Back and a later visit don't reopen the form.
-        onEditEnd={() => {
-          if (editProfile) router.replace('/admin/you', { scroll: false });
-        }}
         stats={
           mine && (
             <StatLine

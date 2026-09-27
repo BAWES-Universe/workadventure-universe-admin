@@ -13,8 +13,8 @@ const nextConfig: NextConfig = {
       { source: '/', destination: '/admin', permanent: false },
       // Links and bookmarks from the first Orbit shell land on Space.
       { source: '/admin/places', destination: '/admin/space', permanent: false },
-      // Your profile (once called the visit card) is on You; Edit profile there opens the form. The game opens this address.
-      { source: '/admin/profile', destination: '/admin/you', permanent: false },
+      // The game's "Edit my profile" opens this address: your profile on You, ready to edit.
+      { source: '/admin/profile', destination: '/admin/you?edit=profile', permanent: false },
     ];
   },
   // Headers for security
