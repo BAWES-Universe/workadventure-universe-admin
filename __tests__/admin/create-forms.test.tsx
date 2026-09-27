@@ -140,6 +140,17 @@ describe('New world without a universe in the address', () => {
     render(<NewWorldPage />);
     expect(await screen.findByRole('button', { name: /try again/i })).toBeTruthy();
     expect(screen.queryByText(/Loading universe information/)).toBeNull();
+    // No half-usable form under the error.
+    expect(screen.queryByLabelText(/Name/)).toBeNull();
+  });
+
+  it('shows no form when your universes cannot be loaded', async () => {
+    fetchMock.mockImplementation((url: string) =>
+      url === '/api/auth/me' ? ok({ user: { id: 'me' } }) : Promise.resolve({ ok: false, status: 503, json: () => Promise.resolve({}) }),
+    );
+    render(<NewWorldPage />);
+    expect(await screen.findByRole('button', { name: /try again/i })).toBeTruthy();
+    expect(screen.queryByLabelText(/Name/)).toBeNull();
   });
 });
 

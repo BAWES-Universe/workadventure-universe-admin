@@ -254,7 +254,8 @@ function NewWorldPageContent() {
         />
       )}
 
-      {!noUniverse && (
+      {/* The form only once there is a universe it can go in: not while loading, after a failure, or for one that isn't yours. */}
+      {universesStatus === 'ready' && (universeIdParam ? Boolean(selectedUniverse) : !noUniverse) && (
         <Card>
           <CardContent className="p-4 sm:p-6">
             <form onSubmit={handleSubmit} className="space-y-6">
