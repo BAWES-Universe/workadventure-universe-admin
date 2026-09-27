@@ -12,13 +12,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Label } from '@/components/ui/label';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
+import { RoleChoice } from './role-choice';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -69,7 +63,6 @@ interface MemberListProps {
   onRefresh: () => void;
 }
 
-const AVAILABLE_TAGS = ['admin', 'editor', 'member'];
 
 export default function MemberList({ worldId, onRefresh }: MemberListProps) {
   const [members, setMembers] = useState<Member[]>([]);
@@ -526,20 +519,9 @@ export default function MemberList({ worldId, onRefresh }: MemberListProps) {
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
-            <div>
-              <Label htmlFor="edit-role">Role</Label>
-              <Select value={editingTag} onValueChange={setEditingTag}>
-                <SelectTrigger id="edit-role" className="mt-1">
-                  <SelectValue placeholder="Select a role" />
-                </SelectTrigger>
-                <SelectContent>
-                  {AVAILABLE_TAGS.map(tag => (
-                    <SelectItem key={tag} value={tag}>
-                      <span className="capitalize">{tag}</span>
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+            <div className="space-y-1">
+              <Label>Role</Label>
+              <RoleChoice value={editingTag} onChange={setEditingTag} />
             </div>
             <div className="flex justify-end gap-2">
               <Button

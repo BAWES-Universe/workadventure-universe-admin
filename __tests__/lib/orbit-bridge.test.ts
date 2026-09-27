@@ -20,6 +20,14 @@ describe('parseBridgeMessage', () => {
     expect(parseBridgeMessage({ origin: GAME, source: parent, data: { type: 'orbit-event', version: 1, requestId: 'r2', roomRevision: revision, topic: 'universes' } }, expected)?.kind).toBe('event');
   });
 
+  it('accepts the view the frame is in, on init and when it changes', () => {
+    expect(parseBridgeMessage({ origin: GAME, source: parent, data: { type: 'orbit-bridge-init', version: 1, roomRevision: revision, capabilities: [], view: 'full' } }, expected)).toEqual(
+      expect.objectContaining({ kind: 'init', message: expect.objectContaining({ view: 'full' }) }),
+    );
+    expect(parseBridgeMessage({ origin: GAME, source: parent, data: { type: 'orbit-view', version: 1, view: 'compact' } }, expected)?.kind).toBe('view');
+    expect(parseBridgeMessage({ origin: GAME, source: parent, data: { type: 'orbit-view', version: 1, view: 'huge' } }, expected)).toBeNull();
+  });
+
   it('keeps an intent it does not know, so it can still answer (with home)', () => {
     expect(parseBridgeMessage({ origin: GAME, source: parent, data: { ...navigate, intent: 'something-new' } }, expected)?.kind).toBe('navigate');
   });

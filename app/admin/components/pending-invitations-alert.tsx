@@ -1,100 +1,121 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Mail, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { X, Mail } from 'lucide-react';
+import { authenticatedFetch } from '@/lib/client-auth';
 
 interface Invitation {
   id: string;
-  world: {
-    id: string;
-    name: string;
-    slug: string;
-    universe: {
-      id: string;
-      name: string;
-      slug: string;
-    };
-  };
-  invitedBy: {
-    id: string;
-    name: string | null;
-    email: string | null;
-  };
+  world: { id: string; name: string; slug: string; universe: { id: string; name: string; slug: string } };
+  invitedBy: { id: string; name: string | null; email: string | null };
   invitedAt: string;
 }
 
-export default function PendingInvitationsAlert() {
-  const [invitations, setInvitations] = useState<Invitation[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [dismissed, setDismissed] = useState(false);
+/** Where the dismissal lives on the account (see lib/user-preferences.ts), so it holds on every device. */
+export const INVITATIONS_DISMISSED_KEY = 'guidance.dismissed.invitations';
+/** The most recent dismissed invitation ids kept; older ones are gone from the account anyway. */
+const DISMISSED_IDS_KEPT = 40;
 
-  useEffect(() => {
-    fetchInvitations();
-  }, []);
-
-  async function fetchInvitations() {
-    try {
-      const { authenticatedFetch } = await import('@/lib/client-auth');
-      const response = await authenticatedFetch('/api/memberships/invitations');
-      if (response.ok) {
-        const data = await response.json();
-        setInvitations(data.invitations || []);
-      }
-    } catch (error) {
-      console.error('Error fetching invitations:', error);
-    } finally {
-      setLoading(false);
-    }
+async function readDismissed(): Promise<string[]> {
+  try {
+    const response = await authenticatedFetch(`/api/me/preferences?key=${encodeURIComponent(INVITATIONS_DISMISSED_KEY)}`);
+    if (!response.ok) return [];
+    const data = (await response.json()) as { preferences?: Record<string, unknown> };
+    const value = data.preferences?.[INVITATIONS_DISMISSED_KEY] as { ids?: unknown } | undefined;
+    return Array.isArray(value?.ids) ? value.ids.filter((id): id is string => typeof id === 'string') : [];
+  } catch {
+    return [];
   }
-
-  if (loading || dismissed || invitations.length === 0) {
-    return null;
-  }
-
-  const inviterName = invitations[0].invitedBy.name || invitations[0].invitedBy.email || 'Someone';
-
-  return (
-    <Alert className="mb-6 border-blue-200 bg-blue-50 dark:bg-blue-950 dark:border-blue-800">
-      <div className="flex items-start justify-between">
-        <div className="flex items-start gap-3 flex-1">
-          <Mail className="h-5 w-5 text-blue-600 dark:text-blue-400 mt-0.5" />
-          <div className="flex-1">
-            <AlertTitle className="text-blue-800 dark:text-blue-200">
-              You have {invitations.length} pending membership invitation{invitations.length > 1 ? 's' : ''}
-            </AlertTitle>
-            <AlertDescription className="text-blue-700 dark:text-blue-300 mt-1">
-              {invitations.length === 1 ? (
-                <>
-                  {inviterName} invited you to join <strong>{invitations[0].world.name}</strong> in {invitations[0].world.universe.name}
-                </>
-              ) : (
-                <>
-                  You have {invitations.length} pending invitations to join worlds
-                </>
-              )}
-            </AlertDescription>
-            <div className="mt-3">
-              <Button asChild variant="default" size="sm">
-                <Link href="/admin/memberships">
-                  View Invitations
-                </Link>
-              </Button>
-            </div>
-          </div>
-        </div>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-6 w-6 text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-200"
-          onClick={() => setDismissed(true)}
-        >
-          <X className="h-4 w-4" />
-        </Button>
-      </div>
-    </Alert>
-  );
 }
 
+async function writeDismissed(ids: string[]): Promise<void> {
+  try {
+    await authenticatedFetch('/api/me/preferences', {
+      method: 'PUT',
+      body: JSON.stringify({ key: INVITATIONS_DISMISSED_KEY, value: { ids: ids.slice(-DISMISSED_IDS_KEPT) } }),
+    });
+  } catch {
+    // The dismissal still holds for this visit.
+  }
+}
+
+/**
+ * Invitations waiting for an answer. Dismissing hides the ones shown now, on this account, on every device; a new
+ * invitation shows again. Answering happens on My Memberships.
+ */
+export default function PendingInvitationsAlert() {
+  const [invitations, setInvitations] = useState<Invitation[] | null>(null);
+  const [dismissedIds, setDismissedIds] = useState<string[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void Promise.all([
+      authenticatedFetch('/api/memberships/invitations')
+        .then(async (response) => (response.ok ? ((await response.json()).invitations as Invitation[]) ?? [] : []))
+        .catch(() => [] as Invitation[]),
+      readDismissed(),
+    ]).then(([list, dismissed]) => {
+      if (cancelled) return;
+      setInvitations(list);
+      setDismissedIds(dismissed);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (!invitations || !dismissedIds) return null;
+  const shown = invitations.filter((invitation) => !dismissedIds.includes(invitation.id));
+  if (shown.length === 0) return null;
+
+  const first = shown[0];
+  const inviterName = first.invitedBy.name || first.invitedBy.email || 'Someone';
+
+  function dismiss() {
+    const ids = [...(dismissedIds ?? []), ...shown.map((invitation) => invitation.id)];
+    setDismissedIds(ids);
+    void writeDismissed(ids);
+  }
+
+  return (
+    <div
+      role="status"
+      className="orbit-card orbit-glow relative flex gap-3 p-4 pr-12 orbit-rise"
+      data-testid="pending-invitations"
+    >
+      <span className="orbit-brand-fill flex h-10 w-10 shrink-0 items-center justify-center rounded-xl">
+        <Mail className="h-5 w-5" aria-hidden="true" />
+      </span>
+      <div className="min-w-0 flex-1 space-y-2">
+        <div>
+          <p className="text-[15px] font-semibold">
+            {shown.length === 1 ? 'You have an invitation' : `You have ${shown.length} invitations`}
+          </p>
+          <p className="text-sm text-muted-foreground">
+            {shown.length === 1 ? (
+              <>
+                {inviterName} invited you to join <strong className="text-foreground">{first.world.name}</strong> in{' '}
+                {first.world.universe.name}
+              </>
+            ) : (
+              <>People invited you to join their worlds</>
+            )}
+          </p>
+        </div>
+        <Button asChild size="sm">
+          <Link href="/admin/memberships">View invitations</Link>
+        </Button>
+      </div>
+      <button
+        type="button"
+        onClick={dismiss}
+        aria-label="Dismiss"
+        className="orbit-press absolute right-2 top-2 flex h-9 w-9 items-center justify-center rounded-xl text-muted-foreground hover:bg-muted hover:text-foreground"
+      >
+        <X className="h-4 w-4" aria-hidden="true" />
+      </button>
+    </div>
+  );
+}

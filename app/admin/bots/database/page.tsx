@@ -328,7 +328,7 @@ export default function DatabaseMonitoringPage() {
             Monitor database size and manage cleanup
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <Button onClick={fetchStats} variant="outline">
             Refresh
           </Button>

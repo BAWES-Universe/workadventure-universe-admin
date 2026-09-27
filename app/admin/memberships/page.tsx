@@ -319,19 +319,19 @@ export default function MyMembershipsPage() {
               {invitations.map((invitation) => (
                 <Card key={invitation.id} className="border hover:bg-accent/50 transition-colors">
                   <CardContent className="pt-6">
-                    <div className="flex items-start justify-between">
-                      <div className="space-y-2 flex-1">
+                    <div className="flex min-w-0 flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                      <div className="min-w-0 flex-1 space-y-2 break-words">
                         <div className="flex items-center gap-2 flex-wrap">
                           <Link 
                             href={`/admin/worlds/${invitation.world.id}`}
-                            className="font-semibold text-primary hover:underline"
+                            className="max-w-full break-words font-semibold text-primary hover:underline"
                           >
                             {invitation.world.name}
                           </Link>
                           <span className="text-muted-foreground">/</span>
                           <Link 
                             href={`/admin/universes/${invitation.world.universe.id}`}
-                            className="text-sm text-primary hover:underline"
+                            className="max-w-full break-words text-sm text-primary hover:underline"
                           >
                             {invitation.world.universe.name}
                           </Link>
@@ -358,9 +358,10 @@ export default function MyMembershipsPage() {
                           </p>
                         )}
                       </div>
-                      <div className="flex gap-2 ml-4">
+                      <div className="flex w-full flex-wrap gap-2 lg:w-auto lg:shrink-0">
                         <Button
                           size="sm"
+                          className="min-h-11 flex-1 basis-24 lg:flex-none"
                           variant="outline"
                           onClick={() => handleRejectInvitation(invitation.id)}
                           disabled={processingInvitation === invitation.id}
@@ -376,6 +377,7 @@ export default function MyMembershipsPage() {
                         </Button>
                         <Button
                           size="sm"
+                          className="min-h-11 flex-1 basis-24 lg:flex-none"
                           onClick={() => handleAcceptInvitation(invitation.id)}
                           disabled={processingInvitation === invitation.id}
                         >
@@ -611,4 +613,3 @@ export default function MyMembershipsPage() {
     </div>
   );
 }
-

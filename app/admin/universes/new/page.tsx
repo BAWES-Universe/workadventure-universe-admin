@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
+import { useDraft } from '../../hooks/use-draft';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
@@ -18,6 +19,8 @@ interface User {
   email: string | null;
 }
 
+const EMPTY_UNIVERSE_DRAFT = { slug: '', name: '', description: '', isPublic: true, featured: false, thumbnailUrl: '', slugManuallyEdited: false };
+
 export default function NewUniversePage() {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
@@ -34,6 +37,29 @@ export default function NewUniversePage() {
     featured: false,
     thumbnailUrl: '',
   });
+
+  // What was typed survives leaving the page (the owner is always the signed-in person, so it isn't kept).
+  const draftFields = useMemo(
+    () => ({
+      slug: formData.slug,
+      name: formData.name,
+      description: formData.description,
+      isPublic: formData.isPublic,
+      featured: formData.featured,
+      thumbnailUrl: formData.thumbnailUrl,
+      slugManuallyEdited,
+    }),
+    [formData.slug, formData.name, formData.description, formData.isPublic, formData.featured, formData.thumbnailUrl, slugManuallyEdited],
+  );
+  const { discard: discardDraft } = useDraft(
+    'universe.new',
+    draftFields,
+    ({ slugManuallyEdited: manualSlug, ...draft }) => {
+      setFormData((prev) => ({ ...prev, ...draft }));
+      setSlugManuallyEdited(manualSlug);
+    },
+    EMPTY_UNIVERSE_DRAFT,
+  );
 
   // Helper function to generate slug from name
   function generateSlug(name: string): string {
@@ -100,6 +126,7 @@ export default function NewUniversePage() {
       }
 
       const universe = await response.json();
+      discardDraft();
       router.push(`/admin/universes/${universe.id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create universe');
@@ -174,7 +201,7 @@ export default function NewUniversePage() {
                 Slug <span className="text-destructive">*</span>
               </Label>
               <p className="text-sm text-muted-foreground">
-                URL identifier (e.g., "my-universe"). Must be unique and URL-safe. Auto-generated from name, but can be edited.
+                URL identifier (e.g., &quot;my-universe&quot;). Must be unique and URL-safe. Auto-generated from name, but can be edited.
               </p>
               <Input
                 id="slug"

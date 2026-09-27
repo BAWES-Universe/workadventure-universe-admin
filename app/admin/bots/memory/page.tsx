@@ -198,7 +198,7 @@ export default function MemoryBrowsePage() {
   return (
     <div className="space-y-8">
       <div className="flex items-center justify-between">
-        <div className="flex items-center gap-4">
+        <div className="flex min-w-0 flex-col items-start gap-3 sm:flex-row sm:items-center sm:gap-4">
           <Button variant="ghost" size="sm" asChild>
             <AuthLink href="/admin/bots/database">
               <ArrowLeft className="mr-2 h-4 w-4" />

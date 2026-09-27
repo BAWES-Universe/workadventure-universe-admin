@@ -1,0 +1,124 @@
+.page { --atlas-line: hsl(var(--border)); --atlas-ink: hsl(var(--foreground)); --atlas-muted: hsl(var(--muted-foreground)); display: grid; gap: 26px; min-width: 0; padding-bottom: 12px; }
+.header { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; }
+.eyebrow { display: flex; align-items: center; gap: 7px; font-size: 10px; font-weight: 600; letter-spacing: .17em; text-transform: uppercase; color: hsl(var(--primary)); }
+.header h1 { font-size: clamp(40px, 6vw, 64px); line-height: 1.12; letter-spacing: -.07em; font-weight: 500; margin: 9px 0 7px; }
+.header h1 > span { color: hsl(var(--primary)); }
+.intro { font-size: 13px; color: var(--atlas-muted); }
+.create { display: inline-flex; flex-shrink: 0; align-items: center; justify-content: center; gap: 9px; min-height: 44px; padding: 11px 16px; color: hsl(var(--primary-foreground)); background: hsl(var(--primary)); border-radius: 999px; font-size: 12px; font-weight: 600; transition: transform 180ms, box-shadow 180ms; }
+.create:hover { transform: translateY(-2px); box-shadow: 0 5px 24px hsl(var(--primary) / .2); }
+.switcher { display: flex; gap: 26px; border-bottom: 1px solid var(--atlas-line); }
+.switcher a { min-height: 48px; display: flex; align-items: center; gap: 32px; font-size: 13px; position: relative; color: var(--atlas-muted); padding: 0 2px 9px; }
+.switcher a[aria-current] { color: var(--atlas-ink); font-weight: 600; }
+.switcher a[aria-current]::after { content: ''; height: 2px; background: hsl(var(--primary)); position: absolute; bottom: -1px; left: 0; right: 0; }
+.switcher a[aria-current] svg { color: hsl(var(--primary)); }
+.mine, .explore { display: grid; gap: 30px; }
+.sectionHeader { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 44px; margin-bottom: 12px; }
+.sectionHeader h2 { font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 11px; }
+.sectionHeader h2 > span, .routeNumber { font-size: 9px; font-weight: 400; color: var(--atlas-muted); font-family: var(--font-geist-mono), monospace; }
+.sectionHeader a { display: inline-flex; align-items: center; justify-content: flex-end; gap: 6px; min-height: 44px; font-size: 11px; color: var(--atlas-muted); white-space: nowrap; }
+.sectionHeader a:hover { color: hsl(var(--primary)); }
+.universes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.universe { --planet-color: #24c0c7; display: flex; flex-direction: column; justify-content: space-between; min-width: 0; min-height: 226px; padding: 21px; border-radius: 16px; background: hsl(var(--card)); border: 1px solid var(--atlas-line); position: relative; overflow: hidden; isolation: isolate; transition: border-color 240ms, transform 240ms; }
+.universe[data-variant='1'] { --planet-color: #d4a967; }
+.universe[data-variant='2'] { --planet-color: #8d8dd8; }
+.universe:hover { transform: translateY(-3px); border-color: color-mix(in srgb, var(--planet-color) 70%, transparent); }
+.universeTop { display: flex; justify-content: space-between; gap: 10px; position: relative; z-index: 2; color: var(--atlas-muted); text-transform: uppercase; font-size: 8px; letter-spacing: .14em; }
+.universeTop > span:last-child { display: flex; align-items: center; gap: 4px; }
+.universeBottom { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; position: relative; z-index: 2; padding-top: 89px; }
+.universeBottom > div { min-width: 0; }
+.universeBottom h3 { font-size: 21px; font-weight: 500; letter-spacing: -.035em; line-height: 1.25; overflow-wrap: anywhere; }
+.universeBottom p { color: var(--atlas-muted); margin-top: 7px; font-size: 11px; line-height: 1.7; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.cardCount { display: block; font-size: 10px; color: var(--atlas-muted); margin-top: 8px; }
+.cardArrow { flex-shrink: 0; color: var(--atlas-muted); transition: transform 200ms, color 200ms; }
+.universe:hover .cardArrow { color: hsl(var(--primary)); transform: translate(2px, -2px); }
+.celestial { position: absolute; width: 204px; height: 154px; top: 21px; right: -16px; opacity: .8; pointer-events: none; transform: rotate(-28deg); transition: transform 600ms; }
+.planet { position: absolute; width: 77px; height: 77px; border-radius: 50%; top: 35px; left: 63px; background: radial-gradient(circle at 27% 25%, color-mix(in srgb, var(--planet-color) 35%, white), var(--planet-color) 20%, color-mix(in srgb, var(--planet-color) 40%, #102534) 56%, #11212b 85%); box-shadow: -4px -3px 22px color-mix(in srgb, var(--planet-color) 15%, transparent), inset 2px 1px 5px #ffffff33; }
+.orbitRing { position: absolute; width: 177px; height: 62px; border: 1px solid color-mix(in srgb, var(--planet-color) 35%, transparent); border-radius: 50%; top: 43px; left: 11px; transform: rotate(-14deg); }
+.orbitRing::after { content: ''; position: absolute; inset: -20px -8px; border: 1px solid color-mix(in srgb, var(--planet-color) 12%, transparent); border-radius: 50%; }
+.moon { position: absolute; width: 8px; height: 8px; border-radius: 50%; background: var(--planet-color); top: 48px; left: 15px; }
+.universe:hover .celestial { transform: rotate(-17deg) translateY(-3px); }
+.collections { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 30px; }
+.rows { border-top: 1px solid var(--atlas-line); }
+.destination { display: flex; align-items: center; gap: 11px; min-height: 80px; padding: 12px 2px; border-bottom: 1px solid var(--atlas-line); transition: background 180ms; }
+.destination:hover { background: hsl(var(--primary) / .04); }
+.destinationIcon { display: grid; place-items: center; width: 34px; height: 40px; flex-shrink: 0; color: hsl(var(--primary)); }
+.destinationText { flex: 1; min-width: 0; display: grid; gap: 5px; }
+.destinationText strong { font-size: 13px; font-weight: 500; line-height: 1.4; overflow-wrap: anywhere; }
+.destinationText > span { font-size: 10px; color: var(--atlas-muted); line-height: 1.5; overflow-wrap: anywhere; }
+.destination > svg { color: var(--atlas-muted); flex-shrink: 0; }
+.empty { min-height: 138px; display: flex; align-items: flex-start; gap: 15px; padding: 22px 2px; border-top: 1px solid var(--atlas-line); }
+.empty > svg { color: hsl(var(--primary)); flex-shrink: 0; margin-top: 3px; }
+.empty h3 { font-size: 14px; font-weight: 500; letter-spacing: -.02em; }
+.empty p { font-size: 12px; line-height: 1.7; color: var(--atlas-muted); max-width: 34em; margin-top: 5px; }
+.empty a { display: inline-flex; align-items: center; gap: 7px; min-height: 44px; margin-top: 3px; color: hsl(var(--primary)); font-size: 12px; }
+.loading { display: flex; align-items: center; gap: 10px; color: var(--atlas-muted); min-height: 124px; padding: 24px 2px; font-size: 12px; }
+.loading > span { width: 7px; height: 7px; border-radius: 50%; background: hsl(var(--primary)); animation: pulse 1.4s ease-in-out infinite; }
+.error { min-height: 124px; display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 20px 2px; font-size: 12px; color: var(--atlas-muted); border-top: 1px solid var(--atlas-line); }
+.error button { display: inline-flex; align-items: center; gap: 7px; min-height: 44px; padding: 0 12px; border: 1px solid var(--atlas-line); border-radius: 999px; color: var(--atlas-ink); }
+.invitation { display: flex; align-items: center; gap: 8px; min-height: 44px; margin-bottom: 10px; font-size: 11px; color: hsl(var(--primary)); }
+.invitation > svg:last-child { margin-left: auto; }
+.templateLink { display: flex; align-items: center; gap: 15px; border-top: 1px solid var(--atlas-line); padding: 22px 0 6px; color: var(--atlas-muted); }
+.templateLink > svg:first-child { color: hsl(var(--primary)); flex-shrink: 0; }
+.templateLink > span { flex: 1; display: grid; gap: 5px; font-size: 11px; }
+.templateLink strong { color: var(--atlas-ink); font-size: 12px; font-weight: 500; }
+.discovery { display: grid; grid-template-columns: minmax(0, .9fr) minmax(0, 1.2fr); border: 1px solid var(--atlas-line); border-radius: 18px; overflow: hidden; }
+.discoveryIntro { position: relative; overflow: hidden; min-height: 360px; padding: 30px; background: hsl(var(--primary) / .035); }
+.discoveryIntro h2 { position: relative; z-index: 1; font-size: clamp(28px, 4vw, 43px); font-weight: 400; letter-spacing: -.055em; line-height: 1.12; margin: 32px 0 16px; }
+.discoveryIntro h2 em { font-weight: 400; font-family: Georgia, 'Times New Roman', serif; color: hsl(var(--primary)); }
+.discoveryIntro p { position: relative; z-index: 1; font-size: 12px; line-height: 1.8; color: var(--atlas-muted); }
+.discoveryOrbit { position: absolute; height: 160px; width: 240px; right: -45px; bottom: -40px; transform: rotate(-30deg); }
+.discoveryOrbit i { display: block; border: 1px solid hsl(var(--primary) / .2); border-radius: 50%; position: absolute; inset: 0; }
+.discoveryOrbit i:nth-child(2) { inset: 20px; }
+.discoveryOrbit i:nth-child(3) { inset: 40px; }
+.discoveryOrbit > span { position: absolute; border-radius: 50%; width: 9px; height: 9px; background: hsl(var(--primary)); top: 13px; left: 31px; }
+.discoveryLinks { display: grid; align-content: stretch; }
+.exploreLink { display: flex; align-items: center; gap: 15px; padding: 20px; border-bottom: 1px solid var(--atlas-line); transition: background 180ms; }
+.exploreLink:last-child { border-bottom: 0; }
+.exploreLink:hover { background: hsl(var(--primary) / .045); }
+.exploreLink > svg:first-of-type { color: hsl(var(--primary)); flex-shrink: 0; }
+.exploreLink > svg:last-child { color: var(--atlas-muted); margin-left: auto; flex-shrink: 0; }
+.exploreLink > span:not(.routeNumber) { display: grid; gap: 5px; }
+.exploreLink strong { font-size: 17px; letter-spacing: -.03em; font-weight: 500; }
+.exploreLink strong + span { font-size: 10px; line-height: 1.6; color: var(--atlas-muted); }
+.build { display: flex; justify-content: space-between; align-items: center; gap: 26px; padding: 15px 0; }
+.build h2 { font-size: 25px; font-weight: 400; letter-spacing: -.04em; margin: 12px 0 9px; }
+.build p:last-child { font-size: 12px; color: var(--atlas-muted); max-width: 29em; line-height: 1.8; }
+.buildActions { flex-shrink: 0; display: grid; gap: 6px; }
+.textAction { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 44px; font-size: 11px; color: var(--atlas-muted); }
+.page a:focus-visible, .page button:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 5px; }
+@keyframes pulse { 0%, 100% { opacity: .3; } 50% { opacity: 1; } }
+@media (max-width: 700px) {
+  .collections { grid-template-columns: 1fr; gap: 24px; }
+  .discovery { grid-template-columns: 1fr; }
+  .discoveryIntro { min-height: 246px; padding: 25px; }
+  .discoveryIntro h2 { margin-top: 22px; }
+  .discoveryIntro h2 br { display: none; }
+  .discoveryOrbit { right: -35px; bottom: -40px; }
+  .discoveryLinks { border-top: 1px solid var(--atlas-line); }
+  .exploreLink { padding: 20px; min-height: 97px; }
+  .build { align-items: flex-start; flex-direction: column; gap: 20px; }
+  .buildActions { display: flex; flex-wrap: wrap; gap: 10px; }
+}
+@media (max-width: 440px) {
+  .page { gap: 20px; }
+  .header { align-items: flex-start; gap: 14px; flex-direction: column; }
+  .header > .create { padding: 10px 15px; font-size: 11px; }
+  .header h1 { font-size: 43px; }
+  .universes { grid-template-columns: 1fr; }
+  .universe { min-height: 215px; padding: 20px; }
+  .universeBottom { padding-top: 85px; }
+  .celestial { right: 7px; top: 15px; }
+  .sectionHeader { gap: 8px; }
+  .sectionHeader h2 { font-size: 13px; gap: 8px; }
+  .discoveryIntro { min-height: 237px; padding: 22px; }
+  .discoveryIntro h2 { font-size: 34px; }
+  .discoveryIntro h2 br { display: initial; }
+  .exploreLink { gap: 11px; padding: 18px 15px; }
+  .exploreLink .routeNumber { display: none; }
+  .buildActions { flex-direction: column; align-items: flex-start; }
+  .buildActions > a { justify-content: flex-start; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .page *, .page *::before, .page *::after { animation: none !important; transition: none !important; }
+  .universe:hover, .universe:hover .celestial, .universe:hover .cardArrow, .create:hover { transform: none; }
+}

@@ -1,6 +1,8 @@
 'use client';
 
-import { useState, useEffect, Suspense } from 'react';
+import { useState, useEffect, Suspense, useMemo } from 'react';
+import { useDraft } from '../../hooks/use-draft';
+import { readDraft, scopedDraftKey } from '@/lib/drafts';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
@@ -31,11 +33,24 @@ interface World {
   };
 }
 
+const EMPTY_ROOM_DRAFT = {
+  slug: '', name: '', description: '', mapUrl: '', isPublic: true,
+  slugManuallyEdited: false, useTemplate: true,
+  templateMapId: null as string | null,
+  selectedTemplateSlug: null as string | null,
+  selectedMapId: null as string | null,
+  selectedMapUrl: null as string | null,
+  selectedMapPreviewImageUrl: null as string | null,
+  selectedTemplateName: null as string | null,
+  selectedMapName: null as string | null,
+};
+
 function NewRoomPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const worldIdParam = searchParams.get('worldId');
   const templateMapIdParam = searchParams.get('templateMapId');
+  const draftKey = scopedDraftKey('room.new', worldIdParam, templateMapIdParam);
   
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -62,6 +77,46 @@ function NewRoomPageContent() {
     isPublic: true,
   });
 
+  // Keep the map choice and the visible template/custom-map mode with the fields, scoped to their destination.
+  const draftFields = useMemo(
+    () => ({
+      slug: formData.slug,
+      name: formData.name,
+      description: formData.description,
+      mapUrl: formData.mapUrl,
+      isPublic: formData.isPublic,
+      slugManuallyEdited,
+      useTemplate,
+      templateMapId: formData.templateMapId,
+      selectedTemplateSlug,
+      selectedMapId,
+      selectedMapUrl,
+      selectedMapPreviewImageUrl,
+      selectedTemplateName,
+      selectedMapName,
+    }),
+    [formData.slug, formData.name, formData.description, formData.mapUrl, formData.isPublic, formData.templateMapId,
+      slugManuallyEdited, useTemplate, selectedTemplateSlug, selectedMapId, selectedMapUrl,
+      selectedMapPreviewImageUrl, selectedTemplateName, selectedMapName],
+  );
+  const { discard: discardDraft } = useDraft(
+    draftKey,
+    draftFields,
+    (draft) => {
+      setFormData((prev) => ({ ...prev, worldId: worldIdParam || '', slug: draft.slug, name: draft.name,
+        description: draft.description, mapUrl: draft.mapUrl, isPublic: draft.isPublic, templateMapId: draft.templateMapId }));
+      setSlugManuallyEdited(draft.slugManuallyEdited);
+      setUseTemplate(draft.useTemplate);
+      setSelectedTemplateSlug(draft.selectedTemplateSlug);
+      setSelectedMapId(draft.selectedMapId);
+      setSelectedMapUrl(draft.selectedMapUrl);
+      setSelectedMapPreviewImageUrl(draft.selectedMapPreviewImageUrl);
+      setSelectedTemplateName(draft.selectedTemplateName);
+      setSelectedMapName(draft.selectedMapName);
+    },
+    EMPTY_ROOM_DRAFT,
+  );
+
   // Helper function to generate slug from name
   function generateSlug(name: string): string {
     return name
@@ -78,10 +133,10 @@ function NewRoomPageContent() {
     if (!worldIdParam) {
       fetchWorlds();
     }
-    if (templateMapIdParam) {
+    if (templateMapIdParam && !readDraft(draftKey)) {
       fetchTemplateMap(templateMapIdParam);
     }
-  }, [templateMapIdParam]);
+  }, [templateMapIdParam, draftKey]);
 
   useEffect(() => {
     async function fetchWorldDetails() {
@@ -177,7 +232,7 @@ function NewRoomPageContent() {
         const data = await response.json();
         if (data.template) {
           setSelectedTemplateName(data.template.name);
-          const map = data.template.maps.find((m: any) => m.id === mapId);
+          const map = data.template.maps.find((m: { id: string; name: string; previewImageUrl?: string | null }) => m.id === mapId);
           if (map) {
             setSelectedMapName(map.name);
             setSelectedMapPreviewImageUrl(map.previewImageUrl || null);
@@ -242,7 +297,10 @@ function NewRoomPageContent() {
       const { authenticatedFetch } = await import('@/lib/client-auth');
       
       // Build request body
-      const requestBody: any = {
+      const requestBody: {
+        worldId: string; slug: string; name: string; description: string | null; isPublic: boolean;
+        templateMapId?: string; mapUrl?: string;
+      } = {
         worldId: formData.worldId,
         slug: formData.slug,
         name: formData.name,
@@ -279,6 +337,7 @@ function NewRoomPageContent() {
       }
 
       const room = await response.json();
+      discardDraft();
       router.push(`/admin/rooms/${room.id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create room');
@@ -332,7 +391,7 @@ function NewRoomPageContent() {
           <AlertTriangle className="h-4 w-4" />
           <AlertTitle>World Required</AlertTitle>
           <AlertDescription>
-            Rooms must be created from a world detail page. Please navigate to a world and click "Create Room" from there.
+            Rooms must be created from a world detail page. Please navigate to a world and click &quot;Create Room&quot; from there.
           </AlertDescription>
         </Alert>
       )}
@@ -496,7 +555,7 @@ function NewRoomPageContent() {
                 Slug <span className="text-destructive">*</span>
               </Label>
               <p className="text-sm text-muted-foreground">
-                URL identifier (e.g., "lobby"). Must be unique within the world. Auto-generated from name, but can be edited.
+                URL identifier (e.g., &quot;lobby&quot;). Must be unique within the world. Auto-generated from name, but can be edited.
               </p>
               <Input
                 id="slug"

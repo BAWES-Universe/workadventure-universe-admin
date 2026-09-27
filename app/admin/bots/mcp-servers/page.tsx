@@ -93,7 +93,7 @@ export default function McpServersPage() {
   }
 
   return (
-    <div className="space-y-6 p-6">
+    <div className="min-w-0 space-y-6 sm:p-6">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
@@ -106,7 +106,7 @@ export default function McpServersPage() {
 
       {/* Filters */}
       <div className="flex flex-wrap items-center gap-3">
-        <div className="relative flex-1 max-w-sm">
+        <div className="relative min-w-[12rem] flex-1 max-w-sm">
           <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
           <Input
             placeholder="Search by server name, URL, or bot..."
@@ -159,8 +159,8 @@ export default function McpServersPage() {
       {/* Table */}
       {!loading && !error && servers.length > 0 && (
         <Card>
-          <CardContent className="p-0">
-            <table className="w-full">
+          <CardContent className="max-w-full overflow-x-auto p-0" tabIndex={0} role="region" aria-label="MCP servers table">
+            <table className="w-full min-w-[48rem]">
               <thead>
                 <tr className="border-b">
                   <th className="text-left px-4 py-3 text-sm font-medium text-muted-foreground">Server Name</th>
@@ -223,7 +223,7 @@ export default function McpServersPage() {
           <p className="text-sm text-muted-foreground">
             Showing {((pagination.page - 1) * pagination.limit) + 1} - {Math.min(pagination.page * pagination.limit, pagination.total)} of {pagination.total} servers
           </p>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Button
               variant="outline"
               size="sm"

@@ -5,12 +5,30 @@ import { isSuperAdmin } from '@/lib/super-admin';
 
 export const runtime = 'nodejs';
 
+/**
+ * GET /api/admin/bootstrap - what the shell needs to start: who is signed in, the Universe's numbers, and the
+ * person's own: the universes they own, the worlds they belong to, the rooms they starred, invitations waiting.
+ */
 export async function GET(request: NextRequest) {
   const sessionId = getSessionId(request);
   const session = sessionId ? await getSessionData(sessionId) : null;
   if (!session) return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
 
-  const [user, universes, worlds, rooms, users, defaultUniverse, defaultWorld, defaultRoom, systemUser] = await Promise.all([
+  const [
+    user,
+    universes,
+    worlds,
+    rooms,
+    users,
+    defaultUniverse,
+    defaultWorld,
+    defaultRoom,
+    systemUser,
+    myUniverses,
+    myWorlds,
+    myStars,
+    myInvitations,
+  ] = await Promise.all([
     prisma.user.findUnique({
       where: { id: session.userId },
       select: { id: true, uuid: true, email: true, name: true },
@@ -23,6 +41,10 @@ export async function GET(request: NextRequest) {
     prisma.world.findFirst({ where: { slug: 'default', universe: { slug: 'default' } }, select: { id: true } }),
     prisma.room.findFirst({ where: { slug: 'default', world: { slug: 'default', universe: { slug: 'default' } } }, select: { id: true } }),
     prisma.user.findUnique({ where: { email: 'system@workadventure.local' }, select: { id: true } }),
+    prisma.universe.count({ where: { ownerId: session.userId } }),
+    prisma.worldMember.count({ where: { userId: session.userId } }),
+    prisma.favorite.count({ where: { userId: session.userId, roomId: { not: null } } }),
+    prisma.membershipInvitation.count({ where: { invitedUserId: session.userId, status: 'pending' } }),
   ]);
   if (!user) return NextResponse.json({ error: 'User not found' }, { status: 404 });
 
@@ -35,6 +57,7 @@ export async function GET(request: NextRequest) {
       rooms: Math.max(0, rooms - (defaultRoom ? 1 : 0)),
       users: Math.max(0, users - (systemUser ? 1 : 0)),
     },
+    mine: { universes: myUniverses, worlds: myWorlds, stars: myStars, invitations: myInvitations },
   });
   response.headers.set('Cache-Control', 'no-store');
   return response;

@@ -1,17 +1,19 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { useWorkAdventure } from '../workadventure-context';
-import RecentRoomCard from './recent-room-card';
-import { Loader2 } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import Link from 'next/link';
+import { ArrowUpRight } from 'lucide-react';
+import { authenticatedFetch } from '@/lib/client-auth';
+import RoomSignalCard from './room-signal-card';
+import type { SignalRoom } from './room-signal-data';
+import styles from './room-signal-card.module.css';
 
 interface RecentRoom {
   roomId: string;
   roomName: string;
   roomSlug: string;
-  roomDescription: string | null;
-  roomMapUrl: string | null;
-  roomFavorites: number;
+  roomDescription?: string | null;
+  roomFavorites?: number;
   worldId: string;
   worldName: string;
   worldSlug: string;
@@ -21,130 +23,56 @@ interface RecentRoom {
   accessedAt: string;
 }
 
-export default function RecentlyVisited() {
-  const { wa, isReady, isLoading } = useWorkAdventure();
-  const [recentRooms, setRecentRooms] = useState<RecentRoom[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [currentRoomId, setCurrentRoomId] = useState<string | null>(null);
-  const [hasCheckedCurrentRoom, setHasCheckedCurrentRoom] = useState(false);
+type RecentState = { kind: 'loading' | 'error' } | { kind: 'ready'; rooms: RecentRoom[] };
+
+function asSignalRoom(room: RecentRoom): SignalRoom {
+  return {
+    id: room.roomId,
+    name: room.roomName,
+    slug: room.roomSlug,
+    description: room.roomDescription,
+    _count: { favorites: room.roomFavorites },
+    accessedAt: room.accessedAt,
+    world: {
+      id: room.worldId, name: room.worldName, slug: room.worldSlug,
+      universe: { id: room.universeId, name: room.universeName, slug: room.universeSlug },
+    },
+  };
+}
+
+/** Personal, access-filtered destinations: keep the visit trail useful even when optional analytics fail. */
+export default function RecentlyVisited({ limit = 4 }: { limit?: number }) {
+  const [state, setState] = useState<RecentState>({ kind: 'loading' });
+  const [retry, setRetry] = useState(0);
 
   useEffect(() => {
-    async function getCurrentRoomId() {
-      // If WorkAdventure is not available or still loading, mark as checked and proceed
-      if (!isReady || !wa) {
-        // Give it a moment to initialize, then mark as checked
-        if (!isLoading) {
-          setTimeout(() => setHasCheckedCurrentRoom(true), 1000);
-        }
-        return;
-      }
-
+    const controller = new AbortController();
+    setState({ kind: 'loading' });
+    async function load() {
       try {
-        await wa.onInit();
-        const roomIdValue = wa.room.id as string | undefined;
-
-        if (roomIdValue) {
-          // Fetch room details to get the room ID
-          try {
-            const { authenticatedFetch } = await import('@/lib/client-auth');
-            const response = await authenticatedFetch(
-              `/api/admin/rooms/from-play-uri?playUri=${encodeURIComponent(roomIdValue)}`,
-            );
-
-            if (response.ok) {
-              const data = await response.json();
-              setCurrentRoomId(data.id);
-            }
-          } catch (err) {
-            console.error('[RecentlyVisited] Failed to resolve current room:', err);
-          }
-        }
-        setHasCheckedCurrentRoom(true);
-      } catch (err) {
-        console.error('[RecentlyVisited] Failed to get room info:', err);
-        setHasCheckedCurrentRoom(true);
+        const response = await authenticatedFetch(`/api/admin/rooms/recent?limit=${limit}`, { signal: controller.signal });
+        if (!response.ok) throw new Error('Recent rooms unavailable');
+        const data = await response.json() as { rooms?: RecentRoom[] };
+        if (!Array.isArray(data.rooms)) throw new Error('Invalid recent rooms response');
+        if (!controller.signal.aborted) setState({ kind: 'ready', rooms: data.rooms });
+      } catch {
+        if (!controller.signal.aborted) setState({ kind: 'error' });
       }
     }
-
-    if (isReady && wa) {
-      getCurrentRoomId();
-    } else if (!isLoading) {
-      // If WorkAdventure is not available, wait a bit then mark as checked
-      const timeout = setTimeout(() => {
-        setHasCheckedCurrentRoom(true);
-      }, 1000);
-      return () => clearTimeout(timeout);
-    }
-  }, [wa, isReady, isLoading]);
-
-  useEffect(() => {
-    async function fetchRecentRooms() {
-      if (!hasCheckedCurrentRoom) {
-        return; // Wait until we've checked for current room
-      }
-
-      try {
-        setLoading(true);
-        const { authenticatedFetch } = await import('@/lib/client-auth');
-        const excludeParam = currentRoomId ? `&excludeRoomId=${encodeURIComponent(currentRoomId)}` : '';
-        const response = await authenticatedFetch(
-          `/api/admin/rooms/recent?limit=2${excludeParam}`,
-        );
-
-        if (response.ok) {
-          const data = await response.json();
-          setRecentRooms(data.rooms || []);
-        }
-      } catch (err) {
-        console.error('[RecentlyVisited] Failed to fetch recent rooms:', err);
-      } finally {
-        setLoading(false);
-      }
-    }
-
-    fetchRecentRooms();
-  }, [currentRoomId, hasCheckedCurrentRoom]);
-
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center py-12">
-        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-      </div>
-    );
-  }
-
-  if (recentRooms.length === 0) {
-    return null;
-  }
+    void load();
+    return () => controller.abort();
+  }, [limit, retry]);
 
   return (
-    <section className="space-y-3">
-      <div className="space-y-1">
-        <h2 className="text-xl font-semibold tracking-tight">Recently visited</h2>
-        <p className="text-sm text-muted-foreground">
-          Jump back into rooms that have been active most recently.
-        </p>
+    <section className={`observatory-recent ${styles.recentSection}`} data-testid="recently-visited" aria-labelledby="recent-rooms-heading">
+      <div className={styles.recentHeading}>
+        <div><h2 id="recent-rooms-heading">Recently visited</h2><p>A trail of rooms worth returning to.</p></div>
+        {state.kind === 'ready' && state.rooms.length > 0 && <span aria-label={`${state.rooms.length} recent rooms`}>{String(state.rooms.length).padStart(2, '0')}</span>}
       </div>
-      <div className="grid gap-4 md:grid-cols-2">
-        {recentRooms.map((room) => (
-          <RecentRoomCard
-            key={room.roomId}
-            room={{
-              roomId: room.roomId,
-              roomName: room.roomName,
-              roomSlug: room.roomSlug,
-              worldId: room.worldId,
-              worldName: room.worldName,
-              worldSlug: room.worldSlug,
-              universeId: room.universeId,
-              universeName: room.universeName,
-              universeSlug: room.universeSlug,
-              accessedAt: new Date(room.accessedAt),
-            }}
-          />
-        ))}
-      </div>
+      {state.kind === 'loading' && <div className={styles.recentGrid} role="status" aria-label="Loading recent rooms"><div className={styles.skeleton} /><div className={styles.skeleton} /></div>}
+      {state.kind === 'error' && <div className={styles.notice}><p>We couldn&apos;t load your recent rooms.</p><button type="button" className={styles.retry} onClick={() => setRetry((value) => value + 1)}>Try again</button></div>}
+      {state.kind === 'ready' && state.rooms.length === 0 && <div className={styles.notice}><p>Your visits will leave a trail here. Step into a room to begin.</p><Link href="/admin/spaces" className={styles.detailsLink}>Explore universes <ArrowUpRight size={15} aria-hidden="true" /></Link></div>}
+      {state.kind === 'ready' && state.rooms.length > 0 && <div className={styles.recentGrid}>{state.rooms.map((room, index) => <RoomSignalCard key={room.roomId} room={asSignalRoom(room)} index={index} />)}</div>}
     </section>
   );
 }
-

@@ -527,15 +527,15 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
   return (
     <div className="space-y-8">
       <div className="flex items-center justify-between">
-          <div className="flex items-center gap-4">
+          <div className="flex min-w-0 flex-col items-start gap-3 sm:flex-row sm:items-center sm:gap-4">
           <Button variant="ghost" size="sm" asChild>
             <AuthLink href="/admin/bots">
               <ArrowLeft className="mr-2 h-4 w-4" />
               Back to Bots
             </AuthLink>
           </Button>
-          <div className="space-y-1">
-            <h1 className="text-4xl font-bold tracking-tight">{bot ? bot.name : 'Bot Usage History'}</h1>
+          <div className="min-w-0 space-y-1">
+            <h1 className="break-words text-3xl font-bold tracking-tight sm:text-4xl">{bot ? bot.name : 'Bot Usage History'}</h1>
             <p className="text-muted-foreground text-lg">
               Bot details and usage history
             </p>
@@ -558,7 +558,8 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
           }
           setActiveTab(value);
         }} className="w-full">
-        <TabsList className="grid w-full grid-cols-6">
+        <div className="max-w-full overflow-x-auto pb-1">
+        <TabsList className="flex h-auto w-max min-w-full justify-start [&>button]:min-h-11 [&>button]:shrink-0 [&>button]:px-4" aria-label="Bot tools">
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="usage">Usage</TabsTrigger>
           <TabsTrigger value="metrics">Metrics</TabsTrigger>
@@ -566,6 +567,7 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
           <TabsTrigger value="emotions">Emotions</TabsTrigger>
           <TabsTrigger value="mcp-servers">MCP Servers</TabsTrigger>
         </TabsList>
+        </div>
 
         {/* Overview Tab */}
         <TabsContent value="overview" className="space-y-6 animate-in fade-in-50 duration-200">

@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
+import { useDraft } from '../hooks/use-draft';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
@@ -23,6 +24,20 @@ export default function VisitCardPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
+  // What the server has, so a draft is only kept while something differs from it.
+  const [saved, setSaved] = useState<{ bio: string; links: LinkItem[] }>({ bio: '', links: [] });
+
+  const draftValue = useMemo(() => ({ bio, links }), [bio, links]);
+  const { discard: discardDraft } = useDraft(
+    'visit-card',
+    draftValue,
+    (draft) => {
+      setBio(draft.bio);
+      setLinks(draft.links);
+    },
+    saved,
+    !loading,
+  );
 
   useEffect(() => {
     checkAuth();
@@ -58,6 +73,7 @@ export default function VisitCardPage() {
       const data = await response.json();
       setBio(data.bio || '');
       setLinks(data.links || []);
+      setSaved({ bio: data.bio || '', links: data.links || [] });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load visit card');
     } finally {
@@ -104,6 +120,12 @@ export default function VisitCardPage() {
         throw new Error(errorData.error || 'Failed to save visit card');
       }
 
+      const savedBio = bio.trim();
+      const savedLinks = links.filter(link => link.label.trim() && link.url.trim());
+      setBio(savedBio);
+      setLinks(savedLinks);
+      setSaved({ bio: savedBio, links: savedLinks });
+      discardDraft();
       setSuccess(true);
       setTimeout(() => setSuccess(false), 3000);
     } catch (err) {
@@ -288,4 +310,3 @@ export default function VisitCardPage() {
     </div>
   );
 }
-

@@ -13,6 +13,7 @@ import {
   type OrbitBridgeAckError,
   type OrbitBridgeReady,
   type OrbitEventTopic,
+  type OrbitView,
 } from '@/lib/orbit-bridge';
 
 /** Fired on `window` when the game says something changed, for pages that keep their own data. */
@@ -37,13 +38,22 @@ async function resolvePage(intent: string, params: Record<string, string> | unde
  * Orbit's end of the bridge (see lib/orbit-bridge.ts). Mounted by the shell once the session is loaded, so it only
  * says it is ready (and so only receives page requests) after sign-in has completed.
  */
-export default function OrbitBridge({ onRefresh }: { onRefresh: () => void }) {
+export default function OrbitBridge({
+  onRefresh,
+  onView,
+}: {
+  onRefresh: () => void;
+  /** The game said which view (compact or full-screen) its frame is in. */
+  onView?: (view: OrbitView) => void;
+}) {
   const router = useRouter();
   const roomRevision = useRef<string | null>(null);
   const onRefreshRef = useRef(onRefresh);
+  const onViewRef = useRef(onView);
   useEffect(() => {
     onRefreshRef.current = onRefresh;
-  }, [onRefresh]);
+    onViewRef.current = onView;
+  }, [onRefresh, onView]);
 
   useEffect(() => {
     if (!isInsideFrame()) return;
@@ -64,6 +74,12 @@ export default function OrbitBridge({ onRefresh }: { onRefresh: () => void }) {
 
       if (parsed.kind === 'init') {
         roomRevision.current = parsed.message.roomRevision;
+        if (parsed.message.view) onViewRef.current?.(parsed.message.view);
+        return;
+      }
+
+      if (parsed.kind === 'view') {
+        onViewRef.current?.(parsed.message.view);
         return;
       }
 

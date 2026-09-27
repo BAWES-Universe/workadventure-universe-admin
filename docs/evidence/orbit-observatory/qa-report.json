@@ -1,0 +1,404 @@
+{
+  "fixture": "All data and game interactions are simulated; actual Orbit application renders inside cross-origin localhost iframe.",
+  "fixedTime": "2026-09-27T09:00:00.000Z",
+  "screenshots": [
+    "phone-390x844-compact-dark.webp",
+    "phone-390x844-compact-light.webp",
+    "phone-390x844-full-dark.webp",
+    "phone-390x844-full-light.webp",
+    "desktop-1440x900-compact-dark.webp",
+    "desktop-1440x900-compact-light.webp",
+    "desktop-1440x900-full-dark.webp",
+    "desktop-1440x900-full-light.webp",
+    "phone-compact-spaces.webp",
+    "phone-compact-spaces-explore.webp",
+    "phone-compact-you.webp",
+    "phone-compact-bots.webp",
+    "phone-compact-memberships.webp",
+    "phone-compact-profile.webp",
+    "phone-compact-membership-dialog.webp",
+    "phone-compact-you-lower.webp",
+    "phone-compact-spaces-explore-lower.webp",
+    "phone-compact-menu-search.webp",
+    "390-full-light-spaces.webp",
+    "390-full-light-spaces-explore.webp",
+    "390-full-light-you.webp",
+    "1440-full-dark-spaces.webp",
+    "1440-full-dark-spaces-explore.webp",
+    "1440-full-dark-you.webp",
+    "1440-full-light-spaces.webp",
+    "1440-full-light-spaces-explore.webp",
+    "1440-full-light-you.webp"
+  ],
+  "checks": [
+    {
+      "description": "Home phone-390x844-compact-dark",
+      "width": 312,
+      "documentWidth": 312,
+      "title": "Your orbit.",
+      "clippedTargets": [],
+      "overflow": false,
+      "error": false
+    },
+    {
+      "description": "Home phone-390x844-compact-light",
+      "width": 312,
+      "documentWidth": 312,
+      "title": "Your orbit.",
+      "clippedTargets": [],
+      "overflow": false,
+      "error": false
+    },
+    {
+      "description": "Home phone-390x844-full-dark",
+      "width": 390,
+      "documentWidth": 390,
+      "title": "Your orbit.",
+      "clippedTargets": [],
+      "overflow": false,
+      "error": false
+    },
+    {
+      "description": "Home phone-390x844-full-light",
+      "width": 390,
+      "documentWidth": 390,
+      "title": "Your orbit.",
+      "clippedTargets": [],
+      "overflow": false,
+      "error": false
+    },
+    {
+      "description": "Home desktop-1440x900-compact-dark",
+      "width": 475,
+      "documentWidth": 475,
+      "title": "Your orbit.",
+      "clippedTargets": [],
+      "overflow": false,
+      "error": false
+    },
+    {
+      "description": "Home desktop-1440x900-compact-light",
+      "width": 475,
+      "documentWidth": 475,
+      "title": "Your orbit.",
+      "clippedTargets": [],
+      "overflow": false,
+      "error": false
+    },
+    {
+      "description": "Home desktop-1440x900-full-dark",
+      "width": 1440,
+      "documentWidth": 1440,
+      "title": "Your orbit.",
+      "clippedTargets": [],
+      "overflow": false,
+      "error": false
+    },
+    {
+      "description": "Home desktop-1440x900-full-light",
+      "width": 1440,
+      "documentWidth": 1440,
+      "title": "Your orbit.",
+      "clippedTargets": [],
+      "overflow": false,
+      "error": false
+    },
+    {
+      "description": "312px admin route /admin/spaces",
+      "width": 312,
+      "documentWidth": 312,
+      "title": "Spaces.",
+      "clippedTargets": [],
+      "overflow": false,
+      "error": false
+    },
+    {
+      "description": "312px admin route /admin/spaces?tab=explore",
+      "width": 312,
+      "documentWidth": 312,
+      "title": "Spaces.",
+      "clippedTargets": [],
+      "overflow": false,
+      "error": false
+    },
+    {
+      "description": "312px admin route /admin/you",
+      "width": 312,
+      "documentWidth": 312,
+      "title": "You, in every world.",
+      "clippedTargets": [],
+      "overflow": false,
+      "error": false
+    },
+    {
+      "description": "312px admin route /admin/avatars",
+      "width": 312,
+      "documentWidth": 312,
+      "title": "Avatar Sets",
+      "clippedTargets": [],
+      "overflow": false,
+      "error": false
+    },
+    {
+      "description": "312px admin route /admin/bots",
+      "width": 312,
+      "documentWidth": 312,
+      "title": "Bots",
+      "clippedTargets": [],
+      "overflow": false,
+      "error": false
+    },
+    {
+      "description": "312px admin route /admin/ai-providers",
+      "width": 312,
+      "documentWidth": 312,
+      "title": "AI Providers",
+      "clippedTargets": [],
+      "overflow": false,
+      "error": false
+    },
+    {
+      "description": "312px admin route /admin/ai-providers/usage",
+      "width": 312,
+      "documentWidth": 312,
+      "title": "AI Usage Dashboard",
+      "clippedTargets": [],
+      "overflow": false,
+      "error": false
+    },
+    {
+      "description": "312px admin route /admin/bots/database",
+      "width": 312,
+      "documentWidth": 312,
+      "title": "Bot Database Monitoring",
+      "clippedTargets": [],
+      "overflow": false,
+      "error": false
+    },
+    {
+      "description": "312px admin route /admin/bots/mcp-servers",
+      "width": 312,
+      "documentWidth": 312,
+      "title": "MCP Servers",
+      "clippedTargets": [],
+      "overflow": false,
+      "error": false
+    },
+    {
+      "description": "312px admin route /admin/templates",
+      "width": 312,
+      "documentWidth": 312,
+      "title": "Room Templates",
+      "clippedTargets": [],
+      "overflow": false,
+      "error": false
+    },
+    {
+      "description": "312px admin route /admin/users",
+      "width": 312,
+      "documentWidth": 312,
+      "title": "Users",
+      "clippedTargets": [],
+      "overflow": false,
+      "error": false
+    },
+    {
+      "description": "312px admin route /admin/memberships",
+      "width": 312,
+      "documentWidth": 312,
+      "title": "My Memberships",
+      "clippedTargets": [],
+      "overflow": false,
+      "error": false
+    },
+    {
+      "description": "312px admin route /admin/stars",
+      "width": 312,
+      "documentWidth": 312,
+      "title": "My Stars",
+      "clippedTargets": [],
+      "overflow": false,
+      "error": false
+    },
+    {
+      "description": "312px admin route /admin/profile",
+      "width": 312,
+      "documentWidth": 312,
+      "title": "Customize Visit Card",
+      "clippedTargets": [],
+      "overflow": false,
+      "error": false
+    },
+    {
+      "description": "312px admin route /admin/universes",
+      "width": 312,
+      "documentWidth": 312,
+      "title": "My Universes",
+      "clippedTargets": [],
+      "overflow": false,
+      "error": false
+    },
+    {
+      "description": "312px admin route /admin/discover/worlds",
+      "width": 312,
+      "documentWidth": 312,
+      "title": "Discover Worlds",
+      "clippedTargets": [],
+      "overflow": false,
+      "error": false
+    },
+    {
+      "description": "312px admin route /admin/discover/rooms",
+      "width": 312,
+      "documentWidth": 312,
+      "title": "Discover Rooms",
+      "clippedTargets": [],
+      "overflow": false,
+      "error": false
+    },
+    {
+      "description": "Membership confirmation Escape dismisses only dialog, with no mutation",
+      "passed": true
+    },
+    {
+      "description": "You lower content reaches theme and Sign out; radio keyboard changes theme",
+      "passed": true
+    },
+    {
+      "description": "Explore build and templates actions reachable by scrolling",
+      "passed": true
+    },
+    {
+      "description": "Reduced motion suppresses page-entry animation duration",
+      "passed": true,
+      "normalMotion": "0.22s",
+      "reducedMotion": "1e-05s"
+    },
+    {
+      "description": "All 11 required super-admin destinations reachable from menu",
+      "passed": true
+    },
+    {
+      "description": "Menu search filters destinations; Escape closes only menu and restores trigger focus",
+      "passed": true
+    },
+    {
+      "description": "Capability-negotiated menu view control expands phone frame and returns compact",
+      "passed": true
+    },
+    {
+      "description": "Home → Spaces → Universes: browser Back/Forward then shell Back returns to Spaces",
+      "passed": true
+    },
+    {
+      "description": "Query-only history replacement preserves shell Back destination",
+      "passed": true
+    },
+    {
+      "description": "Fresh deep-link Back falls back to registered parent",
+      "passed": true
+    },
+    {
+      "description": "Universe draft survives navigating away and reloading",
+      "passed": true
+    },
+    {
+      "description": "Escape in a form blurs field without closing Orbit",
+      "passed": true
+    },
+    {
+      "description": "Escape with no higher layer asks game to close Orbit",
+      "passed": true
+    },
+    {
+      "description": "390px full light /admin/spaces",
+      "width": 390,
+      "documentWidth": 390,
+      "title": "Spaces.",
+      "clippedTargets": [],
+      "overflow": false,
+      "error": false
+    },
+    {
+      "description": "390px full light /admin/spaces?tab=explore",
+      "width": 390,
+      "documentWidth": 390,
+      "title": "Spaces.",
+      "clippedTargets": [],
+      "overflow": false,
+      "error": false
+    },
+    {
+      "description": "390px full light /admin/you",
+      "width": 390,
+      "documentWidth": 390,
+      "title": "You, in every world.",
+      "clippedTargets": [],
+      "overflow": false,
+      "error": false
+    },
+    {
+      "description": "1440px full dark /admin/spaces",
+      "width": 1440,
+      "documentWidth": 1440,
+      "title": "Spaces.",
+      "clippedTargets": [],
+      "overflow": false,
+      "error": false
+    },
+    {
+      "description": "1440px full dark /admin/spaces?tab=explore",
+      "width": 1440,
+      "documentWidth": 1440,
+      "title": "Spaces.",
+      "clippedTargets": [],
+      "overflow": false,
+      "error": false
+    },
+    {
+      "description": "1440px full dark /admin/you",
+      "width": 1440,
+      "documentWidth": 1440,
+      "title": "You, in every world.",
+      "clippedTargets": [],
+      "overflow": false,
+      "error": false
+    },
+    {
+      "description": "1440px full light /admin/spaces",
+      "width": 1440,
+      "documentWidth": 1440,
+      "title": "Spaces.",
+      "clippedTargets": [],
+      "overflow": false,
+      "error": false
+    },
+    {
+      "description": "1440px full light /admin/spaces?tab=explore",
+      "width": 1440,
+      "documentWidth": 1440,
+      "title": "Spaces.",
+      "clippedTargets": [],
+      "overflow": false,
+      "error": false
+    },
+    {
+      "description": "1440px full light /admin/you",
+      "width": 1440,
+      "documentWidth": 1440,
+      "title": "You, in every world.",
+      "clippedTargets": [],
+      "overflow": false,
+      "error": false
+    }
+  ],
+  "unknownApiRequests": [],
+  "pageErrors": [],
+  "screenshotEncoding": {
+    "format": "lossless WebP",
+    "sourceFormat": "PNG",
+    "decodedRgbaIdentityVerified": true,
+    "count": 27
+  },
+  "copyOnlyEvidenceRefresh": "Home and Explore screenshots refreshed after vocabulary-only copy changes; prior functional results retained, matching layout checks rerun."
+}
