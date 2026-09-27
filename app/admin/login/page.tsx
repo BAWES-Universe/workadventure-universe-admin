@@ -47,6 +47,8 @@ export default function LoginPage() {
   const [outsideUniverse, setOutsideUniverse] = useState(false);
   const activeNonce = useRef<string | null>(null);
   const handshakeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // One second try with a renewed token: the game's OIDC access token runs out long before its own sign-in does.
+  const renewalTried = useRef(false);
 
   const exchangeToken = useCallback(async (accessToken: string) => {
     setLoading(true);
@@ -68,7 +70,7 @@ export default function LoginPage() {
     window.location.replace(getSafeRedirect());
   }, []);
 
-  const beginIframeHandshake = useCallback(() => {
+  const beginIframeHandshake = useCallback((refresh = false) => {
     if (!isInsideFrame()) {
       setOutsideUniverse(true);
       setLoading(false);
@@ -86,7 +88,7 @@ export default function LoginPage() {
       setOutsideUniverse(true);
       setLoading(false);
     }, HANDSHAKE_TIMEOUT_MS);
-    window.parent.postMessage({ type: 'orbit-auth-ready-v2', version: 2, nonce }, PLAY_ORIGIN);
+    window.parent.postMessage({ type: 'orbit-auth-ready-v2', version: 2, nonce, ...(refresh ? { refresh: true } : {}) }, PLAY_ORIGIN);
     setLoading(true);
   }, []);
 
@@ -99,7 +101,18 @@ export default function LoginPage() {
       activeNonce.current = null;
       if (handshakeTimer.current) clearTimeout(handshakeTimer.current);
       void exchangeToken(message.accessToken).catch((cause) => {
-        setError(cause instanceof Error ? cause.message : 'Login failed');
+        const reason = cause instanceof Error ? cause.message : 'Login failed';
+        // Refused with an expired token: ask the game for a renewed one, once.
+        if (/expired/i.test(reason) && !renewalTried.current) {
+          renewalTried.current = true;
+          beginIframeHandshake(true);
+          return;
+        }
+        setError(
+          renewalTried.current && /expired/i.test(reason)
+            ? 'Universe couldn\'t sign you in to Orbit. Select Continue with Universe to try again.'
+            : reason,
+        );
         setLoading(false);
       });
     };
@@ -151,7 +164,7 @@ export default function LoginPage() {
         <div className="orbit-card orbit-rise w-full max-w-md space-y-5 p-6 text-center">
           <OrbitMark className="mx-auto h-12 w-12" />
           <p className="text-[15px]">Orbit runs inside Universe. <a className="font-medium text-primary underline-offset-4 hover:underline" href={PLAY_URL} target="_top" rel="noopener">Open Universe</a></p>
-          {isInsideFrame() && <Button className="w-full" onClick={beginIframeHandshake}>Try again</Button>}
+          {isInsideFrame() && <Button className="w-full" onClick={() => { renewalTried.current = false; beginIframeHandshake(); }}>Try again</Button>}
           {manualForm}
         </div>
       </div>
@@ -167,7 +180,13 @@ export default function LoginPage() {
           <p className="text-sm text-muted-foreground">{signedOut ? 'Your Orbit session has been revoked.' : 'Waiting for Universe authentication.'}</p>
         </div>
         {error && <Alert variant="destructive"><AlertCircle className="h-4 w-4" /><AlertTitle>Authentication failed</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
-        <Button className="w-full" onClick={() => { setSignedOut(false); sessionStorage.removeItem(LOGOUT_SUPPRESSION_KEY); beginIframeHandshake(); }}>
+        <Button className="w-full" onClick={() => {
+          setSignedOut(false);
+          sessionStorage.removeItem(LOGOUT_SUPPRESSION_KEY);
+          // A fresh attempt gets its own renewal try, so an expired token can still be renewed from here.
+          renewalTried.current = false;
+          beginIframeHandshake();
+        }}>
           Continue with Universe
         </Button>
         {manualForm}
