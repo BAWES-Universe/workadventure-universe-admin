@@ -2,13 +2,12 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
-import AuthLink from '@/app/admin/auth-link';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent } from '@/components/ui/card';
-import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Input } from '@/components/ui/input';
-import { AlertCircle, Loader2, Server, Search, Wifi, WifiOff } from 'lucide-react';
-import { Badge } from '@/components/ui/badge';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Search } from 'lucide-react';
+import { EmptyCard, EntityRow, LoadError, LoadingRows, PageHeader, StatLine } from '../../components/ds';
+import { FilterField, FilterRow, ListPager, Pill, type PageInfo } from '../bots-ui';
 
 interface McpServerEntry {
   id: string;
@@ -22,19 +21,12 @@ interface McpServerEntry {
   botOwner: { name: string | null; email: string | null } | null;
 }
 
-interface Pagination {
-  page: number;
-  limit: number;
-  total: number;
-  totalPages: number;
-}
-
 export default function McpServersPage() {
   const router = useRouter();
   const [servers, setServers] = useState<McpServerEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [pagination, setPagination] = useState<Pagination | null>(null);
+  const [pagination, setPagination] = useState<PageInfo | null>(null);
   const [filters, setFilters] = useState({ search: '', enabled: '', page: 1, limit: 20 });
   const [searchInput, setSearchInput] = useState('');
 
@@ -92,158 +84,94 @@ export default function McpServersPage() {
     setFilters((prev) => ({ ...prev, page: newPage }));
   }
 
+  const filtered = Boolean(filters.search || filters.enabled);
+
   return (
-    <div className="space-y-6 p-6">
-      {/* Header */}
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold">MCP Servers</h1>
-          <p className="text-muted-foreground text-sm">
-            View all MCP servers across all bots
-          </p>
-        </div>
-      </div>
+    <div className="grid min-w-0 gap-6">
+      <PageHeader
+        kind="bot"
+        title="MCP servers"
+        context={
+          <span>
+            An MCP (Model Context Protocol) server gives a bot extra tools. These are every bot’s servers; open one to
+            manage them.
+          </span>
+        }
+      />
 
-      {/* Filters */}
-      <div className="flex flex-wrap items-center gap-3">
-        <div className="relative flex-1 max-w-sm">
-          <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-          <Input
-            placeholder="Search by server name, URL, or bot..."
-            value={searchInput}
-            onChange={(e) => setSearchInput(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
-            className="pl-8"
-          />
-        </div>
-        <Button variant="secondary" onClick={handleSearch}>Search</Button>
-        <select
-          value={filters.enabled}
-          onChange={(e) => setFilters((prev) => ({ ...prev, enabled: e.target.value, page: 1 }))}
-          className="h-9 rounded-md border border-input bg-transparent px-3 text-sm"
-        >
-          <option value="">All Status</option>
-          <option value="true">Enabled</option>
-          <option value="false">Disabled</option>
-        </select>
-      </div>
-
-      {/* Error */}
-      {error && (
-        <Alert variant="destructive">
-          <AlertCircle className="h-4 w-4" />
-          <AlertDescription>{error}</AlertDescription>
-        </Alert>
-      )}
-
-      {/* Loading */}
-      {loading && (
-        <div className="flex items-center justify-center min-h-[200px]">
-          <Loader2 className="h-8 w-8 animate-spin" />
-        </div>
-      )}
-
-      {/* Empty */}
-      {!loading && !error && servers.length === 0 && (
-        <Card>
-          <CardContent className="flex flex-col items-center justify-center py-12">
-            <Server className="h-12 w-12 text-muted-foreground mb-4" />
-            <p className="text-muted-foreground text-lg font-medium mb-1">No MCP servers found</p>
-            <p className="text-muted-foreground text-sm">
-              {filters.search ? 'Try adjusting your search filters.' : 'No MCP servers have been configured yet.'}
-            </p>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Table */}
-      {!loading && !error && servers.length > 0 && (
-        <Card>
-          <CardContent className="p-0">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b">
-                  <th className="text-left px-4 py-3 text-sm font-medium text-muted-foreground">Server Name</th>
-                  <th className="text-left px-4 py-3 text-sm font-medium text-muted-foreground">Bot</th>
-                  <th className="text-left px-4 py-3 text-sm font-medium text-muted-foreground">URL</th>
-                  <th className="text-left px-4 py-3 text-sm font-medium text-muted-foreground">Auth</th>
-                  <th className="text-left px-4 py-3 text-sm font-medium text-muted-foreground">Status</th>
-                  <th className="text-left px-4 py-3 text-sm font-medium text-muted-foreground">Owner</th>
-                  <th className="text-left px-4 py-3 text-sm font-medium text-muted-foreground">Created</th>
-                </tr>
-              </thead>
-              <tbody>
-                {servers.map((server) => (
-                  <tr key={server.id} className="border-b last:border-b-0 hover:bg-muted/50 transition-colors">
-                    <td className="px-4 py-3 font-medium">{server.name}</td>
-                    <td className="px-4 py-3">
-                      <AuthLink
-                        href={`/admin/bots/${server.botId}`}
-                        className="text-blue-500 hover:underline"
-                      >
-                        {server.botName}
-                      </AuthLink>
-                    </td>
-                    <td className="px-4 py-3 max-w-[200px] truncate text-sm text-muted-foreground">
-                      {server.serverUrl}
-                    </td>
-                    <td className="px-4 py-3">
-                      <Badge variant={server.authType === 'none' ? 'secondary' : 'outline'}>
-                        {server.authType}
-                      </Badge>
-                    </td>
-                    <td className="px-4 py-3">
-                      {server.enabled ? (
-                        <span className="flex items-center gap-1 text-green-600 text-sm">
-                          <Wifi className="h-3 w-3" /> Enabled
-                        </span>
-                      ) : (
-                        <span className="flex items-center gap-1 text-muted-foreground text-sm">
-                          <WifiOff className="h-3 w-3" /> Disabled
-                        </span>
-                      )}
-                    </td>
-                    <td className="px-4 py-3 text-sm text-muted-foreground">
-                      {server.botOwner?.name || server.botOwner?.email || 'Unknown'}
-                    </td>
-                    <td className="px-4 py-3 text-sm text-muted-foreground">
-                      {new Date(server.createdAt).toLocaleDateString()}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Pagination */}
-      {pagination && pagination.totalPages > 1 && (
-        <div className="flex items-center justify-between">
-          <p className="text-sm text-muted-foreground">
-            Showing {((pagination.page - 1) * pagination.limit) + 1} - {Math.min(pagination.page * pagination.limit, pagination.total)} of {pagination.total} servers
-          </p>
-          <div className="flex items-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={pagination.page <= 1}
-              onClick={() => handlePageChange(pagination.page - 1)}
-            >
-              Previous
-            </Button>
-            <span className="text-sm text-muted-foreground">Page {pagination.page} of {pagination.totalPages}</span>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={pagination.page >= pagination.totalPages}
-              onClick={() => handlePageChange(pagination.page + 1)}
-            >
-              Next
+      <FilterRow label="Filter MCP servers" className="lg:grid-cols-3">
+        <FilterField id="mcpSearch" label="Search">
+          <div className="flex gap-2">
+            <Input
+              id="mcpSearch"
+              type="search"
+              className="h-11"
+              placeholder="Server name, URL or bot"
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
+            />
+            <Button type="button" variant="outline" className="h-11 w-11 shrink-0 px-0" aria-label="Search" onClick={handleSearch}>
+              <Search className="h-4 w-4" aria-hidden="true" />
             </Button>
           </div>
+        </FilterField>
+        <FilterField id="mcpEnabled" label="Status">
+          <Select
+            value={filters.enabled || 'all'}
+            onValueChange={(value) => setFilters((prev) => ({ ...prev, enabled: value === 'all' ? '' : value, page: 1 }))}
+          >
+            <SelectTrigger id="mcpEnabled" className="h-11">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All</SelectItem>
+              <SelectItem value="true">Enabled</SelectItem>
+              <SelectItem value="false">Disabled</SelectItem>
+            </SelectContent>
+          </Select>
+        </FilterField>
+      </FilterRow>
+
+      {error && <LoadError label="MCP servers" retry={() => fetchServers()} />}
+
+      {loading && servers.length === 0 ? (
+        <LoadingRows label="MCP servers" rows={4} />
+      ) : servers.length === 0 ? (
+        !error &&
+        (filtered ? (
+          <p className="text-sm text-muted-foreground" role="status">
+            No MCP servers match these filters.
+          </p>
+        ) : (
+          <EmptyCard kind="bot" title="No MCP servers yet." text="Add one from a bot’s page to give it extra tools." />
+        ))
+      ) : (
+        <div className="grid min-w-0 gap-0.5">
+          {servers.map((server) => (
+            <EntityRow
+              key={server.id}
+              href={`/admin/bots/${server.botId}/mcp-servers`}
+              kind="bot"
+              title={server.name}
+              context={<span className="text-sm text-muted-foreground">For {server.botName}</span>}
+              meta={
+                <StatLine
+                  items={[
+                    server.serverUrl,
+                    server.authType === 'none' ? 'no auth' : server.authType,
+                    `owner ${server.botOwner?.name || server.botOwner?.email || 'unknown'}`,
+                    `added ${new Date(server.createdAt).toLocaleDateString()}`,
+                  ]}
+                />
+              }
+              aside={<Pill tone={server.enabled ? 'ok' : 'off'}>{server.enabled ? 'Enabled' : 'Disabled'}</Pill>}
+            />
+          ))}
         </div>
       )}
+
+      <ListPager pagination={pagination} noun={['server', 'servers']} loading={loading} onChange={handlePageChange} />
     </div>
   );
 }
