@@ -4,9 +4,14 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 /*
- * Orbit's look is the game's: deep navy surfaces (the chat's), the Universe gradient (#8629fc → #4156f6) for what
- * matters and what you can do, gold for counts and stars, white text at full, 70 % and 45 %. Space Grotesk headings
- * and Inter text, as on bawes.net. Dark is the default (the game is dark); light keeps the same accents.
+ * Orbit's look is the game's. The rules (the style page at /admin/style shows them all):
+ * - Neutral base: deep navy surfaces (the chat's), white text at full and 72 %. Links, tabs and pills are neutral.
+ * - The Universe gradient (#8629fc → #4156f6) only for a page's one main action, the active destination and
+ *   "you are here".
+ * - Colour means a kind of thing, everywhere: universe violet, world teal, room amber-rose, star gold, people sky.
+ *   Each universe also has its own colour, derived from its id (lib/universe-colour.ts).
+ * - Status: green live, amber waiting, red only for what can't be undone.
+ * Space Grotesk headings and Inter text, as on bawes.net. Dark is the default (the game is dark).
  */
 @layer base {
   :root {
@@ -16,14 +21,15 @@
     --card-foreground: 218 40% 12%;
     --popover: 0 0% 100%;
     --popover-foreground: 218 40% 12%;
-    --primary: 262 97% 57%;
+    /* Neutral: links, tabs, selected states. The gradient, not this, marks the main action. */
+    --primary: 218 45% 18%;
     --primary-foreground: 0 0% 100%;
     --secondary: 218 25% 93%;
     --secondary-foreground: 218 40% 14%;
     --muted: 218 25% 94%;
     --muted-foreground: 218 12% 42%;
     --accent: 240 60% 95%;
-    --accent-foreground: 262 80% 40%;
+    --accent-foreground: 218 45% 18%;
     --destructive: 0 78% 52%;
     --destructive-foreground: 0 0% 100%;
     --border: 218 20% 87%;
@@ -42,6 +48,17 @@
     --kind-universe: linear-gradient(135deg, #8629fc, #4156f6);
     --kind-world: linear-gradient(135deg, #10b981, #3b82f6);
     --kind-room: linear-gradient(135deg, #f59e0b, #ec4899);
+    --kind-star: #e9c74c;
+    --kind-people: linear-gradient(135deg, #38bdf8, #6366f1);
+    /* The same kinds as one flat colour, for text, dots and borders. */
+    --kind-universe-solid: #a78bfa;
+    --kind-world-solid: #2dd4bf;
+    --kind-room-solid: #fbbf24;
+    --kind-star-solid: #e9c74c;
+    --kind-people-solid: #7dd3fc;
+    /* Status */
+    --status-live: #22c55e;
+    --status-waiting: #f59e0b;
     --surface-elevated: 0 0% 100%;
     --surface-sunken: 218 25% 95%;
     --shadow-color: 218 40% 20%;
@@ -68,8 +85,8 @@
     --card-foreground: 0 0% 100%;
     --popover: 216 41% 16%;
     --popover-foreground: 0 0% 100%;
-    --primary: 258 100% 76%;
-    --primary-foreground: 0 0% 100%;
+    --primary: 216 33% 94%;
+    --primary-foreground: 218 44% 12%;
     --secondary: 216 30% 22%;
     --secondary-foreground: 0 0% 100%;
     --muted: 216 30% 21%;
@@ -280,7 +297,7 @@ a[href] {
   cursor: pointer;
   &:hover {
     transform: translateY(-2px);
-    border-color: color-mix(in oklab, var(--brand-purple) 35%, hsl(var(--border)));
+    border-color: hsl(var(--foreground) / 0.22);
     box-shadow: 0 2px 4px hsl(var(--shadow-color) / 0.06), 0 18px 40px -20px hsl(var(--shadow-color) / 0.4);
   }
   &:active {
@@ -340,7 +357,7 @@ a[href] {
 .orbit-above-orbs { position: relative; z-index: 1; }
 
 /* ─── Editorial pieces shared by Home, Spaces and You ─── */
-.orbit-eyebrow { display: flex; align-items: center; gap: 7px; font-size: 10px; line-height: 1.5; font-weight: 600; letter-spacing: .16em; text-transform: uppercase; color: hsl(var(--primary)); }
+.orbit-eyebrow { display: flex; align-items: center; gap: 7px; font-size: 10px; line-height: 1.5; font-weight: 600; letter-spacing: .16em; text-transform: uppercase; color: hsl(var(--muted-foreground)); }
 .orbit-hero { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; }
 .orbit-hero h1 { font-family: var(--font-display); font-size: clamp(30px, 7vw, 44px); line-height: 1.08; letter-spacing: -.03em; font-weight: 700; margin-top: 6px; }
 .orbit-hero h1 > span, .orbit-gradient-text { background-image: var(--brand-gradient); -webkit-background-clip: text; background-clip: text; color: transparent; }
@@ -352,7 +369,7 @@ a[href] {
 .orbit-explore > p { font-size: 12px; color: hsl(var(--muted-foreground)); margin: 9px 0 15px; }
 .orbit-explore nav { display: grid; }
 .orbit-explore a { display: flex; gap: 14px; align-items: center; min-height: 64px; padding: 10px 0; border-bottom: 1px solid hsl(var(--border) / .6); transition: color 160ms, padding 160ms; }
-.orbit-explore a:hover { color: hsl(var(--primary)); padding-left: 5px; }
+.orbit-explore a:hover { padding-left: 5px; }
 .orbit-explore a > span:not(.orbit-kind) { flex: 1; min-width: 0; }
 .orbit-explore a > .orbit-kind { flex: none; width: 2.25rem; }
 .orbit-explore strong { display: flex; justify-content: space-between; gap: 8px; font-size: 14px; font-weight: 600; }
@@ -412,12 +429,18 @@ a[href] {
 .orbit-kind[data-kind='universe'] { background-image: var(--kind-universe); }
 .orbit-kind[data-kind='world'] { background-image: var(--kind-world); }
 .orbit-kind[data-kind='room'] { background-image: var(--kind-room); }
-.orbit-kind[data-kind='star'] { background: #e9c74c; color: #1b2a41; }
+.orbit-kind[data-kind='star'] { background: var(--kind-star); color: #1b2a41; }
+.orbit-kind[data-kind='people'] { background-image: var(--kind-people); }
+/* A universe in its own colour (style="--hue: …"). */
+.orbit-kind[data-kind='universe'][style*='--hue'] { background-image: linear-gradient(135deg, var(--hue), color-mix(in oklab, var(--hue) 55%, #1b2a41)); }
 .orbit-kind-wash { position: relative; isolation: isolate; }
 .orbit-kind-wash::before { content: ''; position: absolute; inset: 0; z-index: -1; border-radius: inherit; opacity: 0; transition: opacity 200ms; pointer-events: none; }
 .orbit-kind-wash[data-kind='universe']::before { background: linear-gradient(135deg, rgb(134 41 252 / .16), transparent 55%, rgb(65 86 246 / .2)); }
 .orbit-kind-wash[data-kind='world']::before { background: linear-gradient(135deg, rgb(16 185 129 / .14), transparent 55%, rgb(59 130 246 / .2)); }
 .orbit-kind-wash[data-kind='room']::before { background: linear-gradient(135deg, rgb(245 158 11 / .14), transparent 55%, rgb(236 72 153 / .18)); }
+.orbit-kind-wash[data-kind='star']::before { background: linear-gradient(135deg, rgb(233 199 76 / .14), transparent 60%); }
+.orbit-kind-wash[data-kind='people']::before { background: linear-gradient(135deg, rgb(56 189 248 / .14), transparent 55%, rgb(99 102 241 / .16)); }
+.orbit-kind-wash[style*='--hue']::before { background: linear-gradient(135deg, color-mix(in oklab, var(--hue) 18%, transparent), transparent 60%); }
 .orbit-kind-wash:hover::before, .orbit-kind-wash:focus-within::before { opacity: 1; }
 
 /*
