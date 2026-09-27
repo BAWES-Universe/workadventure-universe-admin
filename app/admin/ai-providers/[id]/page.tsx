@@ -2,13 +2,14 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
+import type { ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { AlertCircle, Loader2, ArrowLeft, TestTube, Edit, CheckCircle2, XCircle } from 'lucide-react';
+import { AlertCircle, Loader2, TestTube, Pencil } from 'lucide-react';
 import AuthLink from '@/app/admin/auth-link';
-import { Badge } from '@/components/ui/badge';
 import { isVisionCapableModel, resolveVisionSupport } from '@/lib/vision-models';
+import { EmptyCard, EntityRow, LoadError, LoadingRows, PageHeader, SectionHeader, StatLine } from '../../components/ds';
+import { EnabledPill, providerTypeLabel } from '../components/provider-state';
 
 interface Bot {
   id: string;
@@ -42,7 +43,7 @@ interface AiProvider {
   supportsVision: boolean | null;
   visionModel: string | null;
   defaultVision: boolean;
-  settings: any;
+  settings: Record<string, unknown> | null;
   tested: boolean;
   testedAt: string | null;
   createdAt: string;
@@ -69,6 +70,7 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
     if (providerId) {
       fetchProvider();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [providerId]);
 
   async function fetchProvider() {
@@ -76,6 +78,7 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
     
     try {
       setLoading(true);
+      setError(null);
       const { authenticatedFetch } = await import('@/lib/client-auth');
       const response = await authenticatedFetch(`/api/admin/ai-providers/${providerId}`);
 
@@ -122,213 +125,46 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
     }
   }
 
-  if (loading) {
+  if (loading && !provider) {
     return (
-      <div className="space-y-8">
-        <div className="flex items-center justify-center py-12">
-          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-        </div>
+      <div className="grid min-w-0 gap-6">
+        <PageHeader kind="provider" title="AI provider" />
+        <LoadingRows label="the provider" rows={3} />
       </div>
     );
   }
 
   if (!provider) {
     return (
-      <div className="space-y-8">
-        <Alert variant="destructive">
-          <AlertCircle className="h-4 w-4" />
-          <AlertDescription>Provider not found</AlertDescription>
-        </Alert>
+      <div className="grid min-w-0 gap-6">
+        <PageHeader kind="provider" title="AI provider" />
+        {error ? (
+          <LoadError label="this provider" retry={fetchProvider} />
+        ) : (
+          <EmptyCard kind="provider" title="Provider not found." text="It may have been deleted." href="/admin/ai-providers" action="All AI providers" />
+        )}
       </div>
     );
   }
 
+  const seesImages = resolveVisionSupport(provider.model || '', provider.supportsVision);
+
   return (
-    <div className="space-y-8">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-4">
-          <Button variant="ghost" size="sm" asChild>
-            <AuthLink href="/admin/ai-providers">
-              <ArrowLeft className="mr-2 h-4 w-4" />
-              Back
-            </AuthLink>
-          </Button>
-          <div className="space-y-1">
-            <h1 className="text-4xl font-bold tracking-tight">{provider.name}</h1>
-            <p className="text-muted-foreground text-lg">
-              Provider details and configuration
-            </p>
-          </div>
-        </div>
-        <Button asChild>
-          <AuthLink href={`/admin/ai-providers/${providerId}/edit`}>
-            <Edit className="mr-2 h-4 w-4" />
-            Edit
-          </AuthLink>
-        </Button>
-      </div>
-
-      {error && (
-        <Alert variant="destructive">
-          <AlertCircle className="h-4 w-4" />
-          <AlertDescription>{error}</AlertDescription>
-        </Alert>
-      )}
-
-      {testResult && (
-        <Alert variant={testResult.success ? 'default' : 'destructive'}>
-          <AlertCircle className="h-4 w-4" />
-          <AlertDescription>
-            {testResult.success ? (
-              <div>
-                <div className="font-semibold">Connection test successful!</div>
-                {testResult.details && (
-                  <div className="text-sm mt-1">{testResult.details}</div>
-                )}
-              </div>
-            ) : (
-              <div>
-                <div className="font-semibold">Test failed: {testResult.error || 'Unknown error'}</div>
-                {testResult.details && (
-                  <div className="text-sm mt-1">{testResult.details}</div>
-                )}
-              </div>
-            )}
-          </AlertDescription>
-        </Alert>
-      )}
-
-      <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
-        <Card>
-          <CardHeader>
-            <CardTitle>Basic Information</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div>
-              <div className="text-sm font-medium text-muted-foreground">Provider ID</div>
-              <div className="text-base">{provider.providerId}</div>
-            </div>
-            <div>
-              <div className="text-sm font-medium text-muted-foreground">Name</div>
-              <div className="text-base">{provider.name}</div>
-            </div>
-            <div>
-              <div className="text-sm font-medium text-muted-foreground">Type</div>
-              <Badge variant="outline">{provider.type}</Badge>
-            </div>
-            <div>
-              <div className="text-sm font-medium text-muted-foreground">Status</div>
-              <div className="flex items-center gap-2">
-                {provider.enabled ? (
-                  <Badge variant="default" className="bg-green-600">
-                    <CheckCircle2 className="mr-1 h-3 w-3" />
-                    Enabled
-                  </Badge>
-                ) : (
-                  <Badge variant="secondary">
-                    <XCircle className="mr-1 h-3 w-3" />
-                    Disabled
-                  </Badge>
-                )}
-              </div>
-            </div>
-            {provider.tested && provider.testedAt && (
-              <div>
-                <div className="text-sm font-medium text-muted-foreground">Last Tested</div>
-                <div className="text-base flex items-center gap-2 text-green-600">
-                  <CheckCircle2 className="h-4 w-4" />
-                  {new Date(provider.testedAt).toLocaleString()}
-                </div>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Configuration</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {provider.endpoint && (
-              <div>
-                <div className="text-sm font-medium text-muted-foreground">Endpoint</div>
-                <div className="text-base break-all">{provider.endpoint}</div>
-              </div>
-            )}
-            {provider.model && (
-              <div>
-                <div className="text-sm font-medium text-muted-foreground">Model</div>
-                <div className="text-base">{provider.model}</div>
-              </div>
-            )}
-            {provider.visionModel && (
-              <div>
-                <div className="text-sm font-medium text-muted-foreground">Vision model</div>
-                <div className="text-base">{provider.visionModel}</div>
-              </div>
-            )}
-            {provider.defaultVision && (
-              <div>
-                <div className="text-sm font-medium text-muted-foreground">Default vision provider</div>
-                <div className="text-base text-emerald-600">Yes — used automatically to describe images</div>
-              </div>
-            )}
-            {provider.temperature !== null && (
-              <div>
-                <div className="text-sm font-medium text-muted-foreground">Temperature</div>
-                <div className="text-base">{provider.temperature}</div>
-              </div>
-            )}
-            {provider.maxTokens !== null && (
-              <div>
-                <div className="text-sm font-medium text-muted-foreground">Max Tokens</div>
-                <div className="text-base">{provider.maxTokens}</div>
-              </div>
-            )}
-            <div>
-              <div className="text-sm font-medium text-muted-foreground">Supports Streaming</div>
-              <div className="text-base">
-                {provider.supportsStreaming ? 'Yes' : 'No'}
-              </div>
-            </div>
-            <div>
-              <div className="text-sm font-medium text-muted-foreground">Vision</div>
-              <div className="text-base flex items-center gap-2">
-                {resolveVisionSupport(provider.model || '', provider.supportsVision) ? (
-                  <Badge variant="default">Vision-capable</Badge>
-                ) : (
-                  <Badge variant="secondary">Text-only</Badge>
-                )}
-                {provider.supportsVision === null ? (
-                  <span className="text-xs text-muted-foreground">
-                    (auto{provider.model && isVisionCapableModel(provider.model) ? ' — detected from model name' : ''})
-                  </span>
-                ) : (
-                  <span className="text-xs text-muted-foreground">
-                    (manually forced)
-                  </span>
-                )}
-              </div>
-            </div>
-            <div>
-              <div className="text-sm font-medium text-muted-foreground">API Key</div>
-              <div className="text-base">
-                {provider.apiKeyEncrypted ? '••••••••' : 'Not set'}
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between">
-            <CardTitle>Connection Test</CardTitle>
-            <Button
-              onClick={handleTest}
-              disabled={testing}
-              variant="outline"
-            >
+    <div className="grid min-w-0 gap-6">
+      <PageHeader
+        kind="provider"
+        title={provider.name}
+        context={<StatLine items={[providerTypeLabel(provider.type), provider.model]} />}
+        status={<EnabledPill enabled={provider.enabled} />}
+        actions={
+          <>
+            <Button asChild className="h-11">
+              <AuthLink href={`/admin/ai-providers/${providerId}/edit`}>
+                <Pencil className="mr-2 h-4 w-4" />
+                Edit
+              </AuthLink>
+            </Button>
+            <Button onClick={handleTest} disabled={testing} variant="outline" className="h-11">
               {testing ? (
                 <>
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -337,92 +173,100 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
               ) : (
                 <>
                   <TestTube className="mr-2 h-4 w-4" />
-                  Test Connection
+                  Test connection
                 </>
               )}
             </Button>
-          </div>
-        </CardHeader>
-        <CardContent>
-          <p className="text-sm text-muted-foreground">
-            Test the connection to verify that the provider endpoint is reachable and credentials are valid.
-          </p>
-        </CardContent>
-      </Card>
+          </>
+        }
+      />
 
-      {provider.settings && Object.keys(provider.settings).length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Settings</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <pre className="text-sm bg-muted p-4 rounded-md overflow-auto">
-              {JSON.stringify(provider.settings, null, 2)}
-            </pre>
-          </CardContent>
-        </Card>
+      {error && <LoadError label="the latest details" retry={fetchProvider} />}
+
+      {testResult && (
+        <Alert variant={testResult.success ? 'default' : 'destructive'} role="status">
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription>
+            <div className="font-semibold">
+              {testResult.success ? 'Connection works.' : `Test failed: ${testResult.error || 'Unknown error'}`}
+            </div>
+            {testResult.details && <div className="mt-1 text-sm">{testResult.details}</div>}
+          </AlertDescription>
+        </Alert>
       )}
 
-      {/* Bots Using This Provider */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Bots Using This Provider</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {!provider.bots || provider.bots.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No bots are using this provider</p>
-          ) : (
-            <div className="space-y-4">
-              {provider.bots.map((bot) => (
-                <div
-                  key={bot.id}
-                  className="flex items-center justify-between border-b pb-4 last:border-0"
-                >
-                  <div className="flex-1">
-                    <AuthLink
-                      href={`/admin/bots/${bot.id}`}
-                      className="font-semibold text-primary hover:underline"
-                    >
-                      {bot.name}
-                    </AuthLink>
-                    <div className="text-sm text-muted-foreground mt-1">
-                      <AuthLink
-                        href={`/admin/rooms/${bot.room.id}`}
-                        className="hover:underline"
-                      >
-                        {bot.room.name}
-                      </AuthLink>
-                      {' • '}
-                      <AuthLink
-                        href={`/admin/worlds/${bot.room.world.id}`}
-                        className="hover:underline"
-                      >
-                        {bot.room.world.name}
-                      </AuthLink>
-                      {' • '}
-                      <AuthLink
-                        href={`/admin/universes/${bot.room.world.universe.id}`}
-                        className="hover:underline"
-                      >
-                        {bot.room.world.universe.name}
-                      </AuthLink>
-                    </div>
-                    <div className="text-xs text-muted-foreground mt-1 font-mono">
-                      {bot.id}
-                    </div>
-                  </div>
-                  <div className="ml-4">
-                    <Badge variant={bot.enabled ? 'default' : 'secondary'}>
-                      {bot.enabled ? 'Enabled' : 'Disabled'}
-                    </Badge>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </CardContent>
-      </Card>
+      <section aria-labelledby="provider-settings" className="min-w-0">
+        <SectionHeader id="provider-settings" title="Settings" />
+        <div className="rounded-2xl border bg-card p-4 sm:p-5">
+          <dl className="grid min-w-0 grid-cols-1 gap-4 text-sm sm:grid-cols-2">
+            <Field label="Type">{providerTypeLabel(provider.type)}</Field>
+            <Field label="Model">{provider.model || 'Not set'}</Field>
+            <Field label="Endpoint" mono>{provider.endpoint || 'Not set'}</Field>
+            <Field label="API key">{provider.apiKeyEncrypted ? '••••••••' : 'Not set'}</Field>
+            {provider.temperature !== null && <Field label="Temperature">{provider.temperature}</Field>}
+            {provider.maxTokens !== null && <Field label="Max tokens">{provider.maxTokens}</Field>}
+            <Field label="Streaming">{provider.supportsStreaming ? 'Yes' : 'No'}</Field>
+            <Field label="Images">
+              {seesImages ? 'Sees images' : 'Text only'}
+              <span className="text-xs text-muted-foreground">
+                {provider.supportsVision === null
+                  ? ` (auto${provider.model && isVisionCapableModel(provider.model) ? ', detected from the model name' : ''})`
+                  : ' (set by hand)'}
+              </span>
+            </Field>
+            {provider.visionModel && <Field label="Image description model">{provider.visionModel}</Field>}
+            {provider.defaultVision && <Field label="Default vision provider">Yes, used automatically to describe images</Field>}
+            <Field label="Last tested">
+              {provider.tested && provider.testedAt ? new Date(provider.testedAt).toLocaleString() : 'Not tested yet'}
+            </Field>
+            <Field label="Provider key" mono>{provider.providerId}</Field>
+          </dl>
+          <p className="mt-4 text-xs text-muted-foreground">
+            Test connection checks that the endpoint is reachable and the key is valid.
+          </p>
+        </div>
+      </section>
+
+      {provider.settings && Object.keys(provider.settings).length > 0 && (
+        <section aria-labelledby="provider-extra" className="min-w-0">
+          <SectionHeader id="provider-extra" title="Extra settings" />
+          <pre className="overflow-auto rounded-2xl border bg-muted p-4 text-sm">
+            {JSON.stringify(provider.settings, null, 2)}
+          </pre>
+        </section>
+      )}
+
+      <section aria-labelledby="provider-bots" className="min-w-0">
+        <SectionHeader id="provider-bots" title="Bots using it" count={provider.bots?.length ?? 0} />
+        {!provider.bots || provider.bots.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No bots use this provider.</p>
+        ) : (
+          <div className="grid min-w-0 gap-0.5">
+            {provider.bots.map((bot) => (
+              <EntityRow
+                key={bot.id}
+                href={`/admin/bots/${bot.id}`}
+                kind="bot"
+                title={bot.name}
+                context={
+                  <StatLine items={[`In ${bot.room.world.universe.name} › ${bot.room.world.name} › ${bot.room.name}`]} />
+                }
+                meta={<span className="font-mono text-[11px] text-muted-foreground [overflow-wrap:anywhere]">{bot.id}</span>}
+                aside={<EnabledPill enabled={bot.enabled} />}
+              />
+            ))}
+          </div>
+        )}
+      </section>
     </div>
   );
 }
 
+function Field({ label, mono, children }: { label: string; mono?: boolean; children: ReactNode }) {
+  return (
+    <div className="min-w-0">
+      <dt className="text-xs text-muted-foreground">{label}</dt>
+      <dd className={mono ? 'mt-0.5 font-mono text-xs [overflow-wrap:anywhere]' : 'mt-0.5 [overflow-wrap:anywhere]'}>{children}</dd>
+    </div>
+  );
+}

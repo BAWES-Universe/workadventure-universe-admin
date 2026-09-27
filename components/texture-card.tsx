@@ -2,7 +2,8 @@
 
 import { useState } from 'react';
 import { Input } from '@/components/ui/input';
-import { useRouter } from 'next/navigation';
+import Link from 'next/link';
+import { Pencil, Trash2 } from 'lucide-react';
 import SpriteSheetPreview from '@/components/sprite-preview';
 
 interface TextureItem {
@@ -28,9 +29,8 @@ interface TextureCardProps {
 
 /**
  * A card showing an animated sprite preview of a texture with name, position, and actions.
- * Clicking the card navigates to the detail page (if detailBasePath is provided).
- * Name is editable via double-click (inline edit with auto-save on blur).
- * Delete shows a confirm() dialog before proceeding.
+ * The whole card links to the detail page (if detailBasePath is provided); Rename and Delete sit above the link.
+ * Rename edits the name inline and saves on blur or Enter. Delete asks with confirm() first.
  */
 export default function TextureCard({
   texture,
@@ -39,7 +39,6 @@ export default function TextureCard({
   onDelete,
   detailBasePath,
 }: TextureCardProps) {
-  const router = useRouter();
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState(texture.name || texture.textureId);
   const [saving, setSaving] = useState(false);
@@ -59,75 +58,80 @@ export default function TextureCard({
     setEditing(false);
   }
 
-  function handleDelete(e: React.MouseEvent) {
-    e.stopPropagation();
+  function handleDelete() {
     if (confirm(`Delete "${texture.name || texture.textureId}"? This cannot be undone.`)) {
       onDelete(texture.id);
     }
   }
 
-  function handleClick() {
-    if (!detailBasePath) return;
-    router.push(`${detailBasePath}/${texture.id}`);
-  }
+  const label = texture.name || texture.textureId;
 
   return (
-    <div
-      className={`group relative flex flex-col items-center gap-1.5 rounded-lg border border-border/40 p-2 hover:border-primary/30 transition-colors ${
-        detailBasePath ? 'cursor-pointer' : ''
-      }`}
-      onClick={handleClick}
-    >
+    <div className="relative flex min-w-0 flex-col items-center gap-1.5 rounded-xl border border-border bg-card p-2 transition-colors hover:border-foreground/25 has-[a:focus-visible]:ring-2 has-[a:focus-visible]:ring-ring">
       {/* Animated sprite preview */}
-      <div className="w-[72px] h-[96px] bg-muted/20 rounded flex items-center justify-center overflow-hidden">
+      <div className="flex h-[96px] w-[72px] items-center justify-center overflow-hidden rounded bg-muted/20">
         {texture.url ? (
           <SpriteSheetPreview url={texture.url} playServiceUrl={playServiceUrl} animate />
         ) : null}
       </div>
 
-      {/* Texture ID (always visible, small) */}
-      <span className="text-[9px] text-muted-foreground font-mono truncate w-full text-center">
-        {texture.textureId}
-      </span>
-
-      {/* Editable name */}
+      {/* Editable name; otherwise the name is the card's link */}
       {editing ? (
         <Input
-          className="h-6 text-[10px] text-center"
+          className="relative z-10 h-8 text-center text-xs"
           value={editName}
           onChange={(e) => setEditName(e.target.value)}
           onBlur={handleSave}
           onKeyDown={(e) => {
             if (e.key === 'Enter') handleSave();
-            if (e.key === 'Escape') { setEditName(texture.name || texture.textureId); setEditing(false); }
+            if (e.key === 'Escape') { setEditName(label); setEditing(false); }
           }}
           disabled={saving}
           autoFocus
-          onClick={(e) => e.stopPropagation()}
+          aria-label="Name"
         />
-      ) : (
-        <span
-          className="text-[10px] text-center leading-tight cursor-pointer hover:text-primary truncate w-full"
-          onDoubleClick={(e) => { e.stopPropagation(); setEditName(texture.name || texture.textureId); setEditing(true); }}
-          title={`${texture.textureId} — double-click to rename`}
+      ) : detailBasePath ? (
+        <Link
+          href={`${detailBasePath}/${texture.id}`}
+          className="w-full truncate text-center text-xs font-medium leading-tight outline-none after:absolute after:inset-0 after:rounded-xl after:content-['']"
+          title={texture.textureId}
         >
-          {texture.name || texture.textureId}
+          {label}
+        </Link>
+      ) : (
+        <span className="w-full truncate text-center text-xs font-medium leading-tight" title={texture.textureId}>
+          {label}
         </span>
       )}
 
-      {/* Meta row */}
-      <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
-        <span className="text-[9px] text-muted-foreground font-mono">#{texture.position}</span>
-        <span className={`text-[9px] px-1 rounded ${texture.isActive ? 'text-emerald-500' : 'text-muted-foreground'}`}>
-          {texture.isActive ? 'on' : 'off'}
+      {/* Texture key (always visible, small) */}
+      <span className="w-full truncate text-center font-mono text-[10px] text-muted-foreground">{texture.textureId}</span>
+
+      {/* Meta and controls, kept above the card's link */}
+      <div className="relative z-10 flex w-full items-center justify-between gap-1">
+        <span className="font-mono text-[10px] text-muted-foreground">
+          #{texture.position} · {texture.isActive ? 'on' : 'off'}
         </span>
-        <button
-          className="opacity-0 group-hover:opacity-100 transition-opacity text-[10px] text-red-400 hover:text-red-500"
-          onClick={handleDelete}
-          title="Delete this texture"
-        >
-          ✕
-        </button>
+        <span className="flex items-center">
+          <button
+            type="button"
+            className="grid h-8 w-8 place-items-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+            onClick={() => { setEditName(label); setEditing(true); }}
+            aria-label={`Rename ${label}`}
+            title="Rename"
+          >
+            <Pencil size={13} aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            className="grid h-8 w-8 place-items-center rounded-md text-muted-foreground hover:bg-muted hover:text-destructive"
+            onClick={handleDelete}
+            aria-label={`Delete ${label}`}
+            title="Delete"
+          >
+            <Trash2 size={13} aria-hidden="true" />
+          </button>
+        </span>
       </div>
     </div>
   );

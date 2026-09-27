@@ -2,25 +2,19 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { useRouter, useParams } from 'next/navigation';
-import Link from 'next/link';
-import AuthLink from '@/app/admin/auth-link';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { Separator } from '@/components/ui/separator';
-import { Switch } from '@/components/ui/switch';
-import {
-  Loader2, ArrowLeft, AlertCircle, Layers, Puzzle, Globe, Lock, EyeOff,
-  Users, CheckCircle2, Plus, Trash2, Save, Archive, Copy, ExternalLink,
-  FileText,
-} from 'lucide-react';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Loader2, AlertCircle, ChevronRight, Plus, Trash2, Save, Archive, Upload } from 'lucide-react';
 import TextureCard from '@/components/texture-card';
+import { KindIcon, LoadError, LoadingRows, PageHeader, StatLine, count } from '../../components/ds';
+import { KIND_LABELS, LifecyclePill, Pill, VisibilityPill } from '../components/set-pills';
+import { PlaceName, PlaceSearch, type PlaceType } from '../components/scope-picker';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -59,26 +53,6 @@ interface AvatarSet {
 }
 
 const LAYER_TYPES = ['woka', 'body', 'eyes', 'hair', 'clothes', 'hat', 'accessory'];
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function lifecycleBadge(lifecycle: string) {
-  const styles: Record<string, string> = {
-    active: 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400',
-    draft: 'bg-amber-500/15 text-amber-600 dark:text-amber-400',
-    archived: 'bg-slate-500/15 text-slate-600 dark:text-slate-400',
-  };
-  return <Badge variant="outline" className={styles[lifecycle] || ''}>{lifecycle}</Badge>;
-}
-
-function visibilityLabel(v: string) {
-  const labels: Record<string, string> = {
-    public: 'Public', hidden: 'Hidden', restricted: 'Restricted', assigned_only: 'Assigned Only',
-  };
-  return labels[v] || v;
-}
 
 // ---------------------------------------------------------------------------
 // Page
@@ -441,25 +415,20 @@ export default function AvatarSetDetailPage() {
   }
 
   // Loading / auth states
-  if (checkingAuth || loading) {
+  if (checkingAuth || (loading && !set)) {
     return (
-      <div className="flex items-center justify-center min-h-[300px]">
-        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+      <div className="grid min-w-0 gap-6">
+        <PageHeader kind="avatar" title="Avatar set" />
+        <LoadingRows label="the avatar set" rows={4} />
       </div>
     );
   }
 
   if (error && !set) {
     return (
-      <div className="space-y-4">
-        <AuthLink href="/admin/avatars">
-          <Button variant="ghost" size="sm"><ArrowLeft className="h-4 w-4 mr-2" />Back</Button>
-        </AuthLink>
-        <Alert variant="destructive">
-          <AlertCircle className="h-4 w-4" />
-          <AlertTitle>Not found</AlertTitle>
-          <AlertDescription>{error}</AlertDescription>
-        </Alert>
+      <div className="grid min-w-0 gap-6">
+        <PageHeader kind="avatar" title="Avatar set" />
+        <LoadError label="this avatar set" retry={() => { setError(null); fetchSet(); }} />
       </div>
     );
   }
@@ -474,105 +443,122 @@ export default function AvatarSetDetailPage() {
     layersByType[l.layer].push(l);
   }
 
+  const setTab = (v: string) => {
+    setActiveTab(v);
+    if (v === 'access' && accessUsers.length === 0) {
+      (async () => {
+        const { authenticatedFetch } = await import('@/lib/client-auth');
+        try {
+          const u = await authenticatedFetch('/api/admin/users?limit=200');
+          if (u.ok) setAccessUsers((await u.json()).users || await u.json());
+        } catch {}
+        try {
+          const w = await authenticatedFetch('/api/admin/worlds?limit=200');
+          if (w.ok) setAccessWorlds((await w.json()).worlds || await w.json());
+        } catch {}
+      })();
+    }
+  };
+
+  const tabTrigger = 'min-h-11 shrink-0 rounded-lg px-3 data-[state=active]:bg-card';
+  const panel = 'mt-4 grid min-w-0 gap-4';
+  const formCard = 'min-w-0 rounded-2xl border bg-card p-4 sm:p-5';
+  const row = 'flex min-w-0 flex-wrap items-center gap-2 rounded-xl border border-border bg-card px-3 py-2 text-xs';
+  const removeButton = 'ml-auto h-9 w-9 text-muted-foreground hover:text-destructive';
+
   return (
-    <div className="space-y-6 max-w-5xl">
-      {/* Header */}
-      <div className="flex items-start justify-between">
-        <div className="flex items-center gap-3">
-          <AuthLink href="/admin/avatars">
-            <Button variant="ghost" size="icon"><ArrowLeft className="h-4 w-4" /></Button>
-          </AuthLink>
-          <div>
-            <div className="flex items-center gap-2">
-              <h1 className="text-2xl font-semibold tracking-tight">{set.name}</h1>
-              {lifecycleBadge(set.lifecycle)}
-              <Badge variant="secondary" className="text-xs">{visibilityLabel(set.visibility)}</Badge>
-            </div>
-            <p className="text-sm text-muted-foreground mt-0.5">{set.slug}</p>
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          {successMsg && <span className="text-xs text-emerald-600">{successMsg}</span>}
-          {set.lifecycle === 'archived' ? (
-            <Button variant="destructive" size="sm" onClick={openDeleteConfirm} disabled={saving || deleting}>
-              <Trash2 className="h-3.5 w-3.5 mr-1.5" />
-              Delete
+    <div className="grid min-w-0 gap-6">
+      <PageHeader
+        kind="avatar"
+        title={set.name}
+        context={
+          <StatLine
+            items={[
+              KIND_LABELS[set.kind] || set.kind,
+              count(set.layers?.length ?? 0, 'layer'),
+              count(set.companions?.length ?? 0, 'companion'),
+            ]}
+          />
+        }
+        status={
+          <span className="flex flex-wrap items-center gap-1.5">
+            <LifecyclePill lifecycle={set.lifecycle} />
+            <VisibilityPill visibility={set.visibility} />
+          </span>
+        }
+        actions={
+          <>
+            <Button className="h-11" onClick={handleSave} disabled={saving}>
+              {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+              Save
             </Button>
-          ) : (
-            <Button variant="outline" size="sm" onClick={handleArchive} disabled={saving}>
-              <Archive className="h-3.5 w-3.5 mr-1.5" />
-              Archive
-            </Button>
-          )}
-          <Button size="sm" onClick={handleSave} disabled={saving}>
-            {saving ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : <Save className="h-3.5 w-3.5 mr-1.5" />}
-            Save
-          </Button>
-        </div>
-      </div>
+            {set.lifecycle === 'archived' ? (
+              <Button variant="outline" className="h-11 text-destructive hover:text-destructive" onClick={openDeleteConfirm} disabled={saving || deleting}>
+                <Trash2 className="mr-2 h-4 w-4" />
+                Delete
+              </Button>
+            ) : (
+              <Button variant="outline" className="h-11" onClick={handleArchive} disabled={saving}>
+                <Archive className="mr-2 h-4 w-4" />
+                Archive
+              </Button>
+            )}
+            {successMsg && (
+              <span className="self-center text-sm text-muted-foreground" role="status">
+                {successMsg}
+              </span>
+            )}
+          </>
+        }
+      />
 
       {error && (
-        <Alert variant="destructive" className="mb-4">
+        <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
 
-      {/* Tabs */}
-      <Tabs value={activeTab} onValueChange={v => {
-        setActiveTab(v);
-        if (v === 'access' && accessUsers.length === 0) {
-          (async () => {
-            const { authenticatedFetch } = await import('@/lib/client-auth');
-            try {
-              const u = await authenticatedFetch('/api/admin/users?limit=200');
-              if (u.ok) setAccessUsers((await u.json()).users || await u.json());
-            } catch {}
-            try {
-              const w = await authenticatedFetch('/api/admin/worlds?limit=200');
-              if (w.ok) setAccessWorlds((await w.json()).worlds || await w.json());
-            } catch {}
-          })();
-        }
-      }}>
-        <TabsList>
-          <TabsTrigger value="overview">Overview</TabsTrigger>
-          <TabsTrigger value="layers">Layers ({set.layers?.length ?? 0})</TabsTrigger>
-          <TabsTrigger value="companions">Companions ({set.companions?.length ?? 0})</TabsTrigger>
-          <TabsTrigger value="scopes">Scopes ({set.scopes?.length ?? 0})</TabsTrigger>
-          <TabsTrigger value="policies">Policies ({set.policies?.length ?? 0})</TabsTrigger>
-          <TabsTrigger value="grants">Grants ({set.userGrants?.length ?? 0})</TabsTrigger>
-          <TabsTrigger value="access">Access Check</TabsTrigger>
-          <TabsTrigger value="audit">
+      <Tabs value={activeTab} onValueChange={setTab} className="min-w-0">
+        <TabsList className="flex h-auto w-full justify-start gap-1 overflow-x-auto rounded-xl p-1">
+          <TabsTrigger value="overview" className={tabTrigger}>Overview</TabsTrigger>
+          <TabsTrigger value="layers" className={tabTrigger}>Layers ({set.layers?.length ?? 0})</TabsTrigger>
+          <TabsTrigger value="companions" className={tabTrigger}>Companions ({set.companions?.length ?? 0})</TabsTrigger>
+          <TabsTrigger value="scopes" className={tabTrigger}>Available in ({set.scopes?.length ?? 0})</TabsTrigger>
+          <TabsTrigger value="policies" className={tabTrigger}>Policies ({set.policies?.length ?? 0})</TabsTrigger>
+          <TabsTrigger value="grants" className={tabTrigger}>Grants ({set.userGrants?.length ?? 0})</TabsTrigger>
+          <TabsTrigger value="access" className={tabTrigger}>Access check</TabsTrigger>
+          <TabsTrigger value="audit" className={tabTrigger}>
             Audit
             {set.auditLogs && <span className="ml-1">({set.auditLogs.length})</span>}
           </TabsTrigger>
         </TabsList>
 
         {/* === OVERVIEW === */}
-        <TabsContent value="overview" className="space-y-4">
-          <Card className="border-border/50">
-            <CardHeader><CardTitle className="text-base">Metadata</CardTitle></CardHeader>
-            <CardContent className="space-y-4">
-              <div className="grid gap-3 sm:grid-cols-2">
+        <TabsContent value="overview" className={panel}>
+          <section aria-labelledby="set-details" className={formCard}>
+            <h2 id="set-details" className="orbit-display mb-4 text-base font-semibold">Name and description</h2>
+            <div className="grid gap-4">
+              <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-2">
-                  <Label>Name</Label>
-                  <Input value={editForm.name} onChange={e => setEditForm(f => ({ ...f, name: e.target.value }))} />
+                  <Label htmlFor="set-name">Name</Label>
+                  <Input id="set-name" className="h-11" value={editForm.name} onChange={e => setEditForm(f => ({ ...f, name: e.target.value }))} />
                 </div>
                 <div className="space-y-2">
-                  <Label>Slug</Label>
-                  <Input value={editForm.slug} onChange={e => setEditForm(f => ({ ...f, slug: e.target.value }))} />
+                  <Label htmlFor="set-key">Set key</Label>
+                  <Input id="set-key" className="h-11 font-mono" value={editForm.slug} readOnly aria-describedby="set-key-hint" />
+                  <p id="set-key-hint" className="text-xs text-muted-foreground">Set when the set is created; it can’t be changed here.</p>
                 </div>
               </div>
               <div className="space-y-2">
-                <Label>Description</Label>
-                <Textarea value={editForm.description} onChange={e => setEditForm(f => ({ ...f, description: e.target.value }))} rows={3} />
+                <Label htmlFor="set-description">Description</Label>
+                <Textarea id="set-description" value={editForm.description} onChange={e => setEditForm(f => ({ ...f, description: e.target.value }))} rows={3} />
               </div>
-              <div className="grid gap-3 sm:grid-cols-4">
+              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                 <div className="space-y-2">
-                  <Label>Kind</Label>
+                  <Label htmlFor="set-kind">Kind</Label>
                   <Select value={editForm.kind} onValueChange={v => setEditForm(f => ({ ...f, kind: v }))}>
-                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectTrigger id="set-kind" className="h-11"><SelectValue /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="woka">Woka</SelectItem>
                       <SelectItem value="companion">Companion</SelectItem>
@@ -581,26 +567,21 @@ export default function AvatarSetDetailPage() {
                   </Select>
                 </div>
                 <div className="space-y-2">
-                  <Label>Visibility</Label>
+                  <Label htmlFor="set-visibility">Visibility</Label>
                   <Select value={editForm.visibility} onValueChange={v => setEditForm(f => ({ ...f, visibility: v }))}>
-                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectTrigger id="set-visibility" className="h-11"><SelectValue /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="public">Public</SelectItem>
                       <SelectItem value="restricted">Restricted</SelectItem>
                       <SelectItem value="hidden">Hidden</SelectItem>
-                      <SelectItem value="assigned_only">Assigned Only</SelectItem>
+                      <SelectItem value="assigned_only">Assigned only</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
                 <div className="space-y-2">
-                  <Label>Lifecycle</Label>
-                  <Select
-                    value={editForm.lifecycle}
-                    onValueChange={v => setEditForm(f => ({ ...f, lifecycle: v }))}
-                  >
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
+                  <Label htmlFor="set-lifecycle">Lifecycle</Label>
+                  <Select value={editForm.lifecycle} onValueChange={v => setEditForm(f => ({ ...f, lifecycle: v }))}>
+                    <SelectTrigger id="set-lifecycle" className="h-11"><SelectValue /></SelectTrigger>
                     <SelectContent>
                       <SelectItem value="draft">Draft</SelectItem>
                       <SelectItem value="active">Active</SelectItem>
@@ -609,119 +590,127 @@ export default function AvatarSetDetailPage() {
                   </Select>
                 </div>
                 <div className="space-y-2">
-                  <Label>Position</Label>
-                  <Input type="number" value={editForm.position} onChange={e => setEditForm(f => ({ ...f, position: parseInt(e.target.value) || 0 }))} />
+                  <Label htmlFor="set-position">Display order</Label>
+                  <Input id="set-position" className="h-11" type="number" value={editForm.position} onChange={e => setEditForm(f => ({ ...f, position: parseInt(e.target.value) || 0 }))} />
                 </div>
               </div>
-              <div className="grid gap-3 sm:grid-cols-2">
+              <div className="grid gap-4 sm:grid-cols-2">
                 <div className="space-y-2">
-                  <Label>Available From</Label>
-                  <Input type="datetime-local" value={editForm.availableFrom} onChange={e => setEditForm(f => ({ ...f, availableFrom: e.target.value }))} />
+                  <Label htmlFor="set-from">Available from</Label>
+                  <Input id="set-from" className="h-11" type="datetime-local" value={editForm.availableFrom} onChange={e => setEditForm(f => ({ ...f, availableFrom: e.target.value }))} />
                 </div>
                 <div className="space-y-2">
-                  <Label>Available Until</Label>
-                  <Input type="datetime-local" value={editForm.availableUntil} onChange={e => setEditForm(f => ({ ...f, availableUntil: e.target.value }))} />
+                  <Label htmlFor="set-until">Available until</Label>
+                  <Input id="set-until" className="h-11" type="datetime-local" value={editForm.availableUntil} onChange={e => setEditForm(f => ({ ...f, availableUntil: e.target.value }))} />
                 </div>
               </div>
-            </CardContent>
-          </Card>
+            </div>
+          </section>
 
-          <Card className="border-border/50">
-            <CardHeader><CardTitle className="text-base">Commercial</CardTitle></CardHeader>
-            <CardContent className="grid gap-3 sm:grid-cols-3 text-sm text-muted-foreground">
-              <div><span className="font-medium text-foreground">Owner Type:</span> {set.sourceOwnerType}</div>
-              <div><span className="font-medium text-foreground">Monetization:</span> {set.monetizationType}</div>
-              <div><span className="font-medium text-foreground">Partner Ref:</span> {set.partnerRef || '—'}</div>
-            </CardContent>
-          </Card>
+          <section aria-labelledby="set-commercial" className={formCard}>
+            <h2 id="set-commercial" className="orbit-display mb-4 text-base font-semibold">Commercial</h2>
+            <dl className="grid min-w-0 gap-4 text-sm sm:grid-cols-3">
+              <div className="min-w-0">
+                <dt className="text-xs text-muted-foreground">Owner type</dt>
+                <dd className="mt-0.5 [overflow-wrap:anywhere]">{set.sourceOwnerType}</dd>
+              </div>
+              <div className="min-w-0">
+                <dt className="text-xs text-muted-foreground">Monetization</dt>
+                <dd className="mt-0.5 [overflow-wrap:anywhere]">{set.monetizationType}</dd>
+              </div>
+              <div className="min-w-0">
+                <dt className="text-xs text-muted-foreground">Partner ref</dt>
+                <dd className="mt-0.5 [overflow-wrap:anywhere]">{set.partnerRef || '—'}</dd>
+              </div>
+            </dl>
+          </section>
         </TabsContent>
 
         {/* === LAYERS === */}
-        <TabsContent value="layers" className="space-y-4">
-          <Card className="border-border/50">
-            <CardHeader>
-              <CardTitle className="text-base">Add Texture Layer</CardTitle>
-              <CardDescription>Standard WA textures are 96×128 PNG spritesheets</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="flex flex-wrap items-end gap-3">
-                <div className="space-y-1.5">
-                  <Label className="text-xs">Short Name</Label>
-                  <Input
-                    className="h-9 w-28 font-mono text-xs"
-                    placeholder="cowboy-hat"
-                    value={newLayer.textureId}
-                    onChange={e => setNewLayer(f => ({ ...f, textureId: e.target.value.replace(/[/\s]/g, '-').toLowerCase() }))}
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label className="text-xs">Display Name</Label>
-                  <Input className="h-9 w-28" placeholder="Cowboy Hat" value={newLayer.name} onChange={e => setNewLayer(f => ({ ...f, name: e.target.value }))} />
-                </div>
-                <div className="space-y-1.5">
-                  <Label className="text-xs">Layer Type</Label>
-                  <Select value={newLayer.layer} onValueChange={v => setNewLayer(f => ({ ...f, layer: v }))}>
-                    <SelectTrigger className="h-9 w-24"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      {LAYER_TYPES.map(t => <SelectItem key={t} value={t}>{t}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-1.5 flex-1 min-w-[150px]">
-                  <Label className="text-xs">Image URL</Label>
-                  <div className="flex gap-1">
-                    <Input className="h-9 flex-1 font-mono text-xs" placeholder="http://... or upload" value={newLayer.url} onChange={e => setNewLayer(f => ({ ...f, url: e.target.value }))} />
-                    <Button variant="outline" size="sm" className="h-9 shrink-0 text-xs" onClick={() => {
-                      const input = document.createElement('input');
-                      input.type = 'file';
-                      input.accept = 'image/png,image/jpeg,image/webp';
-                      input.onchange = async (e) => {
-                        const file = (e.target as HTMLInputElement).files?.[0];
-                        if (!file) return;
-                        // Auto-fill texture ID from filename (strip extension, kebab-case)
-                        const name = file.name.replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-|-$/g, '').toLowerCase();
-                        setNewLayer(f => ({ ...f, textureId: name }));
-                        // Upload and set URL
-                        try {
-                          const { authenticatedFetch } = await import('@/lib/client-auth');
-                          const fd = new FormData();
-                          fd.append('file', file);
-                          fd.append('setId', setId);
-                          fd.append('textureId', name);
-                          const res = await authenticatedFetch('/api/admin/avatar-sets/upload-texture', { method: 'POST', body: fd });
-                          if (res.ok) {
-                            const data = await res.json();
-                            setNewLayer(f => ({ ...f, url: data.url }));
-                          }
-                        } catch {}
-                      };
-                      input.click();
-                    }}>
-                      Upload
-                    </Button>
-                  </div>
-                </div>
-                <div className="space-y-1.5">
-                  <Label className="text-xs">Pos</Label>
-                  <Input className="h-9 w-14 text-center" type="number" min={0} value={newLayer.position} onChange={e => setNewLayer(f => ({ ...f, position: parseInt(e.target.value) || 0 }))} />
-                </div>
-                <Button size="sm" className="h-9" onClick={handleAddLayer} disabled={addSubmitting || !newLayer.textureId || !newLayer.url}>
-                  {addSubmitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5 mr-1" />}
-                  Add
-                </Button>
+        <TabsContent value="layers" className={panel}>
+          <section aria-labelledby="add-layer" className={formCard}>
+            <h2 id="add-layer" className="orbit-display text-base font-semibold">Add a texture layer</h2>
+            <p className="mb-4 mt-1 text-xs text-muted-foreground">Standard textures are 96×128 PNG spritesheets.</p>
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-[repeat(3,minmax(0,1fr))_6rem]">
+              <div className="space-y-2">
+                <Label htmlFor="layer-texture">Texture key</Label>
+                <Input
+                  id="layer-texture"
+                  className="h-11 font-mono text-xs"
+                  placeholder="cowboy-hat"
+                  value={newLayer.textureId}
+                  onChange={e => setNewLayer(f => ({ ...f, textureId: e.target.value.replace(/[/\s]/g, '-').toLowerCase() }))}
+                />
               </div>
-              {/* Naming hint */}
-              {newLayer.textureId && !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(newLayer.textureId) && (
-                <p className="text-[10px] text-amber-500 mt-2">Kebab-case only: lowercase letters, numbers, and hyphens</p>
-              )}
-              {newLayer.textureId && newLayer.layer && (
-                <p className="text-[10px] text-muted-foreground mt-1">
-                  Path: <code className="text-[10px] font-mono bg-muted px-1 rounded">{newLayer.layer}s/{newLayer.textureId}.png</code>
-                  — category auto-set from layer type
-                </p>
-              )}
-            </CardContent>
-          </Card>
+              <div className="space-y-2">
+                <Label htmlFor="layer-name">Display name</Label>
+                <Input id="layer-name" className="h-11" placeholder="Cowboy Hat" value={newLayer.name} onChange={e => setNewLayer(f => ({ ...f, name: e.target.value }))} />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="layer-type">Layer type</Label>
+                <Select value={newLayer.layer} onValueChange={v => setNewLayer(f => ({ ...f, layer: v }))}>
+                  <SelectTrigger id="layer-type" className="h-11 capitalize"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {LAYER_TYPES.map(t => <SelectItem key={t} value={t} className="capitalize">{t}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="layer-position">Position</Label>
+                <Input id="layer-position" className="h-11 text-center" type="number" min={0} value={newLayer.position} onChange={e => setNewLayer(f => ({ ...f, position: parseInt(e.target.value) || 0 }))} />
+              </div>
+              <div className="space-y-2 sm:col-span-2 lg:col-span-4">
+                <Label htmlFor="layer-url">Image URL</Label>
+                <div className="flex gap-2">
+                  <Input id="layer-url" className="h-11 flex-1 font-mono text-xs" placeholder="http://... or upload" value={newLayer.url} onChange={e => setNewLayer(f => ({ ...f, url: e.target.value }))} />
+                  <Button variant="outline" className="h-11 shrink-0" onClick={() => {
+                    const input = document.createElement('input');
+                    input.type = 'file';
+                    input.accept = 'image/png,image/jpeg,image/webp';
+                    input.onchange = async (e) => {
+                      const file = (e.target as HTMLInputElement).files?.[0];
+                      if (!file) return;
+                      // Auto-fill texture ID from filename (strip extension, kebab-case)
+                      const name = file.name.replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-|-$/g, '').toLowerCase();
+                      setNewLayer(f => ({ ...f, textureId: name }));
+                      // Upload and set URL
+                      try {
+                        const { authenticatedFetch } = await import('@/lib/client-auth');
+                        const fd = new FormData();
+                        fd.append('file', file);
+                        fd.append('setId', setId);
+                        fd.append('textureId', name);
+                        const res = await authenticatedFetch('/api/admin/avatar-sets/upload-texture', { method: 'POST', body: fd });
+                        if (res.ok) {
+                          const data = await res.json();
+                          setNewLayer(f => ({ ...f, url: data.url }));
+                        }
+                      } catch {}
+                    };
+                    input.click();
+                  }}>
+                    <Upload className="mr-2 h-4 w-4" />
+                    Upload
+                  </Button>
+                </div>
+              </div>
+            </div>
+            {/* Naming hint */}
+            {newLayer.textureId && !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(newLayer.textureId) && (
+              <p className="mt-3 text-xs text-destructive">Lowercase letters, numbers and single hyphens only.</p>
+            )}
+            {newLayer.textureId && newLayer.layer && (
+              <p className="mt-2 text-xs text-muted-foreground">
+                Saved as <code className="rounded bg-muted px-1 font-mono">{newLayer.layer}s/{newLayer.textureId}.png</code>; its category follows the layer type.
+              </p>
+            )}
+            <div className="mt-4 flex justify-end">
+              <Button variant="outline" className="h-11" onClick={handleAddLayer} disabled={addSubmitting || !newLayer.textureId || !newLayer.url}>
+                {addSubmitting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Plus className="mr-2 h-4 w-4" />}
+                Add layer
+              </Button>
+            </div>
+          </section>
 
           {LAYER_TYPES.map(type => {
             const items = layersByType[type] || [];
@@ -738,129 +727,121 @@ export default function AvatarSetDetailPage() {
               fetchSet();
             };
             return (
-              <Card key={type} className="border-border/50">
-                <CardHeader
-                  className="py-3 cursor-pointer select-none"
-                  onClick={() => setCollapsedLayers(p => ({ ...p, [type]: !isCollapsed }))}
-                >
-                  <CardTitle className="text-sm capitalize flex items-center gap-2">
+              <section key={type} aria-labelledby={`layers-${type}`} className="min-w-0">
+                <div className="mb-2 flex min-h-11 items-center justify-between gap-3">
+                  <h2 id={`layers-${type}`} className="orbit-display flex items-baseline gap-2 text-base font-semibold capitalize">
                     {type}
-                    <span className="text-muted-foreground font-normal">({items.length})</span>
-                    <span className="ml-auto text-xs text-muted-foreground">
-                      {isCollapsed ? `▼ show all` : '▲ collapse'}
-                    </span>
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="py-2">
-                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2">
-                    {displayItems.map(l => (
-                      <TextureCard
-                        key={l.id}
-                        texture={l}
-                        onRename={layerRename}
-                        onDelete={(id) => handleDeleteLayer(id)}
-                        detailBasePath={`/admin/avatars/${set.id}/layers`}
-                      />
-                    ))}
-                  </div>
-                  {isCollapsed && items.length > 12 && (
-                    <button
-                      className="w-full text-xs text-muted-foreground mt-2 hover:text-foreground transition-colors"
-                      onClick={() => setCollapsedLayers(p => ({ ...p, [type]: false }))}
+                    <span className="font-sans text-xs font-semibold text-muted-foreground">{items.length}</span>
+                  </h2>
+                  {items.length > 12 && (
+                    <Button
+                      variant="ghost"
+                      className="h-11"
+                      aria-expanded={!isCollapsed}
+                      onClick={() => setCollapsedLayers(p => ({ ...p, [type]: !isCollapsed }))}
                     >
-                      + {items.length - 12} more textures
-                    </button>
+                      {isCollapsed ? `Show all ${items.length}` : 'Show fewer'}
+                    </Button>
                   )}
-                </CardContent>
-              </Card>
+                </div>
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
+                  {displayItems.map(l => (
+                    <TextureCard
+                      key={l.id}
+                      texture={l}
+                      onRename={layerRename}
+                      onDelete={(id) => handleDeleteLayer(id)}
+                      detailBasePath={`/admin/avatars/${set.id}/layers`}
+                    />
+                  ))}
+                </div>
+              </section>
             );
           })}
           {LAYER_TYPES.every(t => (layersByType[t] || []).length === 0) && (
-            <p className="text-sm text-muted-foreground text-center py-8">No texture layers added yet.</p>
+            <p className="text-sm text-muted-foreground">No texture layers yet.</p>
           )}
         </TabsContent>
 
         {/* === COMPANIONS === */}
-        <TabsContent value="companions" className="space-y-4">
-          <Card className="border-border/50">
-            <CardHeader>
-              <CardTitle className="text-base">Add Companion</CardTitle>
-              <CardDescription>Standard companion textures are 96×128 PNG spritesheets</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="flex flex-wrap items-end gap-3">
-                <div className="space-y-1.5">
-                  <Label className="text-xs">Short Name</Label>
-                  <Input className="h-9 w-28 font-mono text-xs" placeholder="robot-pet" value={newCompanion.textureId} onChange={e => setNewCompanion(f => ({ ...f, textureId: e.target.value.replace(/[/\s]/g, '-').toLowerCase() }))} />
-                </div>
-                <div className="space-y-1.5">
-                  <Label className="text-xs">Display Name</Label>
-                  <Input className="h-9 w-28" placeholder="Robot Pet" value={newCompanion.name} onChange={e => setNewCompanion(f => ({ ...f, name: e.target.value }))} />
-                </div>
-                <div className="space-y-1.5 flex-1 min-w-[150px]">
-                  <Label className="text-xs">Image URL</Label>
-                  <div className="flex gap-1">
-                    <Input className="h-9 flex-1 font-mono text-xs" placeholder="http://... or upload" value={newCompanion.url} onChange={e => setNewCompanion(f => ({ ...f, url: e.target.value }))} />
-                    <Button variant="outline" size="sm" className="h-9 shrink-0 text-xs" onClick={() => {
-                      const input = document.createElement('input');
-                      input.type = 'file';
-                      input.accept = 'image/png,image/jpeg,image/webp';
-                      input.onchange = async (e) => {
-                        const file = (e.target as HTMLInputElement).files?.[0];
-                        if (!file) return;
-                        const name = file.name.replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-|-$/g, '').toLowerCase();
-                        setNewCompanion(f => ({ ...f, textureId: name }));
-                        try {
-                          const { authenticatedFetch } = await import('@/lib/client-auth');
-                          const fd = new FormData();
-                          fd.append('file', file);
-                          fd.append('setId', setId);
-                          fd.append('textureId', name);
-                          const res = await authenticatedFetch('/api/admin/avatar-sets/upload-texture', { method: 'POST', body: fd });
-                          if (res.ok) {
-                            const data = await res.json();
-                            setNewCompanion(f => ({ ...f, url: data.url }));
-                          }
-                        } catch {}
-                      };
-                      input.click();
-                    }}>
-                      Upload
-                    </Button>
-                  </div>
-                </div>
-                <div className="space-y-1.5">
-                  <Label className="text-xs">Behavior</Label>
-                  <Select value={newCompanion.behavior} onValueChange={v => setNewCompanion(f => ({ ...f, behavior: v }))}>
-                    <SelectTrigger className="h-9 w-24"><SelectValue placeholder="none" /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value=" ">None</SelectItem>
-                      <SelectItem value="cat">Cat</SelectItem>
-                      <SelectItem value="dog">Dog</SelectItem>
-                      <SelectItem value="red_panda">Red Panda</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <Button size="sm" className="h-9" onClick={handleAddCompanion} disabled={addSubmitting || !newCompanion.textureId || !newCompanion.url}>
-                  {addSubmitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5 mr-1" />}
-                  Add
-                </Button>
+        <TabsContent value="companions" className={panel}>
+          <section aria-labelledby="add-companion" className={formCard}>
+            <h2 id="add-companion" className="orbit-display text-base font-semibold">Add a companion</h2>
+            <p className="mb-4 mt-1 text-xs text-muted-foreground">Standard companion textures are 96×128 PNG spritesheets.</p>
+            <div className="grid gap-4 sm:grid-cols-3">
+              <div className="space-y-2">
+                <Label htmlFor="companion-texture">Texture key</Label>
+                <Input id="companion-texture" className="h-11 font-mono text-xs" placeholder="robot-pet" value={newCompanion.textureId} onChange={e => setNewCompanion(f => ({ ...f, textureId: e.target.value.replace(/[/\s]/g, '-').toLowerCase() }))} />
               </div>
-              {/* Naming hint */}
-              {newCompanion.textureId && !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(newCompanion.textureId) && (
-                <p className="text-[10px] text-amber-500 mt-2">Kebab-case only: lowercase letters, numbers, and hyphens</p>
-              )}
-              {newCompanion.textureId && (
-                <p className="text-[10px] text-muted-foreground mt-1">
-                  Path: <code className="text-[10px] font-mono bg-muted px-1 rounded">companions/{newCompanion.textureId}.png</code>
-                  — category auto-set to companions
-                </p>
-              )}
-            </CardContent>
-          </Card>
+              <div className="space-y-2">
+                <Label htmlFor="companion-name">Display name</Label>
+                <Input id="companion-name" className="h-11" placeholder="Robot Pet" value={newCompanion.name} onChange={e => setNewCompanion(f => ({ ...f, name: e.target.value }))} />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="companion-behavior">Behavior</Label>
+                <Select value={newCompanion.behavior} onValueChange={v => setNewCompanion(f => ({ ...f, behavior: v }))}>
+                  <SelectTrigger id="companion-behavior" className="h-11"><SelectValue placeholder="None" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value=" ">None</SelectItem>
+                    <SelectItem value="cat">Cat</SelectItem>
+                    <SelectItem value="dog">Dog</SelectItem>
+                    <SelectItem value="red_panda">Red Panda</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2 sm:col-span-3">
+                <Label htmlFor="companion-url">Image URL</Label>
+                <div className="flex gap-2">
+                  <Input id="companion-url" className="h-11 flex-1 font-mono text-xs" placeholder="http://... or upload" value={newCompanion.url} onChange={e => setNewCompanion(f => ({ ...f, url: e.target.value }))} />
+                  <Button variant="outline" className="h-11 shrink-0" onClick={() => {
+                    const input = document.createElement('input');
+                    input.type = 'file';
+                    input.accept = 'image/png,image/jpeg,image/webp';
+                    input.onchange = async (e) => {
+                      const file = (e.target as HTMLInputElement).files?.[0];
+                      if (!file) return;
+                      const name = file.name.replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-|-$/g, '').toLowerCase();
+                      setNewCompanion(f => ({ ...f, textureId: name }));
+                      try {
+                        const { authenticatedFetch } = await import('@/lib/client-auth');
+                        const fd = new FormData();
+                        fd.append('file', file);
+                        fd.append('setId', setId);
+                        fd.append('textureId', name);
+                        const res = await authenticatedFetch('/api/admin/avatar-sets/upload-texture', { method: 'POST', body: fd });
+                        if (res.ok) {
+                          const data = await res.json();
+                          setNewCompanion(f => ({ ...f, url: data.url }));
+                        }
+                      } catch {}
+                    };
+                    input.click();
+                  }}>
+                    <Upload className="mr-2 h-4 w-4" />
+                    Upload
+                  </Button>
+                </div>
+              </div>
+            </div>
+            {/* Naming hint */}
+            {newCompanion.textureId && !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(newCompanion.textureId) && (
+              <p className="mt-3 text-xs text-destructive">Lowercase letters, numbers and single hyphens only.</p>
+            )}
+            {newCompanion.textureId && (
+              <p className="mt-2 text-xs text-muted-foreground">
+                Saved as <code className="rounded bg-muted px-1 font-mono">companions/{newCompanion.textureId}.png</code>; its category is companions.
+              </p>
+            )}
+            <div className="mt-4 flex justify-end">
+              <Button variant="outline" className="h-11" onClick={handleAddCompanion} disabled={addSubmitting || !newCompanion.textureId || !newCompanion.url}>
+                {addSubmitting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Plus className="mr-2 h-4 w-4" />}
+                Add companion
+              </Button>
+            </div>
+          </section>
 
           {/* Companions grid */}
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
             {(collapsedCompanions ? (set.companions ?? []).slice(0, 12) : (set.companions ?? [])).map(c => (
               <TextureCard
                 key={c.id}
@@ -880,329 +861,359 @@ export default function AvatarSetDetailPage() {
             ))}
           </div>
           {collapsedCompanions && (set.companions ?? []).length > 12 && (
-            <button
-              className="w-full text-xs text-muted-foreground hover:text-foreground transition-colors"
-              onClick={() => setCollapsedCompanions(false)}
-            >
-              + {(set.companions ?? []).length - 12} more companions
-            </button>
+            <Button variant="ghost" className="h-11 justify-self-center" aria-expanded={false} onClick={() => setCollapsedCompanions(false)}>
+              Show all {(set.companions ?? []).length} companions
+            </Button>
           )}
           {(set.companions ?? []).length === 0 && (
-            <p className="text-sm text-muted-foreground text-center py-8">No companions added yet.</p>
+            <p className="text-sm text-muted-foreground">No companions yet.</p>
           )}
         </TabsContent>
 
-        {/* === SCOPES === */}
-        <TabsContent value="scopes" className="space-y-4">
-          <Card className="border-border/50">
-            <CardHeader><CardTitle className="text-base">Add Scope</CardTitle></CardHeader>
-            <CardContent>
-              <div className="flex flex-wrap items-end gap-3">
-                <div className="space-y-1.5">
-                  <Label className="text-xs">Scope Type</Label>
-                  <Select value={newScope.scopeType} onValueChange={v => setNewScope(f => ({ ...f, scopeType: v }))}>
-                    <SelectTrigger className="h-9 w-32"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="platform">Platform (global)</SelectItem>
-                      <SelectItem value="universe">Universe</SelectItem>
-                      <SelectItem value="world">World</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                {newScope.scopeType !== 'platform' && (
-                  <div className="space-y-1.5 flex-1 min-w-[200px]">
-                    <Label className="text-xs">Scope ID (universe/world ID)</Label>
-                    <Input className="h-9" placeholder="UUID..." value={newScope.scopeId} onChange={e => setNewScope(f => ({ ...f, scopeId: e.target.value }))} />
-                  </div>
-                )}
-                <Button size="sm" className="h-9" onClick={handleAddScope} disabled={addSubmitting || (newScope.scopeType !== 'platform' && !newScope.scopeId)}>
-                  {addSubmitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5 mr-1" />}
-                  Add
-                </Button>
+        {/* === AVAILABLE IN (scopes) === */}
+        <TabsContent value="scopes" className={panel}>
+          <section aria-labelledby="add-scope" className={formCard}>
+            <h2 id="add-scope" className="orbit-display text-base font-semibold">Make it available</h2>
+            <p className="mb-4 mt-1 text-xs text-muted-foreground">Everywhere, or in one universe or world.</p>
+            <div className="grid gap-4">
+              <div className="space-y-2 sm:max-w-xs">
+                <Label htmlFor="scope-type">Where</Label>
+                <Select value={newScope.scopeType} onValueChange={v => setNewScope({ scopeType: v, scopeId: '' })}>
+                  <SelectTrigger id="scope-type" className="h-11"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="platform">Everywhere (platform)</SelectItem>
+                    <SelectItem value="universe">A universe</SelectItem>
+                    <SelectItem value="world">A world</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
-            </CardContent>
-          </Card>
-
-          {(set.scopes ?? []).map(s => (
-            <div key={s.id} className="flex items-center gap-3 text-xs py-2 px-3 rounded border border-border/40">
-              <Badge variant="secondary" className="text-[10px] uppercase">{s.scopeType}</Badge>
-              <span className="font-mono text-muted-foreground">{s.scopeId || '(global)'}</span>
-              <Button variant="ghost" size="icon" className="h-6 w-6 ml-auto text-muted-foreground hover:text-red-500" onClick={() => handleDeleteScope(s.id)}>
-                <Trash2 className="h-3 w-3" />
+              {newScope.scopeType !== 'platform' && (
+                <>
+                  <PlaceSearch
+                    type={newScope.scopeType as PlaceType}
+                    value={newScope.scopeId}
+                    onPick={id => setNewScope(f => ({ ...f, scopeId: id }))}
+                  />
+                  <details className="group min-w-0">
+                    <summary className="flex min-h-11 cursor-pointer list-none items-center gap-2 text-sm font-semibold [&::-webkit-details-marker]:hidden">
+                      <ChevronRight size={16} className="text-muted-foreground transition-transform group-open:rotate-90" aria-hidden="true" />
+                      Advanced
+                    </summary>
+                    <div className="mt-2 space-y-2">
+                      <Label htmlFor="scope-id">{newScope.scopeType === 'universe' ? 'Universe' : 'World'} ID</Label>
+                      <Input id="scope-id" className="h-11 font-mono text-xs" placeholder="UUID..." value={newScope.scopeId} onChange={e => setNewScope(f => ({ ...f, scopeId: e.target.value }))} />
+                      <p className="text-xs text-muted-foreground">For a private one the search can’t find.</p>
+                    </div>
+                  </details>
+                </>
+              )}
+            </div>
+            <div className="mt-4 flex justify-end">
+              <Button variant="outline" className="h-11" onClick={handleAddScope} disabled={addSubmitting || (newScope.scopeType !== 'platform' && !newScope.scopeId)}>
+                {addSubmitting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Plus className="mr-2 h-4 w-4" />}
+                Add
               </Button>
             </div>
-          ))}
+          </section>
+
+          {(set.scopes ?? []).length > 0 && (
+            <div className="grid min-w-0 gap-2">
+              {(set.scopes ?? []).map(s => (
+                <div key={s.id} className={row}>
+                  {s.scopeType === 'universe' || s.scopeType === 'world' ? (
+                    <KindIcon kind={s.scopeType} size="sm" />
+                  ) : (
+                    <Pill>Everywhere</Pill>
+                  )}
+                  {s.scopeId && (
+                    <span className="grid min-w-0">
+                      <span className="text-sm font-medium [overflow-wrap:anywhere]"><PlaceName type={s.scopeType} id={s.scopeId} /></span>
+                      <span className="font-mono text-[10px] text-muted-foreground [overflow-wrap:anywhere]">{s.scopeId}</span>
+                    </span>
+                  )}
+                  <Button variant="ghost" size="icon" className={removeButton} onClick={() => handleDeleteScope(s.id)} aria-label="Remove">
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
           {(set.scopes ?? []).length === 0 && (
-            <p className="text-sm text-muted-foreground text-center py-8">No scopes set. The set won't be visible anywhere.</p>
+            <p className="text-sm text-muted-foreground">Not available anywhere yet. Add a place so players can see this set.</p>
           )}
         </TabsContent>
 
         {/* === POLICIES === */}
-        <TabsContent value="policies" className="space-y-4">
-          <Card className="border-border/50">
-            <CardHeader><CardTitle className="text-base">Add Entitlement Policy</CardTitle></CardHeader>
-            <CardContent>
-              <div className="flex flex-wrap items-end gap-3">
-                <div className="space-y-1.5">
-                  <Label className="text-xs">Subject Type</Label>
-                  <Select value={newPolicy.subjectType} onValueChange={v => setNewPolicy(f => ({ ...f, subjectType: v }))}>
-                    <SelectTrigger className="h-9 w-36"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="everyone">Everyone</SelectItem>
-                      <SelectItem value="membership_tag">Membership Tag</SelectItem>
-                      <SelectItem value="user">Specific User</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-1.5 flex-1 min-w-[150px]">
-                  <Label className="text-xs">Subject Value</Label>
-                  <Input className="h-9" placeholder={newPolicy.subjectType === 'everyone' ? '(not needed)' : 'tag name / user ID'} value={newPolicy.subjectValue} onChange={e => setNewPolicy(f => ({ ...f, subjectValue: e.target.value }))} disabled={newPolicy.subjectType === 'everyone'} />
-                </div>
-                <div className="space-y-1.5">
-                  <Label className="text-xs">Action</Label>
-                  <Select value={newPolicy.action} onValueChange={v => setNewPolicy(f => ({ ...f, action: v }))}>
-                    <SelectTrigger className="h-9 w-24"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="select">Select</SelectItem>
-                      <SelectItem value="assign_to_bot">Assign Bot</SelectItem>
-                      <SelectItem value="manage">Manage</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <Button size="sm" className="h-9" onClick={handleAddPolicy} disabled={addSubmitting || (newPolicy.subjectType !== 'everyone' && !newPolicy.subjectValue)}>
-                  {addSubmitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5 mr-1" />}
-                  Add
-                </Button>
+        <TabsContent value="policies" className={panel}>
+          <section aria-labelledby="add-policy" className={formCard}>
+            <h2 id="add-policy" className="orbit-display mb-4 text-base font-semibold">Add an entitlement policy</h2>
+            <div className="grid gap-4 sm:grid-cols-3">
+              <div className="space-y-2">
+                <Label htmlFor="policy-subject-type">Who</Label>
+                <Select value={newPolicy.subjectType} onValueChange={v => setNewPolicy(f => ({ ...f, subjectType: v }))}>
+                  <SelectTrigger id="policy-subject-type" className="h-11"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="everyone">Everyone</SelectItem>
+                    <SelectItem value="membership_tag">Membership tag</SelectItem>
+                    <SelectItem value="user">Specific user</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
-            </CardContent>
-          </Card>
-
-          {(set.policies ?? []).map(p => (
-            <div key={p.id} className="flex items-center gap-3 text-xs py-2 px-3 rounded border border-border/40">
-              <Badge variant="secondary" className="text-[10px]">{p.subjectType}</Badge>
-              <span className="font-mono">{p.subjectValue || '(everyone)'}</span>
-              <Badge variant="outline" className="text-[10px]">{p.action}</Badge>
-              {p.worldId && <span className="text-muted-foreground">world: {p.worldId.slice(0, 8)}...</span>}
-              <div className="ml-auto flex items-center gap-2">
-                {p.isActive ? <CheckCircle2 className="h-3 w-3 text-emerald-500" /> : <span className="text-muted-foreground">inactive</span>}
-                <Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground hover:text-red-500" onClick={() => handleDeletePolicy(p.id)}>
-                  <Trash2 className="h-3 w-3" />
-                </Button>
+              <div className="space-y-2">
+                <Label htmlFor="policy-subject-value">Tag or user ID</Label>
+                <Input id="policy-subject-value" className="h-11" placeholder={newPolicy.subjectType === 'everyone' ? '(not needed)' : 'tag name / user ID'} value={newPolicy.subjectValue} onChange={e => setNewPolicy(f => ({ ...f, subjectValue: e.target.value }))} disabled={newPolicy.subjectType === 'everyone'} />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="policy-action">Can</Label>
+                <Select value={newPolicy.action} onValueChange={v => setNewPolicy(f => ({ ...f, action: v }))}>
+                  <SelectTrigger id="policy-action" className="h-11"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="select">Select</SelectItem>
+                    <SelectItem value="assign_to_bot">Assign to bot</SelectItem>
+                    <SelectItem value="manage">Manage</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
             </div>
-          ))}
+            <div className="mt-4 flex justify-end">
+              <Button variant="outline" className="h-11" onClick={handleAddPolicy} disabled={addSubmitting || (newPolicy.subjectType !== 'everyone' && !newPolicy.subjectValue)}>
+                {addSubmitting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Plus className="mr-2 h-4 w-4" />}
+                Add policy
+              </Button>
+            </div>
+          </section>
+
+          {(set.policies ?? []).length > 0 && (
+            <div className="grid min-w-0 gap-2">
+              {(set.policies ?? []).map(p => (
+                <div key={p.id} className={row}>
+                  <Pill>{p.subjectType}</Pill>
+                  <span className="font-mono [overflow-wrap:anywhere]">{p.subjectValue || '(everyone)'}</span>
+                  <Pill>{p.action}</Pill>
+                  {p.worldId && <span className="text-muted-foreground">world: {p.worldId.slice(0, 8)}...</span>}
+                  <span className="ml-auto text-muted-foreground">{p.isActive ? 'active' : 'inactive'}</span>
+                  <Button variant="ghost" size="icon" className="h-9 w-9 text-muted-foreground hover:text-destructive" onClick={() => handleDeletePolicy(p.id)} aria-label="Remove policy">
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
           {(set.policies ?? []).length === 0 && (
-            <p className="text-sm text-muted-foreground text-center py-8">No policies. Restricted sets won't be accessible.</p>
+            <p className="text-sm text-muted-foreground">No policies. A restricted set can’t be used until it has one.</p>
           )}
         </TabsContent>
 
         {/* === GRANTS === */}
-        <TabsContent value="grants" className="space-y-4">
-          <Card className="border-border/50">
-            <CardHeader><CardTitle className="text-base">Issue Grant</CardTitle></CardHeader>
-            <CardContent>
-              <div className="flex flex-wrap items-end gap-3">
-                <div className="space-y-1.5 flex-1 min-w-[180px]">
-                  <Label className="text-xs">User ID *</Label>
-                  <Input className="h-9" placeholder="User UUID..." value={newGrant.userId} onChange={e => setNewGrant(f => ({ ...f, userId: e.target.value }))} />
-                </div>
-                <div className="space-y-1.5">
-                  <Label className="text-xs">Type</Label>
-                  <Select value={newGrant.grantType} onValueChange={v => setNewGrant(f => ({ ...f, grantType: v }))}>
-                    <SelectTrigger className="h-9 w-28"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="select">Select</SelectItem>
-                      <SelectItem value="direct">Direct</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-1.5">
-                  <Label className="text-xs">Expires</Label>
-                  <Input className="h-9 w-36" type="datetime-local" value={newGrant.expiresAt} onChange={e => setNewGrant(f => ({ ...f, expiresAt: e.target.value }))} />
-                </div>
-                <div className="space-y-1.5 flex-1 min-w-[150px]">
-                  <Label className="text-xs">Note</Label>
-                  <Input className="h-9" placeholder="Contest winner..." value={newGrant.note} onChange={e => setNewGrant(f => ({ ...f, note: e.target.value }))} />
-                </div>
-                <Button size="sm" className="h-9" onClick={handleAddGrant} disabled={addSubmitting || !newGrant.userId}>
-                  {addSubmitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5 mr-1" />}
-                  Issue
-                </Button>
+        <TabsContent value="grants" className={panel}>
+          <section aria-labelledby="add-grant" className={formCard}>
+            <h2 id="add-grant" className="orbit-display mb-4 text-base font-semibold">Issue a grant</h2>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="grant-user">User ID *</Label>
+                <Input id="grant-user" className="h-11 font-mono text-xs" placeholder="User UUID..." value={newGrant.userId} onChange={e => setNewGrant(f => ({ ...f, userId: e.target.value }))} />
               </div>
-            </CardContent>
-          </Card>
-
-          {(set.userGrants ?? []).map(g => (
-            <div key={g.id} className="flex items-center gap-3 text-xs py-2 px-3 rounded border border-border/40">
-              <span className="font-mono text-muted-foreground w-24 truncate">{g.user?.name || g.userId.slice(0, 8)}</span>
-              <Badge variant="secondary" className="text-[10px]">{g.grantType}</Badge>
-              {g.note && <span className="text-muted-foreground truncate max-w-[200px]">{g.note}</span>}
-              {g.expiresAt && <span className="text-muted-foreground">expires {new Date(g.expiresAt).toLocaleDateString()}</span>}
-              <span className="ml-auto text-muted-foreground">{g.isActive ? 'active' : 'revoked'}</span>
-              {g.isActive && (
-                <Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground hover:text-red-500" onClick={() => handleRevokeGrant(g.id)}>
-                  <Trash2 className="h-3 w-3" />
-                </Button>
-              )}
+              <div className="space-y-2">
+                <Label htmlFor="grant-type">Type</Label>
+                <Select value={newGrant.grantType} onValueChange={v => setNewGrant(f => ({ ...f, grantType: v }))}>
+                  <SelectTrigger id="grant-type" className="h-11"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="select">Select</SelectItem>
+                    <SelectItem value="direct">Direct</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="grant-expires">Expires</Label>
+                <Input id="grant-expires" className="h-11" type="datetime-local" value={newGrant.expiresAt} onChange={e => setNewGrant(f => ({ ...f, expiresAt: e.target.value }))} />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="grant-note">Note</Label>
+                <Input id="grant-note" className="h-11" placeholder="Contest winner..." value={newGrant.note} onChange={e => setNewGrant(f => ({ ...f, note: e.target.value }))} />
+              </div>
             </div>
-          ))}
+            <div className="mt-4 flex justify-end">
+              <Button variant="outline" className="h-11" onClick={handleAddGrant} disabled={addSubmitting || !newGrant.userId}>
+                {addSubmitting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Plus className="mr-2 h-4 w-4" />}
+                Issue grant
+              </Button>
+            </div>
+          </section>
+
+          {(set.userGrants ?? []).length > 0 && (
+            <div className="grid min-w-0 gap-2">
+              {(set.userGrants ?? []).map(g => (
+                <div key={g.id} className={row}>
+                  <span className="max-w-[10rem] truncate text-sm font-medium">{g.user?.name || g.userId.slice(0, 8)}</span>
+                  <Pill>{g.grantType}</Pill>
+                  {g.note && <span className="max-w-[200px] truncate text-muted-foreground">{g.note}</span>}
+                  {g.expiresAt && <span className="text-muted-foreground">expires {new Date(g.expiresAt).toLocaleDateString()}</span>}
+                  <span className="ml-auto text-muted-foreground">{g.isActive ? 'active' : 'revoked'}</span>
+                  {g.isActive && (
+                    <Button variant="ghost" size="icon" className="h-9 w-9 text-muted-foreground hover:text-destructive" onClick={() => handleRevokeGrant(g.id)} aria-label="Revoke grant">
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
           {(set.userGrants ?? []).length === 0 && (
-            <p className="text-sm text-muted-foreground text-center py-8">No grants issued.</p>
+            <p className="text-sm text-muted-foreground">No grants issued.</p>
           )}
         </TabsContent>
 
         {/* === ACCESS CHECK === */}
-        <TabsContent value="access" className="space-y-4">
-          <Card className="border-border/50">
-            <CardHeader><CardTitle className="text-base">Test Access</CardTitle></CardHeader>
-            <CardContent>
-              <div className="flex flex-wrap items-end gap-3">
-                <div className="space-y-1.5 flex-1 min-w-[200px]">
-                  <Label className="text-xs">User</Label>
-                  <div className="space-y-1">
-                    <Input
-                      className="h-9 text-xs"
-                      placeholder="Search name or email..."
-                      value={accessSearchUser}
-                      onChange={e => setAccessSearchUser(e.target.value)}
-                    />
-                    <div className="max-h-[180px] overflow-y-auto border rounded-md p-1 space-y-0.5">
-                      {accessUsers
-                        .filter(u => !accessSearchUser || (u.name || '').toLowerCase().includes(accessSearchUser.toLowerCase()) || (u.email || '').toLowerCase().includes(accessSearchUser.toLowerCase()))
-                        .slice(0, 50)
-                        .map(u => (
-                          <div
-                            key={u.id}
-                            className={`text-xs px-2 py-1 rounded cursor-pointer hover:bg-accent ${accessUserId === u.id ? 'bg-primary/10 font-medium' : ''}`}
-                            onClick={() => setAccessUserId(u.id)}
-                          >
-                            {u.name || 'No name'} {u.email ? `<${u.email}>` : ''}
-                          </div>
-                        ))}
-                      {accessUsers.length === 0 && <p className="text-[10px] text-muted-foreground p-2">Loading users...</p>}
-                    </div>
-                  </div>
+        <TabsContent value="access" className={panel}>
+          <section aria-labelledby="access-check" className={formCard}>
+            <h2 id="access-check" className="orbit-display mb-4 text-base font-semibold">Can this person use the set here?</h2>
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="min-w-0 space-y-2">
+                <Label htmlFor="access-user-search">Person</Label>
+                <Input
+                  id="access-user-search"
+                  className="h-11"
+                  placeholder="Search name or email..."
+                  value={accessSearchUser}
+                  onChange={e => setAccessSearchUser(e.target.value)}
+                />
+                <div className="grid max-h-[220px] gap-1 overflow-y-auto rounded-xl border p-1">
+                  {accessUsers
+                    .filter(u => !accessSearchUser || (u.name || '').toLowerCase().includes(accessSearchUser.toLowerCase()) || (u.email || '').toLowerCase().includes(accessSearchUser.toLowerCase()))
+                    .slice(0, 50)
+                    .map(u => (
+                      <button
+                        type="button"
+                        key={u.id}
+                        aria-pressed={accessUserId === u.id}
+                        className="min-h-11 rounded-lg px-3 py-2 text-left text-sm [overflow-wrap:anywhere] hover:bg-muted aria-pressed:bg-accent/60 aria-pressed:font-medium"
+                        onClick={() => setAccessUserId(u.id)}
+                      >
+                        {u.name || 'No name'} {u.email ? <span className="text-muted-foreground">{`<${u.email}>`}</span> : ''}
+                      </button>
+                    ))}
+                  {accessUsers.length === 0 && <p className="p-2 text-xs text-muted-foreground">Loading people...</p>}
                 </div>
-                <div className="space-y-1.5 flex-1 min-w-[200px]">
-                  <Label className="text-xs">World</Label>
-                  <div className="space-y-1">
-                    <Input
-                      className="h-9 text-xs"
-                      placeholder="Search world name..."
-                      value={accessSearchWorld}
-                      onChange={e => setAccessSearchWorld(e.target.value)}
-                    />
-                    <div className="max-h-[180px] overflow-y-auto border rounded-md p-1 space-y-0.5">
-                      {accessWorlds
-                        .filter(w => !accessSearchWorld || w.name.toLowerCase().includes(accessSearchWorld.toLowerCase()) || (w.universe?.name || '').toLowerCase().includes(accessSearchWorld.toLowerCase()))
-                        .slice(0, 50)
-                        .map(w => (
-                          <div
-                            key={w.id}
-                            className={`text-xs px-2 py-1 rounded cursor-pointer hover:bg-accent ${accessWorldId === w.id ? 'bg-primary/10 font-medium' : ''}`}
-                            onClick={() => setAccessWorldId(w.id)}
-                          >
-                            {w.universe?.name || '?'}/{w.name} <span className="text-muted-foreground">({w.slug})</span>
-                          </div>
-                        ))}
-                      {accessWorlds.length === 0 && <p className="text-[10px] text-muted-foreground p-2">Loading worlds...</p>}
-                    </div>
-                  </div>
-                </div>
-                <Button size="sm" className="h-9" onClick={handleAccessCheck} disabled={accessChecking || !accessUserId || !accessWorldId}>
-                  {accessChecking ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-1" /> : null}
-                  Check Access
-                </Button>
               </div>
-            </CardContent>
-          </Card>
+              <div className="min-w-0 space-y-2">
+                <Label htmlFor="access-world-search">World</Label>
+                <Input
+                  id="access-world-search"
+                  className="h-11"
+                  placeholder="Search world name..."
+                  value={accessSearchWorld}
+                  onChange={e => setAccessSearchWorld(e.target.value)}
+                />
+                <div className="grid max-h-[220px] gap-1 overflow-y-auto rounded-xl border p-1">
+                  {accessWorlds
+                    .filter(w => !accessSearchWorld || w.name.toLowerCase().includes(accessSearchWorld.toLowerCase()) || (w.universe?.name || '').toLowerCase().includes(accessSearchWorld.toLowerCase()))
+                    .slice(0, 50)
+                    .map(w => (
+                      <button
+                        type="button"
+                        key={w.id}
+                        aria-pressed={accessWorldId === w.id}
+                        className="min-h-11 rounded-lg px-3 py-2 text-left text-sm [overflow-wrap:anywhere] hover:bg-muted aria-pressed:bg-accent/60 aria-pressed:font-medium"
+                        onClick={() => setAccessWorldId(w.id)}
+                      >
+                        {w.universe?.name || '?'} › {w.name} <span className="text-muted-foreground">({w.slug})</span>
+                      </button>
+                    ))}
+                  {accessWorlds.length === 0 && <p className="p-2 text-xs text-muted-foreground">Loading worlds...</p>}
+                </div>
+              </div>
+            </div>
+            <div className="mt-4 flex justify-end">
+              <Button className="h-11" variant="outline" onClick={handleAccessCheck} disabled={accessChecking || !accessUserId || !accessWorldId}>
+                {accessChecking ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                Check access
+              </Button>
+            </div>
+          </section>
 
           {!!accessResult && (
-            <Card className="border-border/50">
-              <CardContent className="p-4 space-y-2">
-                {(accessResult as Record<string, unknown>).checks ? (
-                  <>
-                    <div className="flex items-center gap-2 mb-3">
-                      <strong>Result: </strong>
-                      {(accessResult as Record<string, { passed: boolean }>).canSelect
-                        ? <Badge className="bg-emerald-500">Can Select</Badge>
-                        : <Badge variant="destructive">Cannot Select</Badge>}
-                    </div>
-                    <pre className="text-xs text-muted-foreground overflow-auto max-h-80">
-                      {JSON.stringify(accessResult, null, 2)}
-                    </pre>
-                  </>
-                ) : (
-                  <pre className="text-xs text-muted-foreground overflow-auto max-h-80">
-                    {JSON.stringify(accessResult, null, 2)}
-                  </pre>
-                )}
-              </CardContent>
-            </Card>
+            <section aria-label="Access check result" className={formCard}>
+              {(accessResult as Record<string, unknown>).checks ? (
+                <div className="mb-3 flex items-center gap-2 text-sm">
+                  <strong>Result:</strong>
+                  {(accessResult as Record<string, { passed: boolean }>).canSelect ? (
+                    <Pill><i aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-green-500" />Can select</Pill>
+                  ) : (
+                    <Pill><i aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-destructive" />Cannot select</Pill>
+                  )}
+                </div>
+              ) : null}
+              <pre className="max-h-80 overflow-auto text-xs text-muted-foreground">
+                {JSON.stringify(accessResult, null, 2)}
+              </pre>
+            </section>
           )}
         </TabsContent>
 
         {/* === AUDIT === */}
-        <TabsContent value="audit" className="space-y-4">
+        <TabsContent value="audit" className={panel}>
           {set.auditLogs && set.auditLogs.length > 0 ? (
-            set.auditLogs.map(log => (
-              <div key={log.id} className="text-xs py-2 px-3 rounded border border-border/40">
-                <div className="flex items-center gap-2 mb-1">
-                  <Badge variant="secondary" className="text-[10px]">{log.action}</Badge>
-                  <span className="text-muted-foreground">
-                    by {log.actor?.name || log.actor?.email || 'unknown'}
-                  </span>
-                  <span className="text-muted-foreground ml-auto">
-                    {new Date(log.createdAt).toLocaleString()}
-                  </span>
+            <div className="grid min-w-0 gap-2">
+              {set.auditLogs.map(log => (
+                <div key={log.id} className="min-w-0 rounded-xl border border-border bg-card px-3 py-2 text-xs">
+                  <div className="mb-1 flex flex-wrap items-center gap-2">
+                    <Pill>{log.action}</Pill>
+                    <span className="text-muted-foreground">
+                      by {log.actor?.name || log.actor?.email || 'unknown'}
+                    </span>
+                    <span className="ml-auto text-muted-foreground">
+                      {new Date(log.createdAt).toLocaleString()}
+                    </span>
+                  </div>
+                  <pre className="mt-1 max-h-20 overflow-auto text-[10px] text-muted-foreground">
+                    {JSON.stringify(log.diff, null, 2)}
+                  </pre>
                 </div>
-                <pre className="text-[10px] text-muted-foreground/60 mt-1 overflow-auto max-h-20">
-                  {JSON.stringify(log.diff, null, 2)}
-                </pre>
-              </div>
-            ))
+              ))}
+            </div>
           ) : (
-            <p className="text-sm text-muted-foreground text-center py-8">No audit log entries.</p>
+            <p className="text-sm text-muted-foreground">No audit log entries.</p>
           )}
         </TabsContent>
       </Tabs>
 
-      {/* Delete confirmation dialog */}
-      {deleteConfirmOpen && set && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center" onClick={() => setDeleteConfirmOpen(false)}>
-          <div className="bg-background border rounded-lg shadow-lg max-w-md w-full mx-4 p-6 space-y-4" onClick={e => e.stopPropagation()}>
-            <h2 className="text-lg font-semibold">Delete &ldquo;{set.name}&rdquo;?</h2>
-            <p className="text-sm text-muted-foreground">
-              This permanently removes this avatar set, all its layers, companions, scopes,
-              grants, and policies. Uploaded textures on S3 will also be deleted.
-              <strong> This cannot be undone.</strong>
-            </p>
-            <div className="space-y-2">
-              <Label>Type the set name to confirm:</Label>
-              <Input
-                placeholder={set.name}
-                value={deleteConfirmName}
-                onChange={e => setDeleteConfirmName(e.target.value)}
-                autoFocus
-              />
-            </div>
-            <div className="flex justify-end gap-2">
-              <Button variant="outline" size="sm" onClick={() => setDeleteConfirmOpen(false)} disabled={deleting}>
-                Cancel
-              </Button>
-              <Button
-                variant="destructive"
-                size="sm"
-                onClick={handlePermanentDelete}
-                disabled={deleteConfirmName !== set.name || deleting}
-              >
-                {deleting ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5 mr-1.5" />}
-                Delete Permanently
-              </Button>
-            </div>
+      {/* Delete confirmation */}
+      <Dialog open={deleteConfirmOpen} onOpenChange={open => { if (!deleting) setDeleteConfirmOpen(open); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete &ldquo;{set.name}&rdquo;?</DialogTitle>
+            <DialogDescription>
+              This permanently removes this avatar set, all its layers, companions, places, grants and policies.
+              Uploaded textures on S3 are deleted too. <strong>This can’t be undone.</strong>
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="delete-confirm-name">Type the set name to confirm</Label>
+            <Input
+              id="delete-confirm-name"
+              className="h-11"
+              placeholder={set.name}
+              value={deleteConfirmName}
+              onChange={e => setDeleteConfirmName(e.target.value)}
+              autoFocus
+            />
           </div>
-        </div>
-      )}
+          <DialogFooter className="gap-2">
+            <Button variant="outline" className="h-11" onClick={() => setDeleteConfirmOpen(false)} disabled={deleting}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              className="h-11"
+              onClick={handlePermanentDelete}
+              disabled={deleteConfirmName !== set.name || deleting}
+            >
+              {deleting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Trash2 className="mr-2 h-4 w-4" />}
+              Delete permanently
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
