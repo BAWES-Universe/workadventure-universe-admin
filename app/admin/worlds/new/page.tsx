@@ -1,9 +1,11 @@
 'use client';
 
+import { useIsSuperAdmin } from '../../admin-bootstrap-context';
+
 import { useState, useEffect, useRef, Suspense, useMemo } from 'react';
 import { DraftNotice } from '../../components/draft-notice';
 import { useDraft } from '../../hooks/use-draft';
-import { EmptyCard, InContext, KindIcon, LoadError, LoadingRows, PageHeader } from '../../components/ds';
+import { EmptyCard, InContext, KindIcon, LoadError, LoadingRows, PageHeader, SettingSwitch, Settings } from '../../components/ds';
 import { FORM_DRAFT_VERSION, addressFromName, scopedDraftKey, upgradeFormDraft } from '@/lib/drafts';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
@@ -11,7 +13,6 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import { Checkbox } from '@/components/ui/checkbox';
 import { Card, CardContent } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { AlertCircle, Loader2, AlertTriangle } from 'lucide-react';
@@ -49,6 +50,7 @@ function NewWorldPageContent() {
   const [addressOpen, setAddressOpen] = useState(false);
   const slugInput = useRef<HTMLInputElement>(null);
 
+  const isSuperAdmin = useIsSuperAdmin();
   const [formData, setFormData] = useState({
     universeId: universeIdParam || '',
     slug: '',
@@ -169,6 +171,8 @@ function NewWorldPageContent() {
         ...fields,
         description: formData.description || null,
         thumbnailUrl: formData.thumbnailUrl || null,
+        // Only super admins feature; anyone else's (an old draft's, say) stays off.
+        featured: isSuperAdmin && formData.featured,
       };
 
       const { authenticatedFetch } = await import('@/lib/client-auth');
@@ -329,28 +333,24 @@ function NewWorldPageContent() {
                 />
               </div>
 
-              <div className="flex flex-wrap gap-x-6 gap-y-1">
-                <div className="flex min-h-11 items-center space-x-2">
-                  <Checkbox
-                    id="isPublic"
-                    checked={formData.isPublic}
-                    onCheckedChange={(checked) => setFormData({ ...formData, isPublic: checked === true })}
-                  />
-                  <Label htmlFor="isPublic" className="flex min-h-11 cursor-pointer items-center font-normal">
-                    Public
-                  </Label>
-                </div>
-                <div className="flex min-h-11 items-center space-x-2">
-                  <Checkbox
+              <Settings label="Visibility">
+                <SettingSwitch
+                  id="isPublic"
+                  label="Public"
+                  hint="Shown in Space, and its public rooms are open to everyone. Off: members only."
+                  checked={formData.isPublic}
+                  onChange={(checked) => setFormData({ ...formData, isPublic: checked })}
+                />
+                {isSuperAdmin && (
+                  <SettingSwitch
                     id="featured"
+                    label="Featured"
+                    hint="Pinned to the top of Space and Discover. Only super admins can change this."
                     checked={formData.featured}
-                    onCheckedChange={(checked) => setFormData({ ...formData, featured: checked === true })}
+                    onChange={(checked) => setFormData({ ...formData, featured: checked })}
                   />
-                  <Label htmlFor="featured" className="flex min-h-11 cursor-pointer items-center font-normal">
-                    Featured
-                  </Label>
-                </div>
-              </div>
+                )}
+              </Settings>
 
               <div className="flex flex-col-reverse gap-3 pt-2 sm:flex-row sm:justify-end">
                 <Button type="button" variant="outline" className="h-11" asChild>

@@ -98,7 +98,7 @@ describe('GET /api/memberships/invitations/[id]', () => {
     session.mockResolvedValue(invitee);
     await call();
     const query = db.membershipInvitation.findUnique.mock.calls[0][0];
-    expect(query.select.world.select.members.take).toBe(6);
+    expect(query.select.world.select.members.take).toBe(8);
     expect(query.select.world.select.rooms.take).toBe(1);
     expect(JSON.stringify(query)).not.toMatch(/email/);
   });

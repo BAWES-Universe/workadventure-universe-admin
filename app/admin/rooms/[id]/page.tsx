@@ -10,7 +10,6 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import { Checkbox } from '@/components/ui/checkbox';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import {
@@ -28,20 +27,7 @@ import { TemplateLibrary } from '@/components/templates/TemplateLibrary';
 import { TemplateDetail } from '@/components/templates/TemplateDetail';
 import { cn } from '@/lib/utils';
 import { timeAgo } from '@/lib/time-ago';
-import {
-  EmptyCard,
-  EntityRow,
-  Figure,
-  Figures,
-  InContext,
-  KindIcon,
-  LoadingRows,
-  PageHeader,
-  RolePills,
-  SectionHeader,
-  StatLine,
-  StatusPill,
-} from '../../components/ds';
+import { EmptyCard, EntityRow, Figure, Figures, InContext, KindIcon, LoadingRows, PageHeader, RolePills, SectionHeader, SettingSwitch, Settings, StatLine, StatusPill } from '../../components/ds';
 
 interface Room {
   id: string;
@@ -914,16 +900,15 @@ export default function RoomDetailPage() {
                   </div>
                 )}
 
-                <div className="flex items-center space-x-2">
-                  <Checkbox
+                <Settings label="Visibility">
+                  <SettingSwitch
                     id="isPublic"
+                    label="Public"
+                    hint="Anyone can enter, if its world and universe are public too. Off: members only."
                     checked={formData.isPublic}
-                    onCheckedChange={(checked) => setFormData({ ...formData, isPublic: checked === true })}
+                    onChange={(checked) => setFormData({ ...formData, isPublic: checked })}
                   />
-                  <Label htmlFor="isPublic" className="font-normal cursor-pointer">
-                    Public
-                  </Label>
-                </div>
+                </Settings>
 
                 <div className="flex flex-col-reverse sm:flex-row justify-end gap-3 pt-4">
                   <Button

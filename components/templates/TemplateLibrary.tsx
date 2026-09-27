@@ -99,9 +99,11 @@ export function TemplateLibrary({ onSelectTemplate, selectedCategory }: Template
       </div>
 
       {/* Category Filter */}
-      <div className="flex flex-wrap gap-2">
+      <div className="flex flex-wrap gap-2" role="group" aria-label="Categories">
         <Button
-          variant={activeCategory === 'all' ? 'default' : 'outline'}
+          type="button"
+          variant={activeCategory === 'all' ? 'secondary' : 'outline'}
+          aria-pressed={activeCategory === 'all'}
           size="sm"
           onClick={() => setActiveCategory('all')}
         >
@@ -110,7 +112,9 @@ export function TemplateLibrary({ onSelectTemplate, selectedCategory }: Template
         {categories.map((category) => (
           <Button
             key={category.id}
-            variant={activeCategory === category.slug ? 'default' : 'outline'}
+            type="button"
+            variant={activeCategory === category.slug ? 'secondary' : 'outline'}
+            aria-pressed={activeCategory === category.slug}
             size="sm"
             onClick={() => setActiveCategory(category.slug)}
           >

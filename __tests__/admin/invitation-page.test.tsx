@@ -94,6 +94,35 @@ describe('The invitation page', () => {
     expect(within(actions).getByRole('button', { name: 'Decline' })).toBeTruthy();
   });
 
+  it('shows as many members as fit in one row, the last slot counting the rest', async () => {
+    const members = Array.from({ length: 8 }, (_, i) => ({ id: `u-${i}`, name: `Member ${i}`, woka: [] }));
+    const width = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth');
+    const observers: ResizeObserverCallback[] = [];
+    const previous = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class {
+      constructor(callback: ResizeObserverCallback) {
+        observers.push(callback);
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    } as unknown as typeof ResizeObserver;
+    // A phone's row: 4 slots of 64px.
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get: () => 260 });
+    try {
+      routeDetail({ invitation: invitation({ world: { ...invitation().world, counts: { rooms: 3, members: 12 }, members } }) });
+      renderPage();
+      const row = await screen.findByTestId('invitation-members');
+      await waitFor(() => expect(row.querySelectorAll('li')).toHaveLength(4));
+      expect(row.textContent).toContain('Member 2');
+      expect(row.textContent).not.toContain('Member 3');
+      expect(row.textContent).toContain('+9 more members');
+    } finally {
+      if (width) Object.defineProperty(HTMLElement.prototype, 'clientWidth', width);
+      globalThis.ResizeObserver = previous;
+    }
+  });
+
   it('describes a custom role by name', async () => {
     routeDetail({ invitation: invitation({ tags: ['dj'] }) });
     renderPage();

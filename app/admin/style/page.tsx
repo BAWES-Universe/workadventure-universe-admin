@@ -1,5 +1,6 @@
 'use client';
 
+import { useState } from 'react';
 import { Pencil, Plus } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { UNIVERSE_COLOURS } from '@/lib/universe-colour';
@@ -15,6 +16,8 @@ import {
   PageHeader,
   RolePills,
   SectionHeader,
+  SettingSwitch,
+  Settings,
   StatLine,
   StatusPill,
   VisitLine,
@@ -187,6 +190,23 @@ export default function StylePage() {
           <EmptyCard kind="star" title="Keep a way back to rooms you like." text="Star a room and it shows up here." href="#" action="Find rooms" />
         </div>
       </section>
+
+      <section className={styles.section} aria-labelledby="settings">
+        <SectionHeader id="settings" title="Settings" />
+        <SettingsSample />
+      </section>
     </div>
+  );
+}
+
+/** An on/off setting says what on and off do; Featured shows only to super admins. */
+function SettingsSample() {
+  const [isPublic, setPublic] = useState(true);
+  const [featured, setFeatured] = useState(false);
+  return (
+    <Settings label="Visibility">
+      <SettingSwitch id="style-public" label="Public" hint="Shown in Space, and its public rooms are open to everyone. Off: members only." checked={isPublic} onChange={setPublic} />
+      <SettingSwitch id="style-featured" label="Featured" hint="Pinned to the top of Space and Discover. Only super admins can change this." checked={featured} onChange={setFeatured} />
+    </Settings>
   );
 }

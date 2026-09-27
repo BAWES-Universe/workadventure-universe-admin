@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, Suspense, useMemo } from 'react';
 import { DraftNotice } from '../../components/draft-notice';
 import { useDraft } from '../../hooks/use-draft';
-import { EmptyCard, InContext, KindIcon, LoadError, LoadingRows, PageHeader, SectionHeader } from '../../components/ds';
+import { EmptyCard, InContext, KindIcon, LoadError, LoadingRows, PageHeader, SectionHeader, SettingSwitch, Settings } from '../../components/ds';
 import { FORM_DRAFT_VERSION, addressFromName, scopedDraftKey, upgradeFormDraft } from '@/lib/drafts';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
@@ -11,7 +11,6 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import { Checkbox } from '@/components/ui/checkbox';
 import { Card, CardContent } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { AlertCircle, Loader2, ArrowLeft } from 'lucide-react';
@@ -469,7 +468,7 @@ function NewRoomPageContent() {
 
           {/* Template Selection Flow */}
           {useTemplate && (
-            <Card className="border-0 shadow-none">
+            <Card className="p-4 shadow-none sm:p-5">
               {selectedTemplateSlug ? (
                 <>
                   <div className="pb-0">
@@ -655,16 +654,15 @@ function NewRoomPageContent() {
               </div>
             ) : null}
 
-            <div className="flex min-h-11 items-center space-x-2">
-              <Checkbox
+            <Settings label="Visibility">
+              <SettingSwitch
                 id="isPublic"
+                label="Public"
+                hint="Anyone can enter, if its world and universe are public too. Off: members only."
                 checked={formData.isPublic}
-                onCheckedChange={(checked) => setFormData({ ...formData, isPublic: checked === true })}
+                onChange={(checked) => setFormData({ ...formData, isPublic: checked })}
               />
-              <Label htmlFor="isPublic" className="flex min-h-11 cursor-pointer items-center font-normal">
-                Public
-              </Label>
-            </div>
+            </Settings>
 
             <div className="flex flex-col-reverse gap-3 pt-2 sm:flex-row sm:justify-end">
               <Button type="button" variant="outline" className="h-11" asChild>

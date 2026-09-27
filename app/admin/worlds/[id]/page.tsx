@@ -1,5 +1,7 @@
 'use client';
 
+import { useIsSuperAdmin } from '../../admin-bootstrap-context';
+
 import { useState, useEffect, useMemo } from 'react';
 import { useRouter, useParams, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
@@ -7,7 +9,6 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import { Checkbox } from '@/components/ui/checkbox';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import {
@@ -23,22 +24,7 @@ import {
 import { AlertCircle, ChevronLeft, ChevronRight, Loader2, Pencil, Plus, Trash2, UserPlus } from 'lucide-react';
 import { timeAgo } from '@/lib/time-ago';
 import { activityStats } from '@/lib/analytics-peak';
-import {
-  EmptyCard,
-  EntityCard,
-  EntityRow,
-  Figure,
-  Figures,
-  InContext,
-  LoadError,
-  LoadingRows,
-  PageHeader,
-  RolePills,
-  SectionHeader,
-  StatLine,
-  StatusPill,
-  VisitLine,
-} from '../../components/ds';
+import { EmptyCard, EntityCard, EntityRow, Figure, Figures, InContext, LoadError, LoadingRows, PageHeader, RolePills, SectionHeader, SettingSwitch, Settings, StatLine, StatusPill, VisitLine } from '../../components/ds';
 import InviteMemberDialog from '../../components/invite-member-dialog';
 import MemberList from '../../components/member-list';
 import { PersonIcon } from '../../components/profile-card';
@@ -117,6 +103,7 @@ export default function WorldDetailPage() {
   const roomIds = useMemo(() => world?.rooms?.map((room) => room.id) ?? [], [world]);
   const roomSummaries = useEntitySummaries('rooms', roomIds);
   
+  const isSuperAdmin = useIsSuperAdmin();
   const [formData, setFormData] = useState({
     slug: '',
     name: '',
@@ -370,28 +357,24 @@ export default function WorldDetailPage() {
               />
             </div>
 
-            <div className="flex flex-wrap gap-6">
-              <div className="flex items-center space-x-2">
-                <Checkbox
-                  id="isPublic"
-                  checked={formData.isPublic}
-                  onCheckedChange={(checked) => setFormData({ ...formData, isPublic: checked === true })}
-                />
-                <Label htmlFor="isPublic" className="font-normal cursor-pointer">
-                  Public
-                </Label>
-              </div>
-              <div className="flex items-center space-x-2">
-                <Checkbox
+            <Settings label="Visibility">
+              <SettingSwitch
+                id="isPublic"
+                label="Public"
+                hint="Shown in Space, and its public rooms are open to everyone. Off: members only."
+                checked={formData.isPublic}
+                onChange={(checked) => setFormData({ ...formData, isPublic: checked })}
+              />
+              {isSuperAdmin && (
+                <SettingSwitch
                   id="featured"
+                  label="Featured"
+                  hint="Pinned to the top of Space and Discover. Only super admins can change this."
                   checked={formData.featured}
-                  onCheckedChange={(checked) => setFormData({ ...formData, featured: checked === true })}
+                  onChange={(checked) => setFormData({ ...formData, featured: checked })}
                 />
-                <Label htmlFor="featured" className="font-normal cursor-pointer">
-                  Featured
-                </Label>
-              </div>
-            </div>
+              )}
+            </Settings>
 
             <div className="flex flex-col-reverse sm:flex-row justify-end gap-3 pt-4">
               <Button

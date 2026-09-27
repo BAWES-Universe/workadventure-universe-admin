@@ -36,3 +36,8 @@ export function useAdminBootstrap(): AdminBootstrap {
   if (!value) throw new Error('useAdminBootstrap must be used inside AdminBootstrapProvider');
   return value;
 }
+
+/** Whether the signed-in person is a super admin; false outside the shell (a test, a sign-in page). */
+export function useIsSuperAdmin(): boolean {
+  return useContext(AdminBootstrapContext)?.user.isSuperAdmin === true;
+}

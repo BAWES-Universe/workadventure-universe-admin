@@ -5,6 +5,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import NewWorldPage from '@/app/admin/worlds/new/page';
 import NewUniversePage from '@/app/admin/universes/new/page';
 import NewRoomPage from '@/app/admin/rooms/new/page';
+import { AdminBootstrapProvider, type AdminBootstrap } from '@/app/admin/admin-bootstrap-context';
 import { DRAFT_KEY_PREFIX, FORM_DRAFT_VERSION, readDraft, upgradeFormDraft } from '@/lib/drafts';
 
 jest.mock('next/link', () => ({
@@ -165,6 +166,46 @@ describe('New room without a world in the address', () => {
     route({ '/api/admin/worlds/managed': { worlds: [] } });
     render(<NewRoomPage />);
     expect((await screen.findByTestId('room-needs-world')).getAttribute('href')).toBe('/admin/worlds/new');
+  });
+});
+
+describe('Public and Featured', () => {
+  const hint = (control: HTMLElement) => document.getElementById(control.getAttribute('aria-describedby') ?? '')?.textContent;
+  const asSuperAdmin = (children: React.ReactNode) => {
+    const bootstrap = {
+      version: 1,
+      user: { id: 'me', uuid: 'me', name: 'Me', email: null, tags: [], isSuperAdmin: true },
+      stats: { universes: 0, worlds: 0, rooms: 0, users: 0 },
+    } satisfies AdminBootstrap;
+    return <AdminBootstrapProvider value={bootstrap}>{children}</AdminBootstrapProvider>;
+  };
+
+  it('say what they do; Featured only for super admins', async () => {
+    route({});
+    const { unmount } = render(<NewUniversePage />);
+    const isPublic = screen.getByRole('switch', { name: 'Public' });
+    expect(isPublic.getAttribute('aria-checked')).toBe('true');
+    expect(hint(isPublic)).toMatch(/Shown in Space/);
+    expect(screen.queryByRole('switch', { name: 'Featured' })).toBeNull();
+    unmount();
+
+    render(asSuperAdmin(<NewUniversePage />));
+    expect(hint(screen.getByRole('switch', { name: 'Featured' }))).toMatch(/Pinned to the top/);
+  });
+
+  it('never send Featured from someone who may not set it, even from an old draft', async () => {
+    window.sessionStorage.setItem(
+      `${DRAFT_KEY_PREFIX}universe.new`,
+      JSON.stringify({ v: FORM_DRAFT_VERSION, name: 'Mine', slug: 'mine', featured: true }),
+    );
+    route({});
+    render(<NewUniversePage />);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/auth/me'));
+    fireEvent.change(screen.getByLabelText(/Name/), { target: { value: 'Mine' } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    fireEvent.click(screen.getByRole('button', { name: 'Create universe' }));
+    await waitFor(() => expect(posted('/api/admin/universes')).not.toBeNull());
+    expect(posted('/api/admin/universes').featured).toBe(false);
   });
 });
 

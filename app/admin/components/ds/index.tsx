@@ -8,6 +8,7 @@
  * - EntityRow / EntityCard: one thing in a list, the whole row or card a single target.
  * - PageHeader: kind, name, where it is, one status and the page's actions. No breadcrumbs, no slugs.
  * - SectionHeader, EmptyCard, StatLine, VisitLine, RolePill, StatusPill.
+ * - SettingSwitch: an on/off setting in a form, saying what on and off mean.
  */
 
 import Link from 'next/link';
@@ -16,6 +17,7 @@ import { ArrowUpRight, DoorOpen, Earth, Globe2, Lock, Sparkles, Star, Users, typ
 import { cn } from '@/lib/utils';
 import { timeAgo } from '@/lib/time-ago';
 import { universeColour } from '@/lib/universe-colour';
+import { Switch } from '@/components/ui/switch';
 import styles from './ds.module.css';
 
 export type Kind = 'universe' | 'world' | 'room' | 'star' | 'people';
@@ -415,5 +417,53 @@ export function LoadError({ label, retry }: { label: string; retry: () => void }
         Try again
       </button>
     </div>
+  );
+}
+
+/**
+ * One on/off setting in a form. The label says what it is; the hint says what on and off do, so nobody has to guess.
+ * The whole row toggles it.
+ */
+export function SettingSwitch({
+  id,
+  label,
+  hint,
+  checked,
+  onChange,
+  disabled,
+}: {
+  id: string;
+  label: string;
+  hint: ReactNode;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <label htmlFor={id} className={styles.setting} data-disabled={disabled || undefined}>
+      <span className={styles.settingText}>
+        <strong id={`${id}-label`}>{label}</strong>
+        <span id={`${id}-hint`}>{hint}</span>
+      </span>
+      <Switch
+        id={id}
+        checked={checked}
+        onCheckedChange={onChange}
+        disabled={disabled}
+        aria-labelledby={`${id}-label`}
+        aria-describedby={`${id}-hint`}
+        className="orbit-touch-exempt"
+      />
+    </label>
+  );
+}
+
+/** A group of SettingSwitch rows. */
+export function Settings({ children, label }: { children: ReactNode; label?: string }) {
+  return (
+    <fieldset className={styles.settings}>
+      {label && <legend className="sr-only">{label}</legend>}
+      {children}
+    </fieldset>
   );
 }

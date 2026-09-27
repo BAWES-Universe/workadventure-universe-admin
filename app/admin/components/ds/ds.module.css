@@ -91,3 +91,13 @@ a.empty:hover::before { opacity: 1 !important; }
   .row:has(.trailing) { flex-wrap: wrap; }
   .row:has(.trailing) .trailing { width: 100%; justify-content: flex-end; }
 }
+
+/* Form settings: each on/off a row that says what it does; the whole row toggles. */
+.settings { display: grid; gap: 8px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.setting { display: flex; align-items: center; gap: 16px; min-height: 64px; padding: 12px 14px; border: 1px solid hsl(var(--border)); border-radius: 14px; background: hsl(var(--card)); cursor: pointer; transition: border-color 160ms; }
+.setting:hover { border-color: hsl(var(--foreground) / 0.22); }
+.setting:has(:focus-visible) { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
+.setting[data-disabled] { cursor: not-allowed; opacity: 0.6; }
+.settingText { display: grid; gap: 2px; min-width: 0; flex: 1; }
+.settingText strong { font-size: 14px; font-weight: 600; }
+.settingText span { font-size: 12px; line-height: 1.4; color: hsl(var(--muted-foreground)); }

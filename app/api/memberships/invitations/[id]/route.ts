@@ -4,7 +4,7 @@ import { getSessionUser } from '@/lib/auth-session';
 import { wokaLayersForMany } from '@/lib/woka-avatar';
 
 /** How many members' Wokas the invitation shows. */
-const MEMBERS_SHOWN = 6;
+const MEMBERS_SHOWN = 8;
 
 /**
  * GET /api/memberships/invitations/[id] - One invitation, for the person it was sent to.

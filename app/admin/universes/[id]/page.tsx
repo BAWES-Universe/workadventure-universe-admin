@@ -1,5 +1,7 @@
 'use client';
 
+import { useIsSuperAdmin } from '../../admin-bootstrap-context';
+
 import { PersonIcon } from '../../components/profile-card';
 
 import { useState, useEffect, useMemo } from 'react';
@@ -9,7 +11,6 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import { Checkbox } from '@/components/ui/checkbox';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import {
@@ -26,23 +27,7 @@ import { ChevronRight, AlertCircle, Loader2, Plus, Edit, Trash2, ChevronLeft } f
 import { timeAgo } from '@/lib/time-ago';
 import { activityStats } from '@/lib/analytics-peak';
 import { useEntitySummaries } from '../../hooks/use-entity-summaries';
-import {
-  EmptyCard,
-  EntityCard,
-  EntityRow,
-  Figure,
-  Figures,
-  KindIcon,
-  LoadError,
-  LoadingRows,
-  PageHeader,
-  RolePills,
-  SectionHeader,
-  StatLine,
-  StatusPill,
-  VisitLine,
-  count,
-} from '../../components/ds';
+import { EmptyCard, EntityCard, EntityRow, Figure, Figures, KindIcon, LoadError, LoadingRows, PageHeader, RolePills, SectionHeader, SettingSwitch, Settings, StatLine, StatusPill, VisitLine, count } from '../../components/ds';
 
 interface Universe {
   id: string;
@@ -97,6 +82,7 @@ export default function UniverseDetailPage() {
   const [visitorsPage, setVisitorsPage] = useState(1);
   const visitorsPerPage = 10;
   
+  const isSuperAdmin = useIsSuperAdmin();
   const [formData, setFormData] = useState({
     slug: '',
     name: '',
@@ -364,28 +350,24 @@ export default function UniverseDetailPage() {
               />
             </div>
 
-            <div className="flex flex-col sm:flex-row gap-6">
-              <div className="flex items-center space-x-2">
-                <Checkbox
-                  id="isPublic"
-                  checked={formData.isPublic}
-                  onCheckedChange={(checked) => setFormData({ ...formData, isPublic: checked === true })}
-                />
-                <Label htmlFor="isPublic" className="font-normal cursor-pointer">
-                  Public
-                </Label>
-              </div>
-              <div className="flex items-center space-x-2">
-                <Checkbox
+            <Settings label="Visibility">
+              <SettingSwitch
+                id="isPublic"
+                label="Public"
+                hint="Shown in Space. Off: hidden, and everything in it is members only."
+                checked={formData.isPublic}
+                onChange={(checked) => setFormData({ ...formData, isPublic: checked })}
+              />
+              {isSuperAdmin && (
+                <SettingSwitch
                   id="featured"
+                  label="Featured"
+                  hint="Pinned to the top of Space and Discover. Only super admins can change this."
                   checked={formData.featured}
-                  onCheckedChange={(checked) => setFormData({ ...formData, featured: checked === true })}
+                  onChange={(checked) => setFormData({ ...formData, featured: checked })}
                 />
-                <Label htmlFor="featured" className="font-normal cursor-pointer">
-                  Featured
-                </Label>
-              </div>
-            </div>
+              )}
+            </Settings>
 
             <div className="flex flex-col-reverse sm:flex-row justify-end gap-3 pt-4">
               <Button
