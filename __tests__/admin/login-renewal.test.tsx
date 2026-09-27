@@ -1,7 +1,7 @@
 /** @jest-environment jsdom */
 
 import React from 'react';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import LoginPage from '@/app/admin/login/page';
 
 const PLAY_ORIGIN = 'http://play.workadventure.localhost';
@@ -65,5 +65,33 @@ describe('signing in when the game’s access token has run out', () => {
     gameSends('still-stale');
     expect(await screen.findByText(/Your Universe sign-in has expired/)).toBeTruthy();
     expect(window.sessionStorage.getItem('orbit_session_v2')).toBeNull();
+  });
+
+  it('tries a renewal again when the person clicks Continue with Universe after a refusal', async () => {
+    let renewedAvailable = false;
+    fetchMock.mockImplementation((url, init) => {
+      if (url !== '/api/auth/login') return answer(404, {});
+      const { accessToken } = JSON.parse(String(init?.body)) as { accessToken: string };
+      return accessToken === 'fresh' && renewedAvailable
+        ? answer(200, { version: 2, sessionId: SESSION, expiresAt: Date.now() + 60_000 })
+        : answer(401, { error: 'Invalid or expired access token' });
+    });
+    render(<LoginPage />);
+    await waitFor(() => expect(postMessage).toHaveBeenCalledTimes(1));
+    gameSends('stale');
+    await waitFor(() => expect(postMessage).toHaveBeenCalledTimes(2));
+    gameSends('still-stale');
+    await screen.findByText(/Your Universe sign-in has expired/);
+
+    renewedAvailable = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Continue with Universe' }));
+    await waitFor(() => expect(postMessage).toHaveBeenCalledTimes(3));
+    expect(postMessage.mock.calls[2][0]).not.toHaveProperty('refresh');
+    gameSends('stale');
+    // Refused again, so the page asks the game to renew rather than giving up.
+    await waitFor(() => expect(postMessage).toHaveBeenCalledTimes(4));
+    expect(postMessage.mock.calls[3][0]).toEqual(expect.objectContaining({ type: 'orbit-auth-ready-v2', refresh: true }));
+    gameSends('fresh');
+    await waitFor(() => expect(window.sessionStorage.getItem('orbit_session_v2')).toBe(SESSION));
   });
 });

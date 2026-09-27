@@ -126,7 +126,13 @@ export default function LoginPage() {
         </CardHeader>
         <CardContent className="space-y-4">
           {error && <Alert variant="destructive"><AlertCircle className="h-4 w-4" /><AlertTitle>Authentication failed</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
-          <Button className="w-full" onClick={() => { setSignedOut(false); sessionStorage.removeItem(LOGOUT_SUPPRESSION_KEY); beginIframeHandshake(); }}>
+          <Button className="w-full" onClick={() => {
+            setSignedOut(false);
+            sessionStorage.removeItem(LOGOUT_SUPPRESSION_KEY);
+            // A fresh attempt gets its own renewal try, so an expired token can still be renewed from here.
+            renewalTried.current = false;
+            beginIframeHandshake();
+          }}>
             Continue with Universe
           </Button>
           {ENABLE_MANUAL_LOGIN && (
