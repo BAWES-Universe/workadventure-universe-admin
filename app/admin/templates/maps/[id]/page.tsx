@@ -5,9 +5,7 @@ import { useState, useEffect } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { Badge } from '@/components/ui/badge';
 import {
   Dialog,
   DialogContent,
@@ -29,7 +27,6 @@ import {
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import { Checkbox } from '@/components/ui/checkbox';
 import {
   Select,
   SelectContent,
@@ -37,9 +34,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { ChevronLeft, ChevronRight, Loader2, Edit, Trash2, AlertCircle, MapPin, ExternalLink, Plus, Star, Activity, Clock } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Loader2, Edit, Trash2, AlertCircle, ExternalLink, Plus, Star } from 'lucide-react';
 import { ImageUpload } from '@/components/templates/ImageUpload';
-import { cn } from '@/lib/utils';
+import { Context, EmptyCard, EntityRow, InContext, LoadError, LoadingRows, PageHeader, SectionHeader, SettingSwitch, Settings, StatLine, VisitLine, count } from '../../../components/ds';
+import { FactPill, InactivePill } from '../../components/template-bits';
 
 interface TemplateMap {
   id: string;
@@ -117,130 +115,43 @@ function formatHourTo12Hour(hour: number): string {
   return `${hour - 12}:00 PM`;
 }
 
-function formatTimeAgo(date: Date): string {
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffSecs = Math.floor(diffMs / 1000);
-  const diffMins = Math.floor(diffSecs / 60);
-  const diffHours = Math.floor(diffMins / 60);
-  const diffDays = Math.floor(diffHours / 24);
-  const diffWeeks = Math.floor(diffDays / 7);
-  const diffMonths = Math.floor(diffDays / 30);
-  const diffYears = Math.floor(diffDays / 365);
-
-  if (diffSecs < 60) return 'just now';
-  if (diffMins < 60) return `${diffMins} ${diffMins === 1 ? 'minute' : 'minutes'} ago`;
-  if (diffHours < 24) return `${diffHours} ${diffHours === 1 ? 'hour' : 'hours'} ago`;
-  if (diffDays < 7) return `${diffDays} ${diffDays === 1 ? 'day' : 'days'} ago`;
-  if (diffWeeks < 4) return `${diffWeeks} ${diffWeeks === 1 ? 'week' : 'weeks'} ago`;
-  if (diffMonths < 12) return `${diffMonths} ${diffMonths === 1 ? 'month' : 'months'} ago`;
-  return `${diffYears} ${diffYears === 1 ? 'year' : 'years'} ago`;
-}
-
-function RoomCard({ room, analytics }: { room: Room; analytics?: RoomAnalytics }) {
+function RoomRow({ room, analytics }: { room: Room; analytics?: RoomAnalytics }) {
   const favorites = room._count?.favorites ?? 0;
+  const you = analytics?.lastVisitedByUser?.accessedAt ?? null;
+  const latest = analytics?.lastVisitedOverall?.accessedAt ?? null;
 
   return (
-    <Link
+    <EntityRow
       href={`/admin/rooms/${room.id}`}
-      className="block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-      aria-label={`View room ${room.name} in world ${room.world.name}`}
-    >
-      <Card
-        className={cn(
-          'group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
-          'hover:-translate-y-1 hover:shadow-lg',
-        )}
-      >
-        <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-emerald-500/10 via-transparent to-sky-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
-
-        <div className="relative flex h-full flex-col p-5">
-          <div className="mb-3 flex items-start gap-3">
-            <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full border bg-muted">
-              <MapPin className="h-5 w-5 text-muted-foreground" />
-            </div>
-
-            <div className="min-w-0 flex-1 space-y-1">
-              <h3 className="truncate text-base font-semibold leading-tight">
-                {room.name}
-              </h3>
-              <p className="truncate text-xs font-mono text-muted-foreground">
-                {room.world.universe.name} · {room.world.name}
-              </p>
-            </div>
-          </div>
-
-          {room.description && (
-            <p className="mb-3 line-clamp-2 text-sm text-muted-foreground">
-              {room.description}
-            </p>
-          )}
-
-          <div className="mt-auto flex items-start justify-between pt-3 text-xs text-muted-foreground">
-            <div className="flex flex-col gap-1.5 min-h-[3rem]">
-              {analytics ? (
-                <>
-                  <div className="flex items-center gap-1.5">
-                    <Activity className="h-3.5 w-3.5 text-muted-foreground" />
-                    <span className="font-medium text-foreground/80">
-                      {analytics.totalAccesses.toLocaleString()} accesses
-                    </span>
-                  </div>
-                  {analytics.peakHour !== null && (
-                    <div className="flex items-center gap-1.5">
-                      <Clock className="h-3.5 w-3.5 text-muted-foreground" />
-                      <span className="text-muted-foreground">
-                        Peak: {formatHourTo12Hour(analytics.peakHour)}
-                      </span>
-                    </div>
-                  )}
-                  {/* Last visited information */}
-                  {analytics.lastVisitedByUser || analytics.lastVisitedOverall ? (
-                    <div className="flex flex-col gap-0.5 mt-0.5">
-                      {analytics.lastVisitedByUser && (
-                        <div className="text-[11px]">
-                          <span className="text-muted-foreground/70">Last visited by you: </span>
-                          <span className="font-medium text-foreground/80">
-                            {formatTimeAgo(new Date(analytics.lastVisitedByUser.accessedAt))}
-                          </span>
-                        </div>
-                      )}
-                      {analytics.lastVisitedOverall && (
-                        <div className="text-[11px]">
-                          {analytics.lastVisitedByUser && 
-                           analytics.lastVisitedByUser.accessedAt === analytics.lastVisitedOverall.accessedAt ? (
-                            <span className="text-muted-foreground/70 italic">
-                              You were the last visitor
-                            </span>
-                          ) : (
-                            <>
-                              <span className="text-muted-foreground/70">Most recent visitor: </span>
-                              <span className="font-medium text-foreground/80">
-                                {formatTimeAgo(new Date(analytics.lastVisitedOverall.accessedAt))}
-                              </span>
-                            </>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  ) : (
-                    <div className="text-[11px] text-muted-foreground/70 mt-0.5">
-                      No accesses yet
-                    </div>
-                  )}
-                </>
-              ) : (
-                <span className="text-muted-foreground">Access data loading...</span>
-              )}
-            </div>
-            <div className="flex items-center gap-1 text-primary self-end">
-              <Star className="h-4 w-4" aria-hidden="true" />
-              <span className="text-xs font-medium">{favorites}</span>
-            </div>
-          </div>
-        </div>
-      </Card>
-    </Link>
+      kind="room"
+      title={room.name}
+      context={<Context parts={[{ label: room.world.universe.name }, { label: room.world.name }]} />}
+      meta={
+        analytics ? (
+          <>
+            <StatLine
+              items={[
+                count(analytics.totalAccesses, 'access', 'accesses'),
+                analytics.peakHour !== null && `Peak ${formatHourTo12Hour(analytics.peakHour)}`,
+              ]}
+            />
+            {you || latest ? (
+              <VisitLine you={you} latest={latest} youWereLast={!!you && you === latest} />
+            ) : (
+              <StatLine items={['No visits yet']} />
+            )}
+          </>
+        ) : (
+          <StatLine items={['Loading visits…']} />
+        )
+      }
+      aside={
+        <span className="inline-flex items-center gap-1" aria-label={count(favorites, 'star') ?? undefined}>
+          <Star className="h-3.5 w-3.5" aria-hidden="true" />
+          {favorites}
+        </span>
+      }
+    />
   );
 }
 
@@ -256,6 +167,7 @@ export default function MapDetailPage() {
   const [saving, setSaving] = useState(false);
   const [rooms, setRooms] = useState<Room[]>([]);
   const [roomsLoading, setRoomsLoading] = useState(false);
+  const [roomsFailed, setRoomsFailed] = useState(false);
   const [analyticsByRoom, setAnalyticsByRoom] = useState<Record<string, RoomAnalytics>>({});
   const [roomsPage, setRoomsPage] = useState(1);
   const roomsPerPage = 12;
@@ -544,6 +456,7 @@ export default function MapDetailPage() {
     
     try {
       setRoomsLoading(true);
+      setRoomsFailed(false);
       const { authenticatedFetch } = await import('@/lib/client-auth');
       const response = await authenticatedFetch(
         `/api/admin/templates/maps/${params.id}/rooms?page=${page}&limit=${roomsPerPage}&sortBy=${sortBy}`
@@ -558,6 +471,7 @@ export default function MapDetailPage() {
       setRoomsPagination(data.pagination || null);
     } catch (err) {
       console.error('Error fetching rooms:', err);
+      setRoomsFailed(true);
       setRooms([]);
       setRoomsPagination(null);
     } finally {
@@ -679,51 +593,51 @@ export default function MapDetailPage() {
     );
   }
 
+  const sizeText = map.sizeLabel ? `${map.sizeLabel.charAt(0).toUpperCase()}${map.sizeLabel.slice(1).toLowerCase()} size` : null;
+
   return (
     <div className="space-y-8">
-      <div className="flex items-center justify-between">
-        <Button variant="ghost" size="sm" asChild>
-          <Link href={map.template?.id ? `/admin/templates/templates/${map.template.id}` : '/admin/templates'}>
-            <ChevronLeft className="h-4 w-4 mr-2" />
-            Back to {map.template?.name || 'Templates'}
-          </Link>
-        </Button>
-        {isSuperAdmin && (
-          <Button variant="outline" onClick={() => setIsEditDialogOpen(true)}>
-            <Edit className="h-4 w-4 mr-2" />
-            Edit
-          </Button>
-        )}
-      </div>
-
-      <div className="space-y-1">
-        <div>
-          <h1 className="text-4xl font-bold tracking-tight">{map.name}</h1>
-          <div className="flex items-center gap-1.5 mt-2">
-            {map.template.category.icon && (
-              <span className="text-sm">{map.template.category.icon}</span>
-            )}
-            <p className="text-xs text-muted-foreground">
-              {map.template.category.name}
-            </p>
-          </div>
-        </div>
-        {map.description && (
-          <p className="text-muted-foreground mt-2">{map.description}</p>
-        )}
-        <div className="flex flex-wrap items-center gap-2 mt-2">
-          {isSuperAdmin && (
-            <Badge variant={map.isActive ? 'default' : 'secondary'}>
-              {map.isActive ? 'Active' : 'Inactive'}
-            </Badge>
-          )}
-          {map.sizeLabel && (
-            <Badge variant="secondary">
-              {map.sizeLabel.charAt(0).toUpperCase() + map.sizeLabel.slice(1).toLowerCase()} size
-            </Badge>
-          )}
-        </div>
-      </div>
+      <PageHeader
+        kind="map"
+        title={map.name}
+        context={
+          <InContext
+            parts={[
+              {
+                label: map.template.category.icon ? `${map.template.category.icon} ${map.template.category.name}` : map.template.category.name,
+                href: `/admin/templates/categories/${map.template.category.id}`,
+              },
+              { label: map.template.name, href: `/admin/templates/templates/${map.template.id}` },
+            ]}
+          />
+        }
+        status={
+          <>
+            {sizeText && <FactPill>{sizeText}</FactPill>}
+            {isSuperAdmin && !map.isActive && <InactivePill />}
+          </>
+        }
+        actions={
+          managedWorlds.length > 0 || isSuperAdmin ? (
+            <>
+              {managedWorlds.length > 0 && (
+                <Button className="h-11" onClick={() => setIsCreateRoomDialogOpen(true)}>
+                  <Plus className="h-4 w-4 mr-2" />
+                  Create a room from this map
+                </Button>
+              )}
+              {isSuperAdmin && (
+                <Button variant="outline" className="h-11" onClick={() => setIsEditDialogOpen(true)}>
+                  <Edit className="h-4 w-4 mr-2" />
+                  Edit map
+                </Button>
+              )}
+            </>
+          ) : undefined
+        }
+      >
+        {map.description && <p className="max-w-3xl text-sm text-foreground/80">{map.description}</p>}
+      </PageHeader>
 
       {error && (
         <Alert variant="destructive">
@@ -734,92 +648,61 @@ export default function MapDetailPage() {
       )}
 
       {/* Map Details */}
-      <Card className="border-0">
-        <CardContent className="p-6">
-          {map.previewImageUrl ? (
-            <div className="space-y-4">
-              <img
-                src={map.previewImageUrl}
-                alt={map.name}
-                className="w-full rounded-lg object-cover"
-              />
-              {managedWorlds.length > 0 && (
-                <Button
-                  onClick={() => setIsCreateRoomDialogOpen(true)}
-                  className="w-full"
-                >
-                  <Plus className="h-4 w-4 mr-2" />
-                  Create Room from Template
-                </Button>
-              )}
-            </div>
-          ) : (
-            managedWorlds.length > 0 && (
-              <Button
-                onClick={() => setIsCreateRoomDialogOpen(true)}
-                className="w-full"
-              >
-                <Plus className="h-4 w-4 mr-2" />
-                Create Room from Template
-              </Button>
-            )
-          )}
-        </CardContent>
-      </Card>
+      {map.previewImageUrl && (
+        <div className="overflow-hidden rounded-2xl border bg-card">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={map.previewImageUrl} alt={map.name} className="w-full object-cover" />
+        </div>
+      )}
+
+      {isSuperAdmin && (
+        <p className="text-xs text-muted-foreground [overflow-wrap:anywhere]">
+          Map key <code className="rounded bg-muted px-1 text-foreground">{map.slug}</code>
+          {' · '}
+          <a href={map.mapUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 underline underline-offset-2">
+            Map file
+            <ExternalLink className="h-3 w-3" aria-hidden="true" />
+          </a>
+        </p>
+      )}
 
       {/* Rooms Using This Map */}
-      <div>
-        <h2 className="text-2xl font-semibold mb-2">Rooms Using This Map</h2>
-        <div className="flex items-center gap-2 text-sm mb-4">
-          <MapPin className="h-4 w-4 text-muted-foreground" />
-          <span>
-            {map._count.rooms} {map._count.rooms === 1 ? 'room' : 'rooms'} using this map
-          </span>
-        </div>
+      <section aria-labelledby="map-rooms">
+        <SectionHeader id="map-rooms" title="Rooms using this map" count={map._count.rooms} />
         {map._count.rooms > 3 && (
-          <div className="flex items-center gap-2 mb-4">
-            <Label htmlFor="sortBy" className="text-sm text-muted-foreground">Sort by:</Label>
+          <div className="mb-4 flex items-center gap-2">
+            <Label htmlFor="sortBy" className="text-sm text-muted-foreground">Sort by</Label>
             <Select
               value={roomsSortBy}
               onValueChange={(value) => handleSortChange(value as 'created' | 'accesses' | 'stars')}
               disabled={roomsLoading}
             >
-              <SelectTrigger id="sortBy" className="w-[140px]">
+              <SelectTrigger id="sortBy" className="h-11 w-[160px]">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="created">Date Created</SelectItem>
-                <SelectItem value="accesses">Access Count</SelectItem>
+                <SelectItem value="created">Date created</SelectItem>
+                <SelectItem value="accesses">Access count</SelectItem>
                 <SelectItem value="stars">Stars</SelectItem>
               </SelectContent>
             </Select>
           </div>
         )}
         {roomsLoading ? (
-          <div className="flex items-center justify-center py-12">
-            <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-          </div>
+          <LoadingRows label="rooms using this map" rows={3} />
+        ) : roomsFailed ? (
+          <LoadError label="the rooms using this map" retry={() => fetchRooms(roomsPage, roomsSortBy)} />
         ) : rooms.length === 0 ? (
-          <Card className="border-0">
-            <CardContent className="py-12 text-center">
-              <MapPin className="h-12 w-12 mx-auto mb-4 text-muted-foreground" />
-              <p className="text-muted-foreground">No rooms are using this map yet.</p>
-              {managedWorlds.length > 0 && (
-                <Button
-                  onClick={() => setIsCreateRoomDialogOpen(true)}
-                  className="mt-4"
-                >
-                  <Plus className="h-4 w-4 mr-2" />
-                  Create First Room
-                </Button>
-              )}
-            </CardContent>
-          </Card>
+          <EmptyCard
+            kind="room"
+            title="No rooms use this map yet"
+            text={managedWorlds.length > 0 ? 'Create a room from this map in one of your worlds.' : 'Rooms started from this map will show here.'}
+          />
         ) : (
           <>
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+            <div>
               {rooms.map((room) => (
-                <RoomCard
+                <RoomRow
                   key={room.id}
                   room={room}
                   analytics={analyticsByRoom[room.id]}
@@ -827,14 +710,14 @@ export default function MapDetailPage() {
               ))}
             </div>
             {roomsPagination && roomsPagination.totalPages > 1 && (
-              <div className="flex items-center justify-between pt-2">
+              <div className="flex flex-wrap items-center justify-between gap-3 pt-4">
                 <div className="text-sm text-muted-foreground">
                   Showing {(roomsPagination.page - 1) * roomsPagination.limit + 1} to {Math.min(roomsPagination.page * roomsPagination.limit, roomsPagination.total)} of {roomsPagination.total} {roomsPagination.total === 1 ? 'room' : 'rooms'}
                 </div>
                 <div className="flex items-center gap-2">
                   <Button
                     variant="outline"
-                    size="sm"
+                    className="h-11"
                     onClick={() => setRoomsPage(prev => Math.max(1, prev - 1))}
                     disabled={roomsPage === 1 || roomsLoading}
                   >
@@ -843,7 +726,7 @@ export default function MapDetailPage() {
                   </Button>
                   <Button
                     variant="outline"
-                    size="sm"
+                    className="h-11"
                     onClick={() => setRoomsPage(prev => prev + 1)}
                     disabled={roomsPage >= (roomsPagination?.totalPages || 1) || roomsLoading}
                   >
@@ -855,20 +738,22 @@ export default function MapDetailPage() {
             )}
           </>
         )}
-      </div>
+      </section>
 
       {/* Create Room Dialog */}
       <Dialog open={isCreateRoomDialogOpen} onOpenChange={setIsCreateRoomDialogOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Create Room from Template Map</DialogTitle>
+            <DialogTitle>Create a room from this map</DialogTitle>
             <DialogDescription>
-              Select a world to create a room using this template map.
+              Choose the world the new room goes in.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
-              <Label htmlFor="world">World *</Label>
+              <Label htmlFor="world">
+                World <span className="text-destructive">*</span>
+              </Label>
               {worldsLoading ? (
                 <div className="flex items-center justify-center py-4">
                   <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
@@ -885,7 +770,7 @@ export default function MapDetailPage() {
                   value={selectedWorldId}
                   onValueChange={setSelectedWorldId}
                 >
-                  <SelectTrigger>
+                  <SelectTrigger id="world" className="h-11">
                     <SelectValue placeholder="Select a world" />
                   </SelectTrigger>
                   <SelectContent>
@@ -900,7 +785,7 @@ export default function MapDetailPage() {
             </div>
             {map && (
               <div className="space-y-2">
-                <Label>Template Map</Label>
+                <Label>Map</Label>
                 <div className="p-3 bg-muted rounded-md">
                   <p className="font-medium">{map.name}</p>
                   {map.description && (
@@ -910,15 +795,16 @@ export default function MapDetailPage() {
               </div>
             )}
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setIsCreateRoomDialogOpen(false)}>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" className="h-11" onClick={() => setIsCreateRoomDialogOpen(false)}>
               Cancel
             </Button>
             <Button
+              className="h-11"
               onClick={handleCreateRoom}
               disabled={!selectedWorldId || worldsLoading || managedWorlds.length === 0}
             >
-              Create Room
+              Continue
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -927,28 +813,18 @@ export default function MapDetailPage() {
       {/* Edit Dialog */}
       <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>
         <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
-          <DialogHeader className="relative">
-            <DialogTitle>Edit Map</DialogTitle>
-            <DialogDescription>Update map details</DialogDescription>
-            <Button
-              variant="destructive"
-              size="sm"
-              className="absolute top-0 right-0"
-              onClick={() => {
-                setIsEditDialogOpen(false);
-                setIsDeleteDialogOpen(true);
-              }}
-              disabled={map._count.rooms > 0}
-            >
-              <Trash2 className="h-4 w-4 mr-2" />
-              Delete
-            </Button>
+          <DialogHeader>
+            <DialogTitle>Edit map</DialogTitle>
+            <DialogDescription>Change how this map shows in the template library.</DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
-              <Label htmlFor="name">Name *</Label>
+              <Label htmlFor="name">
+                Name <span className="text-destructive">*</span>
+              </Label>
               <Input
                 id="name"
+                className="h-11"
                 value={formData.name}
                 onChange={(e) => setFormData({ ...formData, name: e.target.value })}
               />
@@ -963,9 +839,12 @@ export default function MapDetailPage() {
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="mapUrl">Map URL *</Label>
+              <Label htmlFor="mapUrl">
+                Map URL <span className="text-destructive">*</span>
+              </Label>
               <Input
                 id="mapUrl"
+                className="h-11"
                 type="url"
                 value={formData.mapUrl}
                 onChange={(e) => setFormData({ ...formData, mapUrl: e.target.value })}
@@ -981,15 +860,15 @@ export default function MapDetailPage() {
                 onFileChange={(file) => setPendingImageFile(file)}
               />
             </div>
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-2">
-                <Label htmlFor="sizeLabel">Size Label</Label>
+                <Label htmlFor="sizeLabel">Size</Label>
                 <Select
                   key={`size-select-${map?.id}-${map?.sizeLabel || 'empty'}`}
                   value={formData.sizeLabel && formData.sizeLabel.trim() !== '' ? formData.sizeLabel : undefined}
                   onValueChange={(value) => setFormData({ ...formData, sizeLabel: value })}
                 >
-                  <SelectTrigger>
+                  <SelectTrigger id="sizeLabel" className="h-11">
                     <SelectValue placeholder="Select size (optional)" />
                   </SelectTrigger>
                   <SelectContent>
@@ -1003,30 +882,41 @@ export default function MapDetailPage() {
                 <Label htmlFor="order">Order</Label>
                 <Input
                   id="order"
+                  className="h-11"
                   type="number"
                   value={formData.order}
                   onChange={(e) => setFormData({ ...formData, order: parseInt(e.target.value) || 0 })}
                 />
               </div>
             </div>
-            <div className="flex items-center space-x-2">
-              <Checkbox
+            <Settings label="Library">
+              <SettingSwitch
                 id="isActive"
+                label="Active"
+                hint="Offered when people start a room from this template. Off: hidden."
                 checked={formData.isActive}
-                onCheckedChange={(checked) =>
-                  setFormData({ ...formData, isActive: checked === true })
-                }
+                onChange={(checked) => setFormData({ ...formData, isActive: checked })}
               />
-              <Label htmlFor="isActive" className="font-normal cursor-pointer">
-                Active
-              </Label>
-            </div>
+            </Settings>
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setIsEditDialogOpen(false)}>
+          <DialogFooter className="gap-2">
+            <Button
+              variant="outline"
+              className="h-11 text-destructive hover:text-destructive sm:mr-auto"
+              onClick={() => {
+                setIsEditDialogOpen(false);
+                setIsDeleteDialogOpen(true);
+              }}
+              disabled={map._count.rooms > 0}
+              title={map._count.rooms > 0 ? 'Rooms use this map, so it can’t be deleted.' : undefined}
+            >
+              <Trash2 className="h-4 w-4 mr-2" />
+              Delete
+            </Button>
+            <Button variant="outline" className="h-11" onClick={() => setIsEditDialogOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={handleSave} disabled={saving || !formData.name || !formData.mapUrl}>
+            <Button className="h-11" onClick={handleSave} disabled={saving || !formData.name || !formData.mapUrl}>
               {saving ? (
                 <>
                   <Loader2 className="h-4 w-4 mr-2 animate-spin" />
@@ -1044,7 +934,7 @@ export default function MapDetailPage() {
       <AlertDialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete Map</AlertDialogTitle>
+            <AlertDialogTitle>Delete map</AlertDialogTitle>
             <AlertDialogDescription>
               Are you sure you want to delete "{map.name}"? This action cannot be undone.
               {map._count.rooms > 0 && (

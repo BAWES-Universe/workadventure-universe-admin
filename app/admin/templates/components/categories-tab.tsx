@@ -2,7 +2,6 @@
 
 import { useState, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import {
   Table,
   TableBody,
@@ -11,7 +10,6 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { Badge } from '@/components/ui/badge';
 import {
   Dialog,
   DialogContent,
@@ -33,9 +31,10 @@ import {
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import { Checkbox } from '@/components/ui/checkbox';
 import { Plus, Edit, Trash2, Loader2 } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import { LoadError, LoadingRows, SettingSwitch } from '../../components/ds';
+import { InactivePill } from './template-bits';
 
 interface Category {
   id: string;
@@ -54,6 +53,7 @@ export function CategoriesTab() {
   const [categories, setCategories] = useState<Category[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [editingCategory, setEditingCategory] = useState<Category | null>(null);
@@ -86,7 +86,9 @@ export function CategoriesTab() {
       const data = await response.json();
       setCategories(data.categories || []);
       setError(null);
+      setLoadFailed(false);
     } catch (err) {
+      setLoadFailed(true);
       setError(err instanceof Error ? err.message : 'Failed to load categories');
     } finally {
       setLoading(false);
@@ -184,24 +186,22 @@ export function CategoriesTab() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center py-12">
-        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-      </div>
+      <LoadingRows label="categories" rows={3} />
     );
   }
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="text-2xl font-semibold">Categories</h2>
+          <h2 className="orbit-display text-lg font-bold">Categories</h2>
           <p className="text-sm text-muted-foreground">
             Manage template categories
           </p>
         </div>
-        <Button onClick={openCreateDialog}>
+        <Button variant="outline" className="h-11" onClick={openCreateDialog}>
           <Plus className="h-4 w-4 mr-2" />
-          Create Category
+          New category
         </Button>
       </div>
 
@@ -211,13 +211,12 @@ export function CategoriesTab() {
         </Alert>
       )}
 
-      <Card>
-        <CardHeader>
-          <CardTitle>All Categories</CardTitle>
-        </CardHeader>
-        <CardContent>
+      {loadFailed ? (
+        <LoadError label="categories" retry={fetchCategories} />
+      ) : (
+        <div className="overflow-x-auto rounded-2xl border bg-card p-2 sm:p-3">
           {categories.length === 0 ? (
-            <div className="text-center py-8 text-muted-foreground">
+            <div className="px-2 py-6 text-sm text-muted-foreground">
               No categories found. Create your first category.
             </div>
           ) : (
@@ -226,7 +225,7 @@ export function CategoriesTab() {
                 <TableRow>
                   <TableHead>Icon</TableHead>
                   <TableHead>Name</TableHead>
-                  <TableHead>Slug</TableHead>
+                  <TableHead>Category key</TableHead>
                   <TableHead>Order</TableHead>
                   <TableHead>Templates</TableHead>
                   <TableHead>Status</TableHead>
@@ -242,22 +241,24 @@ export function CategoriesTab() {
                     <TableCell>{category.order}</TableCell>
                     <TableCell>{category._count.templates}</TableCell>
                     <TableCell>
-                      <Badge variant={category.isActive ? 'default' : 'secondary'}>
-                        {category.isActive ? 'Active' : 'Inactive'}
-                      </Badge>
+                      {category.isActive ? <span className="text-sm text-muted-foreground">Active</span> : <InactivePill />}
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-2">
                         <Button
                           variant="ghost"
-                          size="sm"
+                          size="icon"
+                          className="h-11 w-11"
+                          aria-label={`Edit ${category.name}`}
                           onClick={() => openEditDialog(category)}
                         >
                           <Edit className="h-4 w-4" />
                         </Button>
                         <Button
                           variant="ghost"
-                          size="sm"
+                          size="icon"
+                          className="h-11 w-11"
+                          aria-label={`Delete ${category.name}`}
                           onClick={() => openDeleteDialog(category)}
                           disabled={category._count.templates > 0}
                         >
@@ -270,15 +271,15 @@ export function CategoriesTab() {
               </TableBody>
             </Table>
           )}
-        </CardContent>
-      </Card>
+        </div>
+      )}
 
       {/* Create/Edit Dialog */}
       <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
             <DialogTitle>
-              {editingCategory ? 'Edit Category' : 'Create Category'}
+              {editingCategory ? 'Edit category' : 'New category'}
             </DialogTitle>
             <DialogDescription>
               {editingCategory
@@ -288,9 +289,10 @@ export function CategoriesTab() {
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
-              <Label htmlFor="slug">Slug *</Label>
+              <Label htmlFor="slug">Category key *</Label>
               <Input
                 id="slug"
+                className="h-11"
                 value={formData.slug}
                 onChange={(e) =>
                   setFormData({ ...formData, slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') })
@@ -303,6 +305,7 @@ export function CategoriesTab() {
               <Label htmlFor="name">Name *</Label>
               <Input
                 id="name"
+                className="h-11"
                 value={formData.name}
                 onChange={(e) => setFormData({ ...formData, name: e.target.value })}
                 placeholder="Work Rooms"
@@ -319,9 +322,10 @@ export function CategoriesTab() {
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="icon">Icon (Emoji)</Label>
+              <Label htmlFor="icon">Icon (emoji)</Label>
               <Input
                 id="icon"
+                className="h-11"
                 value={formData.icon}
                 onChange={(e) => setFormData({ ...formData, icon: e.target.value })}
                 placeholder="🛠️"
@@ -332,29 +336,25 @@ export function CategoriesTab() {
               <Label htmlFor="order">Order</Label>
               <Input
                 id="order"
+                className="h-11"
                 type="number"
                 value={formData.order}
                 onChange={(e) => setFormData({ ...formData, order: parseInt(e.target.value) || 0 })}
               />
             </div>
-            <div className="flex items-center space-x-2">
-              <Checkbox
-                id="isActive"
-                checked={formData.isActive}
-                onCheckedChange={(checked) =>
-                  setFormData({ ...formData, isActive: checked === true })
-                }
-              />
-              <Label htmlFor="isActive" className="font-normal cursor-pointer">
-                Active
-              </Label>
-            </div>
+            <SettingSwitch
+              id="isActive"
+              label="Active"
+              hint="Offered in the template library. Off: hidden."
+              checked={formData.isActive}
+              onChange={(checked) => setFormData({ ...formData, isActive: checked })}
+            />
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setIsDialogOpen(false)}>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" className="h-11" onClick={() => setIsDialogOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={handleSave} disabled={saving || !formData.slug || !formData.name}>
+            <Button className="h-11" onClick={handleSave} disabled={saving || !formData.slug || !formData.name}>
               {saving ? (
                 <>
                   <Loader2 className="h-4 w-4 mr-2 animate-spin" />
@@ -372,7 +372,7 @@ export function CategoriesTab() {
       <AlertDialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete Category</AlertDialogTitle>
+            <AlertDialogTitle>Delete category</AlertDialogTitle>
             <AlertDialogDescription>
               Are you sure you want to delete "{deleteCategory?.name}"? This action cannot be undone.
               {deleteCategory && deleteCategory._count.templates > 0 && (

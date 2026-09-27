@@ -8,6 +8,7 @@ import { useState, useEffect, useMemo } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
@@ -394,39 +395,13 @@ export default function UniverseDetailPage() {
         </Card>
       ) : (
         <>
-          {/* Tabs */}
-          <div className="border-b border-border">
-            <nav className="flex gap-6" role="tablist">
-              <button
-                type="button"
-                role="tab"
-                aria-selected={activeTab === 'details'}
-                onClick={() => setActiveTab('details')}
-                className={`-mb-px py-3 px-1 border-b-2 font-medium text-sm ${
-                  activeTab === 'details'
-                    ? 'border-foreground text-foreground'
-                    : 'border-transparent text-muted-foreground hover:text-foreground'
-                }`}
-              >
-                Details
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={activeTab === 'analytics'}
-                onClick={() => setActiveTab('analytics')}
-                className={`-mb-px py-3 px-1 border-b-2 font-medium text-sm ${
-                  activeTab === 'analytics'
-                    ? 'border-foreground text-foreground'
-                    : 'border-transparent text-muted-foreground hover:text-foreground'
-                }`}
-              >
-                Visitors
-              </button>
-            </nav>
-          </div>
+          <Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as 'details' | 'analytics')} className="space-y-6">
+          <TabsList aria-label="Universe">
+            <TabsTrigger value="details">Details</TabsTrigger>
+            <TabsTrigger value="analytics">Visitors</TabsTrigger>
+          </TabsList>
 
-          {/* Tab Content */}
+          <TabsContent value="details" className="mt-0 space-y-8">
           {activeTab === 'details' && (
             <>
               <section className="space-y-3" aria-labelledby="universe-about">
@@ -506,7 +481,9 @@ export default function UniverseDetailPage() {
               ) : null}
             </>
           )}
+          </TabsContent>
 
+          <TabsContent value="analytics" className="mt-0 space-y-8">
           {activeTab === 'analytics' && (
             <>
               {analyticsLoading ? (
@@ -605,6 +582,8 @@ export default function UniverseDetailPage() {
               )}
             </>
           )}
+          </TabsContent>
+          </Tabs>
         </>
       )}
 

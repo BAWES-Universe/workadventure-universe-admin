@@ -2,24 +2,16 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import AuthLink from '@/app/admin/auth-link';
+import Link from 'next/link';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { AlertCircle, Loader2, Database, CheckCircle2, AlertTriangle, Trash2, Eye, RefreshCw, BarChart3, Activity, TrendingUp, ChevronDown, ChevronUp, MessageSquare, Brain } from 'lucide-react';
+import { AlertCircle, Loader2, AlertTriangle, Trash2, Eye, RefreshCw, BarChart3, Activity, ChevronDown, MessageSquare, Brain } from 'lucide-react';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Badge } from '@/components/ui/badge';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table';
+import { Figure, Figures, LoadError, LoadingRows, PageHeader, SectionHeader } from '../../components/ds';
+import { Detail, Pill } from '../bots-ui';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -50,24 +42,7 @@ interface DatabaseStats {
   recommendations: string[];
 }
 
-// Skeleton loader
-function SkeletonCard() {
-  return (
-    <Card>
-      <CardHeader>
-        <div className="h-6 w-32 bg-muted animate-pulse rounded" />
-      </CardHeader>
-      <CardContent>
-        <div className="space-y-2">
-          <div className="h-4 w-full bg-muted animate-pulse rounded" />
-          <div className="h-4 w-3/4 bg-muted animate-pulse rounded" />
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
-export default function DatabaseMonitoringPage() {
+export default function BotDatabasePage() {
   const router = useRouter();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -288,9 +263,6 @@ export default function DatabaseMonitoringPage() {
     return `${(bytes / Math.pow(k, i)).toFixed(2)} ${sizes[i]}`;
   }
 
-  function formatNumber(num: number): string {
-    return new Intl.NumberFormat().format(num);
-  }
 
   function getHealthStatus(table: TableStats): 'healthy' | 'warning' | 'critical' {
     const sizeMB = table.sizeBytes / (1024 * 1024);
@@ -299,129 +271,65 @@ export default function DatabaseMonitoringPage() {
     return 'healthy';
   }
 
-  if (loading) {
-    return (
-      <div className="space-y-8">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div className="space-y-1">
-            <h1 className="text-4xl font-bold tracking-tight">Bot Database Monitoring</h1>
-            <p className="text-muted-foreground text-lg">
-              Monitor database size and manage cleanup
-            </p>
-          </div>
-        </div>
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-          {[...Array(5)].map((_, i) => (
-            <SkeletonCard key={i} />
-          ))}
-        </div>
-      </div>
-    );
-  }
+  const tables = stats
+    ? [
+        { key: 'metrics', label: 'Metrics', href: '/admin/bots/metrics', icon: BarChart3, data: stats.metrics },
+        { key: 'conversations', label: 'Conversations', href: '/admin/bots/conversations', icon: MessageSquare, data: stats.conversations },
+        { key: 'memory', label: 'Memory', href: '/admin/bots/memory', icon: Brain, data: stats.memory },
+        { key: 'testResults', label: 'Test results', href: '/admin/bots/test-results', icon: Activity, data: stats.testResults },
+      ] as const
+    : [];
 
   return (
-    <div className="space-y-8">
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div className="space-y-1">
-          <h1 className="text-4xl font-bold tracking-tight">Bot Database Monitoring</h1>
-          <p className="text-muted-foreground text-lg">
-            Monitor database size and manage cleanup
-          </p>
-        </div>
-        <div className="flex gap-2">
-          <Button onClick={fetchStats} variant="outline">
-            Refresh
-          </Button>
-          <Button 
-            onClick={startFresh} 
-            variant="destructive"
-            disabled={cleanupLoading}
-          >
-            <RefreshCw className="mr-2 h-4 w-4" />
-            Start Fresh (Dev)
-          </Button>
-        </div>
-      </div>
+    <div className="grid min-w-0 gap-6">
+      <PageHeader
+        kind="bot"
+        title="Bot database"
+        context={<span>How much each bot table holds, and cleanup.</span>}
+        stats={
+          stats ? (
+            <Figures>
+              <Figure value={formatBytes(stats.totalSizeBytes)} label="total size" />
+              {tables.map(({ key, label, data }) => (
+                <Figure key={key} value={data.rowCount} label={`${label.toLowerCase()} rows`} />
+              ))}
+            </Figures>
+          ) : undefined
+        }
+        actions={
+          <>
+            <Button onClick={fetchStats} variant="outline" disabled={loading}>
+              <RefreshCw aria-hidden="true" />
+              Refresh
+            </Button>
+            <Button onClick={startFresh} variant="destructive" disabled={cleanupLoading}>
+              <Trash2 aria-hidden="true" />
+              Start fresh (dev)
+            </Button>
+          </>
+        }
+      />
 
-      {error && (
+      {error && stats && (
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
-          <AlertTitle>Error</AlertTitle>
-          <AlertDescription>
-            {error}
-            <Button
-              variant="outline"
-              size="sm"
-              className="ml-4"
-              onClick={fetchStats}
-            >
-              Retry
-            </Button>
-          </AlertDescription>
+          <AlertTitle>Something went wrong</AlertTitle>
+          <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
 
-      {stats && (
+      {loading && !stats ? (
+        <LoadingRows label="database sizes" rows={4} />
+      ) : !stats ? (
+        error && <LoadError label="database sizes" retry={fetchStats} />
+      ) : (
         <>
-          {/* Total Size Summary */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Database className="h-5 w-5" />
-                Total Database Size
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="text-3xl font-bold mb-2">
-                {formatBytes(stats.totalSizeBytes)}
-              </div>
-              <div className="text-sm text-muted-foreground">
-                {stats.totalSizeMB.toFixed(2)} MB total across all bot tables
-              </div>
-              {stats.totalSizeBytes > 0 && (
-                <Collapsible className="mt-4">
-                  <CollapsibleTrigger asChild>
-                    <Button variant="ghost" className="w-full justify-between hover:bg-muted/50">
-                      <div className="flex items-center gap-2">
-                        <AlertCircle className="h-4 w-4" />
-                        <span className="font-semibold">About Table Sizes</span>
-                      </div>
-                      <ChevronDown className="h-4 w-4 transition-transform duration-200 data-[state=open]:rotate-180" />
-                    </Button>
-                  </CollapsibleTrigger>
-                  <CollapsibleContent>
-                    <Alert className="mt-2">
-                      <AlertDescription>
-                        <p className="text-sm">
-                          PostgreSQL table sizes include:
-                        </p>
-                        <ul className="list-disc list-inside text-sm mt-2 space-y-1">
-                          <li>Table data (actual rows)</li>
-                          <li>Indexes (for fast queries)</li>
-                          <li>Table structure and metadata</li>
-                          <li>Unused space from deleted rows (reused automatically)</li>
-                        </ul>
-                        <p className="text-sm mt-2">
-                          After deleting all rows, tables still show size due to indexes and structure. 
-                          This is normal PostgreSQL behavior. To reclaim all space, you would need to run 
-                          <code className="bg-muted px-1 rounded">VACUUM FULL</code> directly on the database 
-                          (not recommended for production).
-                        </p>
-                      </AlertDescription>
-                    </Alert>
-                  </CollapsibleContent>
-                </Collapsible>
-              )}
-            </CardContent>
-          </Card>
-
-          {/* Recommendations */}
           {stats.recommendations.length > 0 && (
-            <Alert variant="default" className="border-yellow-500">
-              <AlertTriangle className="h-4 w-4 text-yellow-600" />
+            <Alert>
+              <AlertTriangle className="h-4 w-4" />
               <AlertTitle>Recommendations</AlertTitle>
               <AlertDescription>
-                <ul className="list-disc list-inside space-y-1 mt-2">
+                <ul className="mt-2 list-inside list-disc space-y-1">
                   {stats.recommendations.map((rec, idx) => (
                     <li key={idx} className="text-sm">{rec}</li>
                   ))}
@@ -430,121 +338,100 @@ export default function DatabaseMonitoringPage() {
             </Alert>
           )}
 
-          {/* Table Stats */}
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {[
-              { key: 'metrics', label: 'Metrics', data: stats.metrics },
-              { key: 'conversations', label: 'Conversations', data: stats.conversations },
-              { key: 'memory', label: 'Memory', data: stats.memory },
-              { key: 'testResults', label: 'Test Results', data: stats.testResults },
-            ].map(({ key, label, data }) => {
-              const health = getHealthStatus(data);
-              return (
-                <Card
-                  key={key}
-                  className={`group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all hover:-translate-y-1 hover:shadow-lg ${
-                    health === 'critical' ? 'border-red-500/50' : health === 'warning' ? 'border-yellow-500/50' : ''
-                  }`}
-                >
-                  <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-purple-500/10 via-transparent to-pink-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
-                  <CardHeader className="relative">
-                    <div className="flex items-center justify-between">
-                      <CardTitle className="text-base">{label}</CardTitle>
-                      {health === 'healthy' ? (
-                        <Badge variant="default" className="bg-green-600">
-                          <CheckCircle2 className="mr-1 h-3 w-3" />
-                          Healthy
-                        </Badge>
-                      ) : health === 'warning' ? (
-                        <Badge variant="default" className="bg-yellow-600">
-                          <AlertTriangle className="mr-1 h-3 w-3" />
-                          Warning
-                        </Badge>
-                      ) : (
-                        <Badge variant="destructive">
-                          <AlertTriangle className="mr-1 h-3 w-3" />
-                          Critical
-                        </Badge>
-                      )}
+          <section aria-labelledby="db-tables" className="min-w-0">
+            <SectionHeader id="db-tables" title="Tables" count={tables.length} />
+            <p className="mb-3 text-sm text-muted-foreground">
+              {stats.totalSizeMB.toFixed(2)} MB across all bot tables.
+            </p>
+            <div className="grid min-w-0 gap-3 md:grid-cols-2">
+              {tables.map(({ key, label, href, icon: Icon, data }) => {
+                const health = getHealthStatus(data);
+                return (
+                  <article key={key} className="flex min-w-0 flex-col gap-4 rounded-2xl border bg-card p-4 sm:p-5">
+                    <div className="flex items-start justify-between gap-3">
+                      <h3 className="orbit-display flex items-center gap-2 text-base font-semibold">
+                        <Icon className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
+                        {label}
+                      </h3>
+                      <Pill tone={health === 'healthy' ? 'ok' : health === 'warning' ? 'waiting' : 'bad'}>
+                        {health === 'healthy' ? 'Healthy' : health === 'warning' ? 'Warning' : 'Critical'}
+                      </Pill>
                     </div>
-                  </CardHeader>
-                  <CardContent className="relative space-y-3">
-                    <div>
-                      <div className="text-sm font-medium text-muted-foreground">Row Count</div>
-                      <div className="text-2xl font-bold">{formatNumber(data.rowCount)}</div>
-                    </div>
-                    <div>
-                      <div className="text-sm font-medium text-muted-foreground">Size</div>
-                      <div className="text-lg font-semibold">{formatBytes(data.sizeBytes)}</div>
+
+                    <Figures>
+                      <Figure value={data.rowCount} label="rows" />
+                      <Figure value={formatBytes(data.sizeBytes)} label="size" />
+                    </Figures>
+
+                    <dl className="grid grid-cols-2 gap-3">
+                      {data.oldestRecord && <Detail label="Oldest record">{new Date(data.oldestRecord).toLocaleDateString()}</Detail>}
+                      {data.newestRecord && <Detail label="Newest record">{new Date(data.newestRecord).toLocaleDateString()}</Detail>}
+                    </dl>
+
+                    <div className="space-y-1 text-xs text-muted-foreground">
+                      <p>{data.recommendation}</p>
                       {data.rowCount === 0 && data.sizeBytes > 0 && (
-                        <div className="text-xs text-muted-foreground mt-1">
-                          (table overhead - indexes & structure)
-                        </div>
+                        <p>The size is table overhead: structure, indexes and space left by earlier rows.</p>
                       )}
-                      {data.rowCount > 0 && data.sizeBytes > 0 && (data.sizeBytes / data.rowCount) > 1024 * 1024 && (
-                        <div className="text-xs text-yellow-600 mt-1">
-                          ⚠️ Large average row size: {formatBytes(data.sizeBytes / data.rowCount)} per row
-                        </div>
-                      )}
-                    </div>
-                    {data.oldestRecord && (
-                      <div>
-                        <div className="text-sm font-medium text-muted-foreground">Oldest Record</div>
-                        <div className="text-sm">{new Date(data.oldestRecord).toLocaleDateString()}</div>
-                      </div>
-                    )}
-                    {data.newestRecord && (
-                      <div>
-                        <div className="text-sm font-medium text-muted-foreground">Newest Record</div>
-                        <div className="text-sm">{new Date(data.newestRecord).toLocaleDateString()}</div>
-                      </div>
-                    )}
-                    <div className="pt-2 border-t">
-                      <div className="text-xs text-muted-foreground">{data.recommendation}</div>
-                      {data.rowCount === 0 && data.sizeBytes > 0 && (
-                        <div className="text-xs text-muted-foreground mt-1 italic">
-                          Size includes table structure, indexes, and unused space from previous rows
-                        </div>
+                      {data.rowCount > 0 && data.sizeBytes > 0 && data.sizeBytes / data.rowCount > 1024 * 1024 && (
+                        <p className="text-amber-600 dark:text-amber-400">
+                          Large average row size: {formatBytes(data.sizeBytes / data.rowCount)} per row.
+                        </p>
                       )}
                       {key === 'testResults' && data.rowCount > 0 && data.sizeBytes > 5 * 1024 * 1024 && (
-                        <div className="text-xs text-yellow-600 mt-1">
-                          Large size may indicate very large JSON data in test results. Check the browse page to inspect.
-                        </div>
+                        <p className="text-amber-600 dark:text-amber-400">
+                          A large size may mean very large JSON in test results. Browse them to check.
+                        </p>
                       )}
                     </div>
-                    <div className="flex gap-2 pt-2 flex-wrap">
-                      {(key === 'metrics' || key === 'testResults' || key === 'conversations' || key === 'memory') && (
-                        <AuthLink href={
-                          key === 'metrics' ? '/admin/bots/metrics' :
-                          key === 'testResults' ? '/admin/bots/test-results' :
-                          key === 'conversations' ? '/admin/bots/conversations' :
-                          '/admin/bots/memory'
-                        }>
-                          <Button variant="outline" size="sm">
-                            {key === 'metrics' && <BarChart3 className="mr-2 h-4 w-4" />}
-                            {key === 'testResults' && <Activity className="mr-2 h-4 w-4" />}
-                            {key === 'conversations' && <MessageSquare className="mr-2 h-4 w-4" />}
-                            {key === 'memory' && <Brain className="mr-2 h-4 w-4" />}
-                            Browse
-                          </Button>
-                        </AuthLink>
-                      )}
+
+                    <div className="mt-auto flex flex-wrap gap-2 border-t pt-4">
+                      <Button variant="outline" className="h-11" asChild>
+                        <Link href={href}>Browse</Link>
+                      </Button>
                       <Button
                         variant="outline"
-                        size="sm"
-                        onClick={() => previewCleanup(key as 'metrics' | 'conversations' | 'memory' | 'testResults')}
+                        className="h-11"
+                        onClick={() => previewCleanup(key)}
                         disabled={cleanupLoading}
                       >
-                        <Eye className="mr-2 h-4 w-4" />
-                        Cleanup
+                        <Eye aria-hidden="true" />
+                        Clean up…
                       </Button>
                     </div>
-                  </CardContent>
-                </Card>
-              );
-            })}
-          </div>
+                  </article>
+                );
+              })}
+            </div>
+          </section>
 
+          {stats.totalSizeBytes > 0 && (
+            <Collapsible>
+              <CollapsibleTrigger asChild>
+                <Button variant="ghost" className="group h-11 w-full justify-between">
+                  <span>Why an empty table still has a size</span>
+                  <ChevronDown className="h-4 w-4 transition-transform duration-200 group-data-[state=open]:rotate-180" aria-hidden="true" />
+                </Button>
+              </CollapsibleTrigger>
+              <CollapsibleContent>
+                <div className="mt-2 rounded-2xl border bg-card p-4 text-sm text-muted-foreground">
+                  <p>PostgreSQL table sizes include:</p>
+                  <ul className="mt-2 list-inside list-disc space-y-1">
+                    <li>Table data (actual rows)</li>
+                    <li>Indexes (for fast queries)</li>
+                    <li>Table structure and metadata</li>
+                    <li>Unused space from deleted rows (reused automatically)</li>
+                  </ul>
+                  <p className="mt-2">
+                    After deleting all rows, tables still show size due to indexes and structure. This is normal
+                    PostgreSQL behavior. To reclaim all space, you would need to run{' '}
+                    <code className="rounded bg-muted px-1">VACUUM FULL</code> directly on the database (not
+                    recommended for production).
+                  </p>
+                </div>
+              </CollapsibleContent>
+            </Collapsible>
+          )}
         </>
       )}
 
@@ -552,35 +439,26 @@ export default function DatabaseMonitoringPage() {
       <AlertDialog open={cleanupOptionsDialogOpen} onOpenChange={setCleanupOptionsDialogOpen}>
         <AlertDialogContent className="max-w-md">
           <AlertDialogHeader>
-            <AlertDialogTitle>Choose Cleanup Strategy</AlertDialogTitle>
+            <AlertDialogTitle>Clean up {cleanupType === 'testResults' ? 'test results' : cleanupType}</AlertDialogTitle>
             <AlertDialogDescription asChild>
               <div className="space-y-4 mt-4">
                 <div className="space-y-2">
-                  <Label>Cleanup Strategy</Label>
+                  <Label htmlFor="cleanupStrategy">What to delete</Label>
                   <Select
                     value={cleanupOptions.strategy}
                     onValueChange={(value) => setCleanupOptions({ ...cleanupOptions, strategy: value as any })}
                   >
-                    <SelectTrigger>
+                    <SelectTrigger id="cleanupStrategy" className="h-11">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="deleteAll">Delete All (Start Fresh)</SelectItem>
-                      <SelectItem value="olderThanDays">Delete Older Than X Days</SelectItem>
-                      {(cleanupType === 'memory' || cleanupType === 'testResults') && (
-                        <SelectItem value="olderThanDays">Delete Older Than X Days</SelectItem>
-                      )}
-                      {cleanupType === 'metrics' && (
-                        <>
-                          <SelectItem value="olderThanDays">Delete Older Than X Days</SelectItem>
-                          <SelectItem value="maxRows">Keep Last N Rows Per Bot</SelectItem>
-                        </>
-                      )}
+                      <SelectItem value="deleteAll">Delete all (start fresh)</SelectItem>
+                      <SelectItem value="olderThanDays">Delete older than X days</SelectItem>
+                      {cleanupType === 'metrics' && <SelectItem value="maxRows">Keep last N rows per bot</SelectItem>}
                       {cleanupType === 'conversations' && (
                         <>
-                          <SelectItem value="olderThanDays">Delete Older Than X Days</SelectItem>
-                          <SelectItem value="maxPerBot">Keep Last N Per Bot</SelectItem>
-                          <SelectItem value="maxTotal">Keep Last N Total</SelectItem>
+                          <SelectItem value="maxPerBot">Keep last N per bot</SelectItem>
+                          <SelectItem value="maxTotal">Keep last N total</SelectItem>
                         </>
                       )}
                     </SelectContent>
@@ -591,6 +469,7 @@ export default function DatabaseMonitoringPage() {
                   <div className="space-y-2">
                     <Label htmlFor="olderThanDays">Days</Label>
                     <Input
+                      className="h-11"
                       id="olderThanDays"
                       type="number"
                       min="1"
@@ -602,8 +481,9 @@ export default function DatabaseMonitoringPage() {
 
                 {cleanupOptions.strategy === 'maxPerBot' && (
                   <div className="space-y-2">
-                    <Label htmlFor="maxPerBot">Keep Last N Per Bot</Label>
+                    <Label htmlFor="maxPerBot">Keep the last N per bot</Label>
                     <Input
+                      className="h-11"
                       id="maxPerBot"
                       type="number"
                       min="1"
@@ -615,8 +495,9 @@ export default function DatabaseMonitoringPage() {
 
                 {cleanupOptions.strategy === 'maxTotal' && (
                   <div className="space-y-2">
-                    <Label htmlFor="maxTotal">Keep Last N Total</Label>
+                    <Label htmlFor="maxTotal">Keep the last N in total</Label>
                     <Input
+                      className="h-11"
                       id="maxTotal"
                       type="number"
                       min="1"
@@ -628,8 +509,9 @@ export default function DatabaseMonitoringPage() {
 
                 {cleanupOptions.strategy === 'maxRows' && (
                   <div className="space-y-2">
-                    <Label htmlFor="maxRows">Keep Last N Rows Per Bot</Label>
+                    <Label htmlFor="maxRows">Keep the last N rows per bot</Label>
                     <Input
+                      className="h-11"
                       id="maxRows"
                       type="number"
                       min="1"
@@ -643,7 +525,7 @@ export default function DatabaseMonitoringPage() {
                   <Alert variant="destructive">
                     <AlertTriangle className="h-4 w-4" />
                     <AlertDescription>
-                      This will delete ALL {cleanupType} data. This action cannot be undone!
+                      This deletes all {cleanupType === 'testResults' ? 'test results' : cleanupType} data. It can’t be undone.
                     </AlertDescription>
                   </Alert>
                 )}
@@ -661,7 +543,7 @@ export default function DatabaseMonitoringPage() {
               ) : (
                 <>
                   <Eye className="mr-2 h-4 w-4" />
-                  Preview Cleanup
+                  Preview cleanup
                 </>
               )}
             </AlertDialogAction>
@@ -673,7 +555,7 @@ export default function DatabaseMonitoringPage() {
       <AlertDialog open={cleanupDialogOpen} onOpenChange={setCleanupDialogOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Cleanup Preview</AlertDialogTitle>
+            <AlertDialogTitle>Cleanup preview</AlertDialogTitle>
             <AlertDialogDescription asChild>
               {cleanupPreview ? (
                 <div className="space-y-2 mt-4">
@@ -715,12 +597,12 @@ export default function DatabaseMonitoringPage() {
               {cleanupLoading ? (
                 <>
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  Cleaning up...
+                  Cleaning up…
                 </>
               ) : (
                 <>
                   <Trash2 className="mr-2 h-4 w-4" />
-                  Confirm Cleanup
+                  Delete
                 </>
               )}
             </AlertDialogAction>

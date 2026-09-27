@@ -2,7 +2,6 @@
 
 import { useState, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import {
   Table,
   TableBody,
@@ -11,7 +10,6 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { Badge } from '@/components/ui/badge';
 import {
   Dialog,
   DialogContent,
@@ -33,7 +31,6 @@ import {
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import { Checkbox } from '@/components/ui/checkbox';
 import {
   Select,
   SelectContent,
@@ -43,6 +40,8 @@ import {
 } from '@/components/ui/select';
 import { Plus, Edit, Trash2, Loader2, ExternalLink } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import { LoadError, LoadingRows, SettingSwitch, StatusPill } from '../../components/ds';
+import { InactivePill } from './template-bits';
 
 interface Category {
   id: string;
@@ -79,6 +78,7 @@ export function TemplatesTab() {
   const [categories, setCategories] = useState<Category[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [editingTemplate, setEditingTemplate] = useState<Template | null>(null);
@@ -130,7 +130,9 @@ export function TemplatesTab() {
       const data = await response.json();
       setTemplates(data.templates || []);
       setError(null);
+      setLoadFailed(false);
     } catch (err) {
+      setLoadFailed(true);
       setError(err instanceof Error ? err.message : 'Failed to load templates');
     } finally {
       setLoading(false);
@@ -252,24 +254,22 @@ export function TemplatesTab() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center py-12">
-        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-      </div>
+      <LoadingRows label="templates" rows={3} />
     );
   }
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="text-2xl font-semibold">Templates</h2>
+          <h2 className="orbit-display text-lg font-bold">Templates</h2>
           <p className="text-sm text-muted-foreground">
             Manage room templates
           </p>
         </div>
-        <Button onClick={openCreateDialog} disabled={categories.length === 0}>
+        <Button variant="outline" className="h-11" onClick={openCreateDialog} disabled={categories.length === 0}>
           <Plus className="h-4 w-4 mr-2" />
-          Create Template
+          New template
         </Button>
       </div>
 
@@ -287,13 +287,12 @@ export function TemplatesTab() {
         </Alert>
       )}
 
-      <Card>
-        <CardHeader>
-          <CardTitle>All Templates</CardTitle>
-        </CardHeader>
-        <CardContent>
+      {loadFailed ? (
+        <LoadError label="templates" retry={fetchTemplates} />
+      ) : (
+        <div className="overflow-x-auto rounded-2xl border bg-card p-2 sm:p-3">
           {templates.length === 0 ? (
-            <div className="text-center py-8 text-muted-foreground">
+            <div className="px-2 py-6 text-sm text-muted-foreground">
               No templates found. Create your first template.
             </div>
           ) : (
@@ -302,7 +301,7 @@ export function TemplatesTab() {
                 <TableRow>
                   <TableHead>Category</TableHead>
                   <TableHead>Name</TableHead>
-                  <TableHead>Slug</TableHead>
+                  <TableHead>Template key</TableHead>
                   <TableHead>Maps</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
@@ -322,35 +321,37 @@ export function TemplatesTab() {
                     <TableCell className="font-medium">
                       {template.name}
                       {template.isFeatured && (
-                        <Badge variant="secondary" className="ml-2">Featured</Badge>
+                        <span className="ml-2 inline-flex align-middle"><StatusPill status="featured" /></span>
                       )}
                     </TableCell>
                     <TableCell className="text-muted-foreground">{template.slug}</TableCell>
                     <TableCell>{template._count.maps}</TableCell>
                     <TableCell>
-                      <Badge variant={template.isActive ? 'default' : 'secondary'}>
-                        {template.isActive ? 'Active' : 'Inactive'}
-                      </Badge>
+                      {template.isActive ? <span className="text-sm text-muted-foreground">Active</span> : <InactivePill />}
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-2">
                         <Button
                           variant="ghost"
-                          size="sm"
+                          size="icon"
+                          className="h-11 w-11"
+                          aria-label={`Edit ${template.name}`}
                           onClick={() => openEditDialog(template)}
                         >
                           <Edit className="h-4 w-4" />
                         </Button>
                         <Button
                           variant="ghost"
-                          size="sm"
+                          size="icon"
+                          className="h-11 w-11"
+                          aria-label={`Delete ${template.name}`}
                           onClick={() => openDeleteDialog(template)}
                           disabled={template._count.maps > 0}
                         >
                           <Trash2 className="h-4 w-4" />
                         </Button>
-                        <Button variant="ghost" size="sm" asChild>
-                          <a href={`/api/templates/${template.slug}`} target="_blank" rel="noopener noreferrer">
+                        <Button variant="ghost" size="icon" className="h-11 w-11" asChild>
+                          <a href={`/api/templates/${template.slug}`} target="_blank" rel="noopener noreferrer" aria-label={`Open ${template.name} in the templates API`}>
                             <ExternalLink className="h-4 w-4" />
                           </a>
                         </Button>
@@ -361,15 +362,15 @@ export function TemplatesTab() {
               </TableBody>
             </Table>
           )}
-        </CardContent>
-      </Card>
+        </div>
+      )}
 
       {/* Create/Edit Dialog */}
       <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
         <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>
-              {editingTemplate ? 'Edit Template' : 'Create Template'}
+              {editingTemplate ? 'Edit template' : 'New template'}
             </DialogTitle>
             <DialogDescription>
               {editingTemplate
@@ -384,7 +385,7 @@ export function TemplatesTab() {
                 value={formData.categoryId}
                 onValueChange={(value) => setFormData({ ...formData, categoryId: value })}
               >
-                <SelectTrigger>
+                <SelectTrigger className="h-11">
                   <SelectValue placeholder="Select a category" />
                 </SelectTrigger>
                 <SelectContent>
@@ -398,9 +399,10 @@ export function TemplatesTab() {
               </Select>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="slug">Slug *</Label>
+              <Label htmlFor="slug">Template key *</Label>
               <Input
                 id="slug"
+                className="h-11"
                 value={formData.slug}
                 onChange={(e) =>
                   setFormData({ ...formData, slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') })
@@ -413,13 +415,14 @@ export function TemplatesTab() {
               <Label htmlFor="name">Name *</Label>
               <Input
                 id="name"
+                className="h-11"
                 value={formData.name}
                 onChange={(e) => setFormData({ ...formData, name: e.target.value })}
                 placeholder="Focus Room"
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="shortDescription">Short Description</Label>
+              <Label htmlFor="shortDescription">Short description</Label>
               <Textarea
                 id="shortDescription"
                 value={formData.shortDescription}
@@ -449,7 +452,7 @@ export function TemplatesTab() {
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="whoItsFor">Who It's For</Label>
+              <Label htmlFor="whoItsFor">Who it’s for</Label>
               <Textarea
                 id="whoItsFor"
                 value={formData.whoItsFor}
@@ -459,7 +462,7 @@ export function TemplatesTab() {
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="typicalUseCases">Typical Use Cases (one per line)</Label>
+              <Label htmlFor="typicalUseCases">Typical use cases (one per line)</Label>
               <Textarea
                 id="typicalUseCases"
                 value={formData.typicalUseCases}
@@ -474,7 +477,7 @@ export function TemplatesTab() {
                 value={formData.visibility}
                 onValueChange={(value) => setFormData({ ...formData, visibility: value })}
               >
-                <SelectTrigger>
+                <SelectTrigger className="h-11">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -483,36 +486,26 @@ export function TemplatesTab() {
                 </SelectContent>
               </Select>
             </div>
-            <div className="flex items-center space-x-2">
-              <Checkbox
-                id="isFeatured"
-                checked={formData.isFeatured}
-                onCheckedChange={(checked) =>
-                  setFormData({ ...formData, isFeatured: checked === true })
-                }
-              />
-              <Label htmlFor="isFeatured" className="font-normal cursor-pointer">
-                Featured
-              </Label>
-            </div>
-            <div className="flex items-center space-x-2">
-              <Checkbox
-                id="isActive"
-                checked={formData.isActive}
-                onCheckedChange={(checked) =>
-                  setFormData({ ...formData, isActive: checked === true })
-                }
-              />
-              <Label htmlFor="isActive" className="font-normal cursor-pointer">
-                Active
-              </Label>
-            </div>
+            <SettingSwitch
+              id="isFeatured"
+              label="Featured"
+              hint="Shown first in the template library."
+              checked={formData.isFeatured}
+              onChange={(checked) => setFormData({ ...formData, isFeatured: checked })}
+            />
+            <SettingSwitch
+              id="isActive"
+              label="Active"
+              hint="Offered in the template library. Off: hidden."
+              checked={formData.isActive}
+              onChange={(checked) => setFormData({ ...formData, isActive: checked })}
+            />
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setIsDialogOpen(false)}>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" className="h-11" onClick={() => setIsDialogOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={handleSave} disabled={saving || !formData.slug || !formData.name || !formData.categoryId}>
+            <Button className="h-11" onClick={handleSave} disabled={saving || !formData.slug || !formData.name || !formData.categoryId}>
               {saving ? (
                 <>
                   <Loader2 className="h-4 w-4 mr-2 animate-spin" />
@@ -530,7 +523,7 @@ export function TemplatesTab() {
       <AlertDialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete Template</AlertDialogTitle>
+            <AlertDialogTitle>Delete template</AlertDialogTitle>
             <AlertDialogDescription>
               Are you sure you want to delete "{deleteTemplate?.name}"? This action cannot be undone.
               {deleteTemplate && deleteTemplate._count.maps > 0 && (

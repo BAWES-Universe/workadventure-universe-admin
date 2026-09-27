@@ -4,9 +4,7 @@ import { useState, useEffect } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { Badge } from '@/components/ui/badge';
 import {
   Dialog,
   DialogContent,
@@ -28,9 +26,9 @@ import {
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import { Checkbox } from '@/components/ui/checkbox';
-import { ChevronLeft, Loader2, Plus, Edit, Trash2, AlertCircle, FolderOpen } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { Loader2, Plus, Edit, Trash2, AlertCircle } from 'lucide-react';
+import { EmptyCard, EntityCard, LoadError, PageHeader, SectionHeader, SettingSwitch, Settings, StatLine, StatusPill, count } from '../../../components/ds';
+import { InactivePill } from '../../components/template-bits';
 
 interface Category {
   id: string;
@@ -70,6 +68,7 @@ export default function CategoryDetailPage() {
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [templatesFailed, setTemplatesFailed] = useState(false);
 
   const [formData, setFormData] = useState({
     name: '',
@@ -94,6 +93,7 @@ export default function CategoryDetailPage() {
     try {
       setLoading(true);
       setError(null);
+      setTemplatesFailed(false);
       
       // Check if user is super admin
       let userIsSuperAdmin = false;
@@ -170,6 +170,8 @@ export default function CategoryDetailPage() {
         if (templatesResponse.ok) {
           const templatesData = await templatesResponse.json();
           setTemplates(templatesData.templates || []);
+        } else {
+          setTemplatesFailed(true);
         }
       }
     } catch (err) {
@@ -276,36 +278,35 @@ export default function CategoryDetailPage() {
 
   return (
     <div className="space-y-8">
-      <div className="flex items-center justify-between">
-        <Button variant="ghost" size="sm" asChild>
-          <Link href="/admin/templates">
-            <ChevronLeft className="h-4 w-4 mr-2" />
-            Back to Categories
-          </Link>
-        </Button>
-        {isSuperAdmin === true && (
-          <Button variant="outline" onClick={() => setIsEditDialogOpen(true)}>
-            <Edit className="h-4 w-4 mr-2" />
-            Edit
-          </Button>
-        )}
-      </div>
+      <PageHeader
+        kind="category"
+        title={category.icon ? `${category.icon} ${category.name}` : category.name}
+        context={category.description ? <span className="text-sm text-muted-foreground">{category.description}</span> : undefined}
+        status={isSuperAdmin && !category.isActive ? <InactivePill /> : undefined}
+        actions={
+          isSuperAdmin === true ? (
+            <>
+              <Button asChild className="h-11">
+                <Link href={`/admin/templates/templates/new?categoryId=${category.id}`}>
+                  <Plus className="h-4 w-4 mr-2" />
+                  New template
+                </Link>
+              </Button>
+              <Button variant="outline" className="h-11" onClick={() => setIsEditDialogOpen(true)}>
+                <Edit className="h-4 w-4 mr-2" />
+                Edit category
+              </Button>
+            </>
+          ) : undefined
+        }
+      />
 
-      <div className="flex items-center justify-between">
-        <div className="space-y-1">
-          <div className="flex items-center gap-3">
-            <div className="flex h-12 w-12 items-center justify-center rounded-lg border-border/70 border bg-muted text-2xl">
-              {category.icon || <FolderOpen className="h-6 w-6 text-muted-foreground" />}
-            </div>
-            <div>
-              <h1 className="text-4xl font-bold tracking-tight">{category.name}</h1>
-            </div>
-          </div>
-          {category.description && (
-            <p className="text-muted-foreground mt-2">{category.description}</p>
-          )}
-        </div>
-      </div>
+      {isSuperAdmin && (
+        <p className="text-xs text-muted-foreground">
+          Category key <code className="rounded bg-muted px-1 text-foreground">{category.slug}</code>
+          {' · '}Order {category.order}
+        </p>
+      )}
 
       {error && (
         <Alert variant="destructive">
@@ -315,121 +316,66 @@ export default function CategoryDetailPage() {
         </Alert>
       )}
 
-      <div>
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-2xl font-semibold">Templates</h2>
-          {isSuperAdmin && (
-            <Button asChild>
-              <Link href={`/admin/templates/templates/new?categoryId=${category.id}`}>
-                <Plus className="h-4 w-4 mr-2" />
-                Create Template
-              </Link>
-            </Button>
-          )}
-        </div>
-        {templates.length === 0 ? (
-          <Card>
-            <CardHeader>
-              <CardTitle>No templates yet</CardTitle>
-              <CardDescription>
-                Create your first template in this category.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <Button asChild>
-                <Link href={`/admin/templates/templates/new?categoryId=${category.id}`}>
-                  <Plus className="mr-2 h-4 w-4" />
-                  Create your first template
-                </Link>
-              </Button>
-            </CardContent>
-          </Card>
+      <section aria-labelledby="category-templates">
+        <SectionHeader id="category-templates" title="Templates" count={templatesFailed ? undefined : templates.length} />
+        {templatesFailed ? (
+          <LoadError label="this category’s templates" retry={fetchData} />
+        ) : templates.length === 0 ? (
+          <EmptyCard
+            kind="template"
+            title="No templates yet"
+            text={isSuperAdmin ? 'Create the first template in this category.' : 'This category has no templates yet.'}
+            href={isSuperAdmin ? `/admin/templates/templates/new?categoryId=${category.id}` : undefined}
+            action={isSuperAdmin ? 'Create a template' : undefined}
+          />
         ) : (
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
             {templates.map((template) => (
-              <Link
+              <EntityCard
                 key={template.id}
                 href={`/admin/templates/templates/${template.id}`}
-                className="block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-              >
-                <Card
-                  className={cn(
-                    'group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
-                    'hover:-translate-y-1 hover:shadow-lg',
-                  )}
-                >
-                  <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-purple-500/10 via-transparent to-pink-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
-
-                  <div className="relative flex flex-col h-full p-5">
-                    {template.isFeatured && (
-                      <div className="absolute top-4 right-4 z-10">
-                        <Badge variant="outline" className="text-xs">Featured</Badge>
-                      </div>
-                    )}
-                    {isSuperAdmin && (
-                      <div className="absolute bottom-4 right-4 z-10">
-                        <Badge variant={template.isActive ? 'default' : 'secondary'}>
-                          {template.isActive ? 'Active' : 'Inactive'}
-                        </Badge>
-                      </div>
-                    )}
-                    <div className="mb-4">
-                      <h3 className="truncate text-base font-semibold leading-tight mb-1">
-                        {template.name}
-                      </h3>
-                    </div>
-
-                    {template.shortDescription && (
-                      <p className="mb-3 line-clamp-2 text-sm text-muted-foreground">
-                        {template.shortDescription}
+                kind="template"
+                title={template.name}
+                description={template.shortDescription}
+                pills={
+                  template.isFeatured || (isSuperAdmin && !template.isActive) ? (
+                    <>
+                      {template.isFeatured && <StatusPill status="featured" />}
+                      {isSuperAdmin && !template.isActive && (
+                        <InactivePill />
+                      )}
+                    </>
+                  ) : undefined
+                }
+                meta={
+                  <>
+                    {template.philosophy && (
+                      <p className="border-l-2 border-muted-foreground/30 pl-3 text-xs italic leading-relaxed text-foreground/80">
+                        &ldquo;{template.philosophy}&rdquo;
                       </p>
                     )}
-                    {template.philosophy && (
-                      <div className="mb-3 border-l-2 border-muted-foreground/30 pl-3">
-                        <p className="text-xs italic text-white leading-relaxed">
-                          &ldquo;{template.philosophy}&rdquo;
-                        </p>
-                      </div>
-                    )}
-
-                    <div className="mt-auto flex items-center gap-1.5 pt-3 text-xs text-muted-foreground">
-                      <FolderOpen className="h-3.5 w-3.5" />
-                      <span>
-                        {template._count.maps} {template._count.maps === 1 ? 'map' : 'maps'}
-                      </span>
-                    </div>
-                  </div>
-                </Card>
-              </Link>
+                    <StatLine items={[count(template._count.maps, 'map')]} />
+                  </>
+                }
+              />
             ))}
           </div>
         )}
-      </div>
+      </section>
 
       {/* Edit Dialog */}
       <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>
         <DialogContent>
-          <DialogHeader className="relative">
-            <DialogTitle>Edit Category</DialogTitle>
-            <DialogDescription>Update category details</DialogDescription>
-            <Button
-              variant="destructive"
-              size="sm"
-              className="absolute top-0 right-0"
-              onClick={() => {
-                setIsEditDialogOpen(false);
-                setIsDeleteDialogOpen(true);
-              }}
-            >
-              <Trash2 className="h-4 w-4 mr-2" />
-              Delete
-            </Button>
+          <DialogHeader>
+            <DialogTitle>Edit category</DialogTitle>
+            <DialogDescription>Change how this category shows in the template library.</DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
               <Label htmlFor="name">Name *</Label>
               <Input
                 id="name"
+                className="h-11"
                 value={formData.name}
                 onChange={(e) => setFormData({ ...formData, name: e.target.value })}
               />
@@ -444,9 +390,10 @@ export default function CategoryDetailPage() {
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="icon">Icon (Emoji)</Label>
+              <Label htmlFor="icon">Icon (emoji)</Label>
               <Input
                 id="icon"
+                className="h-11"
                 value={formData.icon}
                 onChange={(e) => setFormData({ ...formData, icon: e.target.value })}
                 maxLength={2}
@@ -456,29 +403,38 @@ export default function CategoryDetailPage() {
               <Label htmlFor="order">Order</Label>
               <Input
                 id="order"
+                className="h-11"
                 type="number"
                 value={formData.order}
                 onChange={(e) => setFormData({ ...formData, order: parseInt(e.target.value) || 0 })}
               />
             </div>
-            <div className="flex items-center space-x-2">
-              <Checkbox
+            <Settings label="Visibility">
+              <SettingSwitch
                 id="isActive"
+                label="Active"
+                hint="Shown in the template library. Off: hidden from people creating rooms."
                 checked={formData.isActive}
-                onCheckedChange={(checked) =>
-                  setFormData({ ...formData, isActive: checked === true })
-                }
+                onChange={(checked) => setFormData({ ...formData, isActive: checked })}
               />
-              <Label htmlFor="isActive" className="font-normal cursor-pointer">
-                Active
-              </Label>
-            </div>
+            </Settings>
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setIsEditDialogOpen(false)}>
+          <DialogFooter className="gap-2">
+            <Button
+              variant="outline"
+              className="h-11 text-destructive hover:text-destructive sm:mr-auto"
+              onClick={() => {
+                setIsEditDialogOpen(false);
+                setIsDeleteDialogOpen(true);
+              }}
+            >
+              <Trash2 className="h-4 w-4 mr-2" />
+              Delete
+            </Button>
+            <Button variant="outline" className="h-11" onClick={() => setIsEditDialogOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={handleSave} disabled={saving || !formData.name}>
+            <Button className="h-11" onClick={handleSave} disabled={saving || !formData.name}>
               {saving ? (
                 <>
                   <Loader2 className="h-4 w-4 mr-2 animate-spin" />
@@ -496,12 +452,12 @@ export default function CategoryDetailPage() {
       <AlertDialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete Category</AlertDialogTitle>
+            <AlertDialogTitle>Delete category</AlertDialogTitle>
             <AlertDialogDescription>
               Are you sure you want to delete "{category.name}"? This action cannot be undone.
               {templates.length > 0 && (
                 <span className="block mt-2 text-destructive font-semibold">
-                  ⚠️ Warning: This will also delete {templates.length} template(s) and all their maps. This cannot be undone!
+                  This will also delete {templates.length} template(s) and all their maps. This cannot be undone!
                 </span>
               )}
             </AlertDialogDescription>

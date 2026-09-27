@@ -4,9 +4,7 @@ import { useState, useEffect } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { Badge } from '@/components/ui/badge';
 import {
   Dialog,
   DialogContent,
@@ -28,7 +26,6 @@ import {
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import { Checkbox } from '@/components/ui/checkbox';
 import {
   Select,
   SelectContent,
@@ -36,8 +33,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { ChevronLeft, Loader2, Plus, Edit, Trash2, AlertCircle, MapPin } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { Loader2, Plus, Edit, Trash2, AlertCircle } from 'lucide-react';
+import { EmptyCard, InContext, LoadError, PageHeader, SectionHeader, SettingSwitch, Settings, StatLine, StatusPill, count } from '../../../components/ds';
+import { FactPill, InactivePill, MapCard } from '../../components/template-bits';
 
 interface Template {
   id: string;
@@ -74,92 +72,6 @@ interface TemplateMap {
   };
 }
 
-function MapCardWithImageError({ map, isSuperAdmin }: { map: TemplateMap; isSuperAdmin: boolean }) {
-  const [imageReady, setImageReady] = useState(false);
-  const [imageError, setImageError] = useState(false);
-
-  // Reset states when previewImageUrl changes
-  useEffect(() => {
-    setImageReady(false);
-    setImageError(false);
-  }, [map.previewImageUrl]);
-
-  return (
-    <Link
-      href={`/admin/templates/maps/${map.id}`}
-      className="block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-    >
-      <Card
-        className={cn(
-          'group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
-          'hover:-translate-y-1 hover:shadow-lg',
-        )}
-      >
-        <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-green-500/10 via-transparent to-emerald-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
-
-        {/* Hidden pre-loader: test if image loads before showing container */}
-        {map.previewImageUrl && !imageReady && !imageError && (
-          <img
-            src={map.previewImageUrl}
-            alt=""
-            className="absolute opacity-0 pointer-events-none"
-            style={{ width: 1, height: 1 }}
-            onLoad={() => setImageReady(true)}
-            onError={() => setImageError(true)}
-          />
-        )}
-
-        {/* Preview Image - only show container after image successfully loaded
-            If no previewImageUrl or image errors, nothing renders (no grey area) */}
-        {map.previewImageUrl && imageReady && !imageError && (
-          <div className="relative w-full h-48 overflow-hidden bg-muted">
-            <img
-              src={map.previewImageUrl}
-              alt={map.name}
-              className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
-            />
-          </div>
-        )}
-
-        {/* Active badge - show immediately, always in bottom-right corner */}
-        {isSuperAdmin && (
-          <div className="absolute bottom-4 right-4 z-10">
-            <Badge variant={map.isActive ? 'default' : 'secondary'}>
-              {map.isActive ? 'Active' : 'Inactive'}
-            </Badge>
-          </div>
-        )}
-
-        <div className="relative flex flex-col p-5">
-          <div className="mb-2">
-            <h3 className="truncate text-base font-semibold leading-tight mb-1">
-              {map.name}
-            </h3>
-            {map.sizeLabel && (
-              <Badge variant="secondary" className="text-xs">
-                {map.sizeLabel.charAt(0).toUpperCase() + map.sizeLabel.slice(1).toLowerCase()} size
-              </Badge>
-            )}
-          </div>
-
-          {map.description && (
-            <p className="mb-3 line-clamp-2 text-sm text-muted-foreground">
-              {map.description}
-            </p>
-          )}
-
-          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <MapPin className="h-3.5 w-3.5" />
-            <span>
-              {map._count?.rooms || 0} {map._count?.rooms === 1 ? 'room' : 'rooms'} using this map
-            </span>
-          </div>
-        </div>
-      </Card>
-    </Link>
-  );
-}
-
 export default function TemplateDetailPage() {
   const router = useRouter();
   const params = useParams();
@@ -172,6 +84,7 @@ export default function TemplateDetailPage() {
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [mapsFailed, setMapsFailed] = useState(false);
 
   const [formData, setFormData] = useState({
     categoryId: '',
@@ -198,6 +111,7 @@ export default function TemplateDetailPage() {
     try {
       setLoading(true);
       setError(null);
+      setMapsFailed(false);
       
       // Check if user is super admin
       let userIsSuperAdmin = false;
@@ -256,6 +170,8 @@ export default function TemplateDetailPage() {
         if (mapsResponse.ok) {
           const mapsData = await mapsResponse.json();
           setMaps(mapsData.maps || []);
+        } else {
+          setMapsFailed(true);
         }
 
         if (categoriesResponse.ok) {
@@ -399,47 +315,44 @@ export default function TemplateDetailPage() {
 
   return (
     <div className="space-y-8">
-      <div className="flex items-center justify-between">
-        <Button variant="ghost" size="sm" asChild>
-          <Link href={`/admin/templates/categories/${template.category.id}`}>
-            <ChevronLeft className="h-4 w-4 mr-2" />
-            Back to {template.category.name}
-          </Link>
-        </Button>
-        {isSuperAdmin === true && (
-          <Button variant="outline" onClick={() => setIsEditDialogOpen(true)}>
-            <Edit className="h-4 w-4 mr-2" />
-            Edit
-          </Button>
-        )}
-      </div>
-
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div className="space-y-1">
-          <div>
-            <h1 className="text-4xl font-bold tracking-tight">{template.name}</h1>
-            <div className="flex items-center gap-1.5 mt-2">
-              {template.category.icon && (
-                <span className="text-sm">{template.category.icon}</span>
-              )}
-              <p className="text-xs text-muted-foreground">
-                {template.category.name}
-              </p>
-            </div>
-          </div>
-          {template.shortDescription && (
-            <p className="text-muted-foreground mt-2">{template.shortDescription}</p>
-          )}
-          <div className="flex flex-wrap items-center gap-2 mt-2">
-            {isSuperAdmin && (
-              <Badge variant={template.isActive ? 'default' : 'secondary'}>
-                {template.isActive ? 'Active' : 'Inactive'}
-              </Badge>
-            )}
-            {template.isFeatured && <Badge variant="outline">Featured</Badge>}
-          </div>
-        </div>
-      </div>
+      <PageHeader
+        kind="template"
+        title={template.name}
+        context={
+          <InContext
+            parts={[
+              {
+                label: template.category.icon ? `${template.category.icon} ${template.category.name}` : template.category.name,
+                href: `/admin/templates/categories/${template.category.id}`,
+              },
+            ]}
+          />
+        }
+        status={
+          <>
+            {template.isFeatured && <StatusPill status="featured" />}
+            {isSuperAdmin && !template.isActive && <InactivePill />}
+          </>
+        }
+        actions={
+          isSuperAdmin === true ? (
+            <>
+              <Button asChild className="h-11">
+                <Link href={`/admin/templates/maps/new?templateId=${template.id}`}>
+                  <Plus className="h-4 w-4 mr-2" />
+                  New map
+                </Link>
+              </Button>
+              <Button variant="outline" className="h-11" onClick={() => setIsEditDialogOpen(true)}>
+                <Edit className="h-4 w-4 mr-2" />
+                Edit template
+              </Button>
+            </>
+          ) : undefined
+        }
+      >
+        {template.shortDescription && <p className="max-w-3xl text-sm text-foreground/80">{template.shortDescription}</p>}
+      </PageHeader>
 
       {error && (
         <Alert variant="destructive">
@@ -450,12 +363,13 @@ export default function TemplateDetailPage() {
       )}
 
       {/* Template Details */}
-      {(template.philosophy || template.purpose || template.whoItsFor || template.typicalUseCases.length > 0) && (
-        <Card className="border-0">
-          <CardContent className="space-y-4 pt-6">
+      {(template.philosophy || template.purpose || template.whoItsFor || template.typicalUseCases.length > 0 || isSuperAdmin) && (
+        <section aria-labelledby="template-about">
+          <SectionHeader id="template-about" title="About" />
+          <div className="space-y-4 rounded-2xl border bg-card p-4 sm:p-5">
             {template.philosophy && (
               <div>
-                <h3 className="font-semibold mb-2">Philosophy</h3>
+                <h3 className="mb-2 text-sm font-semibold">Philosophy</h3>
                 <div className="border-l-2 border-muted-foreground/30 pl-4">
                   <p className="text-sm italic text-muted-foreground leading-relaxed">
                     &ldquo;{template.philosophy}&rdquo;
@@ -465,19 +379,19 @@ export default function TemplateDetailPage() {
             )}
             {template.purpose && (
               <div>
-                <h3 className="font-semibold mb-1">Purpose</h3>
+                <h3 className="mb-1 text-sm font-semibold">Purpose</h3>
                 <p className="text-sm text-muted-foreground">{template.purpose}</p>
               </div>
             )}
             {template.whoItsFor && (
               <div>
-                <h3 className="font-semibold mb-1">Who It's For</h3>
+                <h3 className="mb-1 text-sm font-semibold">Who it’s for</h3>
                 <p className="text-sm text-muted-foreground">{template.whoItsFor}</p>
               </div>
             )}
             {template.typicalUseCases.length > 0 && (
               <div>
-                <h3 className="font-semibold mb-2">Typical Use Cases</h3>
+                <h3 className="mb-2 text-sm font-semibold">Typical use cases</h3>
                 <div className="flex flex-wrap gap-2">
                   {template.typicalUseCases.map((useCase, idx) => (
                     <span
@@ -490,78 +404,73 @@ export default function TemplateDetailPage() {
                 </div>
               </div>
             )}
-          </CardContent>
-        </Card>
+            {isSuperAdmin && (
+              <p className="text-xs text-muted-foreground">
+                Template key <code className="rounded bg-muted px-1 text-foreground">{template.slug}</code>
+                {' · '}
+                {template.visibility === 'private' ? 'Private' : 'Public'}
+              </p>
+            )}
+          </div>
+        </section>
       )}
 
       {/* Maps */}
-      <div>
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-2xl font-semibold">Maps</h2>
-          {isSuperAdmin && (
-            <Button asChild>
-              <Link href={`/admin/templates/maps/new?templateId=${template.id}`}>
-                <Plus className="h-4 w-4 mr-2" />
-                Create Map
-              </Link>
-            </Button>
-          )}
-        </div>
-        {maps.length === 0 ? (
-          <Card>
-            <CardHeader>
-              <CardTitle>No maps yet</CardTitle>
-              <CardDescription>
-                Create your first map variant for this template.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              {isSuperAdmin && (
-                <Button asChild>
-                  <Link href={`/admin/templates/maps/new?templateId=${template.id}`}>
-                    <Plus className="mr-2 h-4 w-4" />
-                    Create your first map
-                  </Link>
-                </Button>
-              )}
-            </CardContent>
-          </Card>
+      <section aria-labelledby="template-maps">
+        <SectionHeader id="template-maps" title="Maps" count={mapsFailed ? undefined : maps.length} />
+        {mapsFailed ? (
+          <LoadError label="this template’s maps" retry={fetchData} />
+        ) : maps.length === 0 ? (
+          <EmptyCard
+            kind="map"
+            title="No maps yet"
+            text={isSuperAdmin ? 'Add the first map for this template.' : 'This template has no maps yet.'}
+            href={isSuperAdmin ? `/admin/templates/maps/new?templateId=${template.id}` : undefined}
+            action={isSuperAdmin ? 'Create a map' : undefined}
+          />
         ) : (
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
             {maps.map((map) => (
-              <MapCardWithImageError key={map.id} map={map} isSuperAdmin={isSuperAdmin} />
+              <MapCard
+                key={map.id}
+                href={`/admin/templates/maps/${map.id}`}
+                title={map.name}
+                previewImageUrl={map.previewImageUrl}
+                description={map.description}
+                pills={
+                  map.sizeLabel || (isSuperAdmin && !map.isActive) ? (
+                    <>
+                      {map.sizeLabel && (
+                        <FactPill>{map.sizeLabel.charAt(0).toUpperCase() + map.sizeLabel.slice(1).toLowerCase()} size</FactPill>
+                      )}
+                      {isSuperAdmin && !map.isActive && <InactivePill />}
+                    </>
+                  ) : undefined
+                }
+                meta={<StatLine items={[`${count(map._count?.rooms || 0, 'room')} using this map`]} />}
+              />
             ))}
           </div>
         )}
-      </div>
+      </section>
 
       {/* Edit Dialog */}
       <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>
         <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
-          <DialogHeader className="relative">
-            <DialogTitle>Edit Template</DialogTitle>
-            <DialogDescription>Update template details</DialogDescription>
-            <Button
-              variant="destructive"
-              size="sm"
-              className="absolute top-0 right-0"
-              onClick={() => {
-                setIsEditDialogOpen(false);
-                setIsDeleteDialogOpen(true);
-              }}
-            >
-              <Trash2 className="h-4 w-4 mr-2" />
-              Delete
-            </Button>
+          <DialogHeader>
+            <DialogTitle>Edit template</DialogTitle>
+            <DialogDescription>Change how this template shows in the library.</DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
-              <Label htmlFor="categoryId">Category *</Label>
+              <Label htmlFor="categoryId">
+                Category <span className="text-destructive">*</span>
+              </Label>
               <Select
                 value={formData.categoryId}
                 onValueChange={(value) => setFormData({ ...formData, categoryId: value })}
               >
-                <SelectTrigger>
+                <SelectTrigger id="categoryId" className="h-11">
                   <SelectValue placeholder="Select a category" />
                 </SelectTrigger>
                 <SelectContent>
@@ -575,15 +484,18 @@ export default function TemplateDetailPage() {
               </Select>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="name">Name *</Label>
+              <Label htmlFor="name">
+                Name <span className="text-destructive">*</span>
+              </Label>
               <Input
                 id="name"
+                className="h-11"
                 value={formData.name}
                 onChange={(e) => setFormData({ ...formData, name: e.target.value })}
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="shortDescription">Short Description</Label>
+              <Label htmlFor="shortDescription">Short description</Label>
               <Textarea
                 id="shortDescription"
                 value={formData.shortDescription}
@@ -610,7 +522,7 @@ export default function TemplateDetailPage() {
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="whoItsFor">Who It's For</Label>
+              <Label htmlFor="whoItsFor">Who it’s for</Label>
               <Textarea
                 id="whoItsFor"
                 value={formData.whoItsFor}
@@ -619,7 +531,7 @@ export default function TemplateDetailPage() {
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="typicalUseCases">Typical Use Cases (one per line)</Label>
+              <Label htmlFor="typicalUseCases">Typical use cases (one per line)</Label>
               <Textarea
                 id="typicalUseCases"
                 value={formData.typicalUseCases}
@@ -633,7 +545,7 @@ export default function TemplateDetailPage() {
                 value={formData.visibility}
                 onValueChange={(value) => setFormData({ ...formData, visibility: value })}
               >
-                <SelectTrigger>
+                <SelectTrigger id="visibility" className="h-11">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -642,36 +554,39 @@ export default function TemplateDetailPage() {
                 </SelectContent>
               </Select>
             </div>
-            <div className="flex items-center space-x-2">
-              <Checkbox
+            <Settings label="Library">
+              <SettingSwitch
                 id="isFeatured"
+                label="Featured"
+                hint="Shown first in the template library."
                 checked={formData.isFeatured}
-                onCheckedChange={(checked) =>
-                  setFormData({ ...formData, isFeatured: checked === true })
-                }
+                onChange={(checked) => setFormData({ ...formData, isFeatured: checked })}
               />
-              <Label htmlFor="isFeatured" className="font-normal cursor-pointer">
-                Featured
-              </Label>
-            </div>
-            <div className="flex items-center space-x-2">
-              <Checkbox
+              <SettingSwitch
                 id="isActive"
+                label="Active"
+                hint="Offered to people creating rooms. Off: hidden from the library."
                 checked={formData.isActive}
-                onCheckedChange={(checked) =>
-                  setFormData({ ...formData, isActive: checked === true })
-                }
+                onChange={(checked) => setFormData({ ...formData, isActive: checked })}
               />
-              <Label htmlFor="isActive" className="font-normal cursor-pointer">
-                Active
-              </Label>
-            </div>
+            </Settings>
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setIsEditDialogOpen(false)}>
+          <DialogFooter className="gap-2">
+            <Button
+              variant="outline"
+              className="h-11 text-destructive hover:text-destructive sm:mr-auto"
+              onClick={() => {
+                setIsEditDialogOpen(false);
+                setIsDeleteDialogOpen(true);
+              }}
+            >
+              <Trash2 className="h-4 w-4 mr-2" />
+              Delete
+            </Button>
+            <Button variant="outline" className="h-11" onClick={() => setIsEditDialogOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={handleSave} disabled={saving || !formData.name || !formData.categoryId}>
+            <Button className="h-11" onClick={handleSave} disabled={saving || !formData.name || !formData.categoryId}>
               {saving ? (
                 <>
                   <Loader2 className="h-4 w-4 mr-2 animate-spin" />
@@ -689,12 +604,12 @@ export default function TemplateDetailPage() {
       <AlertDialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete Template</AlertDialogTitle>
+            <AlertDialogTitle>Delete template</AlertDialogTitle>
             <AlertDialogDescription>
               Are you sure you want to delete "{template?.name}"? This action cannot be undone.
               {maps.length > 0 && (
                 <span className="block mt-2 text-destructive font-semibold">
-                  ⚠️ Warning: This will also delete {maps.length} map(s). This cannot be undone!
+                  This will also delete {maps.length} map(s). This cannot be undone!
                 </span>
               )}
             </AlertDialogDescription>

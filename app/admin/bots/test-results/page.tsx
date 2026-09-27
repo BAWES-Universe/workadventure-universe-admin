@@ -3,11 +3,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import AuthLink from '@/app/admin/auth-link';
-import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
 import {
   Table,
   TableBody,
@@ -16,9 +11,9 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { AlertCircle, Loader2, Activity, ArrowLeft, Search, CheckCircle2, XCircle } from 'lucide-react';
-import { Badge } from '@/components/ui/badge';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { EmptyCard, LoadError, LoadingRows, PageHeader } from '../../components/ds';
+import { ApplyFilter, DateFilter, FilterField, FilterRow, JsonDetails, ListPager, Panel, Pill, type PageInfo } from '../bots-ui';
 
 interface TestResult {
   id: number;
@@ -30,33 +25,12 @@ interface TestResult {
   createdAt: Date;
 }
 
-interface Pagination {
-  page: number;
-  limit: number;
-  total: number;
-  totalPages: number;
-}
-
-// Skeleton loader
-function SkeletonRow() {
-  return (
-    <TableRow>
-      <TableCell><div className="h-4 w-32 bg-muted animate-pulse rounded" /></TableCell>
-      <TableCell><div className="h-4 w-24 bg-muted animate-pulse rounded" /></TableCell>
-      <TableCell><div className="h-4 w-20 bg-muted animate-pulse rounded" /></TableCell>
-      <TableCell><div className="h-4 w-16 bg-muted animate-pulse rounded" /></TableCell>
-      <TableCell><div className="h-4 w-40 bg-muted animate-pulse rounded" /></TableCell>
-      <TableCell><div className="h-4 w-32 bg-muted animate-pulse rounded" /></TableCell>
-    </TableRow>
-  );
-}
-
 export default function TestResultsBrowsePage() {
   const router = useRouter();
   const [testResults, setTestResults] = useState<TestResult[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [pagination, setPagination] = useState<Pagination | null>(null);
+  const [pagination, setPagination] = useState<PageInfo | null>(null);
   const [filters, setFilters] = useState({
     botId: '',
     testSuite: '',
@@ -144,189 +118,80 @@ export default function TestResultsBrowsePage() {
     return new Date(date).toLocaleString();
   }
 
-  function formatNumber(num: number): string {
-    return new Intl.NumberFormat().format(num);
-  }
 
   // Get unique test suites for filter (exclude null/undefined so SelectItem value is string)
   const testSuites = Array.from(new Set(testResults.map(t => t.testSuite).filter((s): s is string => s != null))).sort();
 
-  if (loading && testResults.length === 0) {
-    return (
-      <div className="space-y-8">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div className="space-y-1">
-            <h1 className="text-4xl font-bold tracking-tight">Browse Test Results</h1>
-            <p className="text-muted-foreground text-lg">
-              View and filter all bot test results
-            </p>
-          </div>
-        </div>
-        <Card>
-          <CardContent className="p-0">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Test ID</TableHead>
-                  <TableHead>Bot ID</TableHead>
-                  <TableHead>Test Suite</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Created</TableHead>
-                  <TableHead>Results</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {[...Array(10)].map((_, i) => (
-                  <SkeletonRow key={i} />
-                ))}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
-      </div>
-    );
-  }
+  const filtered = Boolean(filters.botId || filters.testSuite || filters.passed || filters.startDate || filters.endDate);
 
   return (
-    <div className="space-y-8">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-4">
-          <Button variant="ghost" size="sm" asChild>
-            <AuthLink href="/admin/bots/database">
-              <ArrowLeft className="mr-2 h-4 w-4" />
-              Back
-            </AuthLink>
-          </Button>
-          <div className="space-y-1">
-            <h1 className="text-4xl font-bold tracking-tight">Browse Test Results</h1>
-            <p className="text-muted-foreground text-lg">
-              View and filter all bot test results
-            </p>
-          </div>
-        </div>
-      </div>
+    <div className="grid min-w-0 gap-6">
+      <PageHeader
+        kind="bot"
+        title="Test results"
+        context={<span>Automated checks run against bots, newest first.</span>}
+      />
 
-      {error && (
-        <Alert variant="destructive">
-          <AlertCircle className="h-4 w-4" />
-          <AlertTitle>Error</AlertTitle>
-          <AlertDescription>
-            {error}
-            <Button
-              variant="outline"
-              size="sm"
-              className="ml-4"
-              onClick={fetchTestResults}
-            >
-              Retry
-            </Button>
-          </AlertDescription>
-        </Alert>
-      )}
+      <FilterRow label="Filter test results" className="lg:grid-cols-5">
+        <ApplyFilter
+          id="botId"
+          label="Bot ID"
+          placeholder="Bot ID"
+          value={botIdInput}
+          onChange={setBotIdInput}
+          onApply={() => setFilters({ ...filters, botId: botIdInput, page: 1 })}
+        />
+        <FilterField id="testSuite" label="Test suite">
+          <Select
+            value={filters.testSuite}
+            onValueChange={(value) => setFilters({ ...filters, testSuite: value === 'all' ? '' : value, page: 1 })}
+          >
+            <SelectTrigger id="testSuite" className="h-11">
+              <SelectValue placeholder="All suites" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All suites</SelectItem>
+              {testSuites.map((suite) => (
+                <SelectItem key={suite} value={suite}>{suite}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </FilterField>
+        <FilterField id="passed" label="Status">
+          <Select
+            value={filters.passed}
+            onValueChange={(value) => setFilters({ ...filters, passed: value === 'all' ? '' : value, page: 1 })}
+          >
+            <SelectTrigger id="passed" className="h-11">
+              <SelectValue placeholder="All" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All</SelectItem>
+              <SelectItem value="true">Passed</SelectItem>
+              <SelectItem value="false">Failed</SelectItem>
+            </SelectContent>
+          </Select>
+        </FilterField>
+        <DateFilter id="startDate" label="From" value={filters.startDate} onChange={(startDate) => setFilters({ ...filters, startDate, page: 1 })} />
+        <DateFilter id="endDate" label="To" value={filters.endDate} onChange={(endDate) => setFilters({ ...filters, endDate, page: 1 })} />
+      </FilterRow>
 
-      {/* Filters */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Filters</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-5">
-            <div className="space-y-2">
-              <Label htmlFor="botId">Bot ID</Label>
-              <div className="flex gap-2">
-                <Input
-                  id="botId"
-                  placeholder="Filter by bot ID..."
-                  value={botIdInput}
-                  onChange={(e) => setBotIdInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      setFilters({ ...filters, botId: botIdInput, page: 1 });
-                    }
-                  }}
-                />
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setFilters({ ...filters, botId: botIdInput, page: 1 })}
-                >
-                  <Search className="h-4 w-4" />
-                </Button>
-              </div>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="testSuite">Test Suite</Label>
-              <Select
-                value={filters.testSuite}
-                onValueChange={(value) => setFilters({ ...filters, testSuite: value === 'all' ? '' : value, page: 1 })}
-              >
-                <SelectTrigger id="testSuite">
-                  <SelectValue placeholder="All suites" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">All suites</SelectItem>
-                  {testSuites.map((suite) => (
-                    <SelectItem key={suite} value={suite}>{suite}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="passed">Status</Label>
-              <Select
-                value={filters.passed}
-                onValueChange={(value) => setFilters({ ...filters, passed: value === 'all' ? '' : value, page: 1 })}
-              >
-                <SelectTrigger id="passed">
-                  <SelectValue placeholder="All" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">All</SelectItem>
-                  <SelectItem value="true">Passed</SelectItem>
-                  <SelectItem value="false">Failed</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="startDate">Start Date</Label>
-              <Input
-                id="startDate"
-                type="date"
-                value={filters.startDate}
-                onChange={(e) => setFilters({ ...filters, startDate: e.target.value, page: 1 })}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="endDate">End Date</Label>
-              <Input
-                id="endDate"
-                type="date"
-                value={filters.endDate}
-                onChange={(e) => setFilters({ ...filters, endDate: e.target.value, page: 1 })}
-              />
-            </div>
-          </div>
-        </CardContent>
-      </Card>
+      {error && <LoadError label="test results" retry={fetchTestResults} />}
 
-      {/* Test Results Table */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Test Results</CardTitle>
-        </CardHeader>
-        <CardContent className="p-0">
-          {testResults.length === 0 ? (
-            <div className="py-12 text-center">
-              <Activity className="h-12 w-12 mx-auto mb-4 text-muted-foreground opacity-50" />
-              <h3 className="text-lg font-semibold mb-2">No test results found</h3>
-              <p className="text-sm text-muted-foreground">
-                {Object.values(filters).some(v => v && v !== '1' && v !== '50')
-                  ? 'Try adjusting your filters to see more results.'
-                  : 'No test results have been recorded yet.'}
-              </p>
-            </div>
-          ) : (
+      {loading && testResults.length === 0 ? (
+        <LoadingRows label="test results" rows={5} />
+      ) : testResults.length === 0 ? (
+        !error &&
+        (filtered ? (
+          <p className="text-sm text-muted-foreground" role="status">
+            No test results match these filters.
+          </p>
+        ) : (
+          <EmptyCard kind="bot" title="No test results yet." text="Results appear here once bot tests have run." />
+        ))
+      ) : (
             <>
+              <Panel>
               {/* Desktop Table View */}
               <div className="hidden md:block overflow-x-auto">
                 <Table>
@@ -358,32 +223,21 @@ export default function TestResultsBrowsePage() {
                         </TableCell>
                         <TableCell>
                           {result.testSuite ? (
-                            <Badge variant="outline">{result.testSuite}</Badge>
+                            <Pill>{result.testSuite}</Pill>
                           ) : (
                             <span className="text-muted-foreground">—</span>
                           )}
                         </TableCell>
                         <TableCell>
                           {result.passed ? (
-                            <Badge variant="default" className="bg-green-600">
-                              <CheckCircle2 className="mr-1 h-3 w-3" />
-                              Passed
-                            </Badge>
+                            <Pill tone="ok">Passed</Pill>
                           ) : (
-                            <Badge variant="destructive">
-                              <XCircle className="mr-1 h-3 w-3" />
-                              Failed
-                            </Badge>
+                            <Pill tone="bad">Failed</Pill>
                           )}
                         </TableCell>
                         <TableCell>{formatDate(result.createdAt)}</TableCell>
                         <TableCell>
-                          <details className="cursor-pointer">
-                            <summary className="text-sm text-muted-foreground">View</summary>
-                            <pre className="mt-2 text-xs bg-muted p-2 rounded overflow-auto max-w-md">
-                              {JSON.stringify(result.results, null, 2)}
-                            </pre>
-                          </details>
+                          <JsonDetails label="View" value={result.results} />
                         </TableCell>
                       </TableRow>
                     ))}
@@ -394,8 +248,8 @@ export default function TestResultsBrowsePage() {
               {/* Mobile Card View */}
               <div className="md:hidden space-y-4 p-4">
                 {testResults.map((result) => (
-                  <Card key={result.id}>
-                    <CardContent className="pt-6">
+                  <div key={result.id} className="rounded-xl border p-4">
+                    <div>
                       <div className="space-y-3">
                         <div className="flex items-start justify-between">
                           <div className="space-y-1 flex-1 min-w-0">
@@ -403,15 +257,9 @@ export default function TestResultsBrowsePage() {
                             <div className="font-mono text-sm font-semibold truncate">{result.testId}</div>
                           </div>
                           {result.passed ? (
-                            <Badge variant="default" className="bg-green-600">
-                              <CheckCircle2 className="mr-1 h-3 w-3" />
-                              Passed
-                            </Badge>
+                            <Pill tone="ok">Passed</Pill>
                           ) : (
-                            <Badge variant="destructive">
-                              <XCircle className="mr-1 h-3 w-3" />
-                              Failed
-                            </Badge>
+                            <Pill tone="bad">Failed</Pill>
                           )}
                         </div>
                         {result.botId && (
@@ -428,7 +276,7 @@ export default function TestResultsBrowsePage() {
                         {result.testSuite && (
                           <div>
                             <div className="text-sm font-medium text-muted-foreground mb-1">Test Suite</div>
-                            <Badge variant="outline">{result.testSuite}</Badge>
+                            <Pill>{result.testSuite}</Pill>
                           </div>
                         )}
                         <div>
@@ -436,52 +284,17 @@ export default function TestResultsBrowsePage() {
                           <div className="text-sm">{formatDate(result.createdAt)}</div>
                         </div>
                         <div>
-                          <details className="cursor-pointer">
-                            <summary className="text-sm font-medium text-muted-foreground">View Results</summary>
-                            <pre className="mt-2 text-xs bg-muted p-2 rounded overflow-auto">
-                              {JSON.stringify(result.results, null, 2)}
-                            </pre>
-                          </details>
+                          <JsonDetails label="View results" value={result.results} />
                         </div>
                       </div>
-                    </CardContent>
-                  </Card>
+                    </div>
+                  </div>
                 ))}
               </div>
-
-              {/* Pagination */}
-              {pagination && pagination.totalPages > 1 && (
-                <div className="flex items-center justify-between p-4 border-t">
-                  <div className="text-sm text-muted-foreground">
-                    Showing {((pagination.page - 1) * pagination.limit) + 1} - {Math.min(pagination.page * pagination.limit, pagination.total)} of {formatNumber(pagination.total)} results
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => handlePageChange(pagination.page - 1)}
-                      disabled={pagination.page === 1}
-                    >
-                      Previous
-                    </Button>
-                    <div className="text-sm text-muted-foreground">
-                      Page {pagination.page} of {pagination.totalPages}
-                    </div>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => handlePageChange(pagination.page + 1)}
-                      disabled={pagination.page >= pagination.totalPages}
-                    >
-                      Next
-                    </Button>
-                  </div>
-                </div>
-              )}
+              </Panel>
+              <ListPager pagination={pagination} noun={['result', 'results']} loading={loading} onChange={handlePageChange} />
             </>
-          )}
-        </CardContent>
-      </Card>
+      )}
     </div>
   );
 }

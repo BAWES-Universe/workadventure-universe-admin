@@ -2,13 +2,11 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import AuthLink from '@/app/admin/auth-link';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Alert, AlertDescription } from '@/components/ui/alert';
-import { AlertCircle, Loader2, TrendingUp, DollarSign, Activity, AlertTriangle } from 'lucide-react';
+import { ChevronRight } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Button } from '@/components/ui/button';
+import { EntityRow, Figure, Figures, LoadError, LoadingRows, PageHeader, SectionHeader, StatLine, count } from '../../components/ds';
+import { providerTypeLabel } from '../components/provider-state';
 
 interface UsageStats {
   totalCalls: number;
@@ -37,7 +35,7 @@ interface UsageStats {
   }>;
 }
 
-export default function UsageDashboardPage() {
+export default function AiUsagePage() {
   const router = useRouter();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -53,12 +51,14 @@ export default function UsageDashboardPage() {
 
   useEffect(() => {
     checkAuth();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
     if (!loading) {
       fetchUsage();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filters]);
 
   async function checkAuth() {
@@ -75,7 +75,7 @@ export default function UsageDashboardPage() {
         return;
       }
       fetchUsage();
-    } catch (err) {
+    } catch {
       router.push('/admin/login');
     }
   }
@@ -137,71 +137,74 @@ export default function UsageDashboardPage() {
     }
   }
 
-  if (loading && !stats) {
-    return (
-      <div className="space-y-8">
-        <div className="flex items-center justify-center py-12">
-          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-        </div>
-      </div>
-    );
-  }
+  const idFiltered = Boolean(filters.providerId || filters.botId);
+  const providers = stats ? Object.values(stats.byProvider) : [];
+  const bots = stats ? Object.entries(stats.byBot).sort((a, b) => b[1].calls - a[1].calls) : [];
 
   return (
-    <div className="space-y-8">
-      <div className="space-y-1">
-        <h1 className="text-4xl font-bold tracking-tight">AI Usage Dashboard</h1>
-        <p className="text-muted-foreground text-lg">
-          Track AI provider usage, costs, and performance
-        </p>
-      </div>
-
-      {error && (
-        <Alert variant="destructive">
-          <AlertCircle className="h-4 w-4" />
-          <AlertDescription>
-            {error}
-            <Button
-              variant="outline"
-              size="sm"
-              className="ml-4"
-              onClick={fetchUsage}
-            >
-              Retry
-            </Button>
-          </AlertDescription>
-        </Alert>
-      )}
-
-      {/* Filters */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Filters</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
-            <div className="space-y-2">
-              <Label htmlFor="startDate">Start Date</Label>
-              <Input
-                id="startDate"
-                type="date"
-                value={filters.startDate}
-                onChange={(e) => setFilters({ ...filters, startDate: e.target.value })}
+    <div className="grid min-w-0 gap-6">
+      <PageHeader
+        kind="provider"
+        title="AI usage"
+        context={<span className="text-sm text-muted-foreground">Calls, tokens and cost across AI providers and bots.</span>}
+        stats={
+          stats && (
+            <Figures>
+              <Figure value={formatNumber(stats.totalCalls)} label="calls" />
+              <Figure value={formatNumber(stats.totalTokens)} label="tokens" />
+              <Figure value={formatCurrency(stats.totalCost)} label="cost" />
+              <Figure value={formatDuration(stats.totalDuration)} label="duration" />
+              <Figure
+                value={formatNumber(stats.errorCount)}
+                label={
+                  stats.totalCalls > 0
+                    ? `errors (${((stats.errorCount / stats.totalCalls) * 100).toFixed(2)}%)`
+                    : 'errors'
+                }
               />
-            </div>
+            </Figures>
+          )
+        }
+      />
+
+      <section aria-labelledby="usage-filters" className="min-w-0 rounded-2xl border bg-card p-4 sm:p-5">
+        <h2 id="usage-filters" className="sr-only">
+          Filters
+        </h2>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <div className="space-y-2">
+            <Label htmlFor="startDate">From</Label>
+            <Input
+              id="startDate"
+              type="date"
+              className="h-11"
+              value={filters.startDate}
+              onChange={(e) => setFilters({ ...filters, startDate: e.target.value })}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="endDate">To</Label>
+            <Input
+              id="endDate"
+              type="date"
+              className="h-11"
+              value={filters.endDate}
+              onChange={(e) => setFilters({ ...filters, endDate: e.target.value })}
+            />
+          </div>
+        </div>
+        <details className="group mt-4" open={idFiltered || undefined}>
+          <summary className="flex min-h-11 cursor-pointer list-none items-center gap-2 text-sm font-semibold [&::-webkit-details-marker]:hidden">
+            <ChevronRight size={16} className="text-muted-foreground transition-transform group-open:rotate-90" aria-hidden="true" />
+            Advanced
+            {idFiltered && <span className="text-xs font-normal text-muted-foreground">(filtered)</span>}
+          </summary>
+          <div className="mt-2 grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div className="space-y-2">
-              <Label htmlFor="endDate">End Date</Label>
-              <Input
-                id="endDate"
-                type="date"
-                value={filters.endDate}
-                onChange={(e) => setFilters({ ...filters, endDate: e.target.value })}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="providerId">Provider ID</Label>
+              <Label htmlFor="providerId">Provider key</Label>
               <Input
                 id="providerId"
+                className="h-11 font-mono"
                 value={filters.providerId}
                 onChange={(e) => setFilters({ ...filters, providerId: e.target.value })}
                 placeholder="Filter by provider"
@@ -211,179 +214,87 @@ export default function UsageDashboardPage() {
               <Label htmlFor="botId">Bot ID</Label>
               <Input
                 id="botId"
+                className="h-11 font-mono"
                 value={filters.botId}
                 onChange={(e) => setFilters({ ...filters, botId: e.target.value })}
                 placeholder="Filter by bot"
               />
             </div>
           </div>
-        </CardContent>
-      </Card>
+        </details>
+      </section>
 
-      {/* Summary Stats */}
-      {stats && (
-        <>
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-5">
-            <Card>
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium">Total API Calls</CardTitle>
-                <Activity className="h-4 w-4 text-muted-foreground" />
-              </CardHeader>
-              <CardContent>
-                <div className="text-2xl font-bold">{formatNumber(stats.totalCalls)}</div>
-              </CardContent>
-            </Card>
+      {error && <LoadError label="AI usage" retry={fetchUsage} />}
 
-            <Card>
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium">Total Tokens</CardTitle>
-                <TrendingUp className="h-4 w-4 text-muted-foreground" />
-              </CardHeader>
-              <CardContent>
-                <div className="text-2xl font-bold">{formatNumber(stats.totalTokens)}</div>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium">Total Cost</CardTitle>
-                <DollarSign className="h-4 w-4 text-muted-foreground" />
-              </CardHeader>
-              <CardContent>
-                <div className="text-2xl font-bold">{formatCurrency(stats.totalCost)}</div>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium">Total Duration</CardTitle>
-                <Activity className="h-4 w-4 text-muted-foreground" />
-              </CardHeader>
-              <CardContent>
-                <div className="text-2xl font-bold">
-                  {formatDuration(stats.totalDuration)}
-                </div>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium">Errors</CardTitle>
-                <AlertTriangle className="h-4 w-4 text-muted-foreground" />
-              </CardHeader>
-              <CardContent>
-                <div className="text-2xl font-bold">{formatNumber(stats.errorCount)}</div>
-                <p className="text-xs text-muted-foreground">
-                  {stats.totalCalls > 0
-                    ? `${((stats.errorCount / stats.totalCalls) * 100).toFixed(2)}% error rate`
-                    : 'N/A'}
-                </p>
-              </CardContent>
-            </Card>
-          </div>
-
-          {/* By Provider */}
-          <Card>
-            <CardHeader>
-              <CardTitle>Usage by Provider</CardTitle>
-            </CardHeader>
-            <CardContent>
-              {Object.keys(stats.byProvider).length === 0 ? (
-                <p className="text-sm text-muted-foreground">No usage data by provider</p>
+      {loading && !stats ? (
+        <LoadingRows label="AI usage" rows={4} />
+      ) : (
+        stats && (
+          <>
+            <section aria-labelledby="usage-providers" className="min-w-0">
+              <SectionHeader id="usage-providers" title="By provider" count={providers.length} />
+              {providers.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No provider usage in this range.</p>
               ) : (
-                <div className="space-y-4">
-                  {Object.values(stats.byProvider).map((provider) => (
-                    <div
+                <div className="grid min-w-0 gap-0.5">
+                  {providers.map((provider) => (
+                    <EntityRow
                       key={provider.providerId}
-                      className="flex items-center justify-between border-b pb-4 last:border-0"
-                    >
-                      <div>
-                        <AuthLink
-                          href={`/admin/ai-providers/${provider.providerId}`}
-                          className="font-semibold text-primary hover:underline"
-                        >
-                          {provider.providerName}
-                        </AuthLink>
-                        <div className="text-sm text-muted-foreground">
-                          {provider.providerType} • {provider.providerId}
-                        </div>
-                      </div>
-                      <div className="text-right space-y-1">
-                        <div className="text-sm">
-                          {formatNumber(provider.calls)} calls • {formatNumber(provider.tokens)} tokens
-                        </div>
-                        <div className="text-sm font-medium">
-                          {formatCurrency(provider.cost)}
-                        </div>
-                        {provider.errors > 0 && (
-                          <div className="text-xs text-destructive">
-                            {provider.errors} errors
-                          </div>
-                        )}
-                      </div>
-                    </div>
+                      href={`/admin/ai-providers/${provider.providerId}`}
+                      kind="provider"
+                      title={provider.providerName}
+                      context={
+                        <StatLine
+                          items={[
+                            count(provider.calls, 'call'),
+                            count(provider.tokens, 'token'),
+                            formatCurrency(provider.cost),
+                            provider.errors > 0 && count(provider.errors, 'error'),
+                          ]}
+                        />
+                      }
+                      meta={<StatLine items={[providerTypeLabel(provider.providerType), provider.providerId]} />}
+                    />
                   ))}
                 </div>
               )}
-            </CardContent>
-          </Card>
+            </section>
 
-          {/* By Bot */}
-          <Card>
-            <CardHeader>
-              <CardTitle>Usage by Bot</CardTitle>
-            </CardHeader>
-            <CardContent>
-              {Object.keys(stats.byBot).length === 0 ? (
-                <p className="text-sm text-muted-foreground">No usage data by bot</p>
+            <section aria-labelledby="usage-bots" className="min-w-0">
+              <SectionHeader id="usage-bots" title="By bot" count={bots.length} />
+              {bots.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No bot usage in this range.</p>
               ) : (
-                <div className="space-y-4">
-                  {Object.entries(stats.byBot)
-                    .sort((a, b) => b[1].calls - a[1].calls)
-                    .map(([botId, bot]) => (
-                      <div
-                        key={botId}
-                        className="flex items-center justify-between border-b pb-4 last:border-0"
-                      >
-                        <div>
-                          <AuthLink
-                            href={`/admin/bots/${botId}`}
-                            className="font-semibold text-primary hover:underline"
-                          >
-                            {bot.botName}
-                          </AuthLink>
-                          <div className="text-xs text-muted-foreground mt-1">
-                            {botId}
-                          </div>
-                        </div>
-                        <div className="text-right space-y-1">
-                          <div className="text-sm">
-                            {formatNumber(bot.calls)} calls • {formatNumber(bot.tokens)} tokens
-                          </div>
-                          <div className="text-sm font-medium">
-                            {formatCurrency(bot.cost)}
-                          </div>
-                          {bot.errors > 0 && (
-                            <div className="text-xs text-destructive">
-                              {bot.errors} errors
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    ))}
+                <div className="grid min-w-0 gap-0.5">
+                  {bots.map(([botId, bot]) => (
+                    <EntityRow
+                      key={botId}
+                      href={`/admin/bots/${botId}`}
+                      kind="bot"
+                      title={bot.botName}
+                      context={
+                        <StatLine
+                          items={[
+                            count(bot.calls, 'call'),
+                            count(bot.tokens, 'token'),
+                            formatCurrency(bot.cost),
+                            bot.errors > 0 && count(bot.errors, 'error'),
+                          ]}
+                        />
+                      }
+                      meta={<span className="font-mono text-[11px] text-muted-foreground [overflow-wrap:anywhere]">{botId}</span>}
+                    />
+                  ))}
                 </div>
               )}
-            </CardContent>
-          </Card>
-        </>
+            </section>
+          </>
+        )
       )}
 
       {totalEntries > 0 && (
-        <p className="text-sm text-muted-foreground text-center">
-          Showing {totalEntries} usage entries
-        </p>
+        <p className="text-center text-sm text-muted-foreground">Based on {count(totalEntries, 'usage entry', 'usage entries')}</p>
       )}
     </div>
   );
 }
-

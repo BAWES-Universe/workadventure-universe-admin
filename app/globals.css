@@ -426,6 +426,8 @@ a[href] {
 .orbit-kind[data-kind='room'] { background-image: var(--kind-room); }
 .orbit-kind[data-kind='star'] { background: var(--kind-star); color: #1b2a41; }
 .orbit-kind[data-kind='people'] { background-image: var(--kind-people); }
+/* Admin tools: neutral, so a template or a bot never looks like a room or a person. */
+.orbit-kind:is([data-kind='template'], [data-kind='category'], [data-kind='map'], [data-kind='bot'], [data-kind='provider'], [data-kind='avatar']) { background: hsl(var(--foreground) / 0.1); color: hsl(var(--foreground)); box-shadow: inset 0 0 0 1px hsl(var(--foreground) / 0.12); }
 .orbit-kind-wash { position: relative; isolation: isolate; }
 .orbit-kind-wash::before { content: ''; position: absolute; inset: 0; z-index: -1; border-radius: inherit; opacity: 0; transition: opacity 200ms; pointer-events: none; }
 .orbit-kind-wash[data-kind='universe']::before { background: linear-gradient(135deg, rgb(134 41 252 / .16), transparent 55%, rgb(65 86 246 / .2)); }
