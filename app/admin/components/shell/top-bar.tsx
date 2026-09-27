@@ -28,6 +28,7 @@ export function TopBar() {
             onClick={() => setMenuOpen(!menuOpen)}
             aria-expanded={menuOpen}
             aria-controls="orbit-menu"
+            aria-keyshortcuts="Control+K Meta+K"
             className="orbit-press inline-flex h-10 shrink-0 items-center gap-2 rounded-full border border-foreground/15 pl-3 pr-4 text-sm font-semibold transition-colors hover:border-foreground/30 hover:bg-foreground/5 lg:hidden"
             data-testid="orbit-menu-button"
           >
@@ -38,11 +39,11 @@ export function TopBar() {
           <button
             type="button"
             onClick={goBack}
-            className="orbit-press inline-flex h-10 min-w-0 max-w-full shrink items-center gap-0.5 rounded-full pl-1.5 pr-4 text-primary transition-colors hover:bg-foreground/5 @[26rem]/bar:max-w-[45%]"
+            className="orbit-press inline-flex h-10 min-w-0 max-w-full shrink items-center gap-0.5 rounded-full border border-foreground/15 pl-1.5 pr-4 text-foreground transition-colors hover:border-foreground/30 hover:bg-foreground/5 @[26rem]/bar:max-w-[45%]"
             data-testid="orbit-back"
           >
-            <ChevronLeft className="h-5 w-5 shrink-0" aria-hidden="true" />
-            <span className="truncate text-[15px] font-semibold">{route.parentTitle ?? 'Back'}</span>
+            <ChevronLeft className="h-5 w-5 shrink-0" strokeWidth={2.75} aria-hidden="true" />
+            <span className="truncate text-[15px] font-bold">{route.parentTitle ?? 'Back'}</span>
           </button>
         )}
 

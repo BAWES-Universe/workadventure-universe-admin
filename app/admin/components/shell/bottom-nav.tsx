@@ -8,7 +8,7 @@ import { useOrbitFrame } from '../../orbit-frame-context';
 import { rootOf } from './root-of';
 
 /**
- * Home, Space and You on the three root pages, within a thumb's reach on a phone and as a strip under the bar on
+ * You, Orbit and Space on the three root pages, within a thumb's reach on a phone and as a strip under the bar on
  * a desktop panel. Inner pages hide it: Back in the bar is the one way out, so it is clear where you are. The Menu
  * is at the top-left, beside the game's own buttons. Hidden on the wide layout, where the sidebar takes over.
  */

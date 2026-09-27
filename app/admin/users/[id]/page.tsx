@@ -15,7 +15,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
-import { ChevronRight, AlertCircle, Loader2, Globe, Users, Star, Ban, UserPlus, Activity, Home, Calendar, MapPin, ChevronLeft, ExternalLink, User, FileText } from 'lucide-react';
+import { ChevronRight, AlertCircle, Loader2, Users, Star, Ban, UserPlus, Activity, Home, Calendar, MapPin, ChevronLeft, ExternalLink, User, FileText, Earth, Sparkles } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
   Empty,
@@ -473,7 +473,7 @@ export default function UserDetailPage() {
                 : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
             }`}
           >
-            <Globe className="h-3.5 w-3.5 sm:h-4 sm:w-4 flex-shrink-0" />
+            <Sparkles className="h-3.5 w-3.5 sm:h-4 sm:w-4 flex-shrink-0" />
             <span>Universes</span>
             {user && (
               <Badge variant="secondary" className="ml-0.5 text-xs font-normal">
@@ -685,7 +685,7 @@ export default function UserDetailPage() {
                                 </span>
                               </div>
                               <div className="flex items-center gap-1.5">
-                                <Globe className="h-3.5 w-3.5 text-muted-foreground" />
+                                <Sparkles className="h-3.5 w-3.5 text-muted-foreground" />
                                 <span className="text-muted-foreground">
                                   {(universe._count?.worlds ?? 0)} {(universe._count?.worlds ?? 0) === 1 ? 'world' : 'worlds'} · {(universe._count?.rooms ?? 0)} {(universe._count?.rooms ?? 0) === 1 ? 'room' : 'rooms'} · {(universe._count?.members ?? 0)}{' '}
                                   {(universe._count?.members ?? 0) === 1 ? 'member' : 'members'}
@@ -723,7 +723,7 @@ export default function UserDetailPage() {
                             </>
                           ) : (
                             <div className="flex items-center gap-1.5">
-                              <Globe className="h-3.5 w-3.5 text-muted-foreground" />
+                              <Sparkles className="h-3.5 w-3.5 text-muted-foreground" />
                               <span className="text-muted-foreground">
                                 {(universe._count?.worlds ?? 0)} {(universe._count?.worlds ?? 0) === 1 ? 'world' : 'worlds'} · {(universe._count?.rooms ?? 0)} {(universe._count?.rooms ?? 0) === 1 ? 'room' : 'rooms'} · {(universe._count?.members ?? 0)}{' '}
                                 {(universe._count?.members ?? 0) === 1 ? 'member' : 'members'}
@@ -856,7 +856,7 @@ export default function UserDetailPage() {
                                 </span>
                               </div>
                               <div className="flex items-center gap-1.5">
-                                <Globe className="h-3.5 w-3.5 text-muted-foreground" />
+                                <Earth className="h-3.5 w-3.5 text-muted-foreground" />
                                 <span className="text-muted-foreground">
                                   {roomsCount} {roomsCount === 1 ? 'room' : 'rooms'} · {membersCount}{' '}
                                   {membersCount === 1 ? 'member' : 'members'}

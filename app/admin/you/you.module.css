@@ -1,71 +1,14 @@
-.page { display: grid; gap: 31px; min-width: 0; }
-.eyebrow { display: flex; align-items: center; gap: 7px; font-size: 10px; font-weight: 600; letter-spacing: .16em; text-transform: uppercase; color: hsl(var(--primary)); }
-.header h1 { font-family: var(--font-display); font-size: clamp(30px, 7vw, 44px); letter-spacing: -.03em; font-weight: 700; line-height: 1.08; margin: 6px 0 6px; }
-.header h1 > span { background-image: var(--brand-gradient); -webkit-background-clip: text; background-clip: text; color: transparent; }
-.header > p:last-child { font-size: 13px; color: hsl(var(--muted-foreground)); }
-.identity { display: grid; grid-template-columns: minmax(175px, .68fr) minmax(0, 1.5fr); border: 1px solid hsl(var(--border)); border-radius: 17px; background: hsl(var(--card)); min-height: 258px; overflow: hidden; }
-.identityArt { position: relative; display: grid; place-items: center; isolation: isolate; overflow: hidden; background: radial-gradient(ellipse at 70% 20%, hsl(var(--primary) / .12), transparent 70%), hsl(var(--primary) / .025); border-right: 1px solid hsl(var(--border)); }
-.initials { display: grid; place-items: center; width: 89px; height: 89px; font-family: var(--font-display); font-size: 27px; font-weight: 700; color: #fff; border: 0; background-image: var(--brand-gradient); border-radius: 50%; box-shadow: 0 0 50px hsl(var(--primary) / .07); }
-.identityRing, .identityRingInner { position: absolute; width: 191px; height: 191px; border: 1px solid hsl(var(--primary) / .13); border-radius: 50%; }
-.identityRingInner { width: 135px; height: 135px; border-style: dashed; border-color: hsl(var(--primary) / .18); }
-.identityRing::after { content: ''; position: absolute; inset: -34px; border: 1px solid hsl(var(--primary) / .055); border-radius: 50%; }
-.satellite { width: 7px; height: 7px; background: hsl(var(--primary)); border-radius: 50%; position: absolute; top: calc(50% - 78px); left: calc(50% + 58px); box-shadow: 0 0 12px hsl(var(--primary) / .3); }
-.coordinates { position: absolute; bottom: 21px; left: 0; right: 0; text-align: center; color: hsl(var(--muted-foreground)); font-family: var(--font-mono); font-size: 8px; letter-spacing: .15em; }
-.identityContent { display: flex; flex-direction: column; align-items: flex-start; padding: 26px 30px 15px; min-width: 0; }
-.cardTop { width: 100%; display: flex; align-items: center; justify-content: space-between; font-size: 9px; text-transform: uppercase; letter-spacing: .14em; color: hsl(var(--muted-foreground)); }
-.cardTop > svg { color: hsl(var(--primary)); }
-.identityContent h2 { margin: 18px 0 6px; font-family: var(--font-display); font-size: clamp(22px, 4vw, 30px); line-height: 1.15; font-weight: 700; letter-spacing: -.02em; overflow-wrap: anywhere; max-width: 100%; }
-.email { color: hsl(var(--muted-foreground)); font-size: 12px; overflow-wrap: anywhere; max-width: 100%; }
-.adminBadge { display: inline-flex; align-items: center; gap: 6px; min-height: 26px; border: 1px solid hsl(var(--primary) / .25); background: hsl(var(--primary) / .055); border-radius: 999px; color: hsl(var(--primary)); font-size: 9px; padding: 3px 9px; margin-top: 16px; }
-.cardBottom { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; width: 100%; margin-top: auto; padding-top: 19px; }
-.cardBottom > span { font-size: 10px; color: hsl(var(--muted-foreground)); }
-.cardBottom a { display: inline-flex; align-items: center; gap: 10px; min-height: 44px; font-size: 11px; font-weight: 500; color: hsl(var(--primary)); }
-.details { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, .9fr); gap: 40px; }
-.sectionTitle { display: flex; align-items: center; gap: 12px; font-family: var(--font-display); font-size: 16px; font-weight: 700; margin-bottom: 14px; }
-.sectionTitle > span { font-family: var(--font-mono); font-size: 9px; color: hsl(var(--muted-foreground)); }
-.connection { display: flex; align-items: center; gap: 14px; min-height: 83px; padding: 16px 0; border-top: 1px solid hsl(var(--border)); }
-.connection:last-child { border-bottom: 1px solid hsl(var(--border)); }
-.connection > svg:first-child { color: hsl(var(--primary)); flex-shrink: 0; }
-.connection > svg:last-child { color: hsl(var(--muted-foreground)); flex-shrink: 0; margin-left: auto; }
-.connection > span:not(.invitation) { display: grid; gap: 6px; min-width: 0; }
-.connection strong { font-weight: 600; font-size: 14px; }
-.connection strong + span { color: hsl(var(--muted-foreground)); font-size: 11px; line-height: 1.5; }
-.connection:hover strong { color: hsl(var(--primary)); }
-.invitation { font-size: 9px; color: hsl(var(--primary)); white-space: nowrap; background: hsl(var(--primary) / .07); border-radius: 999px; padding: 6px 8px; margin-left: auto; }
-.appearanceScene { position: relative; height: 72px; overflow: hidden; border-radius: 10px 10px 0 0; background: radial-gradient(ellipse at 50% 95%, hsl(var(--primary) / .09), transparent 70%); border-bottom: 1px solid hsl(var(--border)); }
-.sun { display: block; width: 46px; height: 46px; border-radius: 50%; background: hsl(var(--primary) / .2); border: 1px solid hsl(var(--primary) / .4); position: absolute; bottom: -12px; left: calc(50% - 23px); box-shadow: 0 0 30px hsl(var(--primary) / .12); }
-.sun::after { content: ''; position: absolute; inset: -13px; border: 1px solid hsl(var(--primary) / .12); border-radius: 50%; }
-.horizon { position: absolute; left: 20%; right: 20%; height: 1px; bottom: 9px; background: hsl(var(--primary) / .18); }
-.appearance h3 { font-size: 18px; font-weight: 400; letter-spacing: -.025em; margin-top: 17px; }
-.appearance p { font-size: 11px; color: hsl(var(--muted-foreground)); line-height: 1.7; margin-top: 7px; }
-.themeControl { margin-top: 16px; border: 1px solid hsl(var(--border)); border-radius: 999px !important; background: transparent !important; }
+.page { display: grid; gap: 28px; min-width: 0; }
+.person { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.personWords { min-width: 0; flex: 1 1 14rem; }
+.person h1 { font-size: clamp(26px, 6vw, 36px); line-height: 1.12; letter-spacing: -.02em; font-weight: 700; overflow-wrap: anywhere; }
+.personWords p { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin-top: 8px; }
+.email { color: hsl(var(--muted-foreground)); font-size: 13px; overflow-wrap: anywhere; }
+.adminBadge { display: inline-flex; align-items: center; gap: 6px; min-height: 26px; border: 1px solid hsl(var(--primary) / .3); background: hsl(var(--primary) / .08); border-radius: 999px; color: hsl(var(--primary)); font-size: 11px; font-weight: 600; padding: 3px 10px; }
+.visitCard { display: inline-flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 16px; border: 1px solid hsl(var(--foreground) / .15); border-radius: 999px; font-size: 13px; font-weight: 600; transition: border-color 160ms, background 160ms; }
+.visitCard:hover { border-color: hsl(var(--foreground) / .3); background: hsl(var(--foreground) / .05); }
+.footer { display: flex; justify-content: space-between; align-items: flex-end; flex-wrap: wrap; gap: 16px; padding-top: 18px; border-top: 1px solid hsl(var(--border)); }
+.appearance h2 { font-family: var(--font-display); font-size: 16px; font-weight: 700; }
+.themeControl { margin-top: 12px; border: 1px solid hsl(var(--border)); border-radius: 999px !important; background: transparent !important; }
 .themeControl > button { border-radius: 999px; }
-.footer { display: flex; justify-content: space-between; align-items: center; gap: 14px; padding-top: 13px; border-top: 1px solid hsl(var(--border)); }
-.footer p { font-size: 10px; color: hsl(var(--muted-foreground)); }
 .page a:focus-visible, .page button:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 5px; }
-@media (max-width: 700px) {
-  .details { grid-template-columns: 1fr; gap: 30px; }
-  .identity { grid-template-columns: 150px minmax(0, 1fr); }
-  .identityContent { padding: 24px 20px 12px; }
-  .cardBottom { gap: 0; }
-  .cardBottom > span { width: 100%; }
-  .appearanceScene { height: 80px; }
-  .appearance .themeControl { max-width: 400px; }
-}
-@media (max-width: 440px) {
-  .page { gap: 27px; }
-  .header h1 { font-size: 37px; max-width: 260px; }
-  .identity { grid-template-columns: 1fr; }
-  .identityArt { min-height: 177px; border-right: 0; border-bottom: 1px solid hsl(var(--border)); }
-  .coordinates { bottom: 14px; font-size: 7px; }
-  .initials { width: 74px; height: 74px; font-size: 24px; }
-  .identityRing { width: 158px; height: 158px; }
-  .identityRingInner { width: 116px; height: 116px; }
-  .satellite { top: calc(50% - 60px); left: calc(50% + 47px); }
-  .identityContent { padding: 21px 22px 11px; }
-  .identityContent h2 { margin-top: 20px; font-size: 29px; }
-  .cardBottom { padding-top: 18px; }
-  .adminBadge { margin-top: 12px; }
-  .connection { gap: 11px; }
-  .invitation { font-size: 8px; padding: 5px 6px; }
-}

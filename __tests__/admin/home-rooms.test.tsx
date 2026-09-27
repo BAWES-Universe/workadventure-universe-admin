@@ -99,7 +99,9 @@ describe('Home rooms keep their numbers', () => {
     await waitFor(() => expect(before.textContent).toContain('233'));
     expect(before.textContent).toContain('Creative Hub');
     expect(before.textContent).toContain('You were the last visitor');
-    expect(before.querySelector('button')?.textContent).toBe('Visit');
+    // No small Visit button: the whole card opens the room's page, which has its details and Visit.
+    expect(before.querySelector('button')).toBeNull();
+    expect(before.querySelector('a')?.getAttribute('href')).toBe('/admin/rooms/r-hub');
     expect(onShown).toHaveBeenLastCalledWith(['r-hq', 'r-hub']);
   });
 

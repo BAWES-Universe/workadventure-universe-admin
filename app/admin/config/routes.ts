@@ -27,15 +27,15 @@ export const ROUTES: RouteDefinition[] = [
   { pattern: '/admin/you', title: 'You', parent: null },
 
   // Space: mine
-  { pattern: '/admin/universes', title: 'My Universes', parent: '/admin/space' },
+  { pattern: '/admin/universes', title: 'My Universes', parent: '/admin/you' },
   { pattern: '/admin/universes/new', title: 'New universe', parent: '/admin/universes' },
   { pattern: '/admin/universes/[id]', title: 'Universe', parent: '/admin/universes' },
   { pattern: '/admin/worlds/new', title: 'New world', parent: '/admin/universes' },
   { pattern: '/admin/worlds/[id]', title: 'World', parent: '/admin/space' },
   { pattern: '/admin/rooms/new', title: 'New room', parent: '/admin/space' },
   { pattern: '/admin/rooms/[id]', title: 'Room', parent: '/admin/space' },
-  { pattern: '/admin/stars', title: 'My Stars', parent: '/admin/space' },
-  { pattern: '/admin/memberships', title: 'My Memberships', parent: '/admin/space' },
+  { pattern: '/admin/stars', title: 'My Stars', parent: '/admin/you' },
+  { pattern: '/admin/memberships', title: 'My Memberships', parent: '/admin/you' },
 
   // Space: explore
   { pattern: '/admin/discover/universes', title: 'Discover Universes', parent: '/admin/space' },

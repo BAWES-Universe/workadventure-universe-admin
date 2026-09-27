@@ -140,7 +140,7 @@ export default function HerePanel({ onShown }: { onShown?: (roomIds: string[]) =
         eyebrow="You are here"
         title="The start map"
         action={
-          <Link href="/admin/space?tab=explore" className={styles.detailsLink}>
+          <Link href="/admin/space" className={styles.detailsLink}>
             Explore space
             <ArrowUpRight size={15} aria-hidden="true" />
           </Link>

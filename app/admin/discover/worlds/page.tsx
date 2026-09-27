@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { AlertCircle, Loader2, Search, X, Globe, Users as UsersIcon, Activity, Clock, Star } from 'lucide-react';
+import { AlertCircle, Loader2, Search, X, Users as UsersIcon, Activity, Clock, Star, Earth } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 
@@ -125,7 +125,7 @@ function WorldCard({ world, analytics }: { world: World; analytics?: WorldAnalyt
                     </span>
                   </div>
                   <div className="flex items-center gap-1.5">
-                    <Globe className="h-3.5 w-3.5 text-muted-foreground" />
+                    <Earth className="h-3.5 w-3.5 text-muted-foreground" />
                     <span className="text-muted-foreground">
                       {roomsCount} {roomsCount === 1 ? 'room' : 'rooms'} · {membersCount}{' '}
                       {membersCount === 1 ? 'member' : 'members'}

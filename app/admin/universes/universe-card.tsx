@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { ChevronRight, Activity, Globe, Users, Star } from 'lucide-react';
+import { ChevronRight, Activity, Users, Star, Sparkles } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 export interface UniverseAnalytics {
@@ -170,7 +170,7 @@ export function UniverseCard({
                     </span>
                   </div>
                   <div className="flex items-center gap-1.5">
-                    <Globe className="h-3.5 w-3.5 text-muted-foreground" />
+                    <Sparkles className="h-3.5 w-3.5 text-muted-foreground" />
                     <span className="text-muted-foreground">
                       {worldsCount} {worldsCount === 1 ? 'world' : 'worlds'} · {roomsCount} {roomsCount === 1 ? 'room' : 'rooms'} · {membersCount}{' '}
                       {membersCount === 1 ? 'member' : 'members'}
@@ -222,7 +222,7 @@ export function UniverseCard({
               ) : (
                 <>
                   <div className="flex items-center gap-1.5">
-                    <Globe className="h-3.5 w-3.5 text-muted-foreground" />
+                    <Sparkles className="h-3.5 w-3.5 text-muted-foreground" />
                     <span className="text-muted-foreground">
                       {worldsCount} {worldsCount === 1 ? 'world' : 'worlds'} · {roomsCount} {roomsCount === 1 ? 'room' : 'rooms'} · {membersCount}{' '}
                       {membersCount === 1 ? 'member' : 'members'}

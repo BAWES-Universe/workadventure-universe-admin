@@ -1,12 +1,11 @@
 'use client';
 
 import Link from 'next/link';
-import { useId, useState } from 'react';
-import { DoorOpen, Navigation, Star } from 'lucide-react';
+import { useId } from 'react';
+import { DoorOpen, Star } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { timeAgo } from '@/lib/time-ago';
 import { formatHour, useRoomAnalytics, wasLastVisitorYou } from '../hooks/use-room-analytics';
-import { useWorkAdventure } from '../workadventure-context';
 import styles from './room-card.module.css';
 
 export interface RoomCardRoom {
@@ -61,29 +60,12 @@ const EYEBROW: Record<Kind, string> = { here: 'You are here', previous: 'Before 
 
 /**
  * A room at a glance: where it is, what it is, how popular it is and who was there last, the same on every card.
- * The whole card opens the room's page; Visit takes you there in the game (not on the room you are already in).
+ * The whole card opens the room's page, which has its details and Visit.
  */
 export function RoomCard({ room, kind, index }: { room: RoomCardRoom; kind: Kind; index?: number }) {
   const { analytics, loading, failed, retry } = useRoomAnalytics(room.id);
-  const { isReady, navigateToRoom } = useWorkAdventure();
-  const [visiting, setVisiting] = useState(false);
-  const [visitError, setVisitError] = useState(false);
   const titleId = useId();
   const here = kind === 'here';
-
-  async function visit() {
-    setVisiting(true);
-    setVisitError(false);
-    try {
-      const slugs = [room.universe.slug, room.world.slug, room.slug].map(encodeURIComponent).join('/');
-      await navigateToRoom(`/@/${slugs}`);
-    } catch (cause) {
-      console.error('[RoomCard] Could not visit', cause);
-      setVisitError(true);
-    } finally {
-      setVisiting(false);
-    }
-  }
 
   const you = analytics?.lastVisitedByUser?.accessedAt ?? room.accessedAt ?? null;
   const latest = analytics?.lastVisitedOverall ?? null;
@@ -181,25 +163,6 @@ export function RoomCard({ room, kind, index }: { room: RoomCardRoom; kind: Kind
         )}
       </div>
 
-      {!here && isReady && (
-        <div className={styles.actions}>
-          <button
-            type="button"
-            className={styles.visitButton}
-            disabled={visiting}
-            onClick={() => void visit()}
-            aria-label={`Visit ${room.name}`}
-          >
-            <Navigation size={13} aria-hidden="true" />
-            {visiting ? 'Going…' : 'Visit'}
-          </button>
-        </div>
-      )}
-      {visitError && (
-        <p className={styles.failure} role="alert">
-          Couldn&apos;t open this room. Try again or open its page.
-        </p>
-      )}
     </article>
   );
 }

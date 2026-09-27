@@ -29,7 +29,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { ChevronRight, AlertCircle, Loader2, Plus, Edit, Trash2, Globe, Home, Users as UsersIcon, Activity, Star, ChevronLeft, Clock, MapPin } from 'lucide-react';
+import { ChevronRight, AlertCircle, Loader2, Plus, Edit, Trash2, Home, Users as UsersIcon, Activity, Star, ChevronLeft, Clock, MapPin, Earth, Sparkles } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
   Empty,
@@ -583,7 +583,7 @@ export default function UniverseDetailPage() {
                 <Empty className="border border-border/70">
                   <EmptyHeader>
                     <EmptyMedia variant="icon">
-                      <Globe className="h-6 w-6 text-muted-foreground" />
+                      <Earth className="h-6 w-6 text-muted-foreground" />
                     </EmptyMedia>
                     <EmptyTitle>No worlds yet</EmptyTitle>
                     <EmptyDescription>
@@ -666,7 +666,7 @@ export default function UniverseDetailPage() {
                                     </span>
                                   </div>
                                   <div className="flex items-center gap-1.5">
-                                    <Globe className="h-3.5 w-3.5 text-muted-foreground" />
+                                    <Earth className="h-3.5 w-3.5 text-muted-foreground" />
                                     <span className="text-muted-foreground">
                                       {roomsCount} {roomsCount === 1 ? 'room' : 'rooms'} · {membersCount}{' '}
                                       {membersCount === 1 ? 'member' : 'members'}
@@ -705,7 +705,7 @@ export default function UniverseDetailPage() {
                               ) : (
                                 <>
                                   <span className="flex items-center gap-1 font-medium text-foreground/80">
-                                    <Globe className="h-3 w-3" />
+                                    <Sparkles className="h-3 w-3" />
                                     {universe.name}
                                   </span>
                                   <span className="line-clamp-1">

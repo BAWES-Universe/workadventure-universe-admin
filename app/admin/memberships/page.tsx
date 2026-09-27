@@ -17,7 +17,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { Loader2, AlertCircle, CheckCircle2, XCircle, Users, Mail, Home, Globe, Calendar, Clock, ChevronRight, Activity, Star } from 'lucide-react';
+import { Loader2, AlertCircle, CheckCircle2, XCircle, Users, Mail, Home, Calendar, Clock, ChevronRight, Activity, Star, Earth } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface Invitation {
@@ -497,7 +497,7 @@ export default function MyMembershipsPage() {
                                   </span>
                                 </div>
                                 <div className="flex items-center gap-1.5">
-                                  <Globe className="h-3.5 w-3.5 text-muted-foreground" />
+                                  <Earth className="h-3.5 w-3.5 text-muted-foreground" />
                                   <span className="text-muted-foreground">
                                     {roomsCount} {roomsCount === 1 ? 'room' : 'rooms'} · {membersCount}{' '}
                                     {membersCount === 1 ? 'member' : 'members'}

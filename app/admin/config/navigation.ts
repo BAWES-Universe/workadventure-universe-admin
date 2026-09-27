@@ -1,11 +1,11 @@
 import {
-  Home,
   Orbit,
-  Globe,
+  Telescope,
+  Sparkles,
+  Earth,
   Users,
   UserCircle,
   Mail,
-  Compass,
   FolderOpen,
   Star,
   Bot,
@@ -13,7 +13,6 @@ import {
   Database,
   Layers,
   Server,
-  Building2,
   DoorOpen,
 } from 'lucide-react';
 import { LucideIcon } from 'lucide-react';
@@ -30,31 +29,31 @@ export interface NavItem {
 }
 
 /**
- * The three places the bottom bar and the sidebar always show. Home is here and now, Space is everything you can
- * visit or manage, You is your visit card and account. Everything else lives one tap further, in the menu.
+ * The three places the bottom bar and the sidebar always show, Orbit in the middle: You is you and everything that's
+ * yours, Orbit is here and now, Space is everything out there to explore. Everything else is in the menu.
  */
 export const DESTINATIONS: NavItem[] = [
-  { href: '/admin', label: 'Orbit', icon: Home },
-  { href: '/admin/space', label: 'Space', icon: Orbit },
   { href: '/admin/you', label: 'You', icon: UserCircle },
+  { href: '/admin', label: 'Orbit', icon: Orbit },
+  { href: '/admin/space', label: 'Space', icon: Telescope },
 ];
 
 export const NAV_ITEMS: NavItem[] = [
   // Primary entry (no group, always at top)
-  { href: '/admin', label: 'Orbit', icon: Home },
+  { href: '/admin', label: 'Orbit', icon: Orbit },
 
   // Room Templates - available to all users
   { href: '/admin/templates', label: 'Room Templates', icon: FolderOpen },
 
   // Personalize section
-  { href: '/admin/universes', label: 'My Universes', icon: Globe, group: 'my' },
+  { href: '/admin/universes', label: 'My Universes', icon: Sparkles, group: 'my' },
   { href: '/admin/stars', label: 'My Stars', icon: Star, group: 'my' },
   { href: '/admin/memberships', label: 'My Memberships', icon: Mail, requiresAuth: true, group: 'my' },
   { href: '/admin/profile', label: 'My Visit Card', icon: UserCircle, requiresAuth: true, group: 'my' },
 
   // Discover section
-  { href: '/admin/discover/universes', label: 'Universes', icon: Compass, group: 'discover' },
-  { href: '/admin/discover/worlds', label: 'Worlds', icon: Building2, group: 'discover' },
+  { href: '/admin/discover/universes', label: 'Universes', icon: Sparkles, group: 'discover' },
+  { href: '/admin/discover/worlds', label: 'Worlds', icon: Earth, group: 'discover' },
   { href: '/admin/discover/rooms', label: 'Rooms', icon: DoorOpen, group: 'discover' },
   { href: '/admin/users', label: 'Users', icon: Users, group: 'discover' },
 

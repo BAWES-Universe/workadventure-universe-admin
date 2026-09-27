@@ -180,7 +180,16 @@ function ShellChrome({
   // focus, and with nothing above the page, Orbit closes. Keys pressed here never reach the game.
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      if (event.defaultPrevented) return;
+      // Ctrl+K (Cmd+K on a Mac) opens and closes the menu from anywhere, unless another dialog is open.
+      if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'k') {
+        const otherDialog = document.querySelector('[role="dialog"][data-state="open"]:not(#orbit-menu), [role="alertdialog"][data-state="open"]');
+        if (otherDialog) return;
+        event.preventDefault();
+        setMenuOpen(!menuOpen);
+        return;
+      }
+      if (event.key !== 'Escape') return;
       if (menuOpen) {
         setMenuOpen(false);
         return;

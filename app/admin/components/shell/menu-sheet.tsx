@@ -10,7 +10,7 @@ import { useOrbitFrame } from '../../orbit-frame-context';
 import { rootOf } from './root-of';
 
 /**
- * Everything Orbit has, from the Menu button at the top-left: Home, Space and You, then every tool, searchable.
+ * Everything Orbit has, from the Orbit Menu button at the top-left or Ctrl/Cmd+K: You, Orbit and Space, then every tool, searchable.
  * Nothing else: the account, theme and sign-out live on You. Dismissed by a tap outside, Escape, or going somewhere.
  */
 export function MenuSheet({ user }: { user: NavUser }) {

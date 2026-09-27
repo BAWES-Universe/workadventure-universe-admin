@@ -207,10 +207,43 @@ describe('AdminShell', () => {
     expect(bar.querySelector('button')?.textContent).toBe('Orbit Menu');
   });
 
-  it('keeps Home, Space and You on the bottom bar', async () => {
+  it('keeps You, Orbit and Space on the bottom bar, with Orbit in the middle and lit on arrival', async () => {
     await renderShell('/admin');
     const nav = screen.getByRole('navigation', { name: 'Orbit' });
-    expect(Array.from(nav.querySelectorAll('a')).map((link) => link.textContent)).toEqual(['Orbit', 'Space', 'You']);
+    const links = Array.from(nav.querySelectorAll('a'));
+    expect(links.map((link) => link.textContent)).toEqual(['You', 'Orbit', 'Space']);
+    expect(links[1].getAttribute('aria-current')).toBe('page');
+  });
+
+  it('Ctrl+K and Cmd+K open and close the menu, from any page', async () => {
+    await renderShell('/admin/worlds/w-1');
+    expect(screen.queryByRole('dialog')).toBeNull();
+    const ctrlK = new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, cancelable: true, bubbles: true });
+    act(() => {
+      window.dispatchEvent(ctrlK);
+    });
+    expect(ctrlK.defaultPrevented).toBe(true);
+    expect(await screen.findByRole('dialog')).toBeTruthy();
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'K', metaKey: true, cancelable: true, bubbles: true }));
+    });
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(closeModal).not.toHaveBeenCalled();
+  });
+
+  it('Ctrl+K leaves another open dialog alone', async () => {
+    await renderShell('/admin');
+    const other = document.createElement('div');
+    other.setAttribute('role', 'dialog');
+    other.setAttribute('data-state', 'open');
+    document.body.append(other);
+    const ctrlK = new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, cancelable: true, bubbles: true });
+    act(() => {
+      window.dispatchEvent(ctrlK);
+    });
+    expect(ctrlK.defaultPrevented).toBe(false);
+    expect(screen.queryByTestId('orbit-menu-button')?.getAttribute('aria-expanded')).toBe('false');
+    other.remove();
   });
 
   it('keeps every super-admin tool reachable from the menu', async () => {
