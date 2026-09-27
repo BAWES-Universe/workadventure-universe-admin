@@ -3,6 +3,7 @@
 import { useState, useEffect, Suspense, useMemo } from 'react';
 import { DraftNotice } from '../../components/draft-notice';
 import { useDraft } from '../../hooks/use-draft';
+import { scopedDraftKey } from '@/lib/drafts';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
@@ -78,7 +79,7 @@ function NewRoomPageContent() {
     [formData.slug, formData.name, formData.description, formData.mapUrl, formData.isPublic],
   );
   const { discard: discardDraft, restored: draftRestored, revert: revertDraft } = useDraft(
-    'room.new',
+    scopedDraftKey('room.new', worldIdParam),
     draftFields,
     (draft) => setFormData((prev) => ({ ...prev, ...draft })),
     EMPTY_ROOM_DRAFT,

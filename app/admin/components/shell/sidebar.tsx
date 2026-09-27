@@ -6,7 +6,6 @@ import { useEffect, useRef } from 'react';
 import { cn } from '@/lib/utils';
 import { DESTINATIONS, getNavItems, getNavSections, isNavItemActive, type NavUser } from '../../config/navigation';
 import { OrbitWordmark } from './orbit-mark';
-import { AccountPanel } from './account-panel';
 import { rootOf } from './root-of';
 
 /**
@@ -89,9 +88,6 @@ export function Sidebar({ user }: { user: NavUser }) {
           </div>
         ))}
       </nav>
-      <div className="border-t border-border/60 p-3">
-        <AccountPanel user={user} compact />
-      </div>
     </aside>
   );
 }

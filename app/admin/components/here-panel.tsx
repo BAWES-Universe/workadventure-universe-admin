@@ -2,11 +2,12 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { AlertCircle, MapPin, Orbit as OrbitIcon, Sparkles } from 'lucide-react';
-import { Button } from '@/components/ui/button';
+import { ArrowUpRight } from 'lucide-react';
+import { cn } from '@/lib/utils';
 import { authenticatedFetch } from '@/lib/client-auth';
 import { useWorkAdventure } from '../workadventure-context';
-import { RoomCard, RoomCardSkeleton, type RoomCardRoom } from './room-card';
+import { OrbitalIllustration, RoomCard, RoomCardSkeleton, type RoomCardRoom } from './room-card';
+import styles from './room-card.module.css';
 
 interface ApiRoom {
   id: string;
@@ -15,6 +16,7 @@ interface ApiRoom {
   description?: string | null;
   world: { id: string; name: string; slug: string; universe: { id: string; name: string; slug: string } };
   _count?: { favorites?: number };
+  accessedAt?: string;
 }
 
 function toCardRoom(room: ApiRoom): RoomCardRoom {
@@ -24,8 +26,9 @@ function toCardRoom(room: ApiRoom): RoomCardRoom {
     slug: room.slug,
     description: room.description ?? null,
     favorites: room._count?.favorites ?? 0,
-    world: { name: room.world.name, slug: room.world.slug },
-    universe: { name: room.world.universe.name, slug: room.world.universe.slug },
+    world: { id: room.world.id, name: room.world.name, slug: room.world.slug },
+    universe: { id: room.world.universe.id, name: room.world.universe.name, slug: room.world.universe.slug },
+    accessedAt: room.accessedAt,
   };
 }
 
@@ -45,15 +48,29 @@ type Located =
   | { kind: 'room'; room: ApiRoom; start: boolean }
   | { kind: 'unknown'; playUri: string; start: boolean };
 
+function Notice({ eyebrow, title, children, action }: { eyebrow: string; title: string; children?: React.ReactNode; action?: React.ReactNode }) {
+  return (
+    <div className={styles.notice} role="status">
+      <div className={styles.noticeTop}>
+        <span className={styles.eyebrow}>{eyebrow}</span>
+        <OrbitalIllustration small />
+      </div>
+      <h3 className="orbit-display">{title}</h3>
+      {children}
+      {action}
+    </div>
+  );
+}
+
 /**
  * Where you are and where you were just before: each room with its stars, visits, busiest hour and latest visitor,
- * one tap from its page. On the start map it says so and points at Spaces. Outside the game it explains why there
+ * one tap from its page. On the start map it says so and points at Space. Outside the game it explains why there
  * is nothing to show.
  */
 export default function HerePanel({ onShown }: { onShown?: (roomIds: string[]) => void }) {
   const { wa, isReady, isLoading, error } = useWorkAdventure();
   const [located, setLocated] = useState<Located>({ kind: 'loading' });
-  const [previous, setPrevious] = useState<ApiRoom | null>(null);
+  const [previous, setPrevious] = useState<{ currentId: string; room: ApiRoom | null }>({ currentId: '', room: null });
   const unavailable = Boolean(error) || (!isReady && !isLoading);
 
   useEffect(() => {
@@ -81,7 +98,9 @@ export default function HerePanel({ onShown }: { onShown?: (roomIds: string[]) =
         setLocated({ kind: 'room', room, start });
 
         const before = await authenticatedFetch(`/api/admin/rooms/previous?currentRoomId=${encodeURIComponent(room.id)}`);
-        if (!cancelled && before.ok) setPrevious(((await before.json()) as { room: ApiRoom | null }).room ?? null);
+        if (cancelled) return;
+        // Keyed by the room it was asked for, so an old answer never shows under a newer room.
+        setPrevious({ currentId: room.id, room: before.ok ? (((await before.json()) as { room: ApiRoom | null }).room ?? null) : null });
       } catch (cause) {
         console.error('[Here] Could not resolve the current room', cause);
         if (!cancelled) setLocated({ kind: 'failed' });
@@ -93,91 +112,65 @@ export default function HerePanel({ onShown }: { onShown?: (roomIds: string[]) =
     };
   }, [wa, isReady, unavailable]);
 
-  // The rooms shown here (where you are, where you were before), so Home doesn't list them again.
   const roomId = located.kind === 'room' ? located.room.id : null;
-  const previousId = previous?.id ?? null;
+  const previousRoom = roomId && previous.currentId === roomId ? previous.room : null;
+  const previousId = previousRoom?.id ?? null;
   useEffect(() => {
     onShown?.([roomId, previousId].filter((id): id is string => Boolean(id)));
   }, [roomId, previousId, onShown]);
 
-  if (unavailable) {
-    return (
-      <section aria-labelledby="here-heading">
-        <h2 id="here-heading" className="sr-only">
-          Where you are
-        </h2>
-        <div className="orbit-card flex items-start gap-3 p-4" role="status">
-          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-muted text-muted-foreground">
-            <AlertCircle className="h-5 w-5" aria-hidden="true" />
-          </span>
-          <div className="min-w-0">
-            <p className="text-[15px] font-medium">Your location shows inside Universe</p>
-            <p className="text-sm text-muted-foreground">
-              Open Orbit from the game to see the room you&apos;re in and where you were before.
-            </p>
-          </div>
-        </div>
-      </section>
-    );
-  }
-
   let current: React.ReactNode;
-  if (located.kind === 'loading') {
+  if (unavailable) {
+    current = (
+      <Notice eyebrow="Where you are" title="Your location shows inside Universe">
+        <p>Open Orbit from the game to see the room you&apos;re in and where you were before.</p>
+      </Notice>
+    );
+  } else if (located.kind === 'loading') {
     current = <RoomCardSkeleton />;
   } else if (located.kind === 'failed') {
     current = (
-      <div className="orbit-card flex items-center gap-3 p-4">
-        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-muted text-muted-foreground">
-          <MapPin className="h-5 w-5" aria-hidden="true" />
-        </span>
-        <p className="text-sm text-muted-foreground">No room information available.</p>
-      </div>
+      <Notice eyebrow="Where you are" title="No room information available">
+        <p>Orbit couldn&apos;t tell which room you&apos;re in right now.</p>
+      </Notice>
     );
   } else if (located.start) {
     current = (
-      <div className="orbit-card orbit-glow flex h-full flex-col gap-3 p-4">
-        <div className="flex items-start gap-3">
-          <span className="orbit-brand-fill flex h-10 w-10 shrink-0 items-center justify-center rounded-xl">
-            <Sparkles className="h-5 w-5" aria-hidden="true" />
-          </span>
-          <div className="min-w-0 flex-1">
-            <p className="text-[11px] font-medium uppercase tracking-wider text-primary">You&apos;re here</p>
-            <p className="text-[15px] font-semibold">The start map</p>
-            <p className="text-sm text-muted-foreground">Where everyone lands. Pick a universe to visit, or make one of your own.</p>
-          </div>
-        </div>
-        <Button asChild size="sm" className="self-start">
-          <Link href="/admin/spaces?tab=explore">
-            <OrbitIcon className="h-4 w-4" />
-            Explore spaces
+      <Notice
+        eyebrow="You are here"
+        title="The start map"
+        action={
+          <Link href="/admin/space?tab=explore" className={styles.detailsLink}>
+            Explore space
+            <ArrowUpRight size={15} aria-hidden="true" />
           </Link>
-        </Button>
-      </div>
+        }
+      >
+        <p>Where everyone lands. Pick a universe to visit, or make one of your own.</p>
+      </Notice>
     );
   } else if (located.kind === 'unknown') {
     current = (
-      <div className="orbit-card flex items-center gap-3 p-4">
-        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-muted text-muted-foreground">
-          <MapPin className="h-5 w-5" aria-hidden="true" />
-        </span>
-        <div className="min-w-0 flex-1">
-          <p className="text-[15px] font-medium">You&apos;re in a room Orbit doesn&apos;t know yet</p>
-          <p className="truncate font-mono text-[11px] text-muted-foreground">{located.playUri}</p>
-        </div>
-      </div>
+      <Notice eyebrow="You are here" title="A room Orbit doesn’t know yet">
+        <p className={styles.roomUri}>{located.playUri}</p>
+      </Notice>
     );
   } else {
-    current = <RoomCard room={toCardRoom(located.room)} kind="here" eyebrow="You're here" />;
+    current = <RoomCard room={toCardRoom(located.room)} kind="here" />;
   }
 
   return (
-    <section aria-labelledby="here-heading" data-testid="here">
-      <h2 id="here-heading" className="mb-3 text-lg font-semibold tracking-tight">
+    <section className={styles.location} aria-labelledby="here-heading" data-testid="here">
+      <h2 id="here-heading" className="sr-only">
         Where you are
       </h2>
-      <div className="grid gap-3 sm:grid-cols-2">
+      <div className={cn(styles.locationGrid, previousRoom && styles.hasPrevious)}>
         {current}
-        {previous && <RoomCard room={toCardRoom(previous)} kind="previous" eyebrow="Before this" />}
+        {previousRoom && (
+          <div className={styles.previousStop}>
+            <RoomCard room={toCardRoom(previousRoom)} kind="previous" />
+          </div>
+        )}
       </div>
     </section>
   );

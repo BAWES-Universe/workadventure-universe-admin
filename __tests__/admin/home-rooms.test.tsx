@@ -42,8 +42,8 @@ const responses: Record<string, unknown> = {
     totalAccesses: 233,
     recentActivity: [],
     peakTimes: [],
-    lastVisitedByUser: { accessedAt: minutesAgo(40) },
-    lastVisitedOverall: { accessedAt: minutesAgo(40) },
+    lastVisitedByUser: { accessedAt: minutesAgo(40), userId: 'u1' },
+    lastVisitedOverall: { accessedAt: minutesAgo(40), userId: 'u1' },
   },
   '/api/admin/rooms/recent': {
     rooms: [
@@ -84,7 +84,7 @@ describe('Home rooms keep their numbers', () => {
     const here = await screen.findByTestId('room-card-here');
     await waitFor(() => expect(here.textContent).toContain('1,204'));
     expect(here.textContent).toContain('Headquarters');
-    expect(here.textContent).toContain('BAWES · Office');
+    expect(here.textContent).toMatch(/BAWES\s*\/\s*Office/);
     expect(here.textContent).toContain('Where the team meets');
     expect(here.textContent).toContain('9');
     expect(here.textContent).toMatch(/Latest visitor\s*Imagine, 3 minutes ago/);
@@ -94,7 +94,7 @@ describe('Home rooms keep their numbers', () => {
     const before = await screen.findByTestId('room-card-previous');
     await waitFor(() => expect(before.textContent).toContain('233'));
     expect(before.textContent).toContain('Creative Hub');
-    expect(before.textContent).toContain('You were the last visitor');
+    expect(before.textContent).toMatch(/Latest visitor\s*You/);
     expect(before.querySelector('button')?.textContent).toBe('Visit');
     expect(onShown).toHaveBeenLastCalledWith(['r-hq', 'r-hub']);
   });
@@ -117,8 +117,8 @@ describe('Home rooms keep their numbers', () => {
       date.setHours(hour, 5, 0, 0);
       return { accessedAt: date.toISOString() };
     };
-    expect(peakHourOf({ recentActivity: [at(9), at(14), at(14)] })).toBe(14);
-    expect(peakHourOf({ recentActivity: [], peakTimes: [{ hour: 7, count: 3 }] })).toBe(7);
-    expect(peakHourOf({})).toBeNull();
+    expect(peakHourOf({ recentActivity: [at(9), at(14), at(14)] })).toEqual({ hour: 14, zone: 'local' });
+    expect(peakHourOf({ recentActivity: [], peakTimes: [{ hour: 7, count: 3 }] })).toEqual({ hour: 7, zone: 'UTC' });
+    expect(peakHourOf({})).toEqual({ hour: null, zone: 'UTC' });
   });
 });

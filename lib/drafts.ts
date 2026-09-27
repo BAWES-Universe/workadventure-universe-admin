@@ -6,6 +6,11 @@
 
 export const DRAFT_KEY_PREFIX = 'orbit.draft.';
 
+/** Keep a creation draft attached to the universe or world it will be submitted to. */
+export function scopedDraftKey(form: string, ...scope: (string | null)[]): string {
+  return `${form}:${scope.map((part) => encodeURIComponent(part ?? '')).join(':')}`;
+}
+
 function storage(): Storage | null {
   try {
     return typeof window === 'undefined' ? null : window.sessionStorage;

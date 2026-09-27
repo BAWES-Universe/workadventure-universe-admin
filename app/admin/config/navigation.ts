@@ -30,12 +30,12 @@ export interface NavItem {
 }
 
 /**
- * The three places the bottom bar and the sidebar always show. Home is here and now, Spaces is everything you can
+ * The three places the bottom bar and the sidebar always show. Home is here and now, Space is everything you can
  * visit or manage, You is your visit card and account. Everything else lives one tap further, in the menu.
  */
 export const DESTINATIONS: NavItem[] = [
   { href: '/admin', label: 'Home', icon: Home },
-  { href: '/admin/spaces', label: 'Spaces', icon: Orbit },
+  { href: '/admin/space', label: 'Space', icon: Orbit },
   { href: '/admin/you', label: 'You', icon: UserCircle },
 ];
 

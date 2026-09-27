@@ -4,23 +4,26 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { cn } from '@/lib/utils';
 import { DESTINATIONS } from '../../config/navigation';
+import { useOrbitFrame } from '../../orbit-frame-context';
 import { rootOf } from './root-of';
 
 /**
- * Home, Spaces and You, always within a thumb's reach on a narrow frame. The active item's pill slides to where you
- * go. The Menu is at the top-left, beside the game's own buttons. Hidden on the wide layout, where the sidebar
- * takes over.
+ * Home, Space and You on the three root pages, within a thumb's reach on a phone and as a strip under the bar on
+ * a desktop panel. Inner pages hide it: Back in the bar is the one way out, so it is clear where you are. The Menu
+ * is at the top-left, beside the game's own buttons. Hidden on the wide layout, where the sidebar takes over.
  */
 export function BottomNav() {
   const pathname = usePathname();
+  const { route } = useOrbitFrame();
   const root = rootOf(pathname);
+  if (route.parent !== null) return null;
   const activeIndex = DESTINATIONS.findIndex((item) => item.href === root);
   const slots = DESTINATIONS.length;
 
   return (
     <nav
       aria-label="Orbit"
-      className="orbit-glass fixed inset-x-0 bottom-0 z-40 border-t border-border/60 lg:hidden"
+      className="orbit-glass orbit-dock fixed inset-x-0 bottom-0 z-40 border-t border-border/60 lg:hidden"
       style={{ paddingBottom: 'var(--safe-bottom)' }}
     >
       <div className="relative mx-auto grid max-w-lg" style={{ gridTemplateColumns: `repeat(${slots}, minmax(0, 1fr))`, height: 'var(--bottombar-height)' }}>

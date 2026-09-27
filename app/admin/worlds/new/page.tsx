@@ -3,6 +3,7 @@
 import { useState, useEffect, Suspense, useMemo } from 'react';
 import { DraftNotice } from '../../components/draft-notice';
 import { useDraft } from '../../hooks/use-draft';
+import { scopedDraftKey } from '@/lib/drafts';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
@@ -55,7 +56,7 @@ function NewWorldPageContent() {
     [formData.slug, formData.name, formData.description, formData.isPublic, formData.featured, formData.thumbnailUrl],
   );
   const { discard: discardDraft, restored: draftRestored, revert: revertDraft } = useDraft(
-    'world.new',
+    scopedDraftKey('world.new', universeIdParam),
     draftFields,
     (draft) => setFormData((prev) => ({ ...prev, ...draft })),
     EMPTY_WORLD_DRAFT,

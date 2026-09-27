@@ -147,16 +147,16 @@ describe('AdminShell', () => {
   it('gives every page a Back that names where it goes, and roots the wordmark', async () => {
     await renderShell('/admin/worlds/w-1');
     const back = screen.getByTestId('orbit-back');
-    expect(back.textContent).toContain('Spaces');
+    expect(back.textContent).toContain('Space');
     expect(screen.getByTestId('orbit-title').textContent).toBe('World');
     fireEvent.click(back);
     // The first page of a visit: its parent takes its place, so the browser's Back still closes Orbit.
-    expect(mockRouter.replace).toHaveBeenCalledWith('/admin/spaces');
+    expect(mockRouter.replace).toHaveBeenCalledWith('/admin/space');
     expect(mockRouter.back).not.toHaveBeenCalled();
   });
 
   it('Back returns along Orbit’s own pages before going to a parent', async () => {
-    const view = await renderShell('/admin/spaces');
+    const view = await renderShell('/admin/space');
     act(() => {
       mockPathname = '/admin/worlds/w-1';
       view.rerender(
@@ -207,10 +207,10 @@ describe('AdminShell', () => {
     expect(bar.querySelector('button')?.getAttribute('aria-label')).toBe('Menu');
   });
 
-  it('keeps Home, Spaces and You on the bottom bar', async () => {
+  it('keeps Home, Space and You on the bottom bar', async () => {
     await renderShell('/admin');
     const nav = screen.getByRole('navigation', { name: 'Orbit' });
-    expect(Array.from(nav.querySelectorAll('a')).map((link) => link.textContent)).toEqual(['Home', 'Spaces', 'You']);
+    expect(Array.from(nav.querySelectorAll('a')).map((link) => link.textContent)).toEqual(['Home', 'Space', 'You']);
   });
 
   it('keeps every super-admin tool reachable from the menu', async () => {
@@ -223,6 +223,7 @@ describe('AdminShell', () => {
     for (const label of ['My Universes', 'My Stars', 'My Memberships', 'My Visit Card', 'Room Templates', 'Users']) {
       expect(menu.textContent).toContain(label);
     }
-    expect(menu.textContent).toContain('Sign out');
+    // The account, theme and sign-out live on You, not in the menu.
+    expect(menu.textContent).not.toContain('Sign out');
   });
 });

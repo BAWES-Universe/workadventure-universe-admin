@@ -2,24 +2,30 @@
 
 import * as DialogPrimitive from '@radix-ui/react-dialog';
 import Link from 'next/link';
-import { X } from 'lucide-react';
 import { usePathname } from 'next/navigation';
-import { useEffect } from 'react';
-import { cn } from '@/lib/utils';
-import { getNavItems, getNavSections, isNavItemActive, type NavUser } from '../../config/navigation';
+import { useEffect, useState } from 'react';
+import { ArrowUpRight, Search, X } from 'lucide-react';
+import { DESTINATIONS, getNavItems, getNavSections, isNavItemActive, type NavUser } from '../../config/navigation';
 import { useOrbitFrame } from '../../orbit-frame-context';
-import { AccountPanel } from './account-panel';
+import { rootOf } from './root-of';
 
 /**
- * Everything Orbit has, from the Menu button at the top-left: Tools, Personalize, Discover and (for super admins)
- * Admin, and the account at the end. A drawer that slides in from the left, under the button that opened it;
- * dismissed by a tap outside, Escape, or going somewhere. Home, Spaces and You stay on the bottom bar.
+ * Everything Orbit has, from the Menu button at the top-left: Home, Space and You, then every tool, searchable.
+ * Nothing else: the account, theme and sign-out live on You. Dismissed by a tap outside, Escape, or going somewhere.
  */
 export function MenuSheet({ user }: { user: NavUser }) {
   const pathname = usePathname();
   const { menuOpen, setMenuOpen } = useOrbitFrame();
+  const [query, setQuery] = useState('');
   const items = getNavItems(user);
-  const sections = getNavSections(user);
+  const root = rootOf(pathname);
+  const normalized = query.trim().toLocaleLowerCase();
+  const sections = getNavSections(user)
+    .map((section) => ({
+      ...section,
+      items: section.items.filter((item) => `${item.label} ${section.label}`.toLocaleLowerCase().includes(normalized)),
+    }))
+    .filter((section) => section.items.length > 0);
 
   // Going somewhere closes the menu.
   useEffect(() => {
@@ -27,50 +33,66 @@ export function MenuSheet({ user }: { user: NavUser }) {
   }, [pathname, setMenuOpen]);
 
   return (
-    <DialogPrimitive.Root open={menuOpen} onOpenChange={setMenuOpen}>
+    <DialogPrimitive.Root
+      open={menuOpen}
+      onOpenChange={(open) => {
+        setMenuOpen(open);
+        if (!open) setQuery('');
+      }}
+    >
       <DialogPrimitive.Portal>
-        <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/50 backdrop-blur-[2px] data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=open]:fade-in-0 data-[state=closed]:fade-out-0" />
-        <DialogPrimitive.Content
-          id="orbit-menu"
-          aria-describedby={undefined}
-          className={cn(
-            'fixed inset-y-0 left-0 z-50 w-[min(85%,20rem)] overflow-y-auto border-r border-border/60 bg-popover shadow-2xl outline-none',
-            'data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=open]:slide-in-from-left data-[state=closed]:slide-out-to-left',
-          )}
-          style={{ paddingBottom: 'calc(1rem + var(--safe-bottom))' }}
-        >
-          <div className="sticky top-0 z-10 flex items-center justify-between bg-popover px-4 pb-2 pt-3">
-            <DialogPrimitive.Title className="text-[15px] font-semibold">Menu</DialogPrimitive.Title>
-            <DialogPrimitive.Close
-              className="orbit-press inline-flex h-9 w-9 items-center justify-center rounded-xl text-muted-foreground hover:bg-accent hover:text-foreground"
-              aria-label="Close the menu"
-            >
-              <X className="h-5 w-5" aria-hidden="true" />
+        <DialogPrimitive.Overlay className="orbit-menu-overlay data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=open]:fade-in-0 data-[state=closed]:fade-out-0" />
+        <DialogPrimitive.Content id="orbit-menu" className="orbit-menu">
+          <div className="orbit-menu-heading">
+            <div>
+              <p className="orbit-eyebrow">Menu</p>
+              <DialogPrimitive.Title asChild>
+                <h2>Where to?</h2>
+              </DialogPrimitive.Title>
+            </div>
+            <DialogPrimitive.Close className="orbit-icon-button" aria-label="Close the menu">
+              <X size={20} aria-hidden="true" />
             </DialogPrimitive.Close>
           </div>
-
-          <div className="space-y-6 px-4 pt-1">
+          <DialogPrimitive.Description className="orbit-menu-description">Every place and every tool, one tap away.</DialogPrimitive.Description>
+          <label className="orbit-menu-search">
+            <Search size={18} aria-hidden="true" />
+            <span className="sr-only">Find a place or a tool</span>
+            <input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Find a place or a tool…" />
+          </label>
+          {!normalized && (
+            <nav className="orbit-menu-roots" aria-label="Main destinations">
+              {DESTINATIONS.map((item) => {
+                const Icon = item.icon;
+                return (
+                  <Link key={item.href} href={item.href} aria-current={item.href === root ? 'page' : undefined}>
+                    <Icon size={18} aria-hidden="true" />
+                    {item.label}
+                  </Link>
+                );
+              })}
+            </nav>
+          )}
+          <div className="orbit-menu-sections">
+            {sections.length === 0 && (
+              <p className="orbit-no-results" role="status">
+                Nothing matches “{query}”. Try the name of a tool or a place.
+              </p>
+            )}
             {sections.map((section) => (
               <section key={section.key} aria-label={section.label}>
-                <p className="mb-2 px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/80">
-                  {section.label}
-                </p>
-                <ul className="overflow-hidden rounded-2xl border border-border/60 bg-card">
-                  {section.items.map((item, index) => {
+                <h3 className="orbit-eyebrow">{section.label}</h3>
+                <ul>
+                  {section.items.map((item) => {
                     const Icon = item.icon;
-                    const active = isNavItemActive(item.href, pathname, items);
                     return (
-                      <li key={item.href} className={cn(index > 0 && 'border-t border-border/50')}>
-                        <Link
-                          href={item.href}
-                          aria-current={active ? 'page' : undefined}
-                          className={cn(
-                            'flex h-12 items-center gap-3 px-4 text-[15px] transition-colors active:bg-muted',
-                            active ? 'font-medium text-primary' : 'text-foreground',
-                          )}
-                        >
-                          <Icon className={cn('h-5 w-5', active ? 'text-primary' : 'text-muted-foreground')} aria-hidden="true" />
-                          {item.label}
+                      <li key={item.href}>
+                        <Link href={item.href} aria-current={isNavItemActive(item.href, pathname, items) ? 'page' : undefined}>
+                          <span className="orbit-tool-icon">
+                            <Icon size={18} aria-hidden="true" />
+                          </span>
+                          <span>{item.label}</span>
+                          <ArrowUpRight className="orbit-tool-arrow" size={15} aria-hidden="true" />
                         </Link>
                       </li>
                     );
@@ -78,10 +100,6 @@ export function MenuSheet({ user }: { user: NavUser }) {
                 </ul>
               </section>
             ))}
-
-            <div className="rounded-2xl border border-border/60 bg-card p-4">
-              <AccountPanel user={user} />
-            </div>
           </div>
         </DialogPrimitive.Content>
       </DialogPrimitive.Portal>

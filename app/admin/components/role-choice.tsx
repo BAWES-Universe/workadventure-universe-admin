@@ -1,6 +1,7 @@
 'use client';
 
 import { Check } from 'lucide-react';
+import { useRef } from 'react';
 import { cn } from '@/lib/utils';
 
 export const ROLE_OPTIONS: { value: string; label: string; description: string }[] = [
@@ -27,9 +28,12 @@ export function RoleChoice({
   /** The id of the visible label naming this choice. */
   labelledBy?: string;
 }) {
+  const buttons = useRef<(HTMLButtonElement | null)[]>([]);
+  const selectedIndex = Math.max(0, options.findIndex((option) => option.value === value));
   return (
     <div
       role="radiogroup"
+      aria-orientation="vertical"
       aria-labelledby={labelledBy}
       aria-label={labelledBy ? undefined : 'Role'}
       className="overflow-hidden rounded-xl border border-border/70">
@@ -41,8 +45,24 @@ export function RoleChoice({
             type="button"
             role="radio"
             aria-checked={checked}
+            tabIndex={index === selectedIndex ? 0 : -1}
+            ref={(element) => {
+              buttons.current[index] = element;
+            }}
             name={name}
             onClick={() => onChange(option.value)}
+            onKeyDown={(event) => {
+              // Arrows move and choose, as in a native radio group; Home and End jump to the ends.
+              let next: number;
+              if (event.key === 'ArrowDown' || event.key === 'ArrowRight') next = (index + 1) % options.length;
+              else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') next = (index + options.length - 1) % options.length;
+              else if (event.key === 'Home') next = 0;
+              else if (event.key === 'End') next = options.length - 1;
+              else return;
+              event.preventDefault();
+              onChange(options[next].value);
+              buttons.current[next]?.focus();
+            }}
             className={cn(
               'flex w-full items-center gap-3 px-4 py-3 text-left transition-colors',
               index > 0 && 'border-t border-border/60',

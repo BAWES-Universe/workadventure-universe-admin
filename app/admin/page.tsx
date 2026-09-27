@@ -2,29 +2,19 @@
 
 import Link from 'next/link';
 import { useState } from 'react';
-import { Compass, Building2, DoorOpen, Users, ChevronRight } from 'lucide-react';
+import { ArrowUpRight, Compass, Building2, DoorOpen, Users } from 'lucide-react';
 import { useAdminBootstrap } from './admin-bootstrap-context';
 import HerePanel from './components/here-panel';
 import PendingInvitationsAlert from './components/pending-invitations-alert';
 import RecentlyVisited from './components/recently-visited';
-import YourSpaces from './components/your-spaces';
-
-function greetingFor(hour: number): string {
-  if (hour < 5) return 'Good night';
-  if (hour < 12) return 'Good morning';
-  if (hour < 18) return 'Good afternoon';
-  return 'Good evening';
-}
+import YourSpace from './components/your-space';
 
 function firstName(name: string | null, email: string | null): string | null {
   const source = name?.trim() || email?.split('@')[0] || '';
   return source ? source.split(/\s+/)[0] : null;
 }
 
-/**
- * Home: here and now. Who you are and where you are, anything waiting for you, your own spaces, and where you were
- * last. Exploring the whole Universe is one tap away, under Spaces.
- */
+/** Home follows a journey: here, before, your trail, your own space, then everything beyond it. */
 export default function AdminDashboard() {
   const { user, stats } = useAdminBootstrap();
   const name = firstName(user.name, user.email);
@@ -38,47 +28,49 @@ export default function AdminDashboard() {
   const [shownRoomIds, setShownRoomIds] = useState<string[]>([]);
 
   return (
-    <div className="space-y-6">
-      <header className="space-y-1">
-        <p className="text-sm text-muted-foreground">{greetingFor(new Date().getHours())}</p>
-        <h1 className="text-3xl font-semibold tracking-tight">{name ?? 'Welcome'}</h1>
+    <div className="space-y-7">
+      <header className="orbit-hero">
+        <div>
+          <p className="orbit-eyebrow">{name ? `Welcome back, ${name}` : 'Welcome back'}</p>
+          <h1>
+            Your orbit<span aria-hidden="true">.</span>
+          </h1>
+        </div>
       </header>
 
-      <PendingInvitationsAlert />
-      <HerePanel onShown={setShownRoomIds} />
-      <RecentlyVisited excludeRoomIds={shownRoomIds} />
-      <YourSpaces />
-
-      <section data-testid="explore">
-        <div className="mb-3">
-          <h2 className="text-lg font-semibold tracking-tight">Discover</h2>
-          <p className="text-sm text-muted-foreground">Explore universes, worlds, rooms, and users across the Universe.</p>
+      <div className="orbit-home-columns">
+        <div className="orbit-home-primary">
+          <PendingInvitationsAlert />
+          <HerePanel onShown={setShownRoomIds} />
+          <RecentlyVisited excludeRoomIds={shownRoomIds} />
         </div>
-        <div className="grid gap-3 sm:grid-cols-2">
-          {explore.map((entry) => {
-            const Icon = entry.icon;
-            return (
-              <Link
-                key={entry.href}
-                href={entry.href}
-                className="orbit-card orbit-card-interactive flex items-center gap-3 p-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-muted text-muted-foreground">
-                  <Icon className="h-[18px] w-[18px]" aria-hidden="true" />
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="flex items-baseline justify-between gap-2">
-                    <span className="text-[15px] font-medium">{entry.label}</span>
-                    <span className="text-lg font-semibold tabular-nums">{entry.count.toLocaleString()}</span>
-                  </span>
-                  <span className="block truncate text-xs text-muted-foreground">{entry.description}</span>
-                </span>
-                <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground/60" aria-hidden="true" />
-              </Link>
-            );
-          })}
+        <div className="orbit-home-secondary">
+          <YourSpace />
+          <section className="orbit-explore" data-testid="explore">
+            <p className="orbit-eyebrow">Beyond your orbit</p>
+            <h2>Discover</h2>
+            <p>Explore universes, worlds, rooms, and users across the Universe.</p>
+            <nav aria-label="Discover">
+              {explore.map((entry) => {
+                const Icon = entry.icon;
+                return (
+                  <Link key={entry.href} href={entry.href}>
+                    <Icon size={19} aria-hidden="true" />
+                    <span>
+                      <strong>
+                        {entry.label}
+                        <span>{entry.count.toLocaleString()}</span>
+                      </strong>
+                      <small>{entry.description}</small>
+                    </span>
+                    <ArrowUpRight size={17} aria-hidden="true" />
+                  </Link>
+                );
+              })}
+            </nav>
+          </section>
         </div>
-      </section>
+      </div>
     </div>
   );
 }

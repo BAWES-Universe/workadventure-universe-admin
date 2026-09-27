@@ -6,6 +6,7 @@ import { authenticatedFetch, getClientSessionId } from '@/lib/client-auth';
 import { isInsideFrame } from '@/lib/orbit-frame';
 import type { OrbitView } from '@/lib/orbit-bridge';
 import { Button } from '@/components/ui/button';
+import { cn } from '@/lib/utils';
 import OrbitBridge from './components/orbit-bridge';
 import { AdminBootstrapProvider, type AdminBootstrap } from './admin-bootstrap-context';
 import { OrbitFrameProvider, type OrbitFrameState } from './orbit-frame-context';
@@ -207,9 +208,15 @@ function ShellChrome({
   return (
     <OrbitFrameProvider value={frame}>
       <div className="min-h-dvh bg-background" style={{ ['--sidebar-width' as string]: '15.5rem' }}>
+        <div className="orbit-orbs" aria-hidden="true">
+          <i />
+          <i />
+        </div>
         <Sidebar user={user} />
         <div className="flex min-h-dvh flex-col lg:pl-[var(--sidebar-width)]">
           <TopBar />
+          {/* Before the page in the DOM, so that as a strip under the bar (a desktop panel) it sticks there. */}
+          <BottomNav />
           {error && (
             <div className="mx-4 mt-3 flex items-center justify-between gap-3 rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm sm:mx-6">
               <span>{error}</span>
@@ -220,12 +227,11 @@ function ShellChrome({
           )}
           <main
             id="orbit-main"
-            className="mx-auto w-full max-w-7xl flex-1 px-4 pt-4 sm:px-6 lg:px-8 lg:pt-6"
-            style={{ paddingBottom: 'calc(var(--bottombar-height) + var(--safe-bottom) + 1.5rem)' }}
+            className={cn('orbit-above-orbs mx-auto w-full max-w-7xl flex-1 px-4 pt-4 sm:px-6 lg:px-8 lg:pt-6', route.parent === null && 'orbit-dock-space')}
+            style={{ paddingBottom: route.parent === null ? 'calc(var(--bottombar-height) + var(--safe-bottom) + 1.5rem)' : '2rem' }}
           >
             <PageTransition key={pathname}>{children}</PageTransition>
           </main>
-          <BottomNav />
         </div>
         <MenuSheet user={user} />
       </div>

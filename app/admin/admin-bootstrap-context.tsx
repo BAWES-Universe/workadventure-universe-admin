@@ -12,7 +12,7 @@ export type AdminUser = {
 };
 
 export type AdminStats = { universes: number; worlds: number; rooms: number; users: number };
-/** The person's own spaces: universes they own, worlds they belong to, rooms they starred, invitations waiting. */
+/** The person's own space: universes they own, worlds they belong to, rooms they starred, invitations waiting. */
 export type AdminMine = { universes: number; worlds: number; stars: number; invitations: number };
 export type AdminBootstrap = { version: 1; user: AdminUser; stats: AdminStats; mine?: AdminMine };
 

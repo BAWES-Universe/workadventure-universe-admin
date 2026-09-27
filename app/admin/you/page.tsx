@@ -1,77 +1,39 @@
 'use client';
 
-import { UserCircle, Mail, Star, ShieldCheck } from 'lucide-react';
+import Link from 'next/link';
+import { ArrowUpRight, Fingerprint, Mail, ShieldCheck, Sparkles, Star } from 'lucide-react';
 import { useAdminBootstrap } from '../admin-bootstrap-context';
-import { Avatar } from '../components/shell/account-panel';
+import { initialsOf } from '../components/shell/account-panel';
 import { ThemeChoice } from '../components/shell/theme-choice';
-import { ListGroup, ListRow, SectionHeading } from '../components/shell/list-row';
 import LogoutButton from '../logout-button';
+import styles from './you.module.css';
 
-/** You: your visit card, what you belong to, how Orbit looks, and the way out. */
+/** A traveller's identity, belongings and preferences, backed by the signed-in account. */
 export default function YouPage() {
   const { user, mine } = useAdminBootstrap();
   const label = user.name || user.email || 'You';
-
   return (
-    <div className="space-y-6">
-      <header className="flex items-center gap-4">
-        <Avatar user={user} className="h-16 w-16 text-xl" />
-        <div className="min-w-0">
-          <h1 className="truncate text-2xl font-semibold tracking-tight">{label}</h1>
-          {user.email && user.name && <p className="truncate text-sm text-muted-foreground">{user.email}</p>}
-          {user.isSuperAdmin && (
-            <span className="mt-1 inline-flex items-center gap-1 rounded-full bg-brand-gold/15 px-2 py-0.5 text-[11px] font-medium text-brand-gold">
-              <ShieldCheck className="h-3 w-3" aria-hidden="true" />
-              Super admin
-            </span>
-          )}
+    <div className={styles.page}>
+      <header className={styles.header}><p className={styles.eyebrow}><Fingerprint size={13} aria-hidden="true" /> Your presence</p><h1 className="orbit-display">You, in every world<span>.</span></h1><p>One identity. Everywhere you belong.</p></header>
+      <section className={styles.identity} aria-labelledby="identity-heading">
+        <div className={styles.identityArt} aria-hidden="true"><div className={styles.identityRing} /><div className={styles.identityRingInner} /><span className={styles.initials}>{initialsOf(user)}</span><span className={styles.satellite} /><span className={styles.coordinates}>UNIVERSE / ORBIT</span></div>
+        <div className={styles.identityContent}>
+          <div className={styles.cardTop}><span>Traveller identity</span><Sparkles size={16} aria-hidden="true" /></div>
+          <h2 id="identity-heading" className="orbit-display">{label}</h2>
+          {user.name && user.email && <p className={styles.email}>{user.email}</p>}
+          {user.isSuperAdmin && <span className={styles.adminBadge}><ShieldCheck size={13} aria-hidden="true" />Super admin</span>}
+          <div className={styles.cardBottom}><span>The person behind the avatar.</span><Link href="/admin/profile">My Visit Card<ArrowUpRight size={17} aria-hidden="true" /></Link></div>
         </div>
-      </header>
-
-      <section>
-        <SectionHeading title="Yours" />
-        <ListGroup>
-          <ListRow
-            href="/admin/profile"
-            icon={UserCircle}
-            tone="brand"
-            title="My Visit Card"
-            subtitle="What people see when they tap you"
-          />
-          <ListRow
-            href="/admin/memberships"
-            icon={Mail}
-            title="My Memberships"
-            subtitle={
-              mine
-                ? `${mine.worlds} ${mine.worlds === 1 ? 'world' : 'worlds'}${mine.invitations ? ` · ${mine.invitations} waiting` : ''}`
-                : 'Worlds you belong to'
-            }
-            trailing={
-              mine?.invitations ? (
-                <span className="rounded-full bg-primary px-2 py-0.5 text-[11px] font-semibold text-primary-foreground">
-                  {mine.invitations}
-                </span>
-              ) : undefined
-            }
-          />
-          <ListRow
-            href="/admin/stars"
-            icon={Star}
-            title="My Stars"
-            subtitle={mine ? `${mine.stars} ${mine.stars === 1 ? 'room' : 'rooms'}` : 'Rooms you starred'}
-          />
-        </ListGroup>
       </section>
-
-      <section>
-        <SectionHeading title="Appearance" />
-        <ThemeChoice />
-      </section>
-
-      <section className="flex justify-end">
-        <LogoutButton />
-      </section>
+      <div className={styles.details}>
+        <section className={styles.connections} aria-labelledby="connections-heading">
+          <h2 id="connections-heading" className={styles.sectionTitle}><span>01</span>Your connections</h2>
+          <Link className={styles.connection} href="/admin/memberships"><Mail size={20} aria-hidden="true" /><span><strong>My Memberships</strong><span>{mine ? `${mine.worlds} ${mine.worlds === 1 ? 'world' : 'worlds'} you belong to` : 'Worlds you belong to'}</span></span>{Boolean(mine?.invitations) && <span className={styles.invitation}>{mine!.invitations} waiting</span>}<ArrowUpRight size={17} aria-hidden="true" /></Link>
+          <Link className={styles.connection} href="/admin/stars"><Star size={20} aria-hidden="true" /><span><strong>My Stars</strong><span>{mine ? `${mine.stars} ${mine.stars === 1 ? 'room' : 'rooms'} worth coming back to` : 'Rooms worth coming back to'}</span></span><ArrowUpRight size={17} aria-hidden="true" /></Link>
+        </section>
+        <section className={styles.appearance} aria-labelledby="appearance-heading"><h2 id="appearance-heading" className={styles.sectionTitle}><span>02</span>Your atmosphere</h2><div className={styles.appearanceScene} aria-hidden="true"><span className={styles.sun} /><span className={styles.horizon} /></div><h3>Set the mood.</h3><p>Light, dark, or in rhythm with your device.</p><ThemeChoice className={styles.themeControl} /></section>
+      </div>
+      <footer className={styles.footer}><p>Signed in to Orbit</p><LogoutButton className="h-11" /></footer>
     </div>
   );
 }

@@ -12,9 +12,10 @@ export interface RoomVisit {
 }
 
 export interface RoomAnalytics {
-  totalAccesses: number;
-  /** The busiest hour of the day, in the viewer's own time zone. */
+  totalAccesses: number | null;
+  /** The busiest hour of the day, and whose clock it is on: the viewer's own from recent visits, else the API's UTC buckets. */
   peakHour: number | null;
+  peakZone: 'local' | 'UTC';
   lastVisitedByUser: RoomVisit | null;
   lastVisitedOverall: RoomVisit | null;
 }
@@ -27,10 +28,15 @@ interface AnalyticsResponse {
   lastVisitedOverall?: RoomVisit | null;
 }
 
+function validVisit(visit?: RoomVisit | null): RoomVisit | null {
+  return visit && Number.isFinite(new Date(visit.accessedAt).getTime()) ? visit : null;
+}
+
 /** Busiest local hour from recent visits; the server's UTC peak only when there are none. */
-export function peakHourOf(data: AnalyticsResponse): number | null {
+export function peakHourOf(data: AnalyticsResponse): { hour: number | null; zone: 'local' | 'UTC' } {
   const counts = new Map<number, number>();
   for (const access of data.recentActivity ?? []) {
+    if (!validVisit(access)) continue;
     const hour = new Date(access.accessedAt).getHours();
     counts.set(hour, (counts.get(hour) ?? 0) + 1);
   }
@@ -42,15 +48,39 @@ export function peakHourOf(data: AnalyticsResponse): number | null {
       bestCount = count;
     }
   }
-  if (best !== null) return best;
-  return data.peakTimes?.[0]?.hour ?? null;
+  if (best !== null) return { hour: best, zone: 'local' };
+  const utc = data.peakTimes?.find((peak) => Number.isInteger(peak.hour) && peak.hour >= 0 && peak.hour <= 23)?.hour;
+  return { hour: utc ?? null, zone: 'UTC' };
+}
+
+export function fromAnalytics(data: AnalyticsResponse): RoomAnalytics {
+  const peak = peakHourOf(data);
+  return {
+    totalAccesses:
+      typeof data.totalAccesses === 'number' && Number.isFinite(data.totalAccesses) && data.totalAccesses >= 0
+        ? data.totalAccesses
+        : null,
+    peakHour: peak.hour,
+    peakZone: peak.zone,
+    lastVisitedByUser: validVisit(data.lastVisitedByUser),
+    lastVisitedOverall: validVisit(data.lastVisitedOverall),
+  };
+}
+
+/** Whether the latest visitor was you: the same moment is not enough, the record has to name you. */
+export function wasLastVisitorYou(analytics: RoomAnalytics): boolean {
+  const yours = analytics.lastVisitedByUser;
+  const last = analytics.lastVisitedOverall;
+  if (!yours || !last) return false;
+  if (Math.abs(new Date(yours.accessedAt).getTime() - new Date(last.accessedAt).getTime()) >= 1000) return false;
+  return Boolean(
+    (yours.userId && last.userId && yours.userId === last.userId) ||
+      (yours.userUuid && last.userUuid && yours.userUuid === last.userUuid),
+  );
 }
 
 export function formatHour(hour: number): string {
-  if (hour === 0) return '12 AM';
-  if (hour < 12) return `${hour} AM`;
-  if (hour === 12) return '12 PM';
-  return `${hour - 12} PM`;
+  return `${hour % 12 || 12} ${hour < 12 ? 'AM' : 'PM'}`;
 }
 
 // One request per room per page view, shared by every card showing that room.
@@ -60,16 +90,7 @@ function load(roomId: string): Promise<RoomAnalytics | null> {
   let pending = cache.get(roomId);
   if (!pending) {
     pending = authenticatedFetch(`/api/admin/analytics/rooms/${encodeURIComponent(roomId)}`)
-      .then(async (response) => {
-        if (!response.ok) return null;
-        const data = (await response.json()) as AnalyticsResponse;
-        return {
-          totalAccesses: data.totalAccesses ?? 0,
-          peakHour: peakHourOf(data),
-          lastVisitedByUser: data.lastVisitedByUser ?? null,
-          lastVisitedOverall: data.lastVisitedOverall ?? null,
-        };
-      })
+      .then(async (response) => (response.ok ? fromAnalytics((await response.json()) as AnalyticsResponse) : null))
       .catch(() => null);
     cache.set(roomId, pending);
     // Numbers change as people come and go: keep them for this visit to Home only.
@@ -79,20 +100,33 @@ function load(roomId: string): Promise<RoomAnalytics | null> {
 }
 
 /** A room's visits, stars aside: how many, the busiest hour, when you and the latest visitor were last there. */
-export function useRoomAnalytics(roomId: string | null | undefined): { analytics: RoomAnalytics | null; loading: boolean } {
+export function useRoomAnalytics(roomId: string | null | undefined): {
+  analytics: RoomAnalytics | null;
+  loading: boolean;
+  failed: boolean;
+  retry: () => void;
+} {
   const [state, setState] = useState<{ roomId: string | null; analytics: RoomAnalytics | null }>({ roomId: null, analytics: null });
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     if (!roomId) return;
     let cancelled = false;
+    if (attempt > 0) cache.delete(roomId);
     void load(roomId).then((analytics) => {
+      // Only the room asked for last paints; an older answer never lands on a newer room.
       if (!cancelled) setState({ roomId, analytics });
     });
     return () => {
       cancelled = true;
     };
-  }, [roomId]);
+  }, [roomId, attempt]);
 
   const current = state.roomId === roomId;
-  return { analytics: current ? state.analytics : null, loading: Boolean(roomId) && !current };
+  return {
+    analytics: current ? state.analytics : null,
+    loading: Boolean(roomId) && !current,
+    failed: current && state.analytics === null,
+    retry: () => setAttempt((value) => value + 1),
+  };
 }
