@@ -20,7 +20,7 @@ describe('resolveNavigateIntent', () => {
   });
 
   it('opens your profile, ready to edit', async () => {
-    await expect(resolveNavigateIntent(member, 'visit-card', undefined)).resolves.toBe('/admin/you?edit=profile');
+    await expect(resolveNavigateIntent(member, 'visit-card', undefined)).resolves.toBe('/admin/you');
   });
 
   it('falls back to home for an unknown intent, with no error', async () => {

@@ -24,7 +24,7 @@ export default function YouPage() {
 
 function You() {
   const { user, mine } = useAdminBootstrap();
-  // `?edit=profile` (the game's "edit your profile" and old visit-card links) opens the profile ready to edit.
+  // `?edit=profile` (Get started's "Set up your profile") opens the profile ready to edit; anything else shows it.
   const editProfile = useSearchParams().get('edit') === 'profile';
   const router = useRouter();
   const [profileComplete, setProfileComplete] = useState<boolean | null>(null);
