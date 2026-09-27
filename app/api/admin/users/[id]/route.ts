@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getViewer, isPrivileged, viewerUserId, unauthorizedResponse } from '@/lib/access-scope';
 import { prisma } from '@/lib/db';
+import { wokaLayersFor } from '@/lib/woka-avatar';
 
 // GET /api/admin/users/[id] - Get a single user
 export async function GET(
@@ -143,6 +144,8 @@ export async function GET(
 
     const userWithCounts = {
       ...user,
+      // Their Woka, for the profile's avatar; empty when they never picked one.
+      woka: await wokaLayersFor(user.id).catch(() => []),
       ownedUniverses: user.ownedUniverses.map((universe: any) => {
         const totalRooms = universe.worlds?.reduce((sum: number, world: any) => sum + (world._count?.rooms || 0), 0) || 0;
         const totalMembers = universe.worlds?.reduce((sum: number, world: any) => sum + (world._count?.members || 0), 0) || 0;

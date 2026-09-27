@@ -1,13 +1,10 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Card, CardContent } from '@/components/ui/card';
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { AlertCircle, Loader2, Search, X, Activity, Clock } from 'lucide-react';
+import { timeAgo } from '@/lib/time-ago';
+import { EmptyCard, EntityRow, LoadError, LoadingRows, PageHeader, StatLine, count } from '../components/ds';
+import { Pager, SearchBox } from '../discover/discover-ui';
 
 interface User {
   id: string;
@@ -23,26 +20,6 @@ interface User {
     ownedUniverses: number;
     worldMemberships: number;
   };
-}
-
-function formatTimeAgo(date: Date): string {
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffSecs = Math.floor(diffMs / 1000);
-  const diffMins = Math.floor(diffSecs / 60);
-  const diffHours = Math.floor(diffMins / 60);
-  const diffDays = Math.floor(diffHours / 24);
-  const diffWeeks = Math.floor(diffDays / 7);
-  const diffMonths = Math.floor(diffDays / 30);
-  const diffYears = Math.floor(diffDays / 365);
-
-  if (diffSecs < 60) return 'just now';
-  if (diffMins < 60) return `${diffMins} ${diffMins === 1 ? 'minute' : 'minutes'} ago`;
-  if (diffHours < 24) return `${diffHours} ${diffHours === 1 ? 'hour' : 'hours'} ago`;
-  if (diffDays < 7) return `${diffDays} ${diffDays === 1 ? 'day' : 'days'} ago`;
-  if (diffWeeks < 4) return `${diffWeeks} ${diffWeeks === 1 ? 'week' : 'weeks'} ago`;
-  if (diffMonths < 12) return `${diffMonths} ${diffMonths === 1 ? 'month' : 'months'} ago`;
-  return `${diffYears} ${diffYears === 1 ? 'year' : 'years'} ago`;
 }
 
 export default function UsersPage() {
@@ -115,199 +92,79 @@ export default function UsersPage() {
     }
   }
 
-  function handleSearch(e: React.FormEvent) {
-    e.preventDefault();
+  function handleSearch() {
     setPage(1);
     fetchUsers();
   }
 
-  if (loading && users.length === 0) {
-    return (
-      <div className="space-y-8">
-        <div className="flex items-center justify-center py-12">
-          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <div className="space-y-8">
-      <div className="space-y-1">
-        <h1 className="text-4xl font-bold tracking-tight">Users</h1>
-        <p className="text-muted-foreground text-lg">
-          Browse users across the Universe.
-        </p>
-      </div>
+    <div className="grid min-w-0 gap-6">
+      <PageHeader title="People" />
 
-      <div className="border border-border/70 rounded-lg bg-card">
-        <div className="p-6">
-          <form onSubmit={handleSearch} className="space-y-4">
-            <div className="flex gap-2">
-              <div className="relative flex-1">
-                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  type="text"
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Search by name, email, or UUID..."
-                  className="pl-9"
-                />
-              </div>
-              <Button type="submit" variant="outline" disabled={loading}>
-                {loading ? (
-                  <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Searching...
-                  </>
-                ) : (
-                  <>
-                    <Search className="mr-2 h-4 w-4" />
-                    Search
-                  </>
-                )}
-              </Button>
-              {search && (
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => {
-                    setSearch('');
-                    setPage(1);
-                  }}
-                >
-                  <X className="mr-2 h-4 w-4" />
-                  Clear
-                </Button>
-              )}
-            </div>
-          </form>
-        </div>
-      </div>
+      <SearchBox
+        value={search}
+        onChange={setSearch}
+        onSubmit={handleSearch}
+        onClear={() => {
+          setSearch('');
+          setPage(1);
+        }}
+        label="Search people"
+        placeholder="Search people"
+      />
 
-      {error && (
-        <Alert variant="destructive">
-          <AlertCircle className="h-4 w-4" />
-          <AlertTitle>Error</AlertTitle>
-          <AlertDescription>
-            {error}
-            <Button
-              variant="outline"
-              size="sm"
-              className="ml-4"
-              onClick={fetchUsers}
-            >
-              Retry
-            </Button>
-          </AlertDescription>
-        </Alert>
-      )}
+      {error && <LoadError label="people" retry={fetchUsers} />}
 
-      {users.length === 0 ? (
-        <Card>
-          <CardContent className="py-12 text-center text-sm text-muted-foreground">
-            No users found.
-          </CardContent>
-        </Card>
+      {loading && users.length === 0 ? (
+        <LoadingRows label="people" rows={4} />
+      ) : users.length === 0 ? (
+        !error &&
+        (search ? (
+          <p className="text-sm text-muted-foreground" role="status">
+            Nobody matches “{search}”.
+          </p>
+        ) : (
+          <EmptyCard kind="people" title="Nobody here yet." text="People show up here once they sign in." />
+        ))
       ) : (
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {users.map((user) => {
-            const nameOrEmail = user.name || user.email || 'N/A';
-            const initial = (user.name || user.email || '?').charAt(0).toUpperCase();
-            const created = new Date(user.createdAt).toLocaleDateString();
-
-            return (
-              <Link
-                key={user.id}
-                href={`/admin/users/${user.id}`}
-                className="block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-              >
-                <Card className="group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all hover:-translate-y-1 hover:shadow-lg">
-                  <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-purple-500/10 via-transparent to-pink-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
-                  <CardContent className="relative flex h-full flex-col p-5">
-                    <div className="mb-4 flex items-start gap-3">
-                      <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full border bg-muted text-sm font-semibold">
-                        {initial}
-                      </div>
-                      <div className="min-w-0 flex-1 space-y-1">
-                        <h3 className="truncate text-base font-semibold leading-tight">
-                          {nameOrEmail}
-                        </h3>
-                        {user.email !== undefined && (
-                          <p className="truncate text-xs text-muted-foreground">
-                            {user.email || 'No email'}
-                          </p>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="mt-auto flex items-start justify-between pt-3 text-xs text-muted-foreground">
-                      <div className="flex flex-col gap-1.5 min-h-[3rem]">
-                        {user.totalAccesses !== undefined && (
-                          <div className="flex items-center gap-1.5">
-                            <Activity className="h-3.5 w-3.5 text-muted-foreground" />
-                            <span className="font-medium text-foreground/80">
-                              {user.totalAccesses.toLocaleString()} {user.totalAccesses === 1 ? 'access' : 'accesses'}
-                            </span>
-                          </div>
-                        )}
-                        <div className="flex flex-col gap-0.5">
-                          <span>
-                            {user._count.ownedUniverses}{' '}
-                            {user._count.ownedUniverses === 1 ? 'universe' : 'universes'}
-                          </span>
-                          <span>
-                            {user._count.worldMemberships}{' '}
-                            {user._count.worldMemberships === 1 ? 'world membership' : 'world memberships'}
-                          </span>
-                        </div>
-                        {user.lastAccessed && (
-                          <div className="flex items-center gap-1.5 mt-0.5">
-                            <Clock className="h-3.5 w-3.5 text-muted-foreground" />
-                            <span className="text-[11px] text-muted-foreground/70">
-                              Last accessed {formatTimeAgo(new Date(user.lastAccessed))}
-                            </span>
-                          </div>
-                        )}
-                      </div>
-                      <div className="text-right">
-                        <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
-                          Joined
-                        </div>
-                        <div className="text-xs font-medium text-foreground/80">{created}</div>
-                      </div>
-                    </div>
-                  </CardContent>
-                </Card>
-              </Link>
-            );
-          })}
+        <div className="grid min-w-0 gap-0.5">
+          {users.map((user) => (
+            <EntityRow
+              key={user.id}
+              href={`/admin/users/${user.id}`}
+              kind="people"
+              title={user.name || user.email || 'Someone'}
+              context={
+                <StatLine
+                  items={[
+                    user._count.ownedUniverses ? `Owns ${count(user._count.ownedUniverses, 'universe')}` : null,
+                    user._count.worldMemberships ? `Member of ${count(user._count.worldMemberships, 'world')}` : null,
+                    count(user.totalAccesses, 'visit'),
+                  ]}
+                />
+              }
+              meta={
+                <StatLine
+                  items={[
+                    user.email !== undefined && (user.email || 'No email'),
+                    user.lastAccessed && `last seen ${timeAgo(new Date(user.lastAccessed))}`,
+                    `joined ${new Date(user.createdAt).toLocaleDateString()}`,
+                  ]}
+                />
+              }
+            />
+          ))}
         </div>
       )}
 
-      {totalPages > 1 && (
-        <div className="flex items-center justify-between">
-          <div className="text-sm text-muted-foreground">
-            Showing page {page} of {totalPages} ({total} total users)
-          </div>
-          <div className="flex gap-2">
-            <Button
-              variant="outline"
-              onClick={() => setPage(Math.max(1, page - 1))}
-              disabled={page === 1 || loading}
-            >
-              Previous
-            </Button>
-            <Button
-              variant="outline"
-              onClick={() => setPage(Math.min(totalPages, page + 1))}
-              disabled={page === totalPages || loading}
-            >
-              Next
-            </Button>
-          </div>
-        </div>
-      )}
+      <Pager
+        page={page}
+        totalPages={totalPages}
+        total={total}
+        noun={['person', 'people']}
+        loading={loading}
+        onChange={(next) => setPage(Math.max(1, Math.min(totalPages, next)))}
+      />
     </div>
   );
 }

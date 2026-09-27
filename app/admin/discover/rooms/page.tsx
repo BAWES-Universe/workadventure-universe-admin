@@ -1,15 +1,9 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Button } from '@/components/ui/button';
-import { Card, CardContent } from '@/components/ui/card';
-import { Input } from '@/components/ui/input';
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { AlertCircle, Loader2, Search, X, MapPin, Star, Activity, Clock } from 'lucide-react';
-import { Badge } from '@/components/ui/badge';
-import { cn } from '@/lib/utils';
+import { EmptyCard, EntityCard, LoadError, LoadingRows, PageHeader, StatLine, VisitLine, count } from '../../components/ds';
+import { Pager, SearchBox } from '../discover-ui';
 
 interface Room {
   id: string;
@@ -40,137 +34,39 @@ interface RoomAnalytics {
   lastVisitedOverall: { accessedAt: string; userId?: string | null; userUuid?: string | null } | null;
 }
 
-function formatHourTo12Hour(hour: number): string {
-  if (hour === 0) return '12:00 AM';
-  if (hour < 12) return `${hour}:00 AM`;
-  if (hour === 12) return '12:00 PM';
-  return `${hour - 12}:00 PM`;
-}
-
-function formatTimeAgo(date: Date): string {
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffSecs = Math.floor(diffMs / 1000);
-  const diffMins = Math.floor(diffSecs / 60);
-  const diffHours = Math.floor(diffMins / 60);
-  const diffDays = Math.floor(diffHours / 24);
-  const diffWeeks = Math.floor(diffDays / 7);
-  const diffMonths = Math.floor(diffDays / 30);
-  const diffYears = Math.floor(diffDays / 365);
-
-  if (diffSecs < 60) return 'just now';
-  if (diffMins < 60) return `${diffMins} ${diffMins === 1 ? 'minute' : 'minutes'} ago`;
-  if (diffHours < 24) return `${diffHours} ${diffHours === 1 ? 'hour' : 'hours'} ago`;
-  if (diffDays < 7) return `${diffDays} ${diffDays === 1 ? 'day' : 'days'} ago`;
-  if (diffWeeks < 4) return `${diffWeeks} ${diffWeeks === 1 ? 'week' : 'weeks'} ago`;
-  if (diffMonths < 12) return `${diffMonths} ${diffMonths === 1 ? 'month' : 'months'} ago`;
-  return `${diffYears} ${diffYears === 1 ? 'year' : 'years'} ago`;
+/** "4 PM", "12 AM". */
+function formatHour(hour: number): string {
+  const suffix = hour < 12 ? 'AM' : 'PM';
+  const shown = hour % 12 === 0 ? 12 : hour % 12;
+  return `${shown} ${suffix}`;
 }
 
 function RoomCard({ room, analytics }: { room: Room; analytics?: RoomAnalytics }) {
   const favorites = room._count?.favorites ?? 0;
-
+  const you = analytics?.lastVisitedByUser?.accessedAt ?? null;
+  const latest = analytics?.lastVisitedOverall?.accessedAt ?? null;
   return (
-    <Link
+    <EntityCard
       href={`/admin/rooms/${room.id}`}
-      className="block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-      aria-label={`View room ${room.name} in world ${room.world.name}`}
-    >
-      <Card
-        className={cn(
-          'group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
-          'hover:-translate-y-1 hover:shadow-lg',
-        )}
-      >
-        <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-emerald-500/10 via-transparent to-sky-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
-
-        <div className="relative flex h-full flex-col p-5">
-          <div className="mb-3 flex items-start gap-3">
-            <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full border bg-muted">
-              <MapPin className="h-5 w-5 text-muted-foreground" />
-            </div>
-
-            <div className="min-w-0 flex-1 space-y-1">
-              <h3 className="truncate text-base font-semibold leading-tight">
-                {room.name}
-              </h3>
-              <p className="truncate text-xs font-mono text-muted-foreground">
-                {room.world.universe.name} · {room.world.name}
-              </p>
-            </div>
-          </div>
-
-          {room.description && (
-            <p className="mb-3 line-clamp-2 text-sm text-muted-foreground">
-              {room.description}
-            </p>
-          )}
-
-          <div className="mt-auto flex items-start justify-between pt-3 text-xs text-muted-foreground">
-            <div className="flex flex-col gap-1.5 min-h-[3rem]">
-              {analytics ? (
-                <>
-                  <div className="flex items-center gap-1.5">
-                    <Activity className="h-3.5 w-3.5 text-muted-foreground" />
-                    <span className="font-medium text-foreground/80">
-                      {analytics.totalAccesses.toLocaleString()} accesses
-                    </span>
-                  </div>
-                  {analytics.peakHour !== null && (
-                    <div className="flex items-center gap-1.5">
-                      <Clock className="h-3.5 w-3.5 text-muted-foreground" />
-                      <span className="text-muted-foreground">
-                        Peak: {formatHourTo12Hour(analytics.peakHour)}
-                      </span>
-                    </div>
-                  )}
-                  {/* Last visited information */}
-                  {analytics.lastVisitedByUser || analytics.lastVisitedOverall ? (
-                    <div className="flex flex-col gap-0.5 mt-0.5">
-                      {analytics.lastVisitedByUser && (
-                        <div className="text-[11px]">
-                          <span className="text-muted-foreground/70">Last visited by you: </span>
-                          <span className="font-medium text-foreground/80">
-                            {formatTimeAgo(new Date(analytics.lastVisitedByUser.accessedAt))}
-                          </span>
-                        </div>
-                      )}
-                      {analytics.lastVisitedOverall && (
-                        <div className="text-[11px]">
-                          {analytics.lastVisitedByUser && 
-                           analytics.lastVisitedByUser.accessedAt === analytics.lastVisitedOverall.accessedAt ? (
-                            <span className="text-muted-foreground/70 italic">
-                              You were the last visitor
-                            </span>
-                          ) : (
-                            <>
-                              <span className="text-muted-foreground/70">Most recent visitor: </span>
-                              <span className="font-medium text-foreground/80">
-                                {formatTimeAgo(new Date(analytics.lastVisitedOverall.accessedAt))}
-                              </span>
-                            </>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  ) : (
-                    <div className="text-[11px] text-muted-foreground/70 mt-0.5">
-                      No visits recorded
-                    </div>
-                  )}
-                </>
-              ) : (
-                <span className="text-muted-foreground">Access data loading...</span>
-              )}
-            </div>
-            <div className="flex items-center gap-1 text-primary self-end">
-              <Star className="h-4 w-4" aria-hidden="true" />
-              <span className="text-xs font-medium">{favorites}</span>
-            </div>
-          </div>
-        </div>
-      </Card>
-    </Link>
+      kind="room"
+      title={room.name}
+      context={<StatLine items={[`${room.world.universe.name} › ${room.world.name}`]} />}
+      description={room.description}
+      aside={favorites > 0 ? `★ ${favorites}` : undefined}
+      meta={
+        analytics && (
+          <>
+            <StatLine
+              items={[
+                count(analytics.totalAccesses, 'visit'),
+                analytics.peakHour !== null && `busiest at ${formatHour(analytics.peakHour)}`,
+              ]}
+            />
+            <VisitLine you={you} latest={latest} youWereLast={Boolean(you && latest && you === latest)} />
+          </>
+        )
+      }
+    />
   );
 }
 
@@ -295,14 +191,15 @@ export default function DiscoverRoomsPage() {
               let peakHour = null;
               if (data.recentActivity && data.recentActivity.length > 0) {
                 const hourCounts = new Map<number, number>();
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 data.recentActivity.forEach((access: any) => {
                   const date = new Date(access.accessedAt);
                   const hour = date.getHours(); // Local timezone
                   hourCounts.set(hour, (hourCounts.get(hour) || 0) + 1);
                 });
                 const localPeakTimes = Array.from(hourCounts.entries())
-                  .map(([hour, count]) => ({ hour, count }))
-                  .sort((a, b) => b.count - a.count);
+                  .map(([hour, total]) => ({ hour, total }))
+                  .sort((a, b) => b.total - a.total);
                 if (localPeakTimes.length > 0) {
                   peakHour = localPeakTimes[0].hour;
                 }
@@ -354,8 +251,7 @@ export default function DiscoverRoomsPage() {
   // No need to sort client-side
   const sortedRooms = rooms;
 
-  function handleSearchSubmit(e: React.FormEvent) {
-    e.preventDefault();
+  function handleSearchSubmit() {
     const trimmed = searchInput.trim();
     setPage(1);
     setSearch(trimmed);
@@ -377,131 +273,44 @@ export default function DiscoverRoomsPage() {
     fetchRooms(safePage);
   }
 
-  if (checkingAuth) {
-    return (
-      <div className="space-y-8">
-        <div className="flex items-center justify-center py-12">
-          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <div className="space-y-8">
-      <div className="space-y-1">
-        <h1 className="text-4xl font-bold tracking-tight">Discover Rooms</h1>
-        <p className="text-muted-foreground text-lg">
-          Find public rooms across worlds and universes to explore layouts and experiences.
-        </p>
-      </div>
+    <div className="grid min-w-0 gap-6">
+      <PageHeader title="Rooms" />
 
-      <div className="border border-border/70 rounded-lg bg-card">
-        <div className="p-6">
-          <form onSubmit={handleSearchSubmit} className="space-y-4">
-            <div className="flex gap-2">
-              <div className="relative flex-1">
-                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  type="text"
-                  value={searchInput}
-                  onChange={(e) => setSearchInput(e.target.value)}
-                  placeholder="Search rooms by name, slug, or description..."
-                  className="pl-9"
-                />
-              </div>
-              <Button type="submit" variant="outline" disabled={loading}>
-                {loading ? (
-                  <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Searching...
-                  </>
-                ) : (
-                  <>
-                    <Search className="mr-2 h-4 w-4" />
-                    Search
-                  </>
-                )}
-              </Button>
-              {search && (
-                <Button type="button" variant="outline" onClick={handleClear}>
-                  <X className="mr-2 h-4 w-4" />
-                  Clear
-                </Button>
-              )}
-            </div>
-          </form>
-        </div>
-      </div>
+      <SearchBox
+        value={searchInput}
+        onChange={setSearchInput}
+        onSubmit={handleSearchSubmit}
+        onClear={handleClear}
+        showClear={Boolean(search)}
+        label="Search rooms"
+        placeholder="Search rooms"
+      />
 
-      {error && (
-        <Alert variant="destructive">
-          <AlertCircle className="h-4 w-4" />
-          <AlertTitle>Error</AlertTitle>
-          <AlertDescription>
-            {error}
-            <Button
-              variant="outline"
-              size="sm"
-              className="ml-4"
-              onClick={() => fetchRooms()}
-            >
-              Retry
-            </Button>
-          </AlertDescription>
-        </Alert>
-      )}
+      {error && <LoadError label="rooms" retry={() => fetchRooms()} />}
 
-      {loading && rooms.length === 0 ? (
-        <Card>
-          <CardContent className="flex items-center justify-center py-12">
-            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-          </CardContent>
-        </Card>
+      {checkingAuth || (loading && rooms.length === 0) ? (
+        <LoadingRows label="rooms" rows={3} />
       ) : rooms.length === 0 ? (
-        <p className="text-sm text-muted-foreground">
-          There are no public rooms to discover yet. Check back later!
-        </p>
+        !error &&
+        (search ? (
+          <p className="text-sm text-muted-foreground" role="status">
+            No rooms match “{search}”.
+          </p>
+        ) : (
+          <EmptyCard kind="room" title="No public rooms yet." text="Check back later: public rooms show up here." />
+        ))
       ) : (
         <>
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+          <div className="grid min-w-0 grid-cols-[repeat(auto-fill,minmax(min(100%,230px),1fr))] gap-3">
             {sortedRooms.map((room) => (
-              <RoomCard
-                key={room.id}
-                room={room}
-                analytics={analyticsByRoom[room.id]}
-              />
+              <RoomCard key={room.id} room={room} analytics={analyticsByRoom[room.id]} />
             ))}
           </div>
 
-          {totalPages > 1 && (
-            <div className="flex items-center justify-between pt-2">
-              <div className="text-xs text-muted-foreground">
-                Showing page {page} of {totalPages} ({total}{' '}
-                {total === 1 ? 'room' : 'rooms'})
-              </div>
-              <div className="flex gap-2">
-                <Button
-                  variant="outline"
-                  onClick={() => handlePageChange(page - 1)}
-                  disabled={page === 1 || loading}
-                >
-                  Previous
-                </Button>
-                <Button
-                  variant="outline"
-                  onClick={() => handlePageChange(page + 1)}
-                  disabled={page === totalPages || loading}
-                >
-                  Next
-                </Button>
-              </div>
-            </div>
-          )}
+          <Pager page={page} totalPages={totalPages} total={total} noun={['room', 'rooms']} loading={loading} onChange={handlePageChange} />
         </>
       )}
     </div>
   );
 }
-
-

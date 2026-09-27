@@ -1,14 +1,15 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Button } from '@/components/ui/button';
-import { Card, CardContent } from '@/components/ui/card';
-import { Input } from '@/components/ui/input';
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { Plus, AlertCircle, Loader2, Search, X } from 'lucide-react';
-import { UniverseCard, UniverseAnalytics } from '../../universes/universe-card';
+import { EmptyCard, EntityCard, LoadError, LoadingRows, PageHeader, StatLine, StatusPill, VisitLine, count } from '../../components/ds';
+import { Pager, SearchBox } from '../discover-ui';
+
+interface UniverseAnalytics {
+  totalAccesses: number;
+  lastVisitedByUser: { accessedAt: string } | null;
+  lastVisitedOverall: { accessedAt: string } | null;
+}
 
 interface Universe {
   id: string;
@@ -104,8 +105,7 @@ export default function DiscoverUniversesPage() {
     }
   }
 
-  function handleSearchSubmit(e: React.FormEvent) {
-    e.preventDefault();
+  function handleSearchSubmit() {
     const trimmed = searchInput.trim();
     setPage(1);
     setSearch(trimmed);
@@ -179,142 +179,69 @@ export default function DiscoverUniversesPage() {
     fetchUniverses(safePage);
   }
 
-  if (checkingAuth) {
-    return (
-      <div className="space-y-8">
-        <div className="flex items-center justify-center py-12">
-          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <div className="space-y-8">
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div className="space-y-1">
-          <h1 className="text-4xl font-bold tracking-tight">Discover Universes</h1>
-          <p className="text-muted-foreground text-lg">
-            Explore public universes created by users across the Universe.
-          </p>
-        </div>
-        <Button variant="default" asChild>
-          <Link href="/admin/universes/new">
-            <Plus className="mr-2 h-4 w-4" />
-            Create Universe
-          </Link>
-        </Button>
-      </div>
+    <div className="grid min-w-0 gap-6">
+      <PageHeader title="Universes" />
 
-      <div className="border border-border/70 rounded-lg bg-card">
-        <div className="p-6">
-          <form onSubmit={handleSearchSubmit} className="space-y-4">
-            <div className="flex gap-2">
-              <div className="relative flex-1">
-                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  type="text"
-                  value={searchInput}
-                  onChange={(e) => setSearchInput(e.target.value)}
-                  placeholder="Search universes by name, slug, or description..."
-                  className="pl-9"
-                />
-              </div>
-              <Button type="submit" variant="outline" disabled={loading}>
-                {loading ? (
-                  <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Searching...
-                  </>
-                ) : (
-                  <>
-                    <Search className="mr-2 h-4 w-4" />
-                    Search
-                  </>
-                )}
-              </Button>
-              {search && (
-                <Button type="button" variant="outline" onClick={handleClear}>
-                  <X className="mr-2 h-4 w-4" />
-                  Clear
-                </Button>
-              )}
-            </div>
-          </form>
-        </div>
-      </div>
+      <SearchBox
+        value={searchInput}
+        onChange={setSearchInput}
+        onSubmit={handleSearchSubmit}
+        onClear={handleClear}
+        showClear={Boolean(search)}
+        label="Search universes"
+        placeholder="Search universes"
+      />
 
-      {error && (
-        <Alert variant="destructive">
-          <AlertCircle className="h-4 w-4" />
-          <AlertTitle>Error</AlertTitle>
-          <AlertDescription>
-            {error}
-            <Button
-              variant="outline"
-              size="sm"
-              className="ml-4"
-              onClick={() => fetchUniverses()}
-            >
-              Retry
-            </Button>
-          </AlertDescription>
-        </Alert>
-      )}
+      {error && <LoadError label="universes" retry={() => fetchUniverses()} />}
 
-      {loading && universes.length === 0 ? (
-        <Card>
-          <CardContent className="flex items-center justify-center py-12">
-            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-          </CardContent>
-        </Card>
+      {checkingAuth || (loading && universes.length === 0) ? (
+        <LoadingRows label="universes" rows={3} />
       ) : universes.length === 0 ? (
-        <p className="text-sm text-muted-foreground">
-          There are no public universes to discover yet. Check back later!
-        </p>
+        !error &&
+        (search ? (
+          <p className="text-sm text-muted-foreground" role="status">
+            No universes match “{search}”.
+          </p>
+        ) : (
+          <EmptyCard kind="universe" title="No public universes yet." text="Check back later, or make yours public on You." />
+        ))
       ) : (
         <>
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-            {universes.map((universe) => (
-              <UniverseCard
-                key={universe.id}
-                universe={universe}
-                ownedByCurrentUser={false}
-                showVisibility={false}
-                showOwner={true}
-                analytics={analyticsByUniverse[universe.id]}
-              />
-            ))}
+          <div className="grid min-w-0 grid-cols-[repeat(auto-fill,minmax(min(100%,230px),1fr))] gap-3">
+            {universes.map((universe) => {
+              const analytics = analyticsByUniverse[universe.id];
+              const you = analytics?.lastVisitedByUser?.accessedAt ?? null;
+              const latest = analytics?.lastVisitedOverall?.accessedAt ?? null;
+              return (
+                <EntityCard
+                  key={universe.id}
+                  href={`/admin/universes/${universe.id}`}
+                  kind="universe"
+                  universeId={universe.id}
+                  title={universe.name}
+                  pills={universe.featured ? <StatusPill status="featured" /> : undefined}
+                  description={universe.description}
+                  meta={
+                    <>
+                      <StatLine
+                        items={[
+                          count(universe._count?.worlds, 'world'),
+                          analytics && count(analytics.totalAccesses, 'visit'),
+                          universe.owner?.name && `by ${universe.owner.name}`,
+                        ]}
+                      />
+                      <VisitLine you={you} latest={latest} youWereLast={Boolean(you && latest && you === latest)} />
+                    </>
+                  }
+                />
+              );
+            })}
           </div>
 
-          {totalPages > 1 && (
-            <div className="flex items-center justify-between pt-2">
-              <div className="text-xs text-muted-foreground">
-                Showing page {page} of {totalPages} ({total}{' '}
-                {total === 1 ? 'universe' : 'universes'})
-              </div>
-              <div className="flex gap-2">
-                <Button
-                  variant="outline"
-                  onClick={() => handlePageChange(page - 1)}
-                  disabled={page === 1 || loading}
-                >
-                  Previous
-                </Button>
-                <Button
-                  variant="outline"
-                  onClick={() => handlePageChange(page + 1)}
-                  disabled={page === totalPages || loading}
-                >
-                  Next
-                </Button>
-              </div>
-            </div>
-          )}
+          <Pager page={page} totalPages={totalPages} total={total} noun={['universe', 'universes']} loading={loading} onChange={handlePageChange} />
         </>
       )}
     </div>
   );
 }
-
-
