@@ -4,10 +4,10 @@ import { FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { AlertCircle } from 'lucide-react';
-import { Spinner } from '@/components/ui/spinner';
+import { OrbitLoader } from '../components/shell/orbit-loader';
+import { OrbitMark } from '../components/shell/orbit-mark';
 import { adoptHandshakeSession, isOpaqueSessionId, purgeAccountState } from '@/lib/client-auth';
 import { PLAY_ORIGIN, PLAY_URL, isInsideFrame } from '@/lib/play-origin';
 
@@ -130,11 +130,15 @@ export default function LoginPage() {
   };
 
   if (loading) {
-    return <div className="min-h-screen flex items-center justify-center bg-background"><div className="text-center"><Spinner className="size-8 mx-auto mb-4" /><p>Loading your orbit..</p></div></div>;
+    return (
+      <div className="flex min-h-dvh items-center justify-center bg-background">
+        <OrbitLoader />
+      </div>
+    );
   }
 
   const manualForm = ENABLE_MANUAL_LOGIN && (
-    <form className="space-y-3 border-t pt-4" onSubmit={submitManual}>
+    <form className="space-y-3 border-t border-border/60 pt-4" onSubmit={submitManual}>
       <Label htmlFor="accessToken">Development OIDC token</Label>
       <Input id="accessToken" value={manualToken} onChange={(event) => setManualToken(event.target.value)} required />
       <Button type="submit" variant="secondary" className="w-full">Development sign in</Button>
@@ -143,9 +147,10 @@ export default function LoginPage() {
 
   if (outsideUniverse) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-background p-4">
-        <div className="w-full max-w-md space-y-4 text-center">
-          <p>Orbit runs inside Universe. <a className="underline" href={PLAY_URL} target="_top" rel="noopener">Open Universe</a></p>
+      <div className="flex min-h-dvh items-center justify-center bg-background p-4">
+        <div className="orbit-card orbit-rise w-full max-w-md space-y-5 p-6 text-center">
+          <OrbitMark className="mx-auto h-12 w-12" />
+          <p className="text-[15px]">Orbit runs inside Universe. <a className="font-medium text-primary underline-offset-4 hover:underline" href={PLAY_URL} target="_top" rel="noopener">Open Universe</a></p>
           {isInsideFrame() && <Button className="w-full" onClick={beginIframeHandshake}>Try again</Button>}
           {manualForm}
         </div>
@@ -154,20 +159,19 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-background p-4">
-      <Card className="w-full max-w-md">
-        <CardHeader>
-          <CardTitle>{signedOut ? 'Signed out' : 'Sign in to Orbit'}</CardTitle>
-          <CardDescription>{signedOut ? 'Your Orbit session has been revoked.' : 'Waiting for Universe authentication.'}</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          {error && <Alert variant="destructive"><AlertCircle className="h-4 w-4" /><AlertTitle>Authentication failed</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
-          <Button className="w-full" onClick={() => { setSignedOut(false); sessionStorage.removeItem(LOGOUT_SUPPRESSION_KEY); beginIframeHandshake(); }}>
-            Continue with Universe
-          </Button>
-          {manualForm}
-        </CardContent>
-      </Card>
+    <div className="flex min-h-dvh items-center justify-center bg-background p-4">
+      <div className="orbit-card orbit-rise w-full max-w-md space-y-5 p-6">
+        <div className="space-y-2 text-center">
+          <OrbitMark className="mx-auto h-12 w-12" />
+          <h1 className="text-xl font-semibold tracking-tight">{signedOut ? 'Signed out' : 'Sign in to Orbit'}</h1>
+          <p className="text-sm text-muted-foreground">{signedOut ? 'Your Orbit session has been revoked.' : 'Waiting for Universe authentication.'}</p>
+        </div>
+        {error && <Alert variant="destructive"><AlertCircle className="h-4 w-4" /><AlertTitle>Authentication failed</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
+        <Button className="w-full" onClick={() => { setSignedOut(false); sessionStorage.removeItem(LOGOUT_SUPPRESSION_KEY); beginIframeHandshake(); }}>
+          Continue with Universe
+        </Button>
+        {manualForm}
+      </div>
     </div>
   );
 }

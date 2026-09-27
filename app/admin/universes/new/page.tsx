@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
+import { useDraft } from '../../hooks/use-draft';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
@@ -18,6 +19,8 @@ interface User {
   email: string | null;
 }
 
+const EMPTY_UNIVERSE_DRAFT = { slug: '', name: '', description: '', isPublic: true, featured: false, thumbnailUrl: '' };
+
 export default function NewUniversePage() {
   const router = useRouter();
   const [loading, setLoading] = useState(false);
@@ -34,6 +37,25 @@ export default function NewUniversePage() {
     featured: false,
     thumbnailUrl: '',
   });
+
+  // What was typed survives leaving the page (the owner is always the signed-in person, so it isn't kept).
+  const draftFields = useMemo(
+    () => ({
+      slug: formData.slug,
+      name: formData.name,
+      description: formData.description,
+      isPublic: formData.isPublic,
+      featured: formData.featured,
+      thumbnailUrl: formData.thumbnailUrl,
+    }),
+    [formData.slug, formData.name, formData.description, formData.isPublic, formData.featured, formData.thumbnailUrl],
+  );
+  const { discard: discardDraft } = useDraft(
+    'universe.new',
+    draftFields,
+    (draft) => setFormData((prev) => ({ ...prev, ...draft })),
+    EMPTY_UNIVERSE_DRAFT,
+  );
 
   // Helper function to generate slug from name
   function generateSlug(name: string): string {
@@ -100,6 +122,7 @@ export default function NewUniversePage() {
       }
 
       const universe = await response.json();
+      discardDraft();
       router.push(`/admin/universes/${universe.id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create universe');

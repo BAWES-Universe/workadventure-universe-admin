@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useEffect, Suspense } from 'react';
+import { useState, useEffect, Suspense, useMemo } from 'react';
+import { useDraft } from '../../hooks/use-draft';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
@@ -17,6 +18,8 @@ interface Universe {
   name: string;
   slug: string;
 }
+
+const EMPTY_WORLD_DRAFT = { slug: '', name: '', description: '', isPublic: true, featured: false, thumbnailUrl: '' };
 
 function NewWorldPageContent() {
   const router = useRouter();
@@ -37,6 +40,25 @@ function NewWorldPageContent() {
     featured: false,
     thumbnailUrl: '',
   });
+
+  // What was typed survives leaving the page (the universe comes from where you came from, so it isn't kept).
+  const draftFields = useMemo(
+    () => ({
+      slug: formData.slug,
+      name: formData.name,
+      description: formData.description,
+      isPublic: formData.isPublic,
+      featured: formData.featured,
+      thumbnailUrl: formData.thumbnailUrl,
+    }),
+    [formData.slug, formData.name, formData.description, formData.isPublic, formData.featured, formData.thumbnailUrl],
+  );
+  const { discard: discardDraft } = useDraft(
+    'world.new',
+    draftFields,
+    (draft) => setFormData((prev) => ({ ...prev, ...draft })),
+    EMPTY_WORLD_DRAFT,
+  );
 
   // Helper function to generate slug from name
   function generateSlug(name: string): string {
@@ -127,6 +149,7 @@ function NewWorldPageContent() {
       }
 
       const world = await response.json();
+      discardDraft();
       router.push(`/admin/worlds/${world.id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create world');

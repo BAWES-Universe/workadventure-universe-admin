@@ -15,10 +15,17 @@ import { z } from 'zod';
 export const ORBIT_BRIDGE_VERSION = 1 as const;
 
 /** What this Orbit can do over the bridge (sent in `orbit-bridge-ready`). */
-export const ORBIT_BRIDGE_CAPABILITIES = ['navigate', 'event'] as const;
+export const ORBIT_BRIDGE_CAPABILITIES = ['navigate', 'event', 'view'] as const;
 
 /** Pages the game may ask for. Anything else lands on Orbit's home. */
-export const ORBIT_NAVIGATE_INTENTS = ['new-universe', 'world-members'] as const;
+export const ORBIT_NAVIGATE_INTENTS = ['new-universe', 'world-members', 'visit-card'] as const;
+
+/**
+ * The two sizes of Orbit's window inside the game: the compact companion panel (the default) and the full-screen
+ * view for bigger tasks. The game owns the size; Orbit asks (`orbit-view-request`) and is told (`orbit-view`).
+ */
+export const ORBIT_VIEWS = ['compact', 'full'] as const;
+export type OrbitView = (typeof ORBIT_VIEWS)[number];
 export type OrbitNavigateIntent = (typeof ORBIT_NAVIGATE_INTENTS)[number];
 
 /** What changed, for a refresh hint. */
@@ -35,6 +42,14 @@ export const orbitBridgeInitSchema = z.object({
   version: z.literal(ORBIT_BRIDGE_VERSION),
   roomRevision,
   capabilities: z.array(z.string().max(32)).max(16),
+  // Which view the frame is in right now; an older game doesn't say, and the compact view is assumed.
+  view: z.enum(ORBIT_VIEWS).optional(),
+});
+
+export const orbitViewSchema = z.object({
+  type: z.literal('orbit-view'),
+  version: z.literal(ORBIT_BRIDGE_VERSION),
+  view: z.enum(ORBIT_VIEWS),
 });
 
 export const orbitNavigateSchema = z.object({
@@ -58,6 +73,14 @@ export const orbitEventSchema = z.object({
 export type OrbitBridgeInit = z.infer<typeof orbitBridgeInitSchema>;
 export type OrbitNavigate = z.infer<typeof orbitNavigateSchema>;
 export type OrbitEvent = z.infer<typeof orbitEventSchema>;
+export type OrbitViewChange = z.infer<typeof orbitViewSchema>;
+
+/** Orbit → game: please switch to this view. */
+export interface OrbitViewRequest {
+  type: 'orbit-view-request';
+  version: typeof ORBIT_BRIDGE_VERSION;
+  view: OrbitView;
+}
 
 export type OrbitBridgeAckError = 'stale-revision' | 'not-ready';
 
@@ -79,7 +102,8 @@ export interface OrbitBridgeAck {
 export type IncomingBridgeMessage =
   | { kind: 'init'; message: OrbitBridgeInit }
   | { kind: 'navigate'; message: OrbitNavigate }
-  | { kind: 'event'; message: OrbitEvent };
+  | { kind: 'event'; message: OrbitEvent }
+  | { kind: 'view'; message: OrbitViewChange };
 
 /**
  * Accept a message only from the game: exact origin, the parent window, and a known, well-formed message.
@@ -96,6 +120,8 @@ export function parseBridgeMessage(
   if (navigate.success) return { kind: 'navigate', message: navigate.data };
   const orbitEvent = orbitEventSchema.safeParse(event.data);
   if (orbitEvent.success) return { kind: 'event', message: orbitEvent.data };
+  const view = orbitViewSchema.safeParse(event.data);
+  if (view.success) return { kind: 'view', message: view.data };
   return null;
 }
 

@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useEffect, Suspense } from 'react';
+import { useState, useEffect, Suspense, useMemo } from 'react';
+import { useDraft } from '../../hooks/use-draft';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
@@ -30,6 +31,8 @@ interface World {
     name: string;
   };
 }
+
+const EMPTY_ROOM_DRAFT = { slug: '', name: '', description: '', mapUrl: '', isPublic: true };
 
 function NewRoomPageContent() {
   const router = useRouter();
@@ -61,6 +64,24 @@ function NewRoomPageContent() {
     templateMapId: templateMapIdParam || null as string | null,
     isPublic: true,
   });
+
+  // What was typed survives leaving the page (the world and the template come from where you came from).
+  const draftFields = useMemo(
+    () => ({
+      slug: formData.slug,
+      name: formData.name,
+      description: formData.description,
+      mapUrl: formData.mapUrl,
+      isPublic: formData.isPublic,
+    }),
+    [formData.slug, formData.name, formData.description, formData.mapUrl, formData.isPublic],
+  );
+  const { discard: discardDraft } = useDraft(
+    'room.new',
+    draftFields,
+    (draft) => setFormData((prev) => ({ ...prev, ...draft })),
+    EMPTY_ROOM_DRAFT,
+  );
 
   // Helper function to generate slug from name
   function generateSlug(name: string): string {
@@ -279,6 +300,7 @@ function NewRoomPageContent() {
       }
 
       const room = await response.json();
+      discardDraft();
       router.push(`/admin/rooms/${room.id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create room');

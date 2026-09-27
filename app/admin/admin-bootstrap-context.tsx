@@ -12,7 +12,9 @@ export type AdminUser = {
 };
 
 export type AdminStats = { universes: number; worlds: number; rooms: number; users: number };
-export type AdminBootstrap = { version: 1; user: AdminUser; stats: AdminStats };
+/** The person's own places: universes they own, worlds they belong to, rooms they starred, invitations waiting. */
+export type AdminMine = { universes: number; worlds: number; stars: number; invitations: number };
+export type AdminBootstrap = { version: 1; user: AdminUser; stats: AdminStats; mine?: AdminMine };
 
 const AdminBootstrapContext = createContext<AdminBootstrap | null>(null);
 

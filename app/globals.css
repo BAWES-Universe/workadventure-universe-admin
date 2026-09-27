@@ -1,49 +1,84 @@
 @import "tailwindcss";
 
+/* Dark mode follows the `dark` class next-themes sets on <html>, not the OS setting. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
+ * Orbit's look: the same language as the game and bawes.net. A purple → blue brand for what you can do, gold for
+ * what is special, quiet layered surfaces for everything else. Dark is the default (the game is dark), light is a
+ * proper theme, not an afterthought.
+ */
 @layer base {
-:root {
-    --background: 0 0% 100%;
-    --foreground: 0 0% 3.9%;
+  :root {
+    --background: 250 20% 98%;
+    --foreground: 250 25% 9%;
     --card: 0 0% 100%;
-    --card-foreground: 0 0% 3.9%;
+    --card-foreground: 250 25% 9%;
     --popover: 0 0% 100%;
-    --popover-foreground: 0 0% 3.9%;
-    --primary: 0 0% 9%;
-    --primary-foreground: 0 0% 98%;
-    --secondary: 0 0% 96.1%;
-    --secondary-foreground: 0 0% 9%;
-    --muted: 0 0% 96.1%;
-    --muted-foreground: 0 0% 45.1%;
-    --accent: 0 0% 96.1%;
-    --accent-foreground: 0 0% 9%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 0 0% 98%;
-    --border: 0 0% 89.8%;
-    --input: 0 0% 89.8%;
-    --ring: 0 0% 3.9%;
-    --radius: 0.5rem;
+    --popover-foreground: 250 25% 9%;
+    --primary: 262 90% 56%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 250 18% 94%;
+    --secondary-foreground: 250 25% 12%;
+    --muted: 250 18% 94%;
+    --muted-foreground: 250 8% 42%;
+    --accent: 256 40% 94%;
+    --accent-foreground: 262 70% 30%;
+    --destructive: 0 78% 52%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 250 14% 88%;
+    --input: 250 14% 86%;
+    --ring: 262 90% 56%;
+    --radius: 0.875rem;
+
+    /* Brand */
+    --brand-purple: #8629fc;
+    --brand-blue: #4156f6;
+    --brand-violet: #c4b5fd;
+    --brand-gold: #e9c74c;
+    --brand-glow: 134 41 252;
+    --surface-elevated: 0 0% 100%;
+    --surface-sunken: 250 18% 96%;
+    --shadow-color: 250 30% 20%;
+
+    /* Motion */
+    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+    --ease-in: cubic-bezier(0.4, 0, 1, 1);
+    --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+    --duration-fast: 160ms;
+    --duration-base: 220ms;
+    --duration-slow: 320ms;
+
+    /* The shell's own measurements */
+    --topbar-height: 3.5rem;
+    --bottombar-height: 4rem;
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
   }
 
   .dark {
-    --background: 220 15% 11%;
-    --foreground: 0 0% 98%;
-    --card: 220 15% 13%;
-    --card-foreground: 0 0% 98%;
-    --popover: 220 15% 13%;
-    --popover-foreground: 0 0% 98%;
-    --primary: 0 0% 100%;
-    --primary-foreground: 220 15% 11%;
-    --secondary: 220 10% 18%;
-    --secondary-foreground: 0 0% 98%;
-    --muted: 220 10% 18%;
-    --muted-foreground: 0 0% 65%;
-    --accent: 220 12% 20%;
-    --accent-foreground: 0 0% 98%;
-    --destructive: 0 72% 51%;
-    --destructive-foreground: 0 0% 98%;
-    --border: 220 10% 22%;
-    --input: 220 10% 22%;
-    --ring: 220 15% 50%;
+    --background: 246 20% 7%;
+    --foreground: 250 20% 96%;
+    --card: 246 16% 10%;
+    --card-foreground: 250 20% 96%;
+    --popover: 246 16% 11%;
+    --popover-foreground: 250 20% 96%;
+    --primary: 262 92% 66%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 246 12% 16%;
+    --secondary-foreground: 250 20% 96%;
+    --muted: 246 12% 15%;
+    --muted-foreground: 250 10% 64%;
+    --accent: 256 30% 18%;
+    --accent-foreground: 256 90% 88%;
+    --destructive: 0 72% 56%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 246 12% 18%;
+    --input: 246 12% 20%;
+    --ring: 262 92% 66%;
+
+    --surface-elevated: 246 16% 13%;
+    --surface-sunken: 246 22% 5%;
+    --shadow-color: 250 40% 2%;
   }
 }
 
@@ -67,14 +102,194 @@
   --color-border: hsl(var(--border));
   --color-input: hsl(var(--input));
   --color-ring: hsl(var(--ring));
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-elevated: hsl(var(--surface-elevated));
+  --color-sunken: hsl(var(--surface-sunken));
+  --color-brand-purple: var(--brand-purple);
+  --color-brand-blue: var(--brand-blue);
+  --color-brand-violet: var(--brand-violet);
+  --color-brand-gold: var(--brand-gold);
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-lg: var(--radius);
+  --radius-md: calc(var(--radius) - 4px);
+  --radius-sm: calc(var(--radius) - 8px);
+}
+
+html {
+  /* Orbit lives inside the game's frame: the frame scrolls, never the page as a whole. */
+  overscroll-behavior: none;
+  -webkit-text-size-adjust: 100%;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-feature-settings: "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+  min-height: 100dvh;
+}
+
+/* Every interactive control answers a press at once. */
+button,
+[role="button"],
+a[href] {
+  touch-action: manipulation;
+}
+
+::selection {
+  background: color-mix(in oklab, var(--brand-purple) 30%, transparent);
+}
+
+/* ─── Enter / exit animations (the `animate-in` family the UI primitives rely on) ─── */
+@keyframes orbit-enter {
+  from {
+    opacity: var(--tw-enter-opacity, 1);
+    transform: translate3d(var(--tw-enter-translate-x, 0), var(--tw-enter-translate-y, 0), 0)
+      scale3d(var(--tw-enter-scale, 1), var(--tw-enter-scale, 1), var(--tw-enter-scale, 1));
+  }
+}
+@keyframes orbit-exit {
+  to {
+    opacity: var(--tw-exit-opacity, 1);
+    transform: translate3d(var(--tw-exit-translate-x, 0), var(--tw-exit-translate-y, 0), 0)
+      scale3d(var(--tw-exit-scale, 1), var(--tw-exit-scale, 1), var(--tw-exit-scale, 1));
+  }
+}
+@utility animate-in {
+  animation: orbit-enter var(--duration-base) var(--ease-out) both;
+}
+@utility animate-out {
+  animation: orbit-exit var(--duration-fast) var(--ease-in) both;
+}
+@utility fade-in-0 { --tw-enter-opacity: 0; }
+@utility fade-in-50 { --tw-enter-opacity: 0.5; }
+@utility fade-out-0 { --tw-exit-opacity: 0; }
+@utility zoom-in-95 { --tw-enter-scale: 0.95; }
+@utility zoom-out-95 { --tw-exit-scale: 0.95; }
+@utility slide-in-from-top-2 { --tw-enter-translate-y: -0.5rem; }
+@utility slide-in-from-top-5 { --tw-enter-translate-y: -1.25rem; }
+@utility slide-in-from-bottom-2 { --tw-enter-translate-y: 0.5rem; }
+@utility slide-in-from-left-2 { --tw-enter-translate-x: -0.5rem; }
+@utility slide-in-from-right-2 { --tw-enter-translate-x: 0.5rem; }
+@utility slide-in-from-top { --tw-enter-translate-y: -100%; }
+@utility slide-in-from-bottom { --tw-enter-translate-y: 100%; }
+@utility slide-in-from-left { --tw-enter-translate-x: -100%; }
+@utility slide-in-from-right { --tw-enter-translate-x: 100%; }
+@utility slide-out-to-top { --tw-exit-translate-y: -100%; }
+@utility slide-out-to-bottom { --tw-exit-translate-y: 100%; }
+@utility slide-out-to-left { --tw-exit-translate-x: -100%; }
+@utility slide-out-to-right { --tw-exit-translate-x: 100%; }
+
+/* ─── Orbit's own motion ─── */
+@keyframes orbit-page-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 10px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+@keyframes orbit-shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+@keyframes orbit-spin {
+  to { transform: rotate(360deg); }
+}
+@keyframes orbit-breathe {
+  0%, 100% { opacity: 0.55; transform: scale(0.96); }
+  50% { opacity: 1; transform: scale(1); }
+}
+@keyframes orbit-rise {
+  from { opacity: 0; transform: translate3d(0, 6px, 0); }
+  to { opacity: 1; transform: none; }
+}
+
+@utility orbit-page-enter {
+  animation: orbit-page-in var(--duration-base) var(--ease-out) both;
+}
+@utility orbit-rise {
+  animation: orbit-rise var(--duration-slow) var(--ease-out) both;
+}
+@utility orbit-skeleton {
+  background: linear-gradient(
+    100deg,
+    hsl(var(--muted)) 20%,
+    hsl(var(--surface-elevated)) 45%,
+    hsl(var(--muted)) 70%
+  );
+  background-size: 200% 100%;
+  animation: orbit-shimmer 1.6s linear infinite;
+  border-radius: var(--radius-md);
+}
+/* A soft brand glow around what deserves attention. */
+@utility orbit-glow {
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--brand-purple) 22%, transparent),
+    0 12px 40px -18px rgb(var(--brand-glow) / 0.55);
+}
+/* The brand gradient as a fill (buttons, marks). */
+@utility orbit-brand-fill {
+  background-image: linear-gradient(135deg, var(--brand-purple), var(--brand-blue));
+  color: #fff;
+}
+/* The brand gradient as text (the wordmark, hero titles). */
+@utility orbit-brand-text {
+  background-image: linear-gradient(135deg, var(--brand-violet) 0%, var(--brand-gold) 55%, var(--brand-violet) 100%);
+  background-size: 200% 200%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+/* Glass: the shell's bars over the content they float above. */
+@utility orbit-glass {
+  background: color-mix(in oklab, hsl(var(--background)) 82%, transparent);
+  backdrop-filter: saturate(160%) blur(14px);
+  -webkit-backdrop-filter: saturate(160%) blur(14px);
+}
+/* A raised card that lifts a touch on hover and settles on press. */
+@utility orbit-card {
+  background: hsl(var(--card));
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-lg);
+  box-shadow: 0 1px 2px hsl(var(--shadow-color) / 0.06), 0 8px 24px -16px hsl(var(--shadow-color) / 0.25);
+  transition:
+    transform var(--duration-base) var(--ease-out),
+    box-shadow var(--duration-base) var(--ease-out),
+    border-color var(--duration-base) var(--ease-out);
+}
+@utility orbit-card-interactive {
+  cursor: pointer;
+  &:hover {
+    transform: translateY(-2px);
+    border-color: color-mix(in oklab, var(--brand-purple) 35%, hsl(var(--border)));
+    box-shadow: 0 2px 4px hsl(var(--shadow-color) / 0.06), 0 18px 40px -20px hsl(var(--shadow-color) / 0.4);
+  }
+  &:active {
+    transform: translateY(0) scale(0.99);
+    transition-duration: 80ms;
+  }
+}
+/* Press feedback for buttons and rows without a card. */
+@utility orbit-press {
+  transition: transform 120ms var(--ease-out), background-color var(--duration-fast) var(--ease-out);
+  &:active {
+    transform: scale(0.97);
+  }
+}
+/* Room for the game's own controls, which sit over Orbit's top-right corner in the full-screen view. */
+/* A list that scrolls under a fixed panel: its end fades instead of being cut. */
+@utility orbit-scroll-fade {
+  mask-image: linear-gradient(to bottom, black calc(100% - 2rem), transparent);
+}
+@utility orbit-reserve-game-controls {
+  padding-right: 7rem;
 }
 
 @layer utilities {
@@ -84,5 +299,20 @@ body {
   }
   .scrollbar-hide::-webkit-scrollbar {
     display: none;
+  }
+}
+
+/* Motion is a courtesy, never a requirement. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .orbit-skeleton {
+    animation: none;
   }
 }

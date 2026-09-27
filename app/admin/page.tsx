@@ -1,144 +1,77 @@
 'use client';
 
 import Link from 'next/link';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Globe, Users, FolderOpen, Home, Plus, MapPin } from 'lucide-react';
-import { cn } from '@/lib/utils';
-import CurrentLocation from './components/current-location';
+import { Compass, Building2, DoorOpen, Users, ChevronRight } from 'lucide-react';
+import { useAdminBootstrap } from './admin-bootstrap-context';
+import HerePanel from './components/here-panel';
 import PendingInvitationsAlert from './components/pending-invitations-alert';
 import RecentlyVisited from './components/recently-visited';
-import { useAdminBootstrap } from './admin-bootstrap-context';
+import YourPlaces from './components/your-places';
 
+function greetingFor(hour: number): string {
+  if (hour < 5) return 'Good night';
+  if (hour < 12) return 'Good morning';
+  if (hour < 18) return 'Good afternoon';
+  return 'Good evening';
+}
+
+function firstName(name: string | null, email: string | null): string | null {
+  const source = name?.trim() || email?.split('@')[0] || '';
+  return source ? source.split(/\s+/)[0] : null;
+}
+
+/**
+ * Home: here and now. Who you are and where you are, anything waiting for you, your own places, and where you were
+ * last. Exploring the whole Universe is one tap away, under Places.
+ */
 export default function AdminDashboard() {
-  const { stats } = useAdminBootstrap();
-  
+  const { user, stats } = useAdminBootstrap();
+  const name = firstName(user.name, user.email);
+  const explore = [
+    { href: '/admin/discover/universes', label: 'Universes', count: stats.universes, icon: Compass },
+    { href: '/admin/discover/worlds', label: 'Worlds', count: stats.worlds, icon: Building2 },
+    { href: '/admin/discover/rooms', label: 'Rooms', count: stats.rooms, icon: DoorOpen },
+    { href: '/admin/users', label: 'People', count: stats.users, icon: Users },
+  ];
+
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
+      <header className="space-y-1">
+        <p className="text-sm text-muted-foreground">{greetingFor(new Date().getHours())}</p>
+        <h1 className="text-3xl font-semibold tracking-tight">{name ?? 'Welcome'}</h1>
+      </header>
+
+      <HerePanel />
       <PendingInvitationsAlert />
-
-      {/* Current location at the top */}
-      <CurrentLocation />
-
-      {/* Discover / onboarding section */}
-      {stats.universes === 0 ? (
-        <Card className="border-dashed">
-          <CardHeader className="text-center pb-4">
-            <div className="mx-auto mb-4 flex h-20 w-20 items-center justify-center rounded-full bg-muted">
-              <Globe className="h-10 w-10 text-muted-foreground" />
-            </div>
-            <CardTitle className="text-2xl">Get Started</CardTitle>
-            <CardDescription className="text-base mt-2">
-              Create your first universe to begin organizing your Universe worlds and rooms.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="flex justify-center pt-2">
-            <Button variant="default" asChild size="lg" className="gap-2">
-              <Link href="/admin/universes/new">
-                <Plus className="h-5 w-5" />
-                Create Your First Universe
-              </Link>
-            </Button>
-          </CardContent>
-        </Card>
-      ) : (
-        <section className="space-y-3">
-          <div className="space-y-1">
-            <h2 className="text-xl font-semibold tracking-tight">Discover</h2>
-            <p className="text-sm text-muted-foreground">
-              Explore universes, worlds, rooms, and users across the Universe.
-            </p>
-          </div>
-          <div className="grid gap-4 grid-cols-2 md:grid-cols-4">
-            <Link href="/admin/discover/universes" className="group block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background">
-              <Card className={cn(
-                'relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
-                'hover:-translate-y-1 hover:shadow-lg',
-              )}>
-                <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-blue-500/10 via-transparent to-indigo-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
-                <CardHeader className="relative flex flex-row items-center justify-between space-y-0 pb-2">
-                  <CardTitle className="text-sm font-medium">Universes</CardTitle>
-                  <div className="h-9 w-9 rounded-full bg-primary/10 flex items-center justify-center group-hover:bg-primary/20 transition-colors">
-                    <Globe className="h-5 w-5 text-primary" />
-                  </div>
-                </CardHeader>
-                <CardContent className="relative">
-                  <div className="text-3xl font-bold">{stats.universes}</div>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    Public universes you can explore
-                  </p>
-                </CardContent>
-              </Card>
-            </Link>
-
-            <Link href="/admin/discover/worlds" className="group block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background">
-              <Card className={cn(
-                'relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
-                'hover:-translate-y-1 hover:shadow-lg',
-              )}>
-                <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-blue-500/10 via-transparent to-purple-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
-                <CardHeader className="relative flex flex-row items-center justify-between space-y-0 pb-2">
-                  <CardTitle className="text-sm font-medium">Worlds</CardTitle>
-                  <div className="h-9 w-9 rounded-full bg-blue-500/10 flex items-center justify-center group-hover:bg-blue-500/20 transition-colors">
-                    <Home className="h-5 w-5 text-blue-500" />
-                  </div>
-                </CardHeader>
-                <CardContent className="relative">
-                  <div className="text-3xl font-bold">{stats.worlds}</div>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    Worlds across universes
-                  </p>
-                </CardContent>
-              </Card>
-            </Link>
-
-            <Link href="/admin/discover/rooms" className="group block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background">
-              <Card className={cn(
-                'relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
-                'hover:-translate-y-1 hover:shadow-lg',
-              )}>
-                <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-green-500/10 via-transparent to-emerald-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
-                <CardHeader className="relative flex flex-row items-center justify-between space-y-0 pb-2">
-                  <CardTitle className="text-sm font-medium">Rooms</CardTitle>
-                  <div className="h-9 w-9 rounded-full bg-green-500/10 flex items-center justify-center group-hover:bg-green-500/20 transition-colors">
-                    <FolderOpen className="h-5 w-5 text-green-500" />
-                  </div>
-                </CardHeader>
-                <CardContent className="relative">
-                  <div className="text-3xl font-bold">{stats.rooms}</div>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    Individual spaces & maps
-                  </p>
-                </CardContent>
-              </Card>
-            </Link>
-
-            <Link href="/admin/users" className="group block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background">
-              <Card className={cn(
-                'relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
-                'hover:-translate-y-1 hover:shadow-lg',
-              )}>
-                <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-purple-500/10 via-transparent to-pink-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
-                <CardHeader className="relative flex flex-row items-center justify-between space-y-0 pb-2">
-                  <CardTitle className="text-sm font-medium">Users</CardTitle>
-                  <div className="h-9 w-9 rounded-full bg-purple-500/10 flex items-center justify-center group-hover:bg-purple-500/20 transition-colors">
-                    <Users className="h-5 w-5 text-purple-500" />
-                  </div>
-                </CardHeader>
-                <CardContent className="relative">
-                  <div className="text-3xl font-bold">{stats.users}</div>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    People exploring the Universe
-                  </p>
-                </CardContent>
-              </Card>
-            </Link>
-          </div>
-        </section>
-      )}
-
-      {/* Recently visited rooms */}
+      <YourPlaces />
       <RecentlyVisited />
+
+      <section data-testid="explore">
+        <div className="mb-3">
+          <h2 className="text-lg font-semibold tracking-tight">Explore the Universe</h2>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          {explore.map((entry) => {
+            const Icon = entry.icon;
+            return (
+              <Link
+                key={entry.href}
+                href={entry.href}
+                className="orbit-card orbit-card-interactive flex items-center gap-3 p-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-muted text-muted-foreground">
+                  <Icon className="h-[18px] w-[18px]" aria-hidden="true" />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block text-[15px] font-medium">{entry.label}</span>
+                  <span className="block text-xs tabular-nums text-muted-foreground">{entry.count.toLocaleString()}</span>
+                </span>
+                <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground/60" aria-hidden="true" />
+              </Link>
+            );
+          })}
+        </div>
+      </section>
     </div>
   );
 }

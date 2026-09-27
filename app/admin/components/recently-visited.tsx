@@ -1,17 +1,17 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
+import { Clock, Navigation } from 'lucide-react';
+import { Skeleton } from '@/components/ui/skeleton';
+import { authenticatedFetch } from '@/lib/client-auth';
+import { timeAgo } from '@/lib/time-ago';
 import { useWorkAdventure } from '../workadventure-context';
-import RecentRoomCard from './recent-room-card';
-import { Loader2 } from 'lucide-react';
+import { ListGroup, ListRow, SectionHeading } from './shell/list-row';
 
 interface RecentRoom {
   roomId: string;
   roomName: string;
   roomSlug: string;
-  roomDescription: string | null;
-  roomMapUrl: string | null;
-  roomFavorites: number;
   worldId: string;
   worldName: string;
   worldSlug: string;
@@ -21,130 +21,92 @@ interface RecentRoom {
   accessedAt: string;
 }
 
-export default function RecentlyVisited() {
-  const { wa, isReady, isLoading } = useWorkAdventure();
-  const [recentRooms, setRecentRooms] = useState<RecentRoom[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [currentRoomId, setCurrentRoomId] = useState<string | null>(null);
-  const [hasCheckedCurrentRoom, setHasCheckedCurrentRoom] = useState(false);
+/**
+ * The rooms you were in most recently (yours alone, and only the ones you may still see), each one tap from its
+ * page and one from a visit. Empty for a newcomer, and then it says nothing at all.
+ */
+export default function RecentlyVisited({ limit = 4 }: { limit?: number }) {
+  const { isReady, navigateToRoom } = useWorkAdventure();
+  const [rooms, setRooms] = useState<RecentRoom[] | null>(null);
+  const [visiting, setVisiting] = useState<string | null>(null);
 
   useEffect(() => {
-    async function getCurrentRoomId() {
-      // If WorkAdventure is not available or still loading, mark as checked and proceed
-      if (!isReady || !wa) {
-        // Give it a moment to initialize, then mark as checked
-        if (!isLoading) {
-          setTimeout(() => setHasCheckedCurrentRoom(true), 1000);
-        }
-        return;
-      }
+    let cancelled = false;
+    authenticatedFetch(`/api/admin/rooms/recent?limit=${limit}`)
+      .then(async (response) => (response.ok ? (((await response.json()).rooms as RecentRoom[]) ?? []) : []))
+      .catch(() => [] as RecentRoom[])
+      .then((list) => {
+        if (!cancelled) setRooms(list);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [limit]);
 
-      try {
-        await wa.onInit();
-        const roomIdValue = wa.room.id as string | undefined;
-
-        if (roomIdValue) {
-          // Fetch room details to get the room ID
-          try {
-            const { authenticatedFetch } = await import('@/lib/client-auth');
-            const response = await authenticatedFetch(
-              `/api/admin/rooms/from-play-uri?playUri=${encodeURIComponent(roomIdValue)}`,
-            );
-
-            if (response.ok) {
-              const data = await response.json();
-              setCurrentRoomId(data.id);
-            }
-          } catch (err) {
-            console.error('[RecentlyVisited] Failed to resolve current room:', err);
-          }
-        }
-        setHasCheckedCurrentRoom(true);
-      } catch (err) {
-        console.error('[RecentlyVisited] Failed to get room info:', err);
-        setHasCheckedCurrentRoom(true);
-      }
-    }
-
-    if (isReady && wa) {
-      getCurrentRoomId();
-    } else if (!isLoading) {
-      // If WorkAdventure is not available, wait a bit then mark as checked
-      const timeout = setTimeout(() => {
-        setHasCheckedCurrentRoom(true);
-      }, 1000);
-      return () => clearTimeout(timeout);
-    }
-  }, [wa, isReady, isLoading]);
-
-  useEffect(() => {
-    async function fetchRecentRooms() {
-      if (!hasCheckedCurrentRoom) {
-        return; // Wait until we've checked for current room
-      }
-
-      try {
-        setLoading(true);
-        const { authenticatedFetch } = await import('@/lib/client-auth');
-        const excludeParam = currentRoomId ? `&excludeRoomId=${encodeURIComponent(currentRoomId)}` : '';
-        const response = await authenticatedFetch(
-          `/api/admin/rooms/recent?limit=2${excludeParam}`,
-        );
-
-        if (response.ok) {
-          const data = await response.json();
-          setRecentRooms(data.rooms || []);
-        }
-      } catch (err) {
-        console.error('[RecentlyVisited] Failed to fetch recent rooms:', err);
-      } finally {
-        setLoading(false);
-      }
-    }
-
-    fetchRecentRooms();
-  }, [currentRoomId, hasCheckedCurrentRoom]);
-
-  if (loading) {
+  if (rooms === null) {
     return (
-      <div className="flex items-center justify-center py-12">
-        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-      </div>
+      <section>
+        <SectionHeading title="Recently visited" />
+        <ListGroup>
+          {[0, 1].map((index) => (
+            <div key={index} className="flex items-center gap-3 px-4 py-3">
+              <Skeleton className="h-10 w-10 rounded-xl" />
+              <div className="flex-1 space-y-2">
+                <Skeleton className="h-4 w-2/5" />
+                <Skeleton className="h-3 w-1/3" />
+              </div>
+            </div>
+          ))}
+        </ListGroup>
+      </section>
     );
   }
 
-  if (recentRooms.length === 0) {
-    return null;
+  if (rooms.length === 0) return null;
+
+  async function visit(room: RecentRoom) {
+    setVisiting(room.roomId);
+    try {
+      await navigateToRoom(`/@/${room.universeSlug}/${room.worldSlug}/${room.roomSlug}`);
+    } catch (cause) {
+      console.error('[RecentlyVisited] Could not visit', cause);
+    } finally {
+      setVisiting(null);
+    }
   }
 
   return (
-    <section className="space-y-3">
-      <div className="space-y-1">
-        <h2 className="text-xl font-semibold tracking-tight">Recently visited</h2>
-        <p className="text-sm text-muted-foreground">
-          Jump back into rooms that have been active most recently.
-        </p>
-      </div>
-      <div className="grid gap-4 md:grid-cols-2">
-        {recentRooms.map((room) => (
-          <RecentRoomCard
+    <section data-testid="recently-visited">
+      <SectionHeading title="Recently visited" />
+      <ListGroup>
+        {rooms.map((room) => (
+          <ListRow
             key={room.roomId}
-            room={{
-              roomId: room.roomId,
-              roomName: room.roomName,
-              roomSlug: room.roomSlug,
-              worldId: room.worldId,
-              worldName: room.worldName,
-              worldSlug: room.worldSlug,
-              universeId: room.universeId,
-              universeName: room.universeName,
-              universeSlug: room.universeSlug,
-              accessedAt: new Date(room.accessedAt),
-            }}
+            href={`/admin/rooms/${room.roomId}`}
+            icon={Clock}
+            title={room.roomName}
+            subtitle={`${room.worldName} · ${room.universeName} · ${timeAgo(new Date(room.accessedAt))}`}
+            trailing={
+              isReady ? (
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    void visit(room);
+                  }}
+                  disabled={visiting === room.roomId}
+                  aria-label={`Visit ${room.roomName}`}
+                  className="orbit-press inline-flex h-9 items-center gap-1.5 rounded-xl border border-border/70 bg-elevated px-3 text-xs font-medium text-foreground hover:border-primary/40 disabled:opacity-60"
+                >
+                  <Navigation className="h-3.5 w-3.5" aria-hidden="true" />
+                  Visit
+                </button>
+              ) : undefined
+            }
           />
         ))}
-      </div>
+      </ListGroup>
     </section>
   );
 }
-
