@@ -94,11 +94,10 @@ export async function PUT(request: NextRequest) {
           links: validated.links !== undefined ? validated.links : undefined,
         },
       }),
-      prisma.user.update({
-        where: { id: user.id },
-        data: validated.name !== undefined ? { name: validated.name } : {},
-        select: { name: true },
-      }),
+      // No name sent: read it rather than run an update with nothing in it.
+      validated.name !== undefined
+        ? prisma.user.update({ where: { id: user.id }, data: { name: validated.name }, select: { name: true } })
+        : prisma.user.findUniqueOrThrow({ where: { id: user.id }, select: { name: true } }),
     ]);
     
     return NextResponse.json({
