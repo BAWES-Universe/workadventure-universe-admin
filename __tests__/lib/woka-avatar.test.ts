@@ -17,11 +17,14 @@ describe('Wokas for avatars', () => {
   });
 
   it('gives a guest a default Woka that says nothing about who they are', async () => {
-    const [guest, member] = await withWokas([
-      { id: 'visit-1', userId: null, userUuid: 'guest-uuid' },
+    const [guest, member, redacted] = await withWokas([
+      { id: 'visit-1', userId: null, userUuid: 'guest-uuid', isGuest: true },
       { id: 'visit-2', userId: 'u1' },
+      { id: 'visit-3' },
     ]);
     expect(guest.woka).toEqual(defaultWoka('guest-uuid'));
     expect(member.woka?.length).toBe(1);
+    // A record stripped for this viewer stays exactly as it was.
+    expect(redacted).toEqual({ id: 'visit-3' });
   });
 });

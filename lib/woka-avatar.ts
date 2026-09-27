@@ -64,18 +64,20 @@ export async function wokaLayersFor(userId: string): Promise<string[]> {
 }
 
 /**
- * Adds each person's Woka to a list of records that may name them (`userId`). Someone the list doesn't name (a guest,
- * or a person the viewer may not identify) gets a default Woka picked from `userUuid` or the record's `id`, which
- * says nothing about who they are. Never fails the list: without Wokas it comes back as it was.
+ * Adds each person's Woka to a list of records that may name them (`userId`). A guest the viewer may see
+ * (`isGuest: true`) gets a default Woka picked from `userUuid` or the record's `id`. A record redacted for this viewer
+ * (no `userId`, no `isGuest`) is left exactly as it is. Never fails the list: without Wokas it comes back as it was.
  */
-export async function withWokas<T extends { userId?: string | null; userUuid?: string | null; id?: string | null }>(
+export async function withWokas<
+  T extends { userId?: string | null; userUuid?: string | null; id?: string | null; isGuest?: boolean | null },
+>(
   records: T[],
 ): Promise<(T & { woka?: string[] })[]> {
   const ids = records.map((record) => record.userId).filter((id): id is string => typeof id === 'string' && id.length > 0);
   const wokas = ids.length ? await wokaLayersForMany(ids).catch(() => new Map<string, string[]>()) : new Map<string, string[]>();
   return records.map((record) => {
     if (record.userId && wokas.has(record.userId)) return { ...record, woka: wokas.get(record.userId) };
-    const seed = record.userUuid || record.id;
+    const seed = record.isGuest === true ? record.userUuid || record.id : null;
     if (!seed) return record;
     try {
       return { ...record, woka: defaultWoka(seed) };
