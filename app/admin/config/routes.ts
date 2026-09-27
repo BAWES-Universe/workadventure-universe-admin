@@ -52,7 +52,7 @@ export const ROUTES: RouteDefinition[] = [
   { pattern: '/admin/templates/maps/[id]', title: 'Map', parent: '/admin/templates' },
 
   // You
-  { pattern: '/admin/profile', title: 'My Visit Card', parent: '/admin/you' },
+  { pattern: '/admin/profile', title: 'My Profile', parent: '/admin/you' },
 
   // Admin (super admin)
   { pattern: '/admin/avatars', title: 'Avatar Sets', parent: '/admin' },

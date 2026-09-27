@@ -538,10 +538,10 @@ export default function UserDetailPage() {
       {activeTab === 'details' && (
         <>
           <section className="space-y-6">
-            {/* Visit Card */}
+            {/* Profile */}
             {user.visitCard && (
               <div className="space-y-4">
-                <h2 className="text-xl font-semibold tracking-tight">Visit Card</h2>
+                <h2 className="text-xl font-semibold tracking-tight">Profile</h2>
                 {user.visitCard.bio && (
                   <div className="space-y-2">
                     <p className="text-sm font-medium text-muted-foreground">Bio</p>
@@ -552,7 +552,7 @@ export default function UserDetailPage() {
                   <div className="space-y-2">
                     <p className="text-sm font-medium text-muted-foreground">Links</p>
                     <div className="flex flex-wrap gap-2">
-                      {user.visitCard.links.map((link, index) => (
+                      {user.visitCard.links.filter((link) => /^https?:\/\//i.test(link.url)).map((link, index) => (
                         <a
                           key={index}
                           href={link.url}
@@ -568,7 +568,7 @@ export default function UserDetailPage() {
                   </div>
                 )}
                 {!user.visitCard.bio && (!user.visitCard.links || user.visitCard.links.length === 0) && (
-                  <p className="text-sm text-muted-foreground">No visit card information available</p>
+                  <p className="text-sm text-muted-foreground">No profile yet</p>
                 )}
               </div>
             )}

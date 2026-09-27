@@ -7,7 +7,8 @@ const visitCardSchema = z.object({
   bio: z.string().nullable().optional(),
   links: z.array(z.object({
     label: z.string().min(1),
-    url: z.string().url(),
+    // Web links only: a javascript: or data: address would run in whoever opens the profile.
+    url: z.string().url().refine((value) => /^https?:\/\//i.test(value), 'Links must start with http:// or https://'),
   })).default([]),
 });
 

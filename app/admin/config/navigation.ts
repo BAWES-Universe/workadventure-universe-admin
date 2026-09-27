@@ -49,7 +49,7 @@ export const NAV_ITEMS: NavItem[] = [
   { href: '/admin/universes', label: 'My Universes', icon: Sparkles, group: 'my' },
   { href: '/admin/stars', label: 'My Stars', icon: Star, group: 'my' },
   { href: '/admin/memberships', label: 'My Memberships', icon: Mail, requiresAuth: true, group: 'my' },
-  { href: '/admin/profile', label: 'My Visit Card', icon: UserCircle, requiresAuth: true, group: 'my' },
+  { href: '/admin/profile', label: 'My Profile', icon: UserCircle, requiresAuth: true, group: 'my' },
 
   // Discover section
   { href: '/admin/discover/universes', label: 'Universes', icon: Sparkles, group: 'discover' },

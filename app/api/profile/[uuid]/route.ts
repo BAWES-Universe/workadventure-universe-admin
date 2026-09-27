@@ -25,7 +25,8 @@ async function getProfileData(uuid: string) {
   return {
     name: user.name ?? undefined,
     bio: visitCard.bio ?? undefined,
-    links: (visitCard.links || []) as Array<{ label: string; url: string }>,
+    // Web links only, so an old javascript: or data: address never runs for whoever opens the profile.
+    links: ((visitCard.links || []) as Array<{ label: string; url: string }>).filter((link) => /^https?:\/\//i.test(link.url)),
   };
 }
 
@@ -48,7 +49,7 @@ function renderHTML(data: { name?: string; bio?: string; links: Array<{ label: s
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>${name || 'Visit Card'}</title>
+  <title>${name || 'Profile'}</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: system-ui, -apple-system, sans-serif; background: ${isEmbedded ? 'transparent' : '#111827'}; color: white; }
@@ -125,7 +126,7 @@ function renderHTML(data: { name?: string; bio?: string; links: Array<{ label: s
         </div>
       ` : ''}
       ${!data.bio && (!data.links || data.links.length === 0) ? `
-        <div class="empty">This visit card is empty.</div>
+        <div class="empty">No profile yet.</div>
       ` : ''}
     </div>
   </div>
@@ -146,7 +147,7 @@ export async function GET(
     const accept = request.headers.get('accept') || '';
     if (accept.includes('text/html')) {
       return new NextResponse(
-        `<!DOCTYPE html><html><head><title>Not Found</title></head><body><h1>Visit card not found</h1></body></html>`,
+        `<!DOCTYPE html><html><head><title>Not Found</title></head><body><h1>Profile not found</h1></body></html>`,
         { status: 404, headers: { 'Content-Type': 'text/html' } }
       );
     }

@@ -1,12 +1,4 @@
 .page { display: grid; gap: 28px; min-width: 0; }
-.person { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
-.personWords { min-width: 0; flex: 1 1 14rem; }
-.person h1 { font-size: clamp(26px, 6vw, 36px); line-height: 1.12; letter-spacing: -.02em; font-weight: 700; overflow-wrap: anywhere; }
-.personWords p { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin-top: 8px; }
-.email { color: hsl(var(--muted-foreground)); font-size: 13px; overflow-wrap: anywhere; }
-.adminBadge { display: inline-flex; align-items: center; gap: 6px; min-height: 26px; border: 1px solid hsl(var(--primary) / .3); background: hsl(var(--primary) / .08); border-radius: 999px; color: hsl(var(--primary)); font-size: 11px; font-weight: 600; padding: 3px 10px; }
-.visitCard { display: inline-flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 16px; border: 1px solid hsl(var(--foreground) / .15); border-radius: 999px; font-size: 13px; font-weight: 600; transition: border-color 160ms, background 160ms; }
-.visitCard:hover { border-color: hsl(var(--foreground) / .3); background: hsl(var(--foreground) / .05); }
 .footer { display: flex; justify-content: space-between; align-items: flex-end; flex-wrap: wrap; gap: 16px; padding-top: 18px; border-top: 1px solid hsl(var(--border)); }
 .appearance h2 { font-family: var(--font-display); font-size: 16px; font-weight: 700; }
 .themeControl { margin-top: 12px; border: 1px solid hsl(var(--border)); border-radius: 999px !important; background: transparent !important; }
