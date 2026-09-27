@@ -194,6 +194,45 @@ describe('AdminShell', () => {
     expect(mockRouter.replace).not.toHaveBeenCalled();
   });
 
+  it('Back pressed twice before a render walks two steps, and Forward comes back along them', async () => {
+    const view = await renderShell('/admin/stars');
+    const go = (path: string, pops = 0) =>
+      act(() => {
+        for (let i = 0; i < pops; i += 1) window.dispatchEvent(new PopStateEvent('popstate'));
+        mockPathname = path;
+        view.rerender(
+          <AdminShell>
+            <div>page content</div>
+          </AdminShell>,
+        );
+      });
+    go('/admin/rooms/r-1');
+    go('/admin/worlds/w-1');
+    go('/admin/stars', 2); // two quick Backs, one render
+    expect(screen.getByTestId('orbit-back').textContent).not.toContain('Room');
+    go('/admin/rooms/r-1', 1); // Forward
+    expect(screen.getByTestId('orbit-back').textContent).toContain('Stars');
+    go('/admin/worlds/w-1', 1); // Forward again
+    fireEvent.click(screen.getByTestId('orbit-back'));
+    expect(mockRouter.back).toHaveBeenCalledTimes(1);
+  });
+
+  it('Try again shows the loader, not the last error', async () => {
+    mockPathname = '/admin';
+    render(
+      <AdminShell>
+        <div>page content</div>
+      </AdminShell>,
+    );
+    await waitFor(() => expect(mockAuthenticatedFetch).toHaveBeenCalled());
+    await act(async () => answerLast({}, 500));
+    fireEvent.click(await screen.findByRole('button', { name: 'Try again' }));
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+    await waitFor(() => expect(mockAuthenticatedFetch).toHaveBeenCalledTimes(2));
+    await act(async () => answerLast());
+    expect(await screen.findByText('page content')).toBeTruthy();
+  });
+
   it('Escape closes only the top layer: a dialog first, an edited field next, Orbit last', async () => {
     await renderShell('/admin');
     // A dialog handled it (Radix marks the event as handled).

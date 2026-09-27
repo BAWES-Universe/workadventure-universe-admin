@@ -41,7 +41,11 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
   const [view, setView] = useState<OrbitView>('compact');
   const hasBootstrap = bootstrap !== null;
 
-  const load = useCallback(() => setAttempt((value) => value + 1), []);
+  // Trying again shows the loader, not the last error, until the answer comes.
+  const load = useCallback(() => {
+    setError(null);
+    setAttempt((value) => value + 1);
+  }, []);
   // Set when the game says something changed: the next load brings fresh numbers wherever you are.
   const wantBootstrap = useRef(false);
   const refreshFromGame = useCallback(() => {
@@ -164,12 +168,17 @@ function ShellChrome({
       return;
     }
     if (popping.current) {
-      if (behind.current[behind.current.length - 1] === pathname) {
-        behind.current.pop();
-        ahead.current.push(previous);
-      } else if (ahead.current[ahead.current.length - 1] === pathname) {
-        ahead.current.pop();
-        behind.current.push(previous);
+      // Several Back or Forward presses can land before one render: walk as many steps as the browser did.
+      const back = behind.current.lastIndexOf(pathname);
+      const forward = ahead.current.lastIndexOf(pathname);
+      if (back !== -1) {
+        const passed = behind.current.splice(back);
+        passed.shift();
+        ahead.current.push(previous, ...passed.reverse());
+      } else if (forward !== -1) {
+        const passed = ahead.current.splice(forward);
+        passed.shift();
+        behind.current.push(previous, ...passed.reverse());
       } else {
         behind.current = [];
         ahead.current = [];
