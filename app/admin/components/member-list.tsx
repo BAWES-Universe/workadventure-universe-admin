@@ -26,9 +26,11 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { AlertCircle } from 'lucide-react';
 import { timeAgo } from '@/lib/time-ago';
 import { EmptyCard, EntityRow, LoadingRows, RolePills, SectionHeader, StatLine } from './ds';
+import { PersonIcon } from './profile-card';
 
 
 interface Member {
+  woka?: string[];
   id: string;
   tags: string[];
   joinedAt: string;
@@ -233,6 +235,7 @@ export default function MemberList({ worldId, onRefresh }: MemberListProps) {
                 key={member.id}
                 href={`/admin/users/${member.user.id}`}
                 kind="people"
+                leading={<PersonIcon woka={member.woka} name={nameOrEmail} />}
                 title={nameOrEmail}
                 context={
                   <StatLine

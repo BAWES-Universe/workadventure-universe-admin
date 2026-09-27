@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getViewer, accessDetailFor, detailForRecord, redactAccess, unauthorizedResponse } from '@/lib/access-scope';
 import { prisma } from '@/lib/db';
+import { withWokas } from '@/lib/woka-avatar';
 
 export async function GET(
   request: NextRequest,
@@ -157,7 +158,7 @@ export async function GET(
         userName: lastVisitedOverall.userName,
         userEmail: lastVisitedOverall.userEmail,
       }, detailForRecord(viewer, lastVisitedOverall, detail)) : null,
-      recentActivity: recentActivity.map(access => redactAccess({
+      recentActivity: await withWokas(recentActivity.map(access => redactAccess({
         id: access.id,
         accessedAt: access.accessedAt,
         userId: access.userId,
@@ -171,7 +172,7 @@ export async function GET(
         membershipTags: access.membershipTags,
         room: access.room,
         playUri: access.playUri,
-      }, detailForRecord(viewer, access, detail))),
+      }, detailForRecord(viewer, access, detail)))),
       pagination: {
         page,
         limit,

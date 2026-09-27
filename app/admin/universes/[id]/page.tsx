@@ -1,5 +1,7 @@
 'use client';
 
+import { PersonIcon } from '../../components/profile-card';
+
 import { useState, useEffect } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
@@ -578,7 +580,7 @@ export default function UniverseDetailPage() {
                           key={access.id}
                           className="flex min-w-0 items-start gap-3 rounded-[18px] border border-border bg-card p-3"
                         >
-                          <KindIcon kind="people" size="sm" />
+                          <PersonIcon woka={access.woka} name={access.userName} size={32} />
                           <div className="min-w-0 flex-1 space-y-1">
                             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                               {isClickable ? (

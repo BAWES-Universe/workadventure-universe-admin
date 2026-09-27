@@ -40,6 +40,7 @@ import {
 } from '../../components/ds';
 import InviteMemberDialog from '../../components/invite-member-dialog';
 import MemberList from '../../components/member-list';
+import { PersonIcon } from '../../components/profile-card';
 
 interface World {
   id: string;
@@ -69,6 +70,7 @@ interface World {
 
 /** One visit, as the analytics API lists it. */
 interface Visit {
+  woka?: string[];
   id: string;
   accessedAt: string;
   userId?: string | null;
@@ -589,6 +591,7 @@ export default function WorldDetailPage() {
                             key={access.id}
                             href={`/admin/users/${access.userId}`}
                             kind="people"
+                            leading={<PersonIcon woka={access.woka} name={userName} />}
                             title={userName}
                             context={<StatLine items={[who, when]} />}
                             meta={roles.length > 0 ? <RolePills roles={roles} /> : undefined}
@@ -608,6 +611,7 @@ export default function WorldDetailPage() {
                           key={access.id}
                           href={`/admin/rooms/${access.room.id}`}
                           kind="people"
+                          leading={<PersonIcon woka={access.woka} name={userName} />}
                           title={userName}
                           context={<StatLine items={[who, `in ${access.room.name}`, when]} />}
                           meta={roles.length > 0 ? <RolePills roles={roles} /> : undefined}

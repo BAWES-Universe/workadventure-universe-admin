@@ -9,6 +9,7 @@ import { authenticatedFetch } from '@/lib/client-auth';
 import { DraftNotice } from './draft-notice';
 import { useDraft } from '../hooks/use-draft';
 import { announceProfileName, gameMaxNameLength } from './orbit-bridge';
+import { KindIcon } from './ds';
 import styles from './profile-card.module.css';
 
 export interface ProfileLink {
@@ -381,4 +382,10 @@ export function ProfileFrame({
       {children}
     </section>
   );
+}
+
+/** A person in a list: their Woka when we have it, otherwise the people chip. */
+export function PersonIcon({ woka, name, size = 40 }: { woka?: string[] | null; name?: string | null; size?: number }) {
+  if (woka && woka.length > 0) return <WokaAvatar layers={woka} name={name ?? ''} size={size} />;
+  return <KindIcon kind="people" />;
 }

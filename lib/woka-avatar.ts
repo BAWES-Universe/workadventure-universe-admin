@@ -62,3 +62,14 @@ export async function wokaLayersForMany(userIds: string[]): Promise<Map<string, 
 export async function wokaLayersFor(userId: string): Promise<string[]> {
   return (await wokaLayersForMany([userId])).get(userId) ?? [];
 }
+
+/**
+ * Adds each person's Woka to a list of records that may name them (`userId`). Records that don't (a guest, or a
+ * person the viewer may not identify) get none. Never fails the list: without Wokas it comes back as it was.
+ */
+export async function withWokas<T extends { userId?: string | null }>(records: T[]): Promise<(T & { woka?: string[] })[]> {
+  const ids = records.map((record) => record.userId).filter((id): id is string => typeof id === 'string' && id.length > 0);
+  if (ids.length === 0) return records;
+  const wokas = await wokaLayersForMany(ids).catch(() => new Map<string, string[]>());
+  return records.map((record) => (record.userId && wokas.has(record.userId) ? { ...record, woka: wokas.get(record.userId) } : record));
+}

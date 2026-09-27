@@ -1,5 +1,7 @@
 'use client';
 
+import { PersonIcon } from '../../components/profile-card';
+
 import { useState, useEffect, type ReactNode } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import { useWorkAdventure } from '@/app/admin/workadventure-context';
@@ -79,6 +81,7 @@ interface Room {
 
 /** One visit, as the analytics API lists it. */
 interface Visit {
+  woka?: string[];
   id: string;
   accessedAt: string;
   userId?: string | null;
@@ -1021,6 +1024,7 @@ export default function RoomDetailPage() {
                           key={access.id}
                           href={`/admin/users/${access.userId}`}
                           kind="people"
+                          leading={<PersonIcon woka={access.woka} name={userName} />}
                           title={userName}
                           context={context}
                           meta={meta}
