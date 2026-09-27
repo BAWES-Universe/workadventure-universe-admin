@@ -53,7 +53,7 @@ describe('OrbitBridge', () => {
 
   it('tells the game it is ready once mounted (after sign-in)', () => {
     render(<OrbitBridge onRefresh={jest.fn()} />);
-    expect(posted).toContainEqual({ type: 'orbit-bridge-ready', version: 1, capabilities: ['navigate', 'event'] });
+    expect(posted).toContainEqual({ type: 'orbit-bridge-ready', version: 1, capabilities: ['navigate', 'event', 'view'] });
   });
 
   it('answers not-ready to a request before the game said which visit it is', () => {

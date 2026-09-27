@@ -1,13 +1,13 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { Plus, AlertCircle, Loader2 } from 'lucide-react';
-import { UniverseCard, UniverseAnalytics } from './universe-card';
+import { Plus } from 'lucide-react';
+import { EmptyCard, LoadError, LoadingRows, PageHeader } from '../components/ds';
+import { UniverseCard } from './universe-card';
+import { useEntitySummaries } from '../hooks/use-entity-summaries';
 
 interface Universe {
   id: string;
@@ -37,7 +37,6 @@ export default function UniversesPage() {
   const [myUniverses, setMyUniverses] = useState<Universe[]>([]);
   const [myLoading, setMyLoading] = useState(true);
   const [myError, setMyError] = useState<string | null>(null);
-  const [analyticsByUniverse, setAnalyticsByUniverse] = useState<Record<string, UniverseAnalytics>>({});
 
   useEffect(() => {
     checkAuthAndLoad();
@@ -85,130 +84,43 @@ export default function UniversesPage() {
     }
   }
 
-  useEffect(() => {
-    async function fetchAnalyticsForUniverses() {
-      const missing = myUniverses.filter((universe) => !analyticsByUniverse[universe.id]);
-      if (missing.length === 0) return;
-
-      try {
-        const { authenticatedFetch } = await import('@/lib/client-auth');
-        const results = await Promise.all(
-          missing.map(async (universe) => {
-            try {
-              const response = await authenticatedFetch(
-                `/api/admin/analytics/universes/${universe.id}`,
-              );
-              if (!response.ok) {
-                return null;
-              }
-              const data = await response.json();
-              
-              return {
-                universeId: universe.id,
-                totalAccesses: data.totalAccesses || 0,
-                lastVisitedByUser: data.lastVisitedByUser || null,
-                lastVisitedOverall: data.lastVisitedOverall || null,
-              };
-            } catch {
-              return null;
-            }
-          }),
-        );
-
-        setAnalyticsByUniverse((prev) => {
-          const updated: Record<string, UniverseAnalytics> = { ...prev };
-          for (const result of results) {
-            if (result) {
-              updated[result.universeId] = {
-                totalAccesses: result.totalAccesses,
-                lastVisitedByUser: result.lastVisitedByUser || null,
-                lastVisitedOverall: result.lastVisitedOverall || null,
-              };
-            }
-          }
-          return updated;
-        });
-      } catch {
-        // Ignore analytics fetch errors; cards will show a placeholder
-      }
-    }
-
-    if (myUniverses.length > 0) {
-      fetchAnalyticsForUniverses();
-    }
-  }, [myUniverses, analyticsByUniverse]);
+  // Each universe's activity, asked for once; failures offer a retry instead of asking forever.
+  const universeIds = useMemo(() => myUniverses.map((universe) => universe.id), [myUniverses]);
+  const summaries = useEntitySummaries('universes', universeIds);
 
   if (checkingAuth) {
-    return (
-      <div className="space-y-8">
-        <div className="flex items-center justify-center py-12">
-          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-        </div>
-      </div>
-    );
+    return <LoadingRows label="your universes" />;
   }
 
   return (
-    <div className="space-y-8">
-      <div className="flex items-center justify-between">
-        <div className="space-y-1">
-          <h1 className="text-4xl font-bold tracking-tight">My Universes</h1>
-          <p className="text-muted-foreground text-lg">
-            Manage universes you own and control.
-          </p>
-        </div>
-        <Button variant="default" asChild>
-          <Link href="/admin/universes/new">
-            <Plus className="mr-2 h-4 w-4" />
-            Create Universe
-          </Link>
-        </Button>
-      </div>
+    <div className="space-y-6">
+      <PageHeader
+        title="Your universes"
+        actions={
+          <Button variant="default" asChild>
+            <Link href="/admin/universes/new">
+              <Plus className="mr-2 h-4 w-4" />
+              Create universe
+            </Link>
+          </Button>
+        }
+      />
 
-      {/* My Universes */}
       <section className="space-y-4">
-
-        {myError && (
-          <Alert variant="destructive">
-            <AlertCircle className="h-4 w-4" />
-            <AlertTitle>Error</AlertTitle>
-            <AlertDescription>
-              {myError}
-              <Button
-                variant="outline"
-                size="sm"
-                className="ml-4"
-                onClick={fetchMyUniverses}
-              >
-                Retry
-              </Button>
-            </AlertDescription>
-          </Alert>
-        )}
+        {myError && <LoadError label="your universes" retry={fetchMyUniverses} />}
 
         {myLoading && myUniverses.length === 0 ? (
-          <Card>
-            <CardContent className="flex items-center justify-center py-12">
-              <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-            </CardContent>
-          </Card>
+          <LoadingRows label="your universes" />
         ) : myUniverses.length === 0 ? (
-          <Card>
-            <CardHeader>
-              <CardTitle>No universes yet</CardTitle>
-              <CardDescription>
-                Create your first universe to start building your worlds.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <Button variant="default" asChild>
-                <Link href="/admin/universes/new">
-                  <Plus className="mr-2 h-4 w-4" />
-                  Create your first universe
-                </Link>
-              </Button>
-            </CardContent>
-          </Card>
+          !myError && (
+            <EmptyCard
+              kind="universe"
+              title="No universes yet."
+              text="A universe holds your worlds, and worlds hold rooms."
+              href="/admin/universes/new"
+              action="Create your first universe"
+            />
+          )
         ) : (
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
             {myUniverses.map((universe) => (
@@ -217,13 +129,16 @@ export default function UniversesPage() {
                 universe={universe}
                 ownedByCurrentUser
                 showOwner={false}
-                analytics={analyticsByUniverse[universe.id]}
+                analytics={summaries.summary(universe.id)}
               />
             ))}
           </div>
+        )}
+
+        {myUniverses.length > 0 && summaries.failed.length > 0 && (
+          <LoadError label="activity for some universes" retry={() => summaries.retry()} />
         )}
       </section>
     </div>
   );
 }
-

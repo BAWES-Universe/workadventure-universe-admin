@@ -94,7 +94,7 @@ export default function TemplatesAdminPage() {
           </p>
         </div>
         
-        <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <h2 className="text-2xl font-semibold">Categories</h2>
           {isSuperAdmin && (
             <Button asChild>

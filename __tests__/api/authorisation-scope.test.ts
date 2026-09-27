@@ -28,6 +28,7 @@ jest.mock('@/lib/db', () => ({
       deleteMany: jest.fn(),
     },
     botsMemory: { findMany: jest.fn() },
+    $queryRaw: jest.fn(),
   },
 }));
 
@@ -126,6 +127,8 @@ const ACCESS_ROW = {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // Peak hours are counted in the database.
+  (db as unknown as { $queryRaw: jest.Mock }).$queryRaw.mockResolvedValue([]);
   (getSessionUser as jest.Mock).mockImplementation(async (request: NextRequest) => {
     const auth = request.headers.get('authorization') || '';
     const name = auth.replace('Bearer session-', '');

@@ -19,6 +19,10 @@ describe('resolveNavigateIntent', () => {
     await expect(resolveNavigateIntent(member, 'new-universe', undefined)).resolves.toBe('/admin/universes/new');
   });
 
+  it('opens your profile, ready to edit', async () => {
+    await expect(resolveNavigateIntent(member, 'visit-card', undefined)).resolves.toBe('/admin/you?edit=profile');
+  });
+
   it('falls back to home for an unknown intent, with no error', async () => {
     await expect(resolveNavigateIntent(member, 'delete-everything', undefined)).resolves.toBe('/admin');
   });

@@ -15,10 +15,17 @@ import { z } from 'zod';
 export const ORBIT_BRIDGE_VERSION = 1 as const;
 
 /** What this Orbit can do over the bridge (sent in `orbit-bridge-ready`). */
-export const ORBIT_BRIDGE_CAPABILITIES = ['navigate', 'event'] as const;
+export const ORBIT_BRIDGE_CAPABILITIES = ['navigate', 'event', 'view'] as const;
 
 /** Pages the game may ask for. Anything else lands on Orbit's home. */
-export const ORBIT_NAVIGATE_INTENTS = ['new-universe', 'world-members'] as const;
+export const ORBIT_NAVIGATE_INTENTS = ['new-universe', 'world-members', 'visit-card'] as const;
+
+/**
+ * The two sizes of Orbit's window inside the game: the compact companion panel (the default) and the full-screen
+ * view for bigger tasks. The game owns the size (its own maximise button) and tells Orbit (`orbit-view`).
+ */
+export const ORBIT_VIEWS = ['compact', 'full'] as const;
+export type OrbitView = (typeof ORBIT_VIEWS)[number];
 export type OrbitNavigateIntent = (typeof ORBIT_NAVIGATE_INTENTS)[number];
 
 /** What changed, for a refresh hint. */
@@ -35,6 +42,16 @@ export const orbitBridgeInitSchema = z.object({
   version: z.literal(ORBIT_BRIDGE_VERSION),
   roomRevision,
   capabilities: z.array(z.string().max(32)).max(16),
+  // Which view the frame is in right now; an older game doesn't say, and the compact view is assumed.
+  view: z.enum(ORBIT_VIEWS).optional(),
+  // The longest name the game accepts (a game that can take a new name says "profile" in its capabilities).
+  maxNameLength: z.number().int().min(1).max(128).optional(),
+});
+
+export const orbitViewSchema = z.object({
+  type: z.literal('orbit-view'),
+  version: z.literal(ORBIT_BRIDGE_VERSION),
+  view: z.enum(ORBIT_VIEWS),
 });
 
 export const orbitNavigateSchema = z.object({
@@ -58,6 +75,7 @@ export const orbitEventSchema = z.object({
 export type OrbitBridgeInit = z.infer<typeof orbitBridgeInitSchema>;
 export type OrbitNavigate = z.infer<typeof orbitNavigateSchema>;
 export type OrbitEvent = z.infer<typeof orbitEventSchema>;
+export type OrbitViewChange = z.infer<typeof orbitViewSchema>;
 
 export type OrbitBridgeAckError = 'stale-revision' | 'not-ready';
 
@@ -65,6 +83,14 @@ export interface OrbitBridgeReady {
   type: 'orbit-bridge-ready';
   version: typeof ORBIT_BRIDGE_VERSION;
   capabilities: readonly string[];
+}
+
+/** You saved a new name in your profile: the game shows it once Orbit closes (needs the game's "profile"). */
+export interface OrbitProfileChanged {
+  type: 'orbit-profile-changed';
+  version: typeof ORBIT_BRIDGE_VERSION;
+  roomRevision: string;
+  name: string;
 }
 
 export interface OrbitBridgeAck {
@@ -79,7 +105,8 @@ export interface OrbitBridgeAck {
 export type IncomingBridgeMessage =
   | { kind: 'init'; message: OrbitBridgeInit }
   | { kind: 'navigate'; message: OrbitNavigate }
-  | { kind: 'event'; message: OrbitEvent };
+  | { kind: 'event'; message: OrbitEvent }
+  | { kind: 'view'; message: OrbitViewChange };
 
 /**
  * Accept a message only from the game: exact origin, the parent window, and a known, well-formed message.
@@ -96,6 +123,8 @@ export function parseBridgeMessage(
   if (navigate.success) return { kind: 'navigate', message: navigate.data };
   const orbitEvent = orbitEventSchema.safeParse(event.data);
   if (orbitEvent.success) return { kind: 'event', message: orbitEvent.data };
+  const view = orbitViewSchema.safeParse(event.data);
+  if (view.success) return { kind: 'view', message: view.data };
   return null;
 }
 

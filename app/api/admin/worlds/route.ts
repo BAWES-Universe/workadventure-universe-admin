@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
+import { FEATURED_FORBIDDEN, refusesFeaturedChange } from '@/lib/featured';
 
 const createWorldSchema = z.object({
   universeId: z.string().uuid(),
@@ -98,7 +99,7 @@ export async function GET(request: NextRequest) {
       where.universeId = universeId;
     }
     
-    // For discover scope, sort by total accesses (descending)
+    // For discover scope, featured first (super admins pin them), then by total accesses (descending)
     // Otherwise, sort by createdAt (descending)
     let worlds: any[];
     let total: number;
@@ -119,7 +120,7 @@ export async function GET(request: NextRequest) {
             AND NOT (u.slug = 'default' AND w.slug = 'default')
             AND (w.name ILIKE ${`%${search}%`} OR w.slug ILIKE ${`%${search}%`} OR w.description ILIKE ${`%${search}%`})
             GROUP BY w.id
-            ORDER BY access_count DESC, w.created_at DESC
+            ORDER BY w.featured DESC, access_count DESC, w.created_at DESC
             LIMIT ${limit} OFFSET ${(page - 1) * limit}
           `
         : prisma.$queryRaw<Array<{ world_id: string; access_count: bigint }>>`
@@ -133,7 +134,7 @@ export async function GET(request: NextRequest) {
             WHERE w.is_public = true
             AND NOT (u.slug = 'default' AND w.slug = 'default')
             GROUP BY w.id
-            ORDER BY access_count DESC, w.created_at DESC
+            ORDER BY w.featured DESC, access_count DESC, w.created_at DESC
             LIMIT ${limit} OFFSET ${(page - 1) * limit}
           `;
       
@@ -276,6 +277,7 @@ export async function POST(request: NextRequest) {
       authHeader.replace('Bearer ', '').trim() === process.env.ADMIN_API_TOKEN;
     
     let userId: string | null = null;
+    let canFeature = Boolean(isAdminToken);
     
     if (!isAdminToken) {
       // Try to get user from session
@@ -285,6 +287,7 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
       }
       userId = sessionUser.id;
+      canFeature = sessionUser.isSuperAdmin;
     } else {
       // Admin token - require it
       requireAuth(request);
@@ -301,6 +304,10 @@ export async function POST(request: NextRequest) {
     }
     
     const data = createWorldSchema.parse(body);
+
+    if (refusesFeaturedChange(canFeature, data.featured, false)) {
+      return NextResponse.json({ error: FEATURED_FORBIDDEN }, { status: 403 });
+    }
     
     // Verify universe exists and user has permission
     const universe = await prisma.universe.findUnique({

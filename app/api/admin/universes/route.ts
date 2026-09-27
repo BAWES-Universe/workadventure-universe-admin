@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
+import { FEATURED_FORBIDDEN, refusesFeaturedChange } from '@/lib/featured';
 
 const createUniverseSchema = z.object({
   slug: z.string().min(1).max(100),
@@ -76,7 +77,7 @@ export async function GET(request: NextRequest) {
       }
     }
     
-    // For discover scope, sort by total accesses (descending)
+    // For discover scope, featured first (super admins pin them), then by total accesses (descending)
     // Otherwise, sort by createdAt (descending)
     let universes: any[];
     let total: number;
@@ -97,7 +98,7 @@ export async function GET(request: NextRequest) {
             AND u.slug != 'default'
             AND (u.name ILIKE ${`%${search}%`} OR u.slug ILIKE ${`%${search}%`} OR u.description ILIKE ${`%${search}%`})
             GROUP BY u.id
-            ORDER BY access_count DESC, u.created_at DESC
+            ORDER BY u.featured DESC, access_count DESC, u.created_at DESC
             LIMIT ${limit} OFFSET ${(page - 1) * limit}
           `
         : prisma.$queryRaw<Array<{ universe_id: string; access_count: bigint }>>`
@@ -111,7 +112,7 @@ export async function GET(request: NextRequest) {
             WHERE u.is_public = true
             AND u.slug != 'default'
             GROUP BY u.id
-            ORDER BY access_count DESC, u.created_at DESC
+            ORDER BY u.featured DESC, access_count DESC, u.created_at DESC
             LIMIT ${limit} OFFSET ${(page - 1) * limit}
           `;
       
@@ -310,6 +311,7 @@ export async function POST(request: NextRequest) {
       authHeader.replace('Bearer ', '').trim() === process.env.ADMIN_API_TOKEN;
     
     let userId: string | null = null;
+    let canFeature = Boolean(isAdminToken);
     
     if (!isAdminToken) {
       // Try to get user from session
@@ -319,6 +321,7 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
       }
       userId = sessionUser.id;
+      canFeature = sessionUser.isSuperAdmin;
     } else {
       // Admin token - require it
       requireAuth(request);
@@ -338,6 +341,10 @@ export async function POST(request: NextRequest) {
     console.log('Creating universe with data:', JSON.stringify(body, null, 2));
     
     const data = createUniverseSchema.parse(body);
+
+    if (refusesFeaturedChange(canFeature, data.featured, false)) {
+      return NextResponse.json({ error: FEATURED_FORBIDDEN }, { status: 403 });
+    }
     
     // If using session auth (not admin token), ensure user can only create universes for themselves
     if (userId && !isAdminToken && data.ownerId !== userId) {

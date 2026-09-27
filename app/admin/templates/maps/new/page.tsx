@@ -206,9 +206,9 @@ function NewMapPageContent() {
 
   return (
     <div className="space-y-8">
-      <nav className="flex items-center space-x-2 text-sm text-muted-foreground">
+      <nav className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground">
         <Link href="/admin" className="hover:text-foreground">
-          Dashboard
+          Orbit
         </Link>
         <ChevronRight className="h-4 w-4" />
         <Link href="/admin/templates" className="hover:text-foreground">

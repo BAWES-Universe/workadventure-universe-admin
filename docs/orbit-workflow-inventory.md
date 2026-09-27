@@ -10,7 +10,7 @@ routes each page calls.
 | Column | Meaning |
 | --- | --- |
 | **View** | Where the workflow belongs inside the game. **compact view**: fits Orbit's right-hand panel (the game opens Orbit with `position: "right"`), a glance or a single decision. **full-screen view**: dense editors, tables and multi-step forms that need Orbit expanded (`allowFullScreen`). **both**: works in either. |
-| **Mobile path** | How to reach it on a phone. Orbit has one menu for every screen size, the **Orbit menu** (`app/admin/components/mobile-nav.tsx`), grouped as *Personalize*, *Discover* and *Admin*. "Menu → Discover → Worlds" means open the Orbit menu, then the Discover group, then Worlds. |
+| **Mobile path** | How to reach it on a phone. **Home**, **Space** and **You** are on the bottom bar (`app/admin/components/shell/bottom-nav.tsx`). Everything else is in the **Orbit menu**, the button at the top-left beside the game's own close and maximise buttons (`app/admin/components/shell/menu-sheet.tsx`), grouped as *Tools*, *Personalize*, *Discover* and *Admin*; in the full-screen view on a desktop the same groups are the sidebar. "Menu → Discover → Worlds" means open the Orbit menu, then the Discover group, then Worlds. |
 | **Authorisation test** | The test file that proves who may do it, or **none — needs one**. |
 | **Status** | **preserve**, **repair** (unsafe today; fix, do not carry forward), or **fixed in 0A (#208)** (tightened by `fix/orbit-authorisation-hardening`, covered by `__tests__/api/authorisation-scope.test.ts` on that branch). |
 
@@ -42,8 +42,8 @@ routes each page calls.
 
 | Entry | Route | Shown to | View | Mobile path | Authorisation test | Status |
 | --- | --- | --- | --- | --- | --- | --- |
-| Dashboard | `/admin` | everyone signed in | compact view | Menu → Dashboard | none — needs one | preserve |
-| Room Templates | `/admin/templates` | everyone signed in (management tabs super admin) | full-screen view | Menu → Room Templates | none — needs one | preserve |
+| Home | `/admin` | everyone signed in | compact view | Home (bottom bar) | none — needs one | preserve |
+| Room Templates | `/admin/templates` | everyone signed in (management tabs super admin) | full-screen view | Menu → Tools → Room Templates | none — needs one | preserve |
 | My Universes | `/admin/universes` | everyone signed in | both | Menu → Personalize → My Universes | `__tests__/api/admin/universes.test.ts` (list: admin token, 401) | preserve |
 | My Stars | `/admin/stars` | everyone signed in | compact view | Menu → Personalize → My Stars | none — needs one | preserve |
 | My Memberships | `/admin/memberships` | `requiresAuth` | compact view | Menu → Personalize → My Memberships | none — needs one | preserve |
@@ -61,14 +61,14 @@ routes each page calls.
 
 The menu only hides entries; every API route enforces its own check.
 
-## Dashboard (`/admin`)
+## Home (`/admin`)
 
 | Action | API | Who | View | Mobile path | Authorisation test | Status |
 | --- | --- | --- | --- | --- | --- | --- |
-| Current location card | `/api/admin/rooms/from-play-uri`, `/api/admin/rooms/previous`, `/api/admin/analytics/rooms/:id` | signed in | compact view | Menu → Dashboard | analytics: `authorisation-scope.test.ts` (#208); the room lookups: none — needs one | analytics fixed in 0A (#208); rest preserve |
-| Recently visited | `/api/admin/rooms/recent` | signed in (own visits) | compact view | Menu → Dashboard | none — needs one | preserve |
-| Pending invitations alert | `/api/memberships/invitations` | signed in (own) | compact view | Menu → Dashboard | none — needs one | preserve |
-| Stats + quick create links | bootstrap | signed in | compact view | Menu → Dashboard | none — needs one | preserve |
+| Current location card | `/api/admin/rooms/from-play-uri`, `/api/admin/rooms/previous`, `/api/admin/analytics/rooms/:id` | signed in | compact view | Home (bottom bar) | analytics: `authorisation-scope.test.ts` (#208); the room lookups: none — needs one | analytics fixed in 0A (#208); rest preserve |
+| Recently visited | `/api/admin/rooms/recent` | signed in (own visits) | compact view | Home (bottom bar) | none — needs one | preserve |
+| Pending invitations alert | `/api/memberships/invitations` | signed in (own) | compact view | Home (bottom bar) | none — needs one | preserve |
+| Stats + quick create links | bootstrap | signed in | compact view | Home (bottom bar) | none — needs one | preserve |
 
 ## Universes, worlds, rooms
 

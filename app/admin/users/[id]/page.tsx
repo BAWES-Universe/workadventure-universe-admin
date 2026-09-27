@@ -1,30 +1,23 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { useRouter, useParams } from 'next/navigation';
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
+import { useParams, useRouter } from 'next/navigation';
+import { ChevronLeft, ChevronRight, UserPlus } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { timeAgo } from '@/lib/time-ago';
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table';
-import { Badge } from '@/components/ui/badge';
-import { ChevronRight, AlertCircle, Loader2, Globe, Users, Star, Ban, UserPlus, Activity, Home, Calendar, MapPin, ChevronLeft, ExternalLink, User, FileText } from 'lucide-react';
-import { cn } from '@/lib/utils';
-import {
-  Empty,
-  EmptyContent,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyMedia,
-  EmptyTitle,
-} from '@/components/ui/empty';
+  EmptyCard,
+  EntityRow,
+  LoadingRows,
+  RolePills,
+  SectionHeader,
+  StatLine,
+  StatusPill,
+  VisitLine,
+  count,
+} from '../../components/ds';
+import { ProfileFrame, ProfileLinks, WokaAvatar } from '../../components/profile-card';
 import InviteToWorldDialog from '../../components/invite-to-world-dialog';
 
 interface WorldMembership {
@@ -66,6 +59,7 @@ interface Universe {
   };
 }
 
+/** Their profile: a few words and links (stored as their visit card). */
 interface VisitCard {
   id: string;
   bio: string | null;
@@ -86,6 +80,8 @@ interface User {
   createdAt: string;
   updatedAt: string;
   visitCard: VisitCard | null;
+  /** Their Woka's layers, bottom first. */
+  woka?: string[];
   ownedUniverses: Universe[];
   worldMemberships: WorldMembership[];
   _count: {
@@ -97,55 +93,108 @@ interface User {
   };
 }
 
+interface Visit {
+  accessedAt: string;
+}
+
+interface Analytics {
+  totalAccesses: number;
+  lastVisitedByUser: Visit | null;
+  lastVisitedOverall: Visit | null;
+}
+
+interface Access {
+  id: string;
+  accessedAt: string;
+  ipAddress?: string | null;
+  isAuthenticated: boolean;
+  hasMembership: boolean;
+  membershipTags: string[];
+  universe: { id: string; name: string };
+  world: { id: string; name: string };
+  room: { id: string; name: string };
+}
+
+interface AccessHistory {
+  total: number;
+  page: number;
+  limit: number;
+  totalPages: number;
+  firstAccess: string | null;
+  lastAccess: string | null;
+  accesses: Access[];
+}
+
+interface StarredRoom {
+  id: string;
+  name: string;
+  favoritedAt: string;
+  starCount: number;
+  world: { name: string; universe: { name: string } };
+}
+
+interface CurrentUser {
+  id: string;
+  isSuperAdmin?: boolean;
+}
+
+/** When you and anyone were last somewhere, for VisitLine. */
+function visits(analytics?: Analytics) {
+  const you = analytics?.lastVisitedByUser?.accessedAt ?? null;
+  const latest = analytics?.lastVisitedOverall?.accessedAt ?? null;
+  return { you, latest, youWereLast: Boolean(you && latest && you === latest) };
+}
+
+const linkClass = 'underline-offset-2 hover:underline [overflow-wrap:anywhere]';
+
 export default function UserDetailPage() {
   const router = useRouter();
   const params = useParams();
   const id = params.id as string;
-  
+
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [accessHistory, setAccessHistory] = useState<any>(null);
+  const [accessHistory, setAccessHistory] = useState<AccessHistory | null>(null);
   const [accessHistoryLoading, setAccessHistoryLoading] = useState(true);
   const [accessHistoryPage, setAccessHistoryPage] = useState(1);
-  // Access history is only available to the user themselves and super admins.
+  // Access history is only available to the person themselves and super admins.
   const [accessHistoryHidden, setAccessHistoryHidden] = useState(false);
-  const [currentUser, setCurrentUser] = useState<any>(null);
+  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [isSuperAdmin, setIsSuperAdmin] = useState(false);
   const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
-  const [availableWorlds, setAvailableWorlds] = useState<any[]>([]);
-  const [worldsLoading, setWorldsLoading] = useState(false);
-  const [universeAnalytics, setUniverseAnalytics] = useState<Record<string, { totalAccesses: number; lastVisitedByUser: any; lastVisitedOverall: any }>>({});
-  const [worldAnalytics, setWorldAnalytics] = useState<Record<string, { totalAccesses: number; lastVisitedByUser: any; lastVisitedOverall: any }>>({});
-  const [activeTab, setActiveTab] = useState<'details' | 'owned-universes' | 'world-memberships' | 'starred-rooms' | 'access-history'>('details');
-  const [starredRooms, setStarredRooms] = useState<any[]>([]);
+  const [availableWorlds, setAvailableWorlds] = useState<unknown[]>([]);
+  const [, setWorldsLoading] = useState(false);
+  const [universeAnalytics, setUniverseAnalytics] = useState<Record<string, Analytics>>({});
+  const [worldAnalytics, setWorldAnalytics] = useState<Record<string, Analytics>>({});
+  const [starredRooms, setStarredRooms] = useState<StarredRoom[]>([]);
   const [starredRoomsLoading, setStarredRoomsLoading] = useState(false);
 
   useEffect(() => {
     checkAuth();
     fetchUser();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
   useEffect(() => {
     if (user) {
-      // Fetch access history on initial load to show total and last access (page 1)
-      fetchAccessHistory(1);
-      // Fetch starred rooms on initial load to show count
       fetchStarredRooms();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user, id]);
 
   useEffect(() => {
-    if (activeTab === 'access-history' && user) {
-      // Refetch when switching to access history tab or changing page
+    if (user) {
       fetchAccessHistory(accessHistoryPage);
     }
-  }, [accessHistoryPage, activeTab, user]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accessHistoryPage, user]);
 
   useEffect(() => {
     if (currentUser && user && currentUser.id !== user.id) {
       fetchAvailableWorlds();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentUser, user]);
 
   useEffect(() => {
@@ -153,13 +202,8 @@ export default function UserDetailPage() {
       fetchUniverseAnalytics();
       fetchWorldAnalytics();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
-
-  useEffect(() => {
-    if (activeTab === 'starred-rooms' && user) {
-      fetchStarredRooms();
-    }
-  }, [activeTab, user]);
 
   async function checkAuth() {
     try {
@@ -172,7 +216,7 @@ export default function UserDetailPage() {
       const data = await response.json();
       setCurrentUser(data.user);
       setIsSuperAdmin(data.user?.isSuperAdmin || false);
-    } catch (err) {
+    } catch {
       router.push('/admin/login');
     }
   }
@@ -209,7 +253,6 @@ export default function UserDetailPage() {
       if (response.status === 403) {
         setAccessHistoryHidden(true);
         setAccessHistory(null);
-        setActiveTab((tab) => (tab === 'access-history' ? 'details' : tab));
         return;
       }
 
@@ -355,807 +398,309 @@ export default function UserDetailPage() {
     }
   }
 
-  function formatTimeAgo(date: Date): string {
-    const now = new Date();
-    const diffMs = now.getTime() - date.getTime();
-    const diffSecs = Math.floor(diffMs / 1000);
-    const diffMins = Math.floor(diffSecs / 60);
-    const diffHours = Math.floor(diffMins / 60);
-    const diffDays = Math.floor(diffHours / 24);
-    const diffWeeks = Math.floor(diffDays / 7);
-    const diffMonths = Math.floor(diffDays / 30);
-    const diffYears = Math.floor(diffDays / 365);
-
-    if (diffSecs < 60) return 'just now';
-    if (diffMins < 60) return `${diffMins} ${diffMins === 1 ? 'minute' : 'minutes'} ago`;
-    if (diffHours < 24) return `${diffHours} ${diffHours === 1 ? 'hour' : 'hours'} ago`;
-    if (diffDays < 7) return `${diffDays} ${diffDays === 1 ? 'day' : 'days'} ago`;
-    if (diffWeeks < 4) return `${diffWeeks} ${diffWeeks === 1 ? 'week' : 'weeks'} ago`;
-    if (diffMonths < 12) return `${diffMonths} ${diffMonths === 1 ? 'month' : 'months'} ago`;
-    return `${diffYears} ${diffYears === 1 ? 'year' : 'years'} ago`;
-  }
-
   if (loading) {
-    return (
-      <div className="space-y-8">
-        <div className="flex items-center justify-center py-12">
-          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-        </div>
-      </div>
-    );
+    return <LoadingRows label="this person" rows={4} />;
   }
 
   if (!user) {
     return (
-      <div className="space-y-8">
-        <Alert variant="destructive">
-          <AlertCircle className="h-4 w-4" />
-          <AlertTitle>Not Found</AlertTitle>
-          <AlertDescription>User not found</AlertDescription>
-        </Alert>
+      <div className="grid min-w-0 gap-4">
+        {error && (
+          <p className="text-sm text-muted-foreground" role="alert">
+            {error}
+          </p>
+        )}
+        <EmptyCard kind="people" title="We couldn’t find this person." text="They may have left, or the link is wrong." href="/admin/users" action="See everyone" />
       </div>
     );
   }
 
-  return (
-    <div className="space-y-8">
-      <nav className="flex items-center space-x-2 text-sm text-muted-foreground">
-        <Link href="/admin" className="hover:text-foreground">
-          Dashboard
-        </Link>
-        <ChevronRight className="h-4 w-4" />
-        <Link href="/admin/users" className="hover:text-foreground">
-          Users
-        </Link>
-        <ChevronRight className="h-4 w-4" />
-        <span className="text-foreground">{user.name || user.email || 'User'}</span>
-      </nav>
+  const name = user.name || user.email || 'Someone';
+  const isSelf = currentUser?.id === user.id;
+  const canInvite = Boolean(currentUser && !isSelf && availableWorlds.length > 0);
+  const showPrivate = isSuperAdmin || isSelf;
+  const bio = user.visitCard?.bio?.trim();
+  const links = user.visitCard?.links ?? [];
 
-      <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
-        <div className="space-y-1">
-          <h1 className="text-4xl font-bold tracking-tight">{user.name || user.email || 'Unknown User'}</h1>
-          {accessHistory && (
-            <p className="text-muted-foreground flex items-center gap-3">
-              <span className="flex items-center gap-1.5 text-sm">
-                <Activity className="h-4 w-4 text-muted-foreground" />
-                <span className="font-medium text-foreground/80">
-                  {accessHistory.total?.toLocaleString() || 0} {accessHistory.total === 1 ? 'access' : 'accesses'}
-                </span>
-              </span>
-              {accessHistory.lastAccess && (
-                <>
-                  <span className="text-muted-foreground">•</span>
-                  <span className="text-sm">
-                    Last: {formatTimeAgo(new Date(accessHistory.lastAccess))}
-                  </span>
-                </>
-              )}
-            </p>
-          )}
-        </div>
-        {currentUser && currentUser.id !== user.id && availableWorlds.length > 0 && (
-          <div className="w-full lg:w-auto">
-            <Button onClick={() => setInviteDialogOpen(true)} className="w-full lg:w-auto">
-              <UserPlus className="mr-2 h-4 w-4" />
-              Invite to World
+  return (
+    <div className="grid min-w-0 gap-7">
+      <ProfileFrame
+        headingId="person-name"
+        layers={user.woka ?? []}
+        name={name}
+        testId="person-card"
+        stats={
+          <StatLine
+            items={[
+              user.ownedUniverses.length ? `Owns ${count(user.ownedUniverses.length, 'universe')}` : null,
+              user.worldMemberships.length ? `Member of ${count(user.worldMemberships.length, 'world')}` : null,
+              user.isGuest && 'Guest',
+            ]}
+          />
+        }
+        action={
+          canInvite ? (
+            <Button onClick={() => setInviteDialogOpen(true)} className="h-10 shrink-0 gap-2 px-4">
+              <UserPlus size={15} aria-hidden="true" />
+              Invite to a world
             </Button>
+          ) : undefined
+        }
+      >
+        {bio || links.length > 0 ? (
+          <div className="grid min-w-0 gap-3">
+            {bio && <p className="whitespace-pre-line text-sm leading-relaxed [overflow-wrap:anywhere]">{bio}</p>}
+            <ProfileLinks links={links} />
           </div>
+        ) : (
+          <p className="text-sm text-muted-foreground">{isSelf ? 'You haven’t written a profile yet.' : `${name} hasn’t written a profile yet.`}</p>
         )}
-      </div>
+      </ProfileFrame>
 
       {error && (
-        <Alert variant="destructive">
-          <AlertCircle className="h-4 w-4" />
-          <AlertTitle>Error</AlertTitle>
-          <AlertDescription>{error}</AlertDescription>
-        </Alert>
+        <p className="text-sm text-muted-foreground" role="alert">
+          {error}
+        </p>
       )}
 
-      {/* Tabs */}
-      <div>
-        <nav className="flex flex-wrap gap-x-4 sm:gap-x-8 gap-y-2">
-          <button
-            onClick={() => setActiveTab('details')}
-            className={`py-3 sm:py-4 px-1 border-b-2 font-medium text-xs sm:text-sm flex items-center gap-1.5 sm:gap-2 transition-colors ${
-              activeTab === 'details'
-                ? 'border-primary text-primary'
-                : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
-            }`}
-          >
-            <FileText className="h-3.5 w-3.5 sm:h-4 sm:w-4 flex-shrink-0" />
-            <span>Details</span>
-          </button>
-          <button
-            onClick={() => setActiveTab('owned-universes')}
-            className={`py-3 sm:py-4 px-1 border-b-2 font-medium text-xs sm:text-sm flex items-center gap-1.5 sm:gap-2 transition-colors ${
-              activeTab === 'owned-universes'
-                ? 'border-primary text-primary'
-                : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
-            }`}
-          >
-            <Globe className="h-3.5 w-3.5 sm:h-4 sm:w-4 flex-shrink-0" />
-            <span>Universes</span>
-            {user && (
-              <Badge variant="secondary" className="ml-0.5 text-xs font-normal">
-                {user.ownedUniverses.length}
-              </Badge>
-            )}
-          </button>
-          <button
-            onClick={() => setActiveTab('world-memberships')}
-            className={`py-3 sm:py-4 px-1 border-b-2 font-medium text-xs sm:text-sm flex items-center gap-1.5 sm:gap-2 transition-colors ${
-              activeTab === 'world-memberships'
-                ? 'border-primary text-primary'
-                : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
-            }`}
-          >
-            <Users className="h-3.5 w-3.5 sm:h-4 sm:w-4 flex-shrink-0" />
-            <span>Memberships</span>
-            {user && (
-              <Badge variant="secondary" className="ml-0.5 text-xs font-normal">
-                {user.worldMemberships.length}
-              </Badge>
-            )}
-          </button>
-          <button
-            onClick={() => setActiveTab('starred-rooms')}
-            className={`py-3 sm:py-4 px-1 border-b-2 font-medium text-xs sm:text-sm flex items-center gap-1.5 sm:gap-2 transition-colors ${
-              activeTab === 'starred-rooms'
-                ? 'border-primary text-primary'
-                : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
-            }`}
-          >
-            <Star className="h-3.5 w-3.5 sm:h-4 sm:w-4 flex-shrink-0" />
-            <span>Stars</span>
-            {!starredRoomsLoading && (
-              <Badge variant="secondary" className="ml-0.5 text-xs font-normal">
-                {starredRooms.length}
-              </Badge>
-            )}
-          </button>
-          {!accessHistoryHidden && (
-          <button
-            onClick={() => setActiveTab('access-history')}
-            className={`py-3 sm:py-4 px-1 border-b-2 font-medium text-xs sm:text-sm flex items-center gap-1.5 sm:gap-2 transition-colors ${
-              activeTab === 'access-history'
-                ? 'border-primary text-primary'
-                : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
-            }`}
-          >
-            <Activity className="h-3.5 w-3.5 sm:h-4 sm:w-4 flex-shrink-0" />
-            <span>Access</span>
-            {accessHistory && accessHistory.total !== undefined && (
-              <Badge variant="secondary" className="ml-0.5 text-xs font-normal">
-                {accessHistory.total.toLocaleString()}
-              </Badge>
-            )}
-          </button>
-          )}
-        </nav>
-      </div>
-
-      {/* Tab Content */}
-      {activeTab === 'details' && (
-        <>
-          <section className="space-y-6">
-            {/* Visit Card */}
-            {user.visitCard && (
-              <div className="space-y-4">
-                <h2 className="text-xl font-semibold tracking-tight">Visit Card</h2>
-                {user.visitCard.bio && (
-                  <div className="space-y-2">
-                    <p className="text-sm font-medium text-muted-foreground">Bio</p>
-                    <p className="text-sm whitespace-pre-line">{user.visitCard.bio}</p>
-                  </div>
-                )}
-                {user.visitCard.links && user.visitCard.links.length > 0 && (
-                  <div className="space-y-2">
-                    <p className="text-sm font-medium text-muted-foreground">Links</p>
-                    <div className="flex flex-wrap gap-2">
-                      {user.visitCard.links.map((link, index) => (
-                        <a
-                          key={index}
-                          href={link.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm rounded-md border border-border/70 bg-background hover:bg-accent hover:text-accent-foreground transition-colors"
-                        >
-                          <span>{link.label}</span>
-                          <ExternalLink className="h-3 w-3" />
-                        </a>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                {!user.visitCard.bio && (!user.visitCard.links || user.visitCard.links.length === 0) && (
-                  <p className="text-sm text-muted-foreground">No visit card information available</p>
-                )}
-              </div>
-            )}
-
-            {/* User Information */}
-            <div className="space-y-4">
-              <h2 className="text-xl font-semibold tracking-tight">User Information</h2>
-              <dl className="grid grid-cols-1 gap-6 sm:grid-cols-2">
-                <div>
-                  <dt className="text-sm font-medium text-muted-foreground">Email</dt>
-                  <dd className="mt-1 text-sm">
-                    {user.email ? (
-                      <a href={`mailto:${user.email}`} className="text-primary hover:underline">
-                        {user.email}
-                      </a>
-                    ) : (
-                      'N/A'
-                    )}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-sm font-medium text-muted-foreground">Matrix Chat ID</dt>
-                  <dd className="mt-1 text-sm font-mono text-xs">{user.matrixChatId || 'N/A'}</dd>
-                </div>
-                {isSuperAdmin && (
-                  <div className="sm:col-span-2">
-                    <dt className="text-sm font-medium text-muted-foreground">Last IP Address</dt>
-                    <dd className="mt-1 text-sm font-mono text-xs">{user.lastIpAddress || 'N/A'}</dd>
-                  </div>
-                )}
-                <div>
-                  <dt className="text-sm font-medium text-muted-foreground">Created</dt>
-                  <dd className="mt-1 text-sm">{formatTimeAgo(new Date(user.createdAt))}</dd>
-                </div>
-                <div>
-                  <dt className="text-sm font-medium text-muted-foreground">Last Updated</dt>
-                  <dd className="mt-1 text-sm">{formatTimeAgo(new Date(user.updatedAt))}</dd>
-                </div>
-              </dl>
-            </div>
-          </section>
-        </>
-      )}
-
-      {activeTab === 'owned-universes' && (
-        <>
-          {user.ownedUniverses.length > 0 ? (
-            <section className="space-y-4">
-              <div className="space-y-1">
-                <h2 className="text-xl font-semibold tracking-tight">Owned Universes</h2>
-                <p className="text-sm text-muted-foreground">
-                  Universes owned by this user
-                </p>
-              </div>
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+      <section className="grid min-w-0 gap-2" aria-labelledby="person-universes">
+        <SectionHeader id="person-universes" title="Universes" count={user.ownedUniverses.length} />
+        {user.ownedUniverses.length === 0 ? (
+          <EmptyCard kind="universe" title="No universes yet." text={isSelf ? 'You don’t own a universe yet.' : `${name} doesn’t own a universe yet.`} />
+        ) : (
+          <div className="grid min-w-0 gap-0.5">
             {user.ownedUniverses.map((universe) => {
+              const analytics = universeAnalytics[universe.id];
+              const stars = universe._count?.favorites ?? 0;
               return (
-                <Link
+                <EntityRow
                   key={universe.id}
                   href={`/admin/universes/${universe.id}`}
-                  className="block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-                >
-                  <Card
-                    className={cn(
-                      'group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
-                      'hover:-translate-y-1 hover:shadow-lg',
-                    )}
-                  >
-                    <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-blue-500/10 via-transparent to-indigo-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
-
-                    <div className="relative flex h-full flex-col p-5">
-                      <div className="mb-4 flex items-start gap-3">
-                        {universe.thumbnailUrl ? (
-                          <div className="relative h-16 w-16 flex-shrink-0 overflow-hidden rounded-lg border bg-muted">
-                            {/* eslint-disable-next-line @next/next/no-img-element */}
-                            <img
-                              src={universe.thumbnailUrl}
-                              alt={universe.name}
-                              className="h-full w-full object-cover"
-                            />
-                          </div>
-                        ) : (
-                          <div className="flex h-16 w-16 flex-shrink-0 items-center justify-center rounded-lg border bg-muted text-lg font-semibold">
-                            {universe.name?.charAt(0)?.toUpperCase() || '?'}
-                          </div>
-                        )}
-
-                        <div className="min-w-0 flex-1 space-y-1">
-                          <div className="flex items-start justify-between gap-2">
-                            <h3 className="truncate text-base font-semibold leading-tight">
-                              {universe.name}
-                            </h3>
-                          </div>
-                          <p className="truncate text-xs font-mono text-muted-foreground">
-                            {universe.slug}
-                          </p>
-                        </div>
-                      </div>
-
-                      {universe.description && (
-                        <p className="mb-3 line-clamp-2 text-sm text-muted-foreground">
-                          {universe.description}
-                        </p>
-                      )}
-
-                      <div className="mt-auto flex items-center justify-between pt-3 text-xs text-muted-foreground">
-                        <div className="flex flex-col gap-1.5 min-h-[3rem]">
-                          {universeAnalytics[universe.id] ? (
-                            <>
-                              <div className="flex items-center gap-1.5">
-                                <Activity className="h-3.5 w-3.5 text-muted-foreground" />
-                                <span className="font-medium text-foreground/80">
-                                  {universeAnalytics[universe.id].totalAccesses.toLocaleString()} accesses
-                                </span>
-                              </div>
-                              <div className="flex items-center gap-1.5">
-                                <Globe className="h-3.5 w-3.5 text-muted-foreground" />
-                                <span className="text-muted-foreground">
-                                  {(universe._count?.worlds ?? 0)} {(universe._count?.worlds ?? 0) === 1 ? 'world' : 'worlds'} · {(universe._count?.rooms ?? 0)} {(universe._count?.rooms ?? 0) === 1 ? 'room' : 'rooms'} · {(universe._count?.members ?? 0)}{' '}
-                                  {(universe._count?.members ?? 0) === 1 ? 'member' : 'members'}
-                                </span>
-                              </div>
-                              {(universeAnalytics[universe.id].lastVisitedByUser || universeAnalytics[universe.id].lastVisitedOverall) && (
-                                <div className="flex flex-col gap-0.5 mt-0.5">
-                                  {universeAnalytics[universe.id].lastVisitedByUser && (
-                                    <div className="text-[11px]">
-                                      <span className="text-muted-foreground/70">Last visited by you: </span>
-                                      <span className="font-medium text-foreground/80">
-                                        {formatTimeAgo(new Date(universeAnalytics[universe.id].lastVisitedByUser.accessedAt))}
-                                      </span>
-                                    </div>
-                                  )}
-                                  {universeAnalytics[universe.id].lastVisitedOverall && (
-                                    <div className="text-[11px]">
-                                      {universeAnalytics[universe.id].lastVisitedByUser && 
-                                       universeAnalytics[universe.id].lastVisitedByUser.accessedAt === universeAnalytics[universe.id].lastVisitedOverall.accessedAt ? (
-                                        <span className="text-muted-foreground/70 italic">
-                                          You were the last visitor
-                                        </span>
-                                      ) : (
-                                        <>
-                                          <span className="text-muted-foreground/70">Most recent visitor: </span>
-                                          <span className="font-medium text-foreground/80">
-                                            {formatTimeAgo(new Date(universeAnalytics[universe.id].lastVisitedOverall.accessedAt))}
-                                          </span>
-                                        </>
-                                      )}
-                                    </div>
-                                  )}
-                                </div>
-                              )}
-                            </>
-                          ) : (
-                            <div className="flex items-center gap-1.5">
-                              <Globe className="h-3.5 w-3.5 text-muted-foreground" />
-                              <span className="text-muted-foreground">
-                                {(universe._count?.worlds ?? 0)} {(universe._count?.worlds ?? 0) === 1 ? 'world' : 'worlds'} · {(universe._count?.rooms ?? 0)} {(universe._count?.rooms ?? 0) === 1 ? 'room' : 'rooms'} · {(universe._count?.members ?? 0)}{' '}
-                                {(universe._count?.members ?? 0) === 1 ? 'member' : 'members'}
-                              </span>
-                            </div>
-                          )}
-                        </div>
-                        <div className="flex items-center gap-1 text-primary self-end">
-                          <Star className="h-4 w-4" aria-hidden="true" />
-                          <span className="text-xs font-medium">{universe._count?.favorites ?? 0}</span>
-                        </div>
-                      </div>
-                    </div>
-                  </Card>
-                </Link>
+                  kind="universe"
+                  universeId={universe.id}
+                  title={universe.name}
+                  context={
+                    <StatLine
+                      items={[
+                        count(universe._count?.worlds ?? 0, 'world'),
+                        count(universe._count?.rooms ?? 0, 'room'),
+                        count(universe._count?.members ?? 0, 'member'),
+                        analytics && count(analytics.totalAccesses, 'access', 'accesses'),
+                      ]}
+                    />
+                  }
+                  meta={<VisitLine {...visits(analytics)} />}
+                  aside={
+                    <>
+                      {stars > 0 && <span>★ {stars}</span>}
+                      <StatusPill status={universe.isPublic ? 'public' : 'private'} />
+                    </>
+                  }
+                />
               );
             })}
-            </div>
-            </section>
-          ) : (
-            <section className="space-y-4">
-              <div className="space-y-1">
-                <h2 className="text-xl font-semibold tracking-tight">Owned Universes</h2>
-                <p className="text-sm text-muted-foreground">
-                  Universes owned by this user
-                </p>
-              </div>
-              <div className="rounded-lg border border-border/70 bg-gradient-to-br from-background via-background to-background py-12 text-center text-sm text-muted-foreground">
-                This user doesn't own any universes.
-              </div>
-            </section>
-          )}
-        </>
-      )}
+          </div>
+        )}
+      </section>
 
-      {activeTab === 'world-memberships' && (
-        <>
-          {user.worldMemberships.length > 0 ? (
-            <section className="space-y-4">
-              <div className="space-y-1">
-                <h2 className="text-xl font-semibold tracking-tight">World Memberships</h2>
-                <p className="text-sm text-muted-foreground">
-                  Worlds this user is a member of
-                </p>
-              </div>
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+      <section className="grid min-w-0 gap-2" aria-labelledby="person-memberships">
+        <SectionHeader id="person-memberships" title="Memberships" count={user.worldMemberships.length} />
+        {user.worldMemberships.length === 0 ? (
+          <EmptyCard kind="world" title="No memberships yet." text={isSelf ? 'You’re not a member of any world yet.' : `${name} isn’t a member of any world yet.`} />
+        ) : (
+          <div className="grid min-w-0 gap-0.5">
             {user.worldMemberships.map((membership) => {
-              const roomsCount = membership.world._count?.rooms ?? 0;
-              const membersCount = membership.world._count?.members ?? 0;
-              const joinedDate = new Date(membership.joinedAt).toLocaleDateString();
+              const analytics = worldAnalytics[membership.world.id];
+              const stars = membership.world._count?.favorites ?? 0;
               return (
-                <Link
+                <EntityRow
                   key={membership.id}
                   href={`/admin/worlds/${membership.world.id}`}
-                  className="block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-                >
-                  <Card
-                    className={cn(
-                      'group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
-                      'hover:-translate-y-1 hover:shadow-lg',
-                    )}
-                  >
-                    <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-blue-500/10 via-transparent to-purple-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
-
-                    <div className="relative flex h-full flex-col p-5">
-                      <div className="mb-4 flex items-start gap-3">
-                        {membership.world.thumbnailUrl ? (
-                          <div className="relative h-16 w-16 flex-shrink-0 overflow-hidden rounded-lg border bg-muted">
-                            {/* eslint-disable-next-line @next/next/no-img-element */}
-                            <img
-                              src={membership.world.thumbnailUrl}
-                              alt={membership.world.name}
-                              className="h-full w-full object-cover"
-                            />
-                          </div>
-                        ) : (
-                          <div className="flex h-16 w-16 flex-shrink-0 items-center justify-center rounded-lg border bg-muted text-lg font-semibold">
-                            {membership.world.name?.charAt(0)?.toUpperCase() || '?'}
-                          </div>
-                        )}
-
-                        <div className="min-w-0 flex-1 space-y-1">
-                          <div className="flex items-start justify-between gap-2">
-                            <h3 className="truncate text-base font-semibold leading-tight">
-                              {membership.world.name}
-                            </h3>
-                          </div>
-                          <p className="truncate text-xs text-muted-foreground">
-                            {membership.world.universe.name} · {membership.world.slug}
-                          </p>
-
-                          <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
-                            {membership.tags.length > 0
-                              ? membership.tags.map((tag) => (
-                                  <Badge
-                                    key={tag}
-                                    variant={
-                                      tag === 'admin'
-                                        ? 'destructive'
-                                        : tag === 'editor'
-                                          ? 'default'
-                                          : 'secondary'
-                                    }
-                                    className="capitalize"
-                                  >
-                                    {tag}
-                                  </Badge>
-                                ))
-                              : (
-                                  <Badge variant="secondary">Member</Badge>
-                                )}
-                          </div>
-                        </div>
-                      </div>
-
-                      {membership.world.description && (
-                        <p className="mb-3 line-clamp-2 text-sm text-muted-foreground">
-                          {membership.world.description}
-                        </p>
+                  kind="world"
+                  title={membership.world.name}
+                  context={
+                    <StatLine
+                      items={[
+                        membership.world.universe.name,
+                        count(membership.world._count?.rooms ?? 0, 'room'),
+                        count(membership.world._count?.members ?? 0, 'member'),
+                        analytics && count(analytics.totalAccesses, 'access', 'accesses'),
+                      ]}
+                    />
+                  }
+                  meta={
+                    <>
+                      <RolePills roles={membership.tags.length ? membership.tags : ['member']} />
+                      {analytics ? (
+                        <VisitLine {...visits(analytics)} />
+                      ) : (
+                        <StatLine items={[`Joined ${new Date(membership.joinedAt).toLocaleDateString()}`]} />
                       )}
-
-                      <div className="mt-auto flex items-center justify-between pt-3 text-xs text-muted-foreground">
-                        <div className="flex flex-col gap-1.5 min-h-[3rem]">
-                          {worldAnalytics[membership.world.id] ? (
-                            <>
-                              <div className="flex items-center gap-1.5">
-                                <Activity className="h-3.5 w-3.5 text-muted-foreground" />
-                                <span className="font-medium text-foreground/80">
-                                  {worldAnalytics[membership.world.id].totalAccesses.toLocaleString()} accesses
-                                </span>
-                              </div>
-                              <div className="flex items-center gap-1.5">
-                                <Globe className="h-3.5 w-3.5 text-muted-foreground" />
-                                <span className="text-muted-foreground">
-                                  {roomsCount} {roomsCount === 1 ? 'room' : 'rooms'} · {membersCount}{' '}
-                                  {membersCount === 1 ? 'member' : 'members'}
-                                </span>
-                              </div>
-                              {(worldAnalytics[membership.world.id].lastVisitedByUser || worldAnalytics[membership.world.id].lastVisitedOverall) && (
-                                <div className="flex flex-col gap-0.5 mt-0.5">
-                                  {worldAnalytics[membership.world.id].lastVisitedByUser && (
-                                    <div className="text-[11px]">
-                                      <span className="text-muted-foreground/70">Last visited by you: </span>
-                                      <span className="font-medium text-foreground/80">
-                                        {formatTimeAgo(new Date(worldAnalytics[membership.world.id].lastVisitedByUser.accessedAt))}
-                                      </span>
-                                    </div>
-                                  )}
-                                  {worldAnalytics[membership.world.id].lastVisitedOverall && (
-                                    <div className="text-[11px]">
-                                      {worldAnalytics[membership.world.id].lastVisitedByUser && 
-                                       worldAnalytics[membership.world.id].lastVisitedByUser.accessedAt === worldAnalytics[membership.world.id].lastVisitedOverall.accessedAt ? (
-                                        <span className="text-muted-foreground/70 italic">
-                                          You were the last visitor
-                                        </span>
-                                      ) : (
-                                        <>
-                                          <span className="text-muted-foreground/70">Most recent visitor: </span>
-                                          <span className="font-medium text-foreground/80">
-                                            {formatTimeAgo(new Date(worldAnalytics[membership.world.id].lastVisitedOverall.accessedAt))}
-                                          </span>
-                                        </>
-                                      )}
-                                    </div>
-                                  )}
-                                </div>
-                              )}
-                            </>
-                          ) : (
-                            <>
-                              <div className="flex items-center gap-1.5">
-                                <Home className="h-3.5 w-3.5 text-muted-foreground" />
-                                <span className="font-medium text-foreground/80">
-                                  {roomsCount} {roomsCount === 1 ? 'room' : 'rooms'} · {membersCount}{' '}
-                                  {membersCount === 1 ? 'member' : 'members'}
-                                </span>
-                              </div>
-                              <div className="flex items-center gap-1.5">
-                                <Calendar className="h-3.5 w-3.5 text-muted-foreground" />
-                                <span className="text-muted-foreground">
-                                  Joined {joinedDate}
-                                </span>
-                              </div>
-                            </>
-                          )}
-                        </div>
-                        <div className="flex items-center gap-1 text-primary self-end">
-                          <Star className="h-4 w-4" aria-hidden="true" />
-                          <span className="text-xs font-medium">{membership.world._count?.favorites ?? 0}</span>
-                        </div>
-                      </div>
-                    </div>
-                  </Card>
-                </Link>
+                    </>
+                  }
+                  aside={stars > 0 ? `★ ${stars}` : undefined}
+                />
               );
             })}
-            </div>
-            </section>
-          ) : (
-            <section className="space-y-4">
-              <div className="space-y-1">
-                <h2 className="text-xl font-semibold tracking-tight">World Memberships</h2>
-                <p className="text-sm text-muted-foreground">
-                  Worlds this user is a member of
-                </p>
-              </div>
-              <div className="rounded-lg border border-border/70 bg-gradient-to-br from-background via-background to-background py-12 text-center text-sm text-muted-foreground">
-                This user doesn't have any world memberships.
-              </div>
-            </section>
-          )}
-        </>
-      )}
+          </div>
+        )}
+      </section>
 
-      {activeTab === 'starred-rooms' && (
-        <>
-          {starredRoomsLoading ? (
-            <div className="flex items-center justify-center py-12">
-              <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-            </div>
-          ) : starredRooms.length > 0 ? (
-            <section className="space-y-4">
-              <div className="space-y-1">
-                <h2 className="text-xl font-semibold tracking-tight">Starred Rooms</h2>
-                <p className="text-sm text-muted-foreground">
-                  Rooms this user has favorited
-                </p>
-              </div>
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-                {starredRooms.map((room: any) => (
-                  <Link
-                    key={room.id}
-                    href={`/admin/rooms/${room.id}`}
-                    className="block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-                  >
-                    <Card
-                      className={cn(
-                        'group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
-                        'hover:-translate-y-1 hover:shadow-lg',
-                      )}
-                    >
-                      <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-emerald-500/10 via-transparent to-sky-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
-                      <div className="relative flex h-full flex-col p-5">
-                        <div className="mb-3 flex items-start gap-3">
-                          <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full border bg-muted">
-                            <MapPin className="h-5 w-5 text-muted-foreground" />
-                          </div>
-                          <div className="min-w-0 flex-1 space-y-1">
-                            <h3 className="truncate text-base font-semibold leading-tight">
-                              {room.name}
-                            </h3>
-                            <p className="truncate text-xs text-muted-foreground">
-                              {room.world.universe.name} · {room.world.name}
-                            </p>
-                          </div>
-                        </div>
-                        {room.description && (
-                          <p className="mb-3 line-clamp-2 text-sm text-muted-foreground">
-                            {room.description}
-                          </p>
-                        )}
-                        <div className="mt-auto flex items-center justify-between pt-3 text-xs text-muted-foreground">
-                          <div className="flex items-center gap-1.5">
-                            <Calendar className="h-3.5 w-3.5 text-muted-foreground" />
-                            <span className="text-muted-foreground">
-                              Starred {new Date(room.favoritedAt).toLocaleDateString()}
-                            </span>
-                          </div>
-                          <div className="flex items-center gap-1 text-primary self-end">
-                            <Star className="h-4 w-4 fill-yellow-400 text-yellow-400" aria-hidden="true" />
-                            <span className="text-xs font-medium">{room.starCount}</span>
-                          </div>
-                        </div>
-                      </div>
-                    </Card>
-                  </Link>
-                ))}
-              </div>
-            </section>
-          ) : (
-            <section className="space-y-4">
-              <div className="space-y-1">
-                <h2 className="text-xl font-semibold tracking-tight">Starred Rooms</h2>
-                <p className="text-sm text-muted-foreground">
-                  Rooms this user has favorited
-                </p>
-              </div>
-              <div className="rounded-lg border border-border/70 bg-gradient-to-br from-background via-background to-background py-12 text-center text-sm text-muted-foreground">
-                This user hasn't starred any rooms.
-              </div>
-            </section>
-          )}
-        </>
-      )}
+      <section className="grid min-w-0 gap-2" aria-labelledby="person-stars">
+        <SectionHeader id="person-stars" title="Stars" count={starredRooms.length} />
+        {starredRoomsLoading && starredRooms.length === 0 ? (
+          <LoadingRows label="starred rooms" />
+        ) : starredRooms.length === 0 ? (
+          <EmptyCard kind="star" title="No stars yet." text={isSelf ? 'You haven’t starred a room yet.' : `${name} hasn’t starred a room yet.`} />
+        ) : (
+          <div className="grid min-w-0 gap-0.5">
+            {starredRooms.map((room) => (
+              <EntityRow
+                key={room.id}
+                href={`/admin/rooms/${room.id}`}
+                kind="star"
+                title={room.name}
+                context={
+                  <StatLine
+                    items={[`${room.world.universe.name} › ${room.world.name}`, room.favoritedAt && !Number.isNaN(Date.parse(room.favoritedAt)) && `starred ${timeAgo(new Date(room.favoritedAt))}`]}
+                  />
+                }
+                aside={room.starCount > 0 ? `★ ${room.starCount}` : undefined}
+              />
+            ))}
+          </div>
+        )}
+      </section>
 
-      {activeTab === 'access-history' && !accessHistoryHidden && (
-        <>
-          {accessHistoryLoading ? (
-            <div className="flex items-center justify-center py-12">
-              <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-            </div>
-          ) : accessHistory && accessHistory.accesses.length > 0 ? (
-            <div className="space-y-6">
-              <div className="space-y-1">
-                <h2 className="text-xl font-semibold tracking-tight">Access History</h2>
-                {accessHistory && (
-                  <p className="text-sm text-muted-foreground">
-                    {accessHistory.total} total accesses
-                    {accessHistory.firstAccess && (
-                      <> • First: {new Date(accessHistory.firstAccess).toLocaleDateString()}</>
-                    )}
-                    {accessHistory.lastAccess && (
-                      <> • Last: {new Date(accessHistory.lastAccess).toLocaleDateString()}</>
-                    )}
-                  </p>
-                )}
+      {showPrivate && (
+        <details className="group min-w-0 rounded-2xl border border-border bg-card" data-testid="admin-details">
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-sm font-semibold [&::-webkit-details-marker]:hidden">
+            <span>{isSuperAdmin ? 'Admin details' : 'Private details'}</span>
+            <ChevronRight size={16} className="text-muted-foreground transition-transform group-open:rotate-90" aria-hidden="true" />
+          </summary>
+          <div className="grid min-w-0 gap-5 border-t border-border px-4 py-4">
+            {!isSuperAdmin && <p className="text-xs text-muted-foreground">Only you and Orbit’s admins see this.</p>}
+            <dl className="grid min-w-0 grid-cols-1 gap-4 text-sm sm:grid-cols-2">
+              <div className="min-w-0">
+                <dt className="text-xs text-muted-foreground">Email</dt>
+                <dd className="mt-0.5 [overflow-wrap:anywhere]">
+                  {user.email ? (
+                    <a href={`mailto:${user.email}`} className={linkClass}>
+                      {user.email}
+                    </a>
+                  ) : (
+                    'None'
+                  )}
+                </dd>
               </div>
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-                {accessHistory.accesses.map((access: any) => {
-                  const accessDate = new Date(access.accessedAt);
-                  
-                  return (
-                    <Card
-                      key={access.id}
-                      className={cn(
-                        'group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
-                        'hover:-translate-y-1 hover:shadow-lg',
-                      )}
-                    >
-                      <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-purple-500/10 via-transparent to-pink-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
-                      <CardContent className="relative flex h-full flex-col p-4">
-                        <div className="flex items-start justify-between gap-3 mb-3">
-                          <div className="min-w-0 flex-1 flex items-center gap-2">
-                            {access.hasMembership && access.membershipTags.length > 0 ? (
-                              <Badge variant="outline" className="text-xs flex-shrink-0">{access.membershipTags.join(', ')}</Badge>
-                            ) : access.isAuthenticated ? (
-                              <Badge className="text-xs flex-shrink-0">Authenticated</Badge>
-                            ) : (
-                              <Badge variant="secondary" className="text-xs flex-shrink-0">Guest</Badge>
-                            )}
-                          </div>
-                          <div className="flex-shrink-0 text-xs text-muted-foreground">
-                            {formatTimeAgo(accessDate)}
-                          </div>
-                        </div>
-
-                        <div className="grid grid-cols-2 gap-3 text-xs">
-                          <div className="flex items-center gap-2">
-                            <span className="text-muted-foreground">Universe:</span>
-                            <Link
-                              href={`/admin/universes/${access.universe.id}`}
-                              className="text-primary hover:underline truncate"
-                              onClick={(e) => e.stopPropagation()}
-                            >
-                              {access.universe.name}
-                            </Link>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <span className="text-muted-foreground">World:</span>
-                            <Link
-                              href={`/admin/worlds/${access.world.id}`}
-                              className="text-primary hover:underline truncate"
-                              onClick={(e) => e.stopPropagation()}
-                            >
-                              {access.world.name}
-                            </Link>
-                          </div>
-                          <div className="flex items-center gap-2 col-span-2">
-                            <span className="text-muted-foreground">Room:</span>
-                            <Link
-                              href={`/admin/rooms/${access.room.id}`}
-                              className="text-primary hover:underline truncate"
-                              onClick={(e) => e.stopPropagation()}
-                            >
-                              {access.room.name}
-                            </Link>
-                          </div>
-                        </div>
-
-                        {isSuperAdmin && access.ipAddress && (
-                          <div className="mt-2 text-xs text-muted-foreground font-mono">
-                            {access.ipAddress}
-                          </div>
-                        )}
-                      </CardContent>
-                    </Card>
-                  );
-                })}
+              <div className="min-w-0">
+                <dt className="text-xs text-muted-foreground">Matrix ID</dt>
+                <dd className="mt-0.5 font-mono text-xs [overflow-wrap:anywhere]">{user.matrixChatId || 'None'}</dd>
               </div>
-              {accessHistory.totalPages > 1 && (
-                <div className="flex items-center justify-between">
-                  <div className="text-sm text-muted-foreground">
-                    Showing {(accessHistory.page - 1) * accessHistory.limit + 1} to {Math.min(accessHistory.page * accessHistory.limit, accessHistory.total)} of {accessHistory.total} accesses
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setAccessHistoryPage(prev => Math.max(1, prev - 1))}
-                      disabled={accessHistoryPage === 1}
-                    >
-                      <ChevronLeft className="h-4 w-4 mr-1" />
-                      Previous
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setAccessHistoryPage(prev => prev + 1)}
-                      disabled={accessHistoryPage >= (accessHistory.totalPages || 1)}
-                    >
-                      Next
-                      <ChevronRight className="h-4 w-4 ml-1" />
-                    </Button>
-                  </div>
+              {isSuperAdmin && (
+                <div className="min-w-0">
+                  <dt className="text-xs text-muted-foreground">Last IP address</dt>
+                  <dd className="mt-0.5 font-mono text-xs [overflow-wrap:anywhere]">{user.lastIpAddress || 'None'}</dd>
                 </div>
               )}
-            </div>
-          ) : (
-            <Empty className="border border-border/70">
-              <EmptyHeader>
-                <EmptyMedia variant="icon">
-                  <Activity className="h-6 w-6 text-muted-foreground" />
-                </EmptyMedia>
-                <EmptyTitle>No access history</EmptyTitle>
-                <EmptyDescription>
-                  Access history will appear here once this user starts accessing rooms.
-                </EmptyDescription>
-              </EmptyHeader>
-              <EmptyContent />
-            </Empty>
-          )}
-        </>
+              <div className="min-w-0">
+                <dt className="text-xs text-muted-foreground">Joined</dt>
+                <dd className="mt-0.5">{timeAgo(new Date(user.createdAt))}</dd>
+              </div>
+              <div className="min-w-0">
+                <dt className="text-xs text-muted-foreground">Last updated</dt>
+                <dd className="mt-0.5">{timeAgo(new Date(user.updatedAt))}</dd>
+              </div>
+            </dl>
+
+            {!accessHistoryHidden && (
+              <div className="grid min-w-0 gap-3" data-testid="access-history">
+                <div className="grid gap-0.5">
+                  <h2 className="text-sm font-semibold">Visits</h2>
+                  {accessHistory && (
+                    <StatLine
+                      items={[
+                        count(accessHistory.total ?? 0, 'access', 'accesses'),
+                        accessHistory.firstAccess && `first ${new Date(accessHistory.firstAccess).toLocaleDateString()}`,
+                        accessHistory.lastAccess && `last ${timeAgo(new Date(accessHistory.lastAccess))}`,
+                      ]}
+                    />
+                  )}
+                </div>
+                {accessHistoryLoading && !accessHistory ? (
+                  <LoadingRows label="visits" />
+                ) : accessHistory && accessHistory.accesses.length > 0 ? (
+                  <>
+                    <ul className="grid min-w-0 gap-1">
+                      {accessHistory.accesses.map((access) => (
+                        <li key={access.id} className="grid min-w-0 gap-1 rounded-xl px-3 py-2.5 text-xs hover:bg-foreground/[0.04]">
+                          <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                            <span className="min-w-0 text-sm">
+                              <Link href={`/admin/universes/${access.universe.id}`} className={linkClass}>
+                                {access.universe.name}
+                              </Link>
+                              <span className="text-muted-foreground" aria-hidden="true">
+                                {' › '}
+                              </span>
+                              <Link href={`/admin/worlds/${access.world.id}`} className={linkClass}>
+                                {access.world.name}
+                              </Link>
+                              <span className="text-muted-foreground" aria-hidden="true">
+                                {' › '}
+                              </span>
+                              <Link href={`/admin/rooms/${access.room.id}`} className={linkClass}>
+                                {access.room.name}
+                              </Link>
+                            </span>
+                            <span className="shrink-0 text-muted-foreground">{timeAgo(new Date(access.accessedAt))}</span>
+                          </div>
+                          <div className="flex min-w-0 flex-wrap items-center gap-2 text-muted-foreground">
+                            {access.hasMembership && access.membershipTags.length > 0 ? (
+                              <RolePills roles={access.membershipTags} />
+                            ) : (
+                              <span>{access.isAuthenticated ? 'Signed in' : 'Guest'}</span>
+                            )}
+                            {isSuperAdmin && access.ipAddress && <span className="font-mono">{access.ipAddress}</span>}
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                    {accessHistory.totalPages > 1 && (
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <span className="text-xs text-muted-foreground">
+                          {(accessHistory.page - 1) * accessHistory.limit + 1}–{Math.min(accessHistory.page * accessHistory.limit, accessHistory.total)} of{' '}
+                          {accessHistory.total.toLocaleString()}
+                        </span>
+                        <div className="flex gap-2">
+                          <Button
+                            variant="outline"
+                            className="h-9 gap-1 px-3"
+                            onClick={() => setAccessHistoryPage((prev) => Math.max(1, prev - 1))}
+                            disabled={accessHistoryPage === 1}
+                          >
+                            <ChevronLeft aria-hidden="true" />
+                            Previous
+                          </Button>
+                          <Button
+                            variant="outline"
+                            className="h-9 gap-1 px-3"
+                            onClick={() => setAccessHistoryPage((prev) => prev + 1)}
+                            disabled={accessHistoryPage >= (accessHistory.totalPages || 1)}
+                          >
+                            Next
+                            <ChevronRight aria-hidden="true" />
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <p className="text-xs text-muted-foreground">No visits yet.</p>
+                )}
+              </div>
+            )}
+          </div>
+        </details>
       )}
 
       <InviteToWorldDialog

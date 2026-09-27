@@ -1,5 +1,6 @@
 'use client';
 
+import { localPeakHour } from '@/lib/analytics-peak';
 import { useState, useEffect } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
@@ -224,7 +225,7 @@ function RoomCard({ room, analytics }: { room: Room; analytics?: RoomAnalytics }
                     </div>
                   ) : (
                     <div className="text-[11px] text-muted-foreground/70 mt-0.5">
-                      No visits recorded
+                      No accesses yet
                     </div>
                   )}
                 </>
@@ -587,28 +588,9 @@ export default function MapDetailPage() {
               }
               const data = await response.json();
               
-              // Calculate peak hour from recent activity in local timezone (like detail page)
-              let peakHour = null;
-              if (data.recentActivity && data.recentActivity.length > 0) {
-                const hourCounts = new Map<number, number>();
-                data.recentActivity.forEach((access: any) => {
-                  const date = new Date(access.accessedAt);
-                  const hour = date.getHours(); // Local timezone
-                  hourCounts.set(hour, (hourCounts.get(hour) || 0) + 1);
-                });
-                const localPeakTimes = Array.from(hourCounts.entries())
-                  .map(([hour, count]) => ({ hour, count }))
-                  .sort((a, b) => b.count - a.count);
-                if (localPeakTimes.length > 0) {
-                  peakHour = localPeakTimes[0].hour;
-                }
-              }
-              
-              // Fallback to UTC peakTimes if no recent activity
-              if (peakHour === null && Array.isArray(data.peakTimes) && data.peakTimes.length > 0) {
-                peakHour = data.peakTimes[0].hour;
-              }
-              
+              // Peak: the busiest hour of all visits, on your clock.
+              const peakHour = localPeakHour(data.peakTimes);
+
               return {
                 roomId: room.id,
                 totalAccesses: data.totalAccesses || 0,

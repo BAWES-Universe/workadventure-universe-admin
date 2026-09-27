@@ -20,6 +20,9 @@ export async function resolveNavigateIntent(
     case 'new-universe':
       // Every signed-in user may create a universe (they become its owner).
       return '/admin/universes/new';
+    case 'visit-card':
+      // Everyone edits their own profile (once the visit card), in place on You.
+      return '/admin/you?edit=profile';
     case 'world-members': {
       const parsed = worldMembersParams.safeParse(params ?? {});
       if (!parsed.success) return ORBIT_HOME_PATH;

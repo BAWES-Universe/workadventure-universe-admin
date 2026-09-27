@@ -12,23 +12,9 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table';
 import { Loader2, AlertCircle, UserPlus } from 'lucide-react';
+import { RoleChoice } from './role-choice';
 import { useToast } from '@/components/ui/toast';
 
 interface Visitor {
@@ -46,8 +32,6 @@ interface InviteMemberDialogProps {
   worldId: string;
   onInviteSent: () => void;
 }
-
-const AVAILABLE_TAGS = ['admin', 'editor', 'member'];
 
 export default function InviteMemberDialog({
   open,
@@ -138,7 +122,7 @@ export default function InviteMemberDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto rounded-lg">
+      <DialogContent className="max-w-3xl">
         <DialogHeader>
           <DialogTitle>Invite Member</DialogTitle>
           <DialogDescription>
@@ -169,20 +153,9 @@ export default function InviteMemberDialog({
               </div>
             </div>
 
-            <div>
-              <Label htmlFor="role">Role</Label>
-              <Select value={selectedTag} onValueChange={setSelectedTag}>
-                <SelectTrigger id="role" className="mt-1">
-                  <SelectValue placeholder="Select a role" />
-                </SelectTrigger>
-                <SelectContent>
-                  {AVAILABLE_TAGS.map(tag => (
-                    <SelectItem key={tag} value={tag}>
-                      <span className="capitalize">{tag}</span>
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+            <div className="space-y-1">
+              <Label id="invite-role-label">Role</Label>
+              <RoleChoice value={selectedTag} onChange={setSelectedTag} labelledBy="invite-role-label" />
             </div>
 
             <div>
@@ -233,47 +206,28 @@ export default function InviteMemberDialog({
                 No recent visitors found. Users must visit this world before they can be invited.
               </div>
             ) : (
-              <div className="rounded-md border">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Name</TableHead>
-                      <TableHead>Email</TableHead>
-                      <TableHead>Last Visited</TableHead>
-                      <TableHead className="text-right">Action</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {visitors.map((visitor) => (
-                      <TableRow key={visitor.id}>
-                        <TableCell className="font-medium">
-                          {visitor.name || 'Unknown'}
-                        </TableCell>
-                        <TableCell className="text-muted-foreground">
-                          {visitor.email || '-'}
-                        </TableCell>
-                        <TableCell className="text-muted-foreground">
-                          {new Date(visitor.lastVisited).toLocaleDateString()}
-                        </TableCell>
-                        <TableCell className="text-right">
-                          {visitor.isMember ? (
-                            <span className="text-sm text-muted-foreground">Already a member</span>
-                          ) : visitor.hasPendingInvitation ? (
-                            <span className="text-sm text-muted-foreground">Invitation pending</span>
-                          ) : (
-                            <Button
-                              size="sm"
-                              onClick={() => setSelectedUserId(visitor.id)}
-                            >
-                              Invite
-                            </Button>
-                          )}
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
+              <ul className="divide-y divide-border/60 overflow-hidden rounded-xl border border-border/70">
+                {visitors.map((visitor) => (
+                  <li key={visitor.id} className="flex items-center gap-3 px-4 py-3">
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-medium">{visitor.name || 'Unknown'}</p>
+                      <p className="truncate text-xs text-muted-foreground">
+                        {visitor.email ? `${visitor.email} · ` : ''}
+                        Last visited {new Date(visitor.lastVisited).toLocaleDateString()}
+                      </p>
+                    </div>
+                    {visitor.isMember ? (
+                      <span className="shrink-0 text-xs text-muted-foreground">Already a member</span>
+                    ) : visitor.hasPendingInvitation ? (
+                      <span className="shrink-0 text-xs text-muted-foreground">Invitation pending</span>
+                    ) : (
+                      <Button size="sm" className="shrink-0" onClick={() => setSelectedUserId(visitor.id)}>
+                        Invite
+                      </Button>
+                    )}
+                  </li>
+                ))}
+              </ul>
             )}
           </div>
         )}
