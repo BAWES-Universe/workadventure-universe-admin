@@ -88,6 +88,12 @@ export default function Yours({ profileComplete }: { profileComplete: boolean | 
       : undefined;
   const ownsWorld = (mine?.ownedWorlds ?? 0) > 0 || Boolean(runWorld?.isUniverseOwner);
   const sentInvitation = (mine?.invitationsSent ?? 0) > 0;
+  // With one universe, "Create a world" goes straight to it; with several, the form asks which.
+  const onlyUniverse =
+    universes.result.status === 'ready' && universes.result.items.length === 1 && (mine?.universes ?? 1) === 1
+      ? universes.result.items[0]
+      : null;
+  const newWorldHref = onlyUniverse ? `/admin/worlds/new?universeId=${encodeURIComponent(onlyUniverse.id)}` : '/admin/worlds/new';
   const [hidden, hide] = useGuidanceDismissed('getStarted');
   const allDone = profileComplete === true && ownsUniverse && ownsWorld && sentInvitation && hasStar;
 
@@ -101,6 +107,7 @@ export default function Yours({ profileComplete }: { profileComplete: boolean | 
           sentInvitation={sentInvitation}
           hasStar={hasStar}
           inviteHref={runWorld ? `/admin/worlds/${runWorld.world.id}?tab=members` : null}
+          newWorldHref={newWorldHref}
           onHide={hide}
         />
       )}
@@ -164,7 +171,7 @@ export default function Yours({ profileComplete }: { profileComplete: boolean | 
                   ? 'Create a world in your universe and you’re its admin. Then invite people as members, editors or admins.'
                   : 'You become a member when someone invites you to their world, or when you create a world of your own.'
               }
-              href={ownsUniverse ? '/admin/worlds/new' : '/admin/universes/new'}
+              href={ownsUniverse ? newWorldHref : '/admin/universes/new?next=world'}
               action={ownsUniverse ? 'Create a world' : 'Create a universe first'}
               testId="empty-memberships"
             />
@@ -376,6 +383,7 @@ function GetStarted({
   sentInvitation,
   hasStar,
   inviteHref,
+  newWorldHref,
   onHide,
 }: {
   profileComplete: boolean | null;
@@ -385,6 +393,8 @@ function GetStarted({
   hasStar: boolean;
   /** Where to invite people: the members of a world you run, when there is one. */
   inviteHref: string | null;
+  /** Where "Create a world" leads: straight to your universe when you have one. */
+  newWorldHref: string;
   onHide: () => void;
 }) {
   const steps = [
@@ -394,7 +404,7 @@ function GetStarted({
       done: ownsWorld,
       title: 'Create a world',
       text: ownsUniverse ? 'A world in your universe. You’re its admin.' : 'After your universe.',
-      href: ownsUniverse ? '/admin/worlds/new' : undefined,
+      href: ownsUniverse ? newWorldHref : undefined,
     },
     {
       done: sentInvitation,

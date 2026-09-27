@@ -202,14 +202,22 @@ export default function InvitationPage() {
           </div>
           {world.description && <p className="text-[15px] text-foreground/85">{world.description}</p>}
           {world.members.length > 0 && (
-            <ul className="flex flex-wrap gap-2" aria-label={`Some of ${world.name}’s members`} data-testid="invitation-members">
-              {world.members.map((member) => (
-                <li key={member.id} title={member.name ?? undefined}>
-                  <WokaAvatar layers={member.woka ?? []} name={member.name ?? ''} size={40} />
-                  <span className="sr-only">{member.name || 'A member'}</span>
-                </li>
-              ))}
-            </ul>
+            <div className="space-y-2 border-t border-border pt-3">
+              <p className="text-xs font-semibold text-muted-foreground">Members</p>
+              <ul className="flex flex-wrap gap-3" data-testid="invitation-members">
+                {world.members.map((member) => (
+                  <li key={member.id} className="grid w-16 justify-items-center gap-1 text-center">
+                    <WokaAvatar layers={member.woka ?? []} name={member.name ?? ''} size={44} />
+                    <span className="w-full truncate text-[11px] text-foreground/85">{member.name || 'A member'}</span>
+                  </li>
+                ))}
+                {world.counts.members > world.members.length && (
+                  <li className="grid w-16 content-center justify-items-center text-[11px] font-semibold text-muted-foreground">
+                    +{world.counts.members - world.members.length} more
+                  </li>
+                )}
+              </ul>
+            </div>
           )}
         </div>
       </section>

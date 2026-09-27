@@ -15,6 +15,15 @@
  * Space Grotesk headings and Inter text, as on bawes.net. Dark is the default (the game is dark).
  */
 @layer base {
+  /* Tailwind v4 draws a bare `border` in the text colour; here every border is the standard one unless it says
+     otherwise (as shadcn's base layer does). */
+  *,
+  ::before,
+  ::after,
+  ::backdrop {
+    border-color: hsl(var(--border));
+  }
+
   :root {
     --background: 220 30% 97%;
     --foreground: 218 40% 12%;

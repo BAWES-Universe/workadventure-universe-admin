@@ -69,6 +69,27 @@ describe('You, for someone new', () => {
   });
 });
 
+describe('You, with one universe and no world', () => {
+  it('sends "Create a world" straight to that universe', async () => {
+    route({
+      '/api/admin/universes': { universes: [{ id: 'u1', name: 'BAWES', isPublic: true }] },
+      '/api/memberships/my': { memberships: [] },
+      '/api/memberships/invitations': { invitations: [] },
+      '/api/admin/stars/rooms': { rooms: [] },
+    });
+    render(
+      <AdminBootstrapProvider value={bootstrap({ universes: 1, worlds: 0, stars: 0, invitations: 0 })}>
+        <Yours profileComplete />
+      </AdminBootstrapProvider>,
+    );
+    const steps = await screen.findByTestId('get-started');
+    await waitFor(() =>
+      expect(within(steps).getByRole('link', { name: /Create a world/ }).getAttribute('href')).toBe('/admin/worlds/new?universeId=u1'),
+    );
+    expect((await screen.findByTestId('empty-memberships')).getAttribute('href')).toBe('/admin/worlds/new?universeId=u1');
+  });
+});
+
 describe('You, with memberships', () => {
   it('answers an invitation in place and shows roles', async () => {
     route({
