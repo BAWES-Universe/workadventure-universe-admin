@@ -11,9 +11,11 @@
 .getStarted { display: grid; gap: 12px; padding: 18px; border: 1px solid hsl(var(--border)); border-radius: 20px; background: linear-gradient(160deg, rgb(134 41 252 / 0.1), transparent 45%), hsl(var(--card)); }
 .getStartedHead { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .getStartedHead h2 { font-size: 20px; font-weight: 700; }
-.getStartedHead > span { font-size: 12px; font-weight: 600; color: hsl(var(--muted-foreground)); font-variant-numeric: tabular-nums; }
+.hide { min-height: 44px; margin-left: 10px; padding: 0 12px; border-radius: 999px; font-size: 12px; font-weight: 600; color: hsl(var(--muted-foreground)); }
+.hide:hover { color: hsl(var(--foreground)); background: hsl(var(--foreground) / 0.06); }
+.getStartedHead > span { display: inline-flex; align-items: center; font-size: 12px; font-weight: 600; color: hsl(var(--muted-foreground)); font-variant-numeric: tabular-nums; }
 .progress { height: 4px; border-radius: 999px; background: hsl(var(--foreground) / 0.08); overflow: hidden; }
-.progress > span { display: block; height: 100%; border-radius: inherit; background-image: var(--brand-gradient); transition: width 300ms var(--ease-out); }
+.progress > span { display: block; height: 100%; border-radius: inherit; background: var(--status-live); transition: width 300ms var(--ease-out); }
 .steps { display: grid; gap: 4px; }
 .step { display: flex; align-items: center; gap: 12px; min-height: 60px; padding: 10px 12px; border-radius: 14px; transition: background 160ms; }
 a.step:hover { background: hsl(var(--foreground) / 0.05); }

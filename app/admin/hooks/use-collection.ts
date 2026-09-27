@@ -1,7 +1,10 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { authenticatedFetch } from '@/lib/client-auth';
+
+/** Same name as the bridge's event (components/orbit-bridge.tsx), kept here so lists don't import the bridge. */
+const ORBIT_REFRESH_EVENT = 'orbit:refresh';
 
 export type Collection<T> = { status: 'loading' } | { status: 'error' } | { status: 'ready'; items: T[] };
 
@@ -16,10 +19,13 @@ function record(value: unknown): value is Record<string, unknown> {
 export function useCollection<T>(url: string | null, key: string, isItem: (value: unknown) => value is T) {
   const [result, setResult] = useState<Collection<T>>({ status: 'loading' });
   const [attempt, setAttempt] = useState(0);
+  const lastUrl = useRef<string | null>(null);
   useEffect(() => {
     if (url === null) return;
     const controller = new AbortController();
-    setResult({ status: 'loading' });
+    // A refresh keeps the list on screen; only a first load (or a new address) shows loading.
+    setResult((current) => (current.status === 'ready' && lastUrl.current === url ? current : { status: 'loading' }));
+    lastUrl.current = url;
     void (async () => {
       try {
         const response = await authenticatedFetch(url, { signal: controller.signal });
@@ -35,6 +41,13 @@ export function useCollection<T>(url: string | null, key: string, isItem: (value
     return () => controller.abort();
   }, [url, key, isItem, attempt]);
   const retry = useCallback(() => setAttempt((value) => value + 1), []);
+  // The game said something changed (the Orbit bridge's refresh hint): read the list again, keeping what's shown
+  // until the new answer arrives.
+  useEffect(() => {
+    const onRefresh = () => setAttempt((value) => value + 1);
+    window.addEventListener(ORBIT_REFRESH_EVENT, onRefresh);
+    return () => window.removeEventListener(ORBIT_REFRESH_EVENT, onRefresh);
+  }, []);
   /** Changes the list in place (after accepting an invitation, say) without asking the server again. */
   const update = useCallback((change: (items: T[]) => T[]) => {
     setResult((current) => (current.status === 'ready' ? { status: 'ready', items: change(current.items) } : current));

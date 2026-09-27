@@ -8,6 +8,7 @@ import { authenticatedFetch } from '@/lib/client-auth';
 import { universeColour } from '@/lib/universe-colour';
 import { useAdminBootstrap } from '../admin-bootstrap-context';
 import { isNamed, isRecord, useCollection, type Collection } from '../hooks/use-collection';
+import { useGuidanceDismissed } from '../hooks/use-guidance-dismissed';
 import {
   EmptyCard,
   EntityRow,
@@ -80,11 +81,28 @@ export default function Yours({ profileComplete }: { profileComplete: boolean | 
   const hasWorld = memberships.result.status === 'ready' ? memberships.result.items.length > 0 : (mine?.worlds ?? 0) > 0;
   const hasStar = stars.result.status === 'ready' ? stars.result.items.length > 0 : (mine?.stars ?? 0) > 0;
   const universeTotal = mine?.universes ?? (universes.result.status === 'ready' ? universes.result.items.length : 0);
+  // A world you run (you own its universe, or you're its admin): where "Invite someone" leads.
+  const runWorld =
+    memberships.result.status === 'ready'
+      ? memberships.result.items.find((membership) => membership.isUniverseOwner || membership.tags.includes('admin'))
+      : undefined;
+  const ownsWorld = (mine?.ownedWorlds ?? 0) > 0 || Boolean(runWorld?.isUniverseOwner);
+  const sentInvitation = (mine?.invitationsSent ?? 0) > 0;
+  const [hidden, hide] = useGuidanceDismissed('getStarted');
+  const allDone = profileComplete === true && ownsUniverse && ownsWorld && sentInvitation && hasStar;
 
   return (
     <div className={styles.yours} data-testid="yours">
-      {!(ownsUniverse && hasWorld) && (
-        <GetStarted profileComplete={profileComplete} ownsUniverse={ownsUniverse} hasWorld={hasWorld} hasStar={hasStar} />
+      {!allDone && hidden === false && (
+        <GetStarted
+          profileComplete={profileComplete}
+          ownsUniverse={ownsUniverse}
+          ownsWorld={ownsWorld}
+          sentInvitation={sentInvitation}
+          hasStar={hasStar}
+          inviteHref={runWorld ? `/admin/worlds/${runWorld.world.id}?tab=members` : null}
+          onHide={hide}
+        />
       )}
 
       <section aria-labelledby="universes-heading">
@@ -92,7 +110,7 @@ export default function Yours({ profileComplete }: { profileComplete: boolean | 
           id="universes-heading"
           title="Your universes"
           count={universeTotal}
-          action={ownsUniverse ? { href: '/admin/universes/new', label: 'New universe', icon: Plus, primary: true } : null}
+          action={ownsUniverse ? { href: '/admin/universes/new', label: 'New universe', icon: Plus } : null}
         />
         <List
           collection={universes}
@@ -247,20 +265,27 @@ function UniverseCard({ universe }: { universe: MyUniverse }) {
   );
 }
 
-/** Invitations to answer, right here: accepting makes you a member at once. */
+/**
+ * Invitations to answer, right here: accepting makes you a member at once; declining asks first. Each invitation
+ * opens its own page, with who invited you, the world and the role, when you want more before deciding.
+ */
 function Invitations({
   collection,
   onAccepted,
 }: {
-  collection: { result: Collection<Invitation>; update: (change: (items: Invitation[]) => Invitation[]) => void };
+  collection: { result: Collection<Invitation>; retry: () => void; update: (change: (items: Invitation[]) => Invitation[]) => void };
   onAccepted: () => void;
 }) {
-  const [busy, setBusy] = useState<string | null>(null);
+  // One lock per invitation, so answering one never unlocks or blocks another.
+  const [pending, setPending] = useState<ReadonlySet<string>>(new Set());
+  const [confirmingDecline, setConfirmingDecline] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  if (collection.result.status === 'error') return <LoadError label="your invitations" retry={collection.retry} />;
   if (collection.result.status !== 'ready' || collection.result.items.length === 0) return null;
 
   async function answer(invitation: Invitation, choice: 'accept' | 'reject') {
-    setBusy(invitation.id);
+    if (pending.has(invitation.id)) return;
+    setPending((current) => new Set(current).add(invitation.id));
     setError(null);
     try {
       const response = await authenticatedFetch(`/api/memberships/invitations/${invitation.id}/${choice}`, { method: 'POST' });
@@ -270,7 +295,12 @@ function Invitations({
     } catch {
       setError(`Couldn’t ${choice === 'accept' ? 'accept' : 'decline'} the invitation to ${invitation.world.name}. Try again.`);
     } finally {
-      setBusy(null);
+      setPending((current) => {
+        const next = new Set(current);
+        next.delete(invitation.id);
+        return next;
+      });
+      setConfirmingDecline((current) => (current === invitation.id ? null : current));
     }
   }
 
@@ -278,10 +308,12 @@ function Invitations({
     <div className={styles.invitations} data-testid="invitations">
       {collection.result.items.map((invitation) => {
         const from = invitation.invitedBy?.name || invitation.invitedBy?.email;
+        const busy = pending.has(invitation.id);
+        const confirming = confirmingDecline === invitation.id;
         return (
           <EntityRow
             key={invitation.id}
-            href={`/admin/worlds/${invitation.world.id}`}
+            href={`/admin/invitations/${invitation.id}`}
             kind="world"
             tone="waiting"
             title={invitation.world.name}
@@ -293,21 +325,32 @@ function Invitations({
               </span>
             }
             trailing={
-              <>
-                <Button
-                  variant="outline"
-                  className="h-9 w-9 p-0"
-                  aria-label={`Decline the invitation to ${invitation.world.name}`}
-                  disabled={busy === invitation.id}
-                  onClick={() => void answer(invitation, 'reject')}
-                >
-                  <X size={16} aria-hidden="true" />
-                </Button>
-                <Button className="h-9 gap-1.5 px-4" disabled={busy === invitation.id} onClick={() => void answer(invitation, 'accept')}>
-                  <Check size={15} aria-hidden="true" />
-                  Accept
-                </Button>
-              </>
+              confirming ? (
+                <>
+                  <Button variant="outline" className="h-11 px-4" disabled={busy} onClick={() => setConfirmingDecline(null)}>
+                    Keep
+                  </Button>
+                  <Button variant="destructive" className="h-11 px-4" disabled={busy} onClick={() => void answer(invitation, 'reject')}>
+                    Decline
+                  </Button>
+                </>
+              ) : (
+                <>
+                  <Button
+                    variant="outline"
+                    className="h-11 w-11 p-0"
+                    aria-label={`Decline the invitation to ${invitation.world.name}`}
+                    disabled={busy}
+                    onClick={() => setConfirmingDecline(invitation.id)}
+                  >
+                    <X size={16} aria-hidden="true" />
+                  </Button>
+                  <Button className="h-11 gap-1.5 px-4" disabled={busy} onClick={() => void answer(invitation, 'accept')}>
+                    <Check size={15} aria-hidden="true" />
+                    Accept
+                  </Button>
+                </>
+              )
             }
           />
         );
@@ -322,18 +365,42 @@ function Invitations({
 }
 
 /**
- * For someone new: four steps, each one tap, ticked as they're done. Membership comes from making a world (you're
- * its admin) or being invited to one, so the steps lead there rather than to a "join" that doesn't exist.
+ * For someone new: five steps, each one tap, each ticked by the real thing (your profile, a universe you own, a world
+ * in it, an invitation you sent, a star), never by just being a member of someone else's world. It stays until every
+ * step is done or you hide it.
  */
-function GetStarted({ profileComplete, ownsUniverse, hasWorld, hasStar }: { profileComplete: boolean | null; ownsUniverse: boolean; hasWorld: boolean; hasStar: boolean }) {
+function GetStarted({
+  profileComplete,
+  ownsUniverse,
+  ownsWorld,
+  sentInvitation,
+  hasStar,
+  inviteHref,
+  onHide,
+}: {
+  profileComplete: boolean | null;
+  ownsUniverse: boolean;
+  ownsWorld: boolean;
+  sentInvitation: boolean;
+  hasStar: boolean;
+  /** Where to invite people: the members of a world you run, when there is one. */
+  inviteHref: string | null;
+  onHide: () => void;
+}) {
   const steps = [
     { done: profileComplete === true, title: 'Set up your profile', text: 'A few words and your links, so people know who they’re meeting.', href: '/admin/you?edit=profile' },
-    { done: ownsUniverse, title: 'Create your universe', text: 'Your own corner of the Universe, to hold your worlds.', href: '/admin/universes/new' },
+    { done: ownsUniverse, title: 'Create your universe', text: 'Your own corner of the Universe, to hold your worlds.', href: '/admin/universes/new?next=world' },
     {
-      done: hasWorld,
-      title: 'Add a world, then invite people',
-      text: ownsUniverse ? 'You’re its admin: invite people as members, editors or admins.' : 'After your universe. Or accept an invitation to someone’s world.',
+      done: ownsWorld,
+      title: 'Create a world',
+      text: ownsUniverse ? 'A world in your universe. You’re its admin.' : 'After your universe.',
       href: ownsUniverse ? '/admin/worlds/new' : undefined,
+    },
+    {
+      done: sentInvitation,
+      title: 'Invite someone',
+      text: inviteHref ? 'As a member, editor or admin of your world.' : 'After your world.',
+      href: inviteHref ?? undefined,
     },
     { done: hasStar, title: 'Star a room you like', text: 'Keep a way back to it, one tap from a visit.', href: '/admin/discover/rooms' },
   ];
@@ -346,6 +413,9 @@ function GetStarted({ profileComplete, ownsUniverse, hasWorld, hasStar }: { prof
         </h2>
         <span>
           {doneCount} of {steps.length}
+          <button type="button" className={styles.hide} onClick={onHide}>
+            Hide
+          </button>
         </span>
       </div>
       <div className={styles.progress} aria-hidden="true">

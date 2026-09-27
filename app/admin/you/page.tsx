@@ -1,7 +1,7 @@
 'use client';
 
 import { Suspense, useState } from 'react';
-import { useSearchParams } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { useAdminBootstrap } from '../admin-bootstrap-context';
 import { StatLine, count } from '../components/ds';
 import { ProfileCard } from '../components/profile-card';
@@ -26,6 +26,7 @@ function You() {
   const { user, mine } = useAdminBootstrap();
   // `?edit=profile` (the game's "edit your profile" and old visit-card links) opens the profile ready to edit.
   const editProfile = useSearchParams().get('edit') === 'profile';
+  const router = useRouter();
   const [profileComplete, setProfileComplete] = useState<boolean | null>(null);
   return (
     <div className={styles.page}>
@@ -33,6 +34,10 @@ function You() {
         user={user}
         startEditing={editProfile}
         onLoaded={setProfileComplete}
+        // The intent is used up once editing ends, so Back and a later visit don't reopen the form.
+        onEditEnd={() => {
+          if (editProfile) router.replace('/admin/you', { scroll: false });
+        }}
         stats={
           mine && (
             <StatLine

@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type ReactNode, type Ref } from 'react';
 import { ExternalLink, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -48,6 +48,7 @@ export function ProfileCard({
   startEditing = false,
   stats,
   onLoaded,
+  onEditEnd,
 }: {
   user: { name: string | null };
   startEditing?: boolean;
@@ -55,11 +56,31 @@ export function ProfileCard({
   stats?: ReactNode;
   /** Whether the profile has anything in it yet (for You's first steps). */
   onLoaded?: (complete: boolean) => void;
+  /** Editing ended (saved or cancelled): lets the page drop an `?edit=profile` intent. */
+  onEditEnd?: () => void;
 }) {
   const [status, setStatus] = useState<'loading' | 'error' | 'ready'>('loading');
   const [saved, setSaved] = useState<Profile>(EMPTY);
   const [form, setForm] = useState<Profile>(EMPTY);
   const [editing, setEditing] = useState(startEditing);
+  const sectionRef = useRef<HTMLElement>(null);
+  const nameRef = useRef<HTMLInputElement>(null);
+  const onEditEndRef = useRef(onEditEnd);
+  onEditEndRef.current = onEditEnd;
+  // An edit intent can arrive while You is already open (a first-steps link, the game): open the form then too.
+  useEffect(() => {
+    if (startEditing) setEditing(true);
+  }, [startEditing]);
+  // Opening the form brings it into view with the name ready to type.
+  useEffect(() => {
+    if (!editing || status !== 'ready') return;
+    sectionRef.current?.scrollIntoView?.({ block: 'start', behavior: 'smooth' });
+    nameRef.current?.focus({ preventScroll: true });
+  }, [editing, status]);
+  const stopEditing = useCallback(() => {
+    setEditing(false);
+    onEditEndRef.current?.();
+  }, []);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [justSaved, setJustSaved] = useState<string | null>(null);
@@ -109,8 +130,8 @@ export function ProfileCard({
     revert();
     setForm(saved);
     setError(null);
-    setEditing(false);
-  }, [revert, saved]);
+    stopEditing();
+  }, [revert, saved, stopEditing]);
 
   async function save() {
     const links = form.links
@@ -145,7 +166,7 @@ export function ProfileCard({
       onLoadedRef.current?.(Boolean(next.bio || next.links.length));
       setForm(next);
       discard();
-      setEditing(false);
+      stopEditing();
       // Inside the game, the game shows a new name once Orbit closes; otherwise the next time it loads.
       setJustSaved(
         !renamed
@@ -169,6 +190,7 @@ export function ProfileCard({
 
   return (
     <ProfileFrame
+      frameRef={sectionRef}
       headingId={headingId}
       layers={woka}
       name={saved.name || user.name || ''}
@@ -244,6 +266,7 @@ export function ProfileCard({
               autoComplete="nickname"
               onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))}
               placeholder="What people call you"
+              ref={nameRef}
             />
           </label>
           <label className={styles.field}>
@@ -350,6 +373,7 @@ export function ProfileLinks({ links }: { links: ProfileLink[] }) {
  * the page adds (bio, links, an edit form). The same on You and on anyone's page.
  */
 export function ProfileFrame({
+  frameRef,
   headingId,
   layers,
   name,
@@ -358,6 +382,7 @@ export function ProfileFrame({
   testId,
   children,
 }: {
+  frameRef?: Ref<HTMLElement>;
   headingId: string;
   layers: string[];
   name: string;
@@ -367,7 +392,7 @@ export function ProfileFrame({
   children?: ReactNode;
 }) {
   return (
-    <section className={styles.card} aria-labelledby={headingId} data-testid={testId}>
+    <section ref={frameRef} className={styles.card} aria-labelledby={headingId} data-testid={testId}>
       <div className={styles.banner} aria-hidden="true" />
       <div className={styles.identity}>
         <WokaAvatar layers={layers} name={name} />

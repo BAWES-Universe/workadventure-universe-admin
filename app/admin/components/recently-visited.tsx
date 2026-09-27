@@ -1,10 +1,9 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useState } from 'react';
 import { ArrowUpRight } from 'lucide-react';
-import { authenticatedFetch } from '@/lib/client-auth';
-import { SectionHeader } from './ds';
+import { isRecord, useCollection } from '../hooks/use-collection';
+import { LoadError, SectionHeader } from './ds';
 import { RoomCard, RoomCardSkeleton } from './room-card';
 import styles from './room-card.module.css';
 
@@ -23,33 +22,27 @@ interface RecentRoom {
   accessedAt: string;
 }
 
+const isRecentRoom = (value: unknown): value is RecentRoom =>
+  isRecord(value) && typeof value.roomId === 'string' && typeof value.roomName === 'string';
+
 /**
  * The rooms you were in lately (yours alone, only ones you may still see, not the ones already shown under Where you
  * are), each with its numbers and a Visit.
  */
 export default function RecentlyVisited({ limit = 4, excludeRoomIds = [] }: { limit?: number; excludeRoomIds?: string[] }) {
-  const [rooms, setRooms] = useState<RecentRoom[] | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    // Two extra, in case the rooms shown under Where you are are among them.
-    authenticatedFetch(`/api/admin/rooms/recent?limit=${limit + 2}`)
-      .then(async (response) => (response.ok ? (((await response.json()).rooms as RecentRoom[]) ?? []) : []))
-      .catch(() => [] as RecentRoom[])
-      .then((list) => {
-        if (!cancelled) setRooms(list);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [limit]);
+  // Two extra, in case the rooms shown under Where you are are among them. A failure says so; it never looks like
+  // an empty history.
+  const { result, retry } = useCollection(`/api/admin/rooms/recent?limit=${limit + 2}`, 'rooms', isRecentRoom);
+  const rooms = result.status === 'ready' ? result.items : null;
 
   const shown = rooms?.filter((room) => !excludeRoomIds.includes(room.roomId)).slice(0, limit) ?? null;
 
   return (
     <section className={styles.recentSection} data-testid="recently-visited" aria-labelledby="recent-heading">
       <SectionHeader id="recent-heading" title="Recently visited" count={shown?.length} />
-      {shown === null ? (
+      {result.status === 'error' ? (
+        <LoadError label="your recent rooms" retry={retry} />
+      ) : shown === null ? (
         <div className={styles.recentGrid}>
           <RoomCardSkeleton />
           <RoomCardSkeleton />

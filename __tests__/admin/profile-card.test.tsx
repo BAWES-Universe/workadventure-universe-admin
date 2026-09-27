@@ -100,4 +100,14 @@ describe('Your profile on You', () => {
     expect(profileLinkError({ label: '', url: 'https://bawes.net' })).toMatch(/label/);
     expect(profileLinkError({ label: 'x', url: 'ftp://bawes.net' })).toMatch(/web address/);
   });
+
+  it('opens editing when asked while already open (a first-steps link on You), focused on the name', async () => {
+    fetchMock.mockImplementation(() => json({ name: 'Khalid Alsayed', bio: 'Hi', links: [] }));
+    const view = render(<ProfileCard user={me} />);
+    await screen.findByText('Hi');
+    expect(screen.queryByPlaceholderText('What people call you')).toBeNull();
+    view.rerender(<ProfileCard user={me} startEditing />);
+    const name = await screen.findByPlaceholderText('What people call you');
+    expect(document.activeElement).toBe(name);
+  });
 });

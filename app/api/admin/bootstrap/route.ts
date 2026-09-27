@@ -28,6 +28,8 @@ export async function GET(request: NextRequest) {
     myWorlds,
     myStars,
     myInvitations,
+    myOwnedWorlds,
+    myInvitationsSent,
   ] = await Promise.all([
     prisma.user.findUnique({
       where: { id: session.userId },
@@ -45,6 +47,9 @@ export async function GET(request: NextRequest) {
     prisma.worldMember.count({ where: { userId: session.userId } }),
     prisma.favorite.count({ where: { userId: session.userId, roomId: { not: null } } }),
     prisma.membershipInvitation.count({ where: { invitedUserId: session.userId, status: 'pending' } }),
+    // For You's first steps: worlds in universes you own, and invitations you've sent (any answer).
+    prisma.world.count({ where: { universe: { ownerId: session.userId } } }),
+    prisma.membershipInvitation.count({ where: { invitedByUserId: session.userId } }),
   ]);
   if (!user) return NextResponse.json({ error: 'User not found' }, { status: 404 });
 
@@ -57,7 +62,14 @@ export async function GET(request: NextRequest) {
       rooms: Math.max(0, rooms - (defaultRoom ? 1 : 0)),
       users: Math.max(0, users - (systemUser ? 1 : 0)),
     },
-    mine: { universes: myUniverses, worlds: myWorlds, stars: myStars, invitations: myInvitations },
+    mine: {
+      universes: myUniverses,
+      worlds: myWorlds,
+      stars: myStars,
+      invitations: myInvitations,
+      ownedWorlds: myOwnedWorlds,
+      invitationsSent: myInvitationsSent,
+    },
   });
   response.headers.set('Cache-Control', 'no-store');
   return response;

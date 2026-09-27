@@ -70,7 +70,9 @@ function Notice({ eyebrow, title, children, action }: { eyebrow: string; title: 
 export default function HerePanel({ onShown }: { onShown?: (roomIds: string[]) => void }) {
   const { wa, isReady, isLoading, error } = useWorkAdventure();
   const [located, setLocated] = useState<Located>({ kind: 'loading' });
-  const [previous, setPrevious] = useState<{ currentId: string; room: ApiRoom | null }>({ currentId: '', room: null });
+  const [previous, setPrevious] = useState<{ currentId: string; room: ApiRoom | null; failed?: boolean }>({ currentId: '', room: null });
+  // Asking again after a failure (the room lookup, or the room before it).
+  const [attempt, setAttempt] = useState(0);
   const unavailable = Boolean(error) || (!isReady && !isLoading);
 
   useEffect(() => {
@@ -90,7 +92,8 @@ export default function HerePanel({ onShown }: { onShown?: (roomIds: string[]) =
         const response = await authenticatedFetch(`/api/admin/rooms/from-play-uri?playUri=${encodeURIComponent(playUri)}`);
         if (cancelled) return;
         if (!response.ok) {
-          setLocated({ kind: 'unknown', playUri, start });
+          // Only "not found" means Orbit doesn't know the room; anything else is a failure worth retrying.
+          setLocated(response.status === 404 ? { kind: 'unknown', playUri, start } : { kind: 'failed' });
           return;
         }
         const room = (await response.json()) as ApiRoom;
@@ -100,7 +103,11 @@ export default function HerePanel({ onShown }: { onShown?: (roomIds: string[]) =
         const before = await authenticatedFetch(`/api/admin/rooms/previous?currentRoomId=${encodeURIComponent(room.id)}`);
         if (cancelled) return;
         // Keyed by the room it was asked for, so an old answer never shows under a newer room.
-        setPrevious({ currentId: room.id, room: before.ok ? (((await before.json()) as { room: ApiRoom | null }).room ?? null) : null });
+        if (before.ok) {
+          setPrevious({ currentId: room.id, room: ((await before.json()) as { room: ApiRoom | null }).room ?? null });
+        } else {
+          setPrevious({ currentId: room.id, room: null, failed: before.status !== 404 });
+        }
       } catch (cause) {
         console.error('[Here] Could not resolve the current room', cause);
         if (!cancelled) setLocated({ kind: 'failed' });
@@ -110,7 +117,7 @@ export default function HerePanel({ onShown }: { onShown?: (roomIds: string[]) =
     return () => {
       cancelled = true;
     };
-  }, [wa, isReady, unavailable]);
+  }, [wa, isReady, unavailable, attempt]);
 
   const roomId = located.kind === 'room' ? located.room.id : null;
   const previousRoom = roomId && previous.currentId === roomId ? previous.room : null;
@@ -132,6 +139,9 @@ export default function HerePanel({ onShown }: { onShown?: (roomIds: string[]) =
     current = (
       <Notice eyebrow="Where you are" title="No room information available">
         <p>Orbit couldn&apos;t tell which room you&apos;re in right now.</p>
+        <button type="button" className={styles.retry} onClick={() => setAttempt((value) => value + 1)}>
+          Try again
+        </button>
       </Notice>
     );
   } else if (located.start) {
@@ -141,7 +151,7 @@ export default function HerePanel({ onShown }: { onShown?: (roomIds: string[]) =
         title="The start map"
         action={
           <Link href="/admin/space" className={styles.detailsLink}>
-            Explore space
+            Explore Space
             <ArrowUpRight size={15} aria-hidden="true" />
           </Link>
         }
@@ -170,6 +180,14 @@ export default function HerePanel({ onShown }: { onShown?: (roomIds: string[]) =
           <div className={styles.previousStop}>
             <RoomCard room={toCardRoom(previousRoom)} kind="previous" />
           </div>
+        )}
+        {roomId && previous.currentId === roomId && previous.failed && (
+          <p className={styles.activityStatus} role="status">
+            Couldn&apos;t load the room before this.{' '}
+            <button type="button" className={styles.retry} onClick={() => setAttempt((value) => value + 1)}>
+              Try again
+            </button>
+          </p>
         )}
       </div>
     </section>

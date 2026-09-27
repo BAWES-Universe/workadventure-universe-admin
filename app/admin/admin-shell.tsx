@@ -42,6 +42,12 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
   const hasBootstrap = bootstrap !== null;
 
   const load = useCallback(() => setAttempt((value) => value + 1), []);
+  // Set when the game says something changed: the next load brings fresh numbers wherever you are.
+  const wantBootstrap = useRef(false);
+  const refreshFromGame = useCallback(() => {
+    wantBootstrap.current = true;
+    setAttempt((value) => value + 1);
+  }, []);
 
   useEffect(() => {
     if (pathname === '/admin/login') return;
@@ -51,8 +57,11 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
     }
 
     const controller = new AbortController();
-    // The first load, and every visit to Home, brings the numbers too; elsewhere, only the session is re-checked.
-    const endpoint = !hasBootstrap || pathname === '/admin' ? '/api/admin/bootstrap' : '/api/auth/me';
+    // The first load, every visit to Orbit, You or Space, and a change in the game bring the numbers too; elsewhere,
+    // only the session is re-checked.
+    const rootPage = pathname === '/admin' || pathname === '/admin/you' || pathname === '/admin/space';
+    const endpoint = !hasBootstrap || rootPage || wantBootstrap.current ? '/api/admin/bootstrap' : '/api/auth/me';
+    wantBootstrap.current = false;
     void authenticatedFetch(endpoint, { signal: controller.signal })
       .then(async (response) => {
         if (controller.signal.aborted) return;
@@ -100,7 +109,7 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
   return (
     <AdminBootstrapProvider value={bootstrap}>
       <WorkAdventureProvider>
-        <OrbitBridge onRefresh={load} onView={setView} />
+        <OrbitBridge onRefresh={refreshFromGame} onView={setView} />
         <ShellChrome view={view} user={bootstrap.user} error={error} retry={load}>
           {children}
         </ShellChrome>
