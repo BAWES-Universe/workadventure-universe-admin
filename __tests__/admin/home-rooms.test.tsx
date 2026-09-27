@@ -5,7 +5,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import HerePanel from '@/app/admin/components/here-panel';
 import RecentlyVisited from '@/app/admin/components/recently-visited';
 import { WorkAdventureContext } from '@/app/admin/workadventure-context';
-import { peakHourOf } from '@/app/admin/hooks/use-room-analytics';
+import { localHourFromUtc, localPeakHour } from '@/lib/analytics-peak';
 
 jest.mock('next/link', () => ({
   __esModule: true,
@@ -117,14 +117,10 @@ describe('Home rooms keep their numbers', () => {
     expect(cards[0].textContent).toContain('Creative Hub');
   });
 
-  it('finds the busiest hour in local time, falling back to the server', () => {
-    const at = (hour: number) => {
-      const date = new Date();
-      date.setHours(hour, 5, 0, 0);
-      return { accessedAt: date.toISOString() };
-    };
-    expect(peakHourOf({ recentActivity: [at(9), at(14), at(14)] })).toEqual({ hour: 14, zone: 'local' });
-    expect(peakHourOf({ recentActivity: [], peakTimes: [{ hour: 7, count: 3 }] })).toEqual({ hour: 7, zone: 'UTC' });
-    expect(peakHourOf({})).toEqual({ hour: null, zone: 'UTC' });
+  it("takes Peak from all visits (the server's hour buckets), on the viewer's clock", () => {
+    // 16:00 UTC is the busiest bucket; the card shows that hour in local time, whatever one page of visits says.
+    const expected = localHourFromUtc(16);
+    expect(localPeakHour([{ hour: 16, count: 40 }, { hour: 9, count: 2 }])).toBe(expected);
+    expect(localPeakHour([])).toBeNull();
   });
 });

@@ -485,7 +485,7 @@ export default function UserDetailPage() {
                         count(universe._count?.worlds ?? 0, 'world'),
                         count(universe._count?.rooms ?? 0, 'room'),
                         count(universe._count?.members ?? 0, 'member'),
-                        analytics && count(analytics.totalAccesses, 'visit'),
+                        analytics && count(analytics.totalAccesses, 'access', 'accesses'),
                       ]}
                     />
                   }
@@ -524,7 +524,7 @@ export default function UserDetailPage() {
                         membership.world.universe.name,
                         count(membership.world._count?.rooms ?? 0, 'room'),
                         count(membership.world._count?.members ?? 0, 'member'),
-                        analytics && count(analytics.totalAccesses, 'visit'),
+                        analytics && count(analytics.totalAccesses, 'access', 'accesses'),
                       ]}
                     />
                   }
@@ -620,7 +620,7 @@ export default function UserDetailPage() {
                   {accessHistory && (
                     <StatLine
                       items={[
-                        count(accessHistory.total ?? 0, 'visit'),
+                        count(accessHistory.total ?? 0, 'access', 'accesses'),
                         accessHistory.firstAccess && `first ${new Date(accessHistory.firstAccess).toLocaleDateString()}`,
                         accessHistory.lastAccess && `last ${timeAgo(new Date(accessHistory.lastAccess))}`,
                       ]}

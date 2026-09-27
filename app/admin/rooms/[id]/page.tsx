@@ -1,5 +1,6 @@
 'use client';
 
+import { localPeakHour } from '@/lib/analytics-peak';
 import { PersonIcon } from '../../components/profile-card';
 
 import { useState, useEffect, type ReactNode } from 'react';
@@ -520,28 +521,8 @@ export default function RoomDetailPage() {
     return <EmptyCard kind="room" title="Room not found." text="It may have been deleted, or you may not have access to it." />;
   }
 
-  // Calculate peak hour
-  let peakHour = null;
-  let peakCount = 0;
-  if (analytics?.recentActivity && analytics.recentActivity.length > 0) {
-    const hourCounts = new Map<number, number>();
-    analytics.recentActivity.forEach((access: any) => {
-      const date = new Date(access.accessedAt);
-      const hour = date.getHours();
-      hourCounts.set(hour, (hourCounts.get(hour) || 0) + 1);
-    });
-    const localPeakTimes = Array.from(hourCounts.entries())
-      .map(([hour, count]) => ({ hour, count }))
-      .sort((a, b) => b.count - a.count);
-    if (localPeakTimes.length > 0) {
-      peakHour = localPeakTimes[0].hour;
-      peakCount = localPeakTimes[0].count;
-    }
-  }
-  if (peakHour === null && analytics?.peakTimes && analytics.peakTimes.length > 0) {
-    peakHour = analytics.peakTimes[0].hour;
-    peakCount = analytics.peakTimes[0].count;
-  }
+  // Peak: the busiest hour of all visits, on your clock (one definition everywhere: lib/analytics-peak.ts).
+  const peakHour = localPeakHour(analytics?.peakTimes);
 
   const visits = typeof analytics?.totalAccesses === 'number' ? analytics.totalAccesses : null;
   const canEdit = room.canEdit !== false;
@@ -570,8 +551,8 @@ export default function RoomDetailPage() {
         stats={
           visits !== null || peakHour !== null ? (
             <Figures>
-              {visits !== null && <Figure value={visits} label={visits === 1 ? 'visit' : 'visits'} />}
-              {peakHour !== null && <Figure value={formatHour(peakHour)} label="busiest" />}
+              {visits !== null && <Figure value={visits} label={visits === 1 ? 'access' : 'accesses'} />}
+              {peakHour !== null && <Figure value={formatHour(peakHour)} label="peak" />}
             </Figures>
           ) : undefined
         }

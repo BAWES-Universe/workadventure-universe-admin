@@ -284,7 +284,7 @@ export default function UniverseDetailPage() {
           <Figures>
             <Figure value={worlds.length} label={worlds.length === 1 ? 'world' : 'worlds'} />
             {analytics && (
-              <Figure value={analytics.totalAccesses || 0} label={analytics.totalAccesses === 1 ? 'visit' : 'visits'} />
+              <Figure value={analytics.totalAccesses || 0} label={analytics.totalAccesses === 1 ? 'access' : 'accesses'} />
             )}
           </Figures>
         }

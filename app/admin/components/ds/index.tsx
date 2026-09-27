@@ -81,7 +81,7 @@ export function Context({ parts }: { parts: { label: string; href?: string }[] }
   );
 }
 
-/** Numbers about something, in one format everywhere: "1,284 visits · 3 rooms · 18 members". */
+/** Numbers about something, in one format everywhere: "1,284 accesses · 3 rooms · 18 members". */
 export function StatLine({ items }: { items: (string | false | null | undefined)[] }) {
   const shown = items.filter(Boolean) as string[];
   if (shown.length === 0) return null;

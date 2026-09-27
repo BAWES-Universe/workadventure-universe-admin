@@ -292,7 +292,7 @@ export default function WorldDetailPage() {
         }
         stats={
           <Figures>
-            {visits !== null && <Figure value={visits} label={visits === 1 ? 'visit' : 'visits'} />}
+            {visits !== null && <Figure value={visits} label={visits === 1 ? 'access' : 'accesses'} />}
             <Figure value={world.rooms.length} label={world.rooms.length === 1 ? 'room' : 'rooms'} />
           </Figures>
         }

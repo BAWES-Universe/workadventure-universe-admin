@@ -41,30 +41,6 @@ function validVisit(visit?: RoomVisit | null): RoomVisit | null {
   return visit && Number.isFinite(new Date(visit.accessedAt).getTime()) ? visit : null;
 }
 
-/**
- * @deprecated Peak is no longer computed from recent activity (one page of it is not the whole story): use
- * `localPeakHour` from `@/lib/analytics-peak`, which reads the API's all-time buckets. Kept only for an older test.
- */
-export function peakHourOf(data: AnalyticsResponse): { hour: number | null; zone: 'local' | 'UTC' } {
-  const counts = new Map<number, number>();
-  for (const access of data.recentActivity ?? []) {
-    if (!validVisit(access)) continue;
-    const hour = new Date(access.accessedAt).getHours();
-    counts.set(hour, (counts.get(hour) ?? 0) + 1);
-  }
-  let best: number | null = null;
-  let bestCount = 0;
-  for (const [hour, count] of counts) {
-    if (count > bestCount) {
-      best = hour;
-      bestCount = count;
-    }
-  }
-  if (best !== null) return { hour: best, zone: 'local' };
-  const utc = data.peakTimes?.find((peak) => Number.isInteger(peak.hour) && peak.hour >= 0 && peak.hour <= 23)?.hour;
-  return { hour: utc ?? null, zone: 'UTC' };
-}
-
 /** Identity, not timestamps: the same moment is not enough, the record has to name you. */
 function sameVisitor(yours: RoomVisit | null, last: RoomVisit | null): boolean {
   if (!yours || !last) return false;

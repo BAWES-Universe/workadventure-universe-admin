@@ -105,7 +105,7 @@ export default function StylePage() {
             status={<StatusPill status="public" />}
             stats={
               <Figures>
-                <Figure value={1284} label="visits" />
+                <Figure value={1284} label="accesses" />
                 <Figure value={3} label="rooms" />
                 <Figure value={18} label="members" />
               </Figures>
@@ -162,7 +162,7 @@ export default function StylePage() {
             title="Plugn"
             pills={<StatusPill status="private" />}
             description="A private universe for the Plugn product team."
-            meta={<StatLine items={[count(1, 'world'), count(7, 'room'), count(1284, 'visit')]} />}
+            meta={<StatLine items={[count(1, 'world'), count(7, 'room'), count(1284, 'access', 'accesses')]} />}
           />
           <EntityCard
             href="#"
@@ -172,7 +172,7 @@ export default function StylePage() {
             description="Whiteboards and quiet corners for design reviews."
             meta={
               <>
-                <StatLine items={[count(1284, 'visit'), 'busiest at 4 PM']} />
+                <StatLine items={[count(1284, 'access', 'accesses'), 'Peak 4 PM']} />
                 <VisitLine you={minutesAgo(40)} youWereLast />
               </>
             }
