@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useId, useState } from 'react';
-import { Navigation, Star } from 'lucide-react';
+import { DoorOpen, Navigation, Star } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { timeAgo } from '@/lib/time-ago';
 import { formatHour, useRoomAnalytics, wasLastVisitorYou } from '../hooks/use-room-analytics';
@@ -90,7 +90,7 @@ export function RoomCard({ room, kind, index }: { room: RoomCardRoom; kind: Kind
   const variant = here ? styles.current : kind === 'previous' ? styles.previous : styles.recent;
 
   return (
-    <article className={cn(styles.card, variant)} aria-labelledby={titleId} data-testid={`room-card-${kind}`}>
+    <article className={cn(styles.card, variant, 'orbit-kind-wash')} data-kind="room" aria-labelledby={titleId} data-testid={`room-card-${kind}`}>
       {here && <OrbitalIllustration />}
       <div className={styles.cardTop}>
         <span className={styles.eyebrow}>
@@ -115,12 +115,17 @@ export function RoomCard({ room, kind, index }: { room: RoomCardRoom; kind: Kind
             <span aria-hidden="true">/</span>
             <span>{room.world.name}</span>
           </p>
-          <h3 id={titleId} className={styles.roomName}>
-            {/* The whole card opens the room's page. */}
-            <Link href={`/admin/rooms/${room.id}`} className={styles.cardLink}>
-              {room.name}
-            </Link>
-          </h3>
+          <div className={styles.nameRow}>
+            <span className="orbit-kind" data-kind="room" aria-hidden="true">
+              <DoorOpen size={18} />
+            </span>
+            <h3 id={titleId} className={styles.roomName}>
+              {/* The whole card opens the room's page. */}
+              <Link href={`/admin/rooms/${room.id}`} className={styles.cardLink}>
+                {room.name}
+              </Link>
+            </h3>
+          </div>
           {room.description && <p className={styles.description}>{room.description}</p>}
         </div>
       </div>
@@ -142,42 +147,35 @@ export function RoomCard({ room, kind, index }: { room: RoomCardRoom; kind: Kind
         {analytics && (
           <dl className={styles.metrics}>
             <div>
-              <dt>Visits</dt>
-              <dd>{analytics.totalAccesses === null ? 'Unavailable' : analytics.totalAccesses.toLocaleString()}</dd>
+              <dt>Accesses</dt>
+              <dd>{analytics.totalAccesses === null ? '—' : analytics.totalAccesses.toLocaleString()}</dd>
             </div>
             <div>
-              <dt>
-                Busiest hour {analytics.peakHour !== null && <span className={styles.zone}>· {analytics.peakZone}</span>}
-              </dt>
-              <dd>{analytics.peakHour === null ? 'Not enough data' : formatHour(analytics.peakHour)}</dd>
+              <dt>Peak</dt>
+              <dd>{analytics.peakHour === null ? '—' : formatHour(analytics.peakHour)}</dd>
             </div>
           </dl>
         )}
         {(you || analytics) && (
           <div className={styles.visitHistory}>
-            {!here && (
-              <p>
-                <span>You were here</span>
-                <strong>{you ? <VisitTime value={you} /> : 'Not yet'}</strong>
-              </p>
-            )}
+            <p>
+              <span>Last visited by you</span>
+              <strong>{you ? <VisitTime value={you} /> : 'Never'}</strong>
+            </p>
             {analytics &&
               (latest ? (
-                <p>
-                  <span>Latest visitor</span>
-                  <strong>
-                    {wasLastVisitorYou(analytics) ? (
-                      'You'
-                    ) : (
-                      <>
-                        {latest.userName ? `${latest.userName}, ` : ''}
-                        <VisitTime value={latest.accessedAt} />
-                      </>
-                    )}
-                  </strong>
-                </p>
+                wasLastVisitorYou(analytics) ? (
+                  <p className={styles.noVisits}>You were the last visitor</p>
+                ) : (
+                  <p>
+                    <span>Most recent visitor</span>
+                    <strong>
+                      <VisitTime value={latest.accessedAt} />
+                    </strong>
+                  </p>
+                )
               ) : (
-                <p className={styles.noVisits}>No visits recorded yet</p>
+                <p className={styles.noVisits}>No visits recorded</p>
               ))}
           </div>
         )}

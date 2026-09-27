@@ -1,19 +1,19 @@
 .page { --atlas-line: hsl(var(--border)); --atlas-ink: hsl(var(--foreground)); --atlas-muted: hsl(var(--muted-foreground)); display: grid; gap: 26px; min-width: 0; padding-bottom: 12px; }
 .header { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; }
 .eyebrow { display: flex; align-items: center; gap: 7px; font-size: 10px; font-weight: 600; letter-spacing: .17em; text-transform: uppercase; color: hsl(var(--primary)); }
-.header h1 { font-size: clamp(40px, 6vw, 64px); line-height: 1.12; letter-spacing: -.07em; font-weight: 500; margin: 9px 0 7px; }
-.header h1 > span { color: hsl(var(--primary)); }
+.header h1 { font-family: var(--font-display); font-size: clamp(30px, 7vw, 44px); line-height: 1.08; letter-spacing: -.03em; font-weight: 700; margin: 6px 0 6px; }
+.header h1 > span { background-image: var(--brand-gradient); -webkit-background-clip: text; background-clip: text; color: transparent; }
 .intro { font-size: 13px; color: var(--atlas-muted); }
-.create { display: inline-flex; flex-shrink: 0; align-items: center; justify-content: center; gap: 9px; min-height: 44px; padding: 11px 16px; color: hsl(var(--primary-foreground)); background: hsl(var(--primary)); border-radius: 999px; font-size: 12px; font-weight: 600; transition: transform 180ms, box-shadow 180ms; }
+.create { display: inline-flex; flex-shrink: 0; align-items: center; justify-content: center; gap: 9px; min-height: 44px; padding: 11px 16px; color: #fff; background-image: var(--brand-gradient); border-radius: 999px; font-size: 13px; font-weight: 600; transition: transform 180ms, box-shadow 180ms; }
 .create:hover { transform: translateY(-2px); box-shadow: 0 5px 24px hsl(var(--primary) / .2); }
 .switcher { display: flex; gap: 26px; border-bottom: 1px solid var(--atlas-line); }
-.switcher a { min-height: 48px; display: flex; align-items: center; gap: 32px; font-size: 13px; position: relative; color: var(--atlas-muted); padding: 0 2px 9px; }
+.switcher a { min-height: 48px; display: flex; align-items: center; gap: 8px; font-size: 13px; position: relative; color: var(--atlas-muted); padding: 0 2px 9px; }
 .switcher a[aria-current] { color: var(--atlas-ink); font-weight: 600; }
 .switcher a[aria-current]::after { content: ''; height: 2px; background: hsl(var(--primary)); position: absolute; bottom: -1px; left: 0; right: 0; }
 .switcher a[aria-current] svg { color: hsl(var(--primary)); }
 .mine, .explore { display: grid; gap: 30px; }
 .sectionHeader { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 44px; margin-bottom: 12px; }
-.sectionHeader h2 { font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 11px; }
+.sectionHeader h2 { font-family: var(--font-display); font-size: 16px; font-weight: 700; display: flex; align-items: center; gap: 11px; }
 .sectionHeader h2 > span, .routeNumber { font-size: 9px; font-weight: 400; color: var(--atlas-muted); font-family: var(--font-mono); }
 .sectionHeader a { display: inline-flex; align-items: center; justify-content: flex-end; gap: 6px; min-height: 44px; font-size: 11px; color: var(--atlas-muted); white-space: nowrap; }
 .sectionHeader a:hover { color: hsl(var(--primary)); }
@@ -26,7 +26,7 @@
 .universeTop > span:last-child { display: flex; align-items: center; gap: 4px; }
 .universeBottom { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; position: relative; z-index: 2; padding-top: 89px; }
 .universeBottom > div { min-width: 0; }
-.universeBottom h3 { font-size: 21px; font-weight: 600; letter-spacing: -.035em; line-height: 1.25; overflow-wrap: anywhere; }
+.universeBottom h3 { font-family: var(--font-display); font-size: 21px; font-weight: 700; letter-spacing: -.035em; line-height: 1.25; overflow-wrap: anywhere; }
 .universeBottom p { color: var(--atlas-muted); margin-top: 7px; font-size: 11px; line-height: 1.7; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
 .cardCount { display: block; font-size: 10px; color: var(--atlas-muted); margin-top: 8px; }
 .cardArrow { flex-shrink: 0; color: var(--atlas-muted); transition: transform 200ms, color 200ms; }
@@ -54,7 +54,7 @@
 .loading { display: flex; align-items: center; gap: 10px; color: var(--atlas-muted); min-height: 124px; padding: 24px 2px; font-size: 12px; }
 .loading > span { width: 7px; height: 7px; border-radius: 50%; background: hsl(var(--primary)); animation: pulse 1.4s ease-in-out infinite; }
 .error { min-height: 124px; display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 20px 2px; font-size: 12px; color: var(--atlas-muted); border-top: 1px solid var(--atlas-line); }
-.error button { display: inline-flex; align-items: center; gap: 7px; min-height: 44px; padding: 0 12px; border: 1px solid var(--atlas-line); border-radius: 999px; color: var(--atlas-ink); }
+.error button { display: inline-flex; align-items: center; gap: 7px; min-height: 40px; padding: 0 14px; border: 1px solid hsl(var(--foreground) / .15); border-radius: 999px; color: var(--atlas-ink); font-weight: 600; }
 .invitation { display: flex; align-items: center; gap: 8px; min-height: 44px; margin-bottom: 10px; font-size: 11px; color: hsl(var(--primary)); }
 .invitation > svg:last-child { margin-left: auto; }
 .templateLink { display: flex; align-items: center; gap: 15px; border-top: 1px solid var(--atlas-line); padding: 22px 0 6px; color: var(--atlas-muted); }
@@ -63,7 +63,7 @@
 .templateLink strong { color: var(--atlas-ink); font-size: 12px; font-weight: 500; }
 .discovery { display: grid; grid-template-columns: minmax(0, .9fr) minmax(0, 1.2fr); border: 1px solid var(--atlas-line); border-radius: 18px; overflow: hidden; }
 .discoveryIntro { position: relative; overflow: hidden; min-height: 360px; padding: 30px; background: hsl(var(--primary) / .035); }
-.discoveryIntro h2 { position: relative; z-index: 1; font-size: clamp(28px, 4vw, 43px); font-weight: 400; letter-spacing: -.055em; line-height: 1.12; margin: 32px 0 16px; }
+.discoveryIntro h2 { position: relative; z-index: 1; font-family: var(--font-display); font-size: clamp(24px, 4vw, 34px); font-weight: 700; letter-spacing: -.03em; line-height: 1.12; margin: 32px 0 16px; }
 .discoveryIntro h2 em { font-weight: 400; font-family: Georgia, 'Times New Roman', serif; color: hsl(var(--primary)); }
 .discoveryIntro p { position: relative; z-index: 1; font-size: 12px; line-height: 1.8; color: var(--atlas-muted); }
 .discoveryOrbit { position: absolute; height: 160px; width: 240px; right: -45px; bottom: -40px; transform: rotate(-30deg); }
@@ -78,13 +78,13 @@
 .exploreLink > svg:first-of-type { color: hsl(var(--primary)); flex-shrink: 0; }
 .exploreLink > svg:last-child { color: var(--atlas-muted); margin-left: auto; flex-shrink: 0; }
 .exploreLink > span:not(.routeNumber) { display: grid; gap: 5px; }
-.exploreLink strong { font-size: 17px; letter-spacing: -.03em; font-weight: 500; }
+.exploreLink strong { font-family: var(--font-display); font-size: 17px; letter-spacing: -.02em; font-weight: 700; }
 .exploreLink strong + span { font-size: 10px; line-height: 1.6; color: var(--atlas-muted); }
 .build { display: flex; justify-content: space-between; align-items: center; gap: 26px; padding: 15px 0; }
-.build h2 { font-size: 25px; font-weight: 400; letter-spacing: -.04em; margin: 12px 0 9px; }
+.build h2 { font-family: var(--font-display); font-size: 22px; font-weight: 700; letter-spacing: -.02em; margin: 12px 0 9px; }
 .build p:last-child { font-size: 12px; color: var(--atlas-muted); max-width: 29em; line-height: 1.8; }
 .buildActions { flex-shrink: 0; display: grid; gap: 6px; }
-.textAction { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 44px; font-size: 11px; color: var(--atlas-muted); }
+.textAction { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 40px; padding: 0 16px; border: 1px solid hsl(var(--foreground) / .15); border-radius: 999px; font-size: 13px; font-weight: 600; color: var(--atlas-ink); }
 .page a:focus-visible, .page button:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 5px; }
 @keyframes pulse { 0%, 100% { opacity: .3; } 50% { opacity: 1; } }
 @media (max-width: 700px) {

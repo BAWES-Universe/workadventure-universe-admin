@@ -34,14 +34,14 @@ export interface NavItem {
  * visit or manage, You is your visit card and account. Everything else lives one tap further, in the menu.
  */
 export const DESTINATIONS: NavItem[] = [
-  { href: '/admin', label: 'Home', icon: Home },
+  { href: '/admin', label: 'Orbit', icon: Home },
   { href: '/admin/space', label: 'Space', icon: Orbit },
   { href: '/admin/you', label: 'You', icon: UserCircle },
 ];
 
 export const NAV_ITEMS: NavItem[] = [
   // Primary entry (no group, always at top)
-  { href: '/admin', label: 'Home', icon: Home },
+  { href: '/admin', label: 'Orbit', icon: Home },
 
   // Room Templates - available to all users
   { href: '/admin/templates', label: 'Room Templates', icon: FolderOpen },

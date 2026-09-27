@@ -204,13 +204,13 @@ describe('AdminShell', () => {
     expect(screen.queryByTestId('orbit-view-toggle')).toBeNull();
     expect(screen.queryByRole('button', { name: /full screen|expand|maximi/i })).toBeNull();
     const bar = screen.getByRole('banner');
-    expect(bar.querySelector('button')?.getAttribute('aria-label')).toBe('Menu');
+    expect(bar.querySelector('button')?.textContent).toBe('Orbit Menu');
   });
 
   it('keeps Home, Space and You on the bottom bar', async () => {
     await renderShell('/admin');
     const nav = screen.getByRole('navigation', { name: 'Orbit' });
-    expect(Array.from(nav.querySelectorAll('a')).map((link) => link.textContent)).toEqual(['Home', 'Space', 'You']);
+    expect(Array.from(nav.querySelectorAll('a')).map((link) => link.textContent)).toEqual(['Orbit', 'Space', 'You']);
   });
 
   it('keeps every super-admin tool reachable from the menu', async () => {

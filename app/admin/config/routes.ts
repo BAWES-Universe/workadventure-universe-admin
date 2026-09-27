@@ -20,7 +20,7 @@ export interface RouteDefinition {
 
 export const ROUTES: RouteDefinition[] = [
   // The three roots
-  { pattern: '/admin', title: 'Home', parent: null },
+  { pattern: '/admin', title: 'Orbit', parent: null },
   { pattern: '/admin/space', title: 'Space', parent: null },
   // The first shell's name for Space; the page redirects.
   { pattern: '/admin/places', title: 'Space', parent: '/admin/space' },
@@ -161,7 +161,7 @@ export function resolveRoute(pathname: string): ResolvedRoute {
       };
     }
   }
-  return { pattern: pathname, title: 'Orbit', parent: '/admin', parentTitle: 'Home', params: {}, known: false };
+  return { pattern: pathname, title: 'Orbit', parent: '/admin', parentTitle: 'Orbit', params: {}, known: false };
 }
 
 /** Home, Space and You: the pages the bottom bar and the sidebar lead to, with no parent of their own. */

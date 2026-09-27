@@ -4,7 +4,6 @@ import { Suspense, useEffect, useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import {
-  ArrowDownLeft,
   ArrowUpRight,
   Building2,
   Compass,
@@ -108,7 +107,7 @@ function Space() {
       <header className={styles.header}>
         <div>
           <p className={styles.eyebrow}>
-            <Compass size={13} aria-hidden="true" /> Universe · Worlds · Rooms
+            <Compass size={13} aria-hidden="true" /> Universes, worlds and rooms
           </p>
           <h1 className="orbit-display">
             Space<span>.</span>
@@ -123,11 +122,9 @@ function Space() {
       <nav className={styles.switcher} aria-label="Space">
         <Link href="/admin/space" aria-current={!explore ? 'page' : undefined}>
           <span>Mine</span>
-          <ArrowDownLeft size={16} aria-hidden="true" />
         </Link>
         <Link href="/admin/space?tab=explore" aria-current={explore ? 'page' : undefined}>
           <span>Explore</span>
-          <ArrowUpRight size={16} aria-hidden="true" />
         </Link>
       </nav>
       {explore ? <Explore /> : <Mine />}
@@ -188,6 +185,7 @@ function Mine() {
                     key={membership.id}
                     href={`/admin/worlds/${membership.world.id}`}
                     icon={Building2}
+                    kind="world"
                     title={membership.world.name}
                     subtitle={`${membership.world.universe.name}${membership.tags.length ? ` · ${membership.tags.join(', ')}` : ''}`}
                   />
@@ -202,7 +200,7 @@ function Mine() {
             {(items) => (
               <div className={styles.rows}>
                 {items.slice(0, SHOWN).map((room) => (
-                  <Destination key={room.id} href={`/admin/rooms/${room.id}`} icon={Star} title={room.name} subtitle={`${room.world.name} · ${room.world.universe.name}`} />
+                  <Destination key={room.id} href={`/admin/rooms/${room.id}`} icon={Star} kind="star" title={room.name} subtitle={`${room.world.name} · ${room.world.universe.name}`} />
                 ))}
               </div>
             )}
@@ -231,14 +229,16 @@ function UniverseCard({ universe, index }: { universe: MyUniverse; index: number
     .filter(Boolean)
     .join(' · ');
   return (
-    <Link href={`/admin/universes/${universe.id}`} className={styles.universe} data-variant={index % 3}>
+    <Link href={`/admin/universes/${universe.id}`} className={`${styles.universe} orbit-kind-wash`} data-kind="universe" data-variant={index % 3}>
       <div className={styles.celestial} aria-hidden="true">
         <span className={styles.orbitRing} />
         <span className={styles.planet} />
         <span className={styles.moon} />
       </div>
       <div className={styles.universeTop}>
-        <span>Your universe</span>
+        <span className="orbit-kind" data-kind="universe" aria-hidden="true">
+          <Globe2 size={18} />
+        </span>
         <span>
           {!universe.isPublic && <LockKeyhole size={12} aria-hidden="true" />}
           {universe.isPublic ? 'Public' : 'Private'}
@@ -275,10 +275,10 @@ function Explore() {
           </div>
         </div>
         <div className={styles.discoveryLinks}>
-          <ExploreLink href="/admin/discover/universes" number="01" icon={Globe2} title="Universes" count={stats.universes} description="Public universes you can explore" />
-          <ExploreLink href="/admin/discover/worlds" number="02" icon={Building2} title="Worlds" count={stats.worlds} description="Worlds across universes" />
-          <ExploreLink href="/admin/discover/rooms" number="03" icon={DoorOpen} title="Rooms" count={stats.rooms} description="Individual spaces & maps" />
-          <ExploreLink href="/admin/users" number="04" icon={Users} title="Users" count={stats.users} description="People exploring the Universe" />
+          <ExploreLink href="/admin/discover/universes" number="01" icon={Globe2} kind="universe" title="Universes" count={stats.universes} description="Public universes you can explore" />
+          <ExploreLink href="/admin/discover/worlds" number="02" icon={Building2} kind="world" title="Worlds" count={stats.worlds} description="Worlds across universes" />
+          <ExploreLink href="/admin/discover/rooms" number="03" icon={DoorOpen} kind="room" title="Rooms" count={stats.rooms} description="Individual spaces & maps" />
+          <ExploreLink href="/admin/users" number="04" icon={Users} kind="star" title="Users" count={stats.users} description="People exploring the Universe" />
         </div>
       </section>
       <section className={styles.build} aria-labelledby="build-heading">
@@ -304,11 +304,12 @@ function Explore() {
   );
 }
 
-function ExploreLink({ href, number, icon: Icon, title, count, description }: { href: string; number: string; icon: LucideIcon; title: string; count: number; description: string }) {
+function ExploreLink({ href, icon: Icon, kind, title, count, description }: { href: string; number?: string; icon: LucideIcon; kind: 'universe' | 'world' | 'room' | 'star'; title: string; count: number; description: string }) {
   return (
-    <Link className={styles.exploreLink} href={href}>
-      <span className={styles.routeNumber}>{number}</span>
-      <Icon size={23} aria-hidden="true" />
+    <Link className={`${styles.exploreLink} orbit-kind-wash`} data-kind={kind === 'star' ? 'universe' : kind} href={href}>
+      <span className="orbit-kind" data-kind={kind} aria-hidden="true">
+        <Icon size={18} />
+      </span>
       <span>
         <strong>
           {title} <span className={styles.count}>{count.toLocaleString()}</span>
@@ -320,13 +321,10 @@ function ExploreLink({ href, number, icon: Icon, title, count, description }: { 
   );
 }
 
-function SectionHeader({ id, marker, title, href, action }: { id: string; marker: string; title: string; href: string; action: string }) {
+function SectionHeader({ id, title, href, action }: { id: string; marker?: string; title: string; href: string; action: string }) {
   return (
     <div className={styles.sectionHeader}>
-      <h2 id={id}>
-        <span>{marker}</span>
-        {title}
-      </h2>
+      <h2 id={id}>{title}</h2>
       <Link href={href}>
         {action}
         <ArrowUpRight size={14} aria-hidden="true" />
@@ -335,11 +333,11 @@ function SectionHeader({ id, marker, title, href, action }: { id: string; marker
   );
 }
 
-function Destination({ href, icon: Icon, title, subtitle }: { href: string; icon: LucideIcon; title: string; subtitle: string }) {
+function Destination({ href, icon: Icon, kind, title, subtitle }: { href: string; icon: LucideIcon; kind: 'universe' | 'world' | 'room' | 'star'; title: string; subtitle: string }) {
   return (
-    <Link className={styles.destination} href={href}>
-      <span className={styles.destinationIcon}>
-        <Icon size={18} aria-hidden="true" />
+    <Link className={`${styles.destination} orbit-kind-wash`} data-kind={kind === 'star' ? 'room' : kind} href={href}>
+      <span className="orbit-kind" data-kind={kind} aria-hidden="true">
+        <Icon size={18} />
       </span>
       <span className={styles.destinationText}>
         <strong>{title}</strong>

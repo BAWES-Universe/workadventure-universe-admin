@@ -45,7 +45,7 @@ export function MenuSheet({ user }: { user: NavUser }) {
         <DialogPrimitive.Content id="orbit-menu" className="orbit-menu">
           <div className="orbit-menu-heading">
             <div>
-              <p className="orbit-eyebrow">Menu</p>
+              <p className="orbit-eyebrow">Orbit Menu</p>
               <DialogPrimitive.Title asChild>
                 <h2>Where to?</h2>
               </DialogPrimitive.Title>

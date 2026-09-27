@@ -52,7 +52,7 @@ export default function RecentlyVisited({ limit = 4, excludeRoomIds = [] }: { li
           <h2 id="recent-heading" className="orbit-display">
             Recently visited
           </h2>
-          <p>A trail of rooms worth returning to.</p>
+          <p>Rooms you were in lately.</p>
         </div>
         {shown && shown.length > 0 && <span aria-hidden="true">{String(shown.length).padStart(2, '0')}</span>}
       </div>

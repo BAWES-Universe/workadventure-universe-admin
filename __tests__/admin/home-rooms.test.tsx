@@ -87,14 +87,18 @@ describe('Home rooms keep their numbers', () => {
     expect(here.textContent).toMatch(/BAWES\s*\/\s*Office/);
     expect(here.textContent).toContain('Where the team meets');
     expect(here.textContent).toContain('9');
-    expect(here.textContent).toMatch(/Latest visitor\s*Imagine, 3 minutes ago/);
+    expect(here.textContent).toMatch(/Last visited by you\s*12 minutes ago/);
+    expect(here.textContent).toMatch(/Most recent visitor\s*3 minutes ago/);
+    // Visitors aren't named on the card, and the peak hour carries no time-zone label.
+    expect(here.textContent).not.toContain('Imagine');
+    expect(here.textContent).not.toContain('UTC');
     // No Visit on the room you're already in.
     expect(here.querySelector('button')).toBeNull();
 
     const before = await screen.findByTestId('room-card-previous');
     await waitFor(() => expect(before.textContent).toContain('233'));
     expect(before.textContent).toContain('Creative Hub');
-    expect(before.textContent).toMatch(/Latest visitor\s*You/);
+    expect(before.textContent).toContain('You were the last visitor');
     expect(before.querySelector('button')?.textContent).toBe('Visit');
     expect(onShown).toHaveBeenLastCalledWith(['r-hq', 'r-hub']);
   });

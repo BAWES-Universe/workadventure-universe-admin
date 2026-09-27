@@ -362,7 +362,7 @@ export default function WorldDetailPage() {
     <div className="space-y-8">
       <nav className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground">
         <Link href="/admin" className="hover:text-foreground">
-          Home
+          Orbit
         </Link>
         <ChevronRight className="h-4 w-4" />
         <Link href={`/admin/universes/${world.universe.id}`} className="hover:text-foreground">

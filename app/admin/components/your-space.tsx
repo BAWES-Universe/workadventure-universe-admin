@@ -39,10 +39,6 @@ export default function YourSpace() {
     <section className={styles.section} data-testid="your-space">
       <div className={styles.heading}>
         <h2 className="orbit-display">Your space</h2>
-        <Link href="/admin/space">
-          Space
-          <ArrowUpRight size={14} aria-hidden="true" />
-        </Link>
       </div>
       {mine ? (
         <div className={styles.index}>
