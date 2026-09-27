@@ -56,6 +56,7 @@ interface Universe {
     id: string;
     name: string | null;
     email: string | null;
+    woka?: string[];
   };
   worlds: Array<{
     id: string;
@@ -507,6 +508,7 @@ export default function UniverseDetailPage() {
                   <EntityRow
                     href={`/admin/users/${universe.owner.id}`}
                     kind="people"
+                    leading={<PersonIcon woka={universe.owner.woka} name={universe.owner.name} />}
                     title={universe.owner.name || 'Someone'}
                     context={<StatLine items={['Owner']} />}
                   />

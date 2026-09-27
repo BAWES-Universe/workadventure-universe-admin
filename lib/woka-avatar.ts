@@ -12,7 +12,7 @@ function resolve(url: string): string {
 }
 
 /** A stable pick for someone who never chose an outfit: one of the game's default Wokas, the same one every time. */
-function defaultWoka(userId: string): string[] {
+export function defaultWoka(userId: string): string[] {
   const textures = getWokaList(playServiceUrl()).woka?.collections?.[0]?.textures ?? [];
   if (textures.length === 0) return [];
   let hash = 0;
@@ -64,12 +64,23 @@ export async function wokaLayersFor(userId: string): Promise<string[]> {
 }
 
 /**
- * Adds each person's Woka to a list of records that may name them (`userId`). Records that don't (a guest, or a
- * person the viewer may not identify) get none. Never fails the list: without Wokas it comes back as it was.
+ * Adds each person's Woka to a list of records that may name them (`userId`). Someone the list doesn't name (a guest,
+ * or a person the viewer may not identify) gets a default Woka picked from `userUuid` or the record's `id`, which
+ * says nothing about who they are. Never fails the list: without Wokas it comes back as it was.
  */
-export async function withWokas<T extends { userId?: string | null }>(records: T[]): Promise<(T & { woka?: string[] })[]> {
+export async function withWokas<T extends { userId?: string | null; userUuid?: string | null; id?: string | null }>(
+  records: T[],
+): Promise<(T & { woka?: string[] })[]> {
   const ids = records.map((record) => record.userId).filter((id): id is string => typeof id === 'string' && id.length > 0);
-  if (ids.length === 0) return records;
-  const wokas = await wokaLayersForMany(ids).catch(() => new Map<string, string[]>());
-  return records.map((record) => (record.userId && wokas.has(record.userId) ? { ...record, woka: wokas.get(record.userId) } : record));
+  const wokas = ids.length ? await wokaLayersForMany(ids).catch(() => new Map<string, string[]>()) : new Map<string, string[]>();
+  return records.map((record) => {
+    if (record.userId && wokas.has(record.userId)) return { ...record, woka: wokas.get(record.userId) };
+    const seed = record.userUuid || record.id;
+    if (!seed) return record;
+    try {
+      return { ...record, woka: defaultWoka(seed) };
+    } catch {
+      return record;
+    }
+  });
 }

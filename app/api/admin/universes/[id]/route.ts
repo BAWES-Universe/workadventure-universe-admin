@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
+import { wokaLayersFor } from '@/lib/woka-avatar';
 
 const updateUniverseSchema = z.object({
   slug: z.string().min(1).max(100).optional(),
@@ -103,8 +104,10 @@ export async function GET(
     }));
 
     // Allow viewing for anyone, but include ownership info
+    const ownerWoka = universe.owner ? await wokaLayersFor(universe.owner.id).catch(() => []) : [];
     const responseData = {
       ...universe,
+      owner: universe.owner ? { ...universe.owner, woka: ownerWoka } : universe.owner,
       worlds: worldsWithFavorites,
       canEdit: userId ? (isAdminToken || universe.ownerId === userId) : false,
     };

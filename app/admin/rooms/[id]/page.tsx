@@ -107,10 +107,10 @@ const tabClass = (active: boolean) =>
   `py-3 px-1 border-b-2 font-medium text-sm ${active ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'}`;
 
 /** A visitor without an account: the same look as a row, with nothing to open. */
-function StaticRow({ title, context, meta }: { title: string; context?: ReactNode; meta?: ReactNode }) {
+function StaticRow({ title, context, meta, woka }: { title: string; context?: ReactNode; meta?: ReactNode; woka?: string[] }) {
   return (
     <div className="flex min-h-[68px] items-center gap-3 rounded-[18px] border border-border bg-card px-3.5 py-3 [&+&]:mt-2">
-      <KindIcon kind="people" />
+      <PersonIcon woka={woka} name={title} />
       <div className="grid min-w-0 flex-1 gap-[3px]">
         <strong className="text-sm font-semibold leading-snug [overflow-wrap:anywhere]">{title}</strong>
         {context}
@@ -1030,7 +1030,7 @@ export default function RoomDetailPage() {
                           meta={meta}
                         />
                       ) : (
-                        <StaticRow key={access.id} title={userName} context={context} meta={meta} />
+                        <StaticRow key={access.id} title={userName} context={context} meta={meta} woka={access.woka} />
                       );
                     })}
                   </div>

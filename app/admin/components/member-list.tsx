@@ -44,6 +44,7 @@ interface Member {
 }
 
 interface Invitation {
+  woka?: string[];
   id: string;
   tags: string[];
   invitedAt: string;
@@ -305,6 +306,7 @@ export default function MemberList({ worldId, onRefresh }: MemberListProps) {
                     key={invitation.id}
                     href={`/admin/users/${invitation.invitedUser.id}`}
                     kind="people"
+                    leading={<PersonIcon woka={invitation.woka} name={invitedUserName} />}
                     title={invitedUserName}
                     context={
                       <StatLine
