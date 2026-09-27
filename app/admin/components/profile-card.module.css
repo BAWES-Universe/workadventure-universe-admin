@@ -16,10 +16,6 @@
 .emptyState { display: flex; flex-direction: column; gap: 14px; }
 .emptyState > p { font-size: 13px; line-height: 1.7; color: hsl(var(--muted-foreground)); }
 .emptyState strong { display: block; color: hsl(var(--foreground)); font-size: 14px; margin-bottom: 2px; }
-.ghost { display: grid; gap: 8px; padding: 14px; border: 1px dashed hsl(var(--foreground) / .18); border-radius: 12px; }
-.ghost > span { display: block; height: 9px; border-radius: 999px; background: hsl(var(--foreground) / .08); }
-.ghost > span:nth-child(2) { width: 70%; }
-.ghost > .ghostLink { width: 96px; height: 26px; margin-top: 4px; border: 1px solid hsl(var(--foreground) / .12); background: transparent; }
 .form { display: grid; gap: 18px; }
 .field { display: grid; gap: 8px; min-width: 0; border: 0; padding: 0; margin: 0; }
 .field > span, .field > legend { font-size: 13px; font-weight: 600; padding: 0; margin-bottom: 8px; }

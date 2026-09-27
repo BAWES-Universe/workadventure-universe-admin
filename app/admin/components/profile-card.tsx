@@ -179,11 +179,6 @@ export function ProfileCard({
         <>
           {empty ? (
             <div className={styles.emptyState} data-testid="profile-empty">
-              <div className={styles.ghost} aria-hidden="true">
-                <span />
-                <span />
-                <span className={styles.ghostLink} />
-              </div>
               <p>
                 <strong>People don’t know much about you yet.</strong> Add a few words and your links, so people know who
                 you are when they meet you.
