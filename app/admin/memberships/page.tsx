@@ -200,6 +200,8 @@ export default function MyMembershipsPage() {
 
   const handleAcceptInvitation = (invitationId: string) => answerInvitation(invitationId, 'accept');
   const handleRejectInvitation = (invitationId: string) => answerInvitation(invitationId, 'reject');
+  // The invitation whose Decline is waiting for Keep or Decline.
+  const [confirmingDecline, setConfirmingDecline] = useState<string | null>(null);
 
   async function handleLeaveWorld(worldId: string) {
     try {
@@ -250,7 +252,7 @@ export default function MyMembershipsPage() {
                   return (
                     <EntityRow
                       key={invitation.id}
-                      href={`/admin/worlds/${invitation.world.id}`}
+                      href={`/admin/invitations/${invitation.id}`}
                       kind="world"
                       tone="waiting"
                       title={invitation.world.name}
@@ -267,21 +269,39 @@ export default function MyMembershipsPage() {
                         ) : undefined
                       }
                       trailing={
-                        <>
-                          <Button
-                            variant="outline"
-                            className="h-9 w-9 p-0"
-                            aria-label={`Decline the invitation to ${invitation.world.name}`}
-                            disabled={busy}
-                            onClick={() => handleRejectInvitation(invitation.id)}
-                          >
-                            <X size={16} aria-hidden="true" />
-                          </Button>
-                          <Button className="h-9 gap-1.5 px-4" disabled={busy} onClick={() => handleAcceptInvitation(invitation.id)}>
-                            {busy ? <Loader2 className="animate-spin" aria-hidden="true" /> : <Check size={15} aria-hidden="true" />}
-                            Accept
-                          </Button>
-                        </>
+                        // Declining asks first, as on You and the invitation page: it can't be undone.
+                        confirmingDecline === invitation.id ? (
+                          <>
+                            <Button variant="outline" className="h-11 px-4" disabled={busy} onClick={() => setConfirmingDecline(null)}>
+                              Keep
+                            </Button>
+                            <Button
+                              variant="destructive"
+                              className="h-11 px-4"
+                              disabled={busy}
+                              onClick={() => void handleRejectInvitation(invitation.id).finally(() => setConfirmingDecline(null))}
+                            >
+                              {busy ? <Loader2 className="animate-spin" aria-hidden="true" /> : null}
+                              Decline
+                            </Button>
+                          </>
+                        ) : (
+                          <>
+                            <Button
+                              variant="outline"
+                              className="h-11 w-11 p-0"
+                              aria-label={`Decline the invitation to ${invitation.world.name}`}
+                              disabled={busy}
+                              onClick={() => setConfirmingDecline(invitation.id)}
+                            >
+                              <X size={16} aria-hidden="true" />
+                            </Button>
+                            <Button className="h-11 gap-1.5 px-4" disabled={busy} onClick={() => handleAcceptInvitation(invitation.id)}>
+                              {busy ? <Loader2 className="animate-spin" aria-hidden="true" /> : <Check size={15} aria-hidden="true" />}
+                              Accept
+                            </Button>
+                          </>
+                        )
                       }
                     />
                   );

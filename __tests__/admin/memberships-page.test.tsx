@@ -103,10 +103,13 @@ describe('Memberships', () => {
     // Moon is locked; Mars is not.
     expect((screen.getByRole('button', { name: 'Decline the invitation to Moon' }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole('button', { name: 'Decline the invitation to Mars' }) as HTMLButtonElement).disabled).toBe(false);
+    // Declining asks first: the ✕ alone sends nothing.
     fireEvent.click(screen.getByRole('button', { name: 'Decline the invitation to Mars' }));
+    expect(answers).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Decline' }));
     await waitFor(() => expect(answers).toHaveLength(2));
     expect((screen.getByRole('button', { name: 'Decline the invitation to Moon' }) as HTMLButtonElement).disabled).toBe(true);
-    expect((screen.getByRole('button', { name: 'Decline the invitation to Mars' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'Decline' }) as HTMLButtonElement).disabled).toBe(true);
 
     // A second click on a pending invitation sends nothing.
     fireEvent.click(acceptMoon);
