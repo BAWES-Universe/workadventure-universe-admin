@@ -5,6 +5,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import UsersPage from '@/app/admin/users/page';
 import DiscoverWorldsPage from '@/app/admin/discover/worlds/page';
 import { clearSummaryCache } from '@/app/admin/hooks/use-room-analytics';
+import { summariesBody } from '../helpers/summaries';
 
 jest.mock('next/link', () => ({
   __esModule: true,
@@ -129,13 +130,13 @@ describe('Discover search', () => {
   });
 
   it('keeps B’s results when A answers after B, and shows accesses and the peak', async () => {
-    const held = holdLists('/api/admin/worlds', () => ({
+    const held = holdLists('/api/admin/worlds', (url) => summariesBody(url, () => ({
       totalAccesses: 1284,
       peakTimes: [{ hour: 16, count: 40 }],
       lastVisitedByUser: null,
       lastVisitedOverall: { accessedAt: '2026-09-01T10:00:00Z' },
       youWereLast: false,
-    }));
+    })));
     render(<DiscoverWorldsPage />);
     await waitFor(() => expect(held).toHaveLength(1));
     const box = screen.getByRole('searchbox');

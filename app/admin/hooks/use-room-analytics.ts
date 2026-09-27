@@ -78,18 +78,70 @@ export function wasLastVisitorYou(analytics: RoomAnalytics): boolean {
 /** "4 PM", "12 AM". */
 export const formatHour = formatHourShared;
 
-// One request per place per page view, shared by every card and list showing it.
+// One answer per place per page view, shared by every card and list showing it. Places asked for together (a
+// list's cards mounting) go out as one request per kind.
 const cache = new Map<string, Promise<RoomAnalytics | null>>();
 const cacheKey = (kind: SummaryKind, id: string) => `${kind}:${id}`;
+
+/** The summaries endpoint takes at most this many ids. */
+const BATCH_LIMIT = 100;
+const waiting = new Map<SummaryKind, Map<string, (analytics: RoomAnalytics | null) => void>>();
+let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+async function fetchBatch(kind: SummaryKind, ids: string[]): Promise<Record<string, RoomAnalytics | null>> {
+  const answers: Record<string, RoomAnalytics | null> = {};
+  try {
+    const query = new URLSearchParams({ kind, ids: ids.join(',') });
+    const response = await authenticatedFetch(`/api/admin/analytics/summaries?${query.toString()}`);
+    const data: unknown = response.ok ? await response.json() : null;
+    const summaries = isRecord(data) && isRecord(data.summaries) ? data.summaries : null;
+    for (const id of ids) {
+      const summary = summaries?.[id];
+      answers[id] = isRecord(summary) ? fromAnalytics(summary as AnalyticsResponse) : null;
+    }
+  } catch {
+    for (const id of ids) answers[id] = null;
+  }
+  return answers;
+}
+
+function flush() {
+  flushTimer = null;
+  const batches = Array.from(waiting);
+  waiting.clear();
+  for (const [kind, pending] of batches) {
+    const ids = Array.from(pending.keys());
+    for (let start = 0; start < ids.length; start += BATCH_LIMIT) {
+      const chunk = ids.slice(start, start + BATCH_LIMIT);
+      void fetchBatch(kind, chunk).then((answers) => {
+        for (const id of chunk) pending.get(id)?.(answers[id] ?? null);
+      });
+    }
+  }
+}
+
+function requestSummary(kind: SummaryKind, id: string): Promise<RoomAnalytics | null> {
+  return new Promise((resolve) => {
+    let pending = waiting.get(kind);
+    if (!pending) {
+      pending = new Map();
+      waiting.set(kind, pending);
+    }
+    pending.set(id, resolve);
+    flushTimer ??= setTimeout(flush, 0);
+  });
+}
 
 /** A place's activity, or null when it could not be read (any non-OK status, a network error, bad JSON). */
 export function loadSummary(kind: SummaryKind, id: string): Promise<RoomAnalytics | null> {
   const key = cacheKey(kind, id);
   let pending = cache.get(key);
   if (!pending) {
-    pending = authenticatedFetch(`/api/admin/analytics/${kind}/${encodeURIComponent(id)}`)
-      .then(async (response) => (response.ok ? fromAnalytics((await response.json()) as AnalyticsResponse) : null))
-      .catch(() => null);
+    pending = requestSummary(kind, id);
     cache.set(key, pending);
     // Numbers change as people come and go: keep them for this visit only.
     const settled = pending;
@@ -110,6 +162,9 @@ export function forgetSummary(kind: SummaryKind, id: string): void {
 /** For tests: start from an empty cache. */
 export function clearSummaryCache(): void {
   cache.clear();
+  waiting.clear();
+  if (flushTimer) clearTimeout(flushTimer);
+  flushTimer = null;
 }
 
 /** A room's visits, stars aside: how many, the busiest hour, when you and the latest visitor were last there. */
