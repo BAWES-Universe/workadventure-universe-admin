@@ -62,7 +62,7 @@ export default function StylePage() {
             </span>
           ))}
         </div>
-        <p className={styles.note}>Each universe has its own colour, from its id:</p>
+        <p className={styles.note}>Each universe’s planet has its own shade, from its id:</p>
         <div className={styles.kinds}>
           {UNIVERSE_COLOURS.map((colour) => (
             <span key={colour} className={styles.dot} style={{ background: colour }} title={colour} />

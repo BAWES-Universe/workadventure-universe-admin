@@ -9,7 +9,8 @@
  * - The Universe gradient (#8629fc → #4156f6) only for a page's one main action, the active destination and
  *   "you are here".
  * - Colour means a kind of thing, everywhere: universe violet, world teal, room amber-rose, star gold, people sky.
- *   Each universe also has its own colour, derived from its id (lib/universe-colour.ts).
+ *   Chips are always their kind's colour. Each universe's planet also has its own shade of the universe colour,
+ *   from its id (lib/universe-colour.ts), never a world, room or people colour.
  * - Status: green live, amber waiting, red only for what can't be undone.
  * Space Grotesk headings and Inter text, as on bawes.net. Dark is the default (the game is dark).
  */
@@ -413,8 +414,6 @@ a[href] {
 .orbit-kind[data-kind='room'] { background-image: var(--kind-room); }
 .orbit-kind[data-kind='star'] { background: var(--kind-star); color: #1b2a41; }
 .orbit-kind[data-kind='people'] { background-image: var(--kind-people); }
-/* A universe in its own colour (style="--hue: …"). */
-.orbit-kind[data-kind='universe'][style*='--hue'] { background-image: linear-gradient(135deg, var(--hue), color-mix(in oklab, var(--hue) 55%, #1b2a41)); }
 .orbit-kind-wash { position: relative; isolation: isolate; }
 .orbit-kind-wash::before { content: ''; position: absolute; inset: 0; z-index: -1; border-radius: inherit; opacity: 0; transition: opacity 200ms; pointer-events: none; }
 .orbit-kind-wash[data-kind='universe']::before { background: linear-gradient(135deg, rgb(134 41 252 / .16), transparent 55%, rgb(65 86 246 / .2)); }

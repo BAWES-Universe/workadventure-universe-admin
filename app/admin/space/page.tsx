@@ -15,6 +15,7 @@ import {
   count,
 } from '../components/ds';
 import { isNamed, isRecord, useCollection, type Collection } from '../hooks/use-collection';
+import { WokaAvatar } from '../components/profile-card';
 import styles from './space.module.css';
 
 interface Universe {
@@ -42,6 +43,7 @@ interface Person {
   id: string;
   name: string | null;
   isGuest?: boolean;
+  woka?: string[];
   _count?: { ownedUniverses?: number; worldMemberships?: number };
 }
 
@@ -180,6 +182,7 @@ export default function SpacePage() {
                 key={person.id}
                 href={`/admin/users/${person.id}`}
                 kind="people"
+                leading={<WokaAvatar layers={person.woka ?? []} name={person.name || ''} size={40} />}
                 title={person.name || 'Someone'}
                 context={
                   <StatLine

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getViewer, isPrivileged, unauthorizedResponse } from '@/lib/access-scope';
 import { prisma } from '@/lib/db';
+import { wokaLayersForMany } from '@/lib/woka-avatar';
 
 const SYSTEM_USER_EMAIL = 'system@workadventure.local';
 
@@ -168,7 +169,10 @@ export async function GET(request: NextRequest) {
     
     // Apply pagination
     const total = usersWithAccess.length;
-    const paginatedUsers = usersWithAccess.slice((page - 1) * limit, page * limit);
+    const pageOfUsers = usersWithAccess.slice((page - 1) * limit, page * limit);
+    // Each person's Woka, for their avatar (decoration: never costs the list).
+    const wokas = await wokaLayersForMany(pageOfUsers.map((user) => user.id)).catch(() => new Map<string, string[]>());
+    const paginatedUsers = pageOfUsers.map((user) => ({ ...user, woka: wokas.get(user.id) ?? [] }));
     
     return NextResponse.json({
       users: paginatedUsers,

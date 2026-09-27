@@ -15,8 +15,11 @@
   .identity > button { grid-column: 1; justify-self: start; }
 }
 .avatar { flex: none; display: grid; place-items: center; width: var(--avatar-size); height: var(--avatar-size); border-radius: 22px; border: 3px solid hsl(var(--card)); background: radial-gradient(circle at 50% 35%, #2a3b5c, #16223a); overflow: hidden; }
-.woka { position: relative; width: 64px; height: 64px; }
-.wokaLayer { position: absolute; inset: 0; background-size: 192px 256px; background-position: -64px 0; background-repeat: no-repeat; image-rendering: pixelated; }
+.woka { position: relative; width: calc(var(--avatar-size) * 0.84); height: calc(var(--avatar-size) * 0.84); }
+.wokaLayer { position: absolute; inset: 0; background-size: 300% 400%; background-position: 50% 0; background-repeat: no-repeat; image-rendering: pixelated; }
+/* Small avatars (rows): a rounder, tighter frame. */
+.avatar[data-size='sm'] { border-width: 0; border-radius: 12px; }
+.avatar[data-size='sm'] .initial { font-size: 15px; }
 .initial { font-family: var(--font-display); font-size: 30px; font-weight: 700; color: #fff; }
 .who { min-width: 0; flex: 1 1 13rem; }
 .who h1 { font-size: clamp(24px, 6vw, 32px); line-height: 1.15; letter-spacing: -.02em; font-weight: 700; overflow-wrap: anywhere; }

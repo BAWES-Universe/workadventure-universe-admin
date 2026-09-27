@@ -308,7 +308,12 @@ export function ProfileCard({
 export function WokaAvatar({ layers, name, size = 76 }: { layers: string[]; name: string; size?: number }) {
   const initial = name.trim().charAt(0).toUpperCase() || '?';
   return (
-    <span className={styles.avatar} style={{ '--avatar-size': `${size}px` } as CSSProperties} data-testid="woka-avatar">
+    <span
+      className={styles.avatar}
+      style={{ '--avatar-size': `${size}px` } as CSSProperties}
+      data-size={size < 48 ? 'sm' : undefined}
+      data-testid="woka-avatar"
+    >
       {layers.length > 0 ? (
         <span className={styles.woka} aria-hidden="true">
           {layers.map((url) => (

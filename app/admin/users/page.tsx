@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { timeAgo } from '@/lib/time-ago';
 import { EmptyCard, EntityRow, LoadError, LoadingRows, PageHeader, StatLine, count } from '../components/ds';
 import { Pager, SearchBox } from '../discover/discover-ui';
+import { WokaAvatar } from '../components/profile-card';
 
 interface User {
   id: string;
@@ -15,6 +16,7 @@ interface User {
   isGuest: boolean;
   createdAt: string;
   totalAccesses?: number;
+  woka?: string[];
   lastAccessed?: string | null;
   _count: {
     ownedUniverses: number;
@@ -133,6 +135,7 @@ export default function UsersPage() {
               key={user.id}
               href={`/admin/users/${user.id}`}
               kind="people"
+              leading={<WokaAvatar layers={user.woka ?? []} name={user.name || ''} size={40} />}
               title={user.name || user.email || 'Someone'}
               context={
                 <StatLine

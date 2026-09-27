@@ -49,7 +49,7 @@ export function KindIcon({
 }: {
   kind: Kind;
   size?: 'sm' | 'md' | 'lg';
-  /** A universe's chip takes that universe's own colour. */
+  /** Kept for callers; a chip is always its kind's colour (a universe's own colour is on its planet). */
   universeId?: string | null;
   className?: string;
 }) {
@@ -58,7 +58,6 @@ export function KindIcon({
     <span
       className={cn('orbit-kind', styles[`kind-${size}`], className)}
       data-kind={kind}
-      style={kind === 'universe' ? hueStyle(universeId) : undefined}
       aria-hidden="true"
     >
       <Icon size={size === 'sm' ? 14 : size === 'lg' ? 22 : 18} />
@@ -166,6 +165,7 @@ export function EntityRow({
   meta,
   aside,
   trailing,
+  leading,
   testId,
 }: {
   href: string;
@@ -174,6 +174,8 @@ export function EntityRow({
   title: string;
   context?: ReactNode;
   meta?: ReactNode;
+  /** In place of the kind's chip (a person's Woka, say). */
+  leading?: ReactNode;
   /** Quiet information at the end (a star count, a role). */
   aside?: ReactNode;
   /** Controls of their own, kept out of the row's link. */
@@ -187,7 +189,7 @@ export function EntityRow({
       style={kind === 'universe' ? hueStyle(universeId) : undefined}
       data-testid={testId}
     >
-      <KindIcon kind={kind} universeId={universeId} />
+      {leading ?? <KindIcon kind={kind} universeId={universeId} />}
       <div className={styles.rowText}>
         <Link href={href} className={styles.stretched}>
           <strong>{title}</strong>
