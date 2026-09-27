@@ -2,7 +2,6 @@
 
 import { useState, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import {
   Table,
   TableBody,
@@ -11,7 +10,6 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { Badge } from '@/components/ui/badge';
 import {
   Dialog,
   DialogContent,
@@ -33,7 +31,6 @@ import {
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import { Checkbox } from '@/components/ui/checkbox';
 import {
   Select,
   SelectContent,
@@ -43,6 +40,8 @@ import {
 } from '@/components/ui/select';
 import { Plus, Edit, Trash2, Loader2, ExternalLink } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import { LoadError, LoadingRows, SettingSwitch } from '../../components/ds';
+import { FactPill, InactivePill } from './template-bits';
 
 interface Template {
   id: string;
@@ -88,6 +87,7 @@ export function MapsTab() {
   const [templates, setTemplates] = useState<Template[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [editingMap, setEditingMap] = useState<TemplateMap | null>(null);
@@ -137,7 +137,9 @@ export function MapsTab() {
       const data = await response.json();
       setMaps(data.maps || []);
       setError(null);
+      setLoadFailed(false);
     } catch (err) {
+      setLoadFailed(true);
       setError(err instanceof Error ? err.message : 'Failed to load maps');
     } finally {
       setLoading(false);
@@ -250,24 +252,22 @@ export function MapsTab() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center py-12">
-        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-      </div>
+      <LoadingRows label="maps" rows={3} />
     );
   }
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="text-2xl font-semibold">Template Maps</h2>
+          <h2 className="orbit-display text-lg font-bold">Template Maps</h2>
           <p className="text-sm text-muted-foreground">
             Manage template map variants
           </p>
         </div>
-        <Button onClick={openCreateDialog} disabled={templates.length === 0}>
+        <Button variant="outline" className="h-11" onClick={openCreateDialog} disabled={templates.length === 0}>
           <Plus className="h-4 w-4 mr-2" />
-          Create Map
+          New map
         </Button>
       </div>
 
@@ -285,13 +285,12 @@ export function MapsTab() {
         </Alert>
       )}
 
-      <Card>
-        <CardHeader>
-          <CardTitle>All Maps</CardTitle>
-        </CardHeader>
-        <CardContent>
+      {loadFailed ? (
+        <LoadError label="maps" retry={fetchMaps} />
+      ) : (
+        <div className="overflow-x-auto rounded-2xl border bg-card p-2 sm:p-3">
           {maps.length === 0 ? (
-            <div className="text-center py-8 text-muted-foreground">
+            <div className="px-2 py-6 text-sm text-muted-foreground">
               No maps found. Create your first map.
             </div>
           ) : (
@@ -300,7 +299,7 @@ export function MapsTab() {
                 <TableRow>
                   <TableHead>Template</TableHead>
                   <TableHead>Name</TableHead>
-                  <TableHead>Slug</TableHead>
+                  <TableHead>Map key</TableHead>
                   <TableHead>Size</TableHead>
                   <TableHead>Rooms</TableHead>
                   <TableHead>Status</TableHead>
@@ -322,36 +321,38 @@ export function MapsTab() {
                     <TableCell className="text-muted-foreground">{map.slug}</TableCell>
                     <TableCell>
                       {map.sizeLabel && (
-                        <Badge variant="outline">
+                        <FactPill>
                           {map.sizeLabel.charAt(0).toUpperCase() + map.sizeLabel.slice(1).toLowerCase()} size
-                        </Badge>
+                        </FactPill>
                       )}
                     </TableCell>
                     <TableCell>{map._count.rooms}</TableCell>
                     <TableCell>
-                      <Badge variant={map.isActive ? 'default' : 'secondary'}>
-                        {map.isActive ? 'Active' : 'Inactive'}
-                      </Badge>
+                      {map.isActive ? <span className="text-sm text-muted-foreground">Active</span> : <InactivePill />}
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-2">
                         <Button
                           variant="ghost"
-                          size="sm"
+                          size="icon"
+                          className="h-11 w-11"
+                          aria-label={`Edit ${map.name}`}
                           onClick={() => openEditDialog(map)}
                         >
                           <Edit className="h-4 w-4" />
                         </Button>
                         <Button
                           variant="ghost"
-                          size="sm"
+                          size="icon"
+                          className="h-11 w-11"
+                          aria-label={`Delete ${map.name}`}
                           onClick={() => openDeleteDialog(map)}
                           disabled={map._count.rooms > 0}
                         >
                           <Trash2 className="h-4 w-4" />
                         </Button>
-                        <Button variant="ghost" size="sm" asChild>
-                          <a href={map.mapUrl} target="_blank" rel="noopener noreferrer">
+                        <Button variant="ghost" size="icon" className="h-11 w-11" asChild>
+                          <a href={map.mapUrl} target="_blank" rel="noopener noreferrer" aria-label={`Open the map file for ${map.name}`}>
                             <ExternalLink className="h-4 w-4" />
                           </a>
                         </Button>
@@ -362,15 +363,15 @@ export function MapsTab() {
               </TableBody>
             </Table>
           )}
-        </CardContent>
-      </Card>
+        </div>
+      )}
 
       {/* Create/Edit Dialog */}
       <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
         <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>
-              {editingMap ? 'Edit Map' : 'Create Map'}
+              {editingMap ? 'Edit map' : 'New map'}
             </DialogTitle>
             <DialogDescription>
               {editingMap
@@ -385,7 +386,7 @@ export function MapsTab() {
                 value={formData.templateId}
                 onValueChange={(value) => setFormData({ ...formData, templateId: value })}
               >
-                <SelectTrigger>
+                <SelectTrigger className="h-11">
                   <SelectValue placeholder="Select a template" />
                 </SelectTrigger>
                 <SelectContent>
@@ -398,9 +399,10 @@ export function MapsTab() {
               </Select>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="slug">Slug *</Label>
+              <Label htmlFor="slug">Map key *</Label>
               <Input
                 id="slug"
+                className="h-11"
                 value={formData.slug}
                 onChange={(e) =>
                   setFormData({ ...formData, slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') })
@@ -413,6 +415,7 @@ export function MapsTab() {
               <Label htmlFor="name">Name *</Label>
               <Input
                 id="name"
+                className="h-11"
                 value={formData.name}
                 onChange={(e) => setFormData({ ...formData, name: e.target.value })}
                 placeholder="Small Focus Room"
@@ -432,6 +435,7 @@ export function MapsTab() {
               <Label htmlFor="mapUrl">Map URL *</Label>
               <Input
                 id="mapUrl"
+                className="h-11"
                 type="url"
                 value={formData.mapUrl}
                 onChange={(e) => setFormData({ ...formData, mapUrl: e.target.value })}
@@ -442,6 +446,7 @@ export function MapsTab() {
               <Label htmlFor="previewImageUrl">Preview Image URL</Label>
               <Input
                 id="previewImageUrl"
+                className="h-11"
                 type="url"
                 value={formData.previewImageUrl}
                 onChange={(e) => setFormData({ ...formData, previewImageUrl: e.target.value })}
@@ -450,12 +455,12 @@ export function MapsTab() {
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
-                <Label htmlFor="sizeLabel">Size Label</Label>
+                <Label htmlFor="sizeLabel">Size</Label>
                 <Select
                   value={formData.sizeLabel || undefined}
                   onValueChange={(value) => setFormData({ ...formData, sizeLabel: value })}
                 >
-                  <SelectTrigger>
+                  <SelectTrigger className="h-11">
                     <SelectValue placeholder="Select size (optional)" />
                   </SelectTrigger>
                   <SelectContent>
@@ -469,30 +474,26 @@ export function MapsTab() {
                 <Label htmlFor="order">Order</Label>
                 <Input
                   id="order"
+                  className="h-11"
                   type="number"
                   value={formData.order}
                   onChange={(e) => setFormData({ ...formData, order: parseInt(e.target.value) || 0 })}
                 />
               </div>
             </div>
-            <div className="flex items-center space-x-2">
-              <Checkbox
-                id="isActive"
-                checked={formData.isActive}
-                onCheckedChange={(checked) =>
-                  setFormData({ ...formData, isActive: checked === true })
-                }
-              />
-              <Label htmlFor="isActive" className="font-normal cursor-pointer">
-                Active
-              </Label>
-            </div>
+            <SettingSwitch
+              id="isActive"
+              label="Active"
+              hint="Offered in the template library. Off: hidden."
+              checked={formData.isActive}
+              onChange={(checked) => setFormData({ ...formData, isActive: checked })}
+            />
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setIsDialogOpen(false)}>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" className="h-11" onClick={() => setIsDialogOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={handleSave} disabled={saving || !formData.slug || !formData.name || !formData.templateId || !formData.mapUrl}>
+            <Button className="h-11" onClick={handleSave} disabled={saving || !formData.slug || !formData.name || !formData.templateId || !formData.mapUrl}>
               {saving ? (
                 <>
                   <Loader2 className="h-4 w-4 mr-2 animate-spin" />
@@ -510,7 +511,7 @@ export function MapsTab() {
       <AlertDialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete Map</AlertDialogTitle>
+            <AlertDialogTitle>Delete map</AlertDialogTitle>
             <AlertDialogDescription>
               Are you sure you want to delete "{deleteMap?.name}"? This action cannot be undone.
               {deleteMap && deleteMap._count.rooms > 0 && (
