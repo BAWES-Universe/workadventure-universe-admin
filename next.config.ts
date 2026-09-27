@@ -6,6 +6,17 @@ const playOrigin = getPlayOrigin();
 const frameAncestors = `frame-ancestors 'self' ${playOrigin};`;
 
 const nextConfig: NextConfig = {
+  // Old addresses, answered before anything renders. The pages at these addresses redirect while rendering, which
+  // trips React's development timings ("cannot have a negative time stamp"); these run first.
+  async redirects() {
+    return [
+      { source: '/', destination: '/admin', permanent: false },
+      // Links and bookmarks from the first Orbit shell land on Space.
+      { source: '/admin/places', destination: '/admin/space', permanent: false },
+      // Your profile (once called the visit card) is edited in place on You. The game opens this address.
+      { source: '/admin/profile', destination: '/admin/you?edit=profile', permanent: false },
+    ];
+  },
   // Headers for security
   async headers() {
     return [
