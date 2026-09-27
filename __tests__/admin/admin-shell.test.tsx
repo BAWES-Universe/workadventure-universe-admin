@@ -207,8 +207,9 @@ describe('AdminShell', () => {
     const bar = screen.getByRole('banner');
     const menuButton = bar.querySelector('button');
     expect(menuButton?.textContent).toContain('Orbit Menu');
-    // Its shortcut is on the button (shown only with a keyboard and a mouse).
-    expect(menuButton?.querySelector('kbd')?.textContent).toMatch(/^(⌘K|Ctrl K)$/);
+    // Its shortcut is on the button as keycaps (shown on hover, only with a keyboard and a mouse).
+    const keys = Array.from(menuButton?.querySelectorAll('kbd') ?? []).map((key) => key.textContent);
+    expect(keys).toEqual(['Ctrl', 'K']);
   });
 
   it('keeps You, Orbit and Space on the bottom bar, with Orbit in the middle and lit on arrival', async () => {

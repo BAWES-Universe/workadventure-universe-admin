@@ -8,7 +8,6 @@ import { ArrowUpRight, Search, X } from 'lucide-react';
 import { DESTINATIONS, getNavItems, getNavSections, isNavItemActive, type NavUser } from '../../config/navigation';
 import { useOrbitFrame } from '../../orbit-frame-context';
 import { rootOf } from './root-of';
-import { ShortcutHint } from './shortcut-hint';
 
 /**
  * Everything Orbit has, from the Orbit Menu button at the top-left or Ctrl/Cmd+K: You, Orbit and Space, then every tool, searchable.
@@ -60,7 +59,6 @@ export function MenuSheet({ user }: { user: NavUser }) {
             <Search size={18} aria-hidden="true" />
             <span className="sr-only">Find a place or a tool</span>
             <input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Find a place or a tool…" />
-            <ShortcutHint />
           </label>
           {!normalized && (
             <nav className="orbit-menu-roots" aria-label="Main destinations">

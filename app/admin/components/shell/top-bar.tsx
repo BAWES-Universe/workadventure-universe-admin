@@ -30,12 +30,12 @@ export function TopBar({ isSuperAdmin = false }: { isSuperAdmin?: boolean }) {
             aria-expanded={menuOpen}
             aria-controls="orbit-menu"
             aria-keyshortcuts="Control+K Meta+K"
-            className="orbit-press inline-flex h-10 shrink-0 items-center gap-2 rounded-full border border-foreground/15 pl-3 pr-3.5 text-sm font-semibold transition-colors hover:border-foreground/30 hover:bg-foreground/5 lg:hidden"
+            className="orbit-press relative inline-flex h-10 shrink-0 items-center gap-2 rounded-full border border-foreground/15 pl-3 pr-4 text-sm font-semibold transition-colors hover:border-foreground/30 hover:bg-foreground/5 lg:hidden"
             data-testid="orbit-menu-button"
           >
             <Menu className="h-[18px] w-[18px]" aria-hidden="true" />
             Orbit Menu
-            <ShortcutHint className="ml-1" />
+            <ShortcutHint placement="beside" />
           </button>
         ) : (
           <button
