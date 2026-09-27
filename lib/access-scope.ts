@@ -74,6 +74,24 @@ export async function canManageWorld(userId: string, worldId: string): Promise<b
   return !!member;
 }
 
+/**
+ * A world's members are managed by the owner of its universe, or by a world member tagged `admin` (the same rule
+ * the members routes apply).
+ */
+export async function canManageWorldMembers(userId: string, worldId: string): Promise<boolean> {
+  const world = await prisma.world.findUnique({
+    where: { id: worldId },
+    select: { universe: { select: { ownerId: true } } },
+  });
+  if (!world) return false;
+  if (world.universe.ownerId === userId) return true;
+
+  const member = await prisma.worldMember.findFirst({
+    where: { worldId, userId, tags: { has: 'admin' } },
+  });
+  return !!member;
+}
+
 /** A room is managed by whoever can manage its world (same rule as bot management). */
 export async function canManageRoom(userId: string, roomId: string): Promise<boolean> {
   return canManageBots(userId, roomId);

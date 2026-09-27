@@ -392,8 +392,10 @@ describe('reading one bot\'s data', () => {
 
   it('a bot manager can read their own bot\'s conversations', async () => {
     const res = await readBotConversations(req('/api/bots/bot-mine/conversations', 'alice'), params('bot-mine'));
-    expect(res.status).not.toBe(403);
-    expect(res.status).not.toBe(401);
+    expect(res.status).toBe(200);
+    expect(db.botsConversation.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ botId: 'bot-mine' }) }),
+    );
   });
 
   it('a signed-in user cannot read memory of a bot in a room they do not manage', async () => {

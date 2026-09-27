@@ -9,21 +9,12 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { AlertCircle } from 'lucide-react';
 import { Spinner } from '@/components/ui/spinner';
 import { adoptHandshakeSession, isOpaqueSessionId, purgeAccountState } from '@/lib/client-auth';
+import { PLAY_ORIGIN, PLAY_URL, isInsideFrame } from '@/lib/play-origin';
 
 const ENABLE_MANUAL_LOGIN = process.env.NODE_ENV !== 'production' && process.env.NEXT_PUBLIC_ENABLE_MANUAL_LOGIN === 'true';
-const PLAY_URL = process.env.NEXT_PUBLIC_PLAY_URL || (process.env.NODE_ENV !== 'production' ? 'http://play.workadventure.localhost' : (() => { throw new Error('NEXT_PUBLIC_PLAY_URL is required in production'); })());
-const PLAY_ORIGIN = new URL(PLAY_URL).origin;
 const LOGOUT_SUPPRESSION_KEY = 'orbit_auth_suppressed';
 /** How long to wait for the game to answer the handshake before showing the "runs inside Universe" line. */
 const HANDSHAKE_TIMEOUT_MS = 10_000;
-
-function isInsideFrame(): boolean {
-  try {
-    return window.self !== window.top;
-  } catch {
-    return true;
-  }
-}
 
 /** Who the freshly exchanged session belongs to; null when it cannot be confirmed. */
 async function fetchSessionUserUuid(sessionId: string): Promise<string | null> {
