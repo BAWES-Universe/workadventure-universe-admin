@@ -53,8 +53,8 @@ export async function activitySummaries(
       where: { [field]: { in: unique } },
       _count: { _all: true },
     }) as unknown as Promise<Array<Record<string, unknown> & { _count: { _all: number } }>>,
-    prisma.$queryRaw<Array<{ id: string; hour: number; count: number }>>`
-      SELECT ${column} AS id, EXTRACT(HOUR FROM accessed_at)::int AS hour, COUNT(*)::int AS count
+    prisma.$queryRaw<Array<{ id: string; hour: number; count: bigint | number }>>`
+      SELECT ${column} AS id, EXTRACT(HOUR FROM accessed_at)::int AS hour, COUNT(*) AS count
       FROM room_accesses
       WHERE ${column} IN (${idList})
       GROUP BY 1, 2`,

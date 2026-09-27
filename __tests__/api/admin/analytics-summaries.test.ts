@@ -36,7 +36,7 @@ describe('GET /api/admin/analytics/summaries', () => {
     db.$queryRaw
       .mockResolvedValueOnce([
         { id: 'r1', hour: 3, count: 2 },
-        { id: 'r1', hour: 16, count: 10 },
+        { id: 'r1', hour: 16, count: BigInt(10) }, // COUNT(*) comes back as a bigint
       ])
       .mockResolvedValueOnce([{ id: 'r1', accessed_at: latest, user_id: 'someone', user_uuid: null }])
       .mockResolvedValueOnce([{ id: 'r1', accessed_at: mine, user_id: 'me', user_uuid: null }]);
