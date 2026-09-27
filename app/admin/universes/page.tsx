@@ -4,9 +4,8 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { Plus, AlertCircle, Loader2 } from 'lucide-react';
+import { Plus } from 'lucide-react';
+import { EmptyCard, LoadError, LoadingRows, PageHeader } from '../components/ds';
 import { UniverseCard, UniverseAnalytics } from './universe-card';
 
 interface Universe {
@@ -139,76 +138,38 @@ export default function UniversesPage() {
   }, [myUniverses, analyticsByUniverse]);
 
   if (checkingAuth) {
-    return (
-      <div className="space-y-8">
-        <div className="flex items-center justify-center py-12">
-          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-        </div>
-      </div>
-    );
+    return <LoadingRows label="your universes" />;
   }
 
   return (
-    <div className="space-y-8">
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div className="space-y-1">
-          <h1 className="text-4xl font-bold tracking-tight">My Universes</h1>
-          <p className="text-muted-foreground text-lg">
-            Manage universes you own and control.
-          </p>
-        </div>
-        <Button variant="default" asChild>
-          <Link href="/admin/universes/new">
-            <Plus className="mr-2 h-4 w-4" />
-            Create Universe
-          </Link>
-        </Button>
-      </div>
+    <div className="space-y-6">
+      <PageHeader
+        title="Your universes"
+        actions={
+          <Button variant="default" asChild>
+            <Link href="/admin/universes/new">
+              <Plus className="mr-2 h-4 w-4" />
+              Create universe
+            </Link>
+          </Button>
+        }
+      />
 
-      {/* My Universes */}
       <section className="space-y-4">
-
-        {myError && (
-          <Alert variant="destructive">
-            <AlertCircle className="h-4 w-4" />
-            <AlertTitle>Error</AlertTitle>
-            <AlertDescription>
-              {myError}
-              <Button
-                variant="outline"
-                size="sm"
-                className="ml-4"
-                onClick={fetchMyUniverses}
-              >
-                Retry
-              </Button>
-            </AlertDescription>
-          </Alert>
-        )}
+        {myError && <LoadError label="your universes" retry={fetchMyUniverses} />}
 
         {myLoading && myUniverses.length === 0 ? (
-          <Card>
-            <CardContent className="flex items-center justify-center py-12">
-              <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-            </CardContent>
-          </Card>
+          <LoadingRows label="your universes" />
         ) : myUniverses.length === 0 ? (
-          <Card>
-            <CardHeader>
-              <CardTitle>No universes yet</CardTitle>
-              <CardDescription>
-                Create your first universe to start building your worlds.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <Button variant="default" asChild>
-                <Link href="/admin/universes/new">
-                  <Plus className="mr-2 h-4 w-4" />
-                  Create your first universe
-                </Link>
-              </Button>
-            </CardContent>
-          </Card>
+          !myError && (
+            <EmptyCard
+              kind="universe"
+              title="No universes yet."
+              text="A universe holds your worlds, and worlds hold rooms."
+              href="/admin/universes/new"
+              action="Create your first universe"
+            />
+          )
         ) : (
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
             {myUniverses.map((universe) => (
@@ -226,4 +187,3 @@ export default function UniversesPage() {
     </div>
   );
 }
-
