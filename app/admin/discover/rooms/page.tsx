@@ -7,6 +7,7 @@ import { Pager, SearchBox } from '../discover-ui';
 import { activityStats } from '@/lib/analytics-peak';
 import { useEntitySummaries } from '../../hooks/use-entity-summaries';
 import { usePagedSearch } from '../../hooks/use-paged-search';
+import { useInitialSearch, useSearchInUrl } from '../../hooks/use-search-in-url';
 import type { EntitySummary } from '../../hooks/use-room-analytics';
 
 interface Room {
@@ -63,31 +64,9 @@ function RoomCard({ room, analytics }: { room: Room; analytics?: EntitySummary }
 
 export default function DiscoverRoomsPage() {
   const router = useRouter();
-  const [checkingAuth, setCheckingAuth] = useState(true);
-  // Searches in which the hidden default room turned up: the API's total counts it, so those totals drop one.
-  const defaultSeenIn = useRef(new Set<string>());
+  // The shell has already checked the session; a 401 below still leads to sign-in.
+  const initialQuery = useInitialSearch();
 
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const { authenticatedFetch } = await import('@/lib/client-auth');
-        const response = await authenticatedFetch('/api/auth/me');
-        if (!response.ok) {
-          router.push('/admin/login');
-          return;
-        }
-        if (!cancelled) setCheckingAuth(false);
-      } catch {
-        router.push('/admin/login');
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-    // Once per visit: the router is only used to leave for sign-in.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   // One request per {query, page}: Enter searches, the × clears, a new search starts on page 1.
   const list = usePagedSearch<RoomsResult>(
@@ -105,26 +84,17 @@ export default function DiscoverRoomsPage() {
       }
 
       const data = await response.json();
-      const all: Room[] = data.rooms || [];
-      // Hide the default/default/default room path from discovery
-      const filtered = all.filter(
-        (r) =>
-          !(
-            r.world?.universe?.slug === 'default' &&
-            r.world?.slug === 'default' &&
-            r.slug === 'default'
-          ),
-      );
-      if (all.length > filtered.length) defaultSeenIn.current.add(query);
-      const apiTotal = data.pagination?.total || 0;
+      // The server leaves out the built-in default room and anything not discoverable, before paging.
+      const rooms: Room[] = data.rooms || [];
       return {
-        rooms: filtered,
+        rooms,
         totalPages: data.pagination?.totalPages || 1,
-        total: Math.max(0, apiTotal - (defaultSeenIn.current.has(query) ? 1 : 0)),
+        total: data.pagination?.total ?? rooms.length,
       };
     },
-    { enabled: !checkingAuth },
+    { initialQuery },
   );
+  useSearchInUrl(list.query);
 
   const rooms = useMemo(() => list.data?.rooms ?? [], [list.data]);
   const totalPages = list.data?.totalPages ?? 1;
@@ -153,7 +123,7 @@ export default function DiscoverRoomsPage() {
 
       {error && <LoadError label="rooms" retry={list.retry} />}
 
-      {checkingAuth || (loading && rooms.length === 0) ? (
+      {(loading && rooms.length === 0) ? (
         <LoadingRows label="rooms" rows={3} />
       ) : rooms.length === 0 ? (
         !error &&

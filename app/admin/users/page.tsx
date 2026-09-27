@@ -7,6 +7,7 @@ import { EmptyCard, EntityRow, LoadError, LoadingRows, PageHeader, StatLine, cou
 import { Pager, SearchBox } from '../discover/discover-ui';
 import { WokaAvatar } from '../components/profile-card';
 import { usePagedSearch } from '../hooks/use-paged-search';
+import { useInitialSearch, useSearchInUrl } from '../hooks/use-search-in-url';
 
 interface User {
   id: string;
@@ -33,29 +34,9 @@ interface UsersResult {
 
 export default function UsersPage() {
   const router = useRouter();
-  const [authChecked, setAuthChecked] = useState(false);
+  // The shell has already checked the session; a 401 below still leads to sign-in.
+  const initialQuery = useInitialSearch();
 
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const { authenticatedFetch } = await import('@/lib/client-auth');
-        const response = await authenticatedFetch('/api/auth/me');
-        if (!response.ok) {
-          router.push('/admin/login');
-          return;
-        }
-        if (!cancelled) setAuthChecked(true);
-      } catch {
-        router.push('/admin/login');
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-    // Once per visit: the router is only used to leave for sign-in.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   // One request per {query, page}; typing searches after a short pause, Enter searches now.
   const list = usePagedSearch<UsersResult>(
@@ -86,8 +67,9 @@ export default function UsersPage() {
         total: Math.max(0, totalFromApi - systemUsersOnPage),
       };
     },
-    { enabled: authChecked, debounceMs: 250 },
+    { debounceMs: 250, initialQuery },
   );
+  useSearchInUrl(list.query);
 
   const users = list.data?.users ?? [];
   const totalPages = list.data?.totalPages ?? 1;

@@ -16,7 +16,11 @@ jest.mock('next/link', () => ({
 }));
 
 const push = jest.fn();
-jest.mock('next/navigation', () => ({ useRouter: () => ({ push }) }));
+jest.mock('next/navigation', () => ({
+  useRouter: () => ({ push, replace: jest.fn() }),
+  usePathname: () => '/admin/test',
+  useSearchParams: () => new URLSearchParams(),
+}));
 
 const fetchMock = jest.fn();
 jest.mock('@/lib/client-auth', () => ({

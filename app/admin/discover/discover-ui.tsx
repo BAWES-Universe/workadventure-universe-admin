@@ -82,10 +82,10 @@ export function Pager({
         Page {page} of {totalPages} · {total.toLocaleString()} {total === 1 ? noun[0] : noun[1]}
       </span>
       <div className="flex gap-2">
-        <Button variant="outline" className="h-9 px-4" onClick={() => onChange(page - 1)} disabled={page <= 1 || loading}>
+        <Button variant="outline" className="h-11 px-5" onClick={() => onChange(page - 1)} disabled={page <= 1 || loading}>
           Previous
         </Button>
-        <Button variant="outline" className="h-9 px-4" onClick={() => onChange(page + 1)} disabled={page >= totalPages || loading}>
+        <Button variant="outline" className="h-11 px-5" onClick={() => onChange(page + 1)} disabled={page >= totalPages || loading}>
           Next
         </Button>
       </div>

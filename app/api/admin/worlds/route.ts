@@ -116,7 +116,7 @@ export async function GET(request: NextRequest) {
             LEFT JOIN universes u ON w.universe_id = u.id
             LEFT JOIN rooms r ON w.id = r.world_id
             LEFT JOIN room_accesses ra ON r.id = ra.room_id
-            WHERE w.is_public = true
+            WHERE w.is_public = true AND u.is_public = true
             AND NOT (u.slug = 'default' AND w.slug = 'default')
             AND (w.name ILIKE ${`%${search}%`} OR w.slug ILIKE ${`%${search}%`} OR w.description ILIKE ${`%${search}%`})
             GROUP BY w.id
@@ -131,7 +131,7 @@ export async function GET(request: NextRequest) {
             LEFT JOIN universes u ON w.universe_id = u.id
             LEFT JOIN rooms r ON w.id = r.world_id
             LEFT JOIN room_accesses ra ON r.id = ra.room_id
-            WHERE w.is_public = true
+            WHERE w.is_public = true AND u.is_public = true
             AND NOT (u.slug = 'default' AND w.slug = 'default')
             GROUP BY w.id
             ORDER BY w.featured DESC, access_count DESC, w.created_at DESC
@@ -147,7 +147,7 @@ export async function GET(request: NextRequest) {
             SELECT COUNT(DISTINCT w.id)::bigint as count
             FROM worlds w
             LEFT JOIN universes u ON w.universe_id = u.id
-            WHERE w.is_public = true
+            WHERE w.is_public = true AND u.is_public = true
             AND NOT (u.slug = 'default' AND w.slug = 'default')
             AND (w.name ILIKE ${`%${search}%`} OR w.slug ILIKE ${`%${search}%`} OR w.description ILIKE ${`%${search}%`})
           `
@@ -155,7 +155,7 @@ export async function GET(request: NextRequest) {
             SELECT COUNT(DISTINCT w.id)::bigint as count
             FROM worlds w
             LEFT JOIN universes u ON w.universe_id = u.id
-            WHERE w.is_public = true
+            WHERE w.is_public = true AND u.is_public = true
             AND NOT (u.slug = 'default' AND w.slug = 'default')
           `;
       const totalResult = await totalQuery;

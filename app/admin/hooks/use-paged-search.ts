@@ -18,10 +18,14 @@ export type PagedResult<R> =
  */
 export function usePagedSearch<R>(
   load: (params: { query: string; page: number }, signal: AbortSignal) => Promise<R | null>,
-  { enabled = true, debounceMs }: { enabled?: boolean; debounceMs?: number } = {},
+  {
+    enabled = true,
+    debounceMs,
+    initialQuery = '',
+  }: { enabled?: boolean; debounceMs?: number; /** A search to start with (from the address). */ initialQuery?: string } = {},
 ) {
-  const [input, setInputState] = useState('');
-  const [params, setParams] = useState({ query: '', page: 1 });
+  const [input, setInputState] = useState(initialQuery);
+  const [params, setParams] = useState(() => ({ query: initialQuery.trim(), page: 1 }));
   const [attempt, setAttempt] = useState(0);
   // The last settled answer, and which {query, page, attempt} it answered: anything else is still loading.
   const [settled, setSettled] = useState<{

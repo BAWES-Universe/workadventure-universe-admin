@@ -17,7 +17,12 @@ jest.mock('next/link', () => ({
 }));
 
 const push = jest.fn();
-jest.mock('next/navigation', () => ({ useRouter: () => ({ push }) }));
+let urlParams = new URLSearchParams();
+jest.mock('next/navigation', () => ({
+  useRouter: () => ({ push, replace: jest.fn() }),
+  usePathname: () => '/admin/test',
+  useSearchParams: () => urlParams,
+}));
 
 const fetchMock = jest.fn();
 jest.mock('@/lib/client-auth', () => ({
@@ -52,9 +57,21 @@ const person = (id: string, name: string) => ({
 });
 
 beforeEach(() => {
+  urlParams = new URLSearchParams();
   fetchMock.mockReset();
   push.mockReset();
   clearSummaryCache();
+});
+
+describe('A search from the address', () => {
+  it('opens People on the search Space was showing, in one request', async () => {
+    urlParams = new URLSearchParams('q=sara');
+    const held = holdLists('/api/admin/users');
+    render(<UsersPage />);
+    await waitFor(() => expect(held).toHaveLength(1));
+    expect(held[0].url).toContain('search=sara');
+    expect((screen.getByRole('searchbox') as HTMLInputElement).value).toBe('sara');
+  });
 });
 
 describe('People search', () => {
