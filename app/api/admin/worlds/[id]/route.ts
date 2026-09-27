@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
+import { FEATURED_FORBIDDEN, refusesFeaturedChange } from '@/lib/featured';
 
 const updateWorldSchema = z.object({
   slug: z.string().min(1).max(100).optional(),
@@ -131,6 +132,7 @@ export async function PATCH(
       authHeader.replace('Bearer ', '').trim() === process.env.ADMIN_API_TOKEN;
     
     let userId: string | null = null;
+    let canFeature = Boolean(isAdminToken);
     
     if (!isAdminToken) {
       // Try to get user from session
@@ -140,6 +142,7 @@ export async function PATCH(
         return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
       }
       userId = sessionUser.id;
+      canFeature = sessionUser.isSuperAdmin;
     } else {
       // Admin token - require it
       requireAuth(request);
@@ -182,6 +185,10 @@ export async function PATCH(
         { error: 'Forbidden' },
         { status: 403 }
       );
+    }
+
+    if (refusesFeaturedChange(canFeature, data.featured, existing.featured)) {
+      return NextResponse.json({ error: FEATURED_FORBIDDEN }, { status: 403 });
     }
     
     // Check if slug is being changed and already exists

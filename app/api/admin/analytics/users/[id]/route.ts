@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { requireAuth } from '@/lib/auth';
+import { getViewer, isPrivileged, viewerUserId, unauthorizedResponse, forbiddenResponse } from '@/lib/access-scope';
 import { prisma } from '@/lib/db';
 
 export async function GET(
@@ -7,24 +7,18 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    // Check if using admin token or session
-    const authHeader = request.headers.get('authorization');
-    const isAdminToken = authHeader?.startsWith('Bearer ') && 
-      authHeader.replace('Bearer ', '').trim() === process.env.ADMIN_API_TOKEN;
-    
-    if (!isAdminToken) {
-      // Try to get user from session
-      const { getSessionUser } = await import('@/lib/auth-session');
-      const sessionUser = await getSessionUser(request);
-      if (!sessionUser) {
-        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-      }
-    } else {
-      // Admin token - require it
-      requireAuth(request);
+    const viewer = await getViewer(request);
+    if (!viewer) {
+      return unauthorizedResponse();
     }
     
     const { id } = await params;
+    // A user's access history is visible to that user and to privileged
+    // viewers; IP addresses in it only to privileged viewers.
+    const privileged = isPrivileged(viewer);
+    if (!privileged && viewerUserId(viewer) !== id) {
+      return forbiddenResponse();
+    }
     const { searchParams } = new URL(request.url);
     const page = parseInt(searchParams.get('page') || '1');
     const limit = parseInt(searchParams.get('limit') || '50');
@@ -147,7 +141,7 @@ export async function GET(
       accesses: accesses.map(access => ({
         id: access.id,
         accessedAt: access.accessedAt,
-        ipAddress: access.ipAddress,
+        ...(privileged ? { ipAddress: access.ipAddress } : {}),
         isGuest: access.isGuest,
         isAuthenticated: access.isAuthenticated,
         hasMembership: access.hasMembership,

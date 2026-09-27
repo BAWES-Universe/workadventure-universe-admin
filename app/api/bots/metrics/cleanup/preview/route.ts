@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
-import { requireAdminAuth } from '@/lib/admin-auth';
+import { getViewer, isPrivileged, unauthorizedResponse, forbiddenResponse } from '@/lib/access-scope';
 import { corsHeaders } from '@/lib/cors';
 
 export const runtime = 'nodejs';
@@ -25,7 +25,14 @@ export async function OPTIONS() {
  */
 export async function GET(request: NextRequest) {
   try {
-    await requireAdminAuth(request);
+    // Operates on every bot's data: admin token or super admin only.
+    const viewer = await getViewer(request);
+    if (!viewer) {
+      return unauthorizedResponse(corsHeaders());
+    }
+    if (!isPrivileged(viewer)) {
+      return forbiddenResponse(corsHeaders());
+    }
 
     const { searchParams } = new URL(request.url);
 

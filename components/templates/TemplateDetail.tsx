@@ -1,10 +1,10 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
-import { Loader2, ArrowLeft, Check } from 'lucide-react';
+import { ArrowLeft, Check } from 'lucide-react';
+import { cn } from '@/lib/utils';
+import { KindIcon, LoadError, LoadingRows, StatusPill } from '@/app/admin/components/ds';
 
 interface TemplateMap {
   id: string;
@@ -66,69 +66,59 @@ function MapCardWithImage({ map, isSelected, onSelectMap }: { map: TemplateMap; 
     }
   }, [map.previewImageUrl]);
 
+  const sizeText = map.sizeLabel ? `${map.sizeLabel.charAt(0).toUpperCase()}${map.sizeLabel.slice(1).toLowerCase()} size` : null;
+
   return (
-    <Card
-      className={`cursor-pointer transition-all group relative overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background ${
-        isSelected
-          ? 'ring-2 ring-primary shadow-lg'
-          : 'hover:-translate-y-1 hover:shadow-lg'
-      }`}
-      onClick={() => onSelectMap(map.id, map.mapUrl)}
+    <article
+      className={cn(
+        'group relative grid min-w-0 overflow-hidden rounded-[18px] border bg-card transition-[border-color,transform] motion-reduce:transform-none',
+        isSelected ? 'border-foreground/60 ring-1 ring-foreground/40' : 'hover:-translate-y-px hover:border-foreground/20',
+      )}
     >
-      <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-blue-500/10 via-transparent to-indigo-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
-      
       {/* Preview Image - only show container after image successfully loaded
           If no previewImageUrl or image errors, nothing renders (no grey area) */}
       {map.previewImageUrl && imageReady && !imageError && (
-        <div className="relative w-full h-48 overflow-hidden bg-muted">
+        <div className="relative h-44 w-full overflow-hidden border-b bg-muted">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
             ref={imageRef}
             src={map.previewImageUrl}
-            alt={map.name}
-            className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+            alt=""
+            className="h-full w-full object-cover"
           />
-          {isSelected && (
-            <div className="absolute top-2 right-2 z-10">
-              <div className="bg-primary text-primary-foreground rounded-full p-1.5 shadow-lg">
-                <Check className="h-4 w-4" />
-              </div>
-            </div>
-          )}
         </div>
       )}
-      
-      <CardHeader className="relative">
-        <div className="flex items-start justify-between">
-          <div className="flex-1">
-            <CardTitle className="text-base font-semibold leading-tight mb-1">{map.name}</CardTitle>
-            {map.sizeLabel && (
-              <Badge variant="secondary" className="text-xs">
-                {map.sizeLabel.charAt(0).toUpperCase() + map.sizeLabel.slice(1).toLowerCase()} size
-              </Badge>
-            )}
+
+      <div className="grid gap-3 p-4">
+        <div className="flex items-start gap-3">
+          <KindIcon kind="map" />
+          <div className="grid min-w-0 flex-1 gap-1">
+            <h4 className="text-base font-bold leading-snug [overflow-wrap:anywhere]">
+              <button
+                type="button"
+                aria-pressed={isSelected}
+                onClick={() => onSelectMap(map.id, map.mapUrl)}
+                className="text-left outline-none after:absolute after:inset-0 after:rounded-[inherit] after:content-[''] focus-visible:after:outline focus-visible:after:outline-2 focus-visible:after:outline-offset-2 focus-visible:after:outline-ring"
+              >
+                {map.name}
+              </button>
+            </h4>
+            {sizeText && <span className="text-xs text-muted-foreground">{sizeText}</span>}
           </div>
-          {isSelected && (!map.previewImageUrl || imageError || !imageReady) && (
-            <Check className="h-5 w-5 text-primary flex-shrink-0" />
-          )}
         </div>
-        {map.description && (
-          <CardDescription className="mt-3">{map.description}</CardDescription>
-        )}
-      </CardHeader>
-      <CardContent className="relative">
-        <Button
-          variant={isSelected ? 'default' : 'outline'}
-          size="sm"
-          className="w-full"
-          onClick={(e) => {
-            e.stopPropagation();
-            onSelectMap(map.id, map.mapUrl);
-          }}
+        {map.description && <p className="text-[13px] leading-relaxed text-foreground/80">{map.description}</p>}
+        <span
+          aria-hidden="true"
+          className={cn(
+            'inline-flex h-11 items-center justify-center gap-2 rounded-md border text-sm font-medium transition-colors',
+            isSelected ? 'border-foreground/60 bg-foreground/5 text-foreground' : 'text-foreground/85 group-hover:bg-foreground/5',
+          )}
         >
+          {isSelected && <Check className="h-4 w-4" />}
           {isSelected ? 'Selected' : 'Use this map'}
-        </Button>
-      </CardContent>
-    </Card>
+        </span>
+      </div>
+    </article>
   );
 }
 
@@ -169,23 +159,21 @@ export function TemplateDetail({
   }
 
   if (loading) {
-    return (
-      <div className="flex items-center justify-center py-12">
-        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-      </div>
-    );
+    return <LoadingRows label="the template" rows={3} />;
   }
 
   if (error || !template) {
     return (
       <div className="space-y-4">
-        <Button variant="ghost" onClick={onBack} className="gap-2">
+        <Button variant="outline" onClick={onBack} className="h-11 gap-2">
           <ArrowLeft className="h-4 w-4" />
-          Back to Templates
+          Back to templates
         </Button>
-        <div className="rounded-lg border border-destructive bg-destructive/10 p-4 text-sm text-destructive">
-          {error || 'Template not found'}
-        </div>
+        {error && error !== 'Template not found' ? (
+          <LoadError label="this template" retry={fetchTemplate} />
+        ) : (
+          <p className="text-sm text-muted-foreground">This template no longer exists.</p>
+        )}
       </div>
     );
   }
@@ -193,94 +181,76 @@ export function TemplateDetail({
   return (
     <div className="space-y-6">
       {/* Header */}
-      <Card className="border-border/70 bg-gradient-to-br from-background via-background to-background relative">
-        {template.isFeatured && (
-          <div className="absolute top-4 right-4 z-10">
-            <Badge variant="outline" className="text-xs">Featured</Badge>
+      <div className="space-y-4 rounded-2xl border bg-card p-4 sm:p-5">
+        <div className="flex items-start gap-3">
+          <KindIcon kind="template" />
+          <div className="min-w-0 flex-1">
+            <h2 className="orbit-display text-xl font-bold [overflow-wrap:anywhere]">{template.name}</h2>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {template.category.icon && <span className="mr-1">{template.category.icon}</span>}
+              {template.category.name}
+            </p>
           </div>
+          {template.isFeatured && <StatusPill status="featured" />}
+        </div>
+
+        {template.shortDescription && (
+          <p className="text-base text-foreground">
+            {template.shortDescription}
+          </p>
         )}
-        <CardHeader>
-          <div className="space-y-4">
-            <div className={template.isFeatured ? 'pr-20' : ''}>
-              <h2 className="text-xl font-bold tracking-tight">{template.name}</h2>
-              <div className="flex items-center gap-1.5 mt-2">
-                {template.category.icon && (
-                  <span className="text-sm">{template.category.icon}</span>
-                )}
-                <p className="text-xs text-muted-foreground">
-                  {template.category.name}
-                </p>
-              </div>
-            </div>
-            
-            {template.shortDescription && (
-              <p className="text-foreground text-lg">
-                {template.shortDescription}
+
+        {template.philosophy && (
+          <div>
+            <h4 className="text-sm font-semibold mb-2">Philosophy</h4>
+            <div className="border-l-2 border-muted-foreground/30 pl-4">
+              <p className="text-sm italic text-muted-foreground leading-relaxed">
+                &ldquo;{template.philosophy}&rdquo;
               </p>
-            )}
-            
-            {template.philosophy && (
-              <div>
-                <h4 className="text-sm font-semibold mb-2">Philosophy</h4>
-                <div className="border-l-2 border-muted-foreground/30 pl-4">
-                  <p className="text-sm italic text-muted-foreground leading-relaxed">
-                    &ldquo;{template.philosophy}&rdquo;
-                  </p>
-                </div>
-              </div>
-            )}
+            </div>
           </div>
-        </CardHeader>
-        
-        {(template.purpose || template.whoItsFor || template.typicalUseCases?.length) && (
-          <CardContent className="space-y-4 pt-0">
-            {template.purpose && (
-              <div>
-                <h4 className="text-sm font-semibold mb-1">Purpose</h4>
-                <p className="text-sm text-muted-foreground">{template.purpose}</p>
-              </div>
-            )}
-            
-            {template.whoItsFor && (
-              <div>
-                <h4 className="text-sm font-semibold mb-1">Who It's For</h4>
-                <p className="text-sm text-muted-foreground">{template.whoItsFor}</p>
-              </div>
-            )}
-            
-            {template.typicalUseCases && template.typicalUseCases.length > 0 && (
-              <div>
-                <h4 className="text-sm font-semibold mb-2">Typical Use Cases</h4>
-                <div className="flex flex-wrap gap-2">
-                  {template.typicalUseCases.map((useCase, index) => (
-                    <span
-                      key={index}
-                      className="inline-flex items-center rounded-md bg-muted px-2.5 py-0.5 text-xs font-medium text-muted-foreground"
-                    >
-                      {useCase}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            )}
-          </CardContent>
         )}
-      </Card>
+
+        {template.purpose && (
+          <div>
+            <h4 className="text-sm font-semibold mb-1">Purpose</h4>
+            <p className="text-sm text-muted-foreground">{template.purpose}</p>
+          </div>
+        )}
+
+        {template.whoItsFor && (
+          <div>
+            <h4 className="text-sm font-semibold mb-1">Who it’s for</h4>
+            <p className="text-sm text-muted-foreground">{template.whoItsFor}</p>
+          </div>
+        )}
+
+        {template.typicalUseCases && template.typicalUseCases.length > 0 && (
+          <div>
+            <h4 className="text-sm font-semibold mb-2">Typical use cases</h4>
+            <div className="flex flex-wrap gap-2">
+              {template.typicalUseCases.map((useCase, index) => (
+                <span
+                  key={index}
+                  className="inline-flex items-center rounded-md bg-muted px-2.5 py-0.5 text-xs font-medium text-muted-foreground"
+                >
+                  {useCase}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
 
       {/* Map Variants */}
-      <div>
-        <div className="mb-4">
-          <h3 className="text-xl font-semibold mb-1">Select Map</h3>
-          <p className="text-sm text-muted-foreground">Choose from the available maps.</p>
+      <section aria-labelledby="template-detail-maps">
+        <div className="mb-3">
+          <h3 id="template-detail-maps" className="orbit-display text-lg font-bold">Choose a map</h3>
         </div>
         {template.maps.length === 0 ? (
-          <Card>
-            <CardContent className="py-8 text-center text-muted-foreground">
-              No maps available for this template.
-            </CardContent>
-          </Card>
+          <p className="text-sm text-muted-foreground">No maps available for this template.</p>
         ) : (
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             {template.maps.map((map) => {
               const isSelected = selectedMapId === map.id;
               return (
@@ -294,8 +264,7 @@ export function TemplateDetail({
             })}
           </div>
         )}
-      </div>
+      </section>
     </div>
   );
 }
-

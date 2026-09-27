@@ -2,7 +2,21 @@
 
 ## Overview
 
-The login page is designed to work seamlessly with WorkAdventure iframe integration. By default, it shows a loading state while waiting for WorkAdventure to provide an OIDC access token via URL parameter.
+Orbit runs only inside Universe. The game opens `/admin/login` in an iframe and
+hands Orbit a session through a `postMessage` handshake (`orbit-auth-ready-v2` /
+`orbit-auth-token-v2`). Orbit keeps its session token in the iframe's
+`sessionStorage` and sends it as an `Authorization` header (no cookies).
+
+- **Opened directly** (not in an iframe), or the game does not answer the
+  handshake within 10 seconds: the page shows one line, "Orbit runs inside
+  Universe", with a link to `NEXT_PUBLIC_PLAY_URL`. Nothing is fetched and no
+  stored session is reused.
+- **Every open performs the handshake.** A session already stored in the tab is
+  never reused on its own: the game may now be signed in as someone else. The
+  handshake's token is exchanged for a fresh session, the old one is revoked, and
+  unless the stored session is known to belong to the same Universe user, every
+  per-account cache in the tab is cleared (`lib/client-auth.ts`
+  `adoptHandshakeSession`).
 
 ## Environment Variables
 
@@ -25,7 +39,7 @@ NEXT_PUBLIC_ENABLE_MANUAL_LOGIN=true
 
 - **When `false` (default)**: 
   - Shows a loading spinner with "Loading universe..." message
-  - Waits for `accessToken` URL parameter from WorkAdventure
+  - Waits for the game's `orbit-auth-token-v2` handshake message
   - No manual input form is shown
   - This is the production/iframe experience
 
@@ -37,17 +51,14 @@ NEXT_PUBLIC_ENABLE_MANUAL_LOGIN=true
 
 ## Authentication Flow
 
-1. **WorkAdventure Integration (Default)**:
-   - User logs into WorkAdventure
-   - WorkAdventure redirects to `/admin/login?accessToken=...`
-   - Login page automatically processes the token
-   - User is redirected to the admin dashboard
-
-2. **Manual Login (Development Only)**:
-   - Only available when `NEXT_PUBLIC_ENABLE_MANUAL_LOGIN=true`
-   - User can click "Use manual login instead" or wait 2 seconds
-   - User enters OIDC access token manually
-   - Token is validated and user is logged in
+1. **Universe (default)**: the game's Orbit button opens `/admin/login?playUri=…`
+   in an iframe; the page posts `orbit-auth-ready-v2` with a nonce to the play
+   origin; the game answers with `orbit-auth-token-v2` carrying its OIDC access
+   token; Orbit exchanges it at `POST /api/auth/login`, confirms the user with
+   `GET /api/auth/me`, stores the session and redirects into Orbit.
+2. **Manual Login (Development Only)**: only when
+   `NEXT_PUBLIC_ENABLE_MANUAL_LOGIN=true` outside production; paste an OIDC access
+   token into the form.
 
 ## Getting an OIDC Token for Testing
 

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { requireAuth } from '@/lib/auth';
+import { getViewer, isPrivileged, viewerUserId, unauthorizedResponse } from '@/lib/access-scope';
 import { prisma } from '@/lib/db';
+import { wokaLayersFor } from '@/lib/woka-avatar';
 
 // GET /api/admin/users/[id] - Get a single user
 export async function GET(
@@ -8,27 +9,29 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    // Check if using admin token or session
-    const authHeader = request.headers.get('authorization');
-    const isAdminToken = authHeader?.startsWith('Bearer ') && 
-      authHeader.replace('Bearer ', '').trim() === process.env.ADMIN_API_TOKEN;
-    
-    if (!isAdminToken) {
-      // Try to get user from session
-      const { getSessionUser } = await import('@/lib/auth-session');
-      const sessionUser = await getSessionUser(request);
-      if (!sessionUser) {
-        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-      }
-    } else {
-      // Admin token - require it
-      requireAuth(request);
+    const viewer = await getViewer(request);
+    if (!viewer) {
+      return unauthorizedResponse();
     }
     
     const { id } = await params;
+    // Contact details are visible to privileged viewers and to the user
+    // themselves; the last known IP address only to privileged viewers.
+    const privileged = isPrivileged(viewer);
+    const isSelf = viewerUserId(viewer) === id;
+    const canSeeContact = privileged || isSelf;
     const user = await prisma.user.findUnique({
       where: { id },
-      include: {
+      select: {
+        id: true,
+        uuid: true,
+        name: true,
+        email: canSeeContact,
+        matrixChatId: canSeeContact,
+        lastIpAddress: privileged,
+        isGuest: true,
+        createdAt: true,
+        updatedAt: true,
         visitCard: true,
         ownedUniverses: {
           select: {
@@ -141,6 +144,8 @@ export async function GET(
 
     const userWithCounts = {
       ...user,
+      // Their Woka, for the profile's avatar; empty when they never picked one.
+      woka: await wokaLayersFor(user.id).catch(() => []),
       ownedUniverses: user.ownedUniverses.map((universe: any) => {
         const totalRooms = universe.worlds?.reduce((sum: number, world: any) => sum + (world._count?.rooms || 0), 0) || 0;
         const totalMembers = universe.worlds?.reduce((sum: number, world: any) => sum + (world._count?.members || 0), 0) || 0;

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
+import { Prisma } from '@prisma/client';
 import { z } from 'zod';
 
 const createRoomSchema = z.object({
@@ -133,55 +134,30 @@ export async function GET(request: NextRequest) {
     let total: number;
     
     if (scope === 'discover' && userId && !isAdminToken) {
-      // Build search condition for SQL
-      const searchCondition = search
-        ? `AND (r.name ILIKE $1 OR r.slug ILIKE $1 OR r.description ILIKE $1)`
-        : '';
-      const searchParam = search ? `%${search}%` : null;
-      
-      // Use raw SQL to join with roomAccess, count accesses, and sort by count
-      // This ensures proper sorting before pagination
-      const query = search
-        ? prisma.$queryRaw<Array<{ room_id: string; access_count: bigint }>>`
-            SELECT 
-              r.id as room_id,
-              COALESCE(COUNT(ra.id), 0)::bigint as access_count
-            FROM rooms r
-            LEFT JOIN room_accesses ra ON r.id = ra.room_id
-            WHERE r.is_public = true
-            AND (r.name ILIKE ${`%${search}%`} OR r.slug ILIKE ${`%${search}%`} OR r.description ILIKE ${`%${search}%`})
-            GROUP BY r.id
-            ORDER BY access_count DESC, r.created_at DESC
-            LIMIT ${limit} OFFSET ${(page - 1) * limit}
-          `
-        : prisma.$queryRaw<Array<{ room_id: string; access_count: bigint }>>`
-            SELECT 
-              r.id as room_id,
-              COALESCE(COUNT(ra.id), 0)::bigint as access_count
-            FROM rooms r
-            LEFT JOIN room_accesses ra ON r.id = ra.room_id
-            WHERE r.is_public = true
-            GROUP BY r.id
-            ORDER BY access_count DESC, r.created_at DESC
-            LIMIT ${limit} OFFSET ${(page - 1) * limit}
-          `;
-      
-      const roomIdsWithCounts = await query;
+      // Discoverable: the room, its world and its universe all public (as canSeeRoom), never the built-in
+      // default/default/default room. Filtered here, before paging, so pages and totals agree.
+      const discoverable = Prisma.sql`
+        FROM rooms r
+        JOIN worlds w ON w.id = r.world_id
+        JOIN universes u ON u.id = w.universe_id
+        WHERE r.is_public = true AND w.is_public = true AND u.is_public = true
+        AND NOT (u.slug = 'default' AND w.slug = 'default' AND r.slug = 'default')
+        ${search ? Prisma.sql`AND (r.name ILIKE ${`%${search}%`} OR r.slug ILIKE ${`%${search}%`} OR r.description ILIKE ${`%${search}%`})` : Prisma.empty}`;
+
+      // Sorted by accesses before paging (counted per room, not by joining every access row).
+      const roomIdsWithCounts = await prisma.$queryRaw<Array<{ room_id: string; access_count: bigint }>>`
+        SELECT r.id AS room_id,
+          (SELECT COUNT(*) FROM room_accesses ra WHERE ra.room_id = r.id)::bigint AS access_count
+        ${discoverable}
+        ORDER BY access_count DESC, r.created_at DESC
+        LIMIT ${limit} OFFSET ${(page - 1) * limit}
+      `;
       const roomIds = roomIdsWithCounts.map((r: any) => r.room_id);
-      
-      // Get total count
-      const totalQuery = search
-        ? prisma.$queryRaw<Array<{ count: bigint }>>`
-            SELECT COUNT(DISTINCT r.id)::bigint as count
-            FROM rooms r
-            WHERE r.is_public = true
-            AND (r.name ILIKE ${`%${search}%`} OR r.slug ILIKE ${`%${search}%`} OR r.description ILIKE ${`%${search}%`})
-          `
-        : prisma.$queryRaw<Array<{ count: bigint }>>`
-            SELECT COUNT(DISTINCT r.id)::bigint as count
-            FROM rooms r
-            WHERE r.is_public = true
-          `;
+
+      const totalQuery = prisma.$queryRaw<Array<{ count: bigint }>>`
+        SELECT COUNT(*)::bigint AS count
+        ${discoverable}
+      `;
       const totalResult = await totalQuery;
       total = Number(totalResult[0]?.count || 0);
       
