@@ -48,10 +48,10 @@ beforeEach(() => {
     return SESSIONS[name] ?? null;
   });
   db.roomAccess.count.mockResolvedValue(3);
-  // The database's count per UTC hour for TIMES, in no particular order.
+  // The database's count per UTC hour for TIMES, in no particular order (COUNT(*) comes back as a bigint).
   (db.$queryRaw as unknown as jest.Mock).mockResolvedValue([
-    { hour: 9, count: 1 },
-    { hour: 16, count: 2 },
+    { hour: 9, count: BigInt(1) },
+    { hour: 16, count: BigInt(2) },
   ]);
   db.roomAccess.groupBy.mockResolvedValue([]);
   db.roomAccess.findMany.mockImplementation(async (args: { distinct?: unknown; select?: Record<string, unknown> }) => {

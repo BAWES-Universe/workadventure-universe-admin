@@ -2,7 +2,7 @@
 
 import { useIsSuperAdmin } from '../../admin-bootstrap-context';
 
-import { useState, useEffect, useMemo } from 'react';
+import { Suspense, useState, useEffect, useMemo } from 'react';
 import { useRouter, useParams, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
@@ -76,7 +76,16 @@ const TAB_CLASS = 'py-3 px-1 border-b-2 font-medium text-sm';
 const tabClass = (active: boolean) =>
   `${TAB_CLASS} ${active ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'}`;
 
+/** useSearchParams needs a Suspense boundary above it (the tab comes from ?tab=). */
 export default function WorldDetailPage() {
+  return (
+    <Suspense fallback={null}>
+      <WorldDetail />
+    </Suspense>
+  );
+}
+
+function WorldDetail() {
   const router = useRouter();
   const params = useParams();
   const id = params.id as string;

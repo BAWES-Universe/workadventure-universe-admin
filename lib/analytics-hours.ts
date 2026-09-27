@@ -14,8 +14,8 @@ const SCOPE_COLUMN = {
  * however long its history (never every access row). Same order as utcHourBuckets.
  */
 export async function utcHourBucketsFor(scope: keyof typeof SCOPE_COLUMN, id: string): Promise<HourBucket[]> {
-  const rows = await prisma.$queryRaw<Array<{ hour: number; count: number }>>`
-    SELECT EXTRACT(HOUR FROM accessed_at)::int AS hour, COUNT(*)::int AS count
+  const rows = await prisma.$queryRaw<Array<{ hour: number; count: bigint | number }>>`
+    SELECT EXTRACT(HOUR FROM accessed_at)::int AS hour, COUNT(*) AS count
     FROM room_accesses
     WHERE ${SCOPE_COLUMN[scope]} = ${id}
     GROUP BY 1`;
