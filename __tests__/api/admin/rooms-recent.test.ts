@@ -2,6 +2,7 @@
  * Recently visited is personal and access-filtered: only the caller's own visits, and only rooms they may still see.
  */
 import { NextRequest } from 'next/server';
+import { Prisma } from '@prisma/client';
 
 jest.mock('@/lib/db', () => ({
   prisma: {
@@ -21,22 +22,20 @@ const db = prisma as unknown as { $queryRaw: jest.Mock; room: { findMany: jest.M
 
 type Room = ReturnType<typeof room>;
 
-/**
- * The database's answer: each room's latest visit, newest first, paged by the query's LIMIT/OFFSET (its last two
- * values), and the rooms themselves by id.
- */
+/** The database's answer: each room's latest visit, newest first, up to the query's LIMIT (its last value). */
 function visited(rooms: Room[]) {
   const rows = rooms.map((entry, index) => ({ room_id: entry.id, last_at: new Date(Date.UTC(2026, 8, 27, 12) - index * 60_000) }));
-  db.$queryRaw.mockImplementation(async (...args: unknown[]) => {
-    const [limit, offset] = args.slice(-2) as [number, number];
-    return rows.slice(offset, offset + limit);
-  });
+  db.$queryRaw.mockImplementation(async (...args: unknown[]) => rows.slice(0, args[args.length - 1] as number));
   db.room.findMany.mockImplementation(async ({ where }: { where: { id: { in: string[] } } }) =>
     rooms.filter((entry) => where.id.in.includes(entry.id)),
   );
 }
 
-const sqlOf = (call: unknown[]) => (call[0] as TemplateStringsArray).join('?');
+/** The full SQL of a $queryRaw call, nested Prisma.sql fragments included. */
+const sqlOf = (call: unknown[]) => {
+  const [first, ...values] = call as [TemplateStringsArray, ...unknown[]];
+  return Prisma.sql(first, ...values).sql;
+};
 const ids = (body: { rooms: { roomId: string }[] }) => body.rooms.map((entry) => entry.roomId);
 const session = getSessionUser as jest.Mock;
 
@@ -76,11 +75,10 @@ describe('GET /api/admin/rooms/recent', () => {
   it('asks only for the caller’s own visits', async () => {
     visited([]);
     await GET(request());
-    const call = db.$queryRaw.mock.calls[0];
-    expect(sqlOf(call)).toMatch(/GROUP BY room_id/);
-    expect(call).toEqual(expect.arrayContaining([
-      expect.objectContaining({ values: expect.arrayContaining(['u-alice']) }),
-    ]));
+    const query = Prisma.sql(...(db.$queryRaw.mock.calls[0] as [TemplateStringsArray, ...unknown[]]));
+    expect(query.sql).toMatch(/GROUP BY ra\.room_id/);
+    expect(query.sql).toMatch(/ra\.user_id = \? OR ra\.user_uuid = \?/);
+    expect(query.values).toEqual(expect.arrayContaining(['u-alice', 'uuid-alice']));
   });
 
   it('lists each room once, newest first, without the start map', async () => {
@@ -94,11 +92,33 @@ describe('GET /api/admin/rooms/recent', () => {
     expect(ids(await (await GET(request('?limit=2'))).json())).toEqual(['square', 'lab']);
   });
 
-  it('reads further when hidden rooms fill the first page, until the limit is met', async () => {
-    const hidden = Array.from({ length: 20 }, (_, index) => room(`hidden-${index}`, { isPublic: false }));
-    visited([...hidden, room('open-1'), room('open-2')]);
-    expect(ids(await (await GET(request('?limit=2'))).json())).toEqual(['open-1', 'open-2']);
-    expect(db.$queryRaw).toHaveBeenCalledTimes(2);
+  it('filters hidden rooms in the query, before the limit, so none can crowd out a visible one', async () => {
+    visited([room('open')]);
+    await GET(request('?limit=2&excludeRoomId=here'));
+    expect(db.$queryRaw).toHaveBeenCalledTimes(1);
+    const call = db.$queryRaw.mock.calls[0];
+    const sql = sqlOf(call);
+    // The same rule as canSeeRoom: all three public, or the universe is yours, or you belong to the world.
+    expect(sql).toMatch(/r\.is_public AND w\.is_public AND u\.is_public/);
+    expect(sql).toMatch(/u\.owner_id = /);
+    expect(sql).toMatch(/FROM world_members wm WHERE wm\.world_id = w\.id AND wm\.user_id = /);
+    expect(sql).toMatch(/NOT \(u\.slug = 'default' AND w\.slug = 'default' AND r\.slug = 'default'\)/);
+    expect(sql).toMatch(/r\.id <> /);
+    // The limit asked for is the query's LIMIT: no scan cap, no pages.
+    expect(call[call.length - 1]).toBe(2);
+  });
+
+  it('shows the one room still visible after a hundred that are not', async () => {
+    // What the database returns once hidden rooms are filtered in the query: just the visible one.
+    visited([room('room-101')]);
+    expect(ids(await (await GET(request('?limit=2'))).json())).toEqual(['room-101']);
+  });
+
+  it('gives a super admin every room they visited, with no visibility filter', async () => {
+    session.mockResolvedValue({ ...alice, isSuperAdmin: true });
+    visited([]);
+    await GET(request());
+    expect(sqlOf(db.$queryRaw.mock.calls[0])).not.toMatch(/is_public/);
   });
 
   it('leaves out rooms the person may no longer see', async () => {
