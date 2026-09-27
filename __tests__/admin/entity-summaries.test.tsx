@@ -69,6 +69,18 @@ describe('useEntitySummaries', () => {
     expect(analyticsCalls()).toHaveLength(6);
   });
 
+  it('keeps an answer that lands after the list grew, for a place still listed', async () => {
+    let answer: (response: Response) => void = () => undefined;
+    fetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => (answer = resolve)));
+    fetchMock.mockImplementation(() => json(200, { summaries: {} }));
+    const { rerender } = render(<Probe ids={['a']} />);
+    await waitFor(() => expect(analyticsCalls()).toHaveLength(1));
+    // The list changes while "a" is still being answered.
+    rerender(<Probe ids={['a', 'b']} />);
+    await act(async () => answer({ ok: true, status: 200, json: () => Promise.resolve({ totalAccesses: 3, summaries: { a: { totalAccesses: 3 } } }) } as Response));
+    await waitFor(() => expect(screen.getByTestId('state-a').textContent).toBe('ready'));
+  });
+
   it('keeps a bounded number of requests on the discover page when every analytics call is 503', async () => {
     const rooms = ['r1', 'r2', 'r3'].map((id) => ({
       id,

@@ -21,8 +21,16 @@ export function useEntitySummaries(kind: SummaryKind, ids: readonly string[]) {
   const attempted = useRef(new Set<string>());
   const mounted = useRef(true);
 
+  // Answers are kept per id, so one that lands after the list changed is still that place's answer (and a place
+  // still listed must get it: it is never asked for twice). Only unmounting stops them.
   useEffect(() => {
     mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
     const list = key ? key.split('\n') : [];
     for (const id of list) {
       if (attempted.current.has(`${kind}:${id}`)) continue;
@@ -32,9 +40,6 @@ export function useEntitySummaries(kind: SummaryKind, ids: readonly string[]) {
         setStates((previous) => ({ ...previous, [id]: summary ? { status: 'ready', summary } : { status: 'error' } }));
       });
     }
-    return () => {
-      mounted.current = false;
-    };
   }, [kind, key, nonce]);
 
   /** Ask again for the given ids, or for every id that failed. */
