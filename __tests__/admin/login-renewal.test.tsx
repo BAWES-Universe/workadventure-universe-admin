@@ -63,7 +63,7 @@ describe('signing in when the game’s access token has run out', () => {
     gameSends('stale');
     await waitFor(() => expect(postMessage).toHaveBeenCalledTimes(2));
     gameSends('still-stale');
-    expect(await screen.findByText(/Your Universe sign-in has expired/)).toBeTruthy();
+    expect(await screen.findByText(/Universe couldn't sign you in to Orbit/)).toBeTruthy();
     expect(window.sessionStorage.getItem('orbit_session_v2')).toBeNull();
   });
 
@@ -81,7 +81,7 @@ describe('signing in when the game’s access token has run out', () => {
     gameSends('stale');
     await waitFor(() => expect(postMessage).toHaveBeenCalledTimes(2));
     gameSends('still-stale');
-    await screen.findByText(/Your Universe sign-in has expired/);
+    await screen.findByText(/Universe couldn't sign you in to Orbit/);
 
     renewedAvailable = true;
     fireEvent.click(screen.getByRole('button', { name: 'Continue with Universe' }));
