@@ -31,6 +31,8 @@ export default function LoginPage() {
   const [manualToken, setManualToken] = useState('');
   const [signedOut, setSignedOut] = useState(false);
   const activeNonce = useRef<string | null>(null);
+  // One second try with a renewed token: the game's OIDC access token runs out long before its own sign-in does.
+  const renewalTried = useRef(false);
 
   const exchangeToken = useCallback(async (accessToken: string) => {
     setLoading(true);
@@ -50,14 +52,14 @@ export default function LoginPage() {
     window.location.replace(getSafeRedirect());
   }, []);
 
-  const beginIframeHandshake = useCallback(() => {
+  const beginIframeHandshake = useCallback((refresh = false) => {
     if (window.self === window.top) {
       setLoading(false);
       return;
     }
     const nonce = crypto.randomUUID();
     activeNonce.current = nonce;
-    window.parent.postMessage({ type: 'orbit-auth-ready-v2', version: 2, nonce }, PLAY_ORIGIN);
+    window.parent.postMessage({ type: 'orbit-auth-ready-v2', version: 2, nonce, ...(refresh ? { refresh: true } : {}) }, PLAY_ORIGIN);
     setLoading(true);
   }, []);
 
@@ -69,7 +71,18 @@ export default function LoginPage() {
           message.nonce !== activeNonce.current || typeof message.accessToken !== 'string') return;
       activeNonce.current = null;
       void exchangeToken(message.accessToken).catch((cause) => {
-        setError(cause instanceof Error ? cause.message : 'Login failed');
+        const reason = cause instanceof Error ? cause.message : 'Login failed';
+        // Refused with an expired token: ask the game for a renewed one, once.
+        if (/expired/i.test(reason) && !renewalTried.current) {
+          renewalTried.current = true;
+          beginIframeHandshake(true);
+          return;
+        }
+        setError(
+          renewalTried.current && /expired/i.test(reason)
+            ? 'Universe couldn\'t sign you in to Orbit. Select Continue with Universe to try again.'
+            : reason,
+        );
         setLoading(false);
       });
     };
@@ -80,7 +93,7 @@ export default function LoginPage() {
     if (sessionId) {
       fetch('/api/auth/me', { headers: { Authorization: `Bearer ${sessionId}` }, credentials: 'omit' })
         .then((response) => response.ok ? window.location.replace(getSafeRedirect()) : beginIframeHandshake())
-        .catch(beginIframeHandshake);
+        .catch(() => beginIframeHandshake());
     } else if (sessionStorage.getItem(LOGOUT_SUPPRESSION_KEY) === 'true') {
       queueMicrotask(() => {
         setSignedOut(true);
@@ -113,7 +126,13 @@ export default function LoginPage() {
         </CardHeader>
         <CardContent className="space-y-4">
           {error && <Alert variant="destructive"><AlertCircle className="h-4 w-4" /><AlertTitle>Authentication failed</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
-          <Button className="w-full" onClick={() => { setSignedOut(false); sessionStorage.removeItem(LOGOUT_SUPPRESSION_KEY); beginIframeHandshake(); }}>
+          <Button className="w-full" onClick={() => {
+            setSignedOut(false);
+            sessionStorage.removeItem(LOGOUT_SUPPRESSION_KEY);
+            // A fresh attempt gets its own renewal try, so an expired token can still be renewed from here.
+            renewalTried.current = false;
+            beginIframeHandshake();
+          }}>
             Continue with Universe
           </Button>
           {ENABLE_MANUAL_LOGIN && (
