@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useRouter, useParams, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
@@ -22,6 +22,7 @@ import {
 } from '@/components/ui/alert-dialog';
 import { AlertCircle, ChevronLeft, ChevronRight, Loader2, Pencil, Plus, Trash2, UserPlus } from 'lucide-react';
 import { timeAgo } from '@/lib/time-ago';
+import { activityStats } from '@/lib/analytics-peak';
 import {
   EmptyCard,
   EntityCard,
@@ -29,6 +30,7 @@ import {
   Figure,
   Figures,
   InContext,
+  LoadError,
   LoadingRows,
   PageHeader,
   RolePills,
@@ -36,11 +38,11 @@ import {
   StatLine,
   StatusPill,
   VisitLine,
-  count,
 } from '../../components/ds';
 import InviteMemberDialog from '../../components/invite-member-dialog';
 import MemberList from '../../components/member-list';
 import { PersonIcon } from '../../components/profile-card';
+import { useEntitySummaries } from '../../hooks/use-entity-summaries';
 
 interface World {
   id: string;
@@ -84,14 +86,6 @@ interface Visit {
   room: { id: string; name: string };
 }
 
-/** "4 PM": the hour a room is busiest, in the same short form everywhere. */
-function formatHour(hour: number): string {
-  if (hour === 0) return '12 AM';
-  if (hour < 12) return `${hour} AM`;
-  if (hour === 12) return '12 PM';
-  return `${hour - 12} PM`;
-}
-
 const TAB_CLASS = 'py-3 px-1 border-b-2 font-medium text-sm';
 const tabClass = (active: boolean) =>
   `${TAB_CLASS} ${active ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'}`;
@@ -119,7 +113,9 @@ export default function WorldDetailPage() {
   const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
   const [visitorsPage, setVisitorsPage] = useState(1);
   const visitorsPerPage = 10;
-  const [roomAnalytics, setRoomAnalytics] = useState<Record<string, { totalAccesses: number; peakHour: number | null; lastVisitedByUser: { accessedAt: string; userId?: string | null; userUuid?: string | null } | null; lastVisitedOverall: { accessedAt: string; userId?: string | null; userUuid?: string | null } | null }>>({});
+  // Each room's activity for its card, asked for once per room (a failure offers a retry, never a request loop).
+  const roomIds = useMemo(() => world?.rooms?.map((room) => room.id) ?? [], [world]);
+  const roomSummaries = useEntitySummaries('rooms', roomIds);
   
   const [formData, setFormData] = useState({
     slug: '',
@@ -148,78 +144,6 @@ export default function WorldDetailPage() {
       fetchAnalytics(visitorsPage);
     }
   }, [visitorsPage, activeTab, world]);
-
-  useEffect(() => {
-    async function fetchRoomAnalytics() {
-      if (!world?.rooms || world.rooms.length === 0) return;
-
-      try {
-        const { authenticatedFetch } = await import('@/lib/client-auth');
-        const results = await Promise.all(
-          world.rooms.map(async (room) => {
-            try {
-              const response = await authenticatedFetch(`/api/admin/analytics/rooms/${room.id}`);
-              if (!response.ok) {
-                return null;
-              }
-              const data = await response.json();
-              
-              // Calculate peak hour from recent activity in local timezone (like detail page)
-              let peakHour = null;
-              if (data.recentActivity && data.recentActivity.length > 0) {
-                const hourCounts = new Map<number, number>();
-                data.recentActivity.forEach((access: any) => {
-                  const date = new Date(access.accessedAt);
-                  const hour = date.getHours(); // Local timezone
-                  hourCounts.set(hour, (hourCounts.get(hour) || 0) + 1);
-                });
-                const localPeakTimes = Array.from(hourCounts.entries())
-                  .map(([hour, count]) => ({ hour, count }))
-                  .sort((a, b) => b.count - a.count);
-                if (localPeakTimes.length > 0) {
-                  peakHour = localPeakTimes[0].hour;
-                }
-              }
-              
-              // Fallback to UTC peakTimes if no recent activity
-              if (peakHour === null && Array.isArray(data.peakTimes) && data.peakTimes.length > 0) {
-                peakHour = data.peakTimes[0].hour;
-              }
-              
-              return {
-                roomId: room.id,
-                totalAccesses: data.totalAccesses || 0,
-                peakHour,
-                lastVisitedByUser: data.lastVisitedByUser || null,
-                lastVisitedOverall: data.lastVisitedOverall || null,
-              };
-            } catch {
-              return null;
-            }
-          }),
-        );
-
-        const analyticsMap: Record<string, { totalAccesses: number; peakHour: number | null; lastVisitedByUser: { accessedAt: string; userId?: string | null; userUuid?: string | null } | null; lastVisitedOverall: { accessedAt: string; userId?: string | null; userUuid?: string | null } | null }> = {};
-        for (const result of results) {
-          if (result) {
-            analyticsMap[result.roomId] = {
-              totalAccesses: result.totalAccesses,
-              peakHour: result.peakHour,
-              lastVisitedByUser: result.lastVisitedByUser || null,
-              lastVisitedOverall: result.lastVisitedOverall || null,
-            };
-          }
-        }
-        setRoomAnalytics(analyticsMap);
-      } catch {
-        // Silently fail - analytics are optional
-      }
-    }
-
-    if (world) {
-      fetchRoomAnalytics();
-    }
-  }, [world]);
 
   async function checkAuth() {
     try {
@@ -347,8 +271,8 @@ export default function WorldDetailPage() {
 
   const visits = typeof analytics?.totalAccesses === 'number' ? analytics.totalAccesses : null;
   const sortedRooms = [...world.rooms].sort((a, b) => {
-    const aAccesses = roomAnalytics[a.id]?.totalAccesses ?? 0;
-    const bAccesses = roomAnalytics[b.id]?.totalAccesses ?? 0;
+    const aAccesses = roomSummaries.summary(a.id)?.totalAccesses ?? 0;
+    const bAccesses = roomSummaries.summary(b.id)?.totalAccesses ?? 0;
     return bAccesses - aAccesses;
   });
 
@@ -539,7 +463,7 @@ export default function WorldDetailPage() {
                   <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
                     {sortedRooms.map((room) => {
                       const favorites = room._count.favorites ?? 0;
-                      const roomStats = roomAnalytics[room.id];
+                      const roomStats = roomSummaries.summary(room.id);
                       const you = roomStats?.lastVisitedByUser?.accessedAt ?? null;
                       const latest = roomStats?.lastVisitedOverall?.accessedAt ?? null;
                       return (
@@ -553,19 +477,19 @@ export default function WorldDetailPage() {
                           meta={
                             roomStats ? (
                               <>
-                                <StatLine
-                                  items={[
-                                    count(roomStats.totalAccesses, 'visit'),
-                                    roomStats.peakHour !== null && `busiest at ${formatHour(roomStats.peakHour)}`,
-                                  ]}
-                                />
-                                <VisitLine you={you} latest={latest} youWereLast={!!you && you === latest} />
+                                <StatLine items={activityStats(roomStats)} />
+                                <VisitLine you={you} latest={latest} youWereLast={roomStats.youWereLast} />
                               </>
                             ) : undefined
                           }
                         />
                       );
                     })}
+                  </div>
+                )}
+                {world.rooms.length > 0 && roomSummaries.failed.length > 0 && (
+                  <div className="mt-3">
+                    <LoadError label="activity for some rooms" retry={() => roomSummaries.retry()} />
                   </div>
                 )}
               </section>

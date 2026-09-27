@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { authenticatedFetch } from '@/lib/client-auth';
+import { formatHour as formatHourShared, localPeakHour } from '@/lib/analytics-peak';
 
 export interface RoomVisit {
   accessedAt: string;
@@ -11,14 +12,21 @@ export interface RoomVisit {
   userName?: string | null;
 }
 
+/** A universe's, world's or room's activity, as every card shows it. */
 export interface RoomAnalytics {
   totalAccesses: number | null;
-  /** The busiest hour of the day, and whose clock it is on: the viewer's own from recent visits, else the API's UTC buckets. */
+  /** The busiest hour of the day on the viewer's own clock, from the API's all-time UTC hour buckets. */
   peakHour: number | null;
+  /** Always the viewer's clock now; kept for callers that read it. */
   peakZone: 'local' | 'UTC';
   lastVisitedByUser: RoomVisit | null;
   lastVisitedOverall: RoomVisit | null;
+  /** The server's answer to "was the latest visitor you?", decided by identity. */
+  youWereLast: boolean;
 }
+
+export type EntitySummary = RoomAnalytics;
+export type SummaryKind = 'rooms' | 'worlds' | 'universes';
 
 interface AnalyticsResponse {
   totalAccesses?: number;
@@ -26,13 +34,17 @@ interface AnalyticsResponse {
   recentActivity?: Array<{ accessedAt: string }>;
   lastVisitedByUser?: RoomVisit | null;
   lastVisitedOverall?: RoomVisit | null;
+  youWereLast?: boolean;
 }
 
 function validVisit(visit?: RoomVisit | null): RoomVisit | null {
   return visit && Number.isFinite(new Date(visit.accessedAt).getTime()) ? visit : null;
 }
 
-/** Busiest local hour from recent visits; the server's UTC peak only when there are none. */
+/**
+ * @deprecated Peak is no longer computed from recent activity (one page of it is not the whole story): use
+ * `localPeakHour` from `@/lib/analytics-peak`, which reads the API's all-time buckets. Kept only for an older test.
+ */
 export function peakHourOf(data: AnalyticsResponse): { hour: number | null; zone: 'local' | 'UTC' } {
   const counts = new Map<number, number>();
   for (const access of data.recentActivity ?? []) {
@@ -53,50 +65,75 @@ export function peakHourOf(data: AnalyticsResponse): { hour: number | null; zone
   return { hour: utc ?? null, zone: 'UTC' };
 }
 
-export function fromAnalytics(data: AnalyticsResponse): RoomAnalytics {
-  const peak = peakHourOf(data);
-  return {
-    totalAccesses:
-      typeof data.totalAccesses === 'number' && Number.isFinite(data.totalAccesses) && data.totalAccesses >= 0
-        ? data.totalAccesses
-        : null,
-    peakHour: peak.hour,
-    peakZone: peak.zone,
-    lastVisitedByUser: validVisit(data.lastVisitedByUser),
-    lastVisitedOverall: validVisit(data.lastVisitedOverall),
-  };
-}
-
-/** Whether the latest visitor was you: the same moment is not enough, the record has to name you. */
-export function wasLastVisitorYou(analytics: RoomAnalytics): boolean {
-  const yours = analytics.lastVisitedByUser;
-  const last = analytics.lastVisitedOverall;
+/** Identity, not timestamps: the same moment is not enough, the record has to name you. */
+function sameVisitor(yours: RoomVisit | null, last: RoomVisit | null): boolean {
   if (!yours || !last) return false;
-  if (Math.abs(new Date(yours.accessedAt).getTime() - new Date(last.accessedAt).getTime()) >= 1000) return false;
   return Boolean(
     (yours.userId && last.userId && yours.userId === last.userId) ||
       (yours.userUuid && last.userUuid && yours.userUuid === last.userUuid),
   );
 }
 
-export function formatHour(hour: number): string {
-  return `${hour % 12 || 12} ${hour < 12 ? 'AM' : 'PM'}`;
+export function fromAnalytics(data: AnalyticsResponse): RoomAnalytics {
+  const lastVisitedByUser = validVisit(data.lastVisitedByUser);
+  const lastVisitedOverall = validVisit(data.lastVisitedOverall);
+  return {
+    totalAccesses:
+      typeof data.totalAccesses === 'number' && Number.isFinite(data.totalAccesses) && data.totalAccesses >= 0
+        ? data.totalAccesses
+        : null,
+    peakHour: localPeakHour(data.peakTimes),
+    peakZone: 'local',
+    lastVisitedByUser,
+    lastVisitedOverall,
+    // The server decides; an older response without the flag falls back to comparing ids (never timestamps).
+    youWereLast:
+      typeof data.youWereLast === 'boolean'
+        ? data.youWereLast && Boolean(lastVisitedOverall)
+        : sameVisitor(lastVisitedByUser, lastVisitedOverall),
+  };
 }
 
-// One request per room per page view, shared by every card showing that room.
-const cache = new Map<string, Promise<RoomAnalytics | null>>();
+/** Whether the latest visitor was you: the server's identity check, never equal timestamps. */
+export function wasLastVisitorYou(analytics: RoomAnalytics): boolean {
+  return analytics.youWereLast;
+}
 
-function load(roomId: string): Promise<RoomAnalytics | null> {
-  let pending = cache.get(roomId);
+/** "4 PM", "12 AM". */
+export const formatHour = formatHourShared;
+
+// One request per place per page view, shared by every card and list showing it.
+const cache = new Map<string, Promise<RoomAnalytics | null>>();
+const cacheKey = (kind: SummaryKind, id: string) => `${kind}:${id}`;
+
+/** A place's activity, or null when it could not be read (any non-OK status, a network error, bad JSON). */
+export function loadSummary(kind: SummaryKind, id: string): Promise<RoomAnalytics | null> {
+  const key = cacheKey(kind, id);
+  let pending = cache.get(key);
   if (!pending) {
-    pending = authenticatedFetch(`/api/admin/analytics/rooms/${encodeURIComponent(roomId)}`)
+    pending = authenticatedFetch(`/api/admin/analytics/${kind}/${encodeURIComponent(id)}`)
       .then(async (response) => (response.ok ? fromAnalytics((await response.json()) as AnalyticsResponse) : null))
       .catch(() => null);
-    cache.set(roomId, pending);
-    // Numbers change as people come and go: keep them for this visit to Home only.
-    void pending.finally(() => setTimeout(() => cache.delete(roomId), 30_000));
+    cache.set(key, pending);
+    // Numbers change as people come and go: keep them for this visit only.
+    const settled = pending;
+    void settled.finally(() =>
+      setTimeout(() => {
+        if (cache.get(key) === settled) cache.delete(key);
+      }, 30_000),
+    );
   }
   return pending;
+}
+
+/** Forget a cached answer so the next load asks again (an explicit retry). */
+export function forgetSummary(kind: SummaryKind, id: string): void {
+  cache.delete(cacheKey(kind, id));
+}
+
+/** For tests: start from an empty cache. */
+export function clearSummaryCache(): void {
+  cache.clear();
 }
 
 /** A room's visits, stars aside: how many, the busiest hour, when you and the latest visitor were last there. */
@@ -112,8 +149,8 @@ export function useRoomAnalytics(roomId: string | null | undefined): {
   useEffect(() => {
     if (!roomId) return;
     let cancelled = false;
-    if (attempt > 0) cache.delete(roomId);
-    void load(roomId).then((analytics) => {
+    if (attempt > 0) forgetSummary('rooms', roomId);
+    void loadSummary('rooms', roomId).then((analytics) => {
       // Only the room asked for last paints; an older answer never lands on a newer room.
       if (!cancelled) setState({ roomId, analytics });
     });

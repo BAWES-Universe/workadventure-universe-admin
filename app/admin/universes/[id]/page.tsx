@@ -2,7 +2,7 @@
 
 import { PersonIcon } from '../../components/profile-card';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
@@ -24,6 +24,8 @@ import {
 } from '@/components/ui/alert-dialog';
 import { ChevronRight, AlertCircle, Loader2, Plus, Edit, Trash2, ChevronLeft } from 'lucide-react';
 import { timeAgo } from '@/lib/time-ago';
+import { activityStats } from '@/lib/analytics-peak';
+import { useEntitySummaries } from '../../hooks/use-entity-summaries';
 import {
   EmptyCard,
   EntityCard,
@@ -31,6 +33,7 @@ import {
   Figure,
   Figures,
   KindIcon,
+  LoadError,
   LoadingRows,
   PageHeader,
   RolePills,
@@ -86,7 +89,9 @@ export default function UniverseDetailPage() {
   const [analyticsLoading, setAnalyticsLoading] = useState(true);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const [worldAnalytics, setWorldAnalytics] = useState<Record<string, { totalAccesses: number; lastVisitedByUser: any; lastVisitedOverall: any }>>({});
+  // Each world's activity for its card, asked for once per world (a failure offers a retry, never a request loop).
+  const worldIds = useMemo(() => universe?.worlds?.map((world) => world.id) ?? [], [universe]);
+  const worldSummaries = useEntitySummaries('worlds', worldIds);
   const [currentUser, setCurrentUser] = useState<any>(null);
   const [activeTab, setActiveTab] = useState<'details' | 'analytics'>('details');
   const [visitorsPage, setVisitorsPage] = useState(1);
@@ -106,12 +111,6 @@ export default function UniverseDetailPage() {
     checkAuth();
     fetchUniverse();
   }, [id]);
-
-  useEffect(() => {
-    if (universe && universe.worlds && universe.worlds.length > 0) {
-      fetchWorldAnalytics();
-    }
-  }, [universe]);
 
   async function checkAuth() {
     try {
@@ -189,49 +188,6 @@ export default function UniverseDetailPage() {
       fetchAnalytics(visitorsPage);
     }
   }, [visitorsPage, activeTab, universe]);
-
-  async function fetchWorldAnalytics() {
-    if (!universe || !universe.worlds || !universe.worlds.length) return;
-
-    try {
-      const { authenticatedFetch } = await import('@/lib/client-auth');
-      const results = await Promise.all(
-        universe.worlds.map(async (world) => {
-          try {
-            const response = await authenticatedFetch(
-              `/api/admin/analytics/worlds/${world.id}`,
-            );
-            if (!response.ok) return null;
-            const data = await response.json();
-            return {
-              worldId: world.id,
-              totalAccesses: data.totalAccesses || 0,
-              lastVisitedByUser: data.lastVisitedByUser || null,
-              lastVisitedOverall: data.lastVisitedOverall || null,
-            };
-          } catch {
-            return null;
-          }
-        }),
-      );
-
-      setWorldAnalytics((prev) => {
-        const updated = { ...prev };
-        for (const result of results) {
-          if (result) {
-            updated[result.worldId] = {
-              totalAccesses: result.totalAccesses,
-              lastVisitedByUser: result.lastVisitedByUser,
-              lastVisitedOverall: result.lastVisitedOverall,
-            };
-          }
-        }
-        return updated;
-      });
-    } catch {
-      // Ignore errors
-    }
-  }
 
   async function handleSave() {
     setSaving(true);
@@ -530,7 +486,7 @@ export default function UniverseDetailPage() {
                   ) : (
                     <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
                       {worlds.map((world) => {
-                        const visits = worldAnalytics[world.id];
+                        const visits = worldSummaries.summary(world.id);
                         const youAt: string | null = visits?.lastVisitedByUser?.accessedAt ?? null;
                         const latestAt: string | null = visits?.lastVisitedOverall?.accessedAt ?? null;
                         const stars = world._count?.favorites ?? 0;
@@ -548,15 +504,20 @@ export default function UniverseDetailPage() {
                                   items={[
                                     count(world._count.rooms ?? 0, 'room'),
                                     count(world._count.members ?? 0, 'member'),
-                                    visits && count(visits.totalAccesses, 'visit'),
+                                    ...activityStats(visits),
                                   ]}
                                 />
-                                <VisitLine you={youAt} latest={latestAt} youWereLast={!!youAt && youAt === latestAt} />
+                                <VisitLine you={youAt} latest={latestAt} youWereLast={visits?.youWereLast ?? false} />
                               </>
                             }
                           />
                         );
                       })}
+                    </div>
+                  )}
+                  {worlds.length > 0 && worldSummaries.failed.length > 0 && (
+                    <div className="mt-3">
+                      <LoadError label="activity for some worlds" retry={() => worldSummaries.retry()} />
                     </div>
                   )}
                 </section>

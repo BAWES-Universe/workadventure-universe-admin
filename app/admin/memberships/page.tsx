@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import {
@@ -17,6 +17,7 @@ import { Check, Loader2, X } from 'lucide-react';
 import {
   EmptyCard,
   EntityRow,
+  LoadError,
   LoadingRows,
   PageHeader,
   RolePills,
@@ -26,6 +27,8 @@ import {
   VisitLine,
   count,
 } from '../components/ds';
+import { activityStats } from '@/lib/analytics-peak';
+import { useEntitySummaries } from '../hooks/use-entity-summaries';
 
 interface Invitation {
   id: string;
@@ -75,192 +78,151 @@ interface Membership {
   };
 }
 
+type Loaded<T> = { status: 'loading' } | { status: 'error' } | { status: 'ready'; items: T[] };
+
+/** Deduplicate memberships by worldId (in case user is both owner and member). */
+function uniqueByWorld(list: Membership[]): Membership[] {
+  const seenWorlds = new Set<string>();
+  return list.filter((m) => {
+    if (seenWorlds.has(m.world.id)) {
+      return false;
+    }
+    seenWorlds.add(m.world.id);
+    return true;
+  });
+}
+
+async function readList<T>(url: string, key: string): Promise<T[]> {
+  const { authenticatedFetch } = await import('@/lib/client-auth');
+  const response = await authenticatedFetch(url);
+  if (!response.ok) throw new Error(`Failed to fetch ${key}`);
+  const data = await response.json();
+  if (!data || !Array.isArray(data[key])) throw new Error(`Invalid ${key}`);
+  return data[key] as T[];
+}
+
 export default function MyMembershipsPage() {
   const router = useRouter();
-  const [invitations, setInvitations] = useState<Invitation[]>([]);
-  const [memberships, setMemberships] = useState<Membership[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [invitationList, setInvitationList] = useState<Loaded<Invitation>>({ status: 'loading' });
+  const [membershipList, setMembershipList] = useState<Loaded<Membership>>({ status: 'loading' });
+  // What went wrong with the last Accept, Decline or Leave (a failed list load shows its own retry instead).
   const [error, setError] = useState<string | null>(null);
-  const [processingInvitation, setProcessingInvitation] = useState<string | null>(null);
+  // Every invitation with an Accept or Decline on its way: each locks only its own row.
+  const [pendingInvitations, setPendingInvitations] = useState<ReadonlySet<string>>(() => new Set());
   const [leavingWorld, setLeavingWorld] = useState<string | null>(null);
-  const [worldAnalytics, setWorldAnalytics] = useState<Record<string, { totalAccesses: number; lastVisitedByUser: { accessedAt: string } | null; lastVisitedOverall: { accessedAt: string } | null }>>({});
 
-  useEffect(() => {
-    checkAuth();
+  const invitations = invitationList.status === 'ready' ? invitationList.items : [];
+  const memberships = membershipList.status === 'ready' ? membershipList.items : [];
+  const worldIds = useMemo(() => memberships.map((membership) => membership.world.id), [memberships]);
+  const worldSummaries = useEntitySummaries('worlds', worldIds);
+
+  // A reload keeps what is shown until the answer arrives; only a failure replaces it (with a retry).
+  // Answers can overlap (two invitations accepted at once): only the latest request of each list paints.
+  const invitationRequest = useRef(0);
+  const membershipRequest = useRef(0);
+
+  const loadInvitations = useCallback(async () => {
+    const request = ++invitationRequest.current;
+    let next: Loaded<Invitation>;
+    try {
+      next = { status: 'ready', items: await readList<Invitation>('/api/memberships/invitations', 'invitations') };
+    } catch {
+      next = { status: 'error' };
+    }
+    if (request === invitationRequest.current) setInvitationList(next);
   }, []);
 
-  useEffect(() => {
-    if (memberships.length > 0) {
-      fetchWorldAnalytics();
-    }
-  }, [memberships]);
-
-  async function checkAuth() {
+  const loadMemberships = useCallback(async () => {
+    const request = ++membershipRequest.current;
+    let next: Loaded<Membership>;
     try {
-      const { authenticatedFetch } = await import('@/lib/client-auth');
-      const response = await authenticatedFetch('/api/auth/me');
-      if (!response.ok) {
-        router.push('/admin/login');
-        return;
-      }
-      fetchData();
-    } catch (err) {
-      router.push('/admin/login');
+      next = { status: 'ready', items: uniqueByWorld(await readList<Membership>('/api/memberships/my', 'memberships')) };
+    } catch {
+      next = { status: 'error' };
     }
+    if (request === membershipRequest.current) setMembershipList(next);
+  }, []);
+
+  const fetchData = useCallback(async () => {
+    await Promise.all([loadInvitations(), loadMemberships()]);
+  }, [loadInvitations, loadMemberships]);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const { authenticatedFetch } = await import('@/lib/client-auth');
+        const response = await authenticatedFetch('/api/auth/me');
+        if (!response.ok) {
+          router.push('/admin/login');
+          return;
+        }
+        await fetchData();
+      } catch {
+        router.push('/admin/login');
+      }
+    })();
+    // Once per visit: the router is only used to leave for sign-in, and fetchData never changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function setPending(invitationId: string, pending: boolean) {
+    setPendingInvitations((current) => {
+      const next = new Set(current);
+      if (pending) next.add(invitationId);
+      else next.delete(invitationId);
+      return next;
+    });
   }
 
-  async function fetchData() {
+  async function answerInvitation(invitationId: string, answer: 'accept' | 'reject') {
+    if (pendingInvitations.has(invitationId)) return;
+    setPending(invitationId, true);
     try {
-      setLoading(true);
       setError(null);
       const { authenticatedFetch } = await import('@/lib/client-auth');
-
-      const [invitationsRes, membershipsRes] = await Promise.all([
-        authenticatedFetch('/api/memberships/invitations'),
-        authenticatedFetch('/api/memberships/my'),
-      ]);
-
-      if (!invitationsRes.ok) {
-        throw new Error('Failed to fetch invitations');
-      }
-      if (!membershipsRes.ok) {
-        throw new Error('Failed to fetch memberships');
-      }
-
-      const invitationsData = await invitationsRes.json();
-      const membershipsData = await membershipsRes.json();
-
-      setInvitations(invitationsData.invitations || []);
-      
-      // Deduplicate memberships by worldId (in case user is both owner and member)
-      const membershipsList = membershipsData.memberships || [];
-      const seenWorlds = new Set<string>();
-      const uniqueMemberships = membershipsList.filter((m: Membership) => {
-        if (seenWorlds.has(m.world.id)) {
-          return false;
-        }
-        seenWorlds.add(m.world.id);
-        return true;
+      const response = await authenticatedFetch(`/api/memberships/invitations/${invitationId}/${answer}`, {
+        method: 'POST',
       });
-      
-      setMemberships(uniqueMemberships);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load data');
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function handleAcceptInvitation(invitationId: string) {
-    try {
-      setProcessingInvitation(invitationId);
-      const { authenticatedFetch } = await import('@/lib/client-auth');
-      const response = await authenticatedFetch(
-        `/api/memberships/invitations/${invitationId}/accept`,
-        {
-          method: 'POST',
-        }
-      );
 
       if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.error || 'Failed to accept invitation');
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.error || (answer === 'accept' ? 'Failed to accept invitation' : 'Failed to reject invitation'));
       }
 
-      fetchData();
+      // The row stays locked until the lists say what changed.
+      await fetchData();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to accept invitation');
+      setError(err instanceof Error ? err.message : answer === 'accept' ? 'Failed to accept invitation' : 'Failed to reject invitation');
     } finally {
-      setProcessingInvitation(null);
+      setPending(invitationId, false);
     }
   }
 
-  async function handleRejectInvitation(invitationId: string) {
-    try {
-      setProcessingInvitation(invitationId);
-      const { authenticatedFetch } = await import('@/lib/client-auth');
-      const response = await authenticatedFetch(
-        `/api/memberships/invitations/${invitationId}/reject`,
-        {
-          method: 'POST',
-        }
-      );
-
-      if (!response.ok) {
-        const data = await response.json();
-        throw new Error(data.error || 'Failed to reject invitation');
-      }
-
-      fetchData();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to reject invitation');
-    } finally {
-      setProcessingInvitation(null);
-    }
-  }
+  const handleAcceptInvitation = (invitationId: string) => answerInvitation(invitationId, 'accept');
+  const handleRejectInvitation = (invitationId: string) => answerInvitation(invitationId, 'reject');
 
   async function handleLeaveWorld(worldId: string) {
     try {
+      setError(null);
       const { authenticatedFetch } = await import('@/lib/client-auth');
       const response = await authenticatedFetch(`/api/memberships/my/world/${worldId}`, {
         method: 'DELETE',
       });
 
       if (!response.ok) {
-        const data = await response.json();
+        const data = await response.json().catch(() => ({}));
         throw new Error(data.error || 'Failed to leave world');
       }
 
       setLeavingWorld(null);
-      fetchData();
+      await loadMemberships();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to leave world');
       setLeavingWorld(null);
     }
   }
 
-  async function fetchWorldAnalytics() {
-    if (!memberships.length) return;
-
-    try {
-      const { authenticatedFetch } = await import('@/lib/client-auth');
-      const results = await Promise.all(
-        memberships.map(async (membership) => {
-          try {
-            const response = await authenticatedFetch(
-              `/api/admin/analytics/worlds/${membership.world.id}`,
-            );
-            if (!response.ok) return null;
-            const data = await response.json();
-            return {
-              worldId: membership.world.id,
-              totalAccesses: data.totalAccesses || 0,
-              lastVisitedByUser: data.lastVisitedByUser || null,
-              lastVisitedOverall: data.lastVisitedOverall || null,
-            };
-          } catch {
-            return null;
-          }
-        }),
-      );
-
-      setWorldAnalytics((prev) => {
-        const updated = { ...prev };
-        for (const result of results) {
-          if (result) {
-            updated[result.worldId] = {
-              totalAccesses: result.totalAccesses,
-              lastVisitedByUser: result.lastVisitedByUser,
-              lastVisitedOverall: result.lastVisitedOverall,
-            };
-          }
-        }
-        return updated;
-      });
-    } catch {
-      // Ignore errors
-    }
-  }
+  const loading = membershipList.status === 'loading' || invitationList.status === 'loading';
 
   return (
     <div className="grid min-w-0 gap-6">
@@ -276,13 +238,15 @@ export default function MyMembershipsPage() {
         <LoadingRows label="your memberships" rows={3} />
       ) : (
         <>
+          {invitationList.status === 'error' && <LoadError label="your invitations" retry={() => void loadInvitations()} />}
+
           {invitations.length > 0 && (
             <section className="grid min-w-0 gap-2" aria-labelledby="invitations-heading" data-testid="invitations">
               <SectionHeader id="invitations-heading" title="Invitations" count={invitations.length} />
               <div className="grid min-w-0 gap-0.5">
                 {invitations.map((invitation) => {
                   const from = invitation.invitedBy?.name || invitation.invitedBy?.email;
-                  const busy = processingInvitation === invitation.id;
+                  const busy = pendingInvitations.has(invitation.id);
                   return (
                     <EntityRow
                       key={invitation.id}
@@ -331,7 +295,9 @@ export default function MyMembershipsPage() {
             {...(invitations.length > 0 ? { 'aria-labelledby': 'memberships-heading' } : { 'aria-label': 'Your worlds' })}
           >
             {invitations.length > 0 && <SectionHeader id="memberships-heading" title="Worlds" count={memberships.length} />}
-            {memberships.length === 0 ? (
+            {membershipList.status === 'error' ? (
+              <LoadError label="your memberships" retry={() => void loadMemberships()} />
+            ) : memberships.length === 0 ? (
               <EmptyCard
                 kind="world"
                 title="No memberships yet."
@@ -342,7 +308,7 @@ export default function MyMembershipsPage() {
             ) : (
               <div className="grid min-w-0 gap-0.5">
                 {memberships.map((membership) => {
-                  const analytics = worldAnalytics[membership.world.id];
+                  const analytics = worldSummaries.summary(membership.world.id);
                   const you = analytics?.lastVisitedByUser?.accessedAt ?? null;
                   const latest = analytics?.lastVisitedOverall?.accessedAt ?? null;
                   const stars = membership.world._count?.favorites ?? 0;
@@ -358,7 +324,7 @@ export default function MyMembershipsPage() {
                             membership.world.universe.name,
                             count(membership.world._count?.rooms ?? 0, 'room'),
                             count(membership.world._count?.members ?? 0, 'member'),
-                            analytics && count(analytics.totalAccesses, 'visit'),
+                            ...activityStats(analytics),
                           ]}
                         />
                       }
@@ -366,7 +332,7 @@ export default function MyMembershipsPage() {
                         <>
                           <RolePills roles={[...(membership.isUniverseOwner ? ['owner'] : []), ...membership.tags]} />
                           {analytics ? (
-                            <VisitLine you={you} latest={latest} youWereLast={Boolean(you && latest && you === latest)} />
+                            <VisitLine you={you} latest={latest} youWereLast={analytics.youWereLast} />
                           ) : (
                             <StatLine
                               items={[
@@ -394,6 +360,9 @@ export default function MyMembershipsPage() {
                   );
                 })}
               </div>
+            )}
+            {memberships.length > 0 && worldSummaries.failed.length > 0 && (
+              <LoadError label="activity for some worlds" retry={() => worldSummaries.retry()} />
             )}
           </section>
         </>

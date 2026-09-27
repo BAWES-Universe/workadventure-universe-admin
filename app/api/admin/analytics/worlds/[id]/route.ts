@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getViewer, accessDetailFor, detailForRecord, redactAccess, unauthorizedResponse } from '@/lib/access-scope';
 import { prisma } from '@/lib/db';
 import { withWokas } from '@/lib/woka-avatar';
+import { utcHourBuckets } from '@/lib/analytics-peak';
+import { viewerWasLast } from '@/lib/analytics-viewer';
 
 export async function GET(
   request: NextRequest,
@@ -82,6 +84,14 @@ export async function GET(
       }
     }
     
+    // Peak: every access ever made here, bucketed by UTC hour (busiest first); the client shows the busiest
+    // bucket on the viewer's own clock.
+    const allAccesses = await prisma.roomAccess.findMany({
+      where: { worldId: id },
+      select: { accessedAt: true },
+    });
+    const peakTimes = utcHourBuckets(allAccesses.map((access) => access.accessedAt));
+    
     // Get recent activity with pagination
     const recentActivity = await prisma.roomAccess.findMany({
       where: { worldId: id },
@@ -149,8 +159,11 @@ export async function GET(
       totalAccesses,
       uniqueUsers,
       uniqueIPs: uniqueIps.length,
+      peakTimes,
       mostActiveRoom,
       lastVisitedByUser,
+      // Whether the latest visitor is the viewer, decided by identity here, before redaction hides who it was.
+      youWereLast: viewerWasLast(viewer, lastVisitedOverall),
       lastVisitedOverall: lastVisitedOverall ? redactAccess({
         accessedAt: lastVisitedOverall.accessedAt,
         userId: lastVisitedOverall.userId,

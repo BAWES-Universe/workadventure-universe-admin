@@ -1,11 +1,14 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Loader2, Star } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
-import { EmptyCard, EntityRow, LoadError, LoadingRows, PageHeader, StatLine, VisitLine, count } from '../components/ds';
+import { activityStats } from '@/lib/analytics-peak';
+import { EmptyCard, EntityRow, LoadError, LoadingRows, PageHeader, StatLine, VisitLine } from '../components/ds';
+import { useEntitySummaries } from '../hooks/use-entity-summaries';
+import type { EntitySummary } from '../hooks/use-room-analytics';
 
 interface StarredRoom {
   id: string;
@@ -32,69 +35,16 @@ interface StarredRoom {
   };
 }
 
-interface RoomAnalytics {
-  totalAccesses: number;
-  peakHour: number | null;
-  lastVisitedByUser: { accessedAt: string; userId?: string | null; userUuid?: string | null } | null;
-  lastVisitedOverall: { accessedAt: string; userId?: string | null; userUuid?: string | null } | null;
-}
-
-/** "4 PM", "12 AM". */
-function formatHour(hour: number): string {
-  const suffix = hour < 12 ? 'AM' : 'PM';
-  const shown = hour % 12 === 0 ? 12 : hour % 12;
-  return `${shown} ${suffix}`;
-}
-
-function StarredRoomRow({ room, onToggleStar }: { room: StarredRoom; onToggleStar: (roomId: string) => Promise<void> }) {
+function StarredRoomRow({
+  room,
+  analytics,
+  onToggleStar,
+}: {
+  room: StarredRoom;
+  analytics?: EntitySummary;
+  onToggleStar: (roomId: string) => Promise<void>;
+}) {
   const [toggling, setToggling] = useState(false);
-  const [analytics, setAnalytics] = useState<RoomAnalytics | null>(null);
-
-  useEffect(() => {
-    async function fetchAnalytics() {
-      try {
-        const { authenticatedFetch } = await import('@/lib/client-auth');
-        const response = await authenticatedFetch(`/api/admin/analytics/rooms/${room.id}`);
-
-        if (response.ok) {
-          const data = await response.json();
-
-          // Peak hour from recent activity, in local time
-          let peakHour = null;
-          if (data.recentActivity && data.recentActivity.length > 0) {
-            const hourCounts = new Map<number, number>();
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            data.recentActivity.forEach((access: any) => {
-              const hour = new Date(access.accessedAt).getHours();
-              hourCounts.set(hour, (hourCounts.get(hour) || 0) + 1);
-            });
-            const localPeakTimes = Array.from(hourCounts.entries())
-              .map(([hour, total]) => ({ hour, total }))
-              .sort((a, b) => b.total - a.total);
-            if (localPeakTimes.length > 0) {
-              peakHour = localPeakTimes[0].hour;
-            }
-          }
-
-          // Fall back to UTC peakTimes if no recent activity
-          if (peakHour === null && Array.isArray(data.peakTimes) && data.peakTimes.length > 0) {
-            peakHour = data.peakTimes[0].hour;
-          }
-
-          setAnalytics({
-            totalAccesses: data.totalAccesses || 0,
-            peakHour,
-            lastVisitedByUser: data.lastVisitedByUser || null,
-            lastVisitedOverall: data.lastVisitedOverall || null,
-          });
-        }
-      } catch (err) {
-        console.error('[StarredRoomRow] Failed to fetch analytics:', err);
-      }
-    }
-
-    fetchAnalytics();
-  }, [room.id]);
 
   const handleToggle = async (e: React.MouseEvent) => {
     e.preventDefault();
@@ -116,13 +66,8 @@ function StarredRoomRow({ room, onToggleStar }: { room: StarredRoom; onToggleSta
       meta={
         analytics && (
           <>
-            <StatLine
-              items={[
-                count(analytics.totalAccesses, 'visit'),
-                analytics.peakHour !== null && `busiest at ${formatHour(analytics.peakHour)}`,
-              ]}
-            />
-            <VisitLine you={you} latest={latest} youWereLast={Boolean(you && latest && you === latest)} />
+            <StatLine items={activityStats(analytics)} />
+            <VisitLine you={you} latest={latest} youWereLast={analytics.youWereLast} />
           </>
         )
       }
@@ -154,6 +99,9 @@ export default function MyStarsPage() {
   const [starredRooms, setStarredRooms] = useState<StarredRoom[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Each room's activity, asked for once (starring and unstarring keep the list, so nothing is asked again).
+  const roomIds = useMemo(() => starredRooms.map((room) => room.id), [starredRooms]);
+  const summaries = useEntitySummaries('rooms', roomIds);
 
   useEffect(() => {
     checkAuthAndLoad();
@@ -266,9 +214,13 @@ export default function MyStarsPage() {
         ) : (
           <div className="grid min-w-0 gap-0.5">
             {starredRooms.map((room) => (
-              <StarredRoomRow key={room.id} room={room} onToggleStar={handleToggleStar} />
+              <StarredRoomRow key={room.id} room={room} analytics={summaries.summary(room.id)} onToggleStar={handleToggleStar} />
             ))}
           </div>
+        )}
+
+        {starredRooms.length > 0 && summaries.failed.length > 0 && (
+          <LoadError label="activity for some starred rooms" retry={() => summaries.retry()} />
         )}
       </section>
     </div>

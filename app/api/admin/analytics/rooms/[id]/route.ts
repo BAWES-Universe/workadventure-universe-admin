@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getViewer, accessDetailFor, detailForRecord, redactAccess, unauthorizedResponse } from '@/lib/access-scope';
 import { prisma } from '@/lib/db';
 import { withWokas } from '@/lib/woka-avatar';
+import { utcHourBuckets } from '@/lib/analytics-peak';
+import { viewerWasLast } from '@/lib/analytics-viewer';
 
 export async function GET(
   request: NextRequest,
@@ -55,25 +57,13 @@ export async function GET(
       distinct: ['ipAddress'],
     });
     
-    // Get peak times (group by hour in UTC)
-    // Note: Frontend calculates peak hours in user's local timezone from recent activity
-    // This is kept for backwards compatibility/fallback
+    // Peak: every access this room has ever had, bucketed by UTC hour (busiest first). The client shows the
+    // busiest bucket on the viewer's own clock; it never recomputes a peak from one page of recent activity.
     const allAccesses = await prisma.roomAccess.findMany({
       where: { roomId: id },
       select: { accessedAt: true },
     });
-    
-    const hourCounts = new Map<number, number>();
-    allAccesses.forEach(access => {
-      // Calculate in UTC (frontend will use local timezone from recent activity)
-      const hour = access.accessedAt.getUTCHours();
-      hourCounts.set(hour, (hourCounts.get(hour) || 0) + 1);
-    });
-    
-    const peakTimes = Array.from(hourCounts.entries())
-      .map(([hour, count]) => ({ hour, count }))
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 5);
+    const peakTimes = utcHourBuckets(allAccesses.map((access) => access.accessedAt));
     
     // Get recent activity with pagination
     const recentActivity = await prisma.roomAccess.findMany({
@@ -135,6 +125,8 @@ export async function GET(
       uniqueIPs: uniqueIps.length,
       peakTimes,
       lastVisitedByUser,
+      // Whether the latest visitor is the viewer, decided by identity here, before redaction hides who it was.
+      youWereLast: viewerWasLast(viewer, lastVisitedOverall),
       lastVisitedOverall: lastVisitedOverall ? redactAccess({
         accessedAt: lastVisitedOverall.accessedAt,
         userId: lastVisitedOverall.userId,

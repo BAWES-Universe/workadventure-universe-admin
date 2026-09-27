@@ -6,6 +6,7 @@ import { timeAgo } from '@/lib/time-ago';
 import { EmptyCard, EntityRow, LoadError, LoadingRows, PageHeader, StatLine, count } from '../components/ds';
 import { Pager, SearchBox } from '../discover/discover-ui';
 import { WokaAvatar } from '../components/profile-card';
+import { usePagedSearch } from '../hooks/use-paged-search';
 
 interface User {
   id: string;
@@ -24,51 +25,49 @@ interface User {
   };
 }
 
+interface UsersResult {
+  users: User[];
+  totalPages: number;
+  total: number;
+}
+
 export default function UsersPage() {
   const router = useRouter();
-  const [users, setUsers] = useState<User[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [search, setSearch] = useState('');
-  const [page, setPage] = useState(1);
-  const [totalPages, setTotalPages] = useState(1);
-  const [total, setTotal] = useState(0);
+  const [authChecked, setAuthChecked] = useState(false);
 
   useEffect(() => {
-    checkAuth();
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { authenticatedFetch } = await import('@/lib/client-auth');
+        const response = await authenticatedFetch('/api/auth/me');
+        if (!response.ok) {
+          router.push('/admin/login');
+          return;
+        }
+        if (!cancelled) setAuthChecked(true);
+      } catch {
+        router.push('/admin/login');
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // Once per visit: the router is only used to leave for sign-in.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => {
-    if (!loading) {
-      fetchUsers();
-    }
-  }, [page, search]);
-
-  async function checkAuth() {
-    try {
+  // One request per {query, page}; typing searches after a short pause, Enter searches now.
+  const list = usePagedSearch<UsersResult>(
+    async ({ query, page }, signal) => {
+      const searchParam = query ? `&search=${encodeURIComponent(query)}` : '';
       const { authenticatedFetch } = await import('@/lib/client-auth');
-      const response = await authenticatedFetch('/api/auth/me');
-      if (!response.ok) {
-        router.push('/admin/login');
-        return;
-      }
-      fetchUsers();
-    } catch (err) {
-      router.push('/admin/login');
-    }
-  }
-
-  async function fetchUsers() {
-    try {
-      setLoading(true);
-      const searchParam = search ? `&search=${encodeURIComponent(search)}` : '';
-      const { authenticatedFetch } = await import('@/lib/client-auth');
-      const response = await authenticatedFetch(`/api/admin/users?page=${page}&limit=50${searchParam}`);
+      const response = await authenticatedFetch(`/api/admin/users?page=${page}&limit=50${searchParam}`, { signal });
 
       if (!response.ok) {
         if (response.status === 401) {
           router.push('/admin/login');
-          return;
+          return null;
         }
         throw new Error('Failed to fetch users');
       }
@@ -79,43 +78,37 @@ export default function UsersPage() {
       const visibleUsers = rawUsers.filter(
         (user) => user.email !== 'system@workadventure.local',
       );
-
-      setUsers(visibleUsers);
-      setTotalPages(data.pagination?.totalPages || 1);
       const totalFromApi = data.pagination?.total ?? visibleUsers.length;
       const systemUsersOnPage = rawUsers.length - visibleUsers.length;
-      const adjustedTotal = Math.max(0, totalFromApi - systemUsersOnPage);
-      setTotal(adjustedTotal);
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'An error occurred');
-    } finally {
-      setLoading(false);
-    }
-  }
+      return {
+        users: visibleUsers,
+        totalPages: data.pagination?.totalPages || 1,
+        total: Math.max(0, totalFromApi - systemUsersOnPage),
+      };
+    },
+    { enabled: authChecked, debounceMs: 250 },
+  );
 
-  function handleSearch() {
-    setPage(1);
-    fetchUsers();
-  }
+  const users = list.data?.users ?? [];
+  const totalPages = list.data?.totalPages ?? 1;
+  const total = list.data?.total ?? 0;
+  const { loading, page, query: search } = list;
+  const error = list.error;
 
   return (
     <div className="grid min-w-0 gap-6">
       <PageHeader title="People" />
 
       <SearchBox
-        value={search}
-        onChange={setSearch}
-        onSubmit={handleSearch}
-        onClear={() => {
-          setSearch('');
-          setPage(1);
-        }}
+        value={list.input}
+        onChange={list.setInput}
+        onSubmit={list.submit}
+        onClear={list.clear}
         label="Search people"
         placeholder="Search people"
       />
 
-      {error && <LoadError label="people" retry={fetchUsers} />}
+      {error && <LoadError label="people" retry={list.retry} />}
 
       {loading && users.length === 0 ? (
         <LoadingRows label="people" rows={4} />
@@ -142,7 +135,7 @@ export default function UsersPage() {
                   items={[
                     user._count.ownedUniverses ? `Owns ${count(user._count.ownedUniverses, 'universe')}` : null,
                     user._count.worldMemberships ? `Member of ${count(user._count.worldMemberships, 'world')}` : null,
-                    count(user.totalAccesses, 'visit'),
+                    count(user.totalAccesses, 'access', 'accesses'),
                   ]}
                 />
               }
@@ -166,7 +159,7 @@ export default function UsersPage() {
         total={total}
         noun={['person', 'people']}
         loading={loading}
-        onChange={(next) => setPage(Math.max(1, Math.min(totalPages, next)))}
+        onChange={(next) => list.setPage(Math.max(1, Math.min(totalPages, next)))}
       />
     </div>
   );

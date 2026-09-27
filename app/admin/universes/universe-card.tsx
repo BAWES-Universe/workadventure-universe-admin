@@ -1,12 +1,11 @@
 'use client';
 
+import { activityStats } from '@/lib/analytics-peak';
 import { EntityCard, StatLine, StatusPill, VisitLine, count } from '../components/ds';
+import type { EntitySummary } from '../hooks/use-room-analytics';
 
-export interface UniverseAnalytics {
-  totalAccesses: number;
-  lastVisitedByUser: { accessedAt: string; userId?: string | null; userUuid?: string | null } | null;
-  lastVisitedOverall: { accessedAt: string; userId?: string | null; userUuid?: string | null; userName?: string | null; userEmail?: string | null } | null;
-}
+/** A universe's activity (accesses, peak, last visits), from the shared analytics loader. */
+export type UniverseAnalytics = EntitySummary;
 
 export interface UniverseCardProps {
   universe: {
@@ -34,12 +33,12 @@ export interface UniverseCardProps {
   showVisibility?: boolean;
   /** Whether to show who owns it. */
   showOwner?: boolean;
-  /** Visits to the universe. */
+  /** Accesses to the universe. */
   analytics?: UniverseAnalytics;
   className?: string;
 }
 
-/** A universe in a list: its own colour, what's in it, how often it's visited. The whole card is the link. */
+/** A universe in a list: its own colour, what's in it, how often it's accessed. The whole card is the link. */
 export function UniverseCard({
   universe,
   ownedByCurrentUser = false,
@@ -75,11 +74,11 @@ export function UniverseCard({
               count(universe._count?.worlds ?? 0, 'world'),
               count(universe._count?.rooms ?? 0, 'room'),
               count(universe._count?.members ?? 0, 'member'),
-              analytics && count(analytics.totalAccesses, 'visit'),
+              ...activityStats(analytics),
               showOwner && ownerLabel,
             ]}
           />
-          <VisitLine you={youAt} latest={latestAt} youWereLast={!!youAt && youAt === latestAt} />
+          <VisitLine you={youAt} latest={latestAt} youWereLast={analytics?.youWereLast ?? false} />
         </>
       }
     />

@@ -1,12 +1,13 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Plus } from 'lucide-react';
 import { EmptyCard, LoadError, LoadingRows, PageHeader } from '../components/ds';
-import { UniverseCard, UniverseAnalytics } from './universe-card';
+import { UniverseCard } from './universe-card';
+import { useEntitySummaries } from '../hooks/use-entity-summaries';
 
 interface Universe {
   id: string;
@@ -36,7 +37,6 @@ export default function UniversesPage() {
   const [myUniverses, setMyUniverses] = useState<Universe[]>([]);
   const [myLoading, setMyLoading] = useState(true);
   const [myError, setMyError] = useState<string | null>(null);
-  const [analyticsByUniverse, setAnalyticsByUniverse] = useState<Record<string, UniverseAnalytics>>({});
 
   useEffect(() => {
     checkAuthAndLoad();
@@ -84,58 +84,9 @@ export default function UniversesPage() {
     }
   }
 
-  useEffect(() => {
-    async function fetchAnalyticsForUniverses() {
-      const missing = myUniverses.filter((universe) => !analyticsByUniverse[universe.id]);
-      if (missing.length === 0) return;
-
-      try {
-        const { authenticatedFetch } = await import('@/lib/client-auth');
-        const results = await Promise.all(
-          missing.map(async (universe) => {
-            try {
-              const response = await authenticatedFetch(
-                `/api/admin/analytics/universes/${universe.id}`,
-              );
-              if (!response.ok) {
-                return null;
-              }
-              const data = await response.json();
-              
-              return {
-                universeId: universe.id,
-                totalAccesses: data.totalAccesses || 0,
-                lastVisitedByUser: data.lastVisitedByUser || null,
-                lastVisitedOverall: data.lastVisitedOverall || null,
-              };
-            } catch {
-              return null;
-            }
-          }),
-        );
-
-        setAnalyticsByUniverse((prev) => {
-          const updated: Record<string, UniverseAnalytics> = { ...prev };
-          for (const result of results) {
-            if (result) {
-              updated[result.universeId] = {
-                totalAccesses: result.totalAccesses,
-                lastVisitedByUser: result.lastVisitedByUser || null,
-                lastVisitedOverall: result.lastVisitedOverall || null,
-              };
-            }
-          }
-          return updated;
-        });
-      } catch {
-        // Ignore analytics fetch errors; cards will show a placeholder
-      }
-    }
-
-    if (myUniverses.length > 0) {
-      fetchAnalyticsForUniverses();
-    }
-  }, [myUniverses, analyticsByUniverse]);
+  // Each universe's activity, asked for once; failures offer a retry instead of asking forever.
+  const universeIds = useMemo(() => myUniverses.map((universe) => universe.id), [myUniverses]);
+  const summaries = useEntitySummaries('universes', universeIds);
 
   if (checkingAuth) {
     return <LoadingRows label="your universes" />;
@@ -178,10 +129,14 @@ export default function UniversesPage() {
                 universe={universe}
                 ownedByCurrentUser
                 showOwner={false}
-                analytics={analyticsByUniverse[universe.id]}
+                analytics={summaries.summary(universe.id)}
               />
             ))}
           </div>
+        )}
+
+        {myUniverses.length > 0 && summaries.failed.length > 0 && (
+          <LoadError label="activity for some universes" retry={() => summaries.retry()} />
         )}
       </section>
     </div>

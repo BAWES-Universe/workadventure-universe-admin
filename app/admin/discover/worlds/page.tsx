@@ -1,9 +1,13 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { EmptyCard, EntityCard, LoadError, LoadingRows, PageHeader, StatLine, StatusPill, VisitLine, count } from '../../components/ds';
 import { Pager, SearchBox } from '../discover-ui';
+import { activityStats } from '@/lib/analytics-peak';
+import { useEntitySummaries } from '../../hooks/use-entity-summaries';
+import { usePagedSearch } from '../../hooks/use-paged-search';
+import type { EntitySummary } from '../../hooks/use-room-analytics';
 
 interface World {
   id: string;
@@ -25,13 +29,13 @@ interface World {
   };
 }
 
-interface WorldAnalytics {
-  totalAccesses: number;
-  lastVisitedByUser: { accessedAt: string; userId?: string | null; userUuid?: string | null } | null;
-  lastVisitedOverall: { accessedAt: string; userId?: string | null; userUuid?: string | null; userName?: string | null; userEmail?: string | null } | null;
+interface WorldResult {
+  items: World[];
+  totalPages: number;
+  total: number;
 }
 
-function WorldCard({ world, analytics }: { world: World; analytics?: WorldAnalytics }) {
+function WorldCard({ world, analytics }: { world: World; analytics?: EntitySummary }) {
   const you = analytics?.lastVisitedByUser?.accessedAt ?? null;
   const latest = analytics?.lastVisitedOverall?.accessedAt ?? null;
   const stars = world._count?.favorites ?? 0;
@@ -50,10 +54,10 @@ function WorldCard({ world, analytics }: { world: World; analytics?: WorldAnalyt
             items={[
               count(world._count?.rooms ?? 0, 'room'),
               count(world._count?.members ?? 0, 'member'),
-              analytics && count(analytics.totalAccesses, 'visit'),
+              ...activityStats(analytics),
             ]}
           />
-          <VisitLine you={you} latest={latest} youWereLast={Boolean(you && latest && you === latest)} />
+          <VisitLine you={you} latest={latest} youWereLast={analytics?.youWereLast ?? false} />
         </>
       }
     />
@@ -62,60 +66,41 @@ function WorldCard({ world, analytics }: { world: World; analytics?: WorldAnalyt
 
 export default function DiscoverWorldsPage() {
   const router = useRouter();
-
   const [checkingAuth, setCheckingAuth] = useState(true);
-  const [worlds, setWorlds] = useState<World[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [searchInput, setSearchInput] = useState('');
-  const [search, setSearch] = useState('');
-  const [page, setPage] = useState(1);
-  const [totalPages, setTotalPages] = useState(1);
-  const [total, setTotal] = useState(0);
-  const [analyticsByWorld, setAnalyticsByWorld] = useState<Record<string, WorldAnalytics>>({});
 
   useEffect(() => {
-    checkAuthAndLoad();
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { authenticatedFetch } = await import('@/lib/client-auth');
+        const response = await authenticatedFetch('/api/auth/me');
+        if (!response.ok) {
+          router.push('/admin/login');
+          return;
+        }
+        if (!cancelled) setCheckingAuth(false);
+      } catch {
+        router.push('/admin/login');
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // Once per visit: the router is only used to leave for sign-in.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function checkAuthAndLoad() {
-    try {
+  // One request per {query, page}: Enter searches, the × clears, a new search starts on page 1.
+  const list = usePagedSearch<WorldResult>(
+    async ({ query, page }, signal) => {
       const { authenticatedFetch } = await import('@/lib/client-auth');
-      const response = await authenticatedFetch('/api/auth/me');
-      if (!response.ok) {
-        router.push('/admin/login');
-        return;
-      }
-
-      setSearchInput('');
-      setSearch('');
-      setPage(1);
-
-      await fetchWorlds(1, '');
-    } catch {
-      router.push('/admin/login');
-    } finally {
-      setCheckingAuth(false);
-    }
-  }
-
-  async function fetchWorlds(nextPage?: number, nextSearch?: string) {
-    const pageToUse = nextPage ?? page;
-    const searchValue = nextSearch ?? search;
-
-    try {
-      setLoading(true);
-      const { authenticatedFetch } = await import('@/lib/client-auth');
-      const searchParam = searchValue ? `&search=${encodeURIComponent(searchValue)}` : '';
-      const response = await authenticatedFetch(
-        `/api/admin/worlds?scope=discover&page=${pageToUse}&limit=12${searchParam}`,
-      );
+      const searchParam = query ? `&search=${encodeURIComponent(query)}` : '';
+      const response = await authenticatedFetch(`/api/admin/worlds?scope=discover&page=${page}&limit=12${searchParam}`, { signal });
 
       if (!response.ok) {
         if (response.status === 401) {
           router.push('/admin/login');
-          return;
+          return null;
         }
         throw new Error('Failed to fetch worlds to discover');
       }
@@ -126,90 +111,23 @@ export default function DiscoverWorldsPage() {
       const filtered = all.filter(
         (w) => !(w.universe?.slug === 'default' && w.slug === 'default'),
       );
+      return {
+        items: filtered,
+        totalPages: data.pagination?.totalPages || 1,
+        total: (data.pagination?.total || filtered.length) - (all.length - filtered.length),
+      };
+    },
+    { enabled: !checkingAuth },
+  );
 
-      setWorlds(filtered);
-      setTotalPages(data.pagination?.totalPages || 1);
-      setTotal((data.pagination?.total || filtered.length) - (all.length - filtered.length));
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'An error occurred');
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  function handleSearchSubmit() {
-    const trimmed = searchInput.trim();
-    setPage(1);
-    setSearch(trimmed);
-    fetchWorlds(1, trimmed);
-  }
-
-  function handleClear() {
-    setSearchInput('');
-    setSearch('');
-    setPage(1);
-    fetchWorlds(1, '');
-  }
-
-  useEffect(() => {
-    async function fetchAnalyticsForWorlds() {
-      const missing = worlds.filter((world) => !analyticsByWorld[world.id]);
-      if (missing.length === 0) return;
-
-      try {
-        const { authenticatedFetch } = await import('@/lib/client-auth');
-        const results = await Promise.all(
-          missing.map(async (world) => {
-            try {
-              const response = await authenticatedFetch(
-                `/api/admin/analytics/worlds/${world.id}`,
-              );
-              if (!response.ok) {
-                return null;
-              }
-              const data = await response.json();
-              
-              return {
-                worldId: world.id,
-                totalAccesses: data.totalAccesses || 0,
-                lastVisitedByUser: data.lastVisitedByUser || null,
-                lastVisitedOverall: data.lastVisitedOverall || null,
-              };
-            } catch {
-              return null;
-            }
-          }),
-        );
-
-        setAnalyticsByWorld((prev) => {
-          const updated: Record<string, WorldAnalytics> = { ...prev };
-          for (const result of results) {
-            if (result) {
-              updated[result.worldId] = {
-                totalAccesses: result.totalAccesses,
-                lastVisitedByUser: result.lastVisitedByUser || null,
-                lastVisitedOverall: result.lastVisitedOverall || null,
-              };
-            }
-          }
-          return updated;
-        });
-      } catch {
-        // Ignore analytics fetch errors; cards will show a placeholder
-      }
-    }
-
-    if (worlds.length > 0) {
-      fetchAnalyticsForWorlds();
-    }
-  }, [worlds, analyticsByWorld]);
+  const worlds = useMemo(() => list.data?.items ?? [], [list.data]);
+  const totalPages = list.data?.totalPages ?? 1;
+  const total = list.data?.total ?? 0;
+  const { loading, page, query: search, error } = list;
+  const summaries = useEntitySummaries('worlds', useMemo(() => worlds.map((item) => item.id), [worlds]));
 
   function handlePageChange(nextPage: number) {
-    const safePage = Math.max(1, Math.min(totalPages || 1, nextPage));
-    if (safePage === page) return;
-    setPage(safePage);
-    fetchWorlds(safePage);
+    list.setPage(Math.max(1, Math.min(totalPages || 1, nextPage)));
   }
 
   return (
@@ -217,16 +135,16 @@ export default function DiscoverWorldsPage() {
       <PageHeader title="Worlds" />
 
       <SearchBox
-        value={searchInput}
-        onChange={setSearchInput}
-        onSubmit={handleSearchSubmit}
-        onClear={handleClear}
+        value={list.input}
+        onChange={list.setInput}
+        onSubmit={list.submit}
+        onClear={list.clear}
         showClear={Boolean(search)}
         label="Search worlds"
         placeholder="Search worlds"
       />
 
-      {error && <LoadError label="worlds" retry={() => fetchWorlds()} />}
+      {error && <LoadError label="worlds" retry={list.retry} />}
 
       {checkingAuth || (loading && worlds.length === 0) ? (
         <LoadingRows label="worlds" rows={3} />
@@ -243,9 +161,11 @@ export default function DiscoverWorldsPage() {
         <>
           <div className="grid min-w-0 grid-cols-[repeat(auto-fill,minmax(min(100%,230px),1fr))] gap-3">
             {worlds.map((world) => (
-              <WorldCard key={world.id} world={world} analytics={analyticsByWorld[world.id]} />
+              <WorldCard key={world.id} world={world} analytics={summaries.summary(world.id)} />
             ))}
           </div>
+
+          {summaries.failed.length > 0 && <LoadError label="activity for some worlds" retry={() => summaries.retry()} />}
 
           <Pager page={page} totalPages={totalPages} total={total} noun={['world', 'worlds']} loading={loading} onChange={handlePageChange} />
         </>
