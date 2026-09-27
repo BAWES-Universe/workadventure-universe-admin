@@ -34,7 +34,7 @@ li[data-done] .stepText strong { text-decoration: line-through; text-decoration-
 .universeBottom h3 { font-family: var(--font-display); font-size: 21px; font-weight: 700; letter-spacing: -.035em; line-height: 1.25; overflow-wrap: anywhere; }
 .universeBottom p { color: var(--atlas-muted); margin-top: 7px; font-size: 11px; line-height: 1.7; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
 .cardArrow { flex-shrink: 0; color: var(--atlas-muted); transition: transform 200ms, color 200ms; }
-.universe:hover .cardArrow { color: hsl(var(--primary)); transform: translate(2px, -2px); }
+.universe:hover .cardArrow { color: hsl(var(--foreground)); transform: translate(2px, -2px); }
 .celestial { position: absolute; width: 204px; height: 154px; top: 21px; right: -16px; opacity: .8; pointer-events: none; transform: rotate(-28deg); transition: transform 600ms; }
 .planet { position: absolute; width: 77px; height: 77px; border-radius: 50%; top: 35px; left: 63px; background: radial-gradient(circle at 27% 25%, color-mix(in srgb, var(--planet-color) 35%, white), var(--planet-color) 20%, color-mix(in srgb, var(--planet-color) 40%, #1a1030) 56%, #15121b 85%); box-shadow: -4px -3px 22px color-mix(in srgb, var(--planet-color) 15%, transparent), inset 2px 1px 5px #ffffff33; }
 .orbitRing { position: absolute; width: 177px; height: 62px; border: 1px solid color-mix(in srgb, var(--planet-color) 35%, transparent); border-radius: 50%; top: 43px; left: 11px; transform: rotate(-14deg); }

@@ -1,5 +1,5 @@
-.location, .recentSection { --signal-accent: #6d4bff; --signal-line: hsl(var(--border)); --signal-wash: rgb(134 41 252 / .05); min-width: 0; container-type: inline-size; }
-:global(.dark) .location, :global(.dark) .recentSection { --signal-accent: #b69cff; --signal-line: hsl(var(--border)); --signal-wash: rgb(134 41 252 / .06); }
+.location, .recentSection { --signal-accent: #b45309; --signal-line: hsl(var(--border)); --signal-wash: rgb(245 158 11 / .06); min-width: 0; container-type: inline-size; }
+:global(.dark) .location, :global(.dark) .recentSection { --signal-accent: var(--kind-room-solid); --signal-line: hsl(var(--border)); --signal-wash: rgb(245 158 11 / .07); }
 .card { position: relative; display: flex; flex-direction: column; min-width: 0; overflow: hidden; padding: 15px 17px 12px; border: 1px solid var(--signal-line); border-radius: 3px 18px 3px 18px; background: hsl(var(--card)); transition: border-color 180ms ease; }
 .card:focus-within, .card:hover { border-color: color-mix(in srgb, var(--signal-accent) 44%, transparent); }
 .card a:focus-visible, .card button:focus-visible, .card summary:focus-visible, .notice a:focus-visible, .notice button:focus-visible { outline: 2px solid var(--signal-accent); outline-offset: 3px; border-radius: 3px; }
@@ -7,7 +7,7 @@
 .current::before { content: ''; pointer-events: none; position: absolute; width: 68%; height: 160px; right: 0; top: 0; background-image: radial-gradient(var(--signal-accent) .65px, transparent .8px); background-size: 26px 26px; opacity: .18; mask-image: linear-gradient(100deg, transparent, #000); }
 .cardTop { position: relative; z-index: 1; display: flex; align-items: center; gap: 8px; min-height: 16px; }
 .eyebrow { display: inline-flex; align-items: center; gap: 7px; color: var(--signal-accent); font-size: 10px; font-weight: 650; letter-spacing: .13em; text-transform: uppercase; }
-.presence { width: 5px; height: 5px; border-radius: 50%; background: var(--signal-accent); box-shadow: 0 0 0 4px var(--signal-wash); }
+.presence { width: 6px; height: 6px; border-radius: 50%; background: var(--status-live); box-shadow: 0 0 0 4px rgb(34 197 94 / .18); }
 .stars { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; color: var(--signal-accent); font-size: 11px; font-variant-numeric: tabular-nums; }
 .ordinal { color: hsl(var(--muted-foreground)); font-family: var(--font-mono); font-size: 10px; opacity: .65; }
 .place { position: relative; padding-top: 9px; }
