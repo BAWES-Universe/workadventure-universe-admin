@@ -27,7 +27,7 @@
 .public { display: grid; gap: 14px; }
 .bio { font-size: 14px; line-height: 1.7; white-space: pre-line; overflow-wrap: anywhere; }
 .links { display: flex; flex-wrap: wrap; gap: 8px; }
-.links a { display: inline-flex; align-items: center; gap: 7px; min-height: 40px; padding: 0 14px; border: 1px solid hsl(var(--foreground) / .15); border-radius: 999px; font-size: 13px; font-weight: 600; transition: border-color 160ms, background 160ms; }
+.links a { display: inline-flex; align-items: center; gap: 7px; min-height: 44px; padding: 0 14px; border: 1px solid hsl(var(--foreground) / .15); border-radius: 999px; font-size: 13px; font-weight: 600; transition: border-color 160ms, background 160ms; }
 .links a:hover { border-color: hsl(var(--foreground) / .3); background: hsl(var(--foreground) / .05); }
 .links a svg { color: hsl(var(--muted-foreground)); }
 .explain { font-size: 12px; line-height: 1.6; color: hsl(var(--muted-foreground)); padding-top: 12px; border-top: 1px solid hsl(var(--border)); }

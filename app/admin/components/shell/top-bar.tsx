@@ -13,7 +13,7 @@ import { ShortcutHint } from './shortcut-hint';
  * leaves that corner free.
  */
 export function TopBar({ isSuperAdmin = false }: { isSuperAdmin?: boolean }) {
-  const { route, goBack, inFrame, view, menuOpen, setMenuOpen } = useOrbitFrame();
+  const { route, goBack, backLabel, inFrame, view, menuOpen, setMenuOpen } = useOrbitFrame();
   const isRoot = route.parent === null;
   const full = view === 'full';
 
@@ -30,7 +30,7 @@ export function TopBar({ isSuperAdmin = false }: { isSuperAdmin?: boolean }) {
             aria-expanded={menuOpen}
             aria-controls="orbit-menu"
             aria-keyshortcuts="Control+K Meta+K"
-            className="orbit-press relative inline-flex h-10 shrink-0 items-center gap-2 rounded-full border border-foreground/15 pl-3 pr-4 text-sm font-semibold transition-colors hover:border-foreground/30 hover:bg-foreground/5 lg:hidden"
+            className="orbit-press relative inline-flex h-11 shrink-0 items-center gap-2 rounded-full border border-foreground/15 pl-3 pr-4 text-sm font-semibold transition-colors hover:border-foreground/30 hover:bg-foreground/5 lg:hidden"
             data-testid="orbit-menu-button"
           >
             <Menu className="h-[18px] w-[18px]" aria-hidden="true" />
@@ -41,11 +41,11 @@ export function TopBar({ isSuperAdmin = false }: { isSuperAdmin?: boolean }) {
           <button
             type="button"
             onClick={goBack}
-            className="orbit-press inline-flex h-10 min-w-0 max-w-full shrink items-center gap-0.5 rounded-full border border-foreground/15 pl-1.5 pr-4 text-foreground transition-colors hover:border-foreground/30 hover:bg-foreground/5"
+            className="orbit-press inline-flex h-11 min-w-0 max-w-full shrink items-center gap-0.5 rounded-full border border-foreground/15 pl-1.5 pr-4 text-foreground transition-colors hover:border-foreground/30 hover:bg-foreground/5"
             data-testid="orbit-back"
           >
             <ChevronLeft className="h-5 w-5 shrink-0" strokeWidth={2.75} aria-hidden="true" />
-            <span className="truncate text-[15px] font-bold">{route.parentTitle ?? 'Back'}</span>
+            <span className="truncate text-[15px] font-bold">{backLabel ?? 'Back'}</span>
           </button>
         )}
 

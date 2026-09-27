@@ -328,6 +328,9 @@ export function ProfileCard({
 /** Someone's Woka, standing and facing you: each layer's front frame drawn over the last, pixel-sharp. */
 export function WokaAvatar({ layers, name, size = 76 }: { layers: string[]; name: string; size?: number }) {
   const initial = name.trim().charAt(0).toUpperCase() || '?';
+  // A layer that can't load would leave a partial Woka: then the whole avatar falls back instead.
+  const failed = useWokaLoadFailure(layers);
+  const show = layers.length > 0 && !failed;
   return (
     <span
       className={styles.avatar}
@@ -335,12 +338,14 @@ export function WokaAvatar({ layers, name, size = 76 }: { layers: string[]; name
       data-size={size < 48 ? 'sm' : undefined}
       data-testid="woka-avatar"
     >
-      {layers.length > 0 ? (
+      {show ? (
         <span className={styles.woka} aria-hidden="true">
           {layers.map((url) => (
             <span key={url} className={styles.wokaLayer} style={{ backgroundImage: `url("${url.replace(/"/g, '%22')}")` }} />
           ))}
         </span>
+      ) : layers.length > 0 ? (
+        <KindIcon kind="people" />
       ) : (
         <span className={styles.initial} aria-hidden="true">
           {initial}
@@ -348,6 +353,27 @@ export function WokaAvatar({ layers, name, size = 76 }: { layers: string[]; name
       )}
     </span>
   );
+}
+
+/** Whether any of these images fails to load (checked once per set of layers). */
+function useWokaLoadFailure(layers: string[]): boolean {
+  const key = layers.join('\n');
+  const [failedKey, setFailedKey] = useState<string | null>(null);
+  useEffect(() => {
+    if (!key || typeof Image === 'undefined') return;
+    let cancelled = false;
+    for (const url of key.split('\n')) {
+      const image = new Image();
+      image.onerror = () => {
+        if (!cancelled) setFailedKey(key);
+      };
+      image.src = url;
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [key]);
+  return failedKey === key;
 }
 
 /** Someone's links as pills. Only web addresses are ever shown. */

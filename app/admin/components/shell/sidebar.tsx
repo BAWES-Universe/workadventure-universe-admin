@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useRef } from 'react';
-import { Search } from 'lucide-react';
+import { Menu } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { DESTINATIONS, getNavItems, getNavSections, isNavItemActive, type NavUser } from '../../config/navigation';
 import { useOrbitFrame } from '../../orbit-frame-context';
@@ -42,16 +42,16 @@ export function Sidebar({ user }: { user: NavUser }) {
         </Link>
       </div>
       <div className="px-3 pb-3">
-        {/* The Orbit Menu's search, and where its shortcut is learnt on the wide layout. */}
+        {/* The Orbit Menu on the wide layout, and where its shortcut is learnt. */}
         <button
           type="button"
           onClick={() => setMenuOpen(true)}
           aria-keyshortcuts="Control+K Meta+K"
-          className="orbit-press flex h-10 w-full items-center gap-2 rounded-full border border-foreground/15 pl-3 pr-2 text-sm text-muted-foreground transition-colors hover:border-foreground/30 hover:text-foreground"
+          className="orbit-press flex h-11 w-full items-center gap-2 rounded-full border border-foreground/15 pl-3 pr-2 text-sm text-muted-foreground transition-colors hover:border-foreground/30 hover:text-foreground"
           data-testid="sidebar-find"
         >
-          <Search className="h-4 w-4 shrink-0" aria-hidden="true" />
-          <span className="flex-1 text-left">Find anything</span>
+          <Menu className="h-4 w-4 shrink-0" aria-hidden="true" />
+          <span className="flex-1 text-left">Orbit Menu</span>
           <ShortcutHint />
         </button>
       </div>

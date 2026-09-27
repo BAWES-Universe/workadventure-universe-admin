@@ -44,13 +44,13 @@ export const NAV_ITEMS: NavItem[] = [
   { href: '/admin', label: 'Orbit', icon: Orbit },
 
   // Room Templates - available to all users
-  { href: '/admin/templates', label: 'Room Templates', icon: FolderOpen },
+  { href: '/admin/templates', label: 'Room templates', icon: FolderOpen },
 
   // Personalize section
-  { href: '/admin/universes', label: 'My Universes', icon: Sparkles, group: 'my' },
-  { href: '/admin/stars', label: 'My Stars', icon: Star, group: 'my' },
-  { href: '/admin/memberships', label: 'My Memberships', icon: Mail, requiresAuth: true, group: 'my' },
-  { href: '/admin/profile', label: 'My Profile', icon: UserCircle, requiresAuth: true, group: 'my' },
+  { href: '/admin/universes', label: 'Your universes', icon: Sparkles, group: 'my' },
+  { href: '/admin/stars', label: 'Stars', icon: Star, group: 'my' },
+  { href: '/admin/memberships', label: 'Memberships', icon: Mail, requiresAuth: true, group: 'my' },
+  { href: '/admin/profile', label: 'Profile', icon: UserCircle, requiresAuth: true, group: 'my' },
 
   // Discover section
   { href: '/admin/discover/universes', label: 'Universes', icon: Sparkles, group: 'discover' },
@@ -59,13 +59,13 @@ export const NAV_ITEMS: NavItem[] = [
   { href: '/admin/users', label: 'People', icon: Users, group: 'discover' },
 
   // Admin section (super admin only)
-  { href: '/admin/style', label: 'Orbit Style', icon: Palette, requiresSuperAdmin: true, group: 'admin' },
-  { href: '/admin/avatars', label: 'Avatar Sets', icon: Layers, requiresSuperAdmin: true, group: 'admin' },
+  { href: '/admin/style', label: 'Orbit style', icon: Palette, requiresSuperAdmin: true, group: 'admin' },
+  { href: '/admin/avatars', label: 'Avatar sets', icon: Layers, requiresSuperAdmin: true, group: 'admin' },
   { href: '/admin/bots', label: 'Bots', icon: Bot, requiresSuperAdmin: true, group: 'admin' },
-  { href: '/admin/ai-providers', label: 'AI Providers', icon: Bot, requiresSuperAdmin: true, group: 'admin' },
-  { href: '/admin/ai-providers/usage', label: 'AI Usage', icon: BarChart3, requiresSuperAdmin: true, group: 'admin' },
-  { href: '/admin/bots/database', label: 'Bot Database', icon: Database, requiresSuperAdmin: true, group: 'admin' },
-  { href: '/admin/bots/mcp-servers', label: 'MCP Servers', icon: Server, requiresSuperAdmin: true, group: 'admin' },
+  { href: '/admin/ai-providers', label: 'AI providers', icon: Bot, requiresSuperAdmin: true, group: 'admin' },
+  { href: '/admin/ai-providers/usage', label: 'AI usage', icon: BarChart3, requiresSuperAdmin: true, group: 'admin' },
+  { href: '/admin/bots/database', label: 'Bot database', icon: Database, requiresSuperAdmin: true, group: 'admin' },
+  { href: '/admin/bots/mcp-servers', label: 'MCP servers', icon: Server, requiresSuperAdmin: true, group: 'admin' },
 ];
 
 export const NAV_GROUP_LABELS: Record<NavGroup, string> = {

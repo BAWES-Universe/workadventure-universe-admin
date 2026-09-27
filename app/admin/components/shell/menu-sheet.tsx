@@ -27,6 +27,14 @@ export function MenuSheet({ user }: { user: NavUser }) {
     }))
     .filter((section) => section.items.length > 0);
 
+  // Choosing a place closes the menu at once, even the page already open (the address doesn't change then).
+  // A click that opens a new tab leaves it open.
+  const choose = (event: React.MouseEvent) => {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return;
+    setMenuOpen(false);
+    setQuery('');
+  };
+
   // Going somewhere closes the menu.
   useEffect(() => {
     setMenuOpen(false);
@@ -54,18 +62,18 @@ export function MenuSheet({ user }: { user: NavUser }) {
               <X size={20} aria-hidden="true" />
             </DialogPrimitive.Close>
           </div>
-          <DialogPrimitive.Description className="orbit-menu-description">Every place and every tool, one tap away.</DialogPrimitive.Description>
+          <DialogPrimitive.Description className="orbit-menu-description">Every section and tool.</DialogPrimitive.Description>
           <label className="orbit-menu-search">
             <Search size={18} aria-hidden="true" />
-            <span className="sr-only">Find a place or a tool</span>
-            <input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Find a place or a tool…" />
+            <span className="sr-only">Find a section or tool</span>
+            <input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Find a section or tool" />
           </label>
           {!normalized && (
             <nav className="orbit-menu-roots" aria-label="Main destinations">
               {DESTINATIONS.map((item) => {
                 const Icon = item.icon;
                 return (
-                  <Link key={item.href} href={item.href} aria-current={item.href === root ? 'page' : undefined}>
+                  <Link key={item.href} href={item.href} onClick={choose} aria-current={item.href === root ? 'page' : undefined}>
                     <Icon size={18} aria-hidden="true" />
                     {item.label}
                   </Link>
@@ -76,7 +84,7 @@ export function MenuSheet({ user }: { user: NavUser }) {
           <div className="orbit-menu-sections">
             {sections.length === 0 && (
               <p className="orbit-no-results" role="status">
-                Nothing matches “{query}”. Try the name of a tool or a place.
+                Nothing matches “{query}”. Try the name of a section or tool.
               </p>
             )}
             {sections.map((section) => (
@@ -87,7 +95,7 @@ export function MenuSheet({ user }: { user: NavUser }) {
                     const Icon = item.icon;
                     return (
                       <li key={item.href}>
-                        <Link href={item.href} aria-current={isNavItemActive(item.href, pathname, items) ? 'page' : undefined}>
+                        <Link href={item.href} onClick={choose} aria-current={isNavItemActive(item.href, pathname, items) ? 'page' : undefined}>
                           <span className="orbit-tool-icon">
                             <Icon size={18} aria-hidden="true" />
                           </span>

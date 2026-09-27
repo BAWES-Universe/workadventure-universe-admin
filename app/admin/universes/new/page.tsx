@@ -1,18 +1,20 @@
 'use client';
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef, Suspense } from 'react';
 import { DraftNotice } from '../../components/draft-notice';
 import { useDraft } from '../../hooks/use-draft';
-import { useRouter } from 'next/navigation';
+import { PageHeader } from '../../components/ds';
+import { FORM_DRAFT_VERSION, addressFromName, upgradeFormDraft } from '@/lib/drafts';
+import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Checkbox } from '@/components/ui/checkbox';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { ChevronRight, AlertCircle, Loader2 } from 'lucide-react';
+import { AlertCircle, Loader2 } from 'lucide-react';
 
 interface User {
   id: string;
@@ -20,15 +22,31 @@ interface User {
   email: string | null;
 }
 
-const EMPTY_UNIVERSE_DRAFT = { slug: '', name: '', description: '', isPublic: true, featured: false, thumbnailUrl: '' };
+// What was typed survives leaving the page (the owner is always the signed-in person, so it isn't kept).
+// Version 2 also remembers whether the address was edited by hand; older drafts are upgraded on restore.
+const EMPTY_UNIVERSE_DRAFT = {
+  v: FORM_DRAFT_VERSION,
+  slug: '',
+  name: '',
+  description: '',
+  isPublic: true,
+  featured: false,
+  thumbnailUrl: '',
+  addressEdited: false,
+};
+const upgradeUniverseDraft = (saved: unknown) => upgradeFormDraft(saved, EMPTY_UNIVERSE_DRAFT);
 
-export default function NewUniversePage() {
+function NewUniversePageContent() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  // Came from "create a world" with no universe yet: go on to the world once this universe exists.
+  const nextWorld = searchParams.get('next') === 'world';
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [user, setUser] = useState<User | null>(null);
-  const [slugManuallyEdited, setSlugManuallyEdited] = useState(false);
-  
+  const [, setUser] = useState<User | null>(null);
+  const [addressOpen, setAddressOpen] = useState(false);
+  const slugInput = useRef<HTMLInputElement>(null);
+
   const [formData, setFormData] = useState({
     slug: '',
     name: '',
@@ -37,41 +55,40 @@ export default function NewUniversePage() {
     isPublic: true,
     featured: false,
     thumbnailUrl: '',
+    addressEdited: false,
   });
 
-  // What was typed survives leaving the page (the owner is always the signed-in person, so it isn't kept).
   const draftFields = useMemo(
     () => ({
+      v: FORM_DRAFT_VERSION,
       slug: formData.slug,
       name: formData.name,
       description: formData.description,
       isPublic: formData.isPublic,
       featured: formData.featured,
       thumbnailUrl: formData.thumbnailUrl,
+      addressEdited: formData.addressEdited,
     }),
-    [formData.slug, formData.name, formData.description, formData.isPublic, formData.featured, formData.thumbnailUrl],
+    [formData.slug, formData.name, formData.description, formData.isPublic, formData.featured, formData.thumbnailUrl, formData.addressEdited],
   );
   const { discard: discardDraft, restored: draftRestored, revert: revertDraft } = useDraft(
     'universe.new',
     draftFields,
-    (draft) => setFormData((prev) => ({ ...prev, ...draft })),
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    ({ v, ...draft }) => setFormData((prev) => ({ ...prev, ...draft })),
     EMPTY_UNIVERSE_DRAFT,
+    true,
+    upgradeUniverseDraft,
   );
-
-  // Helper function to generate slug from name
-  function generateSlug(name: string): string {
-    return name
-      .toLowerCase()
-      .trim()
-      .replace(/[^a-z0-9\s-]/g, '') // Remove special characters
-      .replace(/\s+/g, '-') // Replace spaces with hyphens
-      .replace(/-+/g, '-') // Replace multiple hyphens with single hyphen
-      .replace(/^-|-$/g, ''); // Remove leading/trailing hyphens
-  }
 
   useEffect(() => {
     checkAuth();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (addressOpen) slugInput.current?.focus();
+  }, [addressOpen]);
 
   async function checkAuth() {
     try {
@@ -84,7 +101,7 @@ export default function NewUniversePage() {
       const data = await response.json();
       setUser(data.user);
       setFormData(prev => ({ ...prev, ownerId: data.user.id }));
-    } catch (err) {
+    } catch {
       router.push('/admin/login');
     }
   }
@@ -101,12 +118,15 @@ export default function NewUniversePage() {
     }
 
     try {
+      // The address flag is the form's own; the API gets the same fields as before.
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { addressEdited, ...fields } = formData;
       const payload = {
-        ...formData,
+        ...fields,
         description: formData.description || null,
         thumbnailUrl: formData.thumbnailUrl || null,
       };
-      
+
       const { authenticatedFetch } = await import('@/lib/client-auth');
       const response = await authenticatedFetch('/api/admin/universes', {
         method: 'POST',
@@ -124,7 +144,9 @@ export default function NewUniversePage() {
 
       const universe = await response.json();
       discardDraft();
-      router.push(`/admin/universes/${universe.id}`);
+      router.push(
+        nextWorld ? `/admin/worlds/new?universeId=${encodeURIComponent(universe.id)}` : `/admin/universes/${universe.id}`,
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create universe');
     } finally {
@@ -132,26 +154,21 @@ export default function NewUniversePage() {
     }
   }
 
-  return (
-    <div className="space-y-8">
-      <nav className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground">
-        <Link href="/admin" className="hover:text-foreground">
-          Orbit
-        </Link>
-        <ChevronRight className="h-4 w-4" />
-        <Link href="/admin/universes" className="hover:text-foreground">
-          Universes
-        </Link>
-        <ChevronRight className="h-4 w-4" />
-        <span className="text-foreground">New Universe</span>
-      </nav>
+  const showAddressInput = addressOpen || formData.addressEdited || (formData.name.trim() !== '' && formData.slug === '');
 
-      <div className="space-y-1">
-        <h1 className="text-4xl font-bold tracking-tight">Create Universe</h1>
-        <p className="text-muted-foreground text-lg">
-          Create a new universe. Universes contain worlds, which contain rooms.
-        </p>
-      </div>
+  return (
+    <div className="space-y-6">
+      <PageHeader
+        kind="universe"
+        title="New universe"
+        context={
+          <span>
+            {nextWorld
+              ? 'Your own space. Once it exists, you’ll add its first world.'
+              : 'Your own space: its worlds and rooms live inside it.'}
+          </span>
+        }
+      />
 
       {error && (
         <Alert variant="destructive">
@@ -162,13 +179,7 @@ export default function NewUniversePage() {
       )}
 
       <Card>
-        <CardHeader>
-          <CardTitle>Universe Details</CardTitle>
-          <CardDescription>
-            Fill in the information below to create a new universe.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
+        <CardContent className="p-4 sm:p-6">
           <form onSubmit={handleSubmit} className="space-y-6">
             {draftRestored && <DraftNotice onDiscard={revertDraft} />}
             <div className="space-y-2">
@@ -178,39 +189,52 @@ export default function NewUniversePage() {
               <Input
                 id="name"
                 required
+                className="h-11"
                 value={formData.name}
                 onChange={(e) => {
                   const newName = e.target.value;
-                  setFormData((prev) => {
-                    const newData = { ...prev, name: newName };
-                    // Auto-generate slug from name if slug hasn't been manually edited
-                    if (!slugManuallyEdited) {
-                      newData.slug = generateSlug(newName);
-                    }
-                    return newData;
-                  });
+                  setFormData((prev) => ({
+                    ...prev,
+                    name: newName,
+                    // The address follows the name until it's edited by hand.
+                    slug: prev.addressEdited ? prev.slug : addressFromName(newName),
+                  }));
                 }}
                 placeholder="My Universe"
               />
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="slug">
-                Slug <span className="text-destructive">*</span>
+              <Label htmlFor={showAddressInput ? 'slug' : undefined}>
+                Address <span className="text-destructive">*</span>
               </Label>
-              <p className="text-sm text-muted-foreground">
-                URL identifier (e.g., "my-universe"). Must be unique and URL-safe. Auto-generated from name, but can be edited.
+              <p className="text-sm text-muted-foreground [overflow-wrap:anywhere]">
+                Its rooms will open at{' '}
+                <code className="rounded bg-muted px-1 text-foreground">
+                  /@/{formData.slug || 'my-universe'}/…
+                </code>
               </p>
-              <Input
-                id="slug"
-                required
-                value={formData.slug}
-                onChange={(e) => {
-                  setSlugManuallyEdited(true);
-                  setFormData({ ...formData, slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') });
-                }}
-                placeholder="my-universe"
-              />
+              {showAddressInput ? (
+                <>
+                  <Input
+                    id="slug"
+                    ref={slugInput}
+                    required
+                    className="h-11"
+                    value={formData.slug}
+                    onChange={(e) => {
+                      const slug = e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '');
+                      setFormData((prev) => ({ ...prev, slug, addressEdited: true }));
+                    }}
+                    placeholder="my-universe"
+                  />
+                  <p className="text-xs text-muted-foreground">Lowercase letters, numbers and dashes. Must be unique.</p>
+                </>
+              ) : (
+                <Button type="button" variant="outline" className="h-11" onClick={() => setAddressOpen(true)}>
+                  Change address
+                </Button>
+              )}
             </div>
 
             <div className="space-y-2">
@@ -224,41 +248,41 @@ export default function NewUniversePage() {
               />
             </div>
 
-            <div className="flex flex-col sm:flex-row gap-6">
-              <div className="flex items-center space-x-2">
+            <div className="flex flex-wrap gap-x-6 gap-y-1">
+              <div className="flex min-h-11 items-center space-x-2">
                 <Checkbox
                   id="isPublic"
                   checked={formData.isPublic}
                   onCheckedChange={(checked) => setFormData({ ...formData, isPublic: checked === true })}
                 />
-                <Label htmlFor="isPublic" className="font-normal cursor-pointer">
+                <Label htmlFor="isPublic" className="flex min-h-11 cursor-pointer items-center font-normal">
                   Public
                 </Label>
               </div>
-              <div className="flex items-center space-x-2">
+              <div className="flex min-h-11 items-center space-x-2">
                 <Checkbox
                   id="featured"
                   checked={formData.featured}
                   onCheckedChange={(checked) => setFormData({ ...formData, featured: checked === true })}
                 />
-                <Label htmlFor="featured" className="font-normal cursor-pointer">
+                <Label htmlFor="featured" className="flex min-h-11 cursor-pointer items-center font-normal">
                   Featured
                 </Label>
               </div>
             </div>
 
-            <div className="flex flex-col-reverse sm:flex-row justify-end gap-3 pt-4">
-              <Button type="button" variant="secondary" asChild>
+            <div className="flex flex-col-reverse gap-3 pt-2 sm:flex-row sm:justify-end">
+              <Button type="button" variant="outline" className="h-11" asChild>
                 <Link href="/admin/universes">Cancel</Link>
               </Button>
-              <Button type="submit" disabled={loading}>
+              <Button type="submit" className="h-11" disabled={loading}>
                 {loading ? (
                   <>
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                     Creating...
                   </>
                 ) : (
-                  'Create Universe'
+                  'Create universe'
                 )}
               </Button>
             </div>
@@ -266,5 +290,19 @@ export default function NewUniversePage() {
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+export default function NewUniversePage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex items-center justify-center py-12">
+          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+        </div>
+      }
+    >
+      <NewUniversePageContent />
+    </Suspense>
   );
 }

@@ -55,3 +55,47 @@ export function clearDraft(key: string): void {
 export function draftDiffers<T extends object>(value: T, empty: T): boolean {
   return JSON.stringify(value) !== JSON.stringify(empty);
 }
+
+/** The readable address a name gives a new universe, world or room: "Head Office" → "head-office". */
+export function addressFromName(name: string): string {
+  return name
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9\s-]/g, '')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+}
+
+/**
+ * The shape creation drafts are saved in now. Version 1 (no `v`) kept only the typed text; version 2 also keeps
+ * whether the address was edited by hand and, for a room, the map choice.
+ */
+export const FORM_DRAFT_VERSION = 2;
+
+/**
+ * Brings a saved creation draft, of any version, into the form's current shape. Only fields the form still has, with
+ * the type it expects, are taken (a field that is `null` when empty also takes a string); the rest start blank. A
+ * draft from before the address flag was kept counts as edited by hand when its address isn't the one its name gives,
+ * so restoring it never overwrites a custom address. Returns null for anything that isn't a draft.
+ */
+export function upgradeFormDraft<T extends { v: number; name: string; slug: string; addressEdited: boolean }>(
+  raw: unknown,
+  empty: T,
+): T | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const saved = raw as Record<string, unknown>;
+  const draft: Record<string, unknown> = { ...empty };
+  for (const field of Object.keys(empty)) {
+    if (!(field in saved)) continue;
+    const blank = (empty as Record<string, unknown>)[field];
+    const value = saved[field];
+    if (blank === null ? value === null || typeof value === 'string' : typeof value === typeof blank) draft[field] = value;
+  }
+  if (typeof saved.addressEdited !== 'boolean') {
+    const slug = draft.slug as string;
+    draft.addressEdited = slug !== '' && slug !== addressFromName(draft.name as string);
+  }
+  draft.v = FORM_DRAFT_VERSION;
+  return draft as T;
+}

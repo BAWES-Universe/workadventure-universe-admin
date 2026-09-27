@@ -16,6 +16,8 @@ export interface OrbitFrameState {
   route: ResolvedRoute;
   /** Back: the previous Orbit page when there is one, else the page's parent. */
   goBack: () => void;
+  /** Where Back goes, by name: the page behind, or the page's parent. */
+  backLabel: string | null;
   /** Close Orbit (through the game's own API). */
   closeOrbit: () => void;
   menuOpen: boolean;

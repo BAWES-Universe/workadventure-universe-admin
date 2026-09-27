@@ -27,15 +27,15 @@ export const ROUTES: RouteDefinition[] = [
   { pattern: '/admin/you', title: 'You', parent: null },
 
   // Space: mine
-  { pattern: '/admin/universes', title: 'My Universes', parent: '/admin/you' },
+  { pattern: '/admin/universes', title: 'Your universes', parent: '/admin/you' },
   { pattern: '/admin/universes/new', title: 'New universe', parent: '/admin/universes' },
   { pattern: '/admin/universes/[id]', title: 'Universe', parent: '/admin/universes' },
   { pattern: '/admin/worlds/new', title: 'New world', parent: '/admin/universes' },
   { pattern: '/admin/worlds/[id]', title: 'World', parent: '/admin/space' },
   { pattern: '/admin/rooms/new', title: 'New room', parent: '/admin/space' },
   { pattern: '/admin/rooms/[id]', title: 'Room', parent: '/admin/space' },
-  { pattern: '/admin/stars', title: 'My Stars', parent: '/admin/you' },
-  { pattern: '/admin/memberships', title: 'My Memberships', parent: '/admin/you' },
+  { pattern: '/admin/stars', title: 'Stars', parent: '/admin/you' },
+  { pattern: '/admin/memberships', title: 'Memberships', parent: '/admin/you' },
   { pattern: '/admin/invitations/[id]', title: 'Invitation', parent: '/admin/you' },
 
   // Space: explore
@@ -44,7 +44,7 @@ export const ROUTES: RouteDefinition[] = [
   { pattern: '/admin/discover/rooms', title: 'Discover Rooms', parent: '/admin/space' },
   { pattern: '/admin/users', title: 'People', parent: '/admin/space' },
   { pattern: '/admin/users/[id]', title: 'Person', parent: '/admin/users' },
-  { pattern: '/admin/templates', title: 'Room Templates', parent: '/admin/space' },
+  { pattern: '/admin/templates', title: 'Room templates', parent: '/admin/space' },
   { pattern: '/admin/templates/categories/new', title: 'New category', parent: '/admin/templates' },
   { pattern: '/admin/templates/categories/[id]', title: 'Category', parent: '/admin/templates' },
   { pattern: '/admin/templates/templates/new', title: 'New template', parent: '/admin/templates' },
@@ -53,11 +53,11 @@ export const ROUTES: RouteDefinition[] = [
   { pattern: '/admin/templates/maps/[id]', title: 'Map', parent: '/admin/templates' },
 
   // You
-  { pattern: '/admin/profile', title: 'My Profile', parent: '/admin/you' },
+  { pattern: '/admin/profile', title: 'Profile', parent: '/admin/you' },
 
   // Admin (super admin)
   { pattern: '/admin/style', title: 'Orbit style', parent: '/admin' },
-  { pattern: '/admin/avatars', title: 'Avatar Sets', parent: '/admin' },
+  { pattern: '/admin/avatars', title: 'Avatar sets', parent: '/admin' },
   { pattern: '/admin/avatars/new', title: 'New avatar set', parent: '/admin/avatars' },
   { pattern: '/admin/avatars/[id]', title: 'Avatar set', parent: '/admin/avatars' },
   { pattern: '/admin/avatars/[id]/layers/[layerId]', title: 'Layer', parent: '/admin/avatars/[id]' },
@@ -67,13 +67,13 @@ export const ROUTES: RouteDefinition[] = [
   { pattern: '/admin/bots/memory', title: 'Memory', parent: '/admin/bots' },
   { pattern: '/admin/bots/metrics', title: 'Metrics', parent: '/admin/bots' },
   { pattern: '/admin/bots/test-results', title: 'Test results', parent: '/admin/bots' },
-  { pattern: '/admin/bots/database', title: 'Bot Database', parent: '/admin/bots' },
-  { pattern: '/admin/bots/mcp-servers', title: 'MCP Servers', parent: '/admin/bots' },
+  { pattern: '/admin/bots/database', title: 'Bot database', parent: '/admin/bots' },
+  { pattern: '/admin/bots/mcp-servers', title: 'MCP servers', parent: '/admin/bots' },
   { pattern: '/admin/bots/[id]', title: 'Bot', parent: '/admin/bots' },
   { pattern: '/admin/bots/[id]/mcp-servers', title: 'Bot MCP servers', parent: '/admin/bots/[id]' },
-  { pattern: '/admin/ai-providers', title: 'AI Providers', parent: '/admin' },
+  { pattern: '/admin/ai-providers', title: 'AI providers', parent: '/admin' },
   { pattern: '/admin/ai-providers/new', title: 'New provider', parent: '/admin/ai-providers' },
-  { pattern: '/admin/ai-providers/usage', title: 'AI Usage', parent: '/admin/ai-providers' },
+  { pattern: '/admin/ai-providers/usage', title: 'AI usage', parent: '/admin/ai-providers' },
   { pattern: '/admin/ai-providers/[id]', title: 'Provider', parent: '/admin/ai-providers' },
   { pattern: '/admin/ai-providers/[id]/edit', title: 'Edit provider', parent: '/admin/ai-providers/[id]' },
 

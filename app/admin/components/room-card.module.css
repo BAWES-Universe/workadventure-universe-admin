@@ -12,10 +12,10 @@
 .ordinal { color: hsl(var(--muted-foreground)); font-family: var(--font-mono); font-size: 10px; opacity: .65; }
 .place { padding-top: 9px; }
 .placeWords { min-width: 0; }
-.coordinates { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 5px; margin: 0 0 7px; color: hsl(var(--muted-foreground)); font-size: 10px; line-height: 1.4; }
+.coordinates { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 5px; margin: 0 0 7px; color: hsl(var(--muted-foreground)); font-size: 12px; line-height: 1.4; }
 .coordinates a { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .coordinates a:hover { color: hsl(var(--foreground)); }
-.coordinates > span { opacity: .5; }
+.coordinates > span[aria-hidden] { opacity: .6; }
 .roomName { margin: 0; font-family: var(--font-display); font-size: 19px; font-weight: 700; letter-spacing: -.02em; line-height: 1.15; overflow-wrap: anywhere; }
 .roomName a:hover { color: var(--signal-accent); }
 .current .place { padding-top: 17px; }
@@ -26,23 +26,23 @@
 .smallOrbit { width: 80px; height: 58px; flex: none; color: var(--signal-accent); }
 .activity { margin-top: 13px; padding-top: 10px; border-top: 1px solid var(--signal-line); }
 .metrics { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; margin: 0 0 9px; }
-.metrics dt { margin-bottom: 2px; color: hsl(var(--muted-foreground)); font-size: 10px; }
+.metrics dt { margin-bottom: 2px; color: hsl(var(--muted-foreground)); font-size: 11px; }
 .metrics dd { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -.02em; line-height: 1.2; font-variant-numeric: tabular-nums; }
 .zone { opacity: .8; }
 .visitHistory { display: grid; gap: 3px; }
-.visitHistory p, .peakDetail { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 8px; margin: 0; color: hsl(var(--muted-foreground)); font-size: 10px; line-height: 1.5; }
+.visitHistory p, .peakDetail { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 8px; margin: 0; color: hsl(var(--muted-foreground)); font-size: 11px; line-height: 1.5; }
 .visitHistory strong, .peakDetail strong { font-weight: 450; color: hsl(var(--foreground)); }
 .visitHistory .noVisits { color: hsl(var(--muted-foreground)); font-style: italic; }
-.activityStatus { margin: 0; color: hsl(var(--muted-foreground)); font-size: 10px; line-height: 1.5; }
+.activityStatus { margin: 0; color: hsl(var(--muted-foreground)); font-size: 12px; line-height: 1.5; }
 .retry { display: inline; min-height: 44px; padding: 0 4px; color: var(--signal-accent); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
 .detailsLink { display: inline-flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 44px; color: hsl(var(--foreground)); font-size: 11px; }
 .detailsLink:hover { color: var(--signal-accent); }
 .detailsLink svg { color: var(--signal-accent); transition: transform 160ms ease; }
 .detailsLink:hover svg { transform: translate(2px, -2px); }
-.accessSummary { display: flex; align-items: baseline; gap: 5px; color: hsl(var(--muted-foreground)); font-size: 10px; }
+.accessSummary { display: flex; align-items: baseline; gap: 5px; color: hsl(var(--muted-foreground)); font-size: 11px; }
 .accessSummary strong { font-size: 15px; font-weight: 450; font-variant-numeric: tabular-nums; color: hsl(var(--foreground)); }
 .disclosure { margin-top: 0; border-top: 1px solid var(--signal-line); }
-.disclosure summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 44px; cursor: pointer; color: hsl(var(--muted-foreground)); font-size: 10px; list-style: none; }
+.disclosure summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 44px; cursor: pointer; color: hsl(var(--muted-foreground)); font-size: 12px; list-style: none; }
 .disclosure summary::-webkit-details-marker { display: none; }
 .disclosure summary svg { color: var(--signal-accent); }
 .disclosure[open] summary svg { transform: rotate(180deg); }

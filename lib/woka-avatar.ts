@@ -6,9 +6,14 @@ function playServiceUrl(): string {
   return (process.env.PLAY_URL || process.env.NEXT_PUBLIC_PLAY_URL || 'http://play.workadventure.localhost').replace(/\/$/, '');
 }
 
+/** A texture address as the browser can load it: absolute ones kept whole (signed or versioned queries included). */
 function resolve(url: string): string {
-  if (/^https?:\/\//i.test(url)) return url.split('?')[0];
-  return `${playServiceUrl()}/${url.replace(/^\//, '').split('/').map(encodeURIComponent).join('/')}`;
+  try {
+    // Relative paths resolve against the game; spaces and the like are encoded once, existing escapes kept.
+    return new URL(url, `${playServiceUrl()}/`).toString();
+  } catch {
+    return url;
+  }
 }
 
 /** A stable pick for someone who never chose an outfit: one of the game's default Wokas, the same one every time. */
@@ -46,6 +51,7 @@ export async function wokaLayersForMany(userIds: string[]): Promise<Map<string, 
 
   for (const id of ids) {
     const urls: string[] = [];
+    let missing = false;
     for (const textureId of latest.get(id) ?? []) {
       let url = fromCatalog.get(textureId);
       if (!url) {
@@ -53,8 +59,10 @@ export async function wokaLayersForMany(userIds: string[]): Promise<Map<string, 
         url = fromConfig.get(textureId)?.url;
       }
       if (url) urls.push(resolve(url));
+      else missing = true;
     }
-    result.set(id, urls.length ? urls : defaultWoka(id));
+    // A layer we can't find would leave a body without a head (or the reverse): show the default Woka instead.
+    result.set(id, urls.length && !missing ? urls : defaultWoka(id));
   }
   return result;
 }

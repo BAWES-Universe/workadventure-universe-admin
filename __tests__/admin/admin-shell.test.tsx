@@ -1,7 +1,7 @@
 /** @jest-environment jsdom */
 
 import React from 'react';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import AdminShell from '@/app/admin/admin-shell';
 import { WorkAdventureContext } from '@/app/admin/workadventure-context';
 
@@ -171,6 +171,29 @@ describe('AdminShell', () => {
     expect(mockRouter.replace).not.toHaveBeenCalled();
   });
 
+  it('Back is named after the page it returns to, and survives Back then Forward', async () => {
+    const view = await renderShell('/admin/stars');
+    const go = (path: string, pop = false) =>
+      act(() => {
+        if (pop) window.dispatchEvent(new PopStateEvent('popstate'));
+        mockPathname = path;
+        view.rerender(
+          <AdminShell>
+            <div>page content</div>
+          </AdminShell>,
+        );
+      });
+    go('/admin/rooms/r-1');
+    // Opened from Stars: Back says Stars, not the room's usual parent.
+    expect(screen.getByTestId('orbit-back').textContent).toContain('Stars');
+    go('/admin/stars', true); // browser Back
+    go('/admin/rooms/r-1', true); // browser Forward
+    expect(screen.getByTestId('orbit-back').textContent).toContain('Stars');
+    fireEvent.click(screen.getByTestId('orbit-back'));
+    expect(mockRouter.back).toHaveBeenCalledTimes(1);
+    expect(mockRouter.replace).not.toHaveBeenCalled();
+  });
+
   it('Escape closes only the top layer: a dialog first, an edited field next, Orbit last', async () => {
     await renderShell('/admin');
     // A dialog handled it (Radix marks the event as handled).
@@ -251,14 +274,22 @@ describe('AdminShell', () => {
     other.remove();
   });
 
+  it('closes the menu when you choose the page already open', async () => {
+    await renderShell('/admin');
+    fireEvent.click(screen.getByTestId('orbit-menu-button'));
+    const menu = await screen.findByRole('dialog');
+    fireEvent.click(within(menu).getByRole('link', { name: 'Orbit' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  });
+
   it('keeps every super-admin tool reachable from the menu', async () => {
     await renderShell('/admin');
     fireEvent.click(screen.getByTestId('orbit-menu-button'));
     const menu = await screen.findByRole('dialog');
-    for (const label of ['Avatar Sets', 'Bots', 'AI Providers', 'AI Usage', 'Bot Database', 'MCP Servers']) {
+    for (const label of ['Avatar sets', 'Bots', 'AI providers', 'AI usage', 'Bot database', 'MCP servers']) {
       expect(menu.textContent).toContain(label);
     }
-    for (const label of ['My Universes', 'My Stars', 'My Memberships', 'My Profile', 'Room Templates', 'People']) {
+    for (const label of ['Your universes', 'Stars', 'Memberships', 'Profile', 'Room templates', 'People']) {
       expect(menu.textContent).toContain(label);
     }
     // The account, theme and sign-out live on You, not in the menu.

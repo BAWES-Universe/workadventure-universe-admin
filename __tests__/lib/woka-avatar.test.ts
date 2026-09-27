@@ -1,7 +1,15 @@
 jest.mock('@/lib/db', () => ({
   prisma: {
-    userAvatar: { findMany: jest.fn(async () => [{ userId: 'u1', textureIds: ['male1'] }]) },
-    avatarLayer: { findMany: jest.fn(async () => []) },
+    userAvatar: {
+      findMany: jest.fn(async () => [
+        { userId: 'u1', textureIds: ['male1'] },
+        { userId: 'u3', textureIds: ['signed'] },
+        { userId: 'u4', textureIds: ['male1', 'no-such-layer'] },
+      ]),
+    },
+    avatarLayer: {
+      findMany: jest.fn(async () => [{ textureId: 'signed', url: 'https://cdn.example.com/w/a.png?sig=abc&v=2' }]),
+    },
   },
 }));
 
@@ -26,5 +34,11 @@ describe('Wokas for avatars', () => {
     expect(member.woka?.length).toBe(1);
     // A record stripped for this viewer stays exactly as it was.
     expect(redacted).toEqual({ id: 'visit-3' });
+  });
+
+  it('keeps signed addresses whole, and uses the default Woka when a layer is missing', async () => {
+    const wokas = await wokaLayersForMany(['u3', 'u4']);
+    expect(wokas.get('u3')).toEqual(['https://cdn.example.com/w/a.png?sig=abc&v=2']);
+    expect(wokas.get('u4')).toEqual(defaultWoka('u4'));
   });
 });

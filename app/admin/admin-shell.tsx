@@ -138,11 +138,16 @@ function ShellChrome({
   const inFrame = useMemo(() => isInsideFrame(), []);
   const route = useMemo(() => resolveRoute(pathname), [pathname]);
 
-  // How deep into Orbit's own pages we are: Back returns along that path first, then goes to the page's parent.
-  const depth = useRef(0);
+  // Orbit's own history this visit: the pages behind (Back) and ahead (Forward), as addresses. A popstate is read by
+  // comparing the new address with both ends, so Back and Forward (the browser's, or ours) keep the stacks right.
+  // A page we don't recognise from either end starts a fresh path. Back goes to the page behind when there is one,
+  // named after it; otherwise the page's parent takes the current page's place.
+  const behind = useRef<string[]>([]);
+  const ahead = useRef<string[]>([]);
   const lastPath = useRef(pathname);
   const popping = useRef(false);
   const replacing = useRef(false);
+  const [behindTop, setBehindTop] = useState<string | null>(null);
 
   useEffect(() => {
     const onPopState = () => {
@@ -153,19 +158,34 @@ function ShellChrome({
   }, []);
 
   useEffect(() => {
-    if (pathname === lastPath.current) return;
+    const previous = lastPath.current;
+    if (pathname === previous) {
+      popping.current = false;
+      return;
+    }
     if (popping.current) {
-      depth.current = Math.max(0, depth.current - 1);
+      if (behind.current[behind.current.length - 1] === pathname) {
+        behind.current.pop();
+        ahead.current.push(previous);
+      } else if (ahead.current[ahead.current.length - 1] === pathname) {
+        ahead.current.pop();
+        behind.current.push(previous);
+      } else {
+        behind.current = [];
+        ahead.current = [];
+      }
     } else if (!replacing.current) {
-      depth.current += 1;
+      behind.current.push(previous);
+      ahead.current = [];
     }
     popping.current = false;
     replacing.current = false;
     lastPath.current = pathname;
+    setBehindTop(behind.current[behind.current.length - 1] ?? null);
   }, [pathname]);
 
   const goBack = useCallback(() => {
-    if (depth.current > 0) {
+    if (behind.current.length > 0) {
       router.back();
       return;
     }
@@ -175,6 +195,8 @@ function ShellChrome({
       router.replace(route.parent);
     }
   }, [router, route.parent]);
+  // What Back says: the page it really returns to.
+  const backLabel = behindTop ? resolveRoute(behindTop).title : route.parentTitle;
 
   const closeOrbit = useCallback(() => {
     if (!inFrame) return;
@@ -219,8 +241,8 @@ function ShellChrome({
   }, [menuOpen, closeOrbit]);
 
   const frame: OrbitFrameState = useMemo(
-    () => ({ inFrame, view, route, goBack, closeOrbit, menuOpen, setMenuOpen }),
-    [inFrame, view, route, goBack, closeOrbit, menuOpen],
+    () => ({ inFrame, view, route, goBack, backLabel, closeOrbit, menuOpen, setMenuOpen }),
+    [inFrame, view, route, goBack, backLabel, closeOrbit, menuOpen],
   );
 
   return (

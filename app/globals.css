@@ -469,3 +469,16 @@ a[href] {
     transform: translate(0, -50%);
   }
 }
+
+/*
+ * Touch targets: on a touch screen every control is at least 44px, whatever its own size says. With a mouse the
+ * denser sizes stay.
+ */
+@media (pointer: coarse) {
+  :is(button, [role='button'], [role='tab'], select, input:not([type='checkbox'], [type='radio'], [type='hidden'], [type='range']), textarea):not(.orbit-touch-exempt) {
+    min-height: 44px;
+  }
+  :is(button, [role='button'], [role='tab']):not(.orbit-touch-exempt) {
+    min-width: 44px;
+  }
+}
