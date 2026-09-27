@@ -167,7 +167,7 @@ export default function BotsPage() {
   if (loading && bots.length === 0) {
     return (
       <div className="space-y-8">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="space-y-1">
             <h1 className="text-4xl font-bold tracking-tight">Bots</h1>
             <p className="text-muted-foreground text-lg">
@@ -186,7 +186,7 @@ export default function BotsPage() {
 
   return (
     <div className="space-y-8">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-4">
         <div className="space-y-1">
           <h1 className="text-4xl font-bold tracking-tight">Bots</h1>
           <p className="text-muted-foreground text-lg">

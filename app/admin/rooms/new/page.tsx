@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, Suspense, useMemo } from 'react';
+import { DraftNotice } from '../../components/draft-notice';
 import { useDraft } from '../../hooks/use-draft';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
@@ -76,7 +77,7 @@ function NewRoomPageContent() {
     }),
     [formData.slug, formData.name, formData.description, formData.mapUrl, formData.isPublic],
   );
-  const { discard: discardDraft } = useDraft(
+  const { discard: discardDraft, restored: draftRestored, revert: revertDraft } = useDraft(
     'room.new',
     draftFields,
     (draft) => setFormData((prev) => ({ ...prev, ...draft })),
@@ -314,9 +315,9 @@ function NewRoomPageContent() {
 
   return (
     <div className="space-y-8">
-      <nav className="flex items-center space-x-2 text-sm text-muted-foreground">
+      <nav className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground">
         <Link href="/admin" className="hover:text-foreground">
-          Dashboard
+          Home
         </Link>
         {worldIdParam && displayWorld && (
           <>
@@ -360,7 +361,7 @@ function NewRoomPageContent() {
       )}
 
       {/* Template/Manual Toggle */}
-      <div className="flex items-center gap-4">
+      <div className="flex flex-wrap items-center gap-2 sm:gap-4">
         <Button
           type="button"
           variant={useTemplate ? 'default' : 'outline'}
@@ -490,6 +491,7 @@ function NewRoomPageContent() {
           </CardHeader>
           <CardContent>
             <form onSubmit={handleSubmit} className="space-y-6">
+            {draftRestored && <DraftNotice onDiscard={revertDraft} />}
             <div className="space-y-2">
               <Label htmlFor="name">
                 Name <span className="text-destructive">*</span>

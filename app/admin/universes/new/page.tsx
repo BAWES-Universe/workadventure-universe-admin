@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useMemo } from 'react';
+import { DraftNotice } from '../../components/draft-notice';
 import { useDraft } from '../../hooks/use-draft';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
@@ -50,7 +51,7 @@ export default function NewUniversePage() {
     }),
     [formData.slug, formData.name, formData.description, formData.isPublic, formData.featured, formData.thumbnailUrl],
   );
-  const { discard: discardDraft } = useDraft(
+  const { discard: discardDraft, restored: draftRestored, revert: revertDraft } = useDraft(
     'universe.new',
     draftFields,
     (draft) => setFormData((prev) => ({ ...prev, ...draft })),
@@ -133,9 +134,9 @@ export default function NewUniversePage() {
 
   return (
     <div className="space-y-8">
-      <nav className="flex items-center space-x-2 text-sm text-muted-foreground">
+      <nav className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground">
         <Link href="/admin" className="hover:text-foreground">
-          Dashboard
+          Home
         </Link>
         <ChevronRight className="h-4 w-4" />
         <Link href="/admin/universes" className="hover:text-foreground">
@@ -169,6 +170,7 @@ export default function NewUniversePage() {
         </CardHeader>
         <CardContent>
           <form onSubmit={handleSubmit} className="space-y-6">
+            {draftRestored && <DraftNotice onDiscard={revertDraft} />}
             <div className="space-y-2">
               <Label htmlFor="name">
                 Name <span className="text-destructive">*</span>

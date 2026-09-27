@@ -319,8 +319,8 @@ export default function MyMembershipsPage() {
               {invitations.map((invitation) => (
                 <Card key={invitation.id} className="border hover:bg-accent/50 transition-colors">
                   <CardContent className="pt-6">
-                    <div className="flex items-start justify-between">
-                      <div className="space-y-2 flex-1">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="min-w-0 space-y-2 flex-1">
                         <div className="flex items-center gap-2 flex-wrap">
                           <Link 
                             href={`/admin/worlds/${invitation.world.id}`}

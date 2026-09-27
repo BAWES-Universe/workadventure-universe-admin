@@ -2,23 +2,22 @@
 
 import * as DialogPrimitive from '@radix-ui/react-dialog';
 import Link from 'next/link';
+import { X } from 'lucide-react';
 import { usePathname } from 'next/navigation';
 import { useEffect } from 'react';
 import { cn } from '@/lib/utils';
-import { DESTINATIONS, getNavItems, getNavSections, isNavItemActive, type NavUser } from '../../config/navigation';
+import { getNavItems, getNavSections, isNavItemActive, type NavUser } from '../../config/navigation';
 import { useOrbitFrame } from '../../orbit-frame-context';
 import { AccountPanel } from './account-panel';
-import { rootOf } from './root-of';
 
 /**
- * Everything Orbit has, one tap from the bottom bar: the three destinations, then Personalize, Discover, Tools and
- * (for super admins) Admin, and the account at the end. A sheet that rises from the bottom, dismissed by a tap
- * outside, Escape, or Back.
+ * Everything Orbit has, from the Menu button at the top-left: Tools, Personalize, Discover and (for super admins)
+ * Admin, and the account at the end. A drawer that slides in from the left, under the button that opened it;
+ * dismissed by a tap outside, Escape, or going somewhere. Home, Spaces and You stay on the bottom bar.
  */
 export function MenuSheet({ user }: { user: NavUser }) {
   const pathname = usePathname();
   const { menuOpen, setMenuOpen } = useOrbitFrame();
-  const root = rootOf(pathname);
   const items = getNavItems(user);
   const sections = getNavSections(user);
 
@@ -35,38 +34,22 @@ export function MenuSheet({ user }: { user: NavUser }) {
           id="orbit-menu"
           aria-describedby={undefined}
           className={cn(
-            'fixed inset-x-0 bottom-0 z-50 mx-auto max-h-[88dvh] w-full max-w-lg overflow-y-auto rounded-t-3xl border-t border-border/60 bg-popover shadow-2xl outline-none',
-            'data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=open]:slide-in-from-bottom data-[state=closed]:slide-out-to-bottom',
+            'fixed inset-y-0 left-0 z-50 w-[min(85%,20rem)] overflow-y-auto border-r border-border/60 bg-popover shadow-2xl outline-none',
+            'data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=open]:slide-in-from-left data-[state=closed]:slide-out-to-left',
           )}
           style={{ paddingBottom: 'calc(1rem + var(--safe-bottom))' }}
         >
-          <div className="sticky top-0 z-10 flex justify-center bg-popover pb-2 pt-3">
-            <span aria-hidden="true" className="h-1.5 w-10 rounded-full bg-muted-foreground/30" />
+          <div className="sticky top-0 z-10 flex items-center justify-between bg-popover px-4 pb-2 pt-3">
+            <DialogPrimitive.Title className="text-[15px] font-semibold">Menu</DialogPrimitive.Title>
+            <DialogPrimitive.Close
+              className="orbit-press inline-flex h-9 w-9 items-center justify-center rounded-xl text-muted-foreground hover:bg-accent hover:text-foreground"
+              aria-label="Close the menu"
+            >
+              <X className="h-5 w-5" aria-hidden="true" />
+            </DialogPrimitive.Close>
           </div>
-          <DialogPrimitive.Title className="sr-only">Menu</DialogPrimitive.Title>
 
           <div className="space-y-6 px-4 pt-1">
-            <div className="grid grid-cols-3 gap-2">
-              {DESTINATIONS.map((item) => {
-                const Icon = item.icon;
-                const active = item.href === root;
-                return (
-                  <Link
-                    key={item.href}
-                    href={item.href}
-                    aria-current={active ? 'page' : undefined}
-                    className={cn(
-                      'orbit-press flex flex-col items-center justify-center gap-1.5 rounded-2xl py-4 text-sm font-medium transition-colors',
-                      active ? 'bg-accent text-accent-foreground' : 'bg-muted/60 text-foreground hover:bg-muted',
-                    )}
-                  >
-                    <Icon className="h-6 w-6" strokeWidth={active ? 2.4 : 2} aria-hidden="true" />
-                    {item.label}
-                  </Link>
-                );
-              })}
-            </div>
-
             {sections.map((section) => (
               <section key={section.key} aria-label={section.label}>
                 <p className="mb-2 px-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/80">

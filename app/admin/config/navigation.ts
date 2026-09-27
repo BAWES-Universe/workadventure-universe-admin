@@ -1,6 +1,6 @@
 import {
   Home,
-  Map,
+  Orbit,
   Globe,
   Users,
   UserCircle,
@@ -30,12 +30,12 @@ export interface NavItem {
 }
 
 /**
- * The three places the bottom bar and the sidebar always show. Home is here and now, Places is everything you can
+ * The three places the bottom bar and the sidebar always show. Home is here and now, Spaces is everything you can
  * visit or manage, You is your visit card and account. Everything else lives one tap further, in the menu.
  */
 export const DESTINATIONS: NavItem[] = [
   { href: '/admin', label: 'Home', icon: Home },
-  { href: '/admin/places', label: 'Places', icon: Map },
+  { href: '/admin/spaces', label: 'Spaces', icon: Orbit },
   { href: '/admin/you', label: 'You', icon: UserCircle },
 ];
 
@@ -94,10 +94,10 @@ export interface NavSection {
   items: NavItem[];
 }
 
-/** The menu's sections in display order: Personalize, Discover, Tools, then Admin for super admins. Empty ones are left out. */
+/** The menu's sections in display order: Tools (Room Templates, first as before), Personalize, Discover, then Admin for super admins. Empty ones are left out. */
 export function getNavSections(user: NavUser | null): NavSection[] {
   const items = getNavItems(user).filter((item) => item.href !== '/admin');
-  const order: NavGroup[] = ['my', 'discover', 'menu', 'admin'];
+  const order: NavGroup[] = ['menu', 'my', 'discover', 'admin'];
   return order
     .map((key) => ({
       key,

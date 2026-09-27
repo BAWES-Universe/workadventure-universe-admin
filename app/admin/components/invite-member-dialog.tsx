@@ -122,7 +122,7 @@ export default function InviteMemberDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-xl">
+      <DialogContent className="max-w-3xl">
         <DialogHeader>
           <DialogTitle>Invite Member</DialogTitle>
           <DialogDescription>
@@ -154,8 +154,8 @@ export default function InviteMemberDialog({
             </div>
 
             <div className="space-y-1">
-              <Label>Role</Label>
-              <RoleChoice value={selectedTag} onChange={setSelectedTag} />
+              <Label id="invite-role-label">Role</Label>
+              <RoleChoice value={selectedTag} onChange={setSelectedTag} labelledBy="invite-role-label" />
             </div>
 
             <div>

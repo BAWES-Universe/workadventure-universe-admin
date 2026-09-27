@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useMemo } from 'react';
+import { DraftNotice } from '../components/draft-notice';
 import { useDraft } from '../hooks/use-draft';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
@@ -28,7 +29,7 @@ export default function VisitCardPage() {
   const [saved, setSaved] = useState<{ bio: string; links: LinkItem[] }>({ bio: '', links: [] });
 
   const draftValue = useMemo(() => ({ bio, links }), [bio, links]);
-  const { discard: discardDraft } = useDraft(
+  const { discard: discardDraft, restored: draftRestored, revert: revertDraft } = useDraft(
     'visit-card',
     draftValue,
     (draft) => {
@@ -178,6 +179,7 @@ export default function VisitCardPage() {
         )}
 
         <section className="space-y-6">
+            {draftRestored && <DraftNotice onDiscard={revertDraft} />}
             {/* Bio */}
             <div className="space-y-2">
               <Label htmlFor="bio">Bio</Label>

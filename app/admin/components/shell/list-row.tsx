@@ -121,7 +121,7 @@ export function StatTile({
       >
         <Icon className="h-[18px] w-[18px]" aria-hidden="true" />
       </span>
-      <span className="block text-2xl font-semibold tabular-nums tracking-tight">{value}</span>
+      <span className="block text-2xl font-semibold tabular-nums tracking-tight">{typeof value === 'number' ? value.toLocaleString() : value}</span>
       <span className="block text-xs text-muted-foreground">{label}</span>
     </Link>
   );

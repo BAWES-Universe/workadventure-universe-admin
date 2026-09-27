@@ -18,14 +18,21 @@ export function RoleChoice({
   onChange,
   options = ROLE_OPTIONS,
   name = 'role',
+  labelledBy,
 }: {
   value: string;
   onChange: (value: string) => void;
   options?: typeof ROLE_OPTIONS;
   name?: string;
+  /** The id of the visible label naming this choice. */
+  labelledBy?: string;
 }) {
   return (
-    <div role="radiogroup" aria-label="Role" className="overflow-hidden rounded-xl border border-border/70">
+    <div
+      role="radiogroup"
+      aria-labelledby={labelledBy}
+      aria-label={labelledBy ? undefined : 'Role'}
+      className="overflow-hidden rounded-xl border border-border/70">
       {options.map((option, index) => {
         const checked = value === option.value;
         return (

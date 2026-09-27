@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { useEffect, useRef } from 'react';
 import { cn } from '@/lib/utils';
 import { DESTINATIONS, getNavItems, getNavSections, isNavItemActive, type NavUser } from '../../config/navigation';
 import { OrbitWordmark } from './orbit-mark';
@@ -17,6 +18,14 @@ export function Sidebar({ user }: { user: NavUser }) {
   const root = rootOf(pathname);
   const items = getNavItems(user);
   const sections = getNavSections(user);
+  // A page with its own entry (Bots, AI Usage…) lights that entry, not the destination it sits under.
+  const sectionActive = sections.some((section) => section.items.some((item) => isNavItemActive(item.href, pathname, items)));
+  const navRef = useRef<HTMLElement>(null);
+
+  // The lit entry is always in sight, even far down the list (the Admin tools).
+  useEffect(() => {
+    navRef.current?.querySelector<HTMLElement>('[aria-current="page"]')?.scrollIntoView?.({ block: 'nearest' });
+  }, [pathname]);
 
   return (
     <aside
@@ -29,11 +38,11 @@ export function Sidebar({ user }: { user: NavUser }) {
           <OrbitWordmark />
         </Link>
       </div>
-      <nav className="orbit-scroll-fade min-h-0 flex-1 space-y-6 overflow-y-auto px-3 pb-8 pt-1">
+      <nav ref={navRef} className="orbit-scroll-fade min-h-0 flex-1 space-y-6 overflow-y-auto px-3 pb-8 pt-1">
         <ul className="space-y-0.5">
           {DESTINATIONS.map((item) => {
             const Icon = item.icon;
-            const active = item.href === root;
+            const active = item.href === root && !sectionActive;
             return (
               <li key={item.href}>
                 <Link

@@ -34,30 +34,30 @@ interface StarredRoom {
 const SHOWN = 4;
 
 /**
- * Places: everything you can visit or manage. Mine is what is yours, Explore is everyone's. Each list shows a few
+ * Spaces: everything you can visit or manage. Mine is what is yours, Explore is everyone's. Each list shows a few
  * and leads to the full page.
  */
-export default function PlacesPage() {
+export default function SpacesPage() {
   return (
     <Suspense fallback={null}>
-      <Places />
+      <Spaces />
     </Suspense>
   );
 }
 
-function Places() {
+function Spaces() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const tab: Tab = searchParams.get('tab') === 'explore' ? 'explore' : 'mine';
 
   function switchTo(next: Tab) {
-    router.replace(next === 'mine' ? '/admin/places' : '/admin/places?tab=explore');
+    router.replace(next === 'mine' ? '/admin/spaces' : '/admin/spaces?tab=explore');
   }
 
   return (
     <div className="space-y-6">
       <header className="flex items-end justify-between gap-3">
-        <h1 className="text-3xl font-semibold tracking-tight">Places</h1>
+        <h1 className="text-3xl font-semibold tracking-tight">Spaces</h1>
         <Button asChild size="sm" className="orbit-brand-fill border-0 hover:opacity-90">
           <Link href="/admin/universes/new">
             <Plus className="h-4 w-4" />
@@ -66,7 +66,7 @@ function Places() {
         </Button>
       </header>
 
-      <div role="tablist" aria-label="Places" className="grid grid-cols-2 gap-1 rounded-xl bg-muted p-1">
+      <div role="tablist" aria-label="Spaces" className="grid grid-cols-2 gap-1 rounded-xl bg-muted p-1">
         {(['mine', 'explore'] as const).map((value) => (
           <button
             key={value}
@@ -122,7 +122,7 @@ function Mine() {
   }, []);
 
   return (
-    <div className="space-y-6" data-testid="places-mine">
+    <div className="space-y-6" data-testid="spaces-mine">
       <section>
         <SectionHeading
           title="My universes"
@@ -215,21 +215,21 @@ function Mine() {
 function Explore() {
   const { stats } = useAdminBootstrap();
   return (
-    <div className="space-y-6" data-testid="places-explore">
+    <div className="space-y-6" data-testid="spaces-explore">
       <section>
-        <SectionHeading title="Across the Universe" description="Public places anyone can visit." />
+        <SectionHeading title="Across the Universe" description="Public universes, worlds and rooms anyone can visit." />
         <div className="grid grid-cols-2 gap-3">
           <StatTile href="/admin/discover/universes" icon={Compass} value={stats.universes} label="Universes" />
           <StatTile href="/admin/discover/worlds" icon={Building2} value={stats.worlds} label="Worlds" accent="muted" />
           <StatTile href="/admin/discover/rooms" icon={DoorOpen} value={stats.rooms} label="Rooms" accent="muted" />
-          <StatTile href="/admin/users" icon={Users} value={stats.users} label="People" accent="gold" />
+          <StatTile href="/admin/users" icon={Users} value={stats.users} label="Users" accent="gold" />
         </div>
       </section>
       <section>
         <SectionHeading title="Build" />
         <ListGroup>
           <ListRow href="/admin/templates" icon={FolderOpen} title="Room Templates" subtitle="Ready-made maps to start a room from" />
-          <ListRow href="/admin/universes/new" icon={Plus} tone="brand" title="New universe" subtitle="A place of your own for worlds and rooms" />
+          <ListRow href="/admin/universes/new" icon={Plus} tone="brand" title="New universe" subtitle="Your own universe, for your worlds and rooms" />
         </ListGroup>
       </section>
     </div>

@@ -1,3 +1,6 @@
+'use client';
+
+import { useId } from 'react';
 import { cn } from '@/lib/utils';
 
 /**
@@ -5,6 +8,10 @@ import { cn } from '@/lib/utils';
  * loading moments; the still version is the wordmark's companion in the shell.
  */
 export function OrbitMark({ className, animated = false }: { className?: string; animated?: boolean }) {
+  // Each mark its own gradients: one inside a hidden sidebar would otherwise leave the visible ones unpainted.
+  const id = useId();
+  const fill = `orbit-mark-fill-${id}`;
+  const ring = `orbit-mark-ring-${id}`;
   return (
     <svg
       viewBox="0 0 48 48"
@@ -13,23 +20,23 @@ export function OrbitMark({ className, animated = false }: { className?: string;
       style={{ overflow: 'visible' }}
     >
       <defs>
-        <linearGradient id="orbit-mark-fill" x1="0" y1="0" x2="1" y2="1">
+        <linearGradient id={fill} x1="0" y1="0" x2="1" y2="1">
           <stop offset="0%" stopColor="var(--brand-purple)" />
           <stop offset="100%" stopColor="var(--brand-blue)" />
         </linearGradient>
-        <linearGradient id="orbit-mark-ring" x1="0" y1="0" x2="1" y2="0">
+        <linearGradient id={ring} x1="0" y1="0" x2="1" y2="0">
           <stop offset="0%" stopColor="var(--brand-violet)" />
           <stop offset="100%" stopColor="var(--brand-gold)" />
         </linearGradient>
       </defs>
-      <circle cx="24" cy="24" r="11" fill="url(#orbit-mark-fill)" />
+      <circle cx="24" cy="24" r="11" fill={`url(#${fill})`} />
       <ellipse
         cx="24"
         cy="24"
         rx="20"
         ry="7.5"
         fill="none"
-        stroke="url(#orbit-mark-ring)"
+        stroke={`url(#${ring})`}
         strokeWidth="2.25"
         transform="rotate(-18 24 24)"
         opacity="0.95"

@@ -268,7 +268,8 @@ export default function MemberList({ worldId, onRefresh }: MemberListProps) {
                           </div>
 
                           <div className="min-w-0 flex-1 space-y-1">
-                            <div className="flex items-start justify-between gap-2">
+                            {/* Room on the right for the edit and remove buttons pinned to the card's corner. */}
+                            <div className="flex items-start justify-between gap-2 pr-16">
                               <h3 className="truncate text-base font-semibold leading-tight">
                                 {nameOrEmail}
                               </h3>
@@ -520,8 +521,8 @@ export default function MemberList({ worldId, onRefresh }: MemberListProps) {
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-1">
-              <Label>Role</Label>
-              <RoleChoice value={editingTag} onChange={setEditingTag} />
+              <Label id="edit-role-label">Role</Label>
+              <RoleChoice value={editingTag} onChange={setEditingTag} name="edit-role" labelledBy="edit-role-label" />
             </div>
             <div className="flex justify-end gap-2">
               <Button

@@ -7,24 +7,24 @@ import { useAdminBootstrap } from '../admin-bootstrap-context';
 import { SectionHeading, StatTile } from './shell/list-row';
 
 /**
- * The person's own places: the universes they own, the worlds they belong to, the rooms they starred. A newcomer
+ * The person's own spaces: the universes they own, the worlds they belong to, the rooms they starred. A newcomer
  * with none of them gets one clear invitation to make a universe, and one to explore.
  */
-export default function YourPlaces() {
+export default function YourSpaces() {
   const { mine } = useAdminBootstrap();
   const counts = mine ?? { universes: 0, worlds: 0, stars: 0, invitations: 0 };
   const nothingYet = counts.universes === 0 && counts.worlds === 0 && counts.stars === 0;
 
   if (nothingYet) {
     return (
-      <section className="orbit-card overflow-hidden" data-testid="your-places-empty">
+      <section className="orbit-card overflow-hidden" data-testid="your-spaces-empty">
         <div
           className="h-1.5 w-full"
           style={{ background: 'linear-gradient(90deg, var(--brand-purple), var(--brand-blue), var(--brand-gold))' }}
         />
         <div className="space-y-4 p-5">
           <div>
-            <h2 className="text-lg font-semibold tracking-tight">Make a place of your own</h2>
+            <h2 className="text-lg font-semibold tracking-tight">Start a universe of your own</h2>
             <p className="text-sm text-muted-foreground">
               A universe holds your worlds and rooms. It takes a minute, and you can shape it later.
             </p>
@@ -37,7 +37,7 @@ export default function YourPlaces() {
               </Link>
             </Button>
             <Button asChild variant="outline">
-              <Link href="/admin/places?tab=explore">
+              <Link href="/admin/spaces?tab=explore">
                 <Compass className="h-4 w-4" />
                 Explore first
               </Link>
@@ -49,11 +49,11 @@ export default function YourPlaces() {
   }
 
   return (
-    <section data-testid="your-places">
+    <section data-testid="your-spaces">
       <SectionHeading
-        title="Your places"
+        title="Your spaces"
         action={
-          <Link href="/admin/places" className="font-medium text-primary hover:underline">
+          <Link href="/admin/spaces" className="font-medium text-primary hover:underline">
             See all
           </Link>
         }

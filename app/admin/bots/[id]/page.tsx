@@ -526,8 +526,8 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
 
   return (
     <div className="space-y-8">
-      <div className="flex items-center justify-between">
-          <div className="flex items-center gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="flex min-w-0 flex-wrap items-center gap-4">
           <Button variant="ghost" size="sm" asChild>
             <AuthLink href="/admin/bots">
               <ArrowLeft className="mr-2 h-4 w-4" />
@@ -535,7 +535,7 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
             </AuthLink>
           </Button>
           <div className="space-y-1">
-            <h1 className="text-4xl font-bold tracking-tight">{bot ? bot.name : 'Bot Usage History'}</h1>
+            <h1 className="min-w-0 break-words text-4xl font-bold tracking-tight">{bot ? bot.name : 'Bot Usage History'}</h1>
             <p className="text-muted-foreground text-lg">
               Bot details and usage history
             </p>
@@ -558,7 +558,7 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
           }
           setActiveTab(value);
         }} className="w-full">
-        <TabsList className="grid w-full grid-cols-6">
+        <TabsList className="flex h-auto w-full flex-wrap justify-start gap-1">
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="usage">Usage</TabsTrigger>
           <TabsTrigger value="metrics">Metrics</TabsTrigger>

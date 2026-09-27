@@ -249,7 +249,7 @@ a[href] {
 }
 /* Glass: the shell's bars over the content they float above. */
 @utility orbit-glass {
-  background: color-mix(in oklab, hsl(var(--background)) 82%, transparent);
+  background: color-mix(in oklab, hsl(var(--background)) 92%, transparent);
   backdrop-filter: saturate(160%) blur(14px);
   -webkit-backdrop-filter: saturate(160%) blur(14px);
 }
@@ -303,8 +303,10 @@ a[href] {
 }
 
 /* Motion is a courtesy, never a requirement. */
+/* Reduced motion: nothing slides, zooms, drifts or shimmers. Loading spinners keep turning (they say "still
+   working", which a still icon doesn't), so they are left out. */
 @media (prefers-reduced-motion: reduce) {
-  *,
+  *:not(.animate-spin),
   *::before,
   *::after {
     animation-duration: 0.01ms !important;

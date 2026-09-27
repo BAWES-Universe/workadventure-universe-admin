@@ -1,6 +1,6 @@
 /**
  * Every Orbit page has a way back. Walks every page under app/admin and every route the workflow inventory names,
- * and follows parents until a root (Home, Places, You): each step must be a known page, and the walk must end.
+ * and follows parents until a root (Home, Spaces, You): each step must be a known page, and the walk must end.
  */
 import fs from 'fs';
 import path from 'path';
@@ -94,7 +94,7 @@ describe('every Orbit page has a back path', () => {
     expect(resolveRoute('/admin/avatars/set-9/layers/layer-3').parent).toBe('/admin/avatars/set-9');
     expect(resolveRoute('/admin/bots/bot-2/mcp-servers').parent).toBe('/admin/bots/bot-2');
     expect(resolveRoute('/admin/bots/database').parent).toBe('/admin/bots');
-    expect(resolveRoute('/admin/worlds/w-1').parentTitle).toBe('Places');
+    expect(resolveRoute('/admin/worlds/w-1').parentTitle).toBe('Spaces');
   });
 
   it('sends an unknown page back to its nearest known ancestor', () => {

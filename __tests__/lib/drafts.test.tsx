@@ -56,3 +56,29 @@ describe('drafts survive navigation', () => {
     expect(hook.result.current.value).toEqual(EMPTY);
   });
 });
+
+describe('a restored draft says so', () => {
+  beforeEach(() => window.sessionStorage.clear());
+
+  function useTracked() {
+    const [value, setValue] = useState<Form>(EMPTY);
+    const draft = useDraft('test.notice', value, setValue, EMPTY);
+    return { value, setValue, ...draft };
+  }
+
+  it('flags a restore and reverts to the starting state on request', () => {
+    window.sessionStorage.setItem(`${DRAFT_KEY_PREFIX}test.notice`, JSON.stringify({ name: 'Old', slug: 'old' }));
+    const hook = renderHook(() => useTracked());
+    expect(hook.result.current.restored).toBe(true);
+    expect(hook.result.current.value).toEqual({ name: 'Old', slug: 'old' });
+    act(() => hook.result.current.revert());
+    expect(hook.result.current.restored).toBe(false);
+    expect(hook.result.current.value).toEqual(EMPTY);
+    expect(readDraft('test.notice')).toBeNull();
+  });
+
+  it('flags nothing when there was nothing to restore', () => {
+    const hook = renderHook(() => useTracked());
+    expect(hook.result.current.restored).toBe(false);
+  });
+});

@@ -199,7 +199,7 @@ export default function ConversationsBrowsePage() {
   if (loading && conversations.length === 0) {
     return (
       <div className="space-y-8">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="space-y-1">
             <h1 className="text-4xl font-bold tracking-tight">Browse Conversations</h1>
             <p className="text-muted-foreground text-lg">

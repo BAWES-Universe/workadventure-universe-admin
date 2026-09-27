@@ -9,7 +9,6 @@ let mockPathname = '/admin';
 const mockRouter = { back: jest.fn(), replace: jest.fn(), push: jest.fn(), refresh: jest.fn() };
 const mockGetClientSessionId = jest.fn(() => `orb_sess_v2_${'a'.repeat(64)}`);
 const closeModal = jest.fn();
-const mockRequestView = jest.fn();
 
 const bootstrap = {
   version: 1,
@@ -51,7 +50,6 @@ jest.mock('@/lib/client-auth', () => ({
 }));
 jest.mock('@/lib/orbit-frame', () => ({
   isInsideFrame: () => true,
-  requestView: (view: string) => mockRequestView(view),
   postToGame: jest.fn(),
 }));
 jest.mock('@/app/admin/components/orbit-bridge', () => ({ __esModule: true, default: () => null }));
@@ -92,7 +90,6 @@ describe('AdminShell', () => {
     mockAuthenticatedFetch.mockClear();
     mockGetClientSessionId.mockClear();
     closeModal.mockClear();
-    mockRequestView.mockClear();
     Object.values(mockRouter).forEach((fn) => fn.mockClear());
   });
 
@@ -150,16 +147,16 @@ describe('AdminShell', () => {
   it('gives every page a Back that names where it goes, and roots the wordmark', async () => {
     await renderShell('/admin/worlds/w-1');
     const back = screen.getByTestId('orbit-back');
-    expect(back.textContent).toContain('Places');
+    expect(back.textContent).toContain('Spaces');
     expect(screen.getByTestId('orbit-title').textContent).toBe('World');
     fireEvent.click(back);
     // The first page of a visit: its parent takes its place, so the browser's Back still closes Orbit.
-    expect(mockRouter.replace).toHaveBeenCalledWith('/admin/places');
+    expect(mockRouter.replace).toHaveBeenCalledWith('/admin/spaces');
     expect(mockRouter.back).not.toHaveBeenCalled();
   });
 
   it('Back returns along Orbit’s own pages before going to a parent', async () => {
-    const view = await renderShell('/admin/places');
+    const view = await renderShell('/admin/spaces');
     act(() => {
       mockPathname = '/admin/worlds/w-1';
       view.rerender(
@@ -202,16 +199,23 @@ describe('AdminShell', () => {
     expect(closeModal).toHaveBeenCalledTimes(1);
   });
 
-  it('offers the full-screen view and asks the game for it', async () => {
+  it('leaves the view to the game: no expand button of its own, and the Menu first in the bar', async () => {
     await renderShell('/admin');
-    fireEvent.click(screen.getByTestId('orbit-view-toggle'));
-    expect(mockRequestView).toHaveBeenCalledWith('full');
-    expect(screen.getByTestId('orbit-view-toggle').getAttribute('aria-label')).toMatch(/compact/i);
+    expect(screen.queryByTestId('orbit-view-toggle')).toBeNull();
+    expect(screen.queryByRole('button', { name: /full screen|expand|maximi/i })).toBeNull();
+    const bar = screen.getByRole('banner');
+    expect(bar.querySelector('button')?.getAttribute('aria-label')).toBe('Menu');
+  });
+
+  it('keeps Home, Spaces and You on the bottom bar', async () => {
+    await renderShell('/admin');
+    const nav = screen.getByRole('navigation', { name: 'Orbit' });
+    expect(Array.from(nav.querySelectorAll('a')).map((link) => link.textContent)).toEqual(['Home', 'Spaces', 'You']);
   });
 
   it('keeps every super-admin tool reachable from the menu', async () => {
     await renderShell('/admin');
-    fireEvent.click(screen.getByRole('button', { name: /menu/i }));
+    fireEvent.click(screen.getByTestId('orbit-menu-button'));
     const menu = await screen.findByRole('dialog');
     for (const label of ['Avatar Sets', 'Bots', 'AI Providers', 'AI Usage', 'Bot Database', 'MCP Servers']) {
       expect(menu.textContent).toContain(label);

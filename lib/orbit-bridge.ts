@@ -22,7 +22,7 @@ export const ORBIT_NAVIGATE_INTENTS = ['new-universe', 'world-members', 'visit-c
 
 /**
  * The two sizes of Orbit's window inside the game: the compact companion panel (the default) and the full-screen
- * view for bigger tasks. The game owns the size; Orbit asks (`orbit-view-request`) and is told (`orbit-view`).
+ * view for bigger tasks. The game owns the size (its own maximise button) and tells Orbit (`orbit-view`).
  */
 export const ORBIT_VIEWS = ['compact', 'full'] as const;
 export type OrbitView = (typeof ORBIT_VIEWS)[number];
@@ -74,13 +74,6 @@ export type OrbitBridgeInit = z.infer<typeof orbitBridgeInitSchema>;
 export type OrbitNavigate = z.infer<typeof orbitNavigateSchema>;
 export type OrbitEvent = z.infer<typeof orbitEventSchema>;
 export type OrbitViewChange = z.infer<typeof orbitViewSchema>;
-
-/** Orbit → game: please switch to this view. */
-export interface OrbitViewRequest {
-  type: 'orbit-view-request';
-  version: typeof ORBIT_BRIDGE_VERSION;
-  view: OrbitView;
-}
 
 export type OrbitBridgeAckError = 'stale-revision' | 'not-ready';
 

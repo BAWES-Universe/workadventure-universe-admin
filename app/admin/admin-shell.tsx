@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { authenticatedFetch, getClientSessionId } from '@/lib/client-auth';
-import { isInsideFrame, requestView as requestFrameView } from '@/lib/orbit-frame';
+import { isInsideFrame } from '@/lib/orbit-frame';
 import type { OrbitView } from '@/lib/orbit-bridge';
 import { Button } from '@/components/ui/button';
 import OrbitBridge from './components/orbit-bridge';
@@ -82,12 +82,6 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [attempt, pathname]);
 
-  const requestView = useCallback((next: OrbitView) => {
-    // Shown at once; the game confirms (or an older game leaves it as it was) through the bridge.
-    setView(next);
-    requestFrameView(next);
-  }, []);
-
   if (pathname === '/admin/login') return <main>{children}</main>;
 
   if (!bootstrap) {
@@ -106,7 +100,7 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
     <AdminBootstrapProvider value={bootstrap}>
       <WorkAdventureProvider>
         <OrbitBridge onRefresh={load} onView={setView} />
-        <ShellChrome view={view} requestView={requestView} user={bootstrap.user} error={error} retry={load}>
+        <ShellChrome view={view} user={bootstrap.user} error={error} retry={load}>
           {children}
         </ShellChrome>
       </WorkAdventureProvider>
@@ -117,14 +111,12 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
 function ShellChrome({
   children,
   view,
-  requestView,
   user,
   error,
   retry,
 }: {
   children: React.ReactNode;
   view: OrbitView;
-  requestView: (view: OrbitView) => void;
   user: AdminBootstrap['user'];
   error: string | null;
   retry: () => void;
@@ -208,8 +200,8 @@ function ShellChrome({
   }, [menuOpen, closeOrbit]);
 
   const frame: OrbitFrameState = useMemo(
-    () => ({ inFrame, view, requestView, route, goBack, closeOrbit, menuOpen, setMenuOpen }),
-    [inFrame, view, requestView, route, goBack, closeOrbit, menuOpen],
+    () => ({ inFrame, view, route, goBack, closeOrbit, menuOpen, setMenuOpen }),
+    [inFrame, view, route, goBack, closeOrbit, menuOpen],
   );
 
   return (
@@ -228,7 +220,7 @@ function ShellChrome({
           )}
           <main
             id="orbit-main"
-            className="mx-auto w-full max-w-6xl flex-1 px-4 pt-4 sm:px-6 lg:pt-6"
+            className="mx-auto w-full max-w-7xl flex-1 px-4 pt-4 sm:px-6 lg:px-8 lg:pt-6"
             style={{ paddingBottom: 'calc(var(--bottombar-height) + var(--safe-bottom) + 1.5rem)' }}
           >
             <PageTransition key={pathname}>{children}</PageTransition>

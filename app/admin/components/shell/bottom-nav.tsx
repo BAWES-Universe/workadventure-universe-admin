@@ -2,22 +2,20 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Menu } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { DESTINATIONS } from '../../config/navigation';
 import { rootOf } from './root-of';
-import { useOrbitFrame } from '../../orbit-frame-context';
 
 /**
- * Home, Places, You and Menu, always within a thumb's reach on a narrow frame. The active item's pill slides to
- * where you go. Hidden on the wide layout, where the sidebar takes over.
+ * Home, Spaces and You, always within a thumb's reach on a narrow frame. The active item's pill slides to where you
+ * go. The Menu is at the top-left, beside the game's own buttons. Hidden on the wide layout, where the sidebar
+ * takes over.
  */
 export function BottomNav() {
   const pathname = usePathname();
-  const { menuOpen, setMenuOpen } = useOrbitFrame();
   const root = rootOf(pathname);
-  const activeIndex = menuOpen ? DESTINATIONS.length : DESTINATIONS.findIndex((item) => item.href === root);
-  const slots = DESTINATIONS.length + 1;
+  const activeIndex = DESTINATIONS.findIndex((item) => item.href === root);
+  const slots = DESTINATIONS.length;
 
   return (
     <nav
@@ -40,13 +38,12 @@ export function BottomNav() {
         )}
         {DESTINATIONS.map((item) => {
           const Icon = item.icon;
-          const active = !menuOpen && item.href === root;
+          const active = item.href === root;
           return (
             <Link
               key={item.href}
               href={item.href}
               aria-current={active ? 'page' : undefined}
-              onClick={() => setMenuOpen(false)}
               className={cn(
                 'orbit-press relative z-10 flex flex-col items-center justify-center gap-1 rounded-2xl text-[11px] font-medium transition-colors',
                 active ? 'text-accent-foreground' : 'text-muted-foreground hover:text-foreground',
@@ -57,19 +54,6 @@ export function BottomNav() {
             </Link>
           );
         })}
-        <button
-          type="button"
-          onClick={() => setMenuOpen(!menuOpen)}
-          aria-expanded={menuOpen}
-          aria-controls="orbit-menu"
-          className={cn(
-            'orbit-press relative z-10 flex flex-col items-center justify-center gap-1 rounded-2xl text-[11px] font-medium transition-colors',
-            menuOpen ? 'text-accent-foreground' : 'text-muted-foreground hover:text-foreground',
-          )}
-        >
-          <Menu className="h-[22px] w-[22px]" strokeWidth={menuOpen ? 2.4 : 2} aria-hidden="true" />
-          Menu
-        </button>
       </div>
     </nav>
   );

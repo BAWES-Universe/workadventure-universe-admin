@@ -1,12 +1,13 @@
 'use client';
 
 import Link from 'next/link';
+import { useState } from 'react';
 import { Compass, Building2, DoorOpen, Users, ChevronRight } from 'lucide-react';
 import { useAdminBootstrap } from './admin-bootstrap-context';
 import HerePanel from './components/here-panel';
 import PendingInvitationsAlert from './components/pending-invitations-alert';
 import RecentlyVisited from './components/recently-visited';
-import YourPlaces from './components/your-places';
+import YourSpaces from './components/your-spaces';
 
 function greetingFor(hour: number): string {
   if (hour < 5) return 'Good night';
@@ -21,18 +22,20 @@ function firstName(name: string | null, email: string | null): string | null {
 }
 
 /**
- * Home: here and now. Who you are and where you are, anything waiting for you, your own places, and where you were
- * last. Exploring the whole Universe is one tap away, under Places.
+ * Home: here and now. Who you are and where you are, anything waiting for you, your own spaces, and where you were
+ * last. Exploring the whole Universe is one tap away, under Spaces.
  */
 export default function AdminDashboard() {
   const { user, stats } = useAdminBootstrap();
   const name = firstName(user.name, user.email);
   const explore = [
-    { href: '/admin/discover/universes', label: 'Universes', count: stats.universes, icon: Compass },
-    { href: '/admin/discover/worlds', label: 'Worlds', count: stats.worlds, icon: Building2 },
-    { href: '/admin/discover/rooms', label: 'Rooms', count: stats.rooms, icon: DoorOpen },
-    { href: '/admin/users', label: 'People', count: stats.users, icon: Users },
+    { href: '/admin/discover/universes', label: 'Universes', description: 'Public universes you can explore', count: stats.universes, icon: Compass },
+    { href: '/admin/discover/worlds', label: 'Worlds', description: 'Worlds across universes', count: stats.worlds, icon: Building2 },
+    { href: '/admin/discover/rooms', label: 'Rooms', description: 'Individual spaces & maps', count: stats.rooms, icon: DoorOpen },
+    { href: '/admin/users', label: 'Users', description: 'People exploring the Universe', count: stats.users, icon: Users },
   ];
+  // The rooms under Where you are (here, and just before), so Recently visited doesn't repeat them.
+  const [shownRoomIds, setShownRoomIds] = useState<string[]>([]);
 
   return (
     <div className="space-y-6">
@@ -41,16 +44,17 @@ export default function AdminDashboard() {
         <h1 className="text-3xl font-semibold tracking-tight">{name ?? 'Welcome'}</h1>
       </header>
 
-      <HerePanel />
       <PendingInvitationsAlert />
-      <YourPlaces />
-      <RecentlyVisited />
+      <HerePanel onShown={setShownRoomIds} />
+      <RecentlyVisited excludeRoomIds={shownRoomIds} />
+      <YourSpaces />
 
       <section data-testid="explore">
         <div className="mb-3">
-          <h2 className="text-lg font-semibold tracking-tight">Explore the Universe</h2>
+          <h2 className="text-lg font-semibold tracking-tight">Discover</h2>
+          <p className="text-sm text-muted-foreground">Explore universes, worlds, rooms, and users across the Universe.</p>
         </div>
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid gap-3 sm:grid-cols-2">
           {explore.map((entry) => {
             const Icon = entry.icon;
             return (
@@ -63,8 +67,11 @@ export default function AdminDashboard() {
                   <Icon className="h-[18px] w-[18px]" aria-hidden="true" />
                 </span>
                 <span className="min-w-0 flex-1">
-                  <span className="block text-[15px] font-medium">{entry.label}</span>
-                  <span className="block text-xs tabular-nums text-muted-foreground">{entry.count.toLocaleString()}</span>
+                  <span className="flex items-baseline justify-between gap-2">
+                    <span className="text-[15px] font-medium">{entry.label}</span>
+                    <span className="text-lg font-semibold tabular-nums">{entry.count.toLocaleString()}</span>
+                  </span>
+                  <span className="block truncate text-xs text-muted-foreground">{entry.description}</span>
                 </span>
                 <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground/60" aria-hidden="true" />
               </Link>

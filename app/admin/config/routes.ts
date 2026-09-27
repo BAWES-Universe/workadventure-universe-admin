@@ -2,7 +2,7 @@
  * Every Orbit page, where Back goes from it, and what to call it.
  *
  * Orbit is a stack of pages inside the game's window, so Back must always have somewhere to go: a page's parent is
- * the place it belongs to (a world's page belongs to Places; a bot's page to Bots). The three roots, Home, Places and
+ * the place it belongs to (a world's page belongs to Spaces; a bot's page to Bots). The three roots, Home, Spaces and
  * You, have no parent: on a root, the last Back closes Orbit and never leaves the room (the game handles that step).
  *
  * `__tests__/admin/routes.test.ts` walks every page in `app/admin` and every route in the workflow inventory and
@@ -21,27 +21,27 @@ export interface RouteDefinition {
 export const ROUTES: RouteDefinition[] = [
   // The three roots
   { pattern: '/admin', title: 'Home', parent: null },
-  { pattern: '/admin/places', title: 'Places', parent: null },
+  { pattern: '/admin/spaces', title: 'Spaces', parent: null },
   { pattern: '/admin/you', title: 'You', parent: null },
 
-  // Places: mine
-  { pattern: '/admin/universes', title: 'My Universes', parent: '/admin/places' },
+  // Spaces: mine
+  { pattern: '/admin/universes', title: 'My Universes', parent: '/admin/spaces' },
   { pattern: '/admin/universes/new', title: 'New universe', parent: '/admin/universes' },
   { pattern: '/admin/universes/[id]', title: 'Universe', parent: '/admin/universes' },
   { pattern: '/admin/worlds/new', title: 'New world', parent: '/admin/universes' },
-  { pattern: '/admin/worlds/[id]', title: 'World', parent: '/admin/places' },
-  { pattern: '/admin/rooms/new', title: 'New room', parent: '/admin/places' },
-  { pattern: '/admin/rooms/[id]', title: 'Room', parent: '/admin/places' },
-  { pattern: '/admin/stars', title: 'My Stars', parent: '/admin/places' },
-  { pattern: '/admin/memberships', title: 'My Memberships', parent: '/admin/places' },
+  { pattern: '/admin/worlds/[id]', title: 'World', parent: '/admin/spaces' },
+  { pattern: '/admin/rooms/new', title: 'New room', parent: '/admin/spaces' },
+  { pattern: '/admin/rooms/[id]', title: 'Room', parent: '/admin/spaces' },
+  { pattern: '/admin/stars', title: 'My Stars', parent: '/admin/spaces' },
+  { pattern: '/admin/memberships', title: 'My Memberships', parent: '/admin/spaces' },
 
-  // Places: explore
-  { pattern: '/admin/discover/universes', title: 'Discover Universes', parent: '/admin/places' },
-  { pattern: '/admin/discover/worlds', title: 'Discover Worlds', parent: '/admin/places' },
-  { pattern: '/admin/discover/rooms', title: 'Discover Rooms', parent: '/admin/places' },
-  { pattern: '/admin/users', title: 'Users', parent: '/admin/places' },
+  // Spaces: explore
+  { pattern: '/admin/discover/universes', title: 'Discover Universes', parent: '/admin/spaces' },
+  { pattern: '/admin/discover/worlds', title: 'Discover Worlds', parent: '/admin/spaces' },
+  { pattern: '/admin/discover/rooms', title: 'Discover Rooms', parent: '/admin/spaces' },
+  { pattern: '/admin/users', title: 'Users', parent: '/admin/spaces' },
   { pattern: '/admin/users/[id]', title: 'User', parent: '/admin/users' },
-  { pattern: '/admin/templates', title: 'Room Templates', parent: '/admin/places' },
+  { pattern: '/admin/templates', title: 'Room Templates', parent: '/admin/spaces' },
   { pattern: '/admin/templates/categories/new', title: 'New category', parent: '/admin/templates' },
   { pattern: '/admin/templates/categories/[id]', title: 'Category', parent: '/admin/templates' },
   { pattern: '/admin/templates/templates/new', title: 'New template', parent: '/admin/templates' },
@@ -162,7 +162,7 @@ export function resolveRoute(pathname: string): ResolvedRoute {
   return { pattern: pathname, title: 'Orbit', parent: '/admin', parentTitle: 'Home', params: {}, known: false };
 }
 
-/** Home, Places and You: the pages the bottom bar and the sidebar lead to, with no parent of their own. */
+/** Home, Spaces and You: the pages the bottom bar and the sidebar lead to, with no parent of their own. */
 export function isRootRoute(pathname: string): boolean {
   return resolveRoute(pathname).parent === null;
 }

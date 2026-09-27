@@ -10,10 +10,8 @@ import type { ResolvedRoute } from './config/routes';
 export interface OrbitFrameState {
   /** Inside the game's frame (false in a plain development tab). */
   inFrame: boolean;
-  /** The frame's size right now. */
+  /** The frame's size right now (the game's own maximise button changes it). */
   view: OrbitView;
-  /** Ask the game for the other size. */
-  requestView: (view: OrbitView) => void;
   /** The page shown, and where Back goes from it. */
   route: ResolvedRoute;
   /** Back: the previous Orbit page when there is one, else the page's parent. */

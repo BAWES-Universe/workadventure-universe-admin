@@ -1,6 +1,6 @@
 import { resolveRoute } from '../../config/routes';
 
-/** Which of Home, Places and You a page belongs to: the root its Back path ends on. */
+/** Which of Home, Spaces and You a page belongs to: the root its Back path ends on. */
 export function rootOf(pathname: string): string {
   let current = pathname;
   for (let guard = 0; guard < 12; guard += 1) {

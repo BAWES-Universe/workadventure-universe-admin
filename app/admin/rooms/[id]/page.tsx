@@ -538,9 +538,9 @@ export default function RoomDetailPage() {
 
   return (
     <div className="space-y-8">
-      <nav className="flex items-center space-x-2 text-sm text-muted-foreground">
+      <nav className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-muted-foreground">
         <Link href="/admin" className="hover:text-foreground">
-          Dashboard
+          Home
         </Link>
         <ChevronRight className="h-4 w-4" />
         <Link href={`/admin/universes/${room.world.universe.id}`} className="hover:text-foreground">
@@ -555,8 +555,8 @@ export default function RoomDetailPage() {
       </nav>
 
       <div className="space-y-1">
-        <div className="flex items-center gap-3">
-          <h1 className="text-4xl font-bold tracking-tight">{room.name}</h1>
+        <div className="flex flex-wrap items-center gap-3">
+          <h1 className="min-w-0 break-words text-4xl font-bold tracking-tight">{room.name}</h1>
           <div className="flex items-center gap-2">
             {room.canEdit !== false && (
               <Badge variant={room.isPublic ? 'default' : 'secondary'}>
@@ -568,8 +568,8 @@ export default function RoomDetailPage() {
         <p className="text-muted-foreground">
           In <Link href={`/admin/worlds/${room.world.id}`} className="text-primary hover:underline">{room.world.name}</Link>
         </p>
-        <div className="flex items-center justify-between">
-          <p className="text-muted-foreground flex items-center gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <p className="text-muted-foreground flex flex-wrap items-center gap-3">
             {analytics && (
               <>
                 <span className="flex items-center gap-1.5 text-sm">
