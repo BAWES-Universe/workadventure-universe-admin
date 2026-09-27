@@ -7,7 +7,7 @@ import { useOrbitFrame } from '../../orbit-frame-context';
 /**
  * The bar at the top of every page, at the frame's top-left beside the game's own close and maximise buttons.
  * On Orbit, Space and You it is the "Orbit Menu" button; on every other page it is Back alone, named after where it
- * goes, so there is one way out and it's clear where you are. The game's maximise button changes the view; Orbit
+ * goes. The page carries its own heading, so the bar doesn't repeat it. The game's maximise button changes the view; Orbit
  * has none of its own. In the full-screen view the game's buttons sit over Orbit's top-right corner, so the bar
  * leaves that corner free.
  */
@@ -21,7 +21,7 @@ export function TopBar() {
       className={cn('orbit-glass sticky top-0 z-40 border-b border-border/60', inFrame && full && 'orbit-reserve-game-controls')}
       style={{ height: 'var(--topbar-height)' }}
     >
-      <div className="@container/bar relative flex h-full items-center gap-2 px-2 sm:px-3">
+      <div className="relative flex h-full items-center gap-2 px-2 sm:px-3">
         {isRoot ? (
           <button
             type="button"
@@ -39,7 +39,7 @@ export function TopBar() {
           <button
             type="button"
             onClick={goBack}
-            className="orbit-press inline-flex h-10 min-w-0 max-w-full shrink items-center gap-0.5 rounded-full border border-foreground/15 pl-1.5 pr-4 text-foreground transition-colors hover:border-foreground/30 hover:bg-foreground/5 @[26rem]/bar:max-w-[45%]"
+            className="orbit-press inline-flex h-10 min-w-0 max-w-full shrink items-center gap-0.5 rounded-full border border-foreground/15 pl-1.5 pr-4 text-foreground transition-colors hover:border-foreground/30 hover:bg-foreground/5"
             data-testid="orbit-back"
           >
             <ChevronLeft className="h-5 w-5 shrink-0" strokeWidth={2.75} aria-hidden="true" />
@@ -47,16 +47,6 @@ export function TopBar() {
           </button>
         )}
 
-        {!isRoot && (
-          // The page carries its own heading; this is the bar's short name for it, shown when the bar has room beside
-          // Back (never over it).
-          <p
-            className="hidden min-w-0 flex-1 truncate pr-2 text-center text-[15px] font-semibold @[26rem]/bar:block lg:pr-12"
-            data-testid="orbit-title"
-          >
-            {route.title}
-          </p>
-        )}
       </div>
     </header>
   );

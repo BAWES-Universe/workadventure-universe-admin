@@ -148,7 +148,8 @@ describe('AdminShell', () => {
     await renderShell('/admin/worlds/w-1');
     const back = screen.getByTestId('orbit-back');
     expect(back.textContent).toContain('Space');
-    expect(screen.getByTestId('orbit-title').textContent).toBe('World');
+    // The page carries its own heading; the bar doesn't repeat it.
+    expect(screen.queryByTestId('orbit-title')).toBeNull();
     fireEvent.click(back);
     // The first page of a visit: its parent takes its place, so the browser's Back still closes Orbit.
     expect(mockRouter.replace).toHaveBeenCalledWith('/admin/space');

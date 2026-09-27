@@ -8,15 +8,9 @@ import HerePanel from './components/here-panel';
 import PendingInvitationsAlert from './components/pending-invitations-alert';
 import RecentlyVisited from './components/recently-visited';
 
-function firstName(name: string | null, email: string | null): string | null {
-  const source = name?.trim() || email?.split('@')[0] || '';
-  return source ? source.split(/\s+/)[0] : null;
-}
-
 /** Orbit follows a journey: here, before, your trail, then everything beyond it. What's yours is on You. */
 export default function AdminDashboard() {
-  const { user, stats } = useAdminBootstrap();
-  const name = firstName(user.name, user.email);
+  const { stats } = useAdminBootstrap();
   const explore = [
     { href: '/admin/discover/universes', label: 'Universes', description: 'Public universes you can explore', count: stats.universes, icon: Sparkles, kind: 'universe' },
     { href: '/admin/discover/worlds', label: 'Worlds', description: 'Worlds across universes', count: stats.worlds, icon: Earth, kind: 'world' },
@@ -28,14 +22,7 @@ export default function AdminDashboard() {
 
   return (
     <div className="space-y-7">
-      <header className="orbit-hero">
-        <div>
-          <p className="orbit-eyebrow">{name ? `Welcome back, ${name}` : 'Welcome back'}</p>
-          <h1>
-            Your orbit<span aria-hidden="true">.</span>
-          </h1>
-        </div>
-      </header>
+      <h1 className="sr-only">Orbit</h1>
 
       <div className="orbit-home-columns">
         <div className="orbit-home-primary">

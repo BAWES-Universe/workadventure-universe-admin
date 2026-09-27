@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { ArrowUpRight, DoorOpen, Earth, Plus, Sparkles, Telescope, Users, type LucideIcon } from 'lucide-react';
+import { ArrowUpRight, DoorOpen, Earth, Plus, Sparkles, Users, type LucideIcon } from 'lucide-react';
 import { useAdminBootstrap } from '../admin-bootstrap-context';
 import styles from './space.module.css';
 
@@ -9,17 +9,7 @@ import styles from './space.module.css';
 export default function SpacePage() {
   return (
     <div className={styles.page}>
-      <header className={styles.header}>
-        <div>
-          <p className={styles.eyebrow}>
-            <Telescope size={13} aria-hidden="true" /> Universes, worlds and rooms
-          </p>
-          <h1 className="orbit-display">
-            Space<span>.</span>
-          </h1>
-          <p className={styles.intro}>Everything out there to explore.</p>
-        </div>
-      </header>
+      <h1 className="sr-only">Space</h1>
       <Explore />
     </div>
   );
