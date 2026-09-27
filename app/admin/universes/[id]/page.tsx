@@ -402,6 +402,8 @@ export default function UniverseDetailPage() {
           </TabsList>
 
           <TabsContent value="details" className="mt-0 space-y-8">
+          {activeTab === 'details' && (
+            <>
               <section className="space-y-3" aria-labelledby="universe-about">
                 <SectionHeader id="universe-about" title="About" />
                 {universe.description && (
@@ -477,9 +479,13 @@ export default function UniverseDetailPage() {
                   )}
                 </section>
               ) : null}
+            </>
+          )}
           </TabsContent>
 
           <TabsContent value="analytics" className="mt-0 space-y-8">
+          {activeTab === 'analytics' && (
+            <>
               {analyticsLoading ? (
                 <LoadingRows label="visitors" rows={3} />
               ) : analytics && analytics.recentActivity && analytics.recentActivity.length > 0 ? (
@@ -574,6 +580,8 @@ export default function UniverseDetailPage() {
                   text="Visits show up here once people come to this universe."
                 />
               )}
+            </>
+          )}
           </TabsContent>
           </Tabs>
         </>
