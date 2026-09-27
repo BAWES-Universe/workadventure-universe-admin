@@ -123,6 +123,35 @@ describe('New world without a universe in the address', () => {
     await screen.findByRole('link', { name: 'Beta' });
     expect(screen.queryAllByRole('radio')).toHaveLength(0);
   });
+
+  it('says so when the universe in the address is not yours, instead of loading forever', async () => {
+    search = new URLSearchParams('universeId=someone-elses');
+    route({ '/api/admin/universes': { universes: [UNIVERSE_A] } });
+    render(<NewWorldPage />);
+    expect((await screen.findByTestId('universe-not-yours')).textContent).toContain('Choose one of yours');
+    expect(screen.queryByText(/Loading universe information/)).toBeNull();
+  });
+
+  it('offers a retry when the universe cannot be loaded at all', async () => {
+    search = new URLSearchParams('universeId=ua');
+    fetchMock.mockImplementation((url: string) =>
+      url === '/api/auth/me' ? ok({ user: { id: 'me' } }) : Promise.resolve({ ok: false, status: 403, json: () => Promise.resolve({}) }),
+    );
+    render(<NewWorldPage />);
+    expect(await screen.findByRole('button', { name: /try again/i })).toBeTruthy();
+    expect(screen.queryByText(/Loading universe information/)).toBeNull();
+    // No half-usable form under the error.
+    expect(screen.queryByLabelText(/Name/)).toBeNull();
+  });
+
+  it('shows no form when your universes cannot be loaded', async () => {
+    fetchMock.mockImplementation((url: string) =>
+      url === '/api/auth/me' ? ok({ user: { id: 'me' } }) : Promise.resolve({ ok: false, status: 503, json: () => Promise.resolve({}) }),
+    );
+    render(<NewWorldPage />);
+    expect(await screen.findByRole('button', { name: /try again/i })).toBeTruthy();
+    expect(screen.queryByLabelText(/Name/)).toBeNull();
+  });
 });
 
 describe('New universe on the way to a world', () => {
@@ -206,6 +235,29 @@ describe('Public and Featured', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Create universe' }));
     await waitFor(() => expect(posted('/api/admin/universes')).not.toBeNull());
     expect(posted('/api/admin/universes').featured).toBe(false);
+  });
+});
+
+describe('New room waits for its world', () => {
+  it('shows no map or form while your worlds load, nor after they fail', async () => {
+    fetchMock.mockImplementation((url: string) =>
+      url === '/api/auth/me' ? ok({ user: { id: 'me' } }) : Promise.resolve({ ok: false, status: 503, json: () => Promise.resolve({}) }),
+    );
+    render(<NewRoomPage />);
+    expect(screen.queryByText('Map')).toBeNull();
+    expect(await screen.findByRole('button', { name: /try again/i })).toBeTruthy();
+    expect(screen.queryByText('Map')).toBeNull();
+    expect(screen.queryByLabelText(/Name/)).toBeNull();
+  });
+
+  it('offers a retry when the world in the address cannot be loaded', async () => {
+    search = new URLSearchParams('worldId=w1');
+    fetchMock.mockImplementation((url: string) =>
+      url === '/api/auth/me' ? ok({ user: { id: 'me' } }) : Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve({}) }),
+    );
+    render(<NewRoomPage />);
+    expect(await screen.findByRole('button', { name: /try again/i })).toBeTruthy();
+    expect(screen.queryByLabelText(/Name/)).toBeNull();
   });
 });
 

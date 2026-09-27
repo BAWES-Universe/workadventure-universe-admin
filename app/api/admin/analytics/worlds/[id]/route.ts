@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getViewer, accessDetailFor, detailForRecord, redactAccess, unauthorizedResponse } from '@/lib/access-scope';
 import { prisma } from '@/lib/db';
 import { withWokas } from '@/lib/woka-avatar';
-import { utcHourBuckets } from '@/lib/analytics-peak';
+import { utcHourBucketsFor } from '@/lib/analytics-hours';
 import { viewerWasLast } from '@/lib/analytics-viewer';
 
 export async function GET(
@@ -86,11 +86,7 @@ export async function GET(
     
     // Peak: every access ever made here, bucketed by UTC hour (busiest first); the client shows the busiest
     // bucket on the viewer's own clock.
-    const allAccesses = await prisma.roomAccess.findMany({
-      where: { worldId: id },
-      select: { accessedAt: true },
-    });
-    const peakTimes = utcHourBuckets(allAccesses.map((access) => access.accessedAt));
+    const peakTimes = await utcHourBucketsFor('world', id);
     
     // Get recent activity with pagination
     const recentActivity = await prisma.roomAccess.findMany({

@@ -116,9 +116,13 @@ export function VisitLine({ you, latest, youWereLast }: { you?: string | null; l
   if (!you && !latest) return null;
   return (
     <span className={styles.visits}>
-      <span>
-        Last visited by you <strong>{you ? timeAgo(new Date(you)) : 'never'}</strong>
-      </span>
+      {you ? (
+        <span>
+          Last visited by you <strong>{timeAgo(new Date(you))}</strong>
+        </span>
+      ) : (
+        <span>You haven’t visited yet</span>
+      )}
       {youWereLast ? (
         <span>You were the last visitor</span>
       ) : (

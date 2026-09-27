@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
+import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { getSessionUser, type SessionUser } from '@/lib/auth-session';
 import { canSeeRoom } from '@/lib/room-visibility';
@@ -68,20 +69,12 @@ export async function GET(request: NextRequest) {
     const limit = Math.min(20, Math.max(1, parseInt(searchParams.get('limit') || '2', 10) || 2));
     const excludeRoomId = searchParams.get('excludeRoomId');
 
-    const [accesses, memberships] = await Promise.all([
-      prisma.roomAccess.findMany({
-        where: viewer ? { OR: [{ userId: viewer.id }, { userUuid: viewer.uuid }] } : {},
-        select: { accessedAt: true, room: { select: ROOM_SELECT } },
-        orderBy: { accessedAt: 'desc' },
-        take: 60,
-      }),
-      viewer
-        ? prisma.worldMember.findMany({ where: { userId: viewer.id }, select: { worldId: true } })
-        : Promise.resolve([] as { worldId: string }[]),
-    ]);
-    const memberWorldIds = new Set(memberships.map((membership) => membership.worldId));
+    const memberWorldIds = new Set(
+      (viewer ? await prisma.worldMember.findMany({ where: { userId: viewer.id }, select: { worldId: true } }) : []).map(
+        (membership) => membership.worldId,
+      ),
+    );
 
-    const seen = new Set<string>();
     const recent: {
       roomId: string;
       roomName: string;
@@ -98,15 +91,46 @@ export async function GET(request: NextRequest) {
       accessedAt: Date;
     }[] = [];
 
-    for (const access of accesses) {
-      const room = access.room as RecentRoomRecord | null;
+    // Each room's latest visit, newest first, with everything the list leaves out filtered in the database before
+    // the limit applies: the start map, the excluded room and, for a person, rooms they may no longer see (the same
+    // rule as canSeeRoom). So the limit always counts rooms that will be shown, however many were hidden before them.
+    const whose = viewer
+      ? Prisma.sql`AND (ra.user_id = ${viewer.id}${viewer.uuid ? Prisma.sql` OR ra.user_uuid = ${viewer.uuid}` : Prisma.empty})`
+      : Prisma.empty;
+    const visible =
+      viewer && !viewer.isSuperAdmin
+        ? Prisma.sql`AND (
+            (r.is_public AND w.is_public AND u.is_public)
+            OR u.owner_id = ${viewer.id}
+            OR EXISTS (SELECT 1 FROM world_members wm WHERE wm.world_id = w.id AND wm.user_id = ${viewer.id})
+          )`
+        : Prisma.empty;
+    const latest = await prisma.$queryRaw<Array<{ room_id: string; last_at: Date }>>`
+      SELECT ra.room_id, MAX(ra.accessed_at) AS last_at
+      FROM room_accesses ra
+      JOIN rooms r ON r.id = ra.room_id
+      JOIN worlds w ON w.id = r.world_id
+      JOIN universes u ON u.id = w.universe_id
+      WHERE NOT (u.slug = 'default' AND w.slug = 'default' AND r.slug = 'default')
+        ${excludeRoomId ? Prisma.sql`AND r.id <> ${excludeRoomId}` : Prisma.empty}
+        ${whose}
+        ${visible}
+      GROUP BY ra.room_id
+      ORDER BY last_at DESC, ra.room_id
+      LIMIT ${limit}`;
+
+    const records = latest.length
+      ? await prisma.room.findMany({ where: { id: { in: latest.map((row) => row.room_id) } }, select: ROOM_SELECT })
+      : [];
+    const byId = new Map(records.map((record) => [record.id, record as RecentRoomRecord]));
+
+    for (const row of latest) {
+      const room = byId.get(row.room_id);
       if (!room) continue;
+      // The query applied these already; kept as a guard should the two ever drift apart.
       if (isStartRoom(room)) continue;
       if (excludeRoomId && room.id === excludeRoomId) continue;
-      if (seen.has(room.id)) continue;
       if (!isAdminToken && !canSeeRoom(room, viewer, memberWorldIds)) continue;
-      seen.add(room.id);
-
       recent.push({
         roomId: room.id,
         roomName: room.name,
@@ -120,9 +144,8 @@ export async function GET(request: NextRequest) {
         universeId: room.world.universe.id,
         universeName: room.world.universe.name,
         universeSlug: room.world.universe.slug,
-        accessedAt: access.accessedAt,
+        accessedAt: new Date(row.last_at),
       });
-      if (recent.length >= limit) break;
     }
 
     return NextResponse.json({ rooms: recent });

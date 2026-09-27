@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef, Suspense, useMemo } from 'react';
+import { useState, useEffect, useRef, Suspense, useMemo, useCallback } from 'react';
 import { DraftNotice } from '../../components/draft-notice';
 import { useDraft } from '../../hooks/use-draft';
 import { EmptyCard, InContext, KindIcon, LoadError, LoadingRows, PageHeader, SectionHeader, SettingSwitch, Settings } from '../../components/ds';
@@ -153,24 +153,27 @@ function NewRoomPageContent() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [templateMapIdParam]);
 
-  useEffect(() => {
-    async function fetchWorldDetails() {
-      if (worldIdParam) {
-        try {
-          const { authenticatedFetch } = await import('@/lib/client-auth');
-          const response = await authenticatedFetch(`/api/admin/worlds/${worldIdParam}`);
-          if (response.ok) {
-            const data = await response.json();
-            setWorldDetails(data);
-            setFormData(prev => ({ ...prev, worldId: data.id }));
-          }
-        } catch {
-          setError('Failed to load world details');
-        }
-      }
+  // The world in the address: loading, then ready or failed (with Try again), never silently missing.
+  const [worldDetailsStatus, setWorldDetailsStatus] = useState<'loading' | 'ready' | 'error'>('loading');
+  const fetchWorldDetails = useCallback(async () => {
+    if (!worldIdParam) return;
+    setWorldDetailsStatus('loading');
+    try {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch(`/api/admin/worlds/${worldIdParam}`);
+      if (!response.ok) throw new Error('Failed to load the world');
+      const data = await response.json();
+      setWorldDetails(data);
+      setFormData(prev => ({ ...prev, worldId: data.id }));
+      setWorldDetailsStatus('ready');
+    } catch {
+      setWorldDetailsStatus('error');
     }
-    fetchWorldDetails();
   }, [worldIdParam]);
+
+  useEffect(() => {
+    void fetchWorldDetails();
+  }, [fetchWorldDetails]);
 
   useEffect(() => {
     if (addressOpen) slugInput.current?.focus();
@@ -386,6 +389,8 @@ function NewRoomPageContent() {
   const selectedWorld = worlds.find(w => w.id === formData.worldId);
   const displayWorld = worldDetails || selectedWorld;
   const noWorld = !worldIdParam && worldsStatus === 'ready' && worlds.length === 0;
+  // The map and the form only once there is a world to add the room to: not while loading, and not after a failure.
+  const worldKnown = worldIdParam ? worldDetailsStatus === 'ready' : worldsStatus === 'ready' && worlds.length > 0;
   const picking = !worldIdParam && worlds.length > 1;
   const showAddressInput = addressOpen || formData.addressEdited || (formData.name.trim() !== '' && formData.slug === '');
 
@@ -418,6 +423,8 @@ function NewRoomPageContent() {
 
       {!worldIdParam && worldsStatus === 'loading' && <LoadingRows label="your worlds" />}
       {!worldIdParam && worldsStatus === 'error' && <LoadError label="your worlds" retry={fetchWorlds} />}
+      {worldIdParam && worldDetailsStatus === 'loading' && <LoadingRows label="the world" rows={1} />}
+      {worldIdParam && worldDetailsStatus === 'error' && <LoadError label="the world" retry={() => void fetchWorldDetails()} />}
       {noWorld && (
         <EmptyCard
           kind="world"
@@ -436,7 +443,7 @@ function NewRoomPageContent() {
         />
       )}
 
-      {!noWorld && (
+      {worldKnown && (
         <section aria-labelledby="room-map" className="space-y-4">
           <SectionHeader id="room-map" title="Map" />
           {/* Template/Manual Toggle */}
@@ -558,7 +565,7 @@ function NewRoomPageContent() {
       )}
 
       {/* Room Form - Only show when not using template, or when template map is selected */}
-      {!noWorld && (useTemplate ? (selectedMapId !== null && selectedMapId !== '') : true) && (
+      {worldKnown && (useTemplate ? (selectedMapId !== null && selectedMapId !== '') : true) && (
         <Card>
           <CardContent className="p-4 sm:p-6">
             <form onSubmit={handleSubmit} className="space-y-6">

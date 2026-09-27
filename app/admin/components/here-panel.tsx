@@ -74,6 +74,12 @@ export default function HerePanel({ onShown }: { onShown?: (roomIds: string[]) =
   // Asking again after a failure (the room lookup, or the room before it).
   const [attempt, setAttempt] = useState(0);
   const unavailable = Boolean(error) || (!isReady && !isLoading);
+  // Try again clears the failure at once, so the card shows it is looking again instead of the old notice.
+  const retry = () => {
+    setLocated((current) => (current.kind === 'failed' ? { kind: 'loading' } : current));
+    setPrevious((current) => (current.failed ? { ...current, failed: false } : current));
+    setAttempt((value) => value + 1);
+  };
 
   useEffect(() => {
     if (unavailable || !isReady || !wa) return;
@@ -139,7 +145,7 @@ export default function HerePanel({ onShown }: { onShown?: (roomIds: string[]) =
     current = (
       <Notice eyebrow="Where you are" title="No room information available">
         <p>Orbit couldn&apos;t tell which room you&apos;re in right now.</p>
-        <button type="button" className={styles.retry} onClick={() => setAttempt((value) => value + 1)}>
+        <button type="button" className={styles.retry} onClick={retry}>
           Try again
         </button>
       </Notice>
@@ -184,7 +190,7 @@ export default function HerePanel({ onShown }: { onShown?: (roomIds: string[]) =
         {roomId && previous.currentId === roomId && previous.failed && (
           <p className={styles.activityStatus} role="status">
             Couldn&apos;t load the room before this.{' '}
-            <button type="button" className={styles.retry} onClick={() => setAttempt((value) => value + 1)}>
+            <button type="button" className={styles.retry} onClick={retry}>
               Try again
             </button>
           </p>

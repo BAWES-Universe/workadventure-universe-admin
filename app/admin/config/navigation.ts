@@ -1,5 +1,4 @@
 import {
-  Palette,
   Orbit,
   Telescope,
   Sparkles,
@@ -50,7 +49,7 @@ export const NAV_ITEMS: NavItem[] = [
   { href: '/admin/universes', label: 'Your universes', icon: Sparkles, group: 'my' },
   { href: '/admin/stars', label: 'Stars', icon: Star, group: 'my' },
   { href: '/admin/memberships', label: 'Memberships', icon: Mail, requiresAuth: true, group: 'my' },
-  { href: '/admin/profile', label: 'Profile', icon: UserCircle, requiresAuth: true, group: 'my' },
+  { href: '/admin/you', label: 'Profile', icon: UserCircle, requiresAuth: true, group: 'my' },
 
   // Discover section
   { href: '/admin/discover/universes', label: 'Universes', icon: Sparkles, group: 'discover' },
@@ -59,7 +58,6 @@ export const NAV_ITEMS: NavItem[] = [
   { href: '/admin/users', label: 'People', icon: Users, group: 'discover' },
 
   // Admin section (super admin only)
-  { href: '/admin/style', label: 'Orbit style', icon: Palette, requiresSuperAdmin: true, group: 'admin' },
   { href: '/admin/avatars', label: 'Avatar sets', icon: Layers, requiresSuperAdmin: true, group: 'admin' },
   { href: '/admin/bots', label: 'Bots', icon: Bot, requiresSuperAdmin: true, group: 'admin' },
   { href: '/admin/ai-providers', label: 'AI providers', icon: Bot, requiresSuperAdmin: true, group: 'admin' },
