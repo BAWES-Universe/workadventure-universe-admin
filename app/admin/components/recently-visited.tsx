@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { ArrowUpRight } from 'lucide-react';
 import { authenticatedFetch } from '@/lib/client-auth';
+import { SectionHeader } from './ds';
 import { RoomCard, RoomCardSkeleton } from './room-card';
 import styles from './room-card.module.css';
 
@@ -47,15 +48,7 @@ export default function RecentlyVisited({ limit = 4, excludeRoomIds = [] }: { li
 
   return (
     <section className={styles.recentSection} data-testid="recently-visited" aria-labelledby="recent-heading">
-      <div className={styles.recentHeading}>
-        <div>
-          <h2 id="recent-heading" className="orbit-display">
-            Recently visited
-          </h2>
-          <p>Rooms you were in lately.</p>
-        </div>
-        {shown && shown.length > 0 && <span aria-hidden="true">{String(shown.length).padStart(2, '0')}</span>}
-      </div>
+      <SectionHeader id="recent-heading" title="Recently visited" count={shown?.length} />
       {shown === null ? (
         <div className={styles.recentGrid}>
           <RoomCardSkeleton />

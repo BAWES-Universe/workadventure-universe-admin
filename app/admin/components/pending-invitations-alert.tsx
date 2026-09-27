@@ -2,7 +2,8 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { Mail, X } from 'lucide-react';
+import { X } from 'lucide-react';
+import { KindIcon } from './ds';
 import { Button } from '@/components/ui/button';
 import { authenticatedFetch } from '@/lib/client-auth';
 
@@ -82,12 +83,10 @@ export default function PendingInvitationsAlert() {
   return (
     <div
       role="status"
-      className="orbit-card orbit-glow relative flex gap-3 p-4 pr-12 orbit-rise"
+      className="orbit-rise relative flex gap-3 rounded-[18px] border border-amber-500/45 bg-card bg-[linear-gradient(135deg,rgb(245_158_11/0.08),transparent_60%)] p-4 pr-12"
       data-testid="pending-invitations"
     >
-      <span className="orbit-brand-fill flex h-10 w-10 shrink-0 items-center justify-center rounded-xl">
-        <Mail className="h-5 w-5" aria-hidden="true" />
-      </span>
+      <KindIcon kind="world" />
       <div className="min-w-0 flex-1 space-y-2">
         <div>
           <p className="text-[15px] font-semibold">
@@ -112,7 +111,7 @@ export default function PendingInvitationsAlert() {
         type="button"
         onClick={dismiss}
         aria-label="Dismiss"
-        className="orbit-press absolute right-2 top-2 flex h-9 w-9 items-center justify-center rounded-xl text-muted-foreground hover:bg-muted hover:text-foreground"
+        className="orbit-press absolute right-2 top-2 flex h-10 w-10 items-center justify-center rounded-full text-muted-foreground hover:bg-muted hover:text-foreground"
       >
         <X className="h-4 w-4" aria-hidden="true" />
       </button>

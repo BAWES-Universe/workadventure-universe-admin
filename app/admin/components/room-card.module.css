@@ -1,9 +1,9 @@
 .location, .recentSection { --signal-accent: #b45309; --signal-line: hsl(var(--border)); --signal-wash: rgb(245 158 11 / .06); min-width: 0; container-type: inline-size; }
 :global(.dark) .location, :global(.dark) .recentSection { --signal-accent: var(--kind-room-solid); --signal-line: hsl(var(--border)); --signal-wash: rgb(245 158 11 / .07); }
-.card { position: relative; display: flex; flex-direction: column; min-width: 0; overflow: hidden; padding: 15px 17px 12px; border: 1px solid var(--signal-line); border-radius: 3px 18px 3px 18px; background: hsl(var(--card)); transition: border-color 180ms ease; }
+.card { position: relative; display: flex; flex-direction: column; min-width: 0; overflow: hidden; padding: 15px 17px 12px; border: 1px solid var(--signal-line); border-radius: 18px; background: hsl(var(--card)); transition: border-color 160ms, transform 160ms; }
 .card:focus-within, .card:hover { border-color: color-mix(in srgb, var(--signal-accent) 44%, transparent); }
 .card a:focus-visible, .card button:focus-visible, .card summary:focus-visible, .notice a:focus-visible, .notice button:focus-visible { outline: 2px solid var(--signal-accent); outline-offset: 3px; border-radius: 3px; }
-.current { padding: 17px 18px 14px; border-radius: 2px 24px 2px 24px; background: linear-gradient(118deg, hsl(var(--card)) 20%, var(--signal-wash)), hsl(var(--card)); }
+.current { padding: 17px 18px 14px; border-radius: 18px; background: linear-gradient(118deg, hsl(var(--card)) 20%, var(--signal-wash)), hsl(var(--card)); }
 .current::before { content: ''; pointer-events: none; position: absolute; width: 68%; height: 160px; right: 0; top: 0; background-image: radial-gradient(var(--signal-accent) .65px, transparent .8px); background-size: 26px 26px; opacity: .18; mask-image: linear-gradient(100deg, transparent, #000); }
 .cardTop { position: relative; z-index: 1; display: flex; align-items: center; gap: 8px; min-height: 16px; }
 .eyebrow { display: inline-flex; align-items: center; gap: 7px; color: var(--signal-accent); font-size: 10px; font-weight: 650; letter-spacing: .13em; text-transform: uppercase; }
@@ -51,24 +51,24 @@
 .peakDetail { margin-bottom: 5px; }
 .disclosureBody .detailsLink { width: 100%; }
 .failure { margin: 0 0 10px; color: hsl(var(--destructive)); font-size: 11px; line-height: 1.5; }
-.locationGrid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
+.locationGrid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
 .previousStop { position: relative; min-width: 0; margin-left: 13px; padding-left: 14px; }
 .previousStop::before { position: absolute; left: 0; top: -12px; width: 12px; height: 35px; content: ''; border-bottom: 1px solid var(--signal-line); border-left: 1px solid var(--signal-line); border-radius: 0 0 0 9px; }
-.previous { border-radius: 2px 15px 2px 15px; padding: 12px 14px 12px; background: var(--signal-wash); }
+.previous { border-radius: 18px; padding: 12px 14px 12px; background: hsl(var(--card)); }
 .previous .roomName { font-size: 18px; }
 .nameRow { display: flex; align-items: center; gap: 10px; }
 .recentHeading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 13px; }
 .recentHeading h2 { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: -.02em; }
 .recentHeading p { margin: 3px 0 0; color: hsl(var(--muted-foreground)); font-size: 11px; }
 .recentHeading > span { color: hsl(var(--muted-foreground)); font-family: var(--font-mono); font-size: 10px; }
-.recentGrid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; align-items: start; }
-.notice { position: relative; padding: 18px; border: 1px solid var(--signal-line); border-radius: 2px 20px 2px 20px; background: var(--signal-wash); }
+.recentGrid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: start; }
+.notice { position: relative; padding: 18px; border: 1px solid var(--signal-line); border-radius: 18px; background: var(--signal-wash); }
 .noticeTop { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .notice h2, .notice h3 { position: relative; margin: 7px 0 9px; font-family: var(--font-display); font-size: 22px; font-weight: 700; letter-spacing: -.02em; line-height: 1.2; }
 .notice p { color: hsl(var(--muted-foreground)); font-size: 12px; line-height: 1.6; }
 .notice .detailsLink { color: var(--signal-accent); }
 .roomUri { overflow-wrap: anywhere; font-family: var(--font-mono); font-size: 10px !important; }
-.skeleton { height: 170px; border-radius: 2px 18px 2px 18px; background: var(--signal-wash); border: 1px solid var(--signal-line); }
+.skeleton { height: 170px; border-radius: 18px; background: var(--signal-wash); border: 1px solid var(--signal-line); }
 .previousStatus { padding-left: 22px; color: hsl(var(--muted-foreground)); font-size: 11px; }
 @container (min-width: 430px) {
   .current { padding: 18px 21px 0; }

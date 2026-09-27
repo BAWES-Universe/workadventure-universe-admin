@@ -363,7 +363,7 @@ a[href] {
 .orbit-hero h1 { font-family: var(--font-display); font-size: clamp(30px, 7vw, 44px); line-height: 1.08; letter-spacing: -.03em; font-weight: 700; margin-top: 6px; }
 .orbit-hero h1 > span, .orbit-gradient-text { background-image: var(--brand-gradient); -webkit-background-clip: text; background-clip: text; color: transparent; }
 .orbit-hero > p { font-size: 13px; color: hsl(var(--muted-foreground)); margin-top: 6px; }
-.orbit-home { display: grid; gap: 28px; min-width: 0; max-width: 760px; }
+.orbit-home { display: grid; gap: 32px; min-width: 0; max-width: 760px; }
 
 /* ─── The menu: every destination and tool, searchable ─── */
 .orbit-menu-overlay { position: fixed; inset: 0; z-index: 50; background: rgb(5 3 12 / .65); backdrop-filter: blur(5px); }
