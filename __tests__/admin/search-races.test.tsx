@@ -5,6 +5,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import UsersPage from '@/app/admin/users/page';
 import DiscoverWorldsPage from '@/app/admin/discover/worlds/page';
 import { clearSummaryCache } from '@/app/admin/hooks/use-room-analytics';
+import { summariesBody } from '../helpers/summaries';
 
 jest.mock('next/link', () => ({
   __esModule: true,
@@ -16,7 +17,12 @@ jest.mock('next/link', () => ({
 }));
 
 const push = jest.fn();
-jest.mock('next/navigation', () => ({ useRouter: () => ({ push }) }));
+let urlParams = new URLSearchParams();
+jest.mock('next/navigation', () => ({
+  useRouter: () => ({ push, replace: jest.fn() }),
+  usePathname: () => '/admin/test',
+  useSearchParams: () => urlParams,
+}));
 
 const fetchMock = jest.fn();
 jest.mock('@/lib/client-auth', () => ({
@@ -51,9 +57,21 @@ const person = (id: string, name: string) => ({
 });
 
 beforeEach(() => {
+  urlParams = new URLSearchParams();
   fetchMock.mockReset();
   push.mockReset();
   clearSummaryCache();
+});
+
+describe('A search from the address', () => {
+  it('opens People on the search Space was showing, in one request', async () => {
+    urlParams = new URLSearchParams('q=sara');
+    const held = holdLists('/api/admin/users');
+    render(<UsersPage />);
+    await waitFor(() => expect(held).toHaveLength(1));
+    expect(held[0].url).toContain('search=sara');
+    expect((screen.getByRole('searchbox') as HTMLInputElement).value).toBe('sara');
+  });
 });
 
 describe('People search', () => {
@@ -129,13 +147,13 @@ describe('Discover search', () => {
   });
 
   it('keeps B’s results when A answers after B, and shows accesses and the peak', async () => {
-    const held = holdLists('/api/admin/worlds', () => ({
+    const held = holdLists('/api/admin/worlds', (url) => summariesBody(url, () => ({
       totalAccesses: 1284,
       peakTimes: [{ hour: 16, count: 40 }],
       lastVisitedByUser: null,
       lastVisitedOverall: { accessedAt: '2026-09-01T10:00:00Z' },
       youWereLast: false,
-    }));
+    })));
     render(<DiscoverWorldsPage />);
     await waitFor(() => expect(held).toHaveLength(1));
     const box = screen.getByRole('searchbox');

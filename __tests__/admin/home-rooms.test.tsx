@@ -6,6 +6,7 @@ import HerePanel from '@/app/admin/components/here-panel';
 import RecentlyVisited from '@/app/admin/components/recently-visited';
 import { WorkAdventureContext } from '@/app/admin/workadventure-context';
 import { localHourFromUtc, localPeakHour } from '@/lib/analytics-peak';
+import { isSummariesUrl, summariesBody } from '../helpers/summaries';
 
 jest.mock('next/link', () => ({
   __esModule: true,
@@ -28,23 +29,26 @@ const hq = {
 };
 const hub = { ...hq, id: 'r-hub', slug: 'hub', name: 'Creative Hub', description: null, _count: { favorites: 3 }, accessedAt: minutesAgo(40) };
 
-const responses: Record<string, unknown> = {
-  '/api/admin/rooms/from-play-uri': hq,
-  '/api/admin/rooms/previous': { room: hub },
-  '/api/admin/analytics/rooms/r-hq': {
+const analytics: Record<string, unknown> = {
+  'r-hq': {
     totalAccesses: 1204,
     recentActivity: [],
     peakTimes: [{ hour: 16, count: 40 }],
     lastVisitedByUser: { accessedAt: minutesAgo(12) },
     lastVisitedOverall: { accessedAt: minutesAgo(3), userName: 'Imagine' },
   },
-  '/api/admin/analytics/rooms/r-hub': {
+  'r-hub': {
     totalAccesses: 233,
     recentActivity: [],
     peakTimes: [],
     lastVisitedByUser: { accessedAt: minutesAgo(40), userId: 'u1' },
     lastVisitedOverall: { accessedAt: minutesAgo(40), userId: 'u1' },
   },
+};
+
+const responses: Record<string, unknown> = {
+  '/api/admin/rooms/from-play-uri': hq,
+  '/api/admin/rooms/previous': { room: hub },
   '/api/admin/rooms/recent': {
     rooms: [
       { roomId: 'r-hq', roomName: 'Headquarters', roomSlug: 'headquarters', roomDescription: null, roomFavorites: 9, worldName: 'Office', worldSlug: 'office', universeName: 'BAWES', universeSlug: 'bawes', accessedAt: minutesAgo(12) },
@@ -60,7 +64,7 @@ jest.mock('@/lib/client-auth', () => ({
   authenticatedFetch: async (url: string) => {
     const path = url.split('?')[0];
     if (failing.has(path)) return { ok: false, status: 500, json: async () => ({}) } as Response;
-    const body = responses[path];
+    const body = isSummariesUrl(url) ? summariesBody(url, (id) => analytics[id]) : responses[path];
     return { ok: body !== undefined, status: body ? 200 : 404, json: async () => body } as Response;
   },
 }));

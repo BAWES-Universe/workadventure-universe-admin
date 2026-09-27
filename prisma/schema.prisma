@@ -173,6 +173,7 @@ model RoomAccess {
   @@index([worldId, accessedAt])
   @@index([roomId, accessedAt])
   @@index([userId, accessedAt])
+  @@index([userUuid, accessedAt])
   @@index([ipAddress, accessedAt])
   @@index([accessedAt])
   @@map("room_accesses")

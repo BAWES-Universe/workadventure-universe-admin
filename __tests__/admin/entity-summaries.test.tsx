@@ -16,7 +16,11 @@ jest.mock('next/link', () => ({
 }));
 
 const push = jest.fn();
-jest.mock('next/navigation', () => ({ useRouter: () => ({ push }) }));
+jest.mock('next/navigation', () => ({
+  useRouter: () => ({ push, replace: jest.fn() }),
+  usePathname: () => '/admin/test',
+  useSearchParams: () => new URLSearchParams(),
+}));
 
 const fetchMock = jest.fn();
 jest.mock('@/lib/client-auth', () => ({
@@ -59,14 +63,16 @@ describe('useEntitySummaries', () => {
     // New arrays with the same ids, many times over: no new requests.
     for (let i = 0; i < 5; i += 1) rerender(<Probe ids={['a', 'b', 'c']} />);
     await settle();
-    expect(analyticsCalls()).toHaveLength(3);
+    // The three cards' numbers go out together: one request.
+    expect(analyticsCalls()).toHaveLength(1);
+    expect(String(analyticsCalls()[0][0])).toContain('ids=a%2Cb%2Cc');
 
-    // An explicit retry asks again, once per failed id.
+    // An explicit retry asks again, once, for every failed id.
     fireEvent.click(screen.getByText('retry'));
-    await waitFor(() => expect(analyticsCalls()).toHaveLength(6));
+    await waitFor(() => expect(analyticsCalls()).toHaveLength(2));
     await settle();
     expect(screen.getByTestId('state-a').textContent).toBe('error');
-    expect(analyticsCalls()).toHaveLength(6);
+    expect(analyticsCalls()).toHaveLength(2);
   });
 
   it('keeps an answer that lands after the list grew, for a place still listed', async () => {
@@ -101,7 +107,7 @@ describe('useEntitySummaries', () => {
     await waitFor(() => expect(screen.getByText(/activity for some rooms/)).toBeTruthy());
     await settle();
     await settle();
-    expect(analyticsCalls()).toHaveLength(3);
+    expect(analyticsCalls()).toHaveLength(1);
   });
 });
 

@@ -2,6 +2,7 @@
 
 import { useEffect, useState, type ReactNode } from 'react';
 import { Search, X } from 'lucide-react';
+import { useInitialSearch, useSearchInUrl } from '../hooks/use-search-in-url';
 import { useAdminBootstrap } from '../admin-bootstrap-context';
 import {
   EmptyCard,
@@ -70,14 +71,18 @@ function useDebounced(value: string, delay = 250): string {
  */
 export default function SpacePage() {
   const { stats } = useAdminBootstrap();
-  const [query, setQuery] = useState('');
+  const [query, setQuery] = useState(useInitialSearch());
   const search = useDebounced(query.trim());
+  useSearchInUrl(search);
   const q = search ? `&search=${encodeURIComponent(search)}` : '';
+  // "See all" opens the full list on the same search.
+  const seeAll = (path: string) => (search ? `${path}?q=${encodeURIComponent(search)}` : path);
 
   const universes = useCollection(`/api/admin/universes?scope=discover&page=1&limit=${LIMIT}${q}`, 'universes', isUniverse);
   const worlds = useCollection(`/api/admin/worlds?scope=discover&page=1&limit=${LIMIT}${q}`, 'worlds', isWorld);
   const rooms = useCollection(`/api/admin/rooms?scope=discover&page=1&limit=${LIMIT + 1}${q}`, 'rooms', isRoom);
-  const people = useCollection(`/api/admin/users?page=1&limit=${LIMIT + 2}${q}`, 'users', isPerson);
+  // Guests are left out by the server, before paging.
+  const people = useCollection(`/api/admin/users?page=1&limit=${LIMIT}&guests=exclude${q}`, 'users', isPerson);
 
   const searching = search.length > 0;
   const nothingFound =
@@ -114,7 +119,7 @@ export default function SpacePage() {
         id="space-universes"
         title="Universes"
         total={searching ? undefined : stats.universes}
-        href="/admin/discover/universes"
+        href={seeAll('/admin/discover/universes')}
         collection={universes}
         hideWhenEmpty={searching}
         empty={<EmptyCard kind="universe" title="No public universes yet." text="Be the first: yours can be public for everyone to visit." href="/admin/universes/new" action="Create a universe" />}
@@ -141,7 +146,7 @@ export default function SpacePage() {
         )}
       </Section>
 
-      <Section id="space-worlds" title="Worlds" total={searching ? undefined : stats.worlds} href="/admin/discover/worlds" collection={worlds} hideWhenEmpty={searching}>
+      <Section id="space-worlds" title="Worlds" total={searching ? undefined : stats.worlds} href={seeAll('/admin/discover/worlds')} collection={worlds} hideWhenEmpty={searching}>
         {(items) => (
           <div className={styles.rows}>
             {items.slice(0, LIMIT).map((world) => (
@@ -157,7 +162,7 @@ export default function SpacePage() {
         )}
       </Section>
 
-      <Section id="space-rooms" title="Rooms" total={searching ? undefined : stats.rooms} href="/admin/discover/rooms" collection={rooms} hideWhenEmpty={searching}>
+      <Section id="space-rooms" title="Rooms" total={searching ? undefined : stats.rooms} href={seeAll('/admin/discover/rooms')} collection={rooms} hideWhenEmpty={searching}>
         {(items) => (
           <div className={styles.rows}>
             {items.slice(0, LIMIT).map((room) => (
@@ -174,7 +179,7 @@ export default function SpacePage() {
         )}
       </Section>
 
-      <Section id="space-people" title="People" total={searching ? undefined : stats.users} href="/admin/users" collection={people} hideWhenEmpty={searching}>
+      <Section id="space-people" title="People" total={searching ? undefined : stats.users} href={seeAll('/admin/users')} collection={people} hideWhenEmpty={searching}>
         {(items) => (
           <div className={styles.rows}>
             {items.slice(0, LIMIT).map((person) => (

@@ -7,6 +7,7 @@ import { Pager, SearchBox } from '../discover-ui';
 import { activityStats } from '@/lib/analytics-peak';
 import { useEntitySummaries } from '../../hooks/use-entity-summaries';
 import { usePagedSearch } from '../../hooks/use-paged-search';
+import { useInitialSearch, useSearchInUrl } from '../../hooks/use-search-in-url';
 
 interface Universe {
   id: string;
@@ -34,29 +35,9 @@ interface UniverseResult {
 
 export default function DiscoverUniversesPage() {
   const router = useRouter();
-  const [checkingAuth, setCheckingAuth] = useState(true);
+  // The shell has already checked the session; a 401 below still leads to sign-in.
+  const initialQuery = useInitialSearch();
 
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const { authenticatedFetch } = await import('@/lib/client-auth');
-        const response = await authenticatedFetch('/api/auth/me');
-        if (!response.ok) {
-          router.push('/admin/login');
-          return;
-        }
-        if (!cancelled) setCheckingAuth(false);
-      } catch {
-        router.push('/admin/login');
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-    // Once per visit: the router is only used to leave for sign-in.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   // One request per {query, page}: Enter searches, the × clears, a new search starts on page 1.
   const list = usePagedSearch<UniverseResult>(
@@ -74,17 +55,17 @@ export default function DiscoverUniversesPage() {
       }
 
       const data = await response.json();
-      const all: Universe[] = data.universes || [];
-      // Extra safety: hide default universe client-side as well
-      const filtered = all.filter((u) => u.slug !== 'default');
+      // The server leaves out the built-in default universe before paging.
+      const items: Universe[] = data.universes || [];
       return {
-        items: filtered,
+        items,
         totalPages: data.pagination?.totalPages || 1,
-        total: (data.pagination?.total || filtered.length) - (all.length - filtered.length),
+        total: data.pagination?.total ?? items.length,
       };
     },
-    { enabled: !checkingAuth },
+    { initialQuery },
   );
+  useSearchInUrl(list.query);
 
   const universes = useMemo(() => list.data?.items ?? [], [list.data]);
   const totalPages = list.data?.totalPages ?? 1;
@@ -112,7 +93,7 @@ export default function DiscoverUniversesPage() {
 
       {error && <LoadError label="universes" retry={list.retry} />}
 
-      {checkingAuth || (loading && universes.length === 0) ? (
+      {(loading && universes.length === 0) ? (
         <LoadingRows label="universes" rows={3} />
       ) : universes.length === 0 ? (
         !error &&

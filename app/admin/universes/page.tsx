@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
@@ -8,6 +8,8 @@ import { Plus } from 'lucide-react';
 import { EmptyCard, LoadError, LoadingRows, PageHeader } from '../components/ds';
 import { UniverseCard } from './universe-card';
 import { useEntitySummaries } from '../hooks/use-entity-summaries';
+import { usePagedSearch } from '../hooks/use-paged-search';
+import { Pager } from '../discover/discover-ui';
 
 interface Universe {
   id: string;
@@ -29,68 +31,41 @@ interface Universe {
   };
 }
 
+/** Universes per page; a super admin can own many. */
+const PAGE_SIZE = 24;
+
+interface UniversePage {
+  items: Universe[];
+  total: number;
+  totalPages: number;
+}
+
 export default function UniversesPage() {
   const router = useRouter();
 
-  const [checkingAuth, setCheckingAuth] = useState(true);
-
-  const [myUniverses, setMyUniverses] = useState<Universe[]>([]);
-  const [myLoading, setMyLoading] = useState(true);
-  const [myError, setMyError] = useState<string | null>(null);
-
-  useEffect(() => {
-    checkAuthAndLoad();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  async function checkAuthAndLoad() {
-    try {
-      const { authenticatedFetch } = await import('@/lib/client-auth');
-      const response = await authenticatedFetch('/api/auth/me');
-      if (!response.ok) {
+  // One request per page, abortable; the shell has already checked the session (a 401 still leads to sign-in).
+  const list = usePagedSearch<UniversePage>(async ({ page }, signal) => {
+    const { authenticatedFetch } = await import('@/lib/client-auth');
+    const response = await authenticatedFetch(`/api/admin/universes?scope=my&page=${page}&limit=${PAGE_SIZE}`, { signal });
+    if (!response.ok) {
+      if (response.status === 401) {
         router.push('/admin/login');
-        return;
+        return null;
       }
-      
-      await fetchMyUniverses();
-    } catch (err) {
-      router.push('/admin/login');
-    } finally {
-      setCheckingAuth(false);
+      throw new Error('Failed to fetch universes');
     }
-  }
-
-  async function fetchMyUniverses() {
-    try {
-      setMyLoading(true);
-      const { authenticatedFetch } = await import('@/lib/client-auth');
-      const response = await authenticatedFetch('/api/admin/universes?scope=my&limit=50');
-
-      if (!response.ok) {
-        if (response.status === 401) {
-          router.push('/admin/login');
-          return;
-        }
-        throw new Error('Failed to fetch universes');
-      }
-
-      const data = await response.json();
-      setMyUniverses(data.universes || []);
-      setMyError(null);
-    } catch (err) {
-      setMyError(err instanceof Error ? err.message : 'An error occurred');
-    } finally {
-      setMyLoading(false);
-    }
-  }
+    const data = await response.json();
+    const items: Universe[] = data.universes || [];
+    return { items, total: data.pagination?.total ?? items.length, totalPages: data.pagination?.totalPages || 1 };
+  });
+  const myUniverses = useMemo(() => list.data?.items ?? [], [list.data]);
+  const myLoading = list.loading;
+  const myError = list.error;
+  const fetchMyUniverses = list.retry;
 
   // Each universe's activity, asked for once; failures offer a retry instead of asking forever.
   const universeIds = useMemo(() => myUniverses.map((universe) => universe.id), [myUniverses]);
   const summaries = useEntitySummaries('universes', universeIds);
-
-  if (checkingAuth) {
-    return <LoadingRows label="your universes" />;
-  }
 
   return (
     <div className="space-y-6">
@@ -138,6 +113,15 @@ export default function UniversesPage() {
         {myUniverses.length > 0 && summaries.failed.length > 0 && (
           <LoadError label="activity for some universes" retry={() => summaries.retry()} />
         )}
+
+        <Pager
+          page={list.page}
+          totalPages={list.data?.totalPages ?? 1}
+          total={list.data?.total ?? 0}
+          noun={['universe', 'universes']}
+          loading={myLoading}
+          onChange={(page) => list.setPage(Math.max(1, Math.min(list.data?.totalPages ?? 1, page)))}
+        />
       </section>
     </div>
   );

@@ -16,6 +16,13 @@ jest.mock('next/link', () => ({
   ),
 }));
 
+const replace = jest.fn();
+jest.mock('next/navigation', () => ({
+  useRouter: () => ({ push: jest.fn(), replace }),
+  usePathname: () => '/admin/space',
+  useSearchParams: () => new URLSearchParams(),
+}));
+
 const fetchMock = jest.fn();
 jest.mock('@/lib/client-auth', () => ({
   authenticatedFetch: (...args: unknown[]) => fetchMock(...args),
@@ -182,6 +189,12 @@ describe('Space', () => {
     for (const path of ['/api/admin/universes', '/api/admin/worlds', '/api/admin/rooms', '/api/admin/users']) {
       expect(fetchMock.mock.calls.some(([url]) => String(url).startsWith(path) && String(url).includes('search=off'))).toBe(true);
     }
+    // Guests are left out by the server, before paging.
+    expect(fetchMock.mock.calls.some(([url]) => String(url).startsWith('/api/admin/users') && String(url).includes('guests=exclude'))).toBe(true);
+    // The search is in the address, and See all keeps it.
+    expect(replace).toHaveBeenCalledWith('/admin/space?q=off', { scroll: false });
+    const universesSection = screen.getByTestId('space-universes');
+    expect(within(universesSection).getAllByRole('link').some((link) => link.getAttribute('href') === '/admin/discover/universes?q=off')).toBe(true);
   });
 });
 

@@ -7,6 +7,7 @@ import { Pager, SearchBox } from '../discover-ui';
 import { activityStats } from '@/lib/analytics-peak';
 import { useEntitySummaries } from '../../hooks/use-entity-summaries';
 import { usePagedSearch } from '../../hooks/use-paged-search';
+import { useInitialSearch, useSearchInUrl } from '../../hooks/use-search-in-url';
 import type { EntitySummary } from '../../hooks/use-room-analytics';
 
 interface World {
@@ -66,29 +67,9 @@ function WorldCard({ world, analytics }: { world: World; analytics?: EntitySumma
 
 export default function DiscoverWorldsPage() {
   const router = useRouter();
-  const [checkingAuth, setCheckingAuth] = useState(true);
+  // The shell has already checked the session; a 401 below still leads to sign-in.
+  const initialQuery = useInitialSearch();
 
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const { authenticatedFetch } = await import('@/lib/client-auth');
-        const response = await authenticatedFetch('/api/auth/me');
-        if (!response.ok) {
-          router.push('/admin/login');
-          return;
-        }
-        if (!cancelled) setCheckingAuth(false);
-      } catch {
-        router.push('/admin/login');
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-    // Once per visit: the router is only used to leave for sign-in.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   // One request per {query, page}: Enter searches, the × clears, a new search starts on page 1.
   const list = usePagedSearch<WorldResult>(
@@ -117,8 +98,9 @@ export default function DiscoverWorldsPage() {
         total: (data.pagination?.total || filtered.length) - (all.length - filtered.length),
       };
     },
-    { enabled: !checkingAuth },
+    { initialQuery },
   );
+  useSearchInUrl(list.query);
 
   const worlds = useMemo(() => list.data?.items ?? [], [list.data]);
   const totalPages = list.data?.totalPages ?? 1;
@@ -146,7 +128,7 @@ export default function DiscoverWorldsPage() {
 
       {error && <LoadError label="worlds" retry={list.retry} />}
 
-      {checkingAuth || (loading && worlds.length === 0) ? (
+      {(loading && worlds.length === 0) ? (
         <LoadingRows label="worlds" rows={3} />
       ) : worlds.length === 0 ? (
         !error &&
