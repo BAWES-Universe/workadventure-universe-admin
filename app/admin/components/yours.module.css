@@ -1,5 +1,6 @@
 /* What's yours on You (see yours.tsx). Colour comes only from kinds and each universe's own colour. */
 .yours { display: grid; gap: 30px; min-width: 0; }
+.yours > section { min-width: 0; }
 .rows, .invitations { display: grid; gap: 2px; }
 .invitations { margin-bottom: 10px; padding: 4px; border: 1px solid rgb(245 158 11 / 0.3); border-radius: 16px; background: rgb(245 158 11 / 0.05); }
 .invitationLine { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px; color: hsl(var(--muted-foreground)); }

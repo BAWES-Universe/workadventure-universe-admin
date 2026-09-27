@@ -561,7 +561,7 @@ export default function UserDetailPage() {
                 title={room.name}
                 context={
                   <StatLine
-                    items={[`${room.world.universe.name} › ${room.world.name}`, `starred ${new Date(room.favoritedAt).toLocaleDateString()}`]}
+                    items={[`${room.world.universe.name} › ${room.world.name}`, room.favoritedAt && !Number.isNaN(Date.parse(room.favoritedAt)) && `starred ${timeAgo(new Date(room.favoritedAt))}`]}
                   />
                 }
                 aside={room.starCount > 0 ? `★ ${room.starCount}` : undefined}
