@@ -123,6 +123,24 @@ describe('New world without a universe in the address', () => {
     await screen.findByRole('link', { name: 'Beta' });
     expect(screen.queryAllByRole('radio')).toHaveLength(0);
   });
+
+  it('says so when the universe in the address is not yours, instead of loading forever', async () => {
+    search = new URLSearchParams('universeId=someone-elses');
+    route({ '/api/admin/universes': { universes: [UNIVERSE_A] } });
+    render(<NewWorldPage />);
+    expect((await screen.findByTestId('universe-not-yours')).textContent).toContain('Choose one of yours');
+    expect(screen.queryByText(/Loading universe information/)).toBeNull();
+  });
+
+  it('offers a retry when the universe cannot be loaded at all', async () => {
+    search = new URLSearchParams('universeId=ua');
+    fetchMock.mockImplementation((url: string) =>
+      url === '/api/auth/me' ? ok({ user: { id: 'me' } }) : Promise.resolve({ ok: false, status: 403, json: () => Promise.resolve({}) }),
+    );
+    render(<NewWorldPage />);
+    expect(await screen.findByRole('button', { name: /try again/i })).toBeTruthy();
+    expect(screen.queryByText(/Loading universe information/)).toBeNull();
+  });
 });
 
 describe('New universe on the way to a world', () => {
