@@ -2,9 +2,6 @@
 .top { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
 .who { min-width: 0; flex: 1 1 13rem; }
 .who h1 { font-size: clamp(24px, 6vw, 32px); line-height: 1.15; letter-spacing: -.02em; font-weight: 700; overflow-wrap: anywhere; }
-.private { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; margin-top: 8px; color: hsl(var(--muted-foreground)); font-size: 12px; overflow-wrap: anywhere; }
-.badge { display: inline-flex; align-items: center; gap: 5px; min-height: 24px; padding: 2px 9px; border: 1px solid hsl(var(--primary) / .3); border-radius: 999px; background: hsl(var(--primary) / .08); color: hsl(var(--primary)); font-size: 11px; font-weight: 600; }
-.onlyYou { font-size: 11px; font-style: italic; opacity: .8; }
 .status { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; color: hsl(var(--muted-foreground)); font-size: 13px; }
 .public { display: grid; gap: 14px; }
 .bio { font-size: 14px; line-height: 1.7; white-space: pre-line; overflow-wrap: anywhere; }

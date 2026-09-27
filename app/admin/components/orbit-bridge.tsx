@@ -13,12 +13,37 @@ import {
   type OrbitBridgeAckError,
   type OrbitBridgeReady,
   type OrbitEventTopic,
+  type OrbitProfileChanged,
   type OrbitView,
 } from '@/lib/orbit-bridge';
 
 /** Fired on `window` when the game says something changed, for pages that keep their own data. */
 export const ORBIT_REFRESH_EVENT = 'orbit:refresh';
 export type OrbitRefreshEventDetail = { topic: OrbitEventTopic };
+
+/** What the game said about this visit (in `orbit-bridge-init`), for the one thing Orbit tells the game. */
+let gameVisit: { roomRevision: string; capabilities: string[]; maxNameLength?: number } | null = null;
+
+/** The longest name the game accepts, when Orbit is open in a game that can take a new name. */
+export function gameMaxNameLength(): number | undefined {
+  return gameVisit?.capabilities.includes('profile') ? gameVisit.maxNameLength : undefined;
+}
+
+/**
+ * Tells the game you saved a new name, so it shows it once Orbit closes. Returns false outside the game, or in a
+ * game that can't take one (the name then shows the next time the game loads).
+ */
+export function announceProfileName(name: string): boolean {
+  if (!gameVisit?.capabilities.includes('profile') || !isInsideFrame()) return false;
+  const message: OrbitProfileChanged = {
+    type: 'orbit-profile-changed',
+    version: ORBIT_BRIDGE_VERSION,
+    roomRevision: gameVisit.roomRevision,
+    name,
+  };
+  window.parent.postMessage(message, PLAY_ORIGIN);
+  return true;
+}
 
 async function resolvePage(intent: string, params: Record<string, string> | undefined): Promise<string> {
   try {
@@ -74,6 +99,11 @@ export default function OrbitBridge({
 
       if (parsed.kind === 'init') {
         roomRevision.current = parsed.message.roomRevision;
+        gameVisit = {
+          roomRevision: parsed.message.roomRevision,
+          capabilities: parsed.message.capabilities,
+          maxNameLength: parsed.message.maxNameLength,
+        };
         if (parsed.message.view) onViewRef.current?.(parsed.message.view);
         return;
       }
@@ -109,7 +139,10 @@ export default function OrbitBridge({
 
     window.addEventListener('message', onMessage);
     post({ type: 'orbit-bridge-ready', version: ORBIT_BRIDGE_VERSION, capabilities: ORBIT_BRIDGE_CAPABILITIES });
-    return () => window.removeEventListener('message', onMessage);
+    return () => {
+      window.removeEventListener('message', onMessage);
+      gameVisit = null;
+    };
   }, [router]);
 
   return null;

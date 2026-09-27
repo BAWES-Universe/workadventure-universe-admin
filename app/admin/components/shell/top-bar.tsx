@@ -1,8 +1,9 @@
 'use client';
 
-import { ChevronLeft, Menu } from 'lucide-react';
+import { ChevronLeft, Menu, ShieldCheck } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useOrbitFrame } from '../../orbit-frame-context';
+import { ShortcutHint } from './shortcut-hint';
 
 /**
  * The bar at the top of every page, at the frame's top-left beside the game's own close and maximise buttons.
@@ -11,7 +12,7 @@ import { useOrbitFrame } from '../../orbit-frame-context';
  * has none of its own. In the full-screen view the game's buttons sit over Orbit's top-right corner, so the bar
  * leaves that corner free.
  */
-export function TopBar() {
+export function TopBar({ isSuperAdmin = false }: { isSuperAdmin?: boolean }) {
   const { route, goBack, inFrame, view, menuOpen, setMenuOpen } = useOrbitFrame();
   const isRoot = route.parent === null;
   const full = view === 'full';
@@ -21,7 +22,7 @@ export function TopBar() {
       className={cn('orbit-glass sticky top-0 z-40 border-b border-border/60', inFrame && full && 'orbit-reserve-game-controls')}
       style={{ height: 'var(--topbar-height)' }}
     >
-      <div className="relative flex h-full items-center gap-2 px-2 sm:px-3">
+      <div className="@container/bar relative flex h-full items-center gap-2 px-2 sm:px-3">
         {isRoot ? (
           <button
             type="button"
@@ -29,11 +30,12 @@ export function TopBar() {
             aria-expanded={menuOpen}
             aria-controls="orbit-menu"
             aria-keyshortcuts="Control+K Meta+K"
-            className="orbit-press inline-flex h-10 shrink-0 items-center gap-2 rounded-full border border-foreground/15 pl-3 pr-4 text-sm font-semibold transition-colors hover:border-foreground/30 hover:bg-foreground/5 lg:hidden"
+            className="orbit-press inline-flex h-10 shrink-0 items-center gap-2 rounded-full border border-foreground/15 pl-3 pr-3.5 text-sm font-semibold transition-colors hover:border-foreground/30 hover:bg-foreground/5 lg:hidden"
             data-testid="orbit-menu-button"
           >
             <Menu className="h-[18px] w-[18px]" aria-hidden="true" />
             Orbit Menu
+            <ShortcutHint className="ml-1" />
           </button>
         ) : (
           <button
@@ -47,6 +49,18 @@ export function TopBar() {
           </button>
         )}
 
+        {isSuperAdmin && (
+          // You see admin tools other people don't; kept clear of the game's own buttons in the full-screen view.
+          <span
+            className="ml-auto inline-flex h-7 shrink-0 items-center gap-1.5 rounded-full border border-primary/35 bg-primary/10 px-2 text-[11px] font-semibold text-primary @[22rem]/bar:px-2.5"
+            title="Super admin"
+            data-testid="super-admin-badge"
+          >
+            <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />
+            {/* On the narrowest bars the shield alone, so it never pushes the menu. */}
+            <span className="sr-only @[22rem]/bar:not-sr-only">Super admin</span>
+          </span>
+        )}
       </div>
     </header>
   );

@@ -205,7 +205,10 @@ describe('AdminShell', () => {
     expect(screen.queryByTestId('orbit-view-toggle')).toBeNull();
     expect(screen.queryByRole('button', { name: /full screen|expand|maximi/i })).toBeNull();
     const bar = screen.getByRole('banner');
-    expect(bar.querySelector('button')?.textContent).toBe('Orbit Menu');
+    const menuButton = bar.querySelector('button');
+    expect(menuButton?.textContent).toContain('Orbit Menu');
+    // Its shortcut is on the button (shown only with a keyboard and a mouse).
+    expect(menuButton?.querySelector('kbd')?.textContent).toMatch(/^(⌘K|Ctrl K)$/);
   });
 
   it('keeps You, Orbit and Space on the bottom bar, with Orbit in the middle and lit on arrival', async () => {

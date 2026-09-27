@@ -1,13 +1,14 @@
 'use client';
 
 import { useCallback, useEffect, useId, useMemo, useState } from 'react';
-import { ExternalLink, Lock, Pencil, Plus, RefreshCw, ShieldCheck, Trash2 } from 'lucide-react';
+import { ExternalLink, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { authenticatedFetch } from '@/lib/client-auth';
 import { DraftNotice } from './draft-notice';
 import { useDraft } from '../hooks/use-draft';
+import { announceProfileName, gameMaxNameLength } from './orbit-bridge';
 import styles from './profile-card.module.css';
 
 export interface ProfileLink {
@@ -15,11 +16,14 @@ export interface ProfileLink {
   url: string;
 }
 interface Profile {
+  name: string;
   bio: string;
   links: ProfileLink[];
 }
 
-const EMPTY: Profile = { bio: '', links: [] };
+const EMPTY: Profile = { name: '', bio: '', links: [] };
+/** The server's limit; inside the game, the game's own (usually shorter) limit applies. */
+const MAX_NAME_LENGTH = 64;
 
 /** A link other people can open: http(s) only, and with a label. */
 export function profileLinkError(link: ProfileLink): string | null {
@@ -34,14 +38,15 @@ export function profileLinkError(link: ProfileLink): string | null {
 }
 
 /**
- * Your profile as other people see it when they click you in the game or find you in Users, edited in place.
- * Your email and role show only to you. An empty profile says what it's for and invites you to set it up.
+ * Your profile as other people see it when they click you in the game or find you in Users: your name, a few words
+ * and your links, edited in place. A new name reaches the game too. An empty profile says what it's for and invites
+ * you to set it up. Nothing here is private: your email lives elsewhere on You.
  */
 export function ProfileCard({
   user,
   startEditing = false,
 }: {
-  user: { name: string | null; email: string | null; isSuperAdmin?: boolean };
+  user: { name: string | null };
   startEditing?: boolean;
 }) {
   const [status, setStatus] = useState<'loading' | 'error' | 'ready'>('loading');
@@ -50,10 +55,9 @@ export function ProfileCard({
   const [editing, setEditing] = useState(startEditing);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [justSaved, setJustSaved] = useState(false);
+  const [justSaved, setJustSaved] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
   const headingId = useId();
-  const name = user.name || user.email || 'You';
 
   useEffect(() => {
     let cancelled = false;
@@ -63,6 +67,7 @@ export function ProfileCard({
         if (!response.ok) throw new Error('Profile unavailable');
         const data = await response.json();
         const profile: Profile = {
+          name: typeof data.name === 'string' ? data.name : (user.name ?? ''),
           bio: typeof data.bio === 'string' ? data.bio : '',
           links: Array.isArray(data.links) ? data.links : [],
         };
@@ -77,6 +82,8 @@ export function ProfileCard({
     return () => {
       cancelled = true;
     };
+    // The name you signed in with is only a starting value; the server's wins once it has loaded.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [attempt]);
 
   const draftValue = useMemo(() => form, [form]);
@@ -97,7 +104,14 @@ export function ProfileCard({
     const links = form.links
       .map((link) => ({ label: link.label.trim(), url: link.url.trim() }))
       .filter((link) => link.label || link.url);
-    const problem = links.map(profileLinkError).find(Boolean);
+    const name = form.name.trim();
+    const renamed = name !== saved.name;
+    const nameLimit = Math.min(gameMaxNameLength() ?? MAX_NAME_LENGTH, MAX_NAME_LENGTH);
+    const problem = !name
+      ? 'Add your name, so people know what to call you.'
+      : renamed && name.length > nameLimit
+        ? `Names can be up to ${nameLimit} characters.`
+        : links.map(profileLinkError).find(Boolean);
     if (problem) {
       setError(problem);
       return;
@@ -108,19 +122,26 @@ export function ProfileCard({
       const response = await authenticatedFetch('/api/admin/profile', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ bio: form.bio.trim() || null, links }),
+        body: JSON.stringify({ ...(renamed ? { name } : {}), bio: form.bio.trim() || null, links }),
       });
       if (!response.ok) {
         const data = await response.json().catch(() => ({}));
         throw new Error(typeof data.error === 'string' ? data.error : 'Couldn’t save your profile. Try again.');
       }
-      const next = { bio: form.bio.trim(), links };
+      const next = { name, bio: form.bio.trim(), links };
       setSaved(next);
       setForm(next);
       discard();
       setEditing(false);
-      setJustSaved(true);
-      window.setTimeout(() => setJustSaved(false), 3000);
+      // Inside the game, the game shows a new name once Orbit closes; otherwise the next time it loads.
+      setJustSaved(
+        !renamed
+          ? 'Saved. This is what people see now.'
+          : announceProfileName(name)
+            ? 'Saved. Close Orbit and everyone in the room sees your new name.'
+            : 'Saved. Your new name shows in the game the next time it loads.',
+      );
+      window.setTimeout(() => setJustSaved(null), 6000);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Couldn’t save your profile. Try again.');
     } finally {
@@ -138,19 +159,8 @@ export function ProfileCard({
       <div className={styles.top}>
         <div className={styles.who}>
           <h1 id={headingId} className="orbit-display">
-            {name}
+            {saved.name || user.name || 'You'}
           </h1>
-          <p className={styles.private}>
-            <Lock size={12} aria-hidden="true" />
-            {user.name && user.email && <span>{user.email}</span>}
-            {user.isSuperAdmin && (
-              <span className={styles.badge}>
-                <ShieldCheck size={12} aria-hidden="true" />
-                Super admin
-              </span>
-            )}
-            <span className={styles.onlyYou}>only you see this</span>
-          </p>
         </div>
         {status === 'ready' && !editing && !empty && (
           <Button variant="outline" onClick={() => setEditing(true)} className="h-10 shrink-0 gap-2">
@@ -207,7 +217,7 @@ export function ProfileCard({
           )}
           <p className={styles.explain}>
             {justSaved ? (
-              <span role="status">Saved. This is what people see now.</span>
+              <span role="status">{justSaved}</span>
             ) : (
               'This is what people see when they click you in the game or find you in Users.'
             )}
@@ -224,6 +234,16 @@ export function ProfileCard({
           }}
         >
           {restored && <DraftNotice onDiscard={cancel} />}
+          <label className={styles.field}>
+            <span>Name</span>
+            <Input
+              value={form.name}
+              maxLength={MAX_NAME_LENGTH}
+              autoComplete="nickname"
+              onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))}
+              placeholder="What people call you"
+            />
+          </label>
           <label className={styles.field}>
             <span>About you</span>
             <Textarea

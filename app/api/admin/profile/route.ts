@@ -4,6 +4,8 @@ import { prisma } from '@/lib/db';
 import { z } from 'zod';
 
 const visitCardSchema = z.object({
+  // Your name, as everyone sees it in the game (the game reads it from here when it loads).
+  name: z.string().trim().min(1).max(64).optional(),
   bio: z.string().nullable().optional(),
   links: z.array(z.object({
     label: z.string().min(1),
@@ -34,6 +36,7 @@ export async function GET(request: NextRequest) {
     }
     
     return NextResponse.json({
+      name: user.name ?? null,
       bio: visitCard.bio,
       links: visitCard.links as Array<{ label: string; url: string }>,
     });
@@ -73,21 +76,29 @@ export async function PUT(request: NextRequest) {
       }
     }
     
-    // Upsert visit card (create if doesn't exist, update if it does)
-    const visitCard = await prisma.visitCard.upsert({
-      where: { userId: user.id },
-      create: {
-        userId: user.id,
-        bio: validated.bio || null,
-        links: validated.links || [],
-      },
-      update: {
-        bio: validated.bio !== undefined ? validated.bio : undefined,
-        links: validated.links !== undefined ? validated.links : undefined,
-      },
-    });
+    // Upsert visit card (create if doesn't exist, update if it does), and your name with it when it changed.
+    const [visitCard, saved] = await prisma.$transaction([
+      prisma.visitCard.upsert({
+        where: { userId: user.id },
+        create: {
+          userId: user.id,
+          bio: validated.bio || null,
+          links: validated.links || [],
+        },
+        update: {
+          bio: validated.bio !== undefined ? validated.bio : undefined,
+          links: validated.links !== undefined ? validated.links : undefined,
+        },
+      }),
+      prisma.user.update({
+        where: { id: user.id },
+        data: validated.name !== undefined ? { name: validated.name } : {},
+        select: { name: true },
+      }),
+    ]);
     
     return NextResponse.json({
+      name: saved.name,
       bio: visitCard.bio,
       links: visitCard.links as Array<{ label: string; url: string }>,
     });

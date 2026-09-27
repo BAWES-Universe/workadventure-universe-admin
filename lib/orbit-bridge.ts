@@ -44,6 +44,8 @@ export const orbitBridgeInitSchema = z.object({
   capabilities: z.array(z.string().max(32)).max(16),
   // Which view the frame is in right now; an older game doesn't say, and the compact view is assumed.
   view: z.enum(ORBIT_VIEWS).optional(),
+  // The longest name the game accepts (a game that can take a new name says "profile" in its capabilities).
+  maxNameLength: z.number().int().min(1).max(128).optional(),
 });
 
 export const orbitViewSchema = z.object({
@@ -81,6 +83,14 @@ export interface OrbitBridgeReady {
   type: 'orbit-bridge-ready';
   version: typeof ORBIT_BRIDGE_VERSION;
   capabilities: readonly string[];
+}
+
+/** You saved a new name in your profile: the game shows it once Orbit closes (needs the game's "profile"). */
+export interface OrbitProfileChanged {
+  type: 'orbit-profile-changed';
+  version: typeof ORBIT_BRIDGE_VERSION;
+  roomRevision: string;
+  name: string;
 }
 
 export interface OrbitBridgeAck {

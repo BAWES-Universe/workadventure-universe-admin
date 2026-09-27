@@ -223,7 +223,7 @@ function ShellChrome({
         </div>
         <Sidebar user={user} />
         <div className="flex min-h-dvh flex-col lg:pl-[var(--sidebar-width)]">
-          <TopBar />
+          <TopBar isSuperAdmin={Boolean(user?.isSuperAdmin)} />
           {/* Before the page in the DOM, so that as a strip under the bar (a desktop panel) it sticks there. */}
           <BottomNav />
           {error && (

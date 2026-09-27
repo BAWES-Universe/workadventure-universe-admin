@@ -419,3 +419,25 @@ a[href] {
 .orbit-kind-wash[data-kind='world']::before { background: linear-gradient(135deg, rgb(16 185 129 / .14), transparent 55%, rgb(59 130 246 / .2)); }
 .orbit-kind-wash[data-kind='room']::before { background: linear-gradient(135deg, rgb(245 158 11 / .14), transparent 55%, rgb(236 72 153 / .18)); }
 .orbit-kind-wash:hover::before, .orbit-kind-wash:focus-within::before { opacity: 1; }
+
+/* The Orbit Menu's keyboard shortcut: only where there is a keyboard and a mouse. */
+.orbit-kbd {
+  display: none;
+  align-items: center;
+  height: 1.375rem;
+  padding: 0 0.4rem;
+  border: 1px solid hsl(var(--foreground) / 0.18);
+  border-radius: 0.375rem;
+  background: hsl(var(--foreground) / 0.05);
+  color: hsl(var(--muted-foreground));
+  font-family: var(--font-sans), system-ui, sans-serif;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+}
+@media (hover: hover) and (pointer: fine) {
+  .orbit-kbd {
+    display: inline-flex;
+  }
+}

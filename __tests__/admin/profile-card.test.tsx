@@ -5,15 +5,21 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { ProfileCard, profileLinkError } from '@/app/admin/components/profile-card';
 
 const fetchMock = jest.fn();
+const announceProfileName = jest.fn((name: string) => Boolean(name));
+jest.mock('@/app/admin/components/orbit-bridge', () => ({
+  announceProfileName: (name: string) => announceProfileName(name),
+  gameMaxNameLength: () => 10,
+}));
 jest.mock('@/lib/client-auth', () => ({
   authenticatedFetch: (...args: unknown[]) => fetchMock(...args),
 }));
 
 const json = (body: unknown, ok = true) => Promise.resolve({ ok, json: () => Promise.resolve(body) });
-const me = { name: 'Khalid Alsayed', email: 'khalid@bawes.net', isSuperAdmin: true };
+const me = { name: 'Khalid Alsayed' };
 
 beforeEach(() => {
   fetchMock.mockReset();
+  announceProfileName.mockClear();
   window.localStorage.clear();
   window.sessionStorage.clear();
 });
@@ -24,7 +30,8 @@ describe('Your profile on You', () => {
     render(<ProfileCard user={me} />);
     expect(await screen.findByTestId('profile-empty')).toBeTruthy();
     expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Khalid Alsayed');
-    expect(screen.getByText('only you see this')).toBeTruthy();
+    // Nothing private in the card that says what people see.
+    expect(screen.getByTestId('profile-card').textContent).not.toContain('@');
     expect(screen.getByText(/what people see when they click you in the game/)).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: /set up your profile/i }));
     expect(screen.getByRole('button', { name: /save profile/i })).toBeTruthy();
@@ -32,7 +39,7 @@ describe('Your profile on You', () => {
 
   it('shows the profile as others see it, and saves edits in place', async () => {
     fetchMock.mockImplementation((_url: string, init?: RequestInit) =>
-      init?.method === 'PUT' ? json({}) : json({ bio: 'Builds universes.', links: [{ label: 'Site', url: 'https://bawes.net' }] }),
+      init?.method === 'PUT' ? json({}) : json({ name: 'Khalid Alsayed', bio: 'Builds universes.', links: [{ label: 'Site', url: 'https://bawes.net' }] }),
     );
     render(<ProfileCard user={me} />);
     expect(await screen.findByText('Builds universes.')).toBeTruthy();
@@ -46,6 +53,28 @@ describe('Your profile on You', () => {
     const put = fetchMock.mock.calls.find(([, init]) => init?.method === 'PUT');
     expect(JSON.parse(put[1].body)).toEqual({ bio: 'Builds worlds.', links: [{ label: 'Site', url: 'https://bawes.net' }] });
     expect(screen.getByText(/Saved\. This is what people see now\./)).toBeTruthy();
+    // The name didn't change, so the game isn't told anything.
+    expect(announceProfileName).not.toHaveBeenCalled();
+  });
+
+  it('renames you, tells the game, and keeps to the game’s name length', async () => {
+    fetchMock.mockImplementation((_url: string, init?: RequestInit) =>
+      init?.method === 'PUT' ? json({}) : json({ name: 'Khalid Alsayed', bio: 'Hi', links: [] }),
+    );
+    render(<ProfileCard user={me} />);
+    fireEvent.click(await screen.findByRole('button', { name: /edit profile/i }));
+    const name = screen.getByPlaceholderText('What people call you');
+    fireEvent.change(name, { target: { value: 'A name far too long' } });
+    fireEvent.click(screen.getByRole('button', { name: /save profile/i }));
+    expect((await screen.findByRole('alert')).textContent).toMatch(/up to 10 characters/);
+
+    fireEvent.change(name, { target: { value: ' Khalid A ' } });
+    fireEvent.click(screen.getByRole('button', { name: /save profile/i }));
+    expect(await screen.findByText(/Close Orbit and everyone in the room sees your new name/)).toBeTruthy();
+    expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Khalid A');
+    const put = fetchMock.mock.calls.find(([, init]) => init?.method === 'PUT');
+    expect(JSON.parse(put[1].body).name).toBe('Khalid A');
+    expect(announceProfileName).toHaveBeenCalledWith('Khalid A');
   });
 
   it('opens ready to edit when asked, and catches a bad link before saving', async () => {

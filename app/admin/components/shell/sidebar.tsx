@@ -3,9 +3,12 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useRef } from 'react';
+import { Search } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { DESTINATIONS, getNavItems, getNavSections, isNavItemActive, type NavUser } from '../../config/navigation';
+import { useOrbitFrame } from '../../orbit-frame-context';
 import { OrbitWordmark } from './orbit-mark';
+import { ShortcutHint } from './shortcut-hint';
 import { rootOf } from './root-of';
 
 /**
@@ -20,6 +23,7 @@ export function Sidebar({ user }: { user: NavUser }) {
   // A page with its own entry (Bots, AI Usage…) lights that entry, not the destination it sits under.
   const sectionActive = sections.some((section) => section.items.some((item) => isNavItemActive(item.href, pathname, items)));
   const navRef = useRef<HTMLElement>(null);
+  const { setMenuOpen } = useOrbitFrame();
 
   // The lit entry is always in sight, even far down the list (the Admin tools).
   useEffect(() => {
@@ -36,6 +40,20 @@ export function Sidebar({ user }: { user: NavUser }) {
         <Link href="/admin" className="rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
           <OrbitWordmark />
         </Link>
+      </div>
+      <div className="px-3 pb-3">
+        {/* The Orbit Menu's search, and where its shortcut is learnt on the wide layout. */}
+        <button
+          type="button"
+          onClick={() => setMenuOpen(true)}
+          aria-keyshortcuts="Control+K Meta+K"
+          className="orbit-press flex h-10 w-full items-center gap-2 rounded-full border border-foreground/15 pl-3 pr-2 text-sm text-muted-foreground transition-colors hover:border-foreground/30 hover:text-foreground"
+          data-testid="sidebar-find"
+        >
+          <Search className="h-4 w-4 shrink-0" aria-hidden="true" />
+          <span className="flex-1 text-left">Find anything</span>
+          <ShortcutHint />
+        </button>
       </div>
       <nav ref={navRef} className="orbit-scroll-fade min-h-0 flex-1 space-y-6 overflow-y-auto px-3 pb-8 pt-1">
         <ul className="space-y-0.5">

@@ -9,7 +9,7 @@ import Yours from '../components/yours';
 import LogoutButton from '../logout-button';
 import styles from './you.module.css';
 
-/** You: your profile as others see it (edited in place), what's yours, then how Orbit looks and signing out. */
+/** You: your profile as others see it (edited in place), what's yours, then how Orbit looks and your account. */
 export default function YouPage() {
   return (
     <Suspense fallback={null}>
@@ -31,7 +31,14 @@ function You() {
           <h2 id="appearance-heading">Appearance</h2>
           <ThemeChoice className={styles.themeControl} />
         </section>
-        <LogoutButton className="h-10 rounded-full" />
+        <div className={styles.account}>
+          {user.email && (
+            <p>
+              Signed in as <strong>{user.email}</strong>
+            </p>
+          )}
+          <LogoutButton className="h-10 rounded-full" />
+        </div>
       </footer>
     </div>
   );
