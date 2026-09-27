@@ -388,3 +388,26 @@ export function Figure({ value, label }: { value: string | number; label: string
 export function Figures({ children }: { children: ReactNode }) {
   return <div className={styles.figures}>{children}</div>;
 }
+
+/** A list still on its way: quiet placeholder rows, not a spinner. */
+export function LoadingRows({ label, rows = 2 }: { label: string; rows?: number }) {
+  return (
+    <div className={styles.loadingRows} role="status" aria-label={`Loading ${label}`}>
+      {Array.from({ length: rows }, (_, index) => (
+        <span key={index} className="orbit-skeleton" />
+      ))}
+    </div>
+  );
+}
+
+/** A list that couldn't load says so, with one way to try again. */
+export function LoadError({ label, retry }: { label: string; retry: () => void }) {
+  return (
+    <div className={styles.loadError} role="alert">
+      <span>We couldn’t load {label}.</span>
+      <button type="button" onClick={retry}>
+        Try again
+      </button>
+    </div>
+  );
+}

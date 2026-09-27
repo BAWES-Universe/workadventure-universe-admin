@@ -1,5 +1,23 @@
-.card { position: relative; display: grid; gap: 16px; min-width: 0; padding: 22px; border-radius: 18px; border: 1px solid transparent; background: linear-gradient(hsl(var(--card)), hsl(var(--card))) padding-box, linear-gradient(135deg, rgb(134 41 252 / .55), rgb(65 86 246 / .35) 45%, hsl(var(--border)) 80%) border-box; box-shadow: 0 18px 50px -30px rgb(134 41 252 / .55); }
-.top { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
+.card { position: relative; display: grid; gap: 16px; min-width: 0; padding: 0 20px 20px; overflow: hidden; border-radius: 22px; border: 1px solid hsl(var(--border)); background: hsl(var(--card)); box-shadow: 0 24px 60px -40px rgb(0 0 0 / .8); }
+.banner { height: 84px; margin: 0 -20px; background:
+  radial-gradient(1.5px 1.5px at 12% 30%, #fff9, transparent), radial-gradient(1px 1px at 28% 70%, #fff7, transparent),
+  radial-gradient(1.5px 1.5px at 46% 22%, #fff8, transparent), radial-gradient(1px 1px at 63% 58%, #fff6, transparent),
+  radial-gradient(1.5px 1.5px at 81% 34%, #fff9, transparent), radial-gradient(1px 1px at 92% 76%, #fff6, transparent),
+  radial-gradient(120% 140% at 85% -20%, rgb(65 86 246 / .55), transparent 60%),
+  radial-gradient(120% 160% at 5% 120%, rgb(134 41 252 / .5), transparent 55%),
+  #0d1526; }
+.identity { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 12px 14px; margin-top: -40px; }
+.identity > .avatar { grid-column: 1 / -1; }
+.identity > .who { grid-column: 1; display: grid; gap: 4px; }
+.identity > button { grid-column: 2; }
+@media (max-width: 400px) {
+  .identity { grid-template-columns: minmax(0, 1fr); }
+  .identity > button { grid-column: 1; justify-self: start; }
+}
+.avatar { flex: none; display: grid; place-items: center; width: var(--avatar-size); height: var(--avatar-size); border-radius: 22px; border: 3px solid hsl(var(--card)); background: radial-gradient(circle at 50% 35%, #2a3b5c, #16223a); overflow: hidden; }
+.woka { position: relative; width: 64px; height: 64px; }
+.wokaLayer { position: absolute; inset: 0; background-size: 192px 256px; background-position: -64px 0; background-repeat: no-repeat; image-rendering: pixelated; }
+.initial { font-family: var(--font-display); font-size: 30px; font-weight: 700; color: #fff; }
 .who { min-width: 0; flex: 1 1 13rem; }
 .who h1 { font-size: clamp(24px, 6vw, 32px); line-height: 1.15; letter-spacing: -.02em; font-weight: 700; overflow-wrap: anywhere; }
 .status { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; color: hsl(var(--muted-foreground)); font-size: 13px; }

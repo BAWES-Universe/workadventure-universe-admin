@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useId, useMemo, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { ExternalLink, Pencil, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -45,9 +45,15 @@ export function profileLinkError(link: ProfileLink): string | null {
 export function ProfileCard({
   user,
   startEditing = false,
+  stats,
+  onLoaded,
 }: {
   user: { name: string | null };
   startEditing?: boolean;
+  /** What people can see about what you've made and joined ("Owns 2 universes · …"). */
+  stats?: ReactNode;
+  /** Whether the profile has anything in it yet (for You's first steps). */
+  onLoaded?: (complete: boolean) => void;
 }) {
   const [status, setStatus] = useState<'loading' | 'error' | 'ready'>('loading');
   const [saved, setSaved] = useState<Profile>(EMPTY);
@@ -57,7 +63,10 @@ export function ProfileCard({
   const [error, setError] = useState<string | null>(null);
   const [justSaved, setJustSaved] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
+  const [woka, setWoka] = useState<string[]>([]);
   const headingId = useId();
+  const onLoadedRef = useRef(onLoaded);
+  onLoadedRef.current = onLoaded;
 
   useEffect(() => {
     let cancelled = false;
@@ -74,7 +83,9 @@ export function ProfileCard({
         if (cancelled) return;
         setSaved(profile);
         setForm(profile);
+        setWoka(Array.isArray(data.woka) ? data.woka.filter((url: unknown): url is string => typeof url === 'string') : []);
         setStatus('ready');
+        onLoadedRef.current?.(Boolean(profile.bio || profile.links.length));
       })
       .catch(() => {
         if (!cancelled) setStatus('error');
@@ -130,6 +141,7 @@ export function ProfileCard({
       }
       const next = { name, bio: form.bio.trim(), links };
       setSaved(next);
+      onLoadedRef.current?.(Boolean(next.bio || next.links.length));
       setForm(next);
       discard();
       setEditing(false);
@@ -156,11 +168,14 @@ export function ProfileCard({
 
   return (
     <section className={styles.card} aria-labelledby={headingId} data-testid="profile-card">
-      <div className={styles.top}>
+      <div className={styles.banner} aria-hidden="true" />
+      <div className={styles.identity}>
+        <WokaAvatar layers={woka} name={saved.name || user.name || ''} />
         <div className={styles.who}>
           <h1 id={headingId} className="orbit-display">
             {saved.name || user.name || 'You'}
           </h1>
+          {stats}
         </div>
         {status === 'ready' && !editing && !empty && (
           <Button variant="outline" onClick={() => setEditing(true)} className="h-10 shrink-0 gap-2">
@@ -201,18 +216,7 @@ export function ProfileCard({
           ) : (
             <div className={styles.public}>
               {saved.bio && <p className={styles.bio}>{saved.bio}</p>}
-              {saved.links.length > 0 && (
-                <ul className={styles.links}>
-                  {saved.links.filter((link) => /^https?:\/\//i.test(link.url)).map((link, index) => (
-                    <li key={`${link.url}-${index}`}>
-                      <a href={link.url} target="_blank" rel="noopener noreferrer">
-                        {link.label}
-                        <ExternalLink size={13} aria-hidden="true" />
-                      </a>
-                    </li>
-                  ))}
-                </ul>
-              )}
+              <ProfileLinks links={saved.links} />
             </div>
           )}
           <p className={styles.explain}>
@@ -297,5 +301,43 @@ export function ProfileCard({
         </form>
       )}
     </section>
+  );
+}
+
+/** Someone's Woka, standing and facing you: each layer's front frame drawn over the last, pixel-sharp. */
+export function WokaAvatar({ layers, name, size = 76 }: { layers: string[]; name: string; size?: number }) {
+  const initial = name.trim().charAt(0).toUpperCase() || '?';
+  return (
+    <span className={styles.avatar} style={{ '--avatar-size': `${size}px` } as CSSProperties} data-testid="woka-avatar">
+      {layers.length > 0 ? (
+        <span className={styles.woka} aria-hidden="true">
+          {layers.map((url) => (
+            <span key={url} className={styles.wokaLayer} style={{ backgroundImage: `url("${url.replace(/"/g, '%22')}")` }} />
+          ))}
+        </span>
+      ) : (
+        <span className={styles.initial} aria-hidden="true">
+          {initial}
+        </span>
+      )}
+    </span>
+  );
+}
+
+/** Someone's links as pills. Only web addresses are ever shown. */
+export function ProfileLinks({ links }: { links: ProfileLink[] }) {
+  const shown = links.filter((link) => /^https?:\/\//i.test(link.url));
+  if (shown.length === 0) return null;
+  return (
+    <ul className={styles.links}>
+      {shown.map((link, index) => (
+        <li key={`${link.url}-${index}`}>
+          <a href={link.url} target="_blank" rel="noopener noreferrer">
+            {link.label}
+            <ExternalLink size={13} aria-hidden="true" />
+          </a>
+        </li>
+      ))}
+    </ul>
   );
 }

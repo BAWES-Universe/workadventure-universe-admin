@@ -43,7 +43,7 @@ async function writeDismissed(ids: string[]): Promise<void> {
 
 /**
  * Invitations waiting for an answer. Dismissing hides the ones shown now, on this account, on every device; a new
- * invitation shows again. Answering happens on My Memberships.
+ * invitation shows again. Answering happens on You, under Memberships.
  */
 export default function PendingInvitationsAlert() {
   const [invitations, setInvitations] = useState<Invitation[] | null>(null);
@@ -105,7 +105,7 @@ export default function PendingInvitationsAlert() {
           </p>
         </div>
         <Button asChild size="sm">
-          <Link href="/admin/memberships">View invitations</Link>
+          <Link href="/admin/you#memberships-heading">Answer on You</Link>
         </Button>
       </div>
       <button

@@ -74,3 +74,9 @@ a.empty:hover::before { opacity: 1 !important; }
 @media (prefers-reduced-motion: reduce) {
   .card, .card:hover { transform: none; }
 }
+
+.loadingRows { display: grid; gap: 8px; }
+.loadingRows > span { height: 64px; border-radius: 14px; }
+.loadError { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; min-height: 64px; padding: 12px 14px; border: 1px solid hsl(var(--border)); border-radius: 14px; font-size: 13px; color: hsl(var(--muted-foreground)); }
+.loadError button { min-height: 36px; padding: 0 14px; border: 1px solid hsl(var(--foreground) / 0.15); border-radius: 999px; font-size: 12px; font-weight: 600; color: hsl(var(--foreground)); }
+.loadError button:hover { border-color: hsl(var(--foreground) / 0.3); }
