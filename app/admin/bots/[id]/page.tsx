@@ -612,12 +612,12 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
       )}
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="min-w-0">
-        <TabsList className="flex h-auto w-full flex-wrap justify-start gap-1">
-          <TabsTrigger value="overview">Overview</TabsTrigger>
-          <TabsTrigger value="usage">Usage</TabsTrigger>
-          <TabsTrigger value="metrics">Metrics</TabsTrigger>
-          <TabsTrigger value="conversations">Conversations</TabsTrigger>
-          <TabsTrigger value="emotions">Emotions</TabsTrigger>
+        <TabsList className="flex h-auto w-full justify-start gap-1 overflow-x-auto rounded-xl p-1">
+          <TabsTrigger value="overview" className="min-h-11 shrink-0 px-4">Overview</TabsTrigger>
+          <TabsTrigger value="usage" className="min-h-11 shrink-0 px-4">Usage</TabsTrigger>
+          <TabsTrigger value="metrics" className="min-h-11 shrink-0 px-4">Metrics</TabsTrigger>
+          <TabsTrigger value="conversations" className="min-h-11 shrink-0 px-4">Conversations</TabsTrigger>
+          <TabsTrigger value="emotions" className="min-h-11 shrink-0 px-4">Emotions</TabsTrigger>
         </TabsList>
 
         <TabsContent value="overview" className="mt-6 grid min-w-0 gap-6">
