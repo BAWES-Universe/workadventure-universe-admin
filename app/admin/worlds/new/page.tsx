@@ -409,7 +409,6 @@ function UniverseChoice({
             <KindIcon kind="universe" universeId={universe.id} size="sm" />
             <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">
               <span className="block text-sm font-medium">{universe.name}</span>
-              <span className="block text-xs text-muted-foreground">/@/{universe.slug}</span>
             </span>
           </label>
         ))}

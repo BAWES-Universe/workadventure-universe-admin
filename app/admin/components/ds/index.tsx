@@ -13,14 +13,18 @@
 
 import Link from 'next/link';
 import type { CSSProperties, ReactNode } from 'react';
-import { ArrowUpRight, DoorOpen, Earth, Globe2, Lock, Sparkles, Star, Users, type LucideIcon } from 'lucide-react';
+import { ArrowUpRight, Bot, Cpu, DoorOpen, Earth, Globe2, LayoutTemplate, Lock, Map as MapIcon, Shirt, Sparkles, Star, Tags, Users, type LucideIcon } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { timeAgo } from '@/lib/time-ago';
 import { universeColour } from '@/lib/universe-colour';
 import { Switch } from '@/components/ui/switch';
 import styles from './ds.module.css';
 
-export type Kind = 'universe' | 'world' | 'room' | 'star' | 'people';
+/** What players meet: each has its own colour. */
+export type EntityKind = 'universe' | 'world' | 'room' | 'star' | 'people';
+/** Super-admin tools: neutral chips, so they never read as a universe, world or room. */
+export type ToolKind = 'template' | 'category' | 'map' | 'bot' | 'provider' | 'avatar';
+export type Kind = EntityKind | ToolKind;
 
 export const KIND_ICON: Record<Kind, LucideIcon> = {
   universe: Sparkles,
@@ -28,6 +32,12 @@ export const KIND_ICON: Record<Kind, LucideIcon> = {
   room: DoorOpen,
   star: Star,
   people: Users,
+  template: LayoutTemplate,
+  category: Tags,
+  map: MapIcon,
+  bot: Bot,
+  provider: Cpu,
+  avatar: Shirt,
 };
 
 export const KIND_LABEL: Record<Kind, string> = {
@@ -36,6 +46,12 @@ export const KIND_LABEL: Record<Kind, string> = {
   room: 'Room',
   star: 'Star',
   people: 'People',
+  template: 'Template',
+  category: 'Category',
+  map: 'Map',
+  bot: 'Bot',
+  provider: 'AI provider',
+  avatar: 'Avatar set',
 };
 
 /** A universe's own colour as a style, for its chip, wash and planet. */
