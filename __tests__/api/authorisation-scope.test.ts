@@ -8,7 +8,8 @@ import { NextRequest } from 'next/server';
 
 jest.mock('@/lib/db', () => ({
   prisma: {
-    user: { findMany: jest.fn(), findUnique: jest.fn() },
+    $queryRaw: jest.fn(),
+    user: { findMany: jest.fn(), findUnique: jest.fn(), count: jest.fn() },
     universe: { findUnique: jest.fn() },
     world: { findUnique: jest.fn() },
     room: { findUnique: jest.fn(), findMany: jest.fn() },
@@ -133,6 +134,10 @@ beforeEach(() => {
   });
 
   db.user.findMany.mockImplementation(async (args: MockArgs) => USER_ROWS.map((u) => applySelect(u, args?.select)));
+  db.user.count.mockResolvedValue(USER_ROWS.length);
+  (prisma.$queryRaw as unknown as jest.Mock).mockResolvedValue(
+    USER_ROWS.map((u) => ({ id: u.id, last_accessed: null, total_accesses: BigInt(0) })),
+  );
   db.user.findUnique.mockImplementation(async (args: MockArgs) => {
     const row = {
       ...USER_ROWS[0],
@@ -179,18 +184,22 @@ describe('users list', () => {
 
   it('a signed-in non-admin cannot search the users list by email', async () => {
     await listUsers(req('/api/admin/users?search=bob%40example', 'alice'));
-    const where = JSON.stringify(db.user.findMany.mock.calls[0][0].where);
+    const where = JSON.stringify(db.user.count.mock.calls[0][0].where);
     expect(where).not.toMatch(/"email":\{"contains"/);
     expect(where).toMatch(/"name":\{"contains"/);
     expect(where).toMatch(/"uuid":\{"contains"/);
+    const pageSql = (prisma.$queryRaw as unknown as jest.Mock).mock.calls[0][0].sql as string;
+    expect(pageSql).not.toMatch(/u\.email ILIKE/);
+    expect(pageSql).toMatch(/u\.name ILIKE/);
   });
 
   it('a super admin sees and can search by email in the users list', async () => {
     const res = await listUsers(req('/api/admin/users?search=bob', 'root'));
     const body = await res.json();
     expect(body.users[0].email).toBe('bob@example.test');
-    const where = JSON.stringify(db.user.findMany.mock.calls[0][0].where);
+    const where = JSON.stringify(db.user.count.mock.calls[0][0].where);
     expect(where).toMatch(/"email":\{"contains"/);
+    expect((prisma.$queryRaw as unknown as jest.Mock).mock.calls[0][0].sql).toMatch(/u\.email ILIKE/);
   });
 
   it('an anonymous caller gets 401 from the users list', async () => {

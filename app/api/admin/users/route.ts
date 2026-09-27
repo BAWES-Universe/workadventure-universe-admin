@@ -1,9 +1,28 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { Prisma } from '@prisma/client';
 import { getViewer, isPrivileged, unauthorizedResponse } from '@/lib/access-scope';
 import { prisma } from '@/lib/db';
 import { wokaLayersForMany } from '@/lib/woka-avatar';
 
 const SYSTEM_USER_EMAIL = 'system@workadventure.local';
+const DEFAULT_LIMIT = 50;
+const MAX_LIMIT = 200;
+
+/** A positive integer from a query parameter, or the fallback when it is missing or not a number. */
+function intParam(value: string | null, fallback: number): number {
+  const parsed = parseInt(value ?? '', 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+/**
+ * Prisma's `contains` as an ILIKE pattern. Prisma does not escape `%` or `_` in the search text, so neither does this:
+ * the page query must match exactly the rows `prisma.user.count` counts.
+ */
+function containsPattern(search: string): string {
+  return `%${search}%`;
+}
+
+type PageRow = { id: string; last_accessed: Date | null; total_accesses: bigint | number };
 
 // GET /api/admin/users - List all users
 export async function GET(request: NextRequest) {
@@ -14,26 +33,29 @@ export async function GET(request: NextRequest) {
     }
     // Email addresses are only visible to, and searchable by, privileged viewers.
     const canSeeEmail = isPrivileged(viewer);
-    
+
     const { searchParams } = new URL(request.url);
-    const page = parseInt(searchParams.get('page') || '1');
-    const limit = parseInt(searchParams.get('limit') || '50');
+    const page = Math.max(1, intParam(searchParams.get('page'), 1));
+    const limit = Math.min(MAX_LIMIT, Math.max(1, intParam(searchParams.get('limit'), DEFAULT_LIMIT)));
     const search = searchParams.get('search') || '';
-    
-    const searchWhere = search
+    // `guests=exclude` leaves guest accounts out before counting and paging, so totals and pages agree.
+    const excludeGuests = searchParams.get('guests') === 'exclude';
+    const offset = (page - 1) * limit;
+
+    // The same filter twice: as a Prisma `where` (for the count) and as SQL (for the page, whose order depends on
+    // access aggregates Prisma cannot sort by). Keep the two in step.
+    const searchWhere: Prisma.UserWhereInput = search
       ? {
           OR: [
-            { name: { contains: search, mode: 'insensitive' as const } },
-            ...(canSeeEmail
-              ? [{ email: { contains: search, mode: 'insensitive' as const } }]
-              : []),
-            { uuid: { contains: search, mode: 'insensitive' as const } },
+            { name: { contains: search, mode: 'insensitive' } },
+            ...(canSeeEmail ? [{ email: { contains: search, mode: 'insensitive' as const } }] : []),
+            { uuid: { contains: search, mode: 'insensitive' } },
           ],
         }
       : {};
     // Viewers who cannot see emails cannot tell the internal system account
     // apart by its address, so it is left out of their list server-side.
-    const where = canSeeEmail
+    const visibleWhere: Prisma.UserWhereInput = canSeeEmail
       ? searchWhere
       : {
           AND: [
@@ -41,148 +63,102 @@ export async function GET(request: NextRequest) {
             { OR: [{ email: null }, { email: { not: SYSTEM_USER_EMAIL } }] },
           ],
         };
-    
-    // First get all users matching the search
-    const allUsers = await prisma.user.findMany({
-      where,
-      select: {
-        id: true,
-        uuid: true,
-        email: canSeeEmail,
-        name: true,
-        isGuest: true,
-        createdAt: true,
-        _count: {
-          select: {
-            ownedUniverses: true,
-            worldMemberships: true,
+    const where: Prisma.UserWhereInput = excludeGuests ? { AND: [visibleWhere, { isGuest: false }] } : visibleWhere;
+
+    const conditions: Prisma.Sql[] = [];
+    if (search) {
+      const pattern = containsPattern(search);
+      const fields = [
+        Prisma.sql`u.name ILIKE ${pattern}`,
+        ...(canSeeEmail ? [Prisma.sql`u.email ILIKE ${pattern}`] : []),
+        Prisma.sql`u.uuid ILIKE ${pattern}`,
+      ];
+      conditions.push(Prisma.sql`(${Prisma.join(fields, ' OR ')})`);
+    }
+    if (!canSeeEmail) {
+      conditions.push(Prisma.sql`(u.email IS NULL OR u.email <> ${SYSTEM_USER_EMAIL})`);
+    }
+    if (excludeGuests) {
+      conditions.push(Prisma.sql`u.is_guest = false`);
+    }
+    const whereSql = conditions.length ? Prisma.sql`WHERE ${Prisma.join(conditions, ' AND ')}` : Prisma.empty;
+
+    // One page of user ids, most recently seen first, then most accesses, then newest; id breaks remaining ties so
+    // pages never overlap. An access counts towards a person by user id, or by uuid when it has no user id; their last
+    // access is the latest one matching either. Aggregates are computed in the database, only for matching users.
+    const [total, pageRows] = await Promise.all([
+      prisma.user.count({ where }),
+      prisma.$queryRaw<PageRow[]>(Prisma.sql`
+        WITH matched AS (
+          SELECT u.id, u.uuid, u.created_at FROM users u ${whereSql}
+        ),
+        by_id AS (
+          SELECT ra.user_id AS key, MAX(ra.accessed_at) AS last_at, COUNT(*) AS n
+          FROM room_accesses ra
+          WHERE ra.user_id IN (SELECT id FROM matched)
+          GROUP BY ra.user_id
+        ),
+        by_uuid AS (
+          SELECT ra.user_uuid AS key, MAX(ra.accessed_at) AS last_at, COUNT(*) FILTER (WHERE ra.user_id IS NULL) AS n
+          FROM room_accesses ra
+          WHERE ra.user_uuid IN (SELECT uuid FROM matched)
+          GROUP BY ra.user_uuid
+        )
+        SELECT m.id,
+               GREATEST(i.last_at, q.last_at) AS last_accessed,
+               COALESCE(i.n, 0) + COALESCE(q.n, 0) AS total_accesses
+        FROM matched m
+        LEFT JOIN by_id i ON i.key = m.id
+        LEFT JOIN by_uuid q ON q.key = m.uuid
+        ORDER BY last_accessed DESC NULLS LAST, total_accesses DESC, m.created_at DESC, m.id ASC
+        LIMIT ${limit} OFFSET ${offset}
+      `),
+    ]);
+
+    const pagination = { page, limit, total, totalPages: Math.ceil(total / limit) };
+    if (pageRows.length === 0) {
+      return NextResponse.json({ users: [], pagination });
+    }
+
+    const pageIds = pageRows.map((row) => row.id);
+    const [rows, wokas] = await Promise.all([
+      prisma.user.findMany({
+        where: { id: { in: pageIds } },
+        select: {
+          id: true,
+          uuid: true,
+          email: canSeeEmail,
+          name: true,
+          isGuest: true,
+          createdAt: true,
+          _count: {
+            select: {
+              ownedUniverses: true,
+              worldMemberships: true,
+            },
           },
         },
-      },
-    });
-    
-    if (allUsers.length === 0) {
-      return NextResponse.json({
-        users: [],
-        pagination: {
-          page,
-          limit,
-          total: 0,
-          totalPages: 0,
+      }),
+      // Each person's Woka, for their avatar (decoration: never costs the list).
+      wokaLayersForMany(pageIds).catch(() => new Map<string, string[]>()),
+    ]);
+
+    const byId = new Map(rows.map((user) => [user.id, user]));
+    const users = pageRows.flatMap((row) => {
+      const user = byId.get(row.id);
+      // A user deleted between the two queries is simply left off the page.
+      if (!user) return [];
+      return [
+        {
+          ...user,
+          totalAccesses: Number(row.total_accesses),
+          lastAccessed: row.last_accessed ? new Date(row.last_accessed).toISOString() : null,
+          woka: wokas.get(user.id) ?? [],
         },
-      });
-    }
-    
-    const userIds = allUsers.map(u => u.id);
-    const userUuids = allUsers.map(u => u.uuid).filter(Boolean);
-    
-    // Get access counts for all users at once using groupBy
-    const accessCountsByUserId = await prisma.roomAccess.groupBy({
-      by: ['userId'],
-      where: {
-        userId: { in: userIds },
-      },
-      _count: { userId: true },
+      ];
     });
-    
-    const accessCountsByUserUuid = await prisma.roomAccess.groupBy({
-      by: ['userUuid'],
-      where: {
-        userUuid: { in: userUuids },
-        userId: null, // Only count UUID accesses where userId is null to avoid double counting
-      },
-      _count: { userUuid: true },
-    });
-    
-    // Create maps for quick lookup
-    const countByUserId = new Map(accessCountsByUserId.map(a => [a.userId, a._count.userId]));
-    const countByUserUuid = new Map(accessCountsByUserUuid.map(a => [a.userUuid, a._count.userUuid]));
-    
-    // Get all accesses for these users to find last accessed dates
-    const allAccesses = await prisma.roomAccess.findMany({
-      where: {
-        OR: [
-          { userId: { in: userIds } },
-          { userUuid: { in: userUuids } },
-        ],
-      },
-      select: {
-        userId: true,
-        userUuid: true,
-        accessedAt: true,
-      },
-      orderBy: { accessedAt: 'desc' },
-    });
-    
-    // Create map for last access lookup - find most recent access for each user
-    const lastAccessMap = new Map<string, Date>();
-    allUsers.forEach(user => {
-      let mostRecent: Date | null = null;
-      allAccesses.forEach(access => {
-        if ((access.userId === user.id || access.userUuid === user.uuid) && access.accessedAt) {
-          if (!mostRecent || access.accessedAt > mostRecent) {
-            mostRecent = access.accessedAt;
-          }
-        }
-      });
-      if (mostRecent) {
-        lastAccessMap.set(user.id, mostRecent);
-      }
-    });
-    
-    // Combine access counts (userId + userUuid - they don't overlap since each access has either userId OR userUuid)
-    const usersWithAccess = allUsers.map((user) => {
-      const countById = countByUserId.get(user.id) || 0;
-      const countByUuid = user.uuid ? (countByUserUuid.get(user.uuid) || 0) : 0;
-      // Sum them since accesses with userId and userUuid are separate (no overlap)
-      const totalAccesses = countById + countByUuid;
-      const lastAccessed = lastAccessMap.get(user.id) || null;
-      
-      return {
-        ...user,
-        totalAccesses,
-        lastAccessed: lastAccessed ? lastAccessed.toISOString() : null,
-      };
-    });
-    
-    // Sort by last accessed (most recent first), then by total accesses, then by createdAt
-    usersWithAccess.sort((a, b) => {
-      // Users with access come first
-      if (a.lastAccessed && !b.lastAccessed) return -1;
-      if (!a.lastAccessed && b.lastAccessed) return 1;
-      
-      // If both have lastAccessed, sort by most recent
-      if (a.lastAccessed && b.lastAccessed) {
-        const dateA = new Date(a.lastAccessed).getTime();
-        const dateB = new Date(b.lastAccessed).getTime();
-        const dateDiff = dateB - dateA;
-        if (dateDiff !== 0) return dateDiff;
-      }
-      
-      // If same lastAccessed or both null, sort by total accesses
-      const accessDiff = b.totalAccesses - a.totalAccesses;
-      if (accessDiff !== 0) return accessDiff;
-      
-      // Finally sort by createdAt
-      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
-    });
-    
-    // Apply pagination
-    const total = usersWithAccess.length;
-    const pageOfUsers = usersWithAccess.slice((page - 1) * limit, page * limit);
-    // Each person's Woka, for their avatar (decoration: never costs the list).
-    const wokas = await wokaLayersForMany(pageOfUsers.map((user) => user.id)).catch(() => new Map<string, string[]>());
-    const paginatedUsers = pageOfUsers.map((user) => ({ ...user, woka: wokas.get(user.id) ?? [] }));
-    
-    return NextResponse.json({
-      users: paginatedUsers,
-      pagination: {
-        page,
-        limit,
-        total,
-        totalPages: Math.ceil(total / limit),
-      },
-    });
+
+    return NextResponse.json({ users, pagination });
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized') {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
@@ -194,4 +170,3 @@ export async function GET(request: NextRequest) {
     );
   }
 }
-
