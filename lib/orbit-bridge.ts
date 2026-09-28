@@ -15,7 +15,7 @@ import { z } from 'zod';
 export const ORBIT_BRIDGE_VERSION = 1 as const;
 
 /** What this Orbit can do over the bridge (sent in `orbit-bridge-ready`). */
-export const ORBIT_BRIDGE_CAPABILITIES = ['navigate', 'event', 'view'] as const;
+export const ORBIT_BRIDGE_CAPABILITIES = ['navigate', 'event', 'view', 'quests'] as const;
 
 /** Pages the game may ask for. Anything else lands on Orbit's home. */
 export const ORBIT_NAVIGATE_INTENTS = ['new-universe', 'world-members', 'visit-card'] as const;

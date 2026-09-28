@@ -80,16 +80,11 @@ function game(isReady: boolean, roomId?: string): WorkAdventureContextValue & { 
 const words = (text: string | null | undefined) => (text ?? '').replace(/[\u2068\u2069]/g, '');
 
 beforeEach(() => {
-  process.env.NEXT_PUBLIC_QUESTS_PROOF_SLICE = 'true';
   fetchMock.mockReset();
   replace.mockReset();
   window.localStorage.clear();
   window.sessionStorage.clear();
   resetQuestLog();
-});
-
-afterAll(() => {
-  delete process.env.NEXT_PUBLIC_QUESTS_PROOF_SLICE;
 });
 
 describe('Add a quest', () => {
@@ -201,13 +196,6 @@ describe('Add a quest', () => {
     route({ contextStatus: 403 });
     render(<NewQuestPage />);
     expect(await screen.findByTestId('quest-not-editor')).toBeTruthy();
-  });
-
-  it('says quests are off, and fetches nothing, without the flag', () => {
-    delete process.env.NEXT_PUBLIC_QUESTS_PROOF_SLICE;
-    render(<NewQuestPage />);
-    expect(screen.getByTestId('quests-off')).toBeTruthy();
-    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 

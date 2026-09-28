@@ -7,13 +7,11 @@ import { Loader2, Navigation, Pause, Pencil, Play } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useWorkAdventure } from '@/app/admin/workadventure-context';
 import { QUEST_PATH_COPY, questCopy } from '@/lib/quests/copy';
-import { questsProofEnabled } from '@/lib/quests/flag';
 import { QUEST_PATHS, questVisitUrl, type PublishedQuest } from '@/lib/quests/model';
 import { waRoomPath } from '@/lib/wa-room-path';
 import { EmptyCard, InContext, LoadError, LoadingRows, PageHeader, SectionHeader, StatusPill } from '../../../../components/ds';
 import { QuestRow } from '../../../../components/quests/quest-row';
 import { QuestStamp } from '../../../../components/quests/quest-stamp';
-import { QuestsOff } from '../../../../components/quests/quests-off';
 import { savePublishedQuest, usePublishedQuest } from '../../../../components/quests/use-published-quest';
 import { useQuestRoom, type QuestRoom } from '../../../../components/quests/use-quest-room';
 import styles from '../../../../components/quests/quests.module.css';
@@ -21,7 +19,6 @@ import styles from '../../../../components/quests/quests.module.css';
 /** A room's published Welcome chapter: whether it is live, a way to see it in the game, Edit, and Pause. */
 export default function WelcomeQuestPage() {
   const roomId = useParams().id as string;
-  if (!questsProofEnabled()) return <QuestsOff />;
   return <WelcomeQuest roomId={roomId} />;
 }
 

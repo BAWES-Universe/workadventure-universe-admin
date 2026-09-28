@@ -28,7 +28,6 @@ import { TemplateDetail } from '@/components/templates/TemplateDetail';
 import { cn } from '@/lib/utils';
 import { timeAgo } from '@/lib/time-ago';
 import { RoomQuests } from '../../components/quests/room-quests';
-import { questsProofEnabled } from '@/lib/quests/flag';
 import { EmptyCard, EntityRow, Figure, Figures, InContext, KindIcon, LoadingRows, PageHeader, RolePills, SectionHeader, SettingSwitch, Settings, StatLine, StatusPill } from '../../components/ds';
 
 interface Room {
@@ -136,11 +135,10 @@ export default function RoomDetailPage() {
 
   // The Quests tab keeps its place in the address (?tab=quests), so Back from a quest page lands on it.
   useEffect(() => {
-    if (questsProofEnabled() && new URLSearchParams(window.location.search).get('tab') === 'quests') setActiveTab('quests');
+    if (new URLSearchParams(window.location.search).get('tab') === 'quests') setActiveTab('quests');
   }, []);
   function selectTab(tab: 'details' | 'analytics' | 'quests') {
     setActiveTab(tab);
-    if (!questsProofEnabled()) return;
     const url = new URL(window.location.href);
     if ((url.searchParams.get('tab') === 'quests') === (tab === 'quests')) return;
     if (tab === 'quests') url.searchParams.set('tab', 'quests');
@@ -529,8 +527,8 @@ export default function RoomDetailPage() {
 
   const visits = typeof analytics?.totalAccesses === 'number' ? analytics.totalAccesses : null;
   const canEdit = room.canEdit !== false;
-  // The quests proof slice: only for those who can edit the room, only where it is switched on.
-  const showQuests = canEdit && questsProofEnabled();
+  // Quests are only for those who can edit the room.
+  const showQuests = canEdit;
   const shownTab = activeTab === 'quests' && !showQuests ? 'details' : activeTab;
 
   return (

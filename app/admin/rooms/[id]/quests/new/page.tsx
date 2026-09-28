@@ -9,7 +9,6 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { scopedDraftKey } from '@/lib/drafts';
 import { questCopy } from '@/lib/quests/copy';
-import { questsProofEnabled } from '@/lib/quests/flag';
 import {
   EMPTY_QUEST_DRAFT,
   draftFromPublished,
@@ -26,7 +25,6 @@ import {
 import { DraftNotice } from '../../../../components/draft-notice';
 import { EmptyCard, InContext, LoadError, LoadingRows, PageHeader, SettingSwitch, Settings } from '../../../../components/ds';
 import { QuestPreview } from '../../../../components/quests/quest-preview';
-import { QuestsOff } from '../../../../components/quests/quests-off';
 import { useQuestRoom, type QuestRoom } from '../../../../components/quests/use-quest-room';
 import styles from '../../../../components/quests/quests.module.css';
 import { savePublishedQuest } from '../../../../components/quests/use-published-quest';
@@ -38,7 +36,6 @@ import { useDraft } from '../../../../hooks/use-draft';
  */
 export default function NewQuestPage() {
   const roomId = useParams().id as string;
-  if (!questsProofEnabled()) return <QuestsOff />;
   return <NewQuest roomId={roomId} />;
 }
 

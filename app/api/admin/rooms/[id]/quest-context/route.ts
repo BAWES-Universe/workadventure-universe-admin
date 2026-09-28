@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { getViewer, memberWorldIdsOf } from '@/lib/access-scope';
 import { canSeeRoom } from '@/lib/room-visibility';
-import { questsProofEnabled } from '@/lib/quests/flag';
 import { readRoomAreas } from '@/lib/quests/room-areas';
 
 const MAX_BOTS = 50;
@@ -14,7 +13,6 @@ const MAX_BOTS = 50;
  * people who can edit the room, with the same rule as the room's own page. Read only.
  */
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  if (!questsProofEnabled()) return NextResponse.json({ error: 'Not found' }, { status: 404 });
   try {
     const viewer = await getViewer(request);
     if (!viewer) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });

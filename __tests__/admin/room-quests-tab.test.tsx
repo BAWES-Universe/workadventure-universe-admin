@@ -66,19 +66,7 @@ beforeEach(() => {
   window.history.replaceState(null, '', '/admin/rooms/r-1');
 });
 
-afterEach(() => {
-  delete process.env.NEXT_PUBLIC_QUESTS_PROOF_SLICE;
-});
-
-it('has no Quests tab while the slice is off', async () => {
-  route(true);
-  renderPage();
-  expect(await screen.findByRole('button', { name: 'Visitors' })).toBeTruthy();
-  expect(screen.queryByRole('button', { name: 'Quests' })).toBeNull();
-});
-
 it('has no Quests tab for someone who cannot edit the room', async () => {
-  process.env.NEXT_PUBLIC_QUESTS_PROOF_SLICE = 'true';
   route(false);
   renderPage();
   expect(await screen.findByRole('button', { name: 'Visitors' })).toBeTruthy();
@@ -86,7 +74,6 @@ it('has no Quests tab for someone who cannot edit the room', async () => {
 });
 
 it('shows the Quests tab to an editor and keeps it in the address', async () => {
-  process.env.NEXT_PUBLIC_QUESTS_PROOF_SLICE = 'true';
   route(true);
   renderPage();
   fireEvent.click(await screen.findByRole('button', { name: 'Quests' }));
@@ -97,7 +84,6 @@ it('shows the Quests tab to an editor and keeps it in the address', async () => 
 });
 
 it('opens on the Quests tab when the address says so', async () => {
-  process.env.NEXT_PUBLIC_QUESTS_PROOF_SLICE = 'true';
   window.history.replaceState(null, '', '/admin/rooms/r-1?tab=quests');
   route(true);
   renderPage();

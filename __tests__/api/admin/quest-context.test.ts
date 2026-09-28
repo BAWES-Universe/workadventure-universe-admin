@@ -1,6 +1,5 @@
 /**
- * What an owner can point a quest at: the room's named areas and bots, only for those who can edit the room, and
- * nothing at all while the quests proof slice is off.
+ * What an owner can point a quest at: the room's named areas and bots, only for those who can edit the room.
  */
 import { NextRequest } from 'next/server';
 
@@ -61,7 +60,6 @@ beforeAll(() => {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  process.env.NEXT_PUBLIC_QUESTS_PROOF_SLICE = 'true';
   process.env.PUBLIC_MAP_STORAGE_URL = 'http://map-storage.test/';
   process.env.MAP_STORAGE_API_TOKEN = 'map-token';
   process.env.PLAY_URL = 'http://play.test';
@@ -77,10 +75,6 @@ beforeEach(() => {
   );
   db.bot.findMany.mockResolvedValue([{ id: 'b-1', name: 'Receptionist' }]);
   fetchMock.mockResolvedValue({ ok: true, json: () => Promise.resolve(WAM) });
-});
-
-afterAll(() => {
-  delete process.env.NEXT_PUBLIC_QUESTS_PROOF_SLICE;
 });
 
 describe('GET /api/admin/rooms/[id]/quest-context', () => {
@@ -133,12 +127,6 @@ describe('GET /api/admin/rooms/[id]/quest-context', () => {
     expect(await (await GET(req('owner'), params)).json()).toEqual(expect.objectContaining({ areas: [], source: 'none' }));
     delete process.env.PUBLIC_MAP_STORAGE_URL;
     expect(await (await GET(req('owner'), params)).json()).toEqual(expect.objectContaining({ areas: [], source: 'none' }));
-  });
-
-  it('does not exist while the proof slice is off', async () => {
-    delete process.env.NEXT_PUBLIC_QUESTS_PROOF_SLICE;
-    expect((await GET(req('owner'), params)).status).toBe(404);
-    expect(db.room.findUnique).not.toHaveBeenCalled();
   });
 });
 
