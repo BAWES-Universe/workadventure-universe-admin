@@ -8,6 +8,8 @@ import { ProfileCard } from '../components/profile-card';
 import { ThemeChoice } from '../components/shell/theme-choice';
 import Yours from '../components/yours';
 import LogoutButton from '../logout-button';
+import Link from 'next/link';
+import { isQuestProofEnabled } from '../quests/proof/proof-model';
 import styles from './you.module.css';
 
 /**
@@ -53,6 +55,15 @@ function You() {
         }
       />
       <Yours profileComplete={profileComplete} />
+      {isQuestProofEnabled() && (
+        <section className={styles.settings} aria-labelledby="quest-proof-heading">
+          <h2 id="quest-proof-heading" className="orbit-display">Quests</h2>
+          <div className={styles.settingRow}>
+            <span><strong>A warmer welcome</strong><span>Design playground. A sample room, with no live changes.</span></span>
+            <Link href="/admin/quests/proof" className="inline-flex min-h-11 items-center rounded-full border px-4 text-sm">Try the quest preview</Link>
+          </div>
+        </section>
+      )}
       <section className={styles.settings} aria-labelledby="settings-heading">
         <h2 id="settings-heading" className="orbit-display">
           Settings
