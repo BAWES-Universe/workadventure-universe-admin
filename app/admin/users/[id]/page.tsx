@@ -101,6 +101,8 @@ interface Analytics {
   totalAccesses: number;
   lastVisitedByUser: Visit | null;
   lastVisitedOverall: Visit | null;
+  /** Decided by identity on the server, never by comparing times. */
+  youWereLast: boolean;
 }
 
 interface Access {
@@ -142,7 +144,7 @@ interface CurrentUser {
 function visits(analytics?: Analytics) {
   const you = analytics?.lastVisitedByUser?.accessedAt ?? null;
   const latest = analytics?.lastVisitedOverall?.accessedAt ?? null;
-  return { you, latest, youWereLast: Boolean(you && latest && you === latest) };
+  return { you, latest, youWereLast: analytics?.youWereLast === true };
 }
 
 const linkClass = 'underline-offset-2 hover:underline [overflow-wrap:anywhere]';
@@ -313,6 +315,7 @@ export default function UserDetailPage() {
               totalAccesses: data.totalAccesses || 0,
               lastVisitedByUser: data.lastVisitedByUser || null,
               lastVisitedOverall: data.lastVisitedOverall || null,
+              youWereLast: data.youWereLast === true,
             };
           } catch {
             return null;
@@ -328,6 +331,7 @@ export default function UserDetailPage() {
               totalAccesses: result.totalAccesses,
               lastVisitedByUser: result.lastVisitedByUser,
               lastVisitedOverall: result.lastVisitedOverall,
+              youWereLast: result.youWereLast,
             };
           }
         }
@@ -356,6 +360,7 @@ export default function UserDetailPage() {
               totalAccesses: data.totalAccesses || 0,
               lastVisitedByUser: data.lastVisitedByUser || null,
               lastVisitedOverall: data.lastVisitedOverall || null,
+              youWereLast: data.youWereLast === true,
             };
           } catch {
             return null;
@@ -371,6 +376,7 @@ export default function UserDetailPage() {
               totalAccesses: result.totalAccesses,
               lastVisitedByUser: result.lastVisitedByUser,
               lastVisitedOverall: result.lastVisitedOverall,
+              youWereLast: result.youWereLast,
             };
           }
         }
