@@ -3,6 +3,8 @@ import { canManageWorldMembers, isPrivileged, viewerUserId, type Viewer } from '
 import { ORBIT_HOME_PATH, isKnownIntent } from '@/lib/orbit-bridge';
 
 const worldMembersParams = z.object({ worldId: z.string().uuid() });
+// A quest's own key, as the game names it ("welcome.meet"): the page is the player's own, so no check beyond that.
+const questParams = z.object({ questId: z.string().regex(/^[a-z]+\.[a-z]+$/).max(64) });
 
 /**
  * The Orbit page for a page request from the game, decided by Orbit alone: the game only names an intent, and
@@ -23,6 +25,11 @@ export async function resolveNavigateIntent(
     case 'visit-card':
       // Everyone edits their own profile (once the visit card), in place on You.
       return '/admin/you?edit=profile';
+    case 'quest': {
+      // The player's own quest and the badge it earns, on You. An unreadable key opens the Quests page.
+      const parsed = questParams.safeParse(params ?? {});
+      return parsed.success ? `/admin/you/quests/${parsed.data.questId}` : '/admin/you/quests';
+    }
     case 'world-members': {
       const parsed = worldMembersParams.safeParse(params ?? {});
       if (!parsed.success) return ORBIT_HOME_PATH;

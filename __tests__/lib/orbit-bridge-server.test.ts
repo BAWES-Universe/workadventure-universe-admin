@@ -23,6 +23,12 @@ describe('resolveNavigateIntent', () => {
     await expect(resolveNavigateIntent(member, 'visit-card', undefined)).resolves.toBe('/admin/you?edit=profile');
   });
 
+  it('opens a quest the game names on You, and the Quests page for anything unreadable', async () => {
+    await expect(resolveNavigateIntent(member, 'quest', { questId: 'welcome.meet' })).resolves.toBe('/admin/you/quests/welcome.meet');
+    await expect(resolveNavigateIntent(member, 'quest', { questId: '../../admin' })).resolves.toBe('/admin/you/quests');
+    await expect(resolveNavigateIntent(member, 'quest', undefined)).resolves.toBe('/admin/you/quests');
+  });
+
   it('falls back to home for an unknown intent, with no error', async () => {
     await expect(resolveNavigateIntent(member, 'delete-everything', undefined)).resolves.toBe('/admin');
   });
