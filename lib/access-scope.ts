@@ -205,3 +205,13 @@ export async function botReadDenied(
   if (viewer.kind === 'user' && (await canManageBot(viewer.user.id, botId))) return null;
   return forbiddenResponse(headers);
 }
+
+/** The worlds this person is a member of, optionally limited to the given worlds. */
+export async function memberWorldIdsOf(userId: string, worldIds?: string[]): Promise<Set<string>> {
+  if (worldIds && worldIds.length === 0) return new Set();
+  const rows = await prisma.worldMember.findMany({
+    where: { userId, ...(worldIds ? { worldId: { in: worldIds } } : {}) },
+    select: { worldId: true },
+  });
+  return new Set(rows.map((row) => row.worldId));
+}

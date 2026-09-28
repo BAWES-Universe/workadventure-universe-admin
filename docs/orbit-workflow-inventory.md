@@ -149,3 +149,5 @@ Called by the game or the bot service with `ADMIN_API_TOKEN` / `BOT_SERVICE_TOKE
 | 5 | Sign out | `LogoutButton` exists but is never rendered | Mount it in the user menu, or remove it |
 
 Items fixed in 0A (#208), not repeated here: users list and detail, all analytics routes, bot data cleanup and database stats, per-bot read routes.
+
+All five items above are fixed: 1–4 by the access-checks pull request (private universes, worlds and rooms return 404 to anyone who can't see them, the owner's email is only for managers, someone else's stars show only rooms you could see, and the two avatar tools are super admin only); 5 by the new shell, which shows Sign out on You and in the account panel.

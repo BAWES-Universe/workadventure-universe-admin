@@ -4,6 +4,8 @@ import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { FEATURED_FORBIDDEN, refusesFeaturedChange } from '@/lib/featured';
 import { wokaLayersFor } from '@/lib/woka-avatar';
+import { getViewer, memberWorldIdsOf } from '@/lib/access-scope';
+import { canSeeUniverse, canSeeWorld } from '@/lib/room-visibility';
 
 const updateUniverseSchema = z.object({
   slug: z.string().min(1).max(100).optional(),
@@ -21,26 +23,14 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    // Check if using admin token or session
-    const authHeader = request.headers.get('authorization');
-    const isAdminToken = authHeader?.startsWith('Bearer ') && 
-      authHeader.replace('Bearer ', '').trim() === process.env.ADMIN_API_TOKEN;
-    
-    let userId: string | null = null;
-    
-    if (!isAdminToken) {
-      // Try to get user from session
-      const { getSessionUser } = await import('@/lib/auth-session');
-      const sessionUser = await getSessionUser(request);
-      if (!sessionUser) {
-        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-      }
-      userId = sessionUser.id;
-    } else {
-      // Admin token - require it
-      requireAuth(request);
+    const viewer = await getViewer(request);
+    if (!viewer) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
-    
+    const isAdminToken = viewer.kind === 'admin-token';
+    const sessionUser = viewer.kind === 'user' ? viewer.user : null;
+    const userId = sessionUser?.id ?? null;
+
     const { id } = await params;
     const universe = await prisma.universe.findUnique({
       where: { id },
@@ -55,6 +45,7 @@ export async function GET(
         worlds: {
           select: {
             id: true,
+            isPublic: true,
             slug: true,
             name: true,
             description: true,
@@ -70,15 +61,24 @@ export async function GET(
       },
     });
     
-    if (!universe) {
+    // Private universes and worlds are only for their owner, their members and super admins; to anyone else they
+    // don't exist.
+    const memberWorldIds =
+      sessionUser && universe ? await memberWorldIdsOf(sessionUser.id, universe.worlds.map((w) => w.id)) : new Set<string>();
+    if (!universe || (!isAdminToken && !canSeeUniverse(universe, sessionUser, memberWorldIds.size > 0))) {
       return NextResponse.json(
         { error: 'Universe not found' },
         { status: 404 }
       );
     }
+    const visibleWorlds = isAdminToken
+      ? universe.worlds
+      : universe.worlds.filter((world) =>
+          canSeeWorld({ ...world, universe: { isPublic: universe.isPublic, ownerId: universe.ownerId } }, sessionUser, memberWorldIds)
+        );
     
     // Calculate favorites counts for all worlds in this universe
-    const worldIds = universe.worlds.map((w: any) => w.id);
+    const worldIds = visibleWorlds.map((w) => w.id);
     const favoritesByWorld = worldIds.length > 0
       ? await prisma.favorite.groupBy({
           by: ['worldId'],
@@ -96,7 +96,7 @@ export async function GET(
     );
 
     // Add favorites count to each world
-    const worldsWithFavorites = universe.worlds.map((world: any) => ({
+    const worldsWithFavorites = visibleWorlds.map((world) => ({
       ...world,
       _count: {
         ...world._count,
@@ -104,13 +104,22 @@ export async function GET(
       },
     }));
 
-    // Allow viewing for anyone, but include ownership info
+    const canEdit = isAdminToken || (userId !== null && universe.ownerId === userId);
     const ownerWoka = universe.owner ? await wokaLayersFor(universe.owner.id).catch(() => []) : [];
+    // The owner's email is only for those who manage the universe.
+    const owner = universe.owner
+      ? {
+          id: universe.owner.id,
+          name: universe.owner.name,
+          ...(canEdit || sessionUser?.isSuperAdmin ? { email: universe.owner.email } : {}),
+          woka: ownerWoka,
+        }
+      : universe.owner;
     const responseData = {
       ...universe,
-      owner: universe.owner ? { ...universe.owner, woka: ownerWoka } : universe.owner,
+      owner,
       worlds: worldsWithFavorites,
-      canEdit: userId ? (isAdminToken || universe.ownerId === userId) : false,
+      canEdit,
     };
     
     return NextResponse.json(responseData);

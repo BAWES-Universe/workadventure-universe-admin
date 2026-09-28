@@ -6,12 +6,21 @@
  */
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
-import { requireAdminSession } from '@/lib/auth'
+import { requireSuperAdminSession } from '@/lib/auth'
 
 type Params = { params: Promise<{ id: string }> }
 
 export async function GET(req: NextRequest, { params }: Params) {
-  await requireAdminSession()
+  // Tells who is a member of which world, and their tags, so it is for super admins only.
+  try {
+    await requireSuperAdminSession()
+  } catch (error) {
+    const forbidden = error instanceof Error && error.message === 'Forbidden'
+    return NextResponse.json(
+      { error: forbidden ? 'Forbidden' : 'Unauthorized' },
+      { status: forbidden ? 403 : 401 },
+    )
+  }
   const { searchParams } = new URL(req.url)
   const userId = searchParams.get('userId')
   const worldId = searchParams.get('worldId')
