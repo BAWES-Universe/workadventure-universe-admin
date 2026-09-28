@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { Loader2, Navigation, Pause, Pencil, Play } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -9,6 +9,7 @@ import { useWorkAdventure } from '@/app/admin/workadventure-context';
 import { QUEST_PATH_COPY, questCopy } from '@/lib/quests/copy';
 import { questsProofEnabled } from '@/lib/quests/flag';
 import { QUEST_PATHS, questVisitUrl, type PublishedQuest } from '@/lib/quests/model';
+import { waRoomPath } from '@/lib/wa-room-path';
 import { EmptyCard, InContext, LoadError, LoadingRows, PageHeader, SectionHeader, StatusPill } from '../../../../components/ds';
 import { QuestRow } from '../../../../components/quests/quest-row';
 import { QuestStamp } from '../../../../components/quests/quest-stamp';
@@ -56,12 +57,37 @@ function WelcomeQuest({ roomId }: { roomId: string }) {
   );
 }
 
+/**
+ * Whether the game is in this room: true, false, or null while it is still asking. Visiting the room you are in only
+ * moves you back to its start (out of any conversation) and brings no new arrival, so the page doesn't offer it.
+ */
+function useInRoom(roomPath: string): boolean | null {
+  const { wa, isReady } = useWorkAdventure();
+  const [here, setHere] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (!isReady || !wa) return;
+    let cancelled = false;
+    wa.onInit()
+      .then(() => waRoomPath(wa.room.id) === roomPath)
+      .catch(() => false)
+      .then((inRoom) => {
+        if (!cancelled) setHere(inRoom);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [wa, isReady, roomPath]);
+  return isReady && wa ? here : false;
+}
+
 function PublishedWelcome({ room, quest }: { room: QuestRoom; quest: PublishedQuest }) {
   const { isReady: waReady, navigateToRoom } = useWorkAdventure();
   const [visiting, setVisiting] = useState(false);
   const [visitError, setVisitError] = useState<string | null>(null);
   const live = quest.status === 'live';
   const roomHref = `/admin/rooms/${room.id}`;
+  const roomPath = `/@/${room.world.universe.slug}/${room.world.slug}/${room.slug}`;
+  const here = useInRoom(roomPath);
   const offered = QUEST_PATHS.filter((path) => quest.paths[path]);
 
   function togglePause() {
@@ -69,10 +95,11 @@ function PublishedWelcome({ room, quest }: { room: QuestRoom; quest: PublishedQu
   }
 
   async function visit() {
+    if (here !== false) return;
     setVisiting(true);
     setVisitError(null);
     try {
-      await navigateToRoom(questVisitUrl(`/@/${room.world.universe.slug}/${room.world.slug}/${room.slug}`, quest));
+      await navigateToRoom(questVisitUrl(roomPath, quest));
     } catch {
       setVisitError('The game didn’t open the room. Try again from inside the game.');
     } finally {
@@ -88,15 +115,17 @@ function PublishedWelcome({ room, quest }: { room: QuestRoom; quest: PublishedQu
         status={<StatusPill status={live ? 'published' : 'paused'} />}
         actions={
           <>
-            <Button
-              className="h-11"
-              onClick={visit}
-              disabled={visiting || !waReady}
-              title={!waReady ? 'Works when Orbit is open inside the game' : undefined}
-            >
-              {visiting ? <Loader2 className="animate-spin" aria-hidden="true" /> : <Navigation aria-hidden="true" />}
-              Visit the room
-            </Button>
+            {here !== true && (
+              <Button
+                className="h-11"
+                onClick={visit}
+                disabled={visiting || !waReady || here === null}
+                title={!waReady ? 'Works when Orbit is open inside the game' : undefined}
+              >
+                {visiting ? <Loader2 className="animate-spin" aria-hidden="true" /> : <Navigation aria-hidden="true" />}
+                Visit the room
+              </Button>
+            )}
             <Button variant="outline" className="h-11" asChild>
               <Link href={`${roomHref}/quests/new`}>
                 <Pencil aria-hidden="true" />
@@ -113,10 +142,15 @@ function PublishedWelcome({ room, quest }: { room: QuestRoom; quest: PublishedQu
         <p className={styles.pauseNote} data-testid="quest-where">
           {live ? 'Live in this browser (prototype).' : 'Paused in this browser (prototype).'} Where it appears: {room.name}.
         </p>
+        {here === true && (
+          <p className={styles.pauseNote} data-testid="quest-here">
+            You’re in this room. The Welcome chapter’s choices apply the next time you arrive here.
+          </p>
+        )}
         <p id="quest-pause-note" className={styles.pauseNote} role="status">
           {live
-            ? 'Pause: new visitors won’t be invited. People who accepted keep their progress.'
-            : 'Paused: new visitors aren’t invited. People who accepted keep their progress.'}
+            ? 'Pause keeps your choices out of Visit the room. The game doesn’t read this browser’s record yet, so visitors are still invited.'
+            : 'Paused in this browser: Visit the room opens it without your choices.'}
         </p>
         {visitError && (
           <p className={styles.problem} role="alert">

@@ -145,7 +145,8 @@ export default function RoomDetailPage() {
     if ((url.searchParams.get('tab') === 'quests') === (tab === 'quests')) return;
     if (tab === 'quests') url.searchParams.set('tab', 'quests');
     else url.searchParams.delete('tab');
-    window.history.replaceState(window.history.state, '', url);
+    // null lets Next's patched replaceState sync its router, so a later refresh keeps ?tab.
+    window.history.replaceState(null, '', url);
   }
   
   const [formData, setFormData] = useState({

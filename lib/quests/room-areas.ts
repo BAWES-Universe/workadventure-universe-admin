@@ -14,9 +14,14 @@ function mapDomain(playUrl: string): string {
   }
 }
 
+/** Restricted areas are closed to a newcomer without the right tags, so the game never sends one there. */
+function isRestricted(properties: unknown): boolean {
+  return Array.isArray(properties) && properties.some((property) => (property as { type?: unknown } | null)?.type === 'restrictedRightsPropertyData');
+}
+
 /**
- * The named areas of a WAM, as the game lists them for quests: a name that isn't blank, once per name (the game finds
- * the published area by name).
+ * The named areas of a WAM, as the game lists them for quests: a name that isn't blank, a size, not restricted, once
+ * per name (the game finds the published area by name).
  */
 export function namedAreas(wam: { areas?: unknown }): QuestContextArea[] {
   if (!Array.isArray(wam.areas)) return [];
@@ -24,8 +29,10 @@ export function namedAreas(wam: { areas?: unknown }): QuestContextArea[] {
   const areas: QuestContextArea[] = [];
   for (const area of wam.areas) {
     if (typeof area !== 'object' || area === null) continue;
-    const { id, name } = area as { id?: unknown; name?: unknown };
+    const { id, name, width, height, properties } = area as { id?: unknown; name?: unknown; width?: unknown; height?: unknown; properties?: unknown };
     if (typeof id !== 'string' || !id || typeof name !== 'string') continue;
+    if (typeof width !== 'number' || typeof height !== 'number' || !(width > 0) || !(height > 0)) continue;
+    if (isRestricted(properties)) continue;
     const trimmed = name.trim();
     const key = trimmed.toLocaleLowerCase();
     if (!trimmed || trimmed.length > MAX_AREA_NAME || seen.has(key)) continue;

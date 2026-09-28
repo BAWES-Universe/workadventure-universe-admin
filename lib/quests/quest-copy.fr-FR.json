@@ -83,6 +83,7 @@
     "followUp.signInBody": "Pour l'instant, elle n'existe que dans ce navigateur et disparaît si ses données sont effacées.",
     "followUp.signIn": "Se connecter",
     "followUp.backToExploring": "Continuer à explorer",
+    "followUp.tryAnother": "En essayer une autre",
     "announce.tracking": "Quête suivie : {objective}",
     "announce.done": "Terminé : {objective}",
     "announce.finishedMany": "Vous avez terminé {count} choses."

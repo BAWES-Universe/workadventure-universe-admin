@@ -84,6 +84,11 @@ function StepHeading({ id, number, children }: { id: string; number: number; chi
   );
 }
 
+/** The game's default host: the bot named Receptionist, else the room's first bot. */
+function defaultBot(bots: QuestContext['bots']) {
+  return bots.find((bot) => bot.name.trim().toLowerCase() === 'receptionist') ?? bots[0] ?? null;
+}
+
 /** Focusing the field also scrolls it into view. */
 function focusField(id: string) {
   document.getElementById(id)?.focus();
@@ -92,15 +97,18 @@ function focusField(id: string) {
 function QuestForm({ room, context }: { room: QuestRoom; context: QuestContext }) {
   const router = useRouter();
   const [published] = useState(() => readPublishedQuest(room.id));
-  // Where the form starts: the published quest when editing, else Welcome with what this room can offer.
+  // Where the form starts: the published quest when editing, else Welcome with what this room can offer, greeted by
+  // its Receptionist (or first bot) as the game would be.
   const baseline = useMemo<QuestDraft>(() => {
     if (published) return draftFromPublished(published);
+    const host = defaultBot(context.bots);
     return {
       ...EMPTY_QUEST_DRAFT,
       explore: context.areas.length > 0,
       areaId: context.areas.length === 1 ? context.areas[0].id : '',
+      ...(host ? { hostKind: 'bot' as const, hostId: host.id } : {}),
     };
-  }, [published, context.areas]);
+  }, [published, context.areas, context.bots]);
   const [draft, setDraft] = useState<QuestDraft>(baseline);
   const [error, setError] = useState<string | null>(null);
   const { discard, restored, revert } = useDraft(scopedDraftKey('quest.new', room.id), draft, setDraft, baseline, true, upgradeQuestDraft);
@@ -324,7 +332,8 @@ function QuestForm({ room, context }: { room: QuestRoom; context: QuestContext }
                 Publish
               </StepHeading>
               <p className={styles.stepNote}>
-                For now a published quest is kept in this browser (a prototype): Visit the room shows it to you in the game.
+                For now a published quest is kept in this browser (a prototype). Visit the room opens it with your area and
+                host; the invitation shows only to someone who hasn’t answered it yet.
               </p>
               {firstProblem && (
                 <button type="button" className={styles.problemLink} onClick={() => focusField(firstProblem.field)}>

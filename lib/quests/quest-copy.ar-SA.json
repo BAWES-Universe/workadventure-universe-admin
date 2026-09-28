@@ -83,6 +83,7 @@
     "followUp.signInBody": "حاليًا يُحفظ في هذا المتصفح فقط ويضيع إذا مُسحت بياناته.",
     "followUp.signIn": "تسجيل الدخول",
     "followUp.backToExploring": "العودة إلى الاستكشاف",
+    "followUp.tryAnother": "جرّب مهمة أخرى",
     "announce.tracking": "قيد المتابعة: {objective}",
     "announce.done": "تمّت: {objective}",
     "announce.finishedMany": "أنهيت {count} مهام."

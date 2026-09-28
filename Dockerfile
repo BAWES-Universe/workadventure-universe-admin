@@ -29,6 +29,7 @@ RUN rm -f next-env.d.ts || true
 ARG NEXT_PUBLIC_PLAY_URL
 ENV NEXT_PUBLIC_PLAY_URL=$NEXT_PUBLIC_PLAY_URL
 # The quests proof slice (game issue #511): "true" only for the dev deployment's image; unset everywhere else.
+# The build workflow never passes it for main, master or a release tag, whatever the repository variable says.
 ARG NEXT_PUBLIC_QUESTS_PROOF_SLICE
 ENV NEXT_PUBLIC_QUESTS_PROOF_SLICE=$NEXT_PUBLIC_QUESTS_PROOF_SLICE
 

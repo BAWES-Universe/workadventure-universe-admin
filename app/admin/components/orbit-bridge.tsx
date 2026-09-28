@@ -117,7 +117,9 @@ export default function OrbitBridge({
 
       // Display only: shown on You while the proof slice is on, never answered (it isn't a request).
       if (parsed.kind === 'quest-state') {
-        if (questsProofEnabled() && parsed.message.roomRevision === roomRevision.current) setQuestLog(parsed.message.entries);
+        const { roomRevision: revision, entries } = parsed.message;
+        const current = roomRevision.current !== null && (revision === undefined || revision === roomRevision.current);
+        if (questsProofEnabled() && current) setQuestLog(entries);
         return;
       }
 

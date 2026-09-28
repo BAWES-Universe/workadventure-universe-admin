@@ -7,6 +7,7 @@ import { cn } from '@/lib/utils';
 import {
   QUEST_COPY_LOCALES,
   QUEST_PATH_COPY,
+  isolateName,
   questCopy,
   questCopyDirection,
   type QuestCopyKey,
@@ -35,9 +36,9 @@ export interface QuestPreviewProps {
 /** Every string a visitor would read on each screen, in the order the screens come. */
 function screenCopy({ roomName, paths, areaName, host }: QuestPreviewProps, locale: QuestCopyLocale) {
   const t = (key: QuestCopyKey, params?: Record<string, string | number>) => questCopy(key, params, locale);
-  const area = areaName ?? '';
+  const area = isolateName(areaName ?? '');
   const offered = QUEST_PATHS.filter((path) => paths[path] && (path !== 'explore' || areaName));
-  const speaker = host.kind === 'none' ? roomName : host.name;
+  const speaker = isolateName(host.kind === 'none' ? roomName : host.name);
   const options = offered.map((path) => ({
     path,
     title: t(QUEST_PATH_COPY[path].title),
@@ -77,7 +78,13 @@ export function QuestPreview(props: QuestPreviewProps) {
   const copy = screenCopy(props, locale);
   const { host } = props;
   const running = step !== null && step < SCREENS.length;
-  const shows = (index: number) => step === null || step >= SCREENS.length || step === index;
+  // Every screen stays in place during a run, so the strip (and the button under it) keeps its height.
+  const screenState = (index: number) => ({
+    className: cn(styles.screen, step === index && styles.current),
+    'data-dim': running && step !== index ? true : undefined,
+  });
+  const dir = questCopyDirection(locale);
+  const screenLine = [copy.invitation.line, copy.optionsTitle, copy.payoff?.line ?? ''];
 
   const eyebrow = (
     <div className={styles.eyebrow}>
@@ -104,60 +111,59 @@ export function QuestPreview(props: QuestPreviewProps) {
               type="button"
               className={styles.language}
               aria-pressed={locale === candidate}
-              aria-label={LANGUAGE_NAME[candidate].name}
               onClick={() => setLocale(candidate)}
             >
               {LANGUAGE_NAME[candidate].short}
+              <span className="sr-only" lang={candidate}>
+                {' '}
+                {LANGUAGE_NAME[candidate].name}
+              </span>
             </button>
           ))}
         </span>
       </div>
 
-      <div className={styles.strip} aria-hidden="true" dir={questCopyDirection(locale)} lang={locale}>
+      <div className={styles.strip} aria-hidden="true" dir={dir} lang={locale}>
         {copy.options.length === 0 ? (
           <p className={styles.nothing}>Nothing to do here yet, so newcomers get no invitation.</p>
         ) : (
           <>
-            {shows(0) && (
-              <div className={cn(styles.screen, step === 0 && styles.current)} data-screen="invitation">
-                <div className={styles.glass}>
-                  {eyebrow}
-                  <p className={styles.line}>{copy.invitation.line}</p>
-                  <p className={styles.secondary}>{copy.invitation.secondary}</p>
-                  <div className={styles.buttons}>
-                    <span className={styles.cta}>{copy.invitation.showOptions}</span>
-                    <span className={styles.ghost}>{copy.invitation.notNow}</span>
-                  </div>
+            <div {...screenState(0)} data-screen="invitation">
+              <div className={styles.glass}>
+                {eyebrow}
+                <p className={styles.line}>{copy.invitation.line}</p>
+                <p className={styles.secondary}>{copy.invitation.secondary}</p>
+                <div className={styles.buttons}>
+                  <span className={styles.cta}>{copy.invitation.showOptions}</span>
+                  <span className={styles.ghost}>{copy.invitation.notNow}</span>
                 </div>
               </div>
-            )}
-            {shows(1) && (
-              <div className={cn(styles.screen, step === 1 && styles.current)} data-screen="options">
-                <div className={styles.glass}>
-                  <div className={styles.optionsHead}>
-                    {host.kind !== 'none' && (
-                      <span className={styles.portrait}>{host.kind === 'bot' ? <Bot size={15} /> : <SquareDashed size={15} />}</span>
-                    )}
-                    <p className={styles.line}>{copy.optionsTitle}</p>
-                    <span className={styles.close}>
-                      <X size={16} />
+            </div>
+            <div {...screenState(1)} data-screen="options">
+              <div className={styles.glass}>
+                <div className={styles.optionsHead}>
+                  {host.kind !== 'none' && (
+                    <span className={styles.portrait}>{host.kind === 'bot' ? <Bot size={15} /> : <SquareDashed size={15} />}</span>
+                  )}
+                  <p className={styles.line}>{copy.optionsTitle}</p>
+                  <span className={styles.close}>
+                    <X size={16} />
+                  </span>
+                </div>
+                {copy.options.map((option) => (
+                  <div key={option.path} className={styles.optionRow}>
+                    <QuestStamp path={option.path} size="sm" />
+                    <span className={styles.optionText}>
+                      <strong>{option.title}</strong>
+                      <span>{option.description}</span>
                     </span>
+                    <span className={styles.minutes}>{option.minutes}</span>
                   </div>
-                  {copy.options.map((option) => (
-                    <div key={option.path} className={styles.optionRow}>
-                      <QuestStamp path={option.path} size="sm" />
-                      <span className={styles.optionText}>
-                        <strong>{option.title}</strong>
-                        <span>{option.description}</span>
-                      </span>
-                      <span className={styles.minutes}>{option.minutes}</span>
-                    </div>
-                  ))}
-                </div>
+                ))}
               </div>
-            )}
-            {shows(2) && copy.payoff && (
-              <div className={cn(styles.screen, step === 2 && styles.current)} data-screen="payoff">
+            </div>
+            {copy.payoff && (
+              <div {...screenState(2)} data-screen="payoff">
                 <div className={cn(styles.glass, styles.payoff)}>
                   <QuestStamp path={copy.payoff.path} size="md" />
                   <span className={styles.payoffText}>
@@ -173,16 +179,25 @@ export function QuestPreview(props: QuestPreviewProps) {
       </div>
 
       {/* What the pictures say, for screen readers; a test run marks the screen it is on. */}
-      <ol className="sr-only" lang={locale} dir={questCopyDirection(locale)}>
+      <ol className="sr-only">
         <li aria-current={step === 0 ? 'step' : undefined}>
-          {SCREENS[0]}: {copy.speaker}. {copy.invitation.line} {copy.invitation.secondary} {copy.invitation.showOptions}. {copy.invitation.notNow}.
+          {SCREENS[0]}:{' '}
+          <span lang={locale} dir={dir}>
+            {copy.speaker}. {copy.invitation.line} {copy.invitation.secondary} {copy.invitation.showOptions}. {copy.invitation.notNow}.
+          </span>
         </li>
         <li aria-current={step === 1 ? 'step' : undefined}>
-          {SCREENS[1]}: {copy.optionsTitle} {copy.options.map((option) => `${option.title}: ${option.description} ${option.minutes}.`).join(' ')}
+          {SCREENS[1]}:{' '}
+          <span lang={locale} dir={dir}>
+            {copy.optionsTitle} {copy.options.map((option) => `${option.title}: ${option.description} ${option.minutes}.`).join(' ')}
+          </span>
         </li>
         {copy.payoff && (
           <li aria-current={step === 2 ? 'step' : undefined}>
-            {SCREENS[2]}: {copy.speaker}. {copy.payoff.line} {copy.payoff.badge}.
+            {SCREENS[2]}:{' '}
+            <span lang={locale} dir={dir}>
+              {copy.speaker}. {copy.payoff.line} {copy.payoff.badge}.
+            </span>
           </li>
         )}
       </ol>
@@ -193,14 +208,26 @@ export function QuestPreview(props: QuestPreviewProps) {
             {runLabel}
           </Button>
           {running && (
-            <span className={styles.runStep}>
+            <span className={styles.runStep} aria-hidden="true">
               Step {step + 1} of {SCREENS.length}: {SCREENS[step].toLowerCase()}
             </span>
           )}
         </div>
       )}
-      <p role="status" className={styles.rehearsal} data-testid="rehearsal-status">
-        {step !== null ? 'Rehearsal only. Nothing was saved.' : ''}
+      {/* The one announcer: each step of a run and its words, then the rehearsal note once it is finished. */}
+      <p role="status" className={running ? 'sr-only' : styles.rehearsal} data-testid="rehearsal-status">
+        {running ? (
+          <>
+            Step {step + 1} of {SCREENS.length}: {SCREENS[step].toLowerCase()}.{' '}
+            <span lang={locale} dir={dir}>
+              {screenLine[step]}
+            </span>
+          </>
+        ) : step !== null ? (
+          'Rehearsal only. Nothing was saved.'
+        ) : (
+          ''
+        )}
       </p>
     </div>
   );

@@ -68,6 +68,11 @@ describe('orbit-quest-state', () => {
     expect(parseBridgeMessage(state([]), expected)?.kind).toBe('quest-state');
   });
 
+  it("accepts the game's message exactly as it sends it (no revision)", () => {
+    const fromGame = { origin: GAME, source: parent, data: { type: 'orbit-quest-state', version: 1, entries: [entry] } };
+    expect(parseBridgeMessage(fromGame, expected)).toEqual({ kind: 'quest-state', message: { type: 'orbit-quest-state', version: 1, entries: [entry] } });
+  });
+
   it.each([
     ['more than eight entries', state(Array.from({ length: 9 }, (_, index) => ({ ...entry, id: `q${index}` })))],
     ['an over-long title', state([{ ...entry, title: 'x'.repeat(81) }])],
@@ -75,7 +80,7 @@ describe('orbit-quest-state', () => {
     ['an over-long room', state([{ ...entry, room: 'x'.repeat(81) }])],
     ['an unknown status', state([{ ...entry, status: 'failed' }])],
     ['an unknown stamp', state([{ ...entry, stamp: 'core' }])],
-    ['no revision', state([entry], { roomRevision: undefined })],
+    ['a malformed revision', state([entry], { roomRevision: 'not-a-revision' })],
     ['entries that are not a list', state([], { entries: 'lots' })],
   ])('ignores %s', (_, message) => {
     expect(parseBridgeMessage(message, expected)).toBeNull();

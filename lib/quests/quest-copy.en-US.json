@@ -83,6 +83,7 @@
     "followUp.signInBody": "Right now it lives only in this browser and goes if its data is cleared.",
     "followUp.signIn": "Sign in",
     "followUp.backToExploring": "Back to exploring",
+    "followUp.tryAnother": "Try another",
     "announce.tracking": "Tracking: {objective}",
     "announce.done": "Done: {objective}",
     "announce.finishedMany": "You finished {count} things."

@@ -71,9 +71,13 @@ function route({ room = ROOM, context = CONTEXT, contextStatus = 200 }: { room?:
   });
 }
 
-function game(isReady: boolean): WorkAdventureContextValue & { navigateToRoom: jest.Mock } {
-  return { wa: null, isReady, isLoading: false, error: null, navigateToRoom: jest.fn().mockResolvedValue(undefined) };
+function game(isReady: boolean, roomId?: string): WorkAdventureContextValue & { navigateToRoom: jest.Mock } {
+  const wa = roomId ? ({ onInit: () => Promise.resolve(), room: { id: roomId } } as unknown as WorkAdventureContextValue['wa']) : null;
+  return { wa, isReady, isLoading: false, error: null, navigateToRoom: jest.fn().mockResolvedValue(undefined) };
 }
+
+/** Names set into sentences are isolated (FSI…PDI); compare the words alone. */
+const words = (text: string | null | undefined) => (text ?? '').replace(/[\u2068\u2069]/g, '');
 
 beforeEach(() => {
   process.env.NEXT_PUBLIC_QUESTS_PROOF_SLICE = 'true';
@@ -113,30 +117,42 @@ describe('Add a quest', () => {
     render(<NewQuestPage />);
     fireEvent.change(await screen.findByLabelText('Area to find'), { target: { value: 'a-1' } });
     const preview = screen.getByTestId('quest-preview');
-    // No host: the room speaks.
-    expect(within(preview).getAllByText('Lobby').length).toBeGreaterThan(0);
+    const strip = () => words(preview.textContent);
+    // The Receptionist greets newcomers unless the owner chooses otherwise, as in the game.
+    expect(screen.getByRole('radio', { name: /A bot/ })).toHaveProperty('checked', true);
+    expect((screen.getByLabelText('Host') as HTMLSelectElement).value).toBe('b-1');
+    expect(strip()).toMatch(/Receptionist/);
+    expect(within(preview).getAllByText('Good to meet you.').length).toBeGreaterThan(0);
     expect(within(preview).getAllByText('Welcome. Want a quick look around?').length).toBeGreaterThan(0);
-    expect(within(preview).getAllByText('Find the Courtyard.').length).toBeGreaterThan(0);
+    expect(strip()).toMatch(/Find the Courtyard\./);
     expect(within(preview).getAllByText(/First Hello badge/).length).toBeGreaterThan(0);
 
-    fireEvent.click(screen.getByRole('radio', { name: /A bot/ }));
-    // The only bot is picked for you.
-    expect((screen.getByLabelText('Host') as HTMLSelectElement).value).toBe('b-1');
-    expect(within(preview).getAllByText('Receptionist').length).toBeGreaterThan(0);
-    expect(within(preview).getAllByText('Good to meet you.').length).toBeGreaterThan(0);
+    // No host: the room speaks.
+    fireEvent.click(screen.getByRole('radio', { name: /No host/ }));
+    expect(strip()).toMatch(/Lobby/);
+    expect(strip()).not.toMatch(/Receptionist/);
 
     const status = screen.getByTestId('rehearsal-status');
     expect(status.getAttribute('role')).toBe('status');
     expect(status.textContent).toBe('');
+    const screens = () => preview.querySelectorAll('[data-screen]');
+    expect(screens()).toHaveLength(3);
     fireEvent.click(screen.getByRole('button', { name: 'Test run' }));
-    expect(screen.getByText('Step 1 of 3: the invitation')).toBeTruthy();
+    // Every screen stays in place; the others fade, and the status says the step and its words.
+    expect(screens()).toHaveLength(3);
+    expect(preview.querySelectorAll('[data-screen][data-dim]')).toHaveLength(2);
+    expect(status.textContent).toBe('Step 1 of 3: the invitation. Welcome. Want a quick look around?');
     fireEvent.click(screen.getByRole('button', { name: 'Next: the options' }));
+    expect(status.textContent).toMatch(/^Step 2 of 3: the options\./);
     fireEvent.click(screen.getByRole('button', { name: 'Next: the payoff' }));
+    expect(status.textContent).toMatch(/^Step 3 of 3: the payoff\./);
     fireEvent.click(screen.getByRole('button', { name: 'Finish test run' }));
     expect(status.textContent).toBe('Rehearsal only. Nothing was saved.');
+    expect(preview.querySelectorAll('[data-screen][data-dim]')).toHaveLength(0);
     expect(readPublishedQuest('r-1')).toBeNull();
 
-    fireEvent.click(screen.getByRole('button', { name: 'العربية' }));
+    // The visible label is part of the name.
+    fireEvent.click(screen.getByRole('button', { name: 'AR العربية' }));
     expect(within(preview).getAllByText('أهلًا بك. هل تريد جولة سريعة؟').length).toBeGreaterThan(0);
   });
 
@@ -147,7 +163,12 @@ describe('Add a quest', () => {
     await waitFor(() => expect(window.sessionStorage.getItem(DRAFT_KEY_PREFIX + scopedDraftKey('quest.new', 'r-1'))).not.toBeNull());
     fireEvent.click(screen.getByTestId('quest-publish'));
     expect(readPublishedQuest('r-1')).toEqual(
-      expect.objectContaining({ status: 'live', area: { id: 'a-2', name: 'Studio' }, host: { kind: 'none' }, paths: { meet: true, explore: true, build: false } }),
+      expect.objectContaining({
+        status: 'live',
+        area: { id: 'a-2', name: 'Studio' },
+        host: { kind: 'bot', id: 'b-1', name: 'Receptionist' },
+        paths: { meet: true, explore: true, build: false },
+      }),
     );
     expect(replace).toHaveBeenCalledWith('/admin/rooms/r-1/quests/welcome');
     expect(window.sessionStorage.getItem(DRAFT_KEY_PREFIX + scopedDraftKey('quest.new', 'r-1'))).toBeNull();
@@ -159,6 +180,12 @@ describe('Add a quest', () => {
     render(<NewQuestPage />);
     expect(await screen.findByTestId('draft-notice')).toBeTruthy();
     expect((screen.getByLabelText('Area to find') as HTMLSelectElement).value).toBe('a-2');
+  });
+
+  it('greets with the Receptionist, else the first bot', async () => {
+    route({ context: { ...CONTEXT, bots: [{ id: 'b-2', name: 'Guide' }, { id: 'b-1', name: ' receptionist ' }] } });
+    render(<NewQuestPage />);
+    expect(((await screen.findByLabelText('Host')) as HTMLSelectElement).value).toBe('b-1');
   });
 
   it('offers no Explore on a map without named areas', async () => {
@@ -216,9 +243,26 @@ describe('The published welcome', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Pause' }));
     expect(screen.getByText('Paused')).toBeTruthy();
     expect(readPublishedQuest('r-1')?.status).toBe('paused');
-    expect(screen.getByText(/new visitors aren’t invited. People who accepted keep their progress./)).toBeTruthy();
+    expect(screen.getByText('Paused in this browser: Visit the room opens it without your choices.')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Resume' }));
     expect(readPublishedQuest('r-1')?.status).toBe('live');
+  });
+
+  it('offers no Visit while the owner is already in the room, and never moves them', async () => {
+    writePublishedQuest('r-1', live);
+    route();
+    const wa = renderPage(game(true, 'https://play.test/@/bawes/office/lobby'));
+    expect((await screen.findByTestId('quest-here')).textContent).toMatch(/choices apply the next time you arrive here/);
+    expect(screen.queryByRole('button', { name: /Visit the room/ })).toBeNull();
+    expect(wa.navigateToRoom).not.toHaveBeenCalled();
+  });
+
+  it('offers Visit from another room', async () => {
+    writePublishedQuest('r-1', live);
+    route();
+    renderPage(game(true, 'https://play.test/@/bawes/office/studio'));
+    await waitFor(() => expect(screen.getByRole('button', { name: /Visit the room/ })).toHaveProperty('disabled', false));
+    expect(screen.queryByTestId('quest-here')).toBeNull();
   });
 
   it('cannot visit from outside the game', async () => {
@@ -271,8 +315,8 @@ describe('Quests on You', () => {
     );
     const log = screen.getByTestId('quest-log');
     expect(within(log).getAllByRole('heading', { level: 3 }).map((heading) => heading.textContent)).toEqual(['Tracked', 'Accepted', 'Done']);
-    expect(screen.getByTestId('quest-e').textContent).toMatch(/From Receptionist · Lobby/);
-    expect(screen.getByTestId('quest-b').textContent).toMatch(/Here · Lobby/);
+    expect(words(screen.getByTestId('quest-e').textContent)).toMatch(/From Receptionist · Lobby/);
+    expect(words(screen.getByTestId('quest-b').textContent)).toMatch(/Here · Lobby/);
     expect(screen.getByTestId('quest-m').textContent).toMatch(/First Hello badge/);
     // Count of what is still to do.
     expect(within(log).getByRole('heading', { level: 2 }).textContent).toBe('Quests2');

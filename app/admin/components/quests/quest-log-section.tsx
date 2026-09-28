@@ -2,7 +2,7 @@
 
 import { useSyncExternalStore } from 'react';
 import type { OrbitQuestEntry } from '@/lib/orbit-bridge';
-import { questCopy, type QuestCopyKey } from '@/lib/quests/copy';
+import { isolateName, questCopy, type QuestCopyKey } from '@/lib/quests/copy';
 import { QUEST_STAMP_PATH } from '@/lib/quests/model';
 import { getQuestLog, getServerQuestLog, subscribeQuestLog } from '@/lib/quests/quest-log';
 import { EmptyCard, SectionHeader } from '../ds';
@@ -61,8 +61,8 @@ export function QuestLogSection() {
                       title={entry.title}
                       context={
                         entry.giver
-                          ? questCopy('log.fromHost', { host: entry.giver, room: entry.room })
-                          : questCopy('log.here', { room: entry.room })
+                          ? questCopy('log.fromHost', { host: isolateName(entry.giver), room: isolateName(entry.room) })
+                          : questCopy('log.here', { room: isolateName(entry.room) })
                       }
                       aside={
                         status === 'done' && entry.stamp

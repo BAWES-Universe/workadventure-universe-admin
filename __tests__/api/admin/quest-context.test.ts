@@ -146,6 +146,20 @@ describe('namedAreas', () => {
   it('ignores anything that is not a list of areas', () => {
     expect(namedAreas({})).toEqual([]);
     expect(namedAreas({ areas: 'nope' })).toEqual([]);
-    expect(namedAreas({ areas: [null, 3, { id: 'x', name: 'x'.repeat(101) }] })).toEqual([]);
+    expect(namedAreas({ areas: [null, 3, { id: 'x', name: 'x'.repeat(101), width: 10, height: 10 }] })).toEqual([]);
+  });
+
+  it('leaves out areas the game never sends a newcomer to: no size, or restricted', () => {
+    const area = { x: 0, y: 0, width: 10, height: 10, properties: [] };
+    expect(
+      namedAreas({
+        areas: [
+          { ...area, id: 'a-1', name: 'Hall' },
+          { ...area, id: 'a-2', name: 'Flat', height: 0 },
+          { ...area, id: 'a-3', name: 'Sizeless', width: undefined },
+          { ...area, id: 'a-4', name: 'Office', properties: [{ id: 'p', type: 'restrictedRightsPropertyData', writeTags: [], readTags: ['staff'] }] },
+        ],
+      }),
+    ).toEqual([{ id: 'a-1', name: 'Hall' }]);
   });
 });

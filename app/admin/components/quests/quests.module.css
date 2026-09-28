@@ -18,6 +18,11 @@
 .rowText strong { font-size: 14px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
 .rowContext { font-size: 12px; color: hsl(var(--muted-foreground)); overflow-wrap: anywhere; }
 .rowAside { flex: none; display: flex; align-items: center; gap: 6px; font-size: 12px; color: hsl(var(--muted-foreground)); }
+/* As ds .row: on narrow panels the aside goes under the text so the title keeps its width. */
+@media (max-width: 400px) {
+  .row:has(.rowAside) { flex-wrap: wrap; }
+  .rowAside { width: 100%; justify-content: flex-end; padding-inline-start: 48px; }
+}
 .stretched { color: inherit; outline: none; }
 .stretched::after { content: ''; position: absolute; inset: 0; border-radius: inherit; }
 .stretched:focus-visible::after { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
@@ -42,6 +47,8 @@
 .stepNote { font-size: 13px; line-height: 1.5; color: hsl(var(--muted-foreground)); }
 .problem { font-size: 12px; font-weight: 600; color: hsl(var(--destructive)); }
 .problemLink { font-size: 12px; font-weight: 600; color: hsl(var(--destructive)); text-decoration: underline; text-underline-offset: 3px; min-height: 44px; display: inline-flex; align-items: center; }
+/* --destructive is too dark to read as small text on the dark card (about 3.5:1). */
+:global(.dark) .problem, :global(.dark) .problemLink { color: #fca5a5; }
 
 .choice { display: flex; align-items: center; gap: 12px; min-height: 56px; padding: 10px 14px; border: 1px solid hsl(var(--border)); border-radius: 14px; background: hsl(var(--card)); cursor: pointer; transition: border-color var(--duration-fast), background var(--duration-fast); }
 .choice:hover { border-color: hsl(var(--foreground) / 0.22); }
@@ -58,7 +65,11 @@
   .choices[data-columns='3'] { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 .target { display: grid; gap: 6px; padding-inline-start: 14px; }
-.select { width: 100%; min-height: 44px; padding: 0 12px; border: 1px solid hsl(var(--input)); border-radius: 12px; background: hsl(var(--background)); color: hsl(var(--foreground)); font-size: 14px; }
+.select { width: 100%; min-height: 44px; padding: 0 12px; border: 1px solid hsl(var(--input)); border-radius: 12px; background: hsl(var(--background)); color: hsl(var(--foreground)); font-size: 16px; }
+/* 16px on phones, as Input: smaller text makes iOS Safari zoom in on focus. */
+@media (min-width: 768px) {
+  .select { font-size: 14px; }
+}
 .select:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
 .select[aria-invalid='true'] { border-color: hsl(var(--destructive)); }
 
@@ -76,7 +87,8 @@
   --game-secondary: rgb(255 255 255 / 0.8);
   --game-eyebrow: #c4b5fd;
   --game-border: rgb(167 139 250 / 0.22);
-  display: grid; gap: 14px; justify-items: start; padding: 18px 14px; border-radius: 18px; overflow: hidden;
+  /* The game's dock sits bottom-left in every language; only the words inside a card run right to left. */
+  display: grid; gap: 14px; justify-items: left; padding: 18px 14px; border-radius: 18px; overflow: hidden;
   background-color: #1a2436;
   background-image: linear-gradient(rgb(255 255 255 / 0.04) 1px, transparent 1px), linear-gradient(90deg, rgb(255 255 255 / 0.04) 1px, transparent 1px);
   background-size: 32px 32px;
@@ -107,6 +119,8 @@
 .payoffText { display: grid; gap: 2px; min-width: 0; }
 .nothing { font-size: 13px; color: var(--game-secondary); }
 .current { outline: 2px solid var(--game-eyebrow); outline-offset: 4px; border-radius: 10px; }
+/* During a test run every screen stays in place (the button below doesn't move); the others fade. */
+.screen[data-dim] { opacity: 0.35; }
 .run { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
 .runStep { font-size: 12px; color: hsl(var(--muted-foreground)); font-variant-numeric: tabular-nums; }
 .rehearsal { font-size: 13px; font-weight: 600; }

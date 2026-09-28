@@ -91,7 +91,8 @@ export const orbitQuestEntrySchema = z.object({
 export const orbitQuestStateSchema = z.object({
   type: z.literal('orbit-quest-state'),
   version: z.literal(ORBIT_BRIDGE_VERSION),
-  roomRevision,
+  // The game sends {type, version, entries}; a revision, when present, must be the current one.
+  roomRevision: roomRevision.optional(),
   entries: z.array(orbitQuestEntrySchema).max(8),
 });
 

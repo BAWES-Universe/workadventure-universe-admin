@@ -24,12 +24,16 @@ export function QuestRow({
       <div className={styles.rowText}>
         {href ? (
           <Link href={href} className={styles.stretched}>
-            <strong>{title}</strong>
+            <strong dir="auto">{title}</strong>
           </Link>
         ) : (
-          <strong>{title}</strong>
+          <strong dir="auto">{title}</strong>
         )}
-        {context && <span className={styles.rowContext}>{context}</span>}
+        {context && (
+          <span className={styles.rowContext} dir="auto">
+            {context}
+          </span>
+        )}
       </div>
       {aside && <div className={styles.rowAside}>{aside}</div>}
     </div>

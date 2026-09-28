@@ -113,7 +113,7 @@ describe('OrbitBridge', () => {
 
   describe('the quest log (quests proof slice)', () => {
     const entry = { id: 'welcome.explore', title: 'Find the Courtyard', status: 'tracked', stamp: 'explorer', room: 'Lobby' };
-    const questState = (roomRevision = revision) => ({ type: 'orbit-quest-state', version: 1, roomRevision, entries: [entry] });
+    const questState = (roomRevision: string | undefined = revision) => ({ type: 'orbit-quest-state', version: 1, roomRevision, entries: [entry] });
 
     beforeEach(() => resetQuestLog());
     afterEach(() => {
@@ -139,6 +139,10 @@ describe('OrbitBridge', () => {
       fromGame(questState(otherRevision));
       expect(getQuestLog()).toBeNull();
       fromGame(questState());
+      expect(getQuestLog()).toEqual([entry]);
+      // As the game sends it: no revision, taken as this visit's.
+      resetQuestLog();
+      fromGame({ type: 'orbit-quest-state', version: 1, entries: [entry] });
       expect(getQuestLog()).toEqual([entry]);
       // Display only: nothing is answered.
       expect(posted.filter((message) => (message as { type: string }).type === 'orbit-bridge-ack')).toHaveLength(0);

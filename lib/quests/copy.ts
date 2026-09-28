@@ -80,6 +80,14 @@ export function formatQuestCopy(text: string, params: Record<string, string | nu
   });
 }
 
+/**
+ * A name set into a sentence (a room, area or host), kept apart from the sentence's direction (FSI…PDI), so a Latin
+ * name in Arabic copy, or the reverse, doesn't take its neighbours' punctuation with it.
+ */
+export function isolateName(name: string): string {
+  return `\u2068${name}\u2069`;
+}
+
 /** One player string in the given language (English when a locale lacks it, as in the game). */
 export function questCopy(
   key: QuestCopyKey,
