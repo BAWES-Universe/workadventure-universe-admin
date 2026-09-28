@@ -302,7 +302,7 @@ describe('Quests on You', () => {
       ]),
     );
     const log = screen.getByTestId('quest-log');
-    expect(within(log).getAllByRole('heading', { level: 3 }).map((heading) => heading.textContent)).toEqual(['Tracked', 'Accepted', 'Done']);
+    expect(within(log).getAllByRole('heading', { level: 3 }).map((heading) => heading.textContent)).toEqual(['Following', 'Accepted', 'Done']);
     expect(words(screen.getByTestId('quest-e').textContent)).toMatch(/From Nova · Lobby/);
     expect(words(screen.getByTestId('quest-b').textContent)).toMatch(/Here · Lobby/);
     expect(screen.getByTestId('quest-m').textContent).toMatch(/First Hello badge/);
