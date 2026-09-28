@@ -79,6 +79,7 @@
     "detail.accept": "قبول",
     "detail.decline": "رفض",
     "detail.showOnMap": "عرض على الخريطة",
+    "detail.onMapNote": "خريطتك تدلّك على طريق هذه المهمة.",
     "detail.abandon": "التخلي عن المهمة",
     "detail.abandonConfirm": "هل تريد التخلي عن هذه المهمة؟ يمكنك قبولها لاحقًا.",
     "detail.keep": "الاحتفاظ بها",

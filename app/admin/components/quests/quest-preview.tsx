@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { Bot, SquareDashed, X } from 'lucide-react';
+import { Bot, ChevronLeft, SquareDashed, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import {
@@ -23,7 +23,7 @@ const LANGUAGE_NAME: Record<QuestCopyLocale, { short: string; name: string }> = 
   'ar-SA': { short: 'AR', name: 'العربية' },
 };
 
-const SCREENS = ['The invitation', 'The options', 'The payoff'] as const;
+const SCREENS = ['The invitation', 'The quest log', 'The quest', 'Quest complete'] as const;
 
 export interface QuestPreviewProps {
   roomName: string;
@@ -39,11 +39,14 @@ function screenCopy({ roomName, paths, areaName, host }: QuestPreviewProps, loca
   const area = isolateName(areaName ?? '');
   const offered = QUEST_PATHS.filter((path) => paths[path] && (path !== 'explore' || areaName));
   const speaker = isolateName(host.kind === 'none' ? roomName : host.name);
+  const origin = host.kind === 'none' ? t('log.here', { room: isolateName(roomName) }) : t('log.fromHost', { host: speaker, room: isolateName(roomName) });
   const options = offered.map((path) => ({
     path,
     title: t(QUEST_PATH_COPY[path].title),
     description: t(QUEST_PATH_COPY[path].description, { area }),
+    objective: t(QUEST_PATH_COPY[path].objective, { area }),
     minutes: t('minutes', { minutes: QUEST_MINUTES[path] }),
+    reward: t('stamps.badge', { stamp: t(QUEST_PATH_COPY[path].stamp) }),
   }));
   const first = offered[0];
   const payoff = first
@@ -55,25 +58,28 @@ function screenCopy({ roomName, paths, areaName, host }: QuestPreviewProps, loca
             : first === 'explore'
               ? t('paths.explore.payoff', { area })
               : t('paths.build.payoff'),
-        badge: t('stamps.badge', { stamp: t(QUEST_PATH_COPY[first].stamp) }),
+        badge: t('celebration.badgeEarned', { stamp: t(QUEST_PATH_COPY[first].stamp) }),
       }
     : null;
   return {
     speaker,
     invitation: { line: t('invitation.line'), secondary: t('invitation.secondary'), showOptions: t('invitation.showOptions'), notNow: t('invitation.notNow') },
-    optionsTitle: t('options.title'),
+    log: { title: t('quests'), progress: t('log.progress', { done: 0, total: options.length }), available: t('log.available') },
+    detail: { objective: t('detail.objective'), reward: t('detail.reward'), accept: t('detail.accept'), decline: t('detail.decline') },
+    complete: t('celebration.questComplete'),
+    origin,
     options,
     payoff,
   };
 }
 
 /**
- * The three screens a newcomer sees, with this room's names, in the game's own words (lib/quests). The pictures are
+ * The four screens a newcomer sees, with this room's names, in the game's own words (lib/quests). The pictures are
  * decorative; the same words are in a list for screen readers. Test run steps through them and saves nothing.
  */
 export function QuestPreview(props: QuestPreviewProps) {
   const [locale, setLocale] = useState<QuestCopyLocale>('en-US');
-  // null: all three screens at once; 0-2: a test run on that screen; 3: the test run finished.
+  // null: all four screens at once; 0-3: a test run on that screen; 4: the test run finished.
   const [step, setStep] = useState<number | null>(null);
   const copy = screenCopy(props, locale);
   const { host } = props;
@@ -84,7 +90,8 @@ export function QuestPreview(props: QuestPreviewProps) {
     'data-dim': running && step !== index ? true : undefined,
   });
   const dir = questCopyDirection(locale);
-  const screenLine = [copy.invitation.line, copy.optionsTitle, copy.payoff?.line ?? ''];
+  const first = copy.options[0];
+  const screenLine = [copy.invitation.line, copy.log.title, first?.title ?? '', copy.payoff?.line ?? ''];
 
   const eyebrow = (
     <div className={styles.eyebrow}>
@@ -139,36 +146,70 @@ export function QuestPreview(props: QuestPreviewProps) {
                 </div>
               </div>
             </div>
-            <div {...screenState(1)} data-screen="options">
+            <div {...screenState(1)} data-screen="log">
               <div className={styles.glass}>
                 <div className={styles.optionsHead}>
-                  {host.kind !== 'none' && (
-                    <span className={styles.portrait}>{host.kind === 'bot' ? <Bot size={15} /> : <SquareDashed size={15} />}</span>
-                  )}
-                  <p className={styles.line}>{copy.optionsTitle}</p>
+                  <span className={styles.logHead}>
+                    <p className={styles.line}>{copy.log.title}</p>
+                    <span className={styles.secondary}>{copy.log.progress}</span>
+                  </span>
                   <span className={styles.close}>
                     <X size={16} />
                   </span>
                 </div>
+                <span className={styles.logSection}>{copy.log.available}</span>
                 {copy.options.map((option) => (
                   <div key={option.path} className={styles.optionRow}>
-                    <QuestStamp path={option.path} size="sm" />
+                    <span className={styles.portrait}>{host.kind === 'bot' ? <Bot size={15} /> : <SquareDashed size={15} />}</span>
                     <span className={styles.optionText}>
                       <strong>{option.title}</strong>
-                      <span>{option.description}</span>
+                      <span>{option.objective}</span>
+                      <span className={styles.meta}>
+                        {copy.origin} · {option.minutes}
+                      </span>
                     </span>
-                    <span className={styles.minutes}>{option.minutes}</span>
+                    <QuestStamp path={option.path} size="sm" />
                   </div>
                 ))}
               </div>
             </div>
+            {first && (
+              <div {...screenState(2)} data-screen="quest">
+                <div className={styles.glass}>
+                  <div className={styles.optionsHead}>
+                    <span className={styles.close}>
+                      <ChevronLeft size={16} />
+                    </span>
+                    <p className={styles.line}>{first.title}</p>
+                    <span className={styles.close}>
+                      <X size={16} />
+                    </span>
+                  </div>
+                  {eyebrow}
+                  <p className={styles.secondary}>{first.description}</p>
+                  <span className={styles.logSection}>{copy.detail.objective}</span>
+                  <span className={styles.objectiveLine}>{first.objective}</span>
+                  <span className={styles.logSection}>{copy.detail.reward}</span>
+                  <span className={styles.rewardLine}>
+                    <QuestStamp path={first.path} size="sm" />
+                    {first.reward}
+                  </span>
+                  <div className={styles.buttons}>
+                    <span className={styles.cta}>{copy.detail.accept}</span>
+                    <span className={styles.ghost}>{copy.detail.decline}</span>
+                  </div>
+                </div>
+              </div>
+            )}
             {copy.payoff && (
-              <div {...screenState(2)} data-screen="payoff">
+              <div {...screenState(3)} data-screen="complete">
                 <div className={cn(styles.glass, styles.payoff)}>
                   <QuestStamp path={copy.payoff.path} size="md" />
                   <span className={styles.payoffText}>
+                    <span className={styles.completeTitle}>{copy.complete}</span>
                     {eyebrow}
                     <span className={styles.line}>{copy.payoff.line}</span>
+                    <span className={styles.badgeLine}>{copy.payoff.badge}</span>
                   </span>
                 </div>
               </div>
@@ -188,14 +229,24 @@ export function QuestPreview(props: QuestPreviewProps) {
         <li aria-current={step === 1 ? 'step' : undefined}>
           {SCREENS[1]}:{' '}
           <span lang={locale} dir={dir}>
-            {copy.optionsTitle} {copy.options.map((option) => `${option.title}: ${option.description} ${option.minutes}.`).join(' ')}
+            {copy.log.title}, {copy.log.progress}. {copy.log.available}:{' '}
+            {copy.options.map((option) => `${option.title}: ${option.objective}. ${copy.origin} · ${option.minutes}. ${option.reward}.`).join(' ')}
           </span>
         </li>
-        {copy.payoff && (
+        {first && (
           <li aria-current={step === 2 ? 'step' : undefined}>
             {SCREENS[2]}:{' '}
             <span lang={locale} dir={dir}>
-              {copy.speaker}. {copy.payoff.line} {copy.payoff.badge}.
+              {first.title}. {copy.speaker}. {first.description} {copy.detail.objective}: {first.objective}. {copy.detail.reward}:{' '}
+              {first.reward}. {copy.detail.accept}. {copy.detail.decline}.
+            </span>
+          </li>
+        )}
+        {copy.payoff && (
+          <li aria-current={step === 3 ? 'step' : undefined}>
+            {SCREENS[3]}:{' '}
+            <span lang={locale} dir={dir}>
+              {copy.complete}. {copy.speaker}. {copy.payoff.line} {copy.payoff.badge}.
             </span>
           </li>
         )}

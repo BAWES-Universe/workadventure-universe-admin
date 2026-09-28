@@ -18,7 +18,6 @@ export const QUEST_COPY_KEYS = [
   'invitation.secondary',
   'invitation.showOptions',
   'invitation.notNow',
-  'options.title',
   'paths.meet.title',
   'paths.meet.description',
   'paths.meet.payoff',
@@ -34,19 +33,35 @@ export const QUEST_COPY_KEYS = [
   'stamps.build',
   'stamps.badge',
   'log.inProgress',
+  'log.available',
   'log.done',
   'log.onMap',
   'log.progress',
+  'paths.meet.objective',
+  'paths.explore.objective',
+  'paths.build.objective',
+  'paths.build.needs',
+  'detail.objective',
+  'detail.reward',
+  'detail.accept',
+  'detail.decline',
+  'detail.completed',
+  'detail.onMapNote',
+  'celebration.questComplete',
+  'celebration.badgeEarned',
   'log.fromHost',
   'log.here',
 ] as const;
 export type QuestCopyKey = (typeof QUEST_COPY_KEYS)[number];
 
-/** Each path's title, one-line description and stamp name. */
-export const QUEST_PATH_COPY: Record<'meet' | 'explore' | 'build', { title: QuestCopyKey; description: QuestCopyKey; stamp: QuestCopyKey }> = {
-  meet: { title: 'paths.meet.title', description: 'paths.meet.description', stamp: 'stamps.meet' },
-  explore: { title: 'paths.explore.title', description: 'paths.explore.description', stamp: 'stamps.explore' },
-  build: { title: 'paths.build.title', description: 'paths.build.description', stamp: 'stamps.build' },
+/** Each path's title, one-line description, objective and stamp name. */
+export const QUEST_PATH_COPY: Record<
+  'meet' | 'explore' | 'build',
+  { title: QuestCopyKey; description: QuestCopyKey; objective: QuestCopyKey; stamp: QuestCopyKey }
+> = {
+  meet: { title: 'paths.meet.title', description: 'paths.meet.description', objective: 'paths.meet.objective', stamp: 'stamps.meet' },
+  explore: { title: 'paths.explore.title', description: 'paths.explore.description', objective: 'paths.explore.objective', stamp: 'stamps.explore' },
+  build: { title: 'paths.build.title', description: 'paths.build.description', objective: 'paths.build.objective', stamp: 'stamps.build' },
 };
 
 interface CopyFile {

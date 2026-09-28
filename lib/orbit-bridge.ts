@@ -87,6 +87,8 @@ export const orbitQuestEntrySchema = z.object({
   stamp: z.enum(ORBIT_QUEST_STAMPS).optional(),
   giver: z.string().min(1).max(64).optional(),
   room: z.string().max(80),
+  // What to do, in the game's words ("Find the Courtyard"); older games don't send it.
+  objective: z.string().min(1).max(120).optional(),
 });
 export const orbitQuestStateSchema = z.object({
   type: z.literal('orbit-quest-state'),

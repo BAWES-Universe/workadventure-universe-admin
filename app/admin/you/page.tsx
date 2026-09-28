@@ -5,13 +5,13 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { useAdminBootstrap } from '../admin-bootstrap-context';
 import { StatLine, count } from '../components/ds';
 import { ProfileCard } from '../components/profile-card';
-import { QuestBadges } from '../components/quests/quest-badges';
+import { YouBadges, YouQuests } from '../components/quests/you-quests';
 import Yours from '../components/yours';
 import styles from './you.module.css';
 
 /**
- * You: your profile as others see it (edited in place), your badges and quests right under it, then what's yours
- * (universes, memberships, stars). Appearance and Sign out sit at the foot of the Orbit Menu; finding new places is
+ * You: your profile as others see it (edited in place), then your quests and, apart, the badges they earned, then
+ * what's yours (universes, memberships, stars). Appearance and Sign out sit at the foot of the Orbit Menu; finding new places is
  * Space's job.
  */
 export default function YouPage() {
@@ -34,23 +34,24 @@ function You() {
   }, [editProfile, router]);
   return (
     <div className={styles.page}>
-      <div className={styles.top}>
-        <ProfileCard
-          user={user}
-          startEditing={editProfile}
-          stats={
-            mine && (
-              <StatLine
-                items={[
-                  mine.universes > 0 && `Owns ${count(mine.universes, 'universe')}`,
-                  mine.worlds > 0 && `Member of ${count(mine.worlds, 'world')}`,
-                  mine.stars > 0 && count(mine.stars, 'star'),
-                ]}
-              />
-            )
-          }
-        />
-        <QuestBadges />
+      <ProfileCard
+        user={user}
+        startEditing={editProfile}
+        stats={
+          mine && (
+            <StatLine
+              items={[
+                mine.universes > 0 && `Owns ${count(mine.universes, 'universe')}`,
+                mine.worlds > 0 && `Member of ${count(mine.worlds, 'world')}`,
+                mine.stars > 0 && count(mine.stars, 'star'),
+              ]}
+            />
+          )
+        }
+      />
+      <div className={styles.quests}>
+        <YouQuests />
+        <YouBadges />
       </div>
       <Yours />
     </div>

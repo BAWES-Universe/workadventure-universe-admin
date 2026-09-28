@@ -2,14 +2,17 @@
 
 /**
  * The owner's first quest (quests proof slice): the room's Quests tab, Add a quest with its preview and Test run,
- * Publish into this browser, the published page with Visit / Pause, and the player's badges and quests on You.
+ * Publish into this browser, the published page with Visit / Pause, and the player's quests and badges on You and
+ * the Quests pages.
  */
 import React from 'react';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import NewQuestPage from '@/app/admin/rooms/[id]/quests/new/page';
 import WelcomeQuestPage from '@/app/admin/rooms/[id]/quests/welcome/page';
 import { RoomQuests } from '@/app/admin/components/quests/room-quests';
-import { QuestBadges } from '@/app/admin/components/quests/quest-badges';
+import { YouBadges, YouQuests } from '@/app/admin/components/quests/you-quests';
+import QuestsPage from '@/app/admin/you/quests/page';
+import QuestPage from '@/app/admin/you/quests/[id]/page';
 import { WorkAdventureContext, type WorkAdventureContextValue } from '@/app/admin/workadventure-context';
 import { publishedFromDraft, readPublishedQuest, writePublishedQuest, EMPTY_QUEST_DRAFT, type QuestContext } from '@/lib/quests/model';
 import { resetQuestLog, setQuestLog } from '@/lib/quests/quest-log';
@@ -25,9 +28,10 @@ jest.mock('next/link', () => ({
 }));
 
 const replace = jest.fn();
+let mockParams: Record<string, string> = { id: 'r-1' };
 jest.mock('next/navigation', () => ({
   useRouter: () => ({ push: jest.fn(), replace }),
-  useParams: () => ({ id: 'r-1' }),
+  useParams: () => mockParams,
   usePathname: () => '/admin/rooms/r-1/quests/new',
   useSearchParams: () => new URLSearchParams(),
 }));
@@ -85,6 +89,7 @@ beforeEach(() => {
   window.localStorage.clear();
   window.sessionStorage.clear();
   resetQuestLog();
+  mockParams = { id: 'r-1' };
 });
 
 describe('Add a quest', () => {
@@ -107,7 +112,7 @@ describe('Add a quest', () => {
     expect(screen.queryByText('Pick an area or skip this path.')).toBeNull();
   });
 
-  it('previews the three screens in the game’s words with this room’s names, and rehearses them', async () => {
+  it('previews the four screens as the game shows them, in its words with this room’s names, and rehearses them', async () => {
     route();
     render(<NewQuestPage />);
     fireEvent.change(await screen.findByLabelText('Area to find'), { target: { value: 'a-1' } });
@@ -121,6 +126,13 @@ describe('Add a quest', () => {
     expect(within(preview).getAllByText('Welcome. Want a quick look around?').length).toBeGreaterThan(0);
     expect(strip()).toMatch(/Find the Courtyard\./);
     expect(within(preview).getAllByText(/First Hello badge/).length).toBeGreaterThan(0);
+    // The quest log, the quest with Accept and Decline, then the completion, as in the game.
+    expect(within(preview).getAllByText('Available').length).toBeGreaterThan(0);
+    expect(within(preview).getAllByText('Accept').length).toBeGreaterThan(0);
+    expect(within(preview).getAllByText('Decline').length).toBeGreaterThan(0);
+    expect(within(preview).getAllByText('Quest complete').length).toBeGreaterThan(0);
+    expect(within(preview).getAllByText('First Hello badge earned').length).toBeGreaterThan(0);
+    expect(strip()).toMatch(/Nova · Lobby/);
 
     // No host: the room speaks.
     fireEvent.click(screen.getByRole('radio', { name: /No host/ }));
@@ -131,16 +143,18 @@ describe('Add a quest', () => {
     expect(status.getAttribute('role')).toBe('status');
     expect(status.textContent).toBe('');
     const screens = () => preview.querySelectorAll('[data-screen]');
-    expect(screens()).toHaveLength(3);
+    expect(screens()).toHaveLength(4);
     fireEvent.click(screen.getByRole('button', { name: 'Test run' }));
     // Every screen stays in place; the others fade, and the status says the step and its words.
-    expect(screens()).toHaveLength(3);
-    expect(preview.querySelectorAll('[data-screen][data-dim]')).toHaveLength(2);
-    expect(status.textContent).toBe('Step 1 of 3: the invitation. Welcome. Want a quick look around?');
-    fireEvent.click(screen.getByRole('button', { name: 'Next: the options' }));
-    expect(status.textContent).toMatch(/^Step 2 of 3: the options\./);
-    fireEvent.click(screen.getByRole('button', { name: 'Next: the payoff' }));
-    expect(status.textContent).toMatch(/^Step 3 of 3: the payoff\./);
+    expect(screens()).toHaveLength(4);
+    expect(preview.querySelectorAll('[data-screen][data-dim]')).toHaveLength(3);
+    expect(status.textContent).toBe('Step 1 of 4: the invitation. Welcome. Want a quick look around?');
+    fireEvent.click(screen.getByRole('button', { name: 'Next: the quest log' }));
+    expect(status.textContent).toBe('Step 2 of 4: the quest log. Quests');
+    fireEvent.click(screen.getByRole('button', { name: 'Next: the quest' }));
+    expect(status.textContent).toBe('Step 3 of 4: the quest. Meet someone');
+    fireEvent.click(screen.getByRole('button', { name: 'Next: quest complete' }));
+    expect(status.textContent).toMatch(/^Step 4 of 4: quest complete\./);
     fireEvent.click(screen.getByRole('button', { name: 'Finish test run' }));
     expect(status.textContent).toBe('Rehearsal only. Nothing was saved.');
     expect(preview.querySelectorAll('[data-screen][data-dim]')).toHaveLength(0);
@@ -286,47 +300,79 @@ describe('The room’s Quests tab', () => {
   });
 });
 
-describe('Badges and quests on You', () => {
-  it('shows every badge faded, and how to earn them, when the game has sent nothing', () => {
-    render(<QuestBadges />);
-    expect(screen.getByTestId('quest-badges-progress').textContent).toBe('0 of 3 done');
-    for (const id of ['first-hello', 'explorer', 'builder']) {
-      expect(screen.getByTestId(`badge-${id}`).hasAttribute('data-earned')).toBe(false);
-    }
-    expect(screen.getByTestId('badge-first-hello').textContent).toMatch(/First Hello\(not earned yet\)/);
-    expect(screen.getByTestId('quest-badges-hint').textContent).toBe('Quests you take on in the game earn these badges.');
+const LOG = [
+  { id: 'welcome.explore', title: 'Explore this place', status: 'tracked' as const, giver: 'Nova', room: 'Lobby', objective: 'Find the Courtyard' },
+  { id: 'welcome.build', title: 'Try building', status: 'accepted' as const, room: 'Lobby', objective: 'Add one thing' },
+  { id: 'welcome.meet', title: 'Meet someone', status: 'done' as const, stamp: 'first-hello' as const, room: 'Lobby', objective: 'Say hi to someone' },
+];
+
+describe('Quests and badges on You', () => {
+  it('before the game has sent anything: nothing in progress, no badges, a way to the quests', () => {
+    render(
+      <>
+        <YouQuests />
+        <YouBadges />
+      </>,
+    );
+    expect(screen.getByTestId('chapter-progress').textContent).toBe('0 of 3 done');
+    expect(screen.getByTestId('you-quests-note').textContent).toMatch(/Nothing in progress/);
+    expect(screen.getByTestId('you-badges-empty').textContent).toBe('No badges yet. Every quest you finish earns one.');
+    expect(screen.getByTestId('you-badges-more').getAttribute('href')).toBe('/admin/you/quests');
   });
 
-  it('lights the badges earned and lists the quests you are on, marking the one on the map', () => {
-    render(<QuestBadges />);
-    act(() =>
-      setQuestLog([
-        { id: 'welcome.explore', title: 'Explore this place', status: 'tracked', giver: 'Nova', room: 'Lobby' },
-        { id: 'welcome.build', title: 'Try building', status: 'accepted', room: 'Lobby' },
-        { id: 'welcome.meet', title: 'Meet someone', status: 'done', stamp: 'first-hello', room: 'Lobby' },
-      ]),
+  it('quests in progress on one card, earned badges on another, each badge saying which quest earned it', () => {
+    render(
+      <>
+        <YouQuests />
+        <YouBadges />
+      </>,
     );
-    expect(screen.getByTestId('quest-badges-progress').textContent).toBe('1 of 3 done');
-    expect(screen.getByTestId('badge-first-hello').hasAttribute('data-earned')).toBe(true);
-    expect(screen.getByTestId('badge-explorer').hasAttribute('data-earned')).toBe(false);
-    expect(screen.getByRole('heading', { level: 3 }).textContent).toBe('In progress');
-    const tracked = screen.getByTestId('quest-welcome.explore');
-    expect(words(tracked.textContent)).toBe('Explore this placeNova · LobbyOn the map');
-    expect(words(screen.getByTestId('quest-welcome.build').textContent)).toBe('Try buildingLobby');
-    // What's done is a badge, not a row.
-    expect(screen.queryByTestId('quest-welcome.meet')).toBeNull();
-    expect(screen.queryByTestId('quest-badges-hint')).toBeNull();
+    act(() => setQuestLog(LOG));
+    const quests = screen.getByTestId('you-quests');
+    expect(within(quests).getByTestId('chapter-progress').textContent).toBe('1 of 3 done');
+    expect(words(within(quests).getByTestId('quest-welcome.explore').textContent)).toBe('Explore this placeFind the CourtyardOn the map');
+    expect(within(quests).getByTestId('quest-welcome.explore').getAttribute('href')).toBe('/admin/you/quests/welcome.explore');
+    expect(within(quests).queryByTestId('quest-welcome.meet')).toBeNull();
+    const badges = screen.getByTestId('you-badges');
+    expect(words(within(badges).getByTestId('badge-first-hello').textContent)).toBe('First HelloFor Meet someone');
+    expect(within(badges).queryByTestId('badge-explorer')).toBeNull();
+    expect(badges.textContent).toMatch(/Only you can see these/);
+    expect(within(badges).getByTestId('you-badges-more').textContent).toMatch(/2 more to earn/);
+  });
+});
+
+describe('The Quests page and a quest’s page', () => {
+  it('groups the chapter as in the game, not started included', () => {
+    render(<QuestsPage />);
+    act(() => setQuestLog(LOG.slice(0, 1)));
+    expect(within(screen.getByTestId('quests-open')).getByTestId('quest-welcome.explore')).toBeTruthy();
+    const notStarted = screen.getByTestId('quests-not-started');
+    expect(within(notStarted).getByTestId('quest-welcome.meet').textContent).toMatch(/Say hi to someone/);
+    expect(within(notStarted).getByTestId('quest-welcome.build')).toBeTruthy();
+    expect(screen.queryByTestId('quests-done')).toBeNull();
   });
 
-  it('asks for nothing more once every badge is earned', () => {
-    render(<QuestBadges />);
-    act(() =>
-      setQuestLog(
-        (['first-hello', 'explorer', 'builder'] as const).map((stamp) => ({ id: stamp, title: stamp, status: 'done' as const, stamp, room: 'Lobby' })),
-      ),
-    );
-    expect(screen.getByTestId('quest-badges-progress').textContent).toBe('3 of 3 done');
-    expect(screen.queryByTestId('quest-badges-hint')).toBeNull();
-    expect(screen.queryByRole('heading', { level: 3 })).toBeNull();
+  it('shows a quest: objective as a tracker line, the map sentence, the badge it earns and what to do next', () => {
+    mockParams = { id: 'welcome.explore' };
+    render(<QuestPage />);
+    act(() => setQuestLog(LOG));
+    const page = screen.getByTestId('quest-page-welcome.explore');
+    expect(words(page.textContent)).toMatch(/Nova · Lobby · 1 min/);
+    expect(screen.getByTestId('quest-objective').textContent).toBe('Find the Courtyard0/1');
+    expect(screen.getByTestId('quest-on-map').textContent).toBe('Your map is showing the way to this quest.');
+    expect(screen.getByTestId('quest-reward').textContent).toBe('Explorer badgeNot earned yet');
+    expect(screen.getByTestId('quest-next-step').textContent).toMatch(/follow the marker/);
+  });
+
+  it('a done quest shows its badge as earned; an unknown one says so', () => {
+    mockParams = { id: 'welcome.meet' };
+    const { unmount } = render(<QuestPage />);
+    act(() => setQuestLog(LOG));
+    expect(screen.getByTestId('quest-reward').textContent).toMatch(/First Hello badgeEarned/);
+    expect(screen.queryByTestId('quest-next-step')).toBeNull();
+    unmount();
+    mockParams = { id: 'nope' };
+    render(<QuestPage />);
+    expect(screen.getByTestId('quest-missing')).toBeTruthy();
   });
 });

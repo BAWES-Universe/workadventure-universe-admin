@@ -1,4 +1,7 @@
-.page { display: grid; gap: 30px; min-width: 0; }
-/* The profile and its badges read as one block: what people see when they click you. */
-.top { display: grid; gap: 12px; min-width: 0; }
+.page { display: grid; gap: 30px; min-width: 0; container-type: inline-size; }
+/* Your quests and your badges, right under the profile: side by side when there's room, stacked on a phone. */
+.quests { display: grid; gap: 12px; min-width: 0; align-items: start; }
+@container (min-width: 760px) {
+  .quests { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+}
 .page a:focus-visible, .page button:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 5px; }

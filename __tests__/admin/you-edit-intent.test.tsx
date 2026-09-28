@@ -22,7 +22,10 @@ jest.mock('@/app/admin/components/profile-card', () => ({
   },
 }));
 jest.mock('@/app/admin/components/yours', () => ({ __esModule: true, default: () => null }));
-jest.mock('@/app/admin/components/quests/quest-badges', () => ({ QuestBadges: () => <div data-testid="quest-badges" /> }));
+jest.mock('@/app/admin/components/quests/you-quests', () => ({
+  YouQuests: () => <div data-testid="you-quests" />,
+  YouBadges: () => <div data-testid="you-badges" />,
+}));
 jest.mock('@/app/admin/admin-bootstrap-context', () => ({ useAdminBootstrap: () => ({ user: { id: 'u', uuid: 'u', name: 'Me', email: null, tags: [], isSuperAdmin: false }, mine: null }) }));
 
 import YouPage from '@/app/admin/you/page';
@@ -47,10 +50,11 @@ describe('You and the edit intent', () => {
     expect(replace).toHaveBeenCalledWith('/admin/you', { scroll: false });
   });
 
-  it('puts your badges and quests right under the profile, and no settings: they are at the foot of the Orbit Menu', () => {
+  it('puts your quests and, apart, your badges right under the profile, and no settings: they are in the Orbit Menu', () => {
     search = '';
     render(<YouPage />);
-    expect(screen.getByTestId('quest-badges')).toBeTruthy();
+    expect(screen.getByTestId('you-quests')).toBeTruthy();
+    expect(screen.getByTestId('you-badges')).toBeTruthy();
     expect(screen.queryByRole('heading', { name: 'Settings' })).toBeNull();
     expect(screen.queryByRole('button', { name: /Sign out/ })).toBeNull();
   });

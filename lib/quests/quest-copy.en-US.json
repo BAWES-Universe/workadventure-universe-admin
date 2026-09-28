@@ -79,6 +79,7 @@
     "detail.accept": "Accept",
     "detail.decline": "Decline",
     "detail.showOnMap": "Show on map",
+    "detail.onMapNote": "Your map is showing the way to this quest.",
     "detail.abandon": "Abandon quest",
     "detail.abandonConfirm": "Abandon this quest? You can take it again later.",
     "detail.keep": "Keep it",

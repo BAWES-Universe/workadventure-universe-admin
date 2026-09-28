@@ -79,6 +79,7 @@
     "detail.accept": "Accepter",
     "detail.decline": "Refuser",
     "detail.showOnMap": "Afficher sur la carte",
+    "detail.onMapNote": "Votre carte vous indique le chemin vers cette quête.",
     "detail.abandon": "Abandonner la quête",
     "detail.abandonConfirm": "Abandonner cette quête ? Vous pourrez la reprendre plus tard.",
     "detail.keep": "La garder",

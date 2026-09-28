@@ -57,6 +57,8 @@ export const ROUTES: RouteDefinition[] = [
 
   // You
   { pattern: '/admin/profile', title: 'Profile', parent: '/admin/you' },
+  { pattern: '/admin/you/quests', title: 'Quests', parent: '/admin/you' },
+  { pattern: '/admin/you/quests/[id]', title: 'Quest', parent: '/admin/you/quests' },
 
   // Admin (super admin)
   { pattern: '/admin/style', title: 'Orbit style', parent: '/admin' },
