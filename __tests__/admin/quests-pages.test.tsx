@@ -59,7 +59,7 @@ const CONTEXT: QuestContext = {
     { id: 'a-1', name: 'Courtyard' },
     { id: 'a-2', name: 'Studio' },
   ],
-  bots: [{ id: 'b-1', name: 'Receptionist' }],
+  bots: [{ id: 'b-1', name: 'Nova' }],
   source: 'wam',
 };
 
@@ -113,10 +113,10 @@ describe('Add a quest', () => {
     fireEvent.change(await screen.findByLabelText('Area to find'), { target: { value: 'a-1' } });
     const preview = screen.getByTestId('quest-preview');
     const strip = () => words(preview.textContent);
-    // The Receptionist greets newcomers unless the owner chooses otherwise, as in the game.
+    // The room's first bot greets newcomers unless the owner chooses otherwise, as in the game.
     expect(screen.getByRole('radio', { name: /A bot/ })).toHaveProperty('checked', true);
     expect((screen.getByLabelText('Host') as HTMLSelectElement).value).toBe('b-1');
-    expect(strip()).toMatch(/Receptionist/);
+    expect(strip()).toMatch(/Nova/);
     expect(within(preview).getAllByText('Good to meet you.').length).toBeGreaterThan(0);
     expect(within(preview).getAllByText('Welcome. Want a quick look around?').length).toBeGreaterThan(0);
     expect(strip()).toMatch(/Find the Courtyard\./);
@@ -125,7 +125,7 @@ describe('Add a quest', () => {
     // No host: the room speaks.
     fireEvent.click(screen.getByRole('radio', { name: /No host/ }));
     expect(strip()).toMatch(/Lobby/);
-    expect(strip()).not.toMatch(/Receptionist/);
+    expect(strip()).not.toMatch(/Nova/);
 
     const status = screen.getByTestId('rehearsal-status');
     expect(status.getAttribute('role')).toBe('status');
@@ -161,7 +161,7 @@ describe('Add a quest', () => {
       expect.objectContaining({
         status: 'live',
         area: { id: 'a-2', name: 'Studio' },
-        host: { kind: 'bot', id: 'b-1', name: 'Receptionist' },
+        host: { kind: 'bot', id: 'b-1', name: 'Nova' },
         paths: { meet: true, explore: true, build: false },
       }),
     );
@@ -177,10 +177,10 @@ describe('Add a quest', () => {
     expect((screen.getByLabelText('Area to find') as HTMLSelectElement).value).toBe('a-2');
   });
 
-  it('greets with the Receptionist, else the first bot', async () => {
-    route({ context: { ...CONTEXT, bots: [{ id: 'b-2', name: 'Guide' }, { id: 'b-1', name: ' receptionist ' }] } });
+  it('greets with the first bot, never picking one by name', async () => {
+    route({ context: { ...CONTEXT, bots: [{ id: 'b-2', name: 'Guide' }, { id: 'b-1', name: 'Welcome' }] } });
     render(<NewQuestPage />);
-    expect(((await screen.findByLabelText('Host')) as HTMLSelectElement).value).toBe('b-1');
+    expect(((await screen.findByLabelText('Host')) as HTMLSelectElement).value).toBe('b-2');
   });
 
   it('offers no Explore on a map without named areas', async () => {
@@ -296,14 +296,14 @@ describe('Quests on You', () => {
     render(<QuestLogSection />);
     act(() =>
       setQuestLog([
-        { id: 'e', title: 'Find the Courtyard', status: 'tracked', stamp: 'explorer', giver: 'Receptionist', room: 'Lobby' },
+        { id: 'e', title: 'Find the Courtyard', status: 'tracked', stamp: 'explorer', giver: 'Nova', room: 'Lobby' },
         { id: 'b', title: 'Add one thing', status: 'accepted', stamp: 'builder', room: 'Lobby' },
         { id: 'm', title: 'Say hi to someone', status: 'done', stamp: 'first-hello', room: 'Lobby' },
       ]),
     );
     const log = screen.getByTestId('quest-log');
     expect(within(log).getAllByRole('heading', { level: 3 }).map((heading) => heading.textContent)).toEqual(['Tracked', 'Accepted', 'Done']);
-    expect(words(screen.getByTestId('quest-e').textContent)).toMatch(/From Receptionist · Lobby/);
+    expect(words(screen.getByTestId('quest-e').textContent)).toMatch(/From Nova · Lobby/);
     expect(words(screen.getByTestId('quest-b').textContent)).toMatch(/Here · Lobby/);
     expect(screen.getByTestId('quest-m').textContent).toMatch(/First Hello badge/);
     // Count of what is still to do.

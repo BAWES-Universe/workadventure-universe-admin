@@ -18,7 +18,7 @@ const CONTEXT: QuestContext = {
     { id: 'a-1', name: 'Courtyard' },
     { id: 'a-2', name: 'Café & Bar' },
   ],
-  bots: [{ id: '0b5f1c2e-1111-4a4a-8b8b-123456789abc', name: 'Receptionist' }],
+  bots: [{ id: '0b5f1c2e-1111-4a4a-8b8b-123456789abc', name: 'Nova' }],
   source: 'wam',
 };
 
@@ -61,7 +61,7 @@ describe('the published record', () => {
       status: 'live',
       paths: { meet: true, explore: true, build: false },
       area: { id: 'a-2', name: 'Café & Bar' },
-      host: { kind: 'bot', id: CONTEXT.bots[0].id, name: 'Receptionist' },
+      host: { kind: 'bot', id: CONTEXT.bots[0].id, name: 'Nova' },
       publishedAt: '2026-09-28T10:00:00.000Z',
     });
     expect(draftFromPublished(quest)).toEqual({ ...EMPTY_QUEST_DRAFT, areaId: 'a-2', hostKind: 'bot', hostId: CONTEXT.bots[0].id });

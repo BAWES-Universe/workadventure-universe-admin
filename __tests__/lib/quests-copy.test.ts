@@ -44,7 +44,7 @@ describe('vendored quest copy', () => {
 
 describe('formatQuestCopy', () => {
   it('fills parameters and leaves unknown ones as they are', () => {
-    expect(formatQuestCopy('From {host} · {room}', { host: 'Receptionist', room: 'Lobby' })).toBe('From Receptionist · Lobby');
+    expect(formatQuestCopy('From {host} · {room}', { host: 'Nova', room: 'Lobby' })).toBe('From Nova · Lobby');
     expect(formatQuestCopy('Find the {area}.')).toBe('Find the {area}.');
   });
 

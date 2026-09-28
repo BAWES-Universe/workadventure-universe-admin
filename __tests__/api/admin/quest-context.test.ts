@@ -73,7 +73,7 @@ beforeEach(() => {
   db.worldMember.findFirst.mockImplementation(({ where }: { where: { userId: string } }) =>
     Promise.resolve(where.userId === 'u-editor' ? { id: 'm-1' } : null),
   );
-  db.bot.findMany.mockResolvedValue([{ id: 'b-1', name: 'Receptionist' }]);
+  db.bot.findMany.mockResolvedValue([{ id: 'b-1', name: 'Nova' }]);
   fetchMock.mockResolvedValue({ ok: true, json: () => Promise.resolve(WAM) });
 });
 
@@ -107,7 +107,7 @@ describe('GET /api/admin/rooms/[id]/quest-context', () => {
         { id: 'a-1', name: 'Atrium' },
         { id: 'a-2', name: 'Courtyard' },
       ],
-      bots: [{ id: 'b-1', name: 'Receptionist' }],
+      bots: [{ id: 'b-1', name: 'Nova' }],
       source: 'wam',
     });
     expect(fetchMock).toHaveBeenCalledWith(

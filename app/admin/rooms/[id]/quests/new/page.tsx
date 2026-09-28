@@ -81,9 +81,9 @@ function StepHeading({ id, number, children }: { id: string; number: number; chi
   );
 }
 
-/** The game's default host: the bot named Receptionist, else the room's first bot. */
+/** The game's default host: the room's first bot. Bots are never picked by name. */
 function defaultBot(bots: QuestContext['bots']) {
-  return bots.find((bot) => bot.name.trim().toLowerCase() === 'receptionist') ?? bots[0] ?? null;
+  return bots[0] ?? null;
 }
 
 /** Focusing the field also scrolls it into view. */
@@ -95,7 +95,7 @@ function QuestForm({ room, context }: { room: QuestRoom; context: QuestContext }
   const router = useRouter();
   const [published] = useState(() => readPublishedQuest(room.id));
   // Where the form starts: the published quest when editing, else Welcome with what this room can offer, greeted by
-  // its Receptionist (or first bot) as the game would be.
+  // its first bot as the game would be.
   const baseline = useMemo<QuestDraft>(() => {
     if (published) return draftFromPublished(published);
     const host = defaultBot(context.bots);

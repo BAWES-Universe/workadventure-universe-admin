@@ -54,7 +54,7 @@ describe('parseBridgeMessage', () => {
 });
 
 describe('orbit-quest-state', () => {
-  const entry = { id: 'welcome.explore', title: 'Find the Courtyard', status: 'tracked', stamp: 'explorer', giver: 'Receptionist', room: 'Lobby' };
+  const entry = { id: 'welcome.explore', title: 'Find the Courtyard', status: 'tracked', stamp: 'explorer', giver: 'Nova', room: 'Lobby' };
   const state = (entries: unknown[], extra: Record<string, unknown> = {}) => ({
     origin: GAME,
     source: parent,
