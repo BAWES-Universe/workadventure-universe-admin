@@ -169,7 +169,6 @@ export function QuestPreview(props: QuestPreviewProps) {
                   <span className={styles.payoffText}>
                     {eyebrow}
                     <span className={styles.line}>{copy.payoff.line}</span>
-                    <span className={styles.secondary}>{copy.payoff.badge}</span>
                   </span>
                 </div>
               </div>

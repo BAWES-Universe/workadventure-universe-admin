@@ -29,6 +29,7 @@
     "paths.explore.objective": "Find the {area}",
     "paths.explore.body": "Walk to the {area} and step inside.",
     "paths.explore.walk": "Walk to the {area}",
+    "paths.explore.notOnThisMap": "The {area} is in another room.",
     "paths.explore.payoff": "You found the {area}.",
     "paths.explore.lastTime": "You found the {area} last time.",
     "paths.build.title": "Try building",

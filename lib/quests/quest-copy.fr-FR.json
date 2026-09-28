@@ -29,6 +29,7 @@
     "paths.explore.objective": "Trouver « {area} »",
     "paths.explore.body": "Marchez jusqu'à « {area} » et entrez.",
     "paths.explore.walk": "Aller à « {area} »",
+    "paths.explore.notOnThisMap": "« {area} » se trouve dans une autre salle.",
     "paths.explore.payoff": "Vous avez trouvé « {area} ».",
     "paths.explore.lastTime": "Vous avez trouvé « {area} » la dernière fois.",
     "paths.build.title": "Essayer de construire",
