@@ -248,6 +248,12 @@ describe('super admin tools', () => {
     expect(db.userAvatar.count).not.toHaveBeenCalled();
   });
 
+  it('answers 500, not 401, when the super admin check itself fails', async () => {
+    (requireSuperAdminSession as jest.Mock).mockRejectedValue(new Error('connection refused'));
+    const res = await accessCheck(req('/api/admin/avatar-sets/s-1/access-check?userId=u&worldId=w', 'root'), params('s-1'));
+    expect(res.status).toBe(500);
+  });
+
   it('answers 401 when nobody is signed in', async () => {
     (requireSuperAdminSession as jest.Mock).mockRejectedValue(new Error('Unauthorized'));
     expect((await textureUsage(req('/api/admin/texture-usage?textureId=t'))).status).toBe(401);

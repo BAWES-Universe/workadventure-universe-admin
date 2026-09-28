@@ -15,11 +15,11 @@ export async function GET(req: NextRequest, { params }: Params) {
   try {
     await requireSuperAdminSession()
   } catch (error) {
-    const forbidden = error instanceof Error && error.message === 'Forbidden'
-    return NextResponse.json(
-      { error: forbidden ? 'Forbidden' : 'Unauthorized' },
-      { status: forbidden ? 403 : 401 },
-    )
+    const message = error instanceof Error ? error.message : null
+    if (message === 'Unauthorized') return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    if (message === 'Forbidden') return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+    console.error('Error checking super admin for avatar-set access check:', error)
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
   const { searchParams } = new URL(req.url)
   const userId = searchParams.get('userId')
