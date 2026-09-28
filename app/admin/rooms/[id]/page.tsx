@@ -96,7 +96,7 @@ const tabClass = (active: boolean) =>
 /** A visitor without an account: the same look as a row, with nothing to open. */
 function StaticRow({ title, context, meta, woka }: { title: string; context?: ReactNode; meta?: ReactNode; woka?: string[] }) {
   return (
-    <div className="flex min-h-[68px] items-center gap-3 rounded-[18px] border border-border bg-card px-3.5 py-3 [&+&]:mt-2">
+    <div className="flex min-h-[68px] items-center gap-3 rounded-[18px] border border-border bg-card px-3.5 py-3">
       <PersonIcon woka={woka} name={title} />
       <div className="grid min-w-0 flex-1 gap-[3px]">
         <strong className="text-sm font-semibold leading-snug [overflow-wrap:anywhere]">{title}</strong>
@@ -964,7 +964,8 @@ export default function RoomDetailPage() {
               ) : analytics && analytics.recentActivity && analytics.recentActivity.length > 0 ? (
                 <div className="space-y-4">
                   <SectionHeader id="room-visitors" title="Recent visitors" count={analytics.pagination?.total} />
-                  <div>
+                  {/* People with an account and guests are different rows; one rule spaces them all the same. */}
+                  <div className="[&>*+*]:mt-2">
                     {analytics.recentActivity.map((access: Visit) => {
                       const userName = access.userName || access.userEmail || access.userUuid || 'Guest';
                       const roles: string[] = access.hasMembership && access.membershipTags.length > 0 ? access.membershipTags : [];

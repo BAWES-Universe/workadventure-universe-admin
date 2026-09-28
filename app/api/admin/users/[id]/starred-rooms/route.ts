@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { requireAuth } from '@/lib/auth';
+import { getViewer, isPrivileged, memberWorldIdsOf } from '@/lib/access-scope';
+import { canSeeRoom } from '@/lib/room-visibility';
 import { prisma } from '@/lib/db';
 
 export async function GET(
@@ -7,23 +8,12 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    // Check if using admin token or session
-    const authHeader = request.headers.get('authorization');
-    const isAdminToken = authHeader?.startsWith('Bearer ') && 
-      authHeader.replace('Bearer ', '').trim() === process.env.ADMIN_API_TOKEN;
-    
-    if (!isAdminToken) {
-      // Try to get user from session
-      const { getSessionUser } = await import('@/lib/auth-session');
-      const sessionUser = await getSessionUser(request);
-      if (!sessionUser) {
-        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-      }
-    } else {
-      // Admin token - require it
-      requireAuth(request);
+    const viewer = await getViewer(request);
+    if (!viewer) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
-    
+    const sessionUser = viewer.kind === 'user' ? viewer.user : null;
+
     const { id } = await params;
     
     // Get all favorites for this user that are rooms
@@ -42,11 +32,14 @@ export async function GET(
                 id: true,
                 name: true,
                 slug: true,
+                isPublic: true,
                 universe: {
                   select: {
                     id: true,
                     name: true,
                     slug: true,
+                    isPublic: true,
+                    ownerId: true,
                   },
                 },
               },
@@ -59,10 +52,16 @@ export async function GET(
       },
     });
 
+    // Someone else's stars only show the rooms the viewer could see anyway; your own stars, and a super admin's view,
+    // show everything.
+    const seesAll = isPrivileged(viewer) || sessionUser?.id === id;
+    const memberWorldIds = seesAll || !sessionUser ? new Set<string>() : await memberWorldIdsOf(sessionUser.id);
+    const visible = favorites.filter(
+      (f) => f.room !== null && (seesAll || canSeeRoom(f.room, sessionUser, memberWorldIds))
+    );
+
     // Get star counts for all rooms in one query
-    const roomIds = favorites
-      .filter((f) => f.room !== null)
-      .map((f) => f.room!.id);
+    const roomIds = visible.map((f) => f.room!.id);
 
     const starCounts = await prisma.favorite.groupBy({
       by: ['roomId'],
@@ -81,26 +80,29 @@ export async function GET(
     );
 
     // Transform to room format with star information
-    const starredRooms = favorites
-      .filter((f) => f.room !== null)
-      .map((favorite) => {
-        const room = favorite.room!;
-        return {
-          id: room.id,
-          slug: room.slug,
-          name: room.name,
-          description: room.description,
-          mapUrl: room.mapUrl,
-          wamUrl: room.wamUrl,
-          isPublic: room.isPublic,
-          createdAt: room.createdAt,
-          updatedAt: room.updatedAt,
-          world: room.world,
-          isStarred: true,
-          starCount: starCountMap.get(room.id) || 0,
-          favoritedAt: favorite.favoritedAt,
-        };
-      });
+    const starredRooms = visible.map((favorite) => {
+      const room = favorite.room!;
+      return {
+        id: room.id,
+        slug: room.slug,
+        name: room.name,
+        description: room.description,
+        mapUrl: room.mapUrl,
+        wamUrl: room.wamUrl,
+        isPublic: room.isPublic,
+        createdAt: room.createdAt,
+        updatedAt: room.updatedAt,
+        world: {
+          id: room.world.id,
+          name: room.world.name,
+          slug: room.world.slug,
+          universe: { id: room.world.universe.id, name: room.world.universe.name, slug: room.world.universe.slug },
+        },
+        isStarred: true,
+        starCount: starCountMap.get(room.id) || 0,
+        favoritedAt: favorite.favoritedAt,
+      };
+    });
 
     return NextResponse.json({
       rooms: starredRooms,

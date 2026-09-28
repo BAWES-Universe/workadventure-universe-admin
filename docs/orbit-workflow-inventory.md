@@ -12,7 +12,7 @@ routes each page calls.
 | **View** | Where the workflow belongs inside the game. **compact view**: fits Orbit's right-hand panel (the game opens Orbit with `position: "right"`), a glance or a single decision. **full-screen view**: dense editors, tables and multi-step forms that need Orbit expanded (`allowFullScreen`). **both**: works in either. |
 | **Mobile path** | How to reach it on a phone. **Home**, **Space** and **You** are on the bottom bar (`app/admin/components/shell/bottom-nav.tsx`). Everything else is in the **Orbit menu**, the button at the top-left beside the game's own close and maximise buttons (`app/admin/components/shell/menu-sheet.tsx`), grouped as *Tools*, *Personalize*, *Discover* and *Admin*; in the full-screen view on a desktop the same groups are the sidebar. "Menu → Discover → Worlds" means open the Orbit menu, then the Discover group, then Worlds. |
 | **Authorisation test** | The test file that proves who may do it, or **none — needs one**. |
-| **Status** | **preserve**, **repair** (unsafe today; fix, do not carry forward), or **fixed in 0A (#208)** (tightened by `fix/orbit-authorisation-hardening`, covered by `__tests__/api/authorisation-scope.test.ts` on that branch). |
+| **Status** | **preserve**, **repair** (unsafe today; fix, do not carry forward), **fixed in 0A (#208)** (tightened by `fix/orbit-authorisation-hardening`, covered by `__tests__/api/authorisation-scope.test.ts` on that branch), or **fixed in #222** (covered by `__tests__/api/admin/entity-visibility.test.ts`). |
 
 ## Roles
 
@@ -34,7 +34,7 @@ routes each page calls.
 | Same-tab account switch: stored session only kept for the handshake's user, caches cleared otherwise | compact view | Automatic | `__tests__/lib/account-switch.test.ts` | preserve (added in #200) |
 | Direct visit outside Universe: one line + link, nothing fetched | compact view | n/a (outside the game) | `__tests__/admin/login-direct-visit.test.tsx` | preserve (added in #200) |
 | Load the shell / bootstrap (`/api/admin/bootstrap`, `/api/auth/me`) | both | Automatic | `__tests__/admin/admin-shell.test.tsx` (request lifecycle only, not authorisation) | preserve; authorisation test **none — needs one** |
-| Sign out (`app/admin/logout-button.tsx`, `/api/auth/logout`) | compact view | **Not reachable**: `LogoutButton` is not rendered anywhere | none — needs one | repair (mount it, or drop it) |
+| Sign out (`app/admin/logout-button.tsx`, `/api/auth/logout`) | compact view | **Not reachable**: `LogoutButton` is not rendered anywhere | none — needs one | fixed: the shell shows Sign out on You and in the account panel |
 | Per-user preferences (`GET`/`PUT /api/me/preferences`) | compact view | n/a (API) | `__tests__/api/me/preferences.test.ts` | preserve (added in #200) |
 | Theme toggle | both | Top bar → theme toggle | n/a (client only) | preserve |
 
@@ -76,17 +76,17 @@ The menu only hides entries; every API route enforces its own check.
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | List my universes | `/admin/universes` | `GET /api/admin/universes?scope=my` | signed in | both | Menu → Personalize → My Universes | `__tests__/api/admin/universes.test.ts` | preserve |
 | Create universe | `/admin/universes/new` | `POST /api/admin/universes` | signed in (owner = self) | full-screen view | My Universes → New | none — needs one | preserve |
-| View universe | `/admin/universes/[id]` | `GET /api/admin/universes/:id` | any signed-in user | both | My Universes / Discover → card | none — needs one | **repair**: no `isPublic`/membership check, so any signed-in user reads a private universe and its owner's email |
+| View universe | `/admin/universes/[id]` | `GET /api/admin/universes/:id` | any signed-in user | both | My Universes / Discover → card | `__tests__/api/admin/entity-visibility.test.ts` | **fixed in #222** |
 | Edit / delete universe | `/admin/universes/[id]` | `PATCH`/`DELETE /api/admin/universes/:id` | owner | full-screen view | universe → Edit / Delete | none — needs one | preserve |
 | Universe visitors (analytics) | `/admin/universes/[id]` | `/api/admin/analytics/universes/:id` | scoped | full-screen view | universe → Visitors | `authorisation-scope.test.ts` (#208) | fixed in 0A (#208) |
 | Create world | `/admin/worlds/new` | `POST /api/admin/worlds` | universe owner | full-screen view | universe → New world | none — needs one | preserve |
-| View world | `/admin/worlds/[id]` | `GET /api/admin/worlds/:id` | any signed-in user | both | universe → world | none — needs one | **repair**: no `isPublic`/membership check on private worlds |
+| View world | `/admin/worlds/[id]` | `GET /api/admin/worlds/:id` | any signed-in user | both | universe → world | `__tests__/api/admin/entity-visibility.test.ts` | **fixed in #222** |
 | Edit / delete world | `/admin/worlds/[id]` | `PATCH`/`DELETE /api/admin/worlds/:id` | universe owner | full-screen view | world → Edit / Delete | none — needs one | preserve |
 | World members: list, add, change role, remove | `/admin/worlds/[id]` (`member-list`, `invite-member-dialog`) | `/api/admin/worlds/:id/members[/:memberId]`, `/visitors` | owner / world admin | full-screen view | world → Members | none — needs one | preserve |
 | World invitations: list, cancel | `/admin/worlds/[id]` | `/api/admin/worlds/:id/invitations[/cancel]` | owner / world admin | full-screen view | world → Members | none — needs one | preserve |
 | World visitors (analytics) | `/admin/worlds/[id]` | `/api/admin/analytics/worlds/:id` | scoped | full-screen view | world → Visitors | `authorisation-scope.test.ts` (#208) | fixed in 0A (#208) |
 | Create room (optionally from template map) | `/admin/rooms/new` | `POST /api/admin/rooms`, `/api/admin/templates/maps/:id`, `/api/templates/:slug` | owner / world editor | full-screen view | world → New room; or template map → Create room | none — needs one | preserve |
-| View room | `/admin/rooms/[id]` | `GET /api/admin/rooms/:id` | any signed-in user | both | world → room; Discover → Rooms | none — needs one | **repair**: no `isPublic`/membership check on private rooms |
+| View room | `/admin/rooms/[id]` | `GET /api/admin/rooms/:id` | any signed-in user | both | world → room; Discover → Rooms | `__tests__/api/admin/entity-visibility.test.ts` | **fixed in #222** |
 | Edit room / switch template / delete | `/admin/rooms/[id]` | `PATCH`/`DELETE /api/admin/rooms/:id` | owner / world editor | full-screen view | room → Edit / Delete | none — needs one | preserve |
 | Star / unstar room | `/admin/rooms/[id]`, `/admin/stars` | `POST /api/admin/rooms/:id/favorite` | signed in (own stars) | compact view | room → star; My Stars | none — needs one | preserve (check it refuses private rooms the user cannot see) |
 | Room visitors (analytics) | `/admin/rooms/[id]`, cards | `/api/admin/analytics/rooms/:id` | scoped | both | room → Visitors | `authorisation-scope.test.ts` (#208) | fixed in 0A (#208) |
@@ -102,7 +102,7 @@ The menu only hides entries; every API route enforces its own check.
 | Leave world | `/admin/memberships` | `DELETE /api/memberships/my/world/:id` | signed in (own) | compact view | My Memberships → Leave | none — needs one | preserve |
 | Users list | `/admin/users` | `GET /api/admin/users` | scoped | both | Menu → Discover → Users | `authorisation-scope.test.ts` (#208) | fixed in 0A (#208) |
 | User detail + access history | `/admin/users/[id]` | `GET /api/admin/users/:id`, `/api/admin/analytics/users/:id` | scoped | both | Users → user | `authorisation-scope.test.ts` (#208) | fixed in 0A (#208) |
-| User's starred rooms | `/admin/users/[id]` | `GET /api/admin/users/:id/starred-rooms` | any signed-in user | both | Users → user → Stars | none — needs one | **repair**: any signed-in user lists anyone's starred rooms, private rooms included (not part of #208) |
+| User's starred rooms | `/admin/users/[id]` | `GET /api/admin/users/:id/starred-rooms` | any signed-in user | both | Users → user → Stars | `__tests__/api/admin/entity-visibility.test.ts` | **fixed in #222** |
 | Invite user to a world | `/admin/users/[id]` (`invite-to-world-dialog`) | `GET /api/admin/users/:id/worlds`, `POST /api/admin/users/:id/invite` | owner / world admin | compact view | Users → user → Invite | none — needs one | preserve |
 | Edit my visit card | `/admin/profile` | `GET`/`PUT /api/admin/profile` | signed in (own) | compact view | Menu → Personalize → My Visit Card | none — needs one | preserve |
 | Public visit card page | n/a (game link) | `GET /api/profile/:uuid` | public by design | n/a | n/a | none — needs one | preserve |
@@ -122,9 +122,9 @@ The menu only hides entries; every API route enforces its own check.
 | Action | Page | API | View | Mobile path | Authorisation test | Status |
 | --- | --- | --- | --- | --- | --- | --- |
 | Avatar sets: list, create, edit, delete | `/admin/avatars`, `/admin/avatars/new`, `/admin/avatars/[id]` | `/api/admin/avatar-sets[/:id]` | full-screen view | Menu → Admin → Avatar Sets | none — needs one | preserve |
-| Avatar layers / companions: add, edit, delete, upload texture, texture usage | `/admin/avatars/[id]/layers/[layerId]`, `/admin/avatars/[id]/companions/[companionId]` | `/api/admin/avatar-sets/:id/{layers,companions}`, `/upload-texture`, `/api/admin/texture-usage` | full-screen view | Avatar set → layer / companion | none — needs one | preserve; **repair** `/api/admin/texture-usage` (any signed-in user; aggregate counts only, should be super admin) |
+| Avatar layers / companions: add, edit, delete, upload texture, texture usage | `/admin/avatars/[id]/layers/[layerId]`, `/admin/avatars/[id]/companions/[companionId]` | `/api/admin/avatar-sets/:id/{layers,companions}`, `/upload-texture`, `/api/admin/texture-usage` | full-screen view | Avatar set → layer / companion | `__tests__/api/admin/entity-visibility.test.ts` (texture usage) | preserve; `/api/admin/texture-usage` **fixed in #222** (super admin only) |
 | Avatar set grants, scopes, policies | `/admin/avatars/[id]` | `/api/admin/avatar-sets/:id/{grants,scopes,policies}` | full-screen view | Avatar set → Access | none — needs one | preserve |
-| Avatar set access tester | (API only) | `GET /api/admin/avatar-sets/:id/access-check` | full-screen view | n/a | none — needs one | **repair**: any signed-in user can probe another user's world membership and tags |
+| Avatar set access tester | (API only) | `GET /api/admin/avatar-sets/:id/access-check` | full-screen view | n/a | `__tests__/api/admin/entity-visibility.test.ts` | **fixed in #222** (super admin only) |
 | Bot-assignable avatar sets | bot texture picker | `GET /api/admin/avatar-sets/bot-assignable` | full-screen view | n/a | none — needs one | preserve (signed in, scope-filtered) |
 | Bots list and bot detail | `/admin/bots`, `/admin/bots/[id]` | `/api/admin/bots[/:id]` (super admin), `/api/bots/:id/{conversations,metrics,emotions}` | full-screen view | Menu → Admin → Bots | per-bot reads: `authorisation-scope.test.ts` (#208); admin list: none — needs one | per-bot reads fixed in 0A (#208); rest preserve |
 | Bot conversations / memory / metrics / test results (global) | `/admin/bots/{conversations,memory,metrics,test-results}` | `/api/admin/bots/*` | full-screen view | Bots → tab | none — needs one | preserve |
@@ -149,3 +149,5 @@ Called by the game or the bot service with `ADMIN_API_TOKEN` / `BOT_SERVICE_TOKE
 | 5 | Sign out | `LogoutButton` exists but is never rendered | Mount it in the user menu, or remove it |
 
 Items fixed in 0A (#208), not repeated here: users list and detail, all analytics routes, bot data cleanup and database stats, per-bot read routes.
+
+All five items above are fixed: 1–4 by #222 (private universes, worlds and rooms return 404 to anyone who can't see them, the owner's email is only for managers, someone else's stars show only rooms you could see, and the two avatar tools are super admin only); 5 by the new shell, which shows Sign out on You and in the account panel.

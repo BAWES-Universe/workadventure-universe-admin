@@ -3,6 +3,8 @@ import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { safeWamExists, getWamUrl, getWamPath, createWamFile } from '@/lib/map-storage';
+import { getViewer, memberWorldIdsOf } from '@/lib/access-scope';
+import { canSeeRoom } from '@/lib/room-visibility';
 
 const updateRoomSchema = z.object({
   slug: z.string().min(1).max(100).optional(),
@@ -19,26 +21,14 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    // Check if using admin token or session
-    const authHeader = request.headers.get('authorization');
-    const isAdminToken = authHeader?.startsWith('Bearer ') && 
-      authHeader.replace('Bearer ', '').trim() === process.env.ADMIN_API_TOKEN;
-    
-    let userId: string | null = null;
-    
-    if (!isAdminToken) {
-      // Try to get user from session
-      const { getSessionUser } = await import('@/lib/auth-session');
-      const sessionUser = await getSessionUser(request);
-      if (!sessionUser) {
-        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-      }
-      userId = sessionUser.id;
-    } else {
-      // Admin token - require it
-      requireAuth(request);
+    const viewer = await getViewer(request);
+    if (!viewer) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
-    
+    const isAdminToken = viewer.kind === 'admin-token';
+    const sessionUser = viewer.kind === 'user' ? viewer.user : null;
+    const userId = sessionUser?.id ?? null;
+
     const { id } = await params;
     let room = await prisma.room.findUnique({
       where: { id },
@@ -48,12 +38,14 @@ export async function GET(
             id: true,
             name: true,
             slug: true,
+            isPublic: true,
             universe: {
               select: {
                 id: true,
                 name: true,
                 slug: true,
                 ownerId: true,
+                isPublic: true,
               },
             },
           },
@@ -80,7 +72,10 @@ export async function GET(
       },
     });
     
-    if (!room) {
+    // A private room, or one in a private world or universe, is only for the universe's owner, the world's members
+    // and super admins; to anyone else it doesn't exist.
+    const memberWorldIds = sessionUser && room ? await memberWorldIdsOf(sessionUser.id, [room.world.id]) : new Set<string>();
+    if (!room || (!isAdminToken && !canSeeRoom(room, sessionUser, memberWorldIds))) {
       return NextResponse.json(
         { error: 'Room not found' },
         { status: 404 }
@@ -151,12 +146,14 @@ export async function GET(
                       id: true,
                       name: true,
                       slug: true,
+                      isPublic: true,
                       universe: {
                         select: {
                           id: true,
                           name: true,
                           slug: true,
                           ownerId: true,
+                          isPublic: true,
                         },
                       },
                     },
@@ -216,12 +213,14 @@ export async function GET(
                       id: true,
                       name: true,
                       slug: true,
+                      isPublic: true,
                       universe: {
                         select: {
                           id: true,
                           name: true,
                           slug: true,
                           ownerId: true,
+                          isPublic: true,
                         },
                       },
                     },

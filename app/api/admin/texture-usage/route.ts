@@ -6,12 +6,12 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import { requireAdminSession } from '@/lib/auth'
+import { requireSuperAdminSession } from '@/lib/auth'
 import { prisma } from '@/lib/db'
 
 export async function GET(request: NextRequest) {
   try {
-    await requireAdminSession()
+    await requireSuperAdminSession()
 
     const textureId = request.nextUrl.searchParams.get('textureId')
     const type = request.nextUrl.searchParams.get('type') || 'layer'
@@ -37,6 +37,9 @@ export async function GET(request: NextRequest) {
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized') {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    }
+    if (error instanceof Error && error.message === 'Forbidden') {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
     }
     console.error('Error in /api/admin/texture-usage:', error)
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
