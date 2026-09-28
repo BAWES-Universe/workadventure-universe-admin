@@ -96,6 +96,7 @@ jobs:
           platforms: linux/amd64
           build-args: |
             NEXT_PUBLIC_PLAY_URL=${{ vars.NEXT_PUBLIC_PLAY_URL || secrets.NEXT_PUBLIC_PLAY_URL }}
+            NEXT_PUBLIC_QUESTS_PROOF_SLICE=${{ vars.NEXT_PUBLIC_QUESTS_PROOF_SLICE || '' }}
 
       - name: Image digest
         run: echo "Image pushed with digest ${{ steps.meta.outputs.digest }}"

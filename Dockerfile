@@ -28,6 +28,9 @@ RUN rm -f next-env.d.ts || true
 # Production builds must provide the exact WorkAdventure play origin.
 ARG NEXT_PUBLIC_PLAY_URL
 ENV NEXT_PUBLIC_PLAY_URL=$NEXT_PUBLIC_PLAY_URL
+# The quests proof slice (game issue #511): "true" only for the dev deployment's image; unset everywhere else.
+ARG NEXT_PUBLIC_QUESTS_PROOF_SLICE
+ENV NEXT_PUBLIC_QUESTS_PROOF_SLICE=$NEXT_PUBLIC_QUESTS_PROOF_SLICE
 
 # DATABASE_URL is required during build for Prisma Client initialization
 # Use a dummy value since we're not connecting to a database during build

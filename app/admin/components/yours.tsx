@@ -22,6 +22,8 @@ import {
   count,
   hueStyle,
 } from './ds';
+import { QuestLogSection } from './quests/quest-log-section';
+import { questsProofEnabled } from '@/lib/quests/flag';
 import styles from './yours.module.css';
 
 interface MyUniverse {
@@ -111,6 +113,9 @@ export default function Yours({ profileComplete }: { profileComplete: boolean | 
           onHide={hide}
         />
       )}
+
+      {/* The player's quest log, from the game (the quests proof slice). */}
+      {questsProofEnabled() && <QuestLogSection />}
 
       <section aria-labelledby="universes-heading">
         <SectionHeader

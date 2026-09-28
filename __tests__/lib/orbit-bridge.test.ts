@@ -52,3 +52,36 @@ describe('parseBridgeMessage', () => {
     expect(parseBridgeMessage({ origin: GAME, source: parent, data: 'orbit-navigate' }, expected)).toBeNull();
   });
 });
+
+describe('orbit-quest-state', () => {
+  const entry = { id: 'welcome.explore', title: 'Find the Courtyard', status: 'tracked', stamp: 'explorer', giver: 'Receptionist', room: 'Lobby' };
+  const state = (entries: unknown[], extra: Record<string, unknown> = {}) => ({
+    origin: GAME,
+    source: parent,
+    data: { type: 'orbit-quest-state', version: 1, roomRevision: revision, entries, ...extra },
+  });
+
+  it('accepts a bounded quest log', () => {
+    expect(parseBridgeMessage(state([entry, { ...entry, id: 'b', status: 'done', stamp: undefined, giver: undefined }]), expected)).toEqual(
+      expect.objectContaining({ kind: 'quest-state', message: expect.objectContaining({ entries: expect.arrayContaining([expect.objectContaining({ id: 'b' })]) }) }),
+    );
+    expect(parseBridgeMessage(state([]), expected)?.kind).toBe('quest-state');
+  });
+
+  it.each([
+    ['more than eight entries', state(Array.from({ length: 9 }, (_, index) => ({ ...entry, id: `q${index}` })))],
+    ['an over-long title', state([{ ...entry, title: 'x'.repeat(81) }])],
+    ['an over-long id', state([{ ...entry, id: 'x'.repeat(65) }])],
+    ['an over-long room', state([{ ...entry, room: 'x'.repeat(81) }])],
+    ['an unknown status', state([{ ...entry, status: 'failed' }])],
+    ['an unknown stamp', state([{ ...entry, stamp: 'core' }])],
+    ['no revision', state([entry], { roomRevision: undefined })],
+    ['entries that are not a list', state([], { entries: 'lots' })],
+  ])('ignores %s', (_, message) => {
+    expect(parseBridgeMessage(message, expected)).toBeNull();
+  });
+
+  it('ignores it from another origin', () => {
+    expect(parseBridgeMessage({ ...state([entry]), origin: 'https://evil.example.test' }, expected)).toBeNull();
+  });
+});

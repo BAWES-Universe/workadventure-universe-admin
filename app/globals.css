@@ -69,6 +69,9 @@
     /* Status */
     --status-live: #22c55e;
     --status-waiting: #f59e0b;
+    /* A quest stamp: the game's lavender ring and gold glyph, deepened on light surfaces so it still reads. */
+    --quest-stamp-ring: #7c5ce0;
+    --quest-stamp-glyph: #b8860b;
     --surface-elevated: 0 0% 100%;
     --surface-sunken: 218 25% 95%;
     --shadow-color: 218 40% 20%;
@@ -109,6 +112,8 @@
     --input: 216 28% 28%;
     --ring: 233 91% 66%;
 
+    --quest-stamp-ring: #c4b5fd;
+    --quest-stamp-glyph: #e9c74c;
     --surface-elevated: 216 41% 20%;
     --surface-sunken: 218 48% 9%;
     --shadow-color: 218 60% 4%;

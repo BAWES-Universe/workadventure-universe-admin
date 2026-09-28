@@ -1,0 +1,280 @@
+/** @jest-environment jsdom */
+
+/**
+ * The owner's first quest (quests proof slice): the room's Quests tab, Add a quest with its preview and Test run,
+ * Publish into this browser, the published page with Visit / Pause, and the player's log on You.
+ */
+import React from 'react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import NewQuestPage from '@/app/admin/rooms/[id]/quests/new/page';
+import WelcomeQuestPage from '@/app/admin/rooms/[id]/quests/welcome/page';
+import { RoomQuests } from '@/app/admin/components/quests/room-quests';
+import { QuestLogSection } from '@/app/admin/components/quests/quest-log-section';
+import { WorkAdventureContext, type WorkAdventureContextValue } from '@/app/admin/workadventure-context';
+import { publishedFromDraft, readPublishedQuest, writePublishedQuest, EMPTY_QUEST_DRAFT, type QuestContext } from '@/lib/quests/model';
+import { resetQuestLog, setQuestLog } from '@/lib/quests/quest-log';
+import { DRAFT_KEY_PREFIX, scopedDraftKey } from '@/lib/drafts';
+
+jest.mock('next/link', () => ({
+  __esModule: true,
+  default: ({ href, children, ...rest }: { href: string; children: React.ReactNode }) => (
+    <a href={href} {...rest}>
+      {children}
+    </a>
+  ),
+}));
+
+const replace = jest.fn();
+jest.mock('next/navigation', () => ({
+  useRouter: () => ({ push: jest.fn(), replace }),
+  useParams: () => ({ id: 'r-1' }),
+  usePathname: () => '/admin/rooms/r-1/quests/new',
+  useSearchParams: () => new URLSearchParams(),
+}));
+
+const fetchMock = jest.fn();
+jest.mock('@/lib/client-auth', () => ({
+  authenticatedFetch: (...args: unknown[]) => fetchMock(...args),
+}));
+
+// Radix's switch measures itself; jsdom has no ResizeObserver.
+class ResizeObserverStub {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+(globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver ??= ResizeObserverStub;
+
+const respond = (body: unknown, status = 200) => Promise.resolve({ ok: status < 400, status, json: () => Promise.resolve(body) });
+
+const ROOM = {
+  id: 'r-1',
+  name: 'Lobby',
+  slug: 'lobby',
+  canEdit: true,
+  world: { id: 'w-1', name: 'Office', slug: 'office', universe: { id: 'u-1', name: 'BAWES', slug: 'bawes' } },
+};
+const CONTEXT: QuestContext = {
+  areas: [
+    { id: 'a-1', name: 'Courtyard' },
+    { id: 'a-2', name: 'Studio' },
+  ],
+  bots: [{ id: 'b-1', name: 'Receptionist' }],
+  source: 'wam',
+};
+
+function route({ room = ROOM, context = CONTEXT, contextStatus = 200 }: { room?: unknown; context?: unknown; contextStatus?: number } = {}) {
+  fetchMock.mockImplementation((url: string) => {
+    if (url === '/api/admin/rooms/r-1') return respond(room);
+    if (url === '/api/admin/rooms/r-1/quest-context') return respond(context, contextStatus);
+    return respond({}, 404);
+  });
+}
+
+function game(isReady: boolean): WorkAdventureContextValue & { navigateToRoom: jest.Mock } {
+  return { wa: null, isReady, isLoading: false, error: null, navigateToRoom: jest.fn().mockResolvedValue(undefined) };
+}
+
+beforeEach(() => {
+  process.env.NEXT_PUBLIC_QUESTS_PROOF_SLICE = 'true';
+  fetchMock.mockReset();
+  replace.mockReset();
+  window.localStorage.clear();
+  window.sessionStorage.clear();
+  resetQuestLog();
+});
+
+afterAll(() => {
+  delete process.env.NEXT_PUBLIC_QUESTS_PROOF_SLICE;
+});
+
+describe('Add a quest', () => {
+  it('starts from the Welcome chapter and asks for the area beside Explore before it can publish', async () => {
+    route();
+    render(<NewQuestPage />);
+    expect(await screen.findByRole('radio', { name: /Welcome chapter/ })).toHaveProperty('checked', true);
+    expect(screen.getByRole('heading', { name: 'Add a quest' })).toBeTruthy();
+    expect(screen.getByText('More presets later.')).toBeTruthy();
+
+    const publish = screen.getByTestId('quest-publish');
+    expect(publish).toHaveProperty('disabled', true);
+    // Beside the select, and again as a link by Publish that takes you there.
+    expect(screen.getAllByText('Pick an area or skip this path.')).toHaveLength(2);
+    fireEvent.click(screen.getByRole('button', { name: 'Pick an area or skip this path.' }));
+    expect(document.activeElement).toBe(screen.getByLabelText('Area to find'));
+
+    fireEvent.change(screen.getByLabelText('Area to find'), { target: { value: 'a-1' } });
+    expect(publish).toHaveProperty('disabled', false);
+    expect(screen.queryByText('Pick an area or skip this path.')).toBeNull();
+  });
+
+  it('previews the three screens in the game’s words with this room’s names, and rehearses them', async () => {
+    route();
+    render(<NewQuestPage />);
+    fireEvent.change(await screen.findByLabelText('Area to find'), { target: { value: 'a-1' } });
+    const preview = screen.getByTestId('quest-preview');
+    // No host: the room speaks.
+    expect(within(preview).getAllByText('Lobby').length).toBeGreaterThan(0);
+    expect(within(preview).getAllByText('Welcome. Want a quick look around?').length).toBeGreaterThan(0);
+    expect(within(preview).getAllByText('Find the Courtyard.').length).toBeGreaterThan(0);
+    expect(within(preview).getAllByText(/First Hello badge/).length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole('radio', { name: /A bot/ }));
+    // The only bot is picked for you.
+    expect((screen.getByLabelText('Host') as HTMLSelectElement).value).toBe('b-1');
+    expect(within(preview).getAllByText('Receptionist').length).toBeGreaterThan(0);
+    expect(within(preview).getAllByText('Good to meet you.').length).toBeGreaterThan(0);
+
+    const status = screen.getByTestId('rehearsal-status');
+    expect(status.getAttribute('role')).toBe('status');
+    expect(status.textContent).toBe('');
+    fireEvent.click(screen.getByRole('button', { name: 'Test run' }));
+    expect(screen.getByText('Step 1 of 3: the invitation')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Next: the options' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Next: the payoff' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Finish test run' }));
+    expect(status.textContent).toBe('Rehearsal only. Nothing was saved.');
+    expect(readPublishedQuest('r-1')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'العربية' }));
+    expect(within(preview).getAllByText('أهلًا بك. هل تريد جولة سريعة؟').length).toBeGreaterThan(0);
+  });
+
+  it('publishes into this browser, forgets the draft and opens the quest', async () => {
+    route();
+    render(<NewQuestPage />);
+    fireEvent.change(await screen.findByLabelText('Area to find'), { target: { value: 'a-2' } });
+    await waitFor(() => expect(window.sessionStorage.getItem(DRAFT_KEY_PREFIX + scopedDraftKey('quest.new', 'r-1'))).not.toBeNull());
+    fireEvent.click(screen.getByTestId('quest-publish'));
+    expect(readPublishedQuest('r-1')).toEqual(
+      expect.objectContaining({ status: 'live', area: { id: 'a-2', name: 'Studio' }, host: { kind: 'none' }, paths: { meet: true, explore: true, build: false } }),
+    );
+    expect(replace).toHaveBeenCalledWith('/admin/rooms/r-1/quests/welcome');
+    expect(window.sessionStorage.getItem(DRAFT_KEY_PREFIX + scopedDraftKey('quest.new', 'r-1'))).toBeNull();
+  });
+
+  it('brings back what was chosen earlier in this room, and says so', async () => {
+    window.sessionStorage.setItem(DRAFT_KEY_PREFIX + scopedDraftKey('quest.new', 'r-1'), JSON.stringify({ ...EMPTY_QUEST_DRAFT, areaId: 'a-2', build: true }));
+    route();
+    render(<NewQuestPage />);
+    expect(await screen.findByTestId('draft-notice')).toBeTruthy();
+    expect((screen.getByLabelText('Area to find') as HTMLSelectElement).value).toBe('a-2');
+  });
+
+  it('offers no Explore on a map without named areas', async () => {
+    route({ context: { areas: [], bots: [], source: 'none' } });
+    render(<NewQuestPage />);
+    expect(await screen.findByText(/No named areas on this map yet. Name one/)).toBeTruthy();
+    expect(screen.queryByLabelText('Area to find')).toBeNull();
+    expect(screen.getByTestId('quest-publish')).toHaveProperty('disabled', false);
+    expect(screen.getByRole('radio', { name: /A bot/ })).toHaveProperty('disabled', true);
+  });
+
+  it('is only for people who can edit the room', async () => {
+    route({ contextStatus: 403 });
+    render(<NewQuestPage />);
+    expect(await screen.findByTestId('quest-not-editor')).toBeTruthy();
+  });
+
+  it('says quests are off, and fetches nothing, without the flag', () => {
+    delete process.env.NEXT_PUBLIC_QUESTS_PROOF_SLICE;
+    render(<NewQuestPage />);
+    expect(screen.getByTestId('quests-off')).toBeTruthy();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('The published welcome', () => {
+  const live = publishedFromDraft({ ...EMPTY_QUEST_DRAFT, areaId: 'a-1', hostKind: 'bot', hostId: 'b-1' }, CONTEXT, 'live');
+
+  function renderPage(wa = game(true)) {
+    render(
+      <WorkAdventureContext.Provider value={wa}>
+        <WelcomeQuestPage />
+      </WorkAdventureContext.Provider>,
+    );
+    return wa;
+  }
+
+  it('is live in this browser, and Visit takes the owner’s choices into the game', async () => {
+    writePublishedQuest('r-1', live);
+    route();
+    const wa = renderPage();
+    expect((await screen.findByTestId('quest-where')).textContent).toMatch(/Live in this browser \(prototype\)/);
+    expect(screen.getByText('Live')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: /Visit the room/ }));
+    await waitFor(() =>
+      expect(wa.navigateToRoom).toHaveBeenCalledWith('/@/bawes/office/lobby#questArea=Courtyard&questHost=bot%3Abot-b-1'),
+    );
+    expect(screen.getByRole('link', { name: /Edit/ }).getAttribute('href')).toBe('/admin/rooms/r-1/quests/new');
+  });
+
+  it('pauses and resumes, saying what pausing means', async () => {
+    writePublishedQuest('r-1', live);
+    route();
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'Pause' }));
+    expect(screen.getByText('Paused')).toBeTruthy();
+    expect(readPublishedQuest('r-1')?.status).toBe('paused');
+    expect(screen.getByText(/new visitors aren’t invited. People who accepted keep their progress./)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Resume' }));
+    expect(readPublishedQuest('r-1')?.status).toBe('live');
+  });
+
+  it('cannot visit from outside the game', async () => {
+    writePublishedQuest('r-1', live);
+    route();
+    renderPage(game(false));
+    expect(await screen.findByRole('button', { name: /Visit the room/ })).toHaveProperty('disabled', true);
+  });
+
+  it('leads to Add a quest when nothing is published', async () => {
+    route();
+    renderPage();
+    expect((await screen.findByTestId('quest-none')).getAttribute('href')).toBe('/admin/rooms/r-1/quests/new');
+  });
+});
+
+describe('The room’s Quests tab', () => {
+  it('explains a quest and offers to add one', async () => {
+    render(<RoomQuests roomId="r-1" />);
+    expect(await screen.findByTestId('room-quests-empty')).toBeTruthy();
+    expect(screen.getByText('A quest is one short thing to do here.')).toBeTruthy();
+    expect(screen.getByRole('link', { name: /Add a quest/ }).getAttribute('href')).toBe('/admin/rooms/r-1/quests/new');
+  });
+
+  it('lists the published welcome with its status', async () => {
+    writePublishedQuest('r-1', { ...publishedFromDraft({ ...EMPTY_QUEST_DRAFT, areaId: 'a-1' }, CONTEXT, 'paused') });
+    render(<RoomQuests roomId="r-1" />);
+    const row = await screen.findByTestId('room-quest-welcome');
+    expect(within(row).getByRole('link', { name: 'Welcome chapter' }).getAttribute('href')).toBe('/admin/rooms/r-1/quests/welcome');
+    expect(row.textContent).toMatch(/Explore this place: Courtyard/);
+    expect(within(row).getByText('Paused')).toBeTruthy();
+    expect(screen.queryByRole('link', { name: /Add a quest/ })).toBeNull();
+  });
+});
+
+describe('Quests on You', () => {
+  it('says how to get one when the game has sent none', () => {
+    render(<QuestLogSection />);
+    expect(screen.getByText('No quests yet — walk into a room and look around.')).toBeTruthy();
+  });
+
+  it('shows the log the game sent, grouped as in the game', () => {
+    render(<QuestLogSection />);
+    act(() =>
+      setQuestLog([
+        { id: 'e', title: 'Find the Courtyard', status: 'tracked', stamp: 'explorer', giver: 'Receptionist', room: 'Lobby' },
+        { id: 'b', title: 'Add one thing', status: 'accepted', stamp: 'builder', room: 'Lobby' },
+        { id: 'm', title: 'Say hi to someone', status: 'done', stamp: 'first-hello', room: 'Lobby' },
+      ]),
+    );
+    const log = screen.getByTestId('quest-log');
+    expect(within(log).getAllByRole('heading', { level: 3 }).map((heading) => heading.textContent)).toEqual(['Tracked', 'Accepted', 'Done']);
+    expect(screen.getByTestId('quest-e').textContent).toMatch(/From Receptionist · Lobby/);
+    expect(screen.getByTestId('quest-b').textContent).toMatch(/Here · Lobby/);
+    expect(screen.getByTestId('quest-m').textContent).toMatch(/First Hello badge/);
+    // Count of what is still to do.
+    expect(within(log).getByRole('heading', { level: 2 }).textContent).toBe('Quests2');
+  });
+});

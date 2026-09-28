@@ -4,6 +4,8 @@ import { useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { authenticatedFetch } from '@/lib/client-auth';
 import { PLAY_ORIGIN, isInsideFrame } from '@/lib/play-origin';
+import { questsProofEnabled } from '@/lib/quests/flag';
+import { setQuestLog } from '@/lib/quests/quest-log';
 import {
   ORBIT_BRIDGE_CAPABILITIES,
   ORBIT_BRIDGE_VERSION,
@@ -113,6 +115,12 @@ export default function OrbitBridge({
         return;
       }
 
+      // Display only: shown on You while the proof slice is on, never answered (it isn't a request).
+      if (parsed.kind === 'quest-state') {
+        if (questsProofEnabled() && parsed.message.roomRevision === roomRevision.current) setQuestLog(parsed.message.entries);
+        return;
+      }
+
       const { requestId, roomRevision: revision } = parsed.message;
       if (roomRevision.current === null) return ack(requestId, revision, 'not-ready');
       // A request from an earlier room or connection is refused.
@@ -138,7 +146,9 @@ export default function OrbitBridge({
     };
 
     window.addEventListener('message', onMessage);
-    post({ type: 'orbit-bridge-ready', version: ORBIT_BRIDGE_VERSION, capabilities: ORBIT_BRIDGE_CAPABILITIES });
+    // The game sends its quest log only to an Orbit that asks for it.
+    const capabilities = questsProofEnabled() ? [...ORBIT_BRIDGE_CAPABILITIES, 'quests'] : ORBIT_BRIDGE_CAPABILITIES;
+    post({ type: 'orbit-bridge-ready', version: ORBIT_BRIDGE_VERSION, capabilities });
     return () => {
       window.removeEventListener('message', onMessage);
       gameVisit = null;

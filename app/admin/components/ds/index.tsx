@@ -162,9 +162,20 @@ export function RolePills({ roles }: { roles: string[] }) {
   );
 }
 
-/** Public, Private, Featured, Live: neutral outline with an icon, never a colour block. */
-export function StatusPill({ status }: { status: 'public' | 'private' | 'featured' | 'live' | 'waiting' }) {
-  const label = { public: 'Public', private: 'Private', featured: 'Featured', live: 'You’re here', waiting: 'Waiting' }[status];
+/**
+ * Public, Private, Featured, Live: neutral outline with an icon, never a colour block. `published` and `paused` are
+ * for something you run (a quest): Live with the green dot, or Paused with a quiet one.
+ */
+export function StatusPill({ status }: { status: 'public' | 'private' | 'featured' | 'live' | 'waiting' | 'published' | 'paused' }) {
+  const label = {
+    public: 'Public',
+    private: 'Private',
+    featured: 'Featured',
+    live: 'You’re here',
+    waiting: 'Waiting',
+    published: 'Live',
+    paused: 'Paused',
+  }[status];
   const Icon = status === 'public' ? Globe2 : status === 'private' ? Lock : status === 'featured' ? Star : null;
   return (
     <span className={styles.pill} data-status={status}>

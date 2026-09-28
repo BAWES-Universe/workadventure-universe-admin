@@ -20,6 +20,7 @@ jest.mock('@/lib/client-auth', () => ({
 }));
 
 import OrbitBridge from '@/app/admin/components/orbit-bridge';
+import { getQuestLog, resetQuestLog } from '@/lib/quests/quest-log';
 
 const revision = 'rev-aaaaaaaaaaaaaaaa';
 const otherRevision = 'rev-bbbbbbbbbbbbbbbb';
@@ -108,5 +109,39 @@ describe('OrbitBridge', () => {
     expect(heard).toHaveBeenCalledTimes(1);
     expect(posted).toContainEqual(expect.objectContaining({ requestId: 'r2', ok: true }));
     window.removeEventListener('orbit:refresh', heard);
+  });
+
+  describe('the quest log (quests proof slice)', () => {
+    const entry = { id: 'welcome.explore', title: 'Find the Courtyard', status: 'tracked', stamp: 'explorer', room: 'Lobby' };
+    const questState = (roomRevision = revision) => ({ type: 'orbit-quest-state', version: 1, roomRevision, entries: [entry] });
+
+    beforeEach(() => resetQuestLog());
+    afterEach(() => {
+      delete process.env.NEXT_PUBLIC_QUESTS_PROOF_SLICE;
+      resetQuestLog();
+    });
+
+    it('is not offered, and not kept, while the slice is off', () => {
+      render(<OrbitBridge onRefresh={jest.fn()} />);
+      init();
+      fromGame(questState());
+      expect(getQuestLog()).toBeNull();
+      expect(posted).toContainEqual(expect.objectContaining({ type: 'orbit-bridge-ready', capabilities: ['navigate', 'event', 'view'] }));
+    });
+
+    it('asks the game for it and keeps the latest one from this visit', () => {
+      process.env.NEXT_PUBLIC_QUESTS_PROOF_SLICE = 'true';
+      render(<OrbitBridge onRefresh={jest.fn()} />);
+      expect(posted).toContainEqual(expect.objectContaining({ type: 'orbit-bridge-ready', capabilities: ['navigate', 'event', 'view', 'quests'] }));
+      fromGame(questState());
+      expect(getQuestLog()).toBeNull();
+      init();
+      fromGame(questState(otherRevision));
+      expect(getQuestLog()).toBeNull();
+      fromGame(questState());
+      expect(getQuestLog()).toEqual([entry]);
+      // Display only: nothing is answered.
+      expect(posted.filter((message) => (message as { type: string }).type === 'orbit-bridge-ack')).toHaveLength(0);
+    });
   });
 });
