@@ -3,11 +3,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import AuthLink from '@/app/admin/auth-link';
-import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
 import {
   Table,
   TableBody,
@@ -16,8 +11,8 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { AlertCircle, Loader2, MessageSquare, ArrowLeft, Search } from 'lucide-react';
-import { Badge } from '@/components/ui/badge';
+import { EmptyCard, LoadError, LoadingRows, PageHeader } from '../../components/ds';
+import { ApplyFilter, DateFilter, FilterRow, JsonDetails, ListPager, Panel, Pill, type PageInfo } from '../bots-ui';
 
 interface Conversation {
   id: number;
@@ -40,34 +35,12 @@ interface Conversation {
   createdAt: Date;
 }
 
-interface Pagination {
-  page: number;
-  limit: number;
-  total: number;
-  totalPages: number;
-}
-
-// Skeleton loader
-function SkeletonRow() {
-  return (
-    <TableRow>
-      <TableCell><div className="h-4 w-24 bg-muted animate-pulse rounded" /></TableCell>
-      <TableCell><div className="h-4 w-32 bg-muted animate-pulse rounded" /></TableCell>
-      <TableCell><div className="h-4 w-20 bg-muted animate-pulse rounded" /></TableCell>
-      <TableCell><div className="h-4 w-16 bg-muted animate-pulse rounded" /></TableCell>
-      <TableCell><div className="h-4 w-40 bg-muted animate-pulse rounded" /></TableCell>
-      <TableCell><div className="h-4 w-40 bg-muted animate-pulse rounded" /></TableCell>
-      <TableCell><div className="h-4 w-32 bg-muted animate-pulse rounded" /></TableCell>
-    </TableRow>
-  );
-}
-
 export default function ConversationsBrowsePage() {
   const router = useRouter();
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [pagination, setPagination] = useState<Pagination | null>(null);
+  const [pagination, setPagination] = useState<PageInfo | null>(null);
   const [filters, setFilters] = useState({
     botId: '',
     userUuid: '',
@@ -159,9 +132,6 @@ export default function ConversationsBrowsePage() {
     return new Date(date).toLocaleString();
   }
 
-  function formatNumber(num: number): string {
-    return new Intl.NumberFormat().format(num);
-  }
 
   function formatDuration(startedAt: Date | string, endedAt: Date | string): string {
     const start = new Date(startedAt).getTime();
@@ -196,196 +166,61 @@ export default function ConversationsBrowsePage() {
     }
   }
 
-  if (loading && conversations.length === 0) {
-    return (
-      <div className="space-y-8">
-        <div className="flex items-center justify-between">
-          <div className="space-y-1">
-            <h1 className="text-4xl font-bold tracking-tight">Browse Conversations</h1>
-            <p className="text-muted-foreground text-lg">
-              View and filter all bot conversations
-            </p>
-          </div>
-        </div>
-        <Card>
-          <CardContent className="p-0">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Bot ID</TableHead>
-                  <TableHead>Player</TableHead>
-                  <TableHead>Messages</TableHead>
-                  <TableHead>Duration</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Started</TableHead>
-                  <TableHead>Ended</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {[...Array(10)].map((_, i) => (
-                  <SkeletonRow key={i} />
-                ))}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
-      </div>
-    );
-  }
+  const filtered = Boolean(filters.botId || filters.userUuid || filters.userId || filters.startDate || filters.endDate);
 
   return (
-    <div className="space-y-8">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-4">
-          <Button variant="ghost" size="sm" asChild>
-            <AuthLink href="/admin/bots/database">
-              <ArrowLeft className="mr-2 h-4 w-4" />
-              Back
-            </AuthLink>
-          </Button>
-          <div className="space-y-1">
-            <h1 className="text-4xl font-bold tracking-tight">Browse Conversations</h1>
-            <p className="text-muted-foreground text-lg">
-              View and filter all bot conversations
-            </p>
-          </div>
-        </div>
-      </div>
+    <div className="grid min-w-0 gap-6">
+      <PageHeader
+        kind="bot"
+        title="Conversations"
+        context={<span>What players and bots said to each other, across every bot.</span>}
+      />
 
-      {error && (
-        <Alert variant="destructive">
-          <AlertCircle className="h-4 w-4" />
-          <AlertTitle>Error</AlertTitle>
-          <AlertDescription>
-            {error}
-            <Button
-              variant="outline"
-              size="sm"
-              className="ml-4"
-              onClick={fetchConversations}
-            >
-              Retry
-            </Button>
-          </AlertDescription>
-        </Alert>
-      )}
+      <FilterRow label="Filter conversations" className="lg:grid-cols-5">
+        <ApplyFilter
+          id="botId"
+          label="Bot ID"
+          placeholder="Bot ID"
+          value={botIdInput}
+          onChange={setBotIdInput}
+          onApply={() => setFilters({ ...filters, botId: botIdInput, page: 1 })}
+        />
+        <ApplyFilter
+          id="userUuid"
+          label="User UUID"
+          placeholder="User UUID"
+          value={userUuidInput}
+          onChange={setUserUuidInput}
+          onApply={() => setFilters({ ...filters, userUuid: userUuidInput, page: 1 })}
+        />
+        <ApplyFilter
+          id="userId"
+          label="User ID"
+          placeholder="User ID"
+          value={userIdInput}
+          onChange={setUserIdInput}
+          onApply={() => setFilters({ ...filters, userId: userIdInput, page: 1 })}
+        />
+        <DateFilter id="startDate" label="From" value={filters.startDate} onChange={(startDate) => setFilters({ ...filters, startDate, page: 1 })} />
+        <DateFilter id="endDate" label="To" value={filters.endDate} onChange={(endDate) => setFilters({ ...filters, endDate, page: 1 })} />
+      </FilterRow>
 
-      {/* Filters */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Filters</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
-            <div className="space-y-2">
-              <Label htmlFor="botId">Bot ID</Label>
-              <div className="flex gap-2">
-                <Input
-                  id="botId"
-                  placeholder="Filter by bot ID..."
-                  value={botIdInput}
-                  onChange={(e) => setBotIdInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      setFilters({ ...filters, botId: botIdInput, page: 1 });
-                    }
-                  }}
-                />
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setFilters({ ...filters, botId: botIdInput, page: 1 })}
-                >
-                  <Search className="h-4 w-4" />
-                </Button>
-              </div>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="userUuid">User UUID</Label>
-              <div className="flex gap-2">
-                <Input
-                  id="userUuid"
-                  placeholder="Filter by user UUID..."
-                  value={userUuidInput}
-                  onChange={(e) => setUserUuidInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      setFilters({ ...filters, userUuid: userUuidInput, page: 1 });
-                    }
-                  }}
-                />
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setFilters({ ...filters, userUuid: userUuidInput, page: 1 })}
-                >
-                  <Search className="h-4 w-4" />
-                </Button>
-              </div>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="userId">User ID</Label>
-              <div className="flex gap-2">
-                <Input
-                  id="userId"
-                  placeholder="Filter by user ID..."
-                  value={userIdInput}
-                  onChange={(e) => setUserIdInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      setFilters({ ...filters, userId: userIdInput, page: 1 });
-                    }
-                  }}
-                />
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setFilters({ ...filters, userId: userIdInput, page: 1 })}
-                >
-                  <Search className="h-4 w-4" />
-                </Button>
-              </div>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="startDate">Start Date</Label>
-              <Input
-                id="startDate"
-                type="date"
-                value={filters.startDate}
-                onChange={(e) => setFilters({ ...filters, startDate: e.target.value, page: 1 })}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="endDate">End Date</Label>
-              <Input
-                id="endDate"
-                type="date"
-                value={filters.endDate}
-                onChange={(e) => setFilters({ ...filters, endDate: e.target.value, page: 1 })}
-              />
-            </div>
-          </div>
-        </CardContent>
-      </Card>
+      {error && <LoadError label="conversations" retry={fetchConversations} />}
 
-      {/* Conversations Table */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Conversations</CardTitle>
-        </CardHeader>
-        <CardContent className="p-0">
-          {conversations.length === 0 ? (
-            <div className="py-12 text-center">
-              <MessageSquare className="h-12 w-12 mx-auto mb-4 text-muted-foreground opacity-50" />
-              <h3 className="text-lg font-semibold mb-2">No conversations found</h3>
-              <p className="text-sm text-muted-foreground">
-                {Object.values(filters).some(v => v && v !== '1' && v !== '50')
-                  ? 'Try adjusting your filters to see more results.'
-                  : 'No conversations have been recorded yet.'}
-              </p>
-            </div>
-          ) : (
+      {loading && conversations.length === 0 ? (
+        <LoadingRows label="conversations" rows={5} />
+      ) : conversations.length === 0 ? (
+        !error &&
+        (filtered ? (
+          <p className="text-sm text-muted-foreground" role="status">
+            No conversations match these filters.
+          </p>
+        ) : (
+          <EmptyCard kind="bot" title="No conversations yet." text="Conversations show up here once players talk to a bot." />
+        ))
+      ) : (
             <>
+              <Panel>
               {/* Desktop Table View */}
               <div className="hidden md:block overflow-x-auto">
                 <Table>
@@ -398,6 +233,7 @@ export default function ConversationsBrowsePage() {
                       <TableHead>Status</TableHead>
                       <TableHead>Started</TableHead>
                       <TableHead>Ended</TableHead>
+                      <TableHead>Transcript</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -423,7 +259,7 @@ export default function ConversationsBrowsePage() {
                                   {conv.userId || conv.userUuid || 'N/A'}
                                 </div>
                                 {conv.isGuest && (
-                                  <Badge variant="outline" className="text-xs">Guest</Badge>
+                                  <Pill>Guest</Pill>
                                 )}
                               </>
                             ) : (
@@ -433,39 +269,32 @@ export default function ConversationsBrowsePage() {
                                   {conv.userUuid || 'N/A'}
                                 </div>
                                 {conv.isGuest && (
-                                  <Badge variant="outline" className="text-xs">Guest</Badge>
+                                  <Pill>Guest</Pill>
                                 )}
                               </>
                             )}
                           </div>
                         </TableCell>
                         <TableCell>
-                          <Badge variant="outline">{conv.messageCount}</Badge>
+                          <Pill>{conv.messageCount}</Pill>
                         </TableCell>
                         <TableCell className="text-sm">
                           {formatDuration(conv.startedAt, conv.endedAt)}
                         </TableCell>
                         <TableCell>
                           <div className="space-y-1">
-                            <Badge variant={getConversationStatus(conv.startedAt, conv.endedAt) === 'active' ? 'default' : 'secondary'}>
-                              {getConversationStatus(conv.startedAt, conv.endedAt) === 'active' ? 'Active' : 'Completed'}
-                            </Badge>
+                            <Pill tone={getConversationStatus(conv.startedAt, conv.endedAt) === 'active' ? 'ok' : 'off'}>{getConversationStatus(conv.startedAt, conv.endedAt) === 'active' ? 'Active' : 'Completed'}</Pill>
                             {conv.endReason && (
-                              <Badge variant="outline" className="text-xs">
+                              <Pill>
                                 {formatEndReason(conv.endReason)}
-                              </Badge>
+                              </Pill>
                             )}
                           </div>
                         </TableCell>
                         <TableCell className="text-sm">{formatDate(conv.startedAt)}</TableCell>
                         <TableCell className="text-sm">{formatDate(conv.endedAt)}</TableCell>
                         <TableCell>
-                          <details className="cursor-pointer">
-                            <summary className="text-sm text-muted-foreground">View</summary>
-                            <pre className="mt-2 text-xs bg-muted p-2 rounded overflow-auto max-w-md max-h-64">
-                              {JSON.stringify(conv.messages, null, 2)}
-                            </pre>
-                          </details>
+                          <JsonDetails label="View" value={conv.messages} />
                         </TableCell>
                       </TableRow>
                     ))}
@@ -476,8 +305,8 @@ export default function ConversationsBrowsePage() {
               {/* Mobile Card View */}
               <div className="md:hidden space-y-4 p-4">
                 {conversations.map((conv) => (
-                  <Card key={conv.id}>
-                    <CardContent className="pt-6">
+                  <div key={conv.id} className="rounded-xl border p-4">
+                    <div>
                       <div className="space-y-3">
                         <div className="flex items-start justify-between">
                           <div className="space-y-1">
@@ -489,7 +318,7 @@ export default function ConversationsBrowsePage() {
                               {conv.botId}
                             </AuthLink>
                           </div>
-                          <Badge variant="outline">{conv.messageCount} messages</Badge>
+                          <Pill>{conv.messageCount} messages</Pill>
                         </div>
                         <div>
                           <div className="text-sm font-medium text-muted-foreground mb-1">User</div>
@@ -503,7 +332,7 @@ export default function ConversationsBrowsePage() {
                                 {conv.userId || conv.userUuid || 'N/A'}
                               </div>
                               {conv.isGuest && (
-                                <Badge variant="outline" className="text-xs mt-1">Guest</Badge>
+                                <Pill>Guest</Pill>
                               )}
                             </>
                           ) : (
@@ -513,7 +342,7 @@ export default function ConversationsBrowsePage() {
                                 {conv.userUuid || 'N/A'}
                               </div>
                               {conv.isGuest && (
-                                <Badge variant="outline" className="text-xs mt-1">Guest</Badge>
+                                <Pill>Guest</Pill>
                               )}
                             </>
                           )}
@@ -532,13 +361,11 @@ export default function ConversationsBrowsePage() {
                           <div>
                             <div className="text-sm font-medium text-muted-foreground mb-1">Status</div>
                             <div className="flex items-center gap-2">
-                              <Badge variant={getConversationStatus(conv.startedAt, conv.endedAt) === 'active' ? 'default' : 'secondary'}>
-                                {getConversationStatus(conv.startedAt, conv.endedAt) === 'active' ? 'Active' : 'Completed'}
-                              </Badge>
+                              <Pill tone={getConversationStatus(conv.startedAt, conv.endedAt) === 'active' ? 'ok' : 'off'}>{getConversationStatus(conv.startedAt, conv.endedAt) === 'active' ? 'Active' : 'Completed'}</Pill>
                               {conv.endReason && (
-                                <Badge variant="outline" className="text-xs">
+                                <Pill>
                                   {formatEndReason(conv.endReason)}
-                                </Badge>
+                                </Pill>
                               )}
                             </div>
                           </div>
@@ -548,52 +375,17 @@ export default function ConversationsBrowsePage() {
                           </div>
                         </div>
                         <div>
-                          <details className="cursor-pointer">
-                            <summary className="text-sm font-medium text-muted-foreground">View Messages</summary>
-                            <pre className="mt-2 text-xs bg-muted p-2 rounded overflow-auto max-h-64">
-                              {JSON.stringify(conv.messages, null, 2)}
-                            </pre>
-                          </details>
+                          <JsonDetails label="View messages" value={conv.messages} />
                         </div>
                       </div>
-                    </CardContent>
-                  </Card>
+                    </div>
+                  </div>
                 ))}
               </div>
-
-              {/* Pagination */}
-              {pagination && pagination.totalPages > 1 && (
-                <div className="flex items-center justify-between p-4 border-t">
-                  <div className="text-sm text-muted-foreground">
-                    Showing {((pagination.page - 1) * pagination.limit) + 1} - {Math.min(pagination.page * pagination.limit, pagination.total)} of {formatNumber(pagination.total)} conversations
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => handlePageChange(pagination.page - 1)}
-                      disabled={pagination.page === 1}
-                    >
-                      Previous
-                    </Button>
-                    <div className="text-sm text-muted-foreground">
-                      Page {pagination.page} of {pagination.totalPages}
-                    </div>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => handlePageChange(pagination.page + 1)}
-                      disabled={pagination.page >= pagination.totalPages}
-                    >
-                      Next
-                    </Button>
-                  </div>
-                </div>
-              )}
+              </Panel>
+              <ListPager pagination={pagination} noun={['conversation', 'conversations']} loading={loading} onChange={handlePageChange} />
             </>
-          )}
-        </CardContent>
-      </Card>
+      )}
     </div>
   );
 }

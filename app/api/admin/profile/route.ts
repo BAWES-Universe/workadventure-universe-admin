@@ -2,12 +2,16 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireSession } from '@/lib/auth-session';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
+import { wokaLayersFor } from '@/lib/woka-avatar';
 
 const visitCardSchema = z.object({
+  // Your name, as everyone sees it in the game (the game reads it from here when it loads).
+  name: z.string().trim().min(1).max(64).optional(),
   bio: z.string().nullable().optional(),
   links: z.array(z.object({
     label: z.string().min(1),
-    url: z.string().url(),
+    // Web links only: a javascript: or data: address would run in whoever opens the profile.
+    url: z.string().url().refine((value) => /^https?:\/\//i.test(value), 'Links must start with http:// or https://'),
   })).default([]),
 });
 
@@ -32,7 +36,11 @@ export async function GET(request: NextRequest) {
       });
     }
     
+    // Your Woka is decoration: a failure to read it never costs you your profile.
+    const woka = await wokaLayersFor(user.id).catch(() => []);
     return NextResponse.json({
+      name: user.name ?? null,
+      woka,
       bio: visitCard.bio,
       links: visitCard.links as Array<{ label: string; url: string }>,
     });
@@ -72,21 +80,28 @@ export async function PUT(request: NextRequest) {
       }
     }
     
-    // Upsert visit card (create if doesn't exist, update if it does)
-    const visitCard = await prisma.visitCard.upsert({
-      where: { userId: user.id },
-      create: {
-        userId: user.id,
-        bio: validated.bio || null,
-        links: validated.links || [],
-      },
-      update: {
-        bio: validated.bio !== undefined ? validated.bio : undefined,
-        links: validated.links !== undefined ? validated.links : undefined,
-      },
-    });
+    // Upsert visit card (create if doesn't exist, update if it does), and your name with it when it changed.
+    const [visitCard, saved] = await prisma.$transaction([
+      prisma.visitCard.upsert({
+        where: { userId: user.id },
+        create: {
+          userId: user.id,
+          bio: validated.bio || null,
+          links: validated.links || [],
+        },
+        update: {
+          bio: validated.bio !== undefined ? validated.bio : undefined,
+          links: validated.links !== undefined ? validated.links : undefined,
+        },
+      }),
+      // No name sent: read it rather than run an update with nothing in it.
+      validated.name !== undefined
+        ? prisma.user.update({ where: { id: user.id }, data: { name: validated.name }, select: { name: true } })
+        : prisma.user.findUniqueOrThrow({ where: { id: user.id }, select: { name: true } }),
+    ]);
     
     return NextResponse.json({
+      name: saved.name,
       bio: visitCard.bio,
       links: visitCard.links as Array<{ label: string; url: string }>,
     });

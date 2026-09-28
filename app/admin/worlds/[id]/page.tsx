@@ -1,24 +1,16 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { useRouter, useParams } from 'next/navigation';
+import { useIsSuperAdmin } from '../../admin-bootstrap-context';
+
+import { Suspense, useState, useEffect, useMemo } from 'react';
+import { useRouter, useParams, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import { Checkbox } from '@/components/ui/checkbox';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table';
-import { Badge } from '@/components/ui/badge';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -29,18 +21,14 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { ChevronRight, AlertCircle, Loader2, Plus, Edit, Trash2, Users, MapPin, Star, Globe, Home, Activity, Clock, ChevronLeft } from 'lucide-react';
-import { cn } from '@/lib/utils';
-import {
-  Empty,
-  EmptyContent,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyMedia,
-  EmptyTitle,
-} from '@/components/ui/empty';
+import { AlertCircle, ChevronLeft, ChevronRight, Loader2, Pencil, Plus, Trash2, UserPlus } from 'lucide-react';
+import { timeAgo } from '@/lib/time-ago';
+import { activityStats } from '@/lib/analytics-peak';
+import { EmptyCard, EntityCard, EntityRow, Figure, Figures, InContext, LoadError, LoadingRows, PageHeader, RolePills, SectionHeader, SettingSwitch, Settings, StatLine, StatusPill, VisitLine } from '../../components/ds';
 import InviteMemberDialog from '../../components/invite-member-dialog';
 import MemberList from '../../components/member-list';
+import { PersonIcon } from '../../components/profile-card';
+import { useEntitySummaries } from '../../hooks/use-entity-summaries';
 
 interface World {
   id: string;
@@ -68,37 +56,40 @@ interface World {
   }>;
 }
 
-function formatHourTo12Hour(hour: number): string {
-  if (hour === 0) return '12:00 AM';
-  if (hour < 12) return `${hour}:00 AM`;
-  if (hour === 12) return '12:00 PM';
-  return `${hour - 12}:00 PM`;
+/** One visit, as the analytics API lists it. */
+interface Visit {
+  woka?: string[];
+  id: string;
+  accessedAt: string;
+  userId?: string | null;
+  userName?: string | null;
+  userEmail?: string | null;
+  userUuid?: string | null;
+  hasMembership?: boolean;
+  membershipTags: string[];
+  isAuthenticated?: boolean;
+  ipAddress?: string | null;
+  room: { id: string; name: string };
 }
 
-function formatTimeAgo(date: Date): string {
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffSecs = Math.floor(diffMs / 1000);
-  const diffMins = Math.floor(diffSecs / 60);
-  const diffHours = Math.floor(diffMins / 60);
-  const diffDays = Math.floor(diffHours / 24);
-  const diffWeeks = Math.floor(diffDays / 7);
-  const diffMonths = Math.floor(diffDays / 30);
-  const diffYears = Math.floor(diffDays / 365);
+const TAB_CLASS = 'py-3 px-1 border-b-2 font-medium text-sm';
+const tabClass = (active: boolean) =>
+  `${TAB_CLASS} ${active ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'}`;
 
-  if (diffSecs < 60) return 'just now';
-  if (diffMins < 60) return `${diffMins} ${diffMins === 1 ? 'minute' : 'minutes'} ago`;
-  if (diffHours < 24) return `${diffHours} ${diffHours === 1 ? 'hour' : 'hours'} ago`;
-  if (diffDays < 7) return `${diffDays} ${diffDays === 1 ? 'day' : 'days'} ago`;
-  if (diffWeeks < 4) return `${diffWeeks} ${diffWeeks === 1 ? 'week' : 'weeks'} ago`;
-  if (diffMonths < 12) return `${diffMonths} ${diffMonths === 1 ? 'month' : 'months'} ago`;
-  return `${diffYears} ${diffYears === 1 ? 'year' : 'years'} ago`;
-}
-
+/** useSearchParams needs a Suspense boundary above it (the tab comes from ?tab=). */
 export default function WorldDetailPage() {
+  return (
+    <Suspense fallback={null}>
+      <WorldDetail />
+    </Suspense>
+  );
+}
+
+function WorldDetail() {
   const router = useRouter();
   const params = useParams();
   const id = params.id as string;
+  const searchParams = useSearchParams();
   
   const [world, setWorld] = useState<World | null>(null);
   const [loading, setLoading] = useState(true);
@@ -110,12 +101,18 @@ export default function WorldDetailPage() {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [currentUser, setCurrentUser] = useState<any>(null);
-  const [activeTab, setActiveTab] = useState<'details' | 'analytics' | 'members'>('details');
+  // The game can open Orbit straight on a world's members (`?tab=members`, see lib/orbit-bridge.ts).
+  const [activeTab, setActiveTab] = useState<'details' | 'analytics' | 'members'>(
+    searchParams.get('tab') === 'members' ? 'members' : 'details',
+  );
   const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
   const [visitorsPage, setVisitorsPage] = useState(1);
   const visitorsPerPage = 10;
-  const [roomAnalytics, setRoomAnalytics] = useState<Record<string, { totalAccesses: number; peakHour: number | null; lastVisitedByUser: { accessedAt: string; userId?: string | null; userUuid?: string | null } | null; lastVisitedOverall: { accessedAt: string; userId?: string | null; userUuid?: string | null } | null }>>({});
+  // Each room's activity for its card, asked for once per room (a failure offers a retry, never a request loop).
+  const roomIds = useMemo(() => world?.rooms?.map((room) => room.id) ?? [], [world]);
+  const roomSummaries = useEntitySummaries('rooms', roomIds);
   
+  const isSuperAdmin = useIsSuperAdmin();
   const [formData, setFormData] = useState({
     slug: '',
     name: '',
@@ -143,78 +140,6 @@ export default function WorldDetailPage() {
       fetchAnalytics(visitorsPage);
     }
   }, [visitorsPage, activeTab, world]);
-
-  useEffect(() => {
-    async function fetchRoomAnalytics() {
-      if (!world?.rooms || world.rooms.length === 0) return;
-
-      try {
-        const { authenticatedFetch } = await import('@/lib/client-auth');
-        const results = await Promise.all(
-          world.rooms.map(async (room) => {
-            try {
-              const response = await authenticatedFetch(`/api/admin/analytics/rooms/${room.id}`);
-              if (!response.ok) {
-                return null;
-              }
-              const data = await response.json();
-              
-              // Calculate peak hour from recent activity in local timezone (like detail page)
-              let peakHour = null;
-              if (data.recentActivity && data.recentActivity.length > 0) {
-                const hourCounts = new Map<number, number>();
-                data.recentActivity.forEach((access: any) => {
-                  const date = new Date(access.accessedAt);
-                  const hour = date.getHours(); // Local timezone
-                  hourCounts.set(hour, (hourCounts.get(hour) || 0) + 1);
-                });
-                const localPeakTimes = Array.from(hourCounts.entries())
-                  .map(([hour, count]) => ({ hour, count }))
-                  .sort((a, b) => b.count - a.count);
-                if (localPeakTimes.length > 0) {
-                  peakHour = localPeakTimes[0].hour;
-                }
-              }
-              
-              // Fallback to UTC peakTimes if no recent activity
-              if (peakHour === null && Array.isArray(data.peakTimes) && data.peakTimes.length > 0) {
-                peakHour = data.peakTimes[0].hour;
-              }
-              
-              return {
-                roomId: room.id,
-                totalAccesses: data.totalAccesses || 0,
-                peakHour,
-                lastVisitedByUser: data.lastVisitedByUser || null,
-                lastVisitedOverall: data.lastVisitedOverall || null,
-              };
-            } catch {
-              return null;
-            }
-          }),
-        );
-
-        const analyticsMap: Record<string, { totalAccesses: number; peakHour: number | null; lastVisitedByUser: { accessedAt: string; userId?: string | null; userUuid?: string | null } | null; lastVisitedOverall: { accessedAt: string; userId?: string | null; userUuid?: string | null } | null }> = {};
-        for (const result of results) {
-          if (result) {
-            analyticsMap[result.roomId] = {
-              totalAccesses: result.totalAccesses,
-              peakHour: result.peakHour,
-              lastVisitedByUser: result.lastVisitedByUser || null,
-              lastVisitedOverall: result.lastVisitedOverall || null,
-            };
-          }
-        }
-        setRoomAnalytics(analyticsMap);
-      } catch {
-        // Silently fail - analytics are optional
-      }
-    }
-
-    if (world) {
-      fetchRoomAnalytics();
-    }
-  }, [world]);
 
   async function checkAuth() {
     try {
@@ -333,81 +258,57 @@ export default function WorldDetailPage() {
   }
 
   if (loading) {
-    return (
-      <div className="space-y-8">
-        <div className="flex items-center justify-center py-12">
-          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-        </div>
-      </div>
-    );
+    return <LoadingRows label="this world" rows={3} />;
   }
 
   if (!world) {
-    return (
-      <div className="space-y-8">
-        <Alert variant="destructive">
-          <AlertCircle className="h-4 w-4" />
-          <AlertTitle>Not Found</AlertTitle>
-          <AlertDescription>World not found</AlertDescription>
-        </Alert>
-      </div>
-    );
+    return <EmptyCard kind="world" title="World not found." text="It may have been deleted, or you may not have access to it." />;
   }
+
+  const visits = typeof analytics?.totalAccesses === 'number' ? analytics.totalAccesses : null;
+  const sortedRooms = [...world.rooms].sort((a, b) => {
+    const aAccesses = roomSummaries.summary(a.id)?.totalAccesses ?? 0;
+    const bAccesses = roomSummaries.summary(b.id)?.totalAccesses ?? 0;
+    return bAccesses - aAccesses;
+  });
 
   return (
     <div className="space-y-8">
-      <nav className="flex items-center space-x-2 text-sm text-muted-foreground">
-        <Link href="/admin" className="hover:text-foreground">
-          Dashboard
-        </Link>
-        <ChevronRight className="h-4 w-4" />
-        <Link href={`/admin/universes/${world.universe.id}`} className="hover:text-foreground">
-          {world.universe.name}
-        </Link>
-        <ChevronRight className="h-4 w-4" />
-        <span className="text-foreground">{world.name}</span>
-      </nav>
-
-      <div className="space-y-1">
-        <div className="flex items-center gap-3">
-          <h1 className="text-4xl font-bold tracking-tight">{world.name}</h1>
-          <div className="flex items-center gap-2">
-            {world.canEdit === true && (
-              <Badge variant={world.isPublic ? 'default' : 'secondary'}>
-                {world.isPublic ? 'Public' : 'Private'}
-              </Badge>
-            )}
-            {world.featured && <Badge variant="outline">Featured</Badge>}
-          </div>
-        </div>
-        <p className="text-muted-foreground">
-          In <Link href={`/admin/universes/${world.universe.id}`} className="text-primary hover:underline">{world.universe.name}</Link>
-        </p>
-        <div className="flex items-center justify-between">
-          <p className="text-muted-foreground flex items-center gap-3">
-            {analytics && (
-              <>
-                <span className="flex items-center gap-1.5 text-sm">
-                  <Activity className="h-4 w-4 text-muted-foreground" />
-                  <span className="font-medium text-foreground/80">
-                    {analytics.totalAccesses?.toLocaleString() || 0} {analytics.totalAccesses === 1 ? 'access' : 'accesses'}
-                  </span>
-                </span>
-                <span className="text-muted-foreground">•</span>
-              </>
-            )}
-            <span>
-              Slug: <code className="bg-muted px-1.5 py-0.5 rounded text-sm">{world.slug}</code>
-            </span>
-          </p>
-          {!isEditing && world.canEdit === true && (
-            <Button variant="outline" onClick={() => setIsEditing(true)}>
-              <Edit className="mr-2 h-4 w-4" />
-              Edit
-            </Button>
-          )}
-        </div>
-      </div>
+      <PageHeader
+        kind="world"
+        title={world.name}
+        context={<InContext parts={[{ label: world.universe.name, href: `/admin/universes/${world.universe.id}` }]} />}
+        status={
+          world.canEdit === true || world.featured ? (
+            <>
+              {world.canEdit === true && <StatusPill status={world.isPublic ? 'public' : 'private'} />}
+              {world.featured && <StatusPill status="featured" />}
+            </>
+          ) : undefined
+        }
+        stats={
+          <Figures>
+            {visits !== null && <Figure value={visits} label={visits === 1 ? 'access' : 'accesses'} />}
+            <Figure value={world.rooms.length} label={world.rooms.length === 1 ? 'room' : 'rooms'} />
+          </Figures>
+        }
+        actions={
+          !isEditing && world.canEdit === true ? (
+            <>
+              <Button asChild>
+                <Link href={`/admin/rooms/new?worldId=${id}`}>
+                  <Plus aria-hidden="true" />
+                  Create room
+                </Link>
+              </Button>
+              <Button variant="outline" onClick={() => setIsEditing(true)}>
+                <Pencil aria-hidden="true" />
+                Edit
+              </Button>
+            </>
+          ) : undefined
+        }
+      />
 
       {error && (
         <Alert variant="destructive">
@@ -420,14 +321,11 @@ export default function WorldDetailPage() {
       {isEditing ? (
         <Card>
           <CardHeader>
-            <div className="flex items-center justify-between">
-              <div>
-                <CardTitle>Edit World</CardTitle>
-                <CardDescription>Update the world details below.</CardDescription>
-              </div>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <CardTitle>Edit world</CardTitle>
               {world.canEdit === true && (
                 <Button variant="destructive" onClick={() => setDeleteDialogOpen(true)}>
-                  <Trash2 className="mr-2 h-4 w-4" />
+                  <Trash2 aria-hidden="true" />
                   Delete
                 </Button>
               )}
@@ -468,32 +366,28 @@ export default function WorldDetailPage() {
               />
             </div>
 
-            <div className="flex flex-col sm:flex-row gap-6">
-              <div className="flex items-center space-x-2">
-                <Checkbox
-                  id="isPublic"
-                  checked={formData.isPublic}
-                  onCheckedChange={(checked) => setFormData({ ...formData, isPublic: checked === true })}
-                />
-                <Label htmlFor="isPublic" className="font-normal cursor-pointer">
-                  Public
-                </Label>
-              </div>
-              <div className="flex items-center space-x-2">
-                <Checkbox
+            <Settings label="Visibility">
+              <SettingSwitch
+                id="isPublic"
+                label="Public"
+                hint="Shown in Space, and its public rooms are open to everyone. Off: members only."
+                checked={formData.isPublic}
+                onChange={(checked) => setFormData({ ...formData, isPublic: checked })}
+              />
+              {isSuperAdmin && (
+                <SettingSwitch
                   id="featured"
+                  label="Featured"
+                  hint="Pinned to the top of Space and Discover. Only super admins can change this."
                   checked={formData.featured}
-                  onCheckedChange={(checked) => setFormData({ ...formData, featured: checked === true })}
+                  onChange={(checked) => setFormData({ ...formData, featured: checked })}
                 />
-                <Label htmlFor="featured" className="font-normal cursor-pointer">
-                  Featured
-                </Label>
-              </div>
-            </div>
+              )}
+            </Settings>
 
             <div className="flex flex-col-reverse sm:flex-row justify-end gap-3 pt-4">
               <Button
-                variant="secondary"
+                variant="outline"
                 onClick={() => {
                   setIsEditing(false);
                   fetchWorld();
@@ -504,11 +398,11 @@ export default function WorldDetailPage() {
               <Button onClick={handleSave} disabled={saving}>
                 {saving ? (
                   <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    <Loader2 className="animate-spin" aria-hidden="true" />
                     Saving...
                   </>
                 ) : (
-                  'Save Changes'
+                  'Save changes'
                 )}
               </Button>
             </div>
@@ -516,301 +410,133 @@ export default function WorldDetailPage() {
         </Card>
       ) : (
         <>
-          {/* Tabs */}
-          <div>
-            <nav className="flex space-x-8">
-              <button
-                onClick={() => setActiveTab('details')}
-                className={`py-4 px-1 border-b-2 font-medium text-sm ${
-                  activeTab === 'details'
-                    ? 'border-primary text-primary'
-                    : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
-                }`}
-              >
-                Details
-              </button>
-              <button
-                onClick={() => setActiveTab('analytics')}
-                className={`py-4 px-1 border-b-2 font-medium text-sm ${
-                  activeTab === 'analytics'
-                    ? 'border-primary text-primary'
-                    : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
-                }`}
-              >
-                Visitors
-              </button>
-              <button
-                onClick={() => setActiveTab('members')}
-                className={`py-4 px-1 border-b-2 font-medium text-sm flex items-center gap-2 ${
-                  activeTab === 'members'
-                    ? 'border-primary text-primary'
-                    : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
-                }`}
-              >
-                <Users className="h-4 w-4" />
-                Members
-              </button>
-            </nav>
-          </div>
+          <nav className="flex flex-wrap gap-x-6 border-b border-border" aria-label="World sections">
+            <button type="button" onClick={() => setActiveTab('details')} className={tabClass(activeTab === 'details')}>
+              Details
+            </button>
+            <button type="button" onClick={() => setActiveTab('analytics')} className={tabClass(activeTab === 'analytics')}>
+              Visitors
+            </button>
+            <button type="button" onClick={() => setActiveTab('members')} className={tabClass(activeTab === 'members')}>
+              Members
+            </button>
+          </nav>
 
-          {/* Tab Content */}
           {activeTab === 'details' && (
             <>
-              <section className="space-y-3">
-                {world.description && (
-                  <div>
-                    <h3 className="text-xl font-semibold mb-2">About this World</h3>
-                    <div className="text-sm text-foreground whitespace-pre-line">
-                      {world.description}
-                    </div>
-                  </div>
-                )}
-                {!world.description && (
-                  <div>
-                    <h3 className="text-xl font-semibold mb-2">About this World</h3>
-                  </div>
-                )}
-                {world.thumbnailUrl && (
-                  <div>
-                    <div className="text-sm font-medium text-muted-foreground mb-1">Thumbnail</div>
-                    <div>
-                      <img src={world.thumbnailUrl} alt={world.name} className="h-20 w-20 object-cover rounded" />
-                    </div>
-                  </div>
-                )}
-              </section>
-
-              <section className="space-y-4">
-                <div className="flex items-center justify-between">
-                  <h2 className="text-xl font-semibold tracking-tight">Rooms ({world.rooms.length})</h2>
-                  {world.canEdit === true && (
-                    <Button variant="outline" size="sm" asChild>
-                      <Link href={`/admin/rooms/new?worldId=${id}`}>
-                        <Plus className="mr-2 h-4 w-4" />
-                        Create Room
-                      </Link>
-                    </Button>
+              {(world.description || world.thumbnailUrl) && (
+                <section aria-labelledby="world-about" className="space-y-3">
+                  <SectionHeader id="world-about" title="About" />
+                  {world.thumbnailUrl && (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={world.thumbnailUrl} alt={world.name} className="h-20 w-20 rounded-xl object-cover" />
                   )}
-                </div>
+                  {world.description && (
+                    <p className="whitespace-pre-line text-sm leading-relaxed text-foreground/85">{world.description}</p>
+                  )}
+                </section>
+              )}
+
+              <section aria-labelledby="world-rooms">
+                <SectionHeader id="world-rooms" title="Rooms" count={world.rooms.length} />
                 {world.rooms.length === 0 ? (
-                  <Empty className="border border-border/70">
-                    <EmptyHeader>
-                      <EmptyMedia variant="icon">
-                        <MapPin className="h-6 w-6 text-muted-foreground" />
-                      </EmptyMedia>
-                      <EmptyTitle>No rooms yet</EmptyTitle>
-                      <EmptyDescription>
-                        Create your first room to get started.
-                      </EmptyDescription>
-                    </EmptyHeader>
-                    <EmptyContent>
-                      {world.canEdit === true && (
-                        <Button variant="default" asChild>
-                          <Link href={`/admin/rooms/new?worldId=${id}`}>
-                            <Plus className="mr-2 h-4 w-4" />
-                            Create Room
-                          </Link>
-                        </Button>
-                      )}
-                    </EmptyContent>
-                  </Empty>
+                  world.canEdit === true ? (
+                    <EmptyCard
+                      kind="room"
+                      title="No rooms yet."
+                      text="Rooms are the places people visit in this world."
+                      href={`/admin/rooms/new?worldId=${id}`}
+                      action="Create a room"
+                    />
+                  ) : (
+                    <EmptyCard kind="room" title="No rooms yet." text="Rooms are the places people visit in this world." />
+                  )
                 ) : (
-                    <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-                      {[...world.rooms].sort((a, b) => {
-                        const aAccesses = roomAnalytics[a.id]?.totalAccesses ?? 0;
-                        const bAccesses = roomAnalytics[b.id]?.totalAccesses ?? 0;
-                        return bAccesses - aAccesses;
-                      }).map((room) => {
-                        const favorites = room._count.favorites ?? 0;
-                        const analytics = roomAnalytics[room.id];
-                        return (
-                          <Link
-                            key={room.id}
-                            href={`/admin/rooms/${room.id}`}
-                            className="block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-                          >
-                            <Card
-                              className={cn(
-                                'group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
-                                'hover:-translate-y-1 hover:shadow-lg',
-                              )}
-                            >
-                              <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-emerald-500/10 via-transparent to-sky-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
-
-                              <div className="relative flex h-full flex-col p-5">
-                                <div className="mb-3 flex items-start gap-3">
-                                  <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full border bg-muted">
-                                    <MapPin className="h-5 w-5 text-muted-foreground" />
-                                  </div>
-
-                                  <div className="min-w-0 flex-1 space-y-1">
-                                    <h3 className="truncate text-base font-semibold leading-tight">
-                                      {room.name}
-                                    </h3>
-                                    <p className="truncate text-xs text-muted-foreground">
-                                      {world.universe.name} · {world.name}
-                                    </p>
-                                  </div>
-                                </div>
-
-                                {room.description && (
-                                  <p className="mb-3 line-clamp-2 text-sm text-muted-foreground">
-                                    {room.description}
-                                  </p>
-                                )}
-
-                                <div className="mt-auto flex items-start justify-between pt-3 text-xs text-muted-foreground">
-                                  <div className="flex flex-col gap-1.5 min-h-[3rem]">
-                                    {analytics ? (
-                                      <>
-                                        <div className="flex items-center gap-1.5">
-                                          <Activity className="h-3.5 w-3.5 text-muted-foreground" />
-                                          <span className="font-medium text-foreground/80">
-                                            {analytics.totalAccesses.toLocaleString()} accesses
-                                          </span>
-                                        </div>
-                                        {analytics.peakHour !== null && (
-                                          <div className="flex items-center gap-1.5">
-                                            <Clock className="h-3.5 w-3.5 text-muted-foreground" />
-                                            <span className="text-muted-foreground">
-                                              Peak: {formatHourTo12Hour(analytics.peakHour)}
-                                            </span>
-                                          </div>
-                                        )}
-                                        {/* Last visited information */}
-                                        {analytics.lastVisitedByUser || analytics.lastVisitedOverall ? (
-                                          <div className="flex flex-col gap-0.5 mt-0.5">
-                                            {analytics.lastVisitedByUser && (
-                                              <div className="text-[11px]">
-                                                <span className="text-muted-foreground/70">Last visited by you: </span>
-                                                <span className="font-medium text-foreground/80">
-                                                  {formatTimeAgo(new Date(analytics.lastVisitedByUser.accessedAt))}
-                                                </span>
-                                              </div>
-                                            )}
-                                            {analytics.lastVisitedOverall && (
-                                              <div className="text-[11px]">
-                                                {analytics.lastVisitedByUser && 
-                                                 analytics.lastVisitedByUser.accessedAt === analytics.lastVisitedOverall.accessedAt ? (
-                                                  <span className="text-muted-foreground/70 italic">
-                                                    You were the last visitor
-                                                  </span>
-                                                ) : (
-                                                  <>
-                                                    <span className="text-muted-foreground/70">Most recent visitor: </span>
-                                                    <span className="font-medium text-foreground/80">
-                                                      {formatTimeAgo(new Date(analytics.lastVisitedOverall.accessedAt))}
-                                                    </span>
-                                                  </>
-                                                )}
-                                              </div>
-                                            )}
-                                          </div>
-                                        ) : (
-                                          <div className="text-[11px] text-muted-foreground/70 mt-0.5">
-                                            No visits recorded
-                                          </div>
-                                        )}
-                                      </>
-                                    ) : (
-                                      <span className="text-muted-foreground">Access data loading...</span>
-                                    )}
-                                  </div>
-                                  <div className="flex items-center gap-1 text-primary self-end">
-                                    <Star className="h-4 w-4" aria-hidden="true" />
-                                    <span className="text-xs font-medium">{favorites}</span>
-                                  </div>
-                                </div>
-                              </div>
-                            </Card>
-                          </Link>
-                        );
-                      })}
-                    </div>
-                  )}
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+                    {sortedRooms.map((room) => {
+                      const favorites = room._count.favorites ?? 0;
+                      const roomStats = roomSummaries.summary(room.id);
+                      const you = roomStats?.lastVisitedByUser?.accessedAt ?? null;
+                      const latest = roomStats?.lastVisitedOverall?.accessedAt ?? null;
+                      return (
+                        <EntityCard
+                          key={room.id}
+                          href={`/admin/rooms/${room.id}`}
+                          kind="room"
+                          title={room.name}
+                          description={room.description}
+                          aside={favorites > 0 ? `★ ${favorites}` : undefined}
+                          meta={
+                            roomStats ? (
+                              <>
+                                <StatLine items={activityStats(roomStats)} />
+                                <VisitLine you={you} latest={latest} youWereLast={roomStats.youWereLast} />
+                              </>
+                            ) : undefined
+                          }
+                        />
+                      );
+                    })}
+                  </div>
+                )}
+                {world.rooms.length > 0 && roomSummaries.failed.length > 0 && (
+                  <div className="mt-3">
+                    <LoadError label="activity for some rooms" retry={() => roomSummaries.retry()} />
+                  </div>
+                )}
               </section>
             </>
           )}
 
           {activeTab === 'analytics' && (
-            <>
+            <section aria-labelledby="world-visitors">
               {analyticsLoading ? (
-                <div className="flex items-center justify-center py-12">
-                  <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-                </div>
+                <LoadingRows label="visitors" rows={3} />
               ) : analytics && analytics.recentActivity && analytics.recentActivity.length > 0 ? (
-                <div className="space-y-6">
-                  <div className="space-y-1">
-                    <h2 className="text-xl font-semibold tracking-tight">Recent Activity</h2>
-                    <p className="text-sm text-muted-foreground">
-                      Visitor activity and access history
-                    </p>
-                  </div>
-                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-                    {analytics.recentActivity.map((access: any) => {
+                <div className="space-y-4">
+                  <SectionHeader id="world-visitors" title="Recent visitors" count={analytics.pagination?.total} />
+                  <div>
+                    {analytics.recentActivity.map((access: Visit) => {
                       const userName = access.userName || access.userEmail || access.userUuid || 'Guest';
-                      const accessDate = new Date(access.accessedAt);
-                      const isClickable = !!access.userId;
-                      
+                      const when = timeAgo(new Date(access.accessedAt));
+                      const roles: string[] = access.hasMembership && access.membershipTags.length > 0 ? access.membershipTags : [];
+                      const who = roles.length > 0 ? null : access.isAuthenticated ? 'Signed in' : 'Guest';
+                      if (access.userId) {
+                        return (
+                          <EntityRow
+                            key={access.id}
+                            href={`/admin/users/${access.userId}`}
+                            kind="people"
+                            leading={<PersonIcon woka={access.woka} name={userName} />}
+                            title={userName}
+                            context={<StatLine items={[who, when]} />}
+                            meta={roles.length > 0 ? <RolePills roles={roles} /> : undefined}
+                            trailing={
+                              <Link
+                                href={`/admin/rooms/${access.room.id}`}
+                                className="flex min-h-9 max-w-[9rem] items-center truncate text-xs font-semibold underline decoration-foreground/30 underline-offset-4 hover:decoration-foreground"
+                              >
+                                {access.room.name}
+                              </Link>
+                            }
+                          />
+                        );
+                      }
                       return (
-                        <Card
+                        <EntityRow
                           key={access.id}
-                          className={cn(
-                            'group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
-                            'hover:-translate-y-1 hover:shadow-lg',
-                          )}
-                        >
-                          <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-purple-500/10 via-transparent to-pink-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
-                          <CardContent className="relative flex h-full flex-col p-4">
-                            <div className="flex items-start justify-between gap-3 mb-3">
-                              <div className="min-w-0 flex-1 flex items-center gap-2">
-                                {isClickable ? (
-                                  <Link
-                                    href={`/admin/users/${access.userId}`}
-                                    className="block"
-                                    onClick={(e) => e.stopPropagation()}
-                                  >
-                                    <div className="text-sm font-medium text-primary hover:underline truncate">
-                                      {userName}
-                                    </div>
-                                  </Link>
-                                ) : (
-                                  <div className="text-sm font-medium text-muted-foreground truncate">
-                                    {userName}
-                                  </div>
-                                )}
-                                {access.hasMembership && access.membershipTags.length > 0 ? (
-                                  <Badge variant="outline" className="text-xs flex-shrink-0">{access.membershipTags.join(', ')}</Badge>
-                                ) : access.isAuthenticated ? (
-                                  <Badge className="text-xs flex-shrink-0">Authenticated</Badge>
-                                ) : (
-                                  <Badge variant="secondary" className="text-xs flex-shrink-0">Guest</Badge>
-                                )}
-                              </div>
-                              <div className="flex-shrink-0 text-xs text-muted-foreground">
-                                {formatTimeAgo(accessDate)}
-                              </div>
-                            </div>
-
-                            <div className="grid grid-cols-2 gap-3 text-xs">
-                              <div className="flex items-center gap-2">
-                                <span className="text-muted-foreground">Room:</span>
-                                <Link
-                                  href={`/admin/rooms/${access.room.id}`}
-                                  className="text-primary hover:underline truncate"
-                                  onClick={(e) => e.stopPropagation()}
-                                >
-                                  {access.room.name}
-                                </Link>
-                              </div>
-                            </div>
-                          </CardContent>
-                        </Card>
+                          href={`/admin/rooms/${access.room.id}`}
+                          kind="people"
+                          leading={<PersonIcon woka={access.woka} name={userName} />}
+                          title={userName}
+                          context={<StatLine items={[who, `in ${access.room.name}`, when]} />}
+                          meta={roles.length > 0 ? <RolePills roles={roles} /> : undefined}
+                        />
                       );
                     })}
                   </div>
                   {analytics.pagination && analytics.pagination.totalPages > 1 && (
-                    <div className="flex items-center justify-between">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
                       <div className="text-sm text-muted-foreground">
                         Showing {(analytics.pagination.page - 1) * analytics.pagination.limit + 1} to {Math.min(analytics.pagination.page * analytics.pagination.limit, analytics.pagination.total)} of {analytics.pagination.total} visitors
                       </div>
@@ -821,7 +547,7 @@ export default function WorldDetailPage() {
                           onClick={() => setVisitorsPage(prev => Math.max(1, prev - 1))}
                           disabled={visitorsPage === 1}
                         >
-                          <ChevronLeft className="h-4 w-4 mr-1" />
+                          <ChevronLeft aria-hidden="true" />
                           Previous
                         </Button>
                         <Button
@@ -831,37 +557,28 @@ export default function WorldDetailPage() {
                           disabled={visitorsPage >= (analytics.pagination?.totalPages || 1)}
                         >
                           Next
-                          <ChevronRight className="h-4 w-4 ml-1" />
+                          <ChevronRight aria-hidden="true" />
                         </Button>
                       </div>
                     </div>
                   )}
                 </div>
               ) : (
-                <Empty className="border border-border/70">
-                  <EmptyHeader>
-                    <EmptyMedia variant="icon">
-                      <Users className="h-6 w-6 text-muted-foreground" />
-                    </EmptyMedia>
-                    <EmptyTitle>No visitors yet</EmptyTitle>
-                    <EmptyDescription>
-                      Visitor activity will appear here once people start accessing rooms in this world.
-                    </EmptyDescription>
-                  </EmptyHeader>
-                  <EmptyContent />
-                </Empty>
+                <EmptyCard kind="people" title="No visitors yet." text="Visits to rooms in this world show up here." />
               )}
-            </>
+            </section>
           )}
 
           {activeTab === 'members' && (
-            <section className="space-y-4">
-              <div className="flex items-center justify-between">
-                <h2 className="text-xl font-semibold tracking-tight">Members</h2>
+            <section aria-labelledby="world-members" className="space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-x-3">
+                <div className="min-w-0 flex-1">
+                  <SectionHeader id="world-members" title="Members" />
+                </div>
                 {world.canEdit !== false && (
-                  <Button onClick={() => setInviteDialogOpen(true)}>
-                    <Plus className="mr-2 h-4 w-4" />
-                    Invite Member
+                  <Button variant="outline" onClick={() => setInviteDialogOpen(true)}>
+                    <UserPlus aria-hidden="true" />
+                    Invite member
                   </Button>
                 )}
               </div>
@@ -883,9 +600,9 @@ export default function WorldDetailPage() {
       <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete World</AlertDialogTitle>
+            <AlertDialogTitle>Delete world</AlertDialogTitle>
             <AlertDialogDescription>
-              Are you sure you want to delete "{world.name}"? This will also delete all rooms in it. This action cannot be undone.
+              Are you sure you want to delete &quot;{world.name}&quot;? This will also delete all rooms in it. This action cannot be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

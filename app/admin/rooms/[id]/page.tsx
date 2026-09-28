@@ -1,25 +1,17 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { localPeakHour } from '@/lib/analytics-peak';
+import { PersonIcon } from '../../components/profile-card';
+
+import { useState, useEffect, type ReactNode } from 'react';
 import { useRouter, useParams } from 'next/navigation';
-import Link from 'next/link';
 import { useWorkAdventure } from '@/app/admin/workadventure-context';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import { Checkbox } from '@/components/ui/checkbox';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table';
-import { Badge } from '@/components/ui/badge';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -30,18 +22,12 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { ChevronRight, AlertCircle, Loader2, Edit, Trash2, Navigation, CheckCircle2, Star, Activity, ChevronLeft, Users, X, ArrowLeft } from 'lucide-react';
+import { AlertCircle, ArrowLeft, ChevronLeft, ChevronRight, Loader2, Navigation, Pencil, Star, Trash2 } from 'lucide-react';
 import { TemplateLibrary } from '@/components/templates/TemplateLibrary';
 import { TemplateDetail } from '@/components/templates/TemplateDetail';
 import { cn } from '@/lib/utils';
-import {
-  Empty,
-  EmptyContent,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyMedia,
-  EmptyTitle,
-} from '@/components/ui/empty';
+import { timeAgo } from '@/lib/time-ago';
+import { EmptyCard, EntityRow, Figure, Figures, InContext, KindIcon, LoadingRows, PageHeader, RolePills, SectionHeader, SettingSwitch, Settings, StatLine, StatusPill } from '../../components/ds';
 
 interface Room {
   id: string;
@@ -80,24 +66,45 @@ interface Room {
   };
 }
 
-function formatTimeAgo(date: Date): string {
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffSecs = Math.floor(diffMs / 1000);
-  const diffMins = Math.floor(diffSecs / 60);
-  const diffHours = Math.floor(diffMins / 60);
-  const diffDays = Math.floor(diffHours / 24);
-  const diffWeeks = Math.floor(diffDays / 7);
-  const diffMonths = Math.floor(diffDays / 30);
-  const diffYears = Math.floor(diffDays / 365);
+/** One visit, as the analytics API lists it. */
+interface Visit {
+  woka?: string[];
+  id: string;
+  accessedAt: string;
+  userId?: string | null;
+  userName?: string | null;
+  userEmail?: string | null;
+  userUuid?: string | null;
+  hasMembership?: boolean;
+  membershipTags: string[];
+  isAuthenticated?: boolean;
+  ipAddress?: string | null;
+  room: { id: string; name: string };
+}
 
-  if (diffSecs < 60) return 'just now';
-  if (diffMins < 60) return `${diffMins} ${diffMins === 1 ? 'minute' : 'minutes'} ago`;
-  if (diffHours < 24) return `${diffHours} ${diffHours === 1 ? 'hour' : 'hours'} ago`;
-  if (diffDays < 7) return `${diffDays} ${diffDays === 1 ? 'day' : 'days'} ago`;
-  if (diffWeeks < 4) return `${diffWeeks} ${diffWeeks === 1 ? 'week' : 'weeks'} ago`;
-  if (diffMonths < 12) return `${diffMonths} ${diffMonths === 1 ? 'month' : 'months'} ago`;
-  return `${diffYears} ${diffYears === 1 ? 'year' : 'years'} ago`;
+/** "4 PM": the hour a room is busiest, in the same short form everywhere. */
+function formatHour(hour: number): string {
+  if (hour === 0) return '12 AM';
+  if (hour < 12) return `${hour} AM`;
+  if (hour === 12) return '12 PM';
+  return `${hour - 12} PM`;
+}
+
+const tabClass = (active: boolean) =>
+  `py-3 px-1 border-b-2 font-medium text-sm ${active ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'}`;
+
+/** A visitor without an account: the same look as a row, with nothing to open. */
+function StaticRow({ title, context, meta, woka }: { title: string; context?: ReactNode; meta?: ReactNode; woka?: string[] }) {
+  return (
+    <div className="flex min-h-[68px] items-center gap-3 rounded-[18px] border border-border bg-card px-3.5 py-3 [&+&]:mt-2">
+      <PersonIcon woka={woka} name={title} />
+      <div className="grid min-w-0 flex-1 gap-[3px]">
+        <strong className="text-sm font-semibold leading-snug [overflow-wrap:anywhere]">{title}</strong>
+        {context}
+        {meta}
+      </div>
+    </div>
+  );
 }
 
 export default function RoomDetailPage() {
@@ -491,136 +498,102 @@ export default function RoomDetailPage() {
   // Compare by room ID (WorkAdventure might store the database room ID)
   const isInCurrentRoom = waReady && currentRoomPath === 'match' && room;
 
+
   if (loading) {
-    return (
-      <div className="space-y-8">
-        <div className="flex items-center justify-center py-12">
-          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-        </div>
-      </div>
-    );
+    return <LoadingRows label="this room" rows={3} />;
   }
 
   if (!room) {
-    return (
-      <div className="space-y-8">
-        <Alert variant="destructive">
-          <AlertCircle className="h-4 w-4" />
-          <AlertTitle>Not Found</AlertTitle>
-          <AlertDescription>Room not found</AlertDescription>
-        </Alert>
-      </div>
-    );
+    return <EmptyCard kind="room" title="Room not found." text="It may have been deleted, or you may not have access to it." />;
   }
 
-  // Calculate peak hour
-  let peakHour = null;
-  let peakCount = 0;
-  if (analytics?.recentActivity && analytics.recentActivity.length > 0) {
-    const hourCounts = new Map<number, number>();
-    analytics.recentActivity.forEach((access: any) => {
-      const date = new Date(access.accessedAt);
-      const hour = date.getHours();
-      hourCounts.set(hour, (hourCounts.get(hour) || 0) + 1);
-    });
-    const localPeakTimes = Array.from(hourCounts.entries())
-      .map(([hour, count]) => ({ hour, count }))
-      .sort((a, b) => b.count - a.count);
-    if (localPeakTimes.length > 0) {
-      peakHour = localPeakTimes[0].hour;
-      peakCount = localPeakTimes[0].count;
-    }
-  }
-  if (peakHour === null && analytics?.peakTimes && analytics.peakTimes.length > 0) {
-    peakHour = analytics.peakTimes[0].hour;
-    peakCount = analytics.peakTimes[0].count;
-  }
+  // Peak: the busiest hour of all visits, on your clock (one definition everywhere: lib/analytics-peak.ts).
+  const peakHour = localPeakHour(analytics?.peakTimes);
+
+  const visits = typeof analytics?.totalAccesses === 'number' ? analytics.totalAccesses : null;
+  const canEdit = room.canEdit !== false;
 
   return (
     <div className="space-y-8">
-      <nav className="flex items-center space-x-2 text-sm text-muted-foreground">
-        <Link href="/admin" className="hover:text-foreground">
-          Dashboard
-        </Link>
-        <ChevronRight className="h-4 w-4" />
-        <Link href={`/admin/universes/${room.world.universe.id}`} className="hover:text-foreground">
-          {room.world.universe.name}
-        </Link>
-        <ChevronRight className="h-4 w-4" />
-        <Link href={`/admin/worlds/${room.world.id}`} className="hover:text-foreground">
-          {room.world.name}
-        </Link>
-        <ChevronRight className="h-4 w-4" />
-        <span className="text-foreground">{room.name}</span>
-      </nav>
-
-      <div className="space-y-1">
-        <div className="flex items-center gap-3">
-          <h1 className="text-4xl font-bold tracking-tight">{room.name}</h1>
-          <div className="flex items-center gap-2">
-            {room.canEdit !== false && (
-              <Badge variant={room.isPublic ? 'default' : 'secondary'}>
-                {room.isPublic ? 'Public' : 'Private'}
-              </Badge>
-            )}
-          </div>
-        </div>
-        <p className="text-muted-foreground">
-          In <Link href={`/admin/worlds/${room.world.id}`} className="text-primary hover:underline">{room.world.name}</Link>
-        </p>
-        <div className="flex items-center justify-between">
-          <p className="text-muted-foreground flex items-center gap-3">
-            {analytics && (
-              <>
-                <span className="flex items-center gap-1.5 text-sm">
-                  <Activity className="h-4 w-4 text-muted-foreground" />
-                  <span className="font-medium text-foreground/80">
-                    {analytics.totalAccesses?.toLocaleString() || 0} {analytics.totalAccesses === 1 ? 'access' : 'accesses'}
-                  </span>
-                </span>
-                <span className="text-muted-foreground">•</span>
-              </>
-            )}
-            <span>
-              Slug: <code className="bg-muted px-1.5 py-0.5 rounded text-sm">{room.slug}</code>
-            </span>
-          </p>
-          {isEditing && room.canEdit !== false && (
-            <Button 
-              variant="destructive" 
-              size="sm"
-              onClick={() => setDeleteDialogOpen(true)}
-            >
-              <Trash2 className="h-4 w-4 mr-2" />
-              Delete
-            </Button>
-          )}
-          {!isEditing && (
-            <div className="flex flex-wrap gap-2">
-              {currentUser && (
+      <PageHeader
+        kind="room"
+        title={room.name}
+        context={
+          <InContext
+            parts={[
+              { label: room.world.universe.name, href: `/admin/universes/${room.world.universe.id}` },
+              { label: room.world.name, href: `/admin/worlds/${room.world.id}` },
+            ]}
+          />
+        }
+        status={
+          isInCurrentRoom || canEdit ? (
+            <>
+              {isInCurrentRoom && <StatusPill status="live" />}
+              {canEdit && <StatusPill status={room.isPublic ? 'public' : 'private'} />}
+            </>
+          ) : undefined
+        }
+        stats={
+          visits !== null || peakHour !== null ? (
+            <Figures>
+              {visits !== null && <Figure value={visits} label={visits === 1 ? 'access' : 'accesses'} />}
+              {peakHour !== null && <Figure value={formatHour(peakHour)} label="peak" />}
+            </Figures>
+          ) : undefined
+        }
+        actions={
+          isEditing ? (
+            canEdit ? (
+              <Button variant="destructive" onClick={() => setDeleteDialogOpen(true)}>
+                <Trash2 aria-hidden="true" />
+                Delete
+              </Button>
+            ) : undefined
+          ) : (
+            <>
+              {!isInCurrentRoom && (
                 <Button
-                  variant="outline"
-                  onClick={handleToggleStar}
-                  disabled={togglingStar}
+                  onClick={handleVisitRoomInUniverse}
+                  disabled={waNavigating || !waReady}
+                  title={!waReady ? 'WorkAdventure API not available (only works in iframe)' : undefined}
                 >
-                  {togglingStar ? (
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  {waNavigating ? (
+                    <>
+                      <Loader2 className="animate-spin" aria-hidden="true" />
+                      Navigating...
+                    </>
                   ) : (
-                    <Star className={`mr-2 h-4 w-4 ${room.isStarred ? 'fill-yellow-400 text-yellow-400' : ''}`} />
+                    <>
+                      <Navigation aria-hidden="true" />
+                      Visit
+                    </>
+                  )}
+                </Button>
+              )}
+              {currentUser && (
+                <Button variant="outline" onClick={handleToggleStar} disabled={togglingStar} aria-pressed={!!room.isStarred}>
+                  {togglingStar ? (
+                    <Loader2 className="animate-spin" aria-hidden="true" />
+                  ) : (
+                    <Star
+                      aria-hidden="true"
+                      className={cn(room.isStarred && 'fill-[var(--kind-star-solid)] text-[var(--kind-star-solid)]')}
+                    />
                   )}
                   {room.starCount !== undefined ? room.starCount : 0}
                 </Button>
               )}
-              {room.canEdit !== false && (
+              {canEdit && (
                 <Button variant="outline" onClick={() => setIsEditing(true)}>
-                  <Edit className="mr-2 h-4 w-4" />
+                  <Pencil aria-hidden="true" />
                   Edit
                 </Button>
               )}
-            </div>
-          )}
-        </div>
-      </div>
+            </>
+          )
+        }
+      />
 
       {error && (
         <Alert variant="destructive">
@@ -633,10 +606,11 @@ export default function RoomDetailPage() {
       {isEditing ? (
         <>
           {/* Template/Custom Map Toggle - At the top */}
-          <div className="flex items-center gap-4">
+          <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Map source">
             <Button
               type="button"
-              variant={!useCustomMap ? 'default' : 'outline'}
+              variant={!useCustomMap ? 'secondary' : 'outline'}
+              aria-pressed={!useCustomMap}
               onClick={() => {
                 setUseCustomMap(false);
                 // If room has a template, restore it
@@ -665,11 +639,12 @@ export default function RoomDetailPage() {
                 }
               }}
             >
-              Use Template
+              Use a template
             </Button>
             <Button
               type="button"
-              variant={useCustomMap ? 'default' : 'outline'}
+              variant={useCustomMap ? 'secondary' : 'outline'}
+              aria-pressed={useCustomMap}
               onClick={() => {
                 setUseCustomMap(true);
                 // Clear template selection when switching to custom map
@@ -686,7 +661,7 @@ export default function RoomDetailPage() {
                 }));
               }}
             >
-              Custom Map (Advanced)
+              Custom map (advanced)
             </Button>
           </div>
 
@@ -750,12 +725,8 @@ export default function RoomDetailPage() {
                   ) : (
                     <>
                       <CardHeader>
-                        <CardTitle>Template Map</CardTitle>
-                        <CardDescription>
-                          {room?.templateMap 
-                            ? 'Current template map for this room. Click "Change Template" to select a different one.'
-                            : 'Choose a template to get started'}
-                        </CardDescription>
+                        <CardTitle>Template map</CardTitle>
+                        {!room?.templateMap && <CardDescription>Choose a template to start from.</CardDescription>}
                       </CardHeader>
                       <CardContent>
                         {selectedMapId && selectedTemplateName && selectedMapName ? (
@@ -778,7 +749,7 @@ export default function RoomDetailPage() {
                             <div className="p-4">
                               <div className="flex items-start justify-between gap-2">
                                 <div className="flex-1 min-w-0">
-                                <div className="text-sm font-medium mb-1">Selected Template Map</div>
+                                <div className="text-sm font-medium mb-1">Selected template map</div>
                                 <div className="text-sm text-muted-foreground">
                                   <div><strong>Template:</strong> {selectedTemplateName}</div>
                                   <div><strong>Map:</strong> {selectedMapName}</div>
@@ -799,7 +770,7 @@ export default function RoomDetailPage() {
                                   setSelectedMapName(null);
                                 }}
                               >
-                                Change Template
+                                Change template
                               </Button>
                               </div>
                             </div>
@@ -824,7 +795,7 @@ export default function RoomDetailPage() {
                             <div className="p-4">
                               <div className="flex items-start justify-between gap-2">
                                 <div className="flex-1 min-w-0">
-                                <div className="text-sm font-medium mb-1">Current Template Map</div>
+                                <div className="text-sm font-medium mb-1">Current template map</div>
                                 <div className="text-sm text-muted-foreground">
                                   <div><strong>Template:</strong> {room.templateMap.template.category.name} - {room.templateMap.template.name}</div>
                                   <div><strong>Map:</strong> {room.templateMap.name}</div>
@@ -845,7 +816,7 @@ export default function RoomDetailPage() {
                                   setSelectedMapName(null);
                                 }}
                               >
-                                Change Template
+                                Change template
                               </Button>
                               </div>
                             </div>
@@ -865,16 +836,10 @@ export default function RoomDetailPage() {
           {(!useCustomMap ? ((selectedMapId || room?.templateMapId) && !selectedTemplateSlug && !isChangingTemplate) : true) && (
             <Card className="border-0 shadow-none">
               <CardHeader>
-                <div className="flex items-center justify-between">
-                  <div>
-                    <CardTitle>Room Details</CardTitle>
-                    <CardDescription>
-                      {!useCustomMap && (selectedMapId || room?.templateMapId)
-                        ? 'Review and customize your room details. Map is set from template.'
-                        : 'Update the room details below.'}
-                    </CardDescription>
-                  </div>
-                </div>
+                <CardTitle>Room details</CardTitle>
+                {!useCustomMap && (selectedMapId || room?.templateMapId) && (
+                  <CardDescription>The map comes from the template.</CardDescription>
+                )}
               </CardHeader>
               <CardContent className="space-y-6">
                 <div className="space-y-2">
@@ -935,20 +900,19 @@ export default function RoomDetailPage() {
                   </div>
                 )}
 
-                <div className="flex items-center space-x-2">
-                  <Checkbox
+                <Settings label="Visibility">
+                  <SettingSwitch
                     id="isPublic"
+                    label="Public"
+                    hint="Anyone can enter, if its world and universe are public too. Off: members only."
                     checked={formData.isPublic}
-                    onCheckedChange={(checked) => setFormData({ ...formData, isPublic: checked === true })}
+                    onChange={(checked) => setFormData({ ...formData, isPublic: checked })}
                   />
-                  <Label htmlFor="isPublic" className="font-normal cursor-pointer">
-                    Public
-                  </Label>
-                </div>
+                </Settings>
 
                 <div className="flex flex-col-reverse sm:flex-row justify-end gap-3 pt-4">
                   <Button
-                    variant="secondary"
+                    variant="outline"
                     onClick={() => {
                       setIsEditing(false);
                       fetchRoom();
@@ -963,7 +927,7 @@ export default function RoomDetailPage() {
                         Saving...
                       </>
                     ) : (
-                      'Save Changes'
+                      'Save changes'
                     )}
                   </Button>
                 </div>
@@ -973,154 +937,71 @@ export default function RoomDetailPage() {
         </>
       ) : (
         <>
-          {/* Visit Button / Current Room Alert */}
-          <div className="w-full">
-            {isInCurrentRoom ? (
-              <div className="flex items-center justify-center gap-2 rounded-lg border border-primary/20 bg-primary/5 px-4 py-3">
-                <div className="flex h-2 w-2 rounded-full bg-green-500 animate-pulse" />
-                <span className="text-sm font-medium text-foreground">You are currently in this room</span>
-              </div>
-            ) : (
-              <Button
-                variant="default"
-                className="w-full"
-                onClick={handleVisitRoomInUniverse}
-                disabled={waNavigating || !waReady}
-                title={!waReady ? 'WorkAdventure API not available (only works in iframe)' : undefined}
-              >
-                {waNavigating ? (
-                  <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Navigating...
-                  </>
-                ) : (
-                  <>
-                    <Navigation className="mr-2 h-4 w-4" />
-                    Visit
-                  </>
-                )}
-              </Button>
-            )}
-          </div>
+          <nav className="flex flex-wrap gap-x-6 border-b border-border" aria-label="Room sections">
+            <button type="button" onClick={() => setActiveTab('details')} className={tabClass(activeTab === 'details')}>
+              Details
+            </button>
+            <button type="button" onClick={() => setActiveTab('analytics')} className={tabClass(activeTab === 'analytics')}>
+              Visitors
+            </button>
+          </nav>
 
-          {/* Tabs */}
-          <div>
-            <nav className="flex space-x-8">
-              <button
-                onClick={() => setActiveTab('details')}
-                className={`py-4 px-1 border-b-2 font-medium text-sm ${
-                  activeTab === 'details'
-                    ? 'border-primary text-primary'
-                    : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
-                }`}
-              >
-                Details
-              </button>
-              <button
-                onClick={() => setActiveTab('analytics')}
-                className={`py-4 px-1 border-b-2 font-medium text-sm ${
-                  activeTab === 'analytics'
-                    ? 'border-primary text-primary'
-                    : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'
-                }`}
-              >
-                Visitors
-              </button>
-            </nav>
-          </div>
-
-          {/* Tab Content */}
           {activeTab === 'details' && (
-            <>
-              <section className="space-y-3">
-                <div>
-                  <h3 className="text-xl font-semibold mb-2">About this Room</h3>
-                  {room.description ? (
-                    <div className="text-sm text-foreground whitespace-pre-line">
-                      {room.description}
-                    </div>
-                  ) : (
-                    <div className="text-sm text-muted-foreground">
-                      No description provided
-                    </div>
-                  )}
-                </div>
-              </section>
-            </>
+            <section aria-labelledby="room-about" className="space-y-2">
+              <SectionHeader id="room-about" title="About" />
+              {room.description ? (
+                <p className="whitespace-pre-line text-sm leading-relaxed text-foreground/85">{room.description}</p>
+              ) : (
+                <p className="text-sm text-muted-foreground">No description yet.</p>
+              )}
+            </section>
           )}
 
           {activeTab === 'analytics' && (
-            <>
+            <section aria-labelledby="room-visitors">
               {analyticsLoading ? (
-                <div className="flex items-center justify-center py-12">
-                  <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-                </div>
+                <LoadingRows label="visitors" rows={3} />
               ) : analytics && analytics.recentActivity && analytics.recentActivity.length > 0 ? (
-                <div className="space-y-6">
-                  <div className="space-y-1">
-                    <h2 className="text-xl font-semibold tracking-tight">Recent Activity</h2>
-                    <p className="text-sm text-muted-foreground">
-                      Visitor activity and access history
-                    </p>
-                  </div>
-                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-                    {analytics.recentActivity.map((access: any) => {
+                <div className="space-y-4">
+                  <SectionHeader id="room-visitors" title="Recent visitors" count={analytics.pagination?.total} />
+                  <div>
+                    {analytics.recentActivity.map((access: Visit) => {
                       const userName = access.userName || access.userEmail || access.userUuid || 'Guest';
-                      const accessDate = new Date(access.accessedAt);
-                      const isClickable = !!access.userId;
-                      
-                      return (
-                        <Card
-                          key={access.id}
-                          className={cn(
-                            'group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
-                            'hover:-translate-y-1 hover:shadow-lg',
-                          )}
-                        >
-                          <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-purple-500/10 via-transparent to-pink-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
-                          <CardContent className="relative flex h-full flex-col p-4">
-                            <div className="flex items-start justify-between gap-3 mb-3">
-                              <div className="min-w-0 flex-1 flex items-center gap-2">
-                                {isClickable ? (
-                                  <Link
-                                    href={`/admin/users/${access.userId}`}
-                                    className="block"
-                                    onClick={(e) => e.stopPropagation()}
-                                  >
-                                    <div className="text-sm font-medium text-primary hover:underline truncate">
-                                      {userName}
-                                    </div>
-                                  </Link>
-                                ) : (
-                                  <div className="text-sm font-medium text-muted-foreground truncate">
-                                    {userName}
-                                  </div>
-                                )}
-                                {access.hasMembership && access.membershipTags.length > 0 ? (
-                                  <Badge variant="outline" className="text-xs flex-shrink-0">{access.membershipTags.join(', ')}</Badge>
-                                ) : access.isAuthenticated ? (
-                                  <Badge className="text-xs flex-shrink-0">Authenticated</Badge>
-                                ) : (
-                                  <Badge variant="secondary" className="text-xs flex-shrink-0">Guest</Badge>
-                                )}
-                              </div>
-                              <div className="flex-shrink-0 text-xs text-muted-foreground">
-                                {formatTimeAgo(accessDate)}
-                              </div>
-                            </div>
-
+                      const roles: string[] = access.hasMembership && access.membershipTags.length > 0 ? access.membershipTags : [];
+                      const context = (
+                        <StatLine
+                          items={[
+                            roles.length > 0 ? null : access.isAuthenticated ? 'Signed in' : 'Guest',
+                            timeAgo(new Date(access.accessedAt)),
+                          ]}
+                        />
+                      );
+                      const meta =
+                        roles.length > 0 || (isSuperAdmin && access.ipAddress) ? (
+                          <span className="flex flex-wrap items-center gap-2">
+                            {roles.length > 0 && <RolePills roles={roles} />}
                             {isSuperAdmin && access.ipAddress && (
-                              <div className="text-xs text-muted-foreground font-mono mb-2">
-                                {access.ipAddress}
-                              </div>
+                              <span className="font-mono text-xs text-muted-foreground">{access.ipAddress}</span>
                             )}
-                          </CardContent>
-                        </Card>
+                          </span>
+                        ) : undefined;
+                      return access.userId ? (
+                        <EntityRow
+                          key={access.id}
+                          href={`/admin/users/${access.userId}`}
+                          kind="people"
+                          leading={<PersonIcon woka={access.woka} name={userName} />}
+                          title={userName}
+                          context={context}
+                          meta={meta}
+                        />
+                      ) : (
+                        <StaticRow key={access.id} title={userName} context={context} meta={meta} woka={access.woka} />
                       );
                     })}
                   </div>
                   {analytics.pagination && analytics.pagination.totalPages > 1 && (
-                    <div className="flex items-center justify-between">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
                       <div className="text-sm text-muted-foreground">
                         Showing {(analytics.pagination.page - 1) * analytics.pagination.limit + 1} to {Math.min(analytics.pagination.page * analytics.pagination.limit, analytics.pagination.total)} of {analytics.pagination.total} visitors
                       </div>
@@ -1131,7 +1012,7 @@ export default function RoomDetailPage() {
                           onClick={() => setVisitorsPage(prev => Math.max(1, prev - 1))}
                           disabled={visitorsPage === 1}
                         >
-                          <ChevronLeft className="h-4 w-4 mr-1" />
+                          <ChevronLeft aria-hidden="true" />
                           Previous
                         </Button>
                         <Button
@@ -1141,27 +1022,16 @@ export default function RoomDetailPage() {
                           disabled={visitorsPage >= (analytics.pagination?.totalPages || 1)}
                         >
                           Next
-                          <ChevronRight className="h-4 w-4 ml-1" />
+                          <ChevronRight aria-hidden="true" />
                         </Button>
                       </div>
                     </div>
                   )}
                 </div>
               ) : (
-                <Empty className="border border-border/70">
-                  <EmptyHeader>
-                    <EmptyMedia variant="icon">
-                      <Users className="h-6 w-6 text-muted-foreground" />
-                    </EmptyMedia>
-                    <EmptyTitle>No visitors yet</EmptyTitle>
-                    <EmptyDescription>
-                      Visitor activity will appear here once people start accessing this room.
-                    </EmptyDescription>
-                  </EmptyHeader>
-                  <EmptyContent />
-                </Empty>
+                <EmptyCard kind="people" title="No visitors yet." text="Visits to this room show up here." />
               )}
-            </>
+            </section>
           )}
         </>
       )}
@@ -1169,9 +1039,9 @@ export default function RoomDetailPage() {
       <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete Room</AlertDialogTitle>
+            <AlertDialogTitle>Delete room</AlertDialogTitle>
             <AlertDialogDescription>
-              Are you sure you want to delete "{room.name}"? This action cannot be undone.
+              Are you sure you want to delete &quot;{room.name}&quot;? This action cannot be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

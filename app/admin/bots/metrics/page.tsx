@@ -4,10 +4,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import AuthLink from '@/app/admin/auth-link';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
 import {
   Table,
   TableBody,
@@ -16,9 +13,10 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { AlertCircle, Loader2, BarChart3, ArrowLeft, Search, Clock, TrendingUp, AlertTriangle } from 'lucide-react';
-import { Badge } from '@/components/ui/badge';
+import { AlertTriangle } from 'lucide-react';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { EmptyCard, Figure, Figures, LoadError, LoadingRows, PageHeader } from '../../components/ds';
+import { ApplyFilter, DateFilter, FilterField, FilterRow, ListPager, Panel, Pill, type PageInfo } from '../bots-ui';
 
 interface GroupedResponse {
   responseId: string | null;
@@ -51,20 +49,13 @@ interface Summary {
   personalityCompliance: string;
 }
 
-interface Pagination {
-  page: number;
-  limit: number;
-  total: number;
-  totalPages: number;
-}
-
 export default function MetricsBrowsePage() {
   const router = useRouter();
   const [responses, setResponses] = useState<GroupedResponse[]>([]);
   const [summary, setSummary] = useState<Summary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [pagination, setPagination] = useState<Pagination | null>(null);
+  const [pagination, setPagination] = useState<PageInfo | null>(null);
   const [filters, setFilters] = useState({
     botId: '',
     timeRange: '24h', // '1h', '24h', '7d', '30d', 'custom'
@@ -215,200 +206,70 @@ export default function MetricsBrowsePage() {
 
   const problematicResponses = responses.filter(hasIssues);
 
-  if (loading && responses.length === 0) {
-    return (
-      <div className="space-y-8">
-        <div className="flex items-center justify-between">
-          <div className="space-y-1">
-            <h1 className="text-4xl font-bold tracking-tight">Response Metrics</h1>
-            <p className="text-muted-foreground text-lg">
-              View bot performance metrics grouped by response
-            </p>
-          </div>
-        </div>
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-          {[...Array(6)].map((_, i) => (
-            <Card key={i}>
-              <CardContent className="pt-6">
-                <div className="h-20 bg-muted animate-pulse rounded" />
-              </CardContent>
-            </Card>
-          ))}
-        </div>
-      </div>
-    );
-  }
+  const filtered = Boolean(filters.botId || filters.timeRange !== '24h');
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-4">
-          <Button variant="ghost" size="sm" asChild>
-            <AuthLink href="/admin/bots/database">
-              <ArrowLeft className="mr-2 h-4 w-4" />
-              Back
-            </AuthLink>
-          </Button>
-          <div className="space-y-1">
-            <h1 className="text-3xl md:text-4xl font-bold tracking-tight">Response Metrics</h1>
-            <p className="text-muted-foreground text-sm md:text-lg">
-              Bot performance metrics grouped by response
-            </p>
-          </div>
-        </div>
-      </div>
+    <div className="grid min-w-0 gap-6">
+      <PageHeader
+        kind="bot"
+        title="Metrics"
+        context={<span>How bots answered: speed, quality and repetition, one row per response.</span>}
+        stats={
+          summary ? (
+            <Figures>
+              <Figure value={summary.totalResponses} label="responses" />
+              <Figure value={formatMs(summary.avgResponseTime)} label="avg response time" />
+              <Figure value={formatMs(summary.p95ResponseTime)} label="p95 response time" />
+              <Figure value={summary.avgQuality.toFixed(3)} label="avg quality" />
+              <Figure value={summary.avgRepetition.toFixed(3)} label="avg repetition" />
+              <Figure value={summary.issuesDetected} label="issues detected" />
+              <Figure value={summary.personalityCompliance} label="personality compliance" />
+            </Figures>
+          ) : undefined
+        }
+      />
 
-      {error && (
-        <Alert variant="destructive">
-          <AlertCircle className="h-4 w-4" />
-          <AlertTitle>Error</AlertTitle>
-          <AlertDescription>
-            {error}
-            <Button
-              variant="outline"
-              size="sm"
-              className="ml-4"
-              onClick={fetchMetrics}
-            >
-              Retry
-            </Button>
-          </AlertDescription>
-        </Alert>
-      )}
+      <FilterRow label="Filter metrics">
+        <ApplyFilter
+          id="botId"
+          label="Bot ID"
+          placeholder="Bot ID"
+          value={botIdInput}
+          onChange={setBotIdInput}
+          onApply={() => setFilters({ ...filters, botId: botIdInput, page: 1 })}
+        />
+        <FilterField id="timeRange" label="Time range">
+          <Select
+            value={filters.timeRange}
+            onValueChange={(value) => setFilters({ ...filters, timeRange: value, page: 1 })}
+          >
+            <SelectTrigger id="timeRange" className="h-11">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="1h">Last hour</SelectItem>
+              <SelectItem value="24h">Last 24 hours</SelectItem>
+              <SelectItem value="7d">Last 7 days</SelectItem>
+              <SelectItem value="30d">Last 30 days</SelectItem>
+              <SelectItem value="custom">Custom range</SelectItem>
+            </SelectContent>
+          </Select>
+        </FilterField>
+        {filters.timeRange === 'custom' && (
+          <>
+            <DateFilter id="startDate" label="From" value={filters.startDate} onChange={(startDate) => setFilters({ ...filters, startDate, page: 1 })} />
+            <DateFilter id="endDate" label="To" value={filters.endDate} onChange={(endDate) => setFilters({ ...filters, endDate, page: 1 })} />
+          </>
+        )}
+      </FilterRow>
 
-      {/* Filters */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Filters</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
-            <div className="space-y-2">
-              <Label htmlFor="botId">Bot ID</Label>
-              <div className="flex gap-2">
-                <Input
-                  id="botId"
-                  placeholder="Filter by bot ID..."
-                  value={botIdInput}
-                  onChange={(e) => setBotIdInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      setFilters({ ...filters, botId: botIdInput, page: 1 });
-                    }
-                  }}
-                />
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setFilters({ ...filters, botId: botIdInput, page: 1 })}
-                >
-                  <Search className="h-4 w-4" />
-                </Button>
-              </div>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="timeRange">Time Range</Label>
-              <Select
-                value={filters.timeRange}
-                onValueChange={(value) => setFilters({ ...filters, timeRange: value, page: 1 })}
-              >
-                <SelectTrigger id="timeRange">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="1h">Last Hour</SelectItem>
-                  <SelectItem value="24h">Last 24 Hours</SelectItem>
-                  <SelectItem value="7d">Last 7 Days</SelectItem>
-                  <SelectItem value="30d">Last 30 Days</SelectItem>
-                  <SelectItem value="custom">Custom Range</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            {filters.timeRange === 'custom' && (
-              <>
-                <div className="space-y-2">
-                  <Label htmlFor="startDate">Start Date</Label>
-                  <Input
-                    id="startDate"
-                    type="date"
-                    value={filters.startDate}
-                    onChange={(e) => setFilters({ ...filters, startDate: e.target.value, page: 1 })}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="endDate">End Date</Label>
-                  <Input
-                    id="endDate"
-                    type="date"
-                    value={filters.endDate}
-                    onChange={(e) => setFilters({ ...filters, endDate: e.target.value, page: 1 })}
-                  />
-                </div>
-              </>
-            )}
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Summary Cards */}
-      {summary && (
-        <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-6">
-          <Card>
-            <CardContent className="pt-6">
-              <div className="text-sm font-medium text-muted-foreground mb-1">Avg Response Time</div>
-              <div className="text-2xl font-bold">{formatMs(summary.avgResponseTime)}</div>
-              <div className="text-xs text-muted-foreground mt-1">
-                {summary.totalResponses} responses
-              </div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="pt-6">
-              <div className="text-sm font-medium text-muted-foreground mb-1">Avg Quality</div>
-              <div className="text-2xl font-bold">{summary.avgQuality.toFixed(3)}</div>
-              <div className="text-xs text-muted-foreground mt-1">
-                {summary.totalResponses} responses
-              </div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="pt-6">
-              <div className="text-sm font-medium text-muted-foreground mb-1">Avg Repetition</div>
-              <div className="text-2xl font-bold">{summary.avgRepetition.toFixed(3)}</div>
-              <div className="text-xs text-muted-foreground mt-1">
-                {summary.totalResponses} responses
-              </div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="pt-6">
-              <div className="text-sm font-medium text-muted-foreground mb-1">P95 Response Time</div>
-              <div className="text-2xl font-bold">{formatMs(summary.p95ResponseTime)}</div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="pt-6">
-              <div className="text-sm font-medium text-muted-foreground mb-1">Issues Detected</div>
-              <div className="text-2xl font-bold">{summary.issuesDetected}</div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardContent className="pt-6">
-              <div className="text-sm font-medium text-muted-foreground mb-1">Personality</div>
-              <div className="text-2xl font-bold">{summary.personalityCompliance}</div>
-              <div className="text-xs text-muted-foreground mt-1">
-                Compliance
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-      )}
+      {error && <LoadError label="metrics" retry={fetchMetrics} />}
 
       {/* Issue Highlights */}
       {problematicResponses.length > 0 && (
         <Alert>
           <AlertTriangle className="h-4 w-4" />
-          <AlertTitle>Issues Found ({problematicResponses.length})</AlertTitle>
+          <AlertTitle>Issues found ({problematicResponses.length})</AlertTitle>
           <AlertDescription>
             {problematicResponses.slice(0, 3).map((r, i) => {
               const issues = getIssueBadges(r);
@@ -427,24 +288,20 @@ export default function MetricsBrowsePage() {
         </Alert>
       )}
 
-      {/* Responses Table */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Response Metrics</CardTitle>
-        </CardHeader>
-        <CardContent className="p-0">
-          {responses.length === 0 ? (
-            <div className="py-12 text-center">
-              <BarChart3 className="h-12 w-12 mx-auto mb-4 text-muted-foreground opacity-50" />
-              <h3 className="text-lg font-semibold mb-2">No responses found</h3>
-              <p className="text-sm text-muted-foreground">
-                {filters.botId || filters.startDate
-                  ? 'Try adjusting your filters to see more results.'
-                  : 'No metrics have been recorded yet.'}
-              </p>
-            </div>
-          ) : (
+      {loading && responses.length === 0 ? (
+        <LoadingRows label="metrics" rows={5} />
+      ) : responses.length === 0 ? (
+        !error &&
+        (filtered ? (
+          <p className="text-sm text-muted-foreground" role="status">
+            No responses in this range.
+          </p>
+        ) : (
+          <EmptyCard kind="bot" title="No metrics yet." text="Metrics appear here once bots start answering players." />
+        ))
+      ) : (
             <>
+              <Panel>
               {/* Desktop Table View */}
               <div className="hidden md:block overflow-x-auto">
                 <Table>
@@ -498,13 +355,13 @@ export default function MetricsBrowsePage() {
                             {issues.length > 0 ? (
                               <div className="flex flex-wrap gap-1">
                                 {issues.map((issue, i) => (
-                                  <Badge key={i} variant="destructive" className="text-xs">
+                                  <Pill key={i} tone="bad">
                                     {issue}
-                                  </Badge>
+                                  </Pill>
                                 ))}
                               </div>
                             ) : (
-                              <Badge variant="outline" className="text-xs">None</Badge>
+                              <Pill>None</Pill>
                             )}
                           </TableCell>
                         </TableRow>
@@ -523,8 +380,7 @@ export default function MetricsBrowsePage() {
                   const isExpanded = expandedResponse === key;
                   
                   return (
-                    <Card key={key} className={hasIssues(response) ? 'border-destructive' : ''}>
-                      <CardContent className="pt-6">
+                    <div key={key} className={`rounded-xl border p-4 ${hasIssues(response) ? 'border-destructive/60' : ''}`}>
                         <div className="space-y-3">
                           <div className="flex items-start justify-between">
                             <div className="space-y-1">
@@ -534,9 +390,9 @@ export default function MetricsBrowsePage() {
                               </div>
                             </div>
                             {issues.length > 0 && (
-                              <Badge variant="destructive" className="text-xs">
+                              <Pill tone="bad">
                                 {issues.length} Issue{issues.length > 1 ? 's' : ''}
-                              </Badge>
+                              </Pill>
                             )}
                           </div>
                           <div className="grid grid-cols-2 gap-3">
@@ -576,9 +432,9 @@ export default function MetricsBrowsePage() {
                               <div className="text-xs text-muted-foreground mb-1">Issues</div>
                               <div className="flex flex-wrap gap-1">
                                 {issues.map((issue, i) => (
-                                  <Badge key={i} variant="destructive" className="text-xs">
+                                  <Pill key={i} tone="bad">
                                     {issue}
-                                  </Badge>
+                                  </Pill>
                                 ))}
                               </div>
                             </div>
@@ -586,10 +442,10 @@ export default function MetricsBrowsePage() {
                           <Button
                             variant="ghost"
                             size="sm"
-                            className="w-full"
+                            className="h-11 w-full"
                             onClick={() => setExpandedResponse(isExpanded ? null : key)}
                           >
-                            {isExpanded ? 'Hide' : 'Show'} Details
+                            {isExpanded ? 'Hide' : 'Show'} details
                           </Button>
                           {isExpanded && (
                             <div className="space-y-2 pt-2 border-t">
@@ -623,45 +479,14 @@ export default function MetricsBrowsePage() {
                             </div>
                           )}
                         </div>
-                      </CardContent>
-                    </Card>
+                    </div>
                   );
                 })}
               </div>
-
-              {/* Pagination */}
-              {pagination && pagination.totalPages > 1 && (
-                <div className="flex flex-col sm:flex-row items-center justify-between gap-4 p-4 border-t">
-                  <div className="text-sm text-muted-foreground">
-                    Showing {((pagination.page - 1) * pagination.limit) + 1} - {Math.min(pagination.page * pagination.limit, pagination.total)} of {formatNumber(pagination.total)} responses
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => handlePageChange(pagination.page - 1)}
-                      disabled={pagination.page === 1}
-                    >
-                      Previous
-                    </Button>
-                    <div className="text-sm text-muted-foreground">
-                      Page {pagination.page} of {pagination.totalPages}
-                    </div>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => handlePageChange(pagination.page + 1)}
-                      disabled={pagination.page >= pagination.totalPages}
-                    >
-                      Next
-                    </Button>
-                  </div>
-                </div>
-              )}
+              </Panel>
+              <ListPager pagination={pagination} noun={['response', 'responses']} loading={loading} onChange={handlePageChange} />
             </>
-          )}
-        </CardContent>
-      </Card>
+      )}
     </div>
   );
 }

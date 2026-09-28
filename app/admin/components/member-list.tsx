@@ -1,8 +1,6 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Card, CardContent } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -12,13 +10,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Label } from '@/components/ui/label';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
+import { RoleChoice } from './role-choice';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -29,13 +21,16 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { Edit, Trash2, Loader2, X, UserCircle, Calendar, Clock, ChevronRight } from 'lucide-react';
+import { Loader2, Pencil, Trash2, X } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { AlertCircle } from 'lucide-react';
-import Link from 'next/link';
-import { cn } from '@/lib/utils';
+import { timeAgo } from '@/lib/time-ago';
+import { EmptyCard, EntityRow, LoadingRows, RolePills, SectionHeader, StatLine } from './ds';
+import { PersonIcon } from './profile-card';
+
 
 interface Member {
+  woka?: string[];
   id: string;
   tags: string[];
   joinedAt: string;
@@ -49,6 +44,7 @@ interface Member {
 }
 
 interface Invitation {
+  woka?: string[];
   id: string;
   tags: string[];
   invitedAt: string;
@@ -69,7 +65,6 @@ interface MemberListProps {
   onRefresh: () => void;
 }
 
-const AVAILABLE_TAGS = ['admin', 'editor', 'member'];
 
 export default function MemberList({ worldId, onRefresh }: MemberListProps) {
   const [members, setMembers] = useState<Member[]>([]);
@@ -214,11 +209,7 @@ export default function MemberList({ worldId, onRefresh }: MemberListProps) {
 
 
   if (loading) {
-    return (
-      <div className="flex items-center justify-center py-12">
-        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-      </div>
-    );
+    return <LoadingRows label="members" rows={3} />;
   }
 
   return (
@@ -230,124 +221,41 @@ export default function MemberList({ worldId, onRefresh }: MemberListProps) {
         </Alert>
       )}
 
-      {/* Active Members */}
-      <div className="space-y-3">
-        <div className="space-y-1">
-          <h3 className="text-xl font-semibold tracking-tight">Active Members</h3>
-          <p className="text-sm text-muted-foreground">
-            Members with special privileges to access special areas, moderate, or use the map and area editor
-          </p>
-        </div>
-        {members.length === 0 ? (
-          <Card>
-            <CardContent className="py-12 text-center text-sm text-muted-foreground">
-              No members yet.
-            </CardContent>
-          </Card>
-        ) : (
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-            {members.map((member) => {
-              const nameOrEmail = member.user.name || member.user.email || 'Unknown';
-              const initial = (member.user.name || member.user.email || '?').charAt(0).toUpperCase();
-              const joinedDate = new Date(member.joinedAt).toLocaleDateString();
-              const lastVisitedDate = member.lastVisited
-                ? new Date(member.lastVisited).toLocaleDateString()
-                : null;
-
-              return (
-                <div key={member.id} className="relative">
-                  <Link
-                    href={`/admin/users/${member.user.id}`}
-                    className="block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-                  >
-                    <Card
-                      className={cn(
-                        'group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
-                        'hover:-translate-y-1 hover:shadow-lg',
-                      )}
-                    >
-                      <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-primary/10 via-transparent to-secondary/20 opacity-0 transition-opacity group-hover:opacity-100" />
-
-                      <div className="relative flex h-full flex-col p-5">
-                        <div className="mb-3 flex items-start gap-3">
-                          <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full border bg-muted text-sm font-semibold">
-                            {initial}
-                          </div>
-
-                          <div className="min-w-0 flex-1 space-y-1">
-                            <div className="flex items-start justify-between gap-2">
-                              <h3 className="truncate text-base font-semibold leading-tight">
-                                {nameOrEmail}
-                              </h3>
-                            </div>
-                            <p className="truncate text-xs text-muted-foreground">
-                              {member.user.email || 'No email'}
-                            </p>
-
-                            <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
-                              {member.isUniverseOwner && (
-                                <Badge variant="default">Owner</Badge>
-                              )}
-                              {member.tags.length > 0
-                                ? member.tags.map((tag) => (
-                                    <Badge
-                                      key={tag}
-                                      variant={
-                                        tag === 'admin'
-                                          ? 'destructive'
-                                          : tag === 'editor'
-                                            ? 'default'
-                                            : 'secondary'
-                                      }
-                                      className="capitalize"
-                                    >
-                                      {tag}
-                                    </Badge>
-                                  ))
-                                : !member.isUniverseOwner && (
-                                    <Badge variant="secondary">Member</Badge>
-                                  )}
-                            </div>
-                          </div>
-                        </div>
-
-                        <div className="mt-auto flex items-center justify-between pt-3 text-xs text-muted-foreground">
-                          <div className="flex flex-col gap-1.5">
-                            <div className="flex items-center gap-1.5">
-                              <Calendar className="h-3.5 w-3.5 text-muted-foreground" />
-                              <span className="text-muted-foreground">
-                                Joined {joinedDate}
-                              </span>
-                            </div>
-                            {lastVisitedDate && (
-                              <div className="flex items-center gap-1.5">
-                                <Clock className="h-3.5 w-3.5 text-muted-foreground" />
-                                <span className="text-muted-foreground">
-                                  Last visited {lastVisitedDate}
-                                </span>
-                              </div>
-                            )}
-                            {!lastVisitedDate && (
-                              <div className="flex items-center gap-1.5">
-                                <Clock className="h-3.5 w-3.5 text-muted-foreground" />
-                                <span className="text-muted-foreground">Never visited</span>
-                              </div>
-                            )}
-                          </div>
-                          <div className="flex items-center gap-1 text-primary transition-transform group-hover:translate-x-0.5">
-                            <span className="hidden text-xs font-medium sm:inline">View</span>
-                            <ChevronRight className="h-4 w-4" aria-hidden="true" />
-                          </div>
-                        </div>
-                      </div>
-                    </Card>
-                  </Link>
-                  {canManage && !member.isUniverseOwner && (
-                    <div className="absolute top-2 right-2 z-10 flex gap-2">
+      {members.length === 0 ? (
+        <EmptyCard kind="people" title="No members yet." text="Invite people to give them a role in this world." />
+      ) : (
+        <div>
+          {members.map((member) => {
+            const nameOrEmail = member.user.name || member.user.email || 'Unknown';
+            const roles = [
+              ...(member.isUniverseOwner ? ['owner'] : []),
+              ...(member.tags.length > 0 ? member.tags : member.isUniverseOwner ? [] : ['member']),
+            ];
+            return (
+              <EntityRow
+                key={member.id}
+                href={`/admin/users/${member.user.id}`}
+                kind="people"
+                leading={<PersonIcon woka={member.woka} name={nameOrEmail} />}
+                title={nameOrEmail}
+                context={
+                  <StatLine
+                    items={[
+                      member.user.name ? member.user.email : null,
+                      `Joined ${new Date(member.joinedAt).toLocaleDateString()}`,
+                      member.lastVisited ? `Last visited ${timeAgo(new Date(member.lastVisited))}` : 'Never visited',
+                    ]}
+                  />
+                }
+                meta={<RolePills roles={roles} />}
+                trailing={
+                  canManage && !member.isUniverseOwner ? (
+                    <>
                       <Button
-                        size="sm"
+                        size="icon"
                         variant="outline"
-                        className="h-8 w-8 p-0"
+                        className="h-9 w-9"
+                        aria-label={`Change ${nameOrEmail}'s role`}
                         onClick={(e) => {
                           e.preventDefault();
                           e.stopPropagation();
@@ -355,191 +263,103 @@ export default function MemberList({ worldId, onRefresh }: MemberListProps) {
                           setEditingTag(member.tags.length > 0 ? member.tags[0] : 'member');
                         }}
                       >
-                        <Edit className="h-4 w-4" />
+                        <Pencil aria-hidden="true" />
                       </Button>
                       <Button
-                        size="sm"
+                        size="icon"
                         variant="destructive"
-                        className="h-8 w-8 p-0"
+                        className="h-9 w-9"
+                        aria-label={`Remove ${nameOrEmail}`}
                         onClick={(e) => {
                           e.preventDefault();
                           e.stopPropagation();
                           setDeletingMember(member);
                         }}
                       >
-                        <Trash2 className="h-4 w-4" />
+                        <Trash2 aria-hidden="true" />
                       </Button>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
+                    </>
+                  ) : undefined
+                }
+              />
+            );
+          })}
+        </div>
+      )}
 
-      {/* Pending Invitations */}
       {(canManage || invitations.length > 0) && (
-        <div className="space-y-3">
-          <div className="space-y-1">
-            <h3 className="text-xl font-semibold tracking-tight">
-              {canManage ? 'Pending Invitations' : 'Your Pending Invitations'}
-            </h3>
-            <p className="text-sm text-muted-foreground">
-              Invitations waiting to be accepted
-            </p>
-          </div>
+        <section aria-labelledby="pending-invitations">
+          <SectionHeader
+            id="pending-invitations"
+            title={canManage ? 'Pending invitations' : 'Your pending invitations'}
+            count={invitations.length}
+          />
           {invitations.length === 0 ? (
-            <Card>
-              <CardContent className="py-12 text-center text-sm text-muted-foreground">
-                No pending invitations.
-              </CardContent>
-            </Card>
+            <EmptyCard kind="people" title="No pending invitations." text="People you invite show up here until they accept." />
           ) : (
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+            <div>
               {invitations.map((invitation) => {
-                const invitedUserName =
-                  invitation.invitedUser.name ||
-                  invitation.invitedUser.email ||
-                  'Unknown';
-                const invitedUserInitial = (
-                  invitation.invitedUser.name ||
-                  invitation.invitedUser.email ||
-                  '?'
-                )
-                  .charAt(0)
-                  .toUpperCase();
-                const invitedBy =
-                  invitation.invitedBy.name ||
-                  invitation.invitedBy.email ||
-                  'Unknown';
-                const invitedDate = new Date(invitation.invitedAt).toLocaleDateString();
-
+                const invitedUserName = invitation.invitedUser.name || invitation.invitedUser.email || 'Unknown';
+                const invitedBy = invitation.invitedBy.name || invitation.invitedBy.email || 'Unknown';
                 return (
-                  <div key={invitation.id} className="relative">
-                    <Link
-                      href={`/admin/users/${invitation.invitedUser.id}`}
-                      className="block h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-                    >
-                      <Card
-                        className={cn(
-                          'group relative flex h-full flex-col overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-background shadow-sm transition-all',
-                          'hover:-translate-y-1 hover:shadow-lg',
-                          'border-dashed',
-                        )}
-                      >
-                        <div className="pointer-events-none absolute inset-0 bg-gradient-to-br from-yellow-500/10 via-transparent to-orange-500/20 opacity-0 transition-opacity group-hover:opacity-100" />
-
-                        <div className="relative flex h-full flex-col p-5">
-                          <div className="mb-3 flex items-start gap-3">
-                            <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full border bg-muted text-sm font-semibold">
-                              {invitedUserInitial}
-                            </div>
-
-                            <div className="min-w-0 flex-1 space-y-1">
-                              <div className="flex items-start justify-between gap-2">
-                                <h3 className="truncate text-base font-semibold leading-tight">
-                                  {invitedUserName}
-                                </h3>
-                              </div>
-                              <p className="truncate text-xs text-muted-foreground">
-                                {invitation.invitedUser.email || 'No email'}
-                              </p>
-
-                              <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
-                                {invitation.tags.map((tag) => (
-                                  <Badge
-                                    key={tag}
-                                    variant={
-                                      tag === 'admin'
-                                        ? 'destructive'
-                                        : tag === 'editor'
-                                          ? 'default'
-                                          : 'secondary'
-                                    }
-                                    className="capitalize"
-                                  >
-                                    {tag}
-                                  </Badge>
-                                ))}
-                              </div>
-                            </div>
-                          </div>
-
-                          <div className="mt-auto flex items-center justify-between pt-3 text-xs text-muted-foreground">
-                            <div className="flex flex-col gap-1.5">
-                              <div className="flex items-center gap-1.5">
-                                <UserCircle className="h-3.5 w-3.5 text-muted-foreground" />
-                                <span className="text-muted-foreground">
-                                  Invited by {invitedBy}
-                                </span>
-                              </div>
-                              <div className="flex items-center gap-1.5">
-                                <Calendar className="h-3.5 w-3.5 text-muted-foreground" />
-                                <span className="text-muted-foreground">
-                                  Invited {invitedDate}
-                                </span>
-                              </div>
-                            </div>
-                            <div className="flex items-center gap-1 text-primary transition-transform group-hover:translate-x-0.5">
-                              <span className="hidden text-xs font-medium sm:inline">View</span>
-                              <ChevronRight className="h-4 w-4" aria-hidden="true" />
-                            </div>
-                          </div>
-                        </div>
-                      </Card>
-                    </Link>
-                    {canManage && (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="absolute top-2 right-2 z-10 h-8 w-8 p-0"
-                        onClick={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          handleCancelInvitation(invitation.id);
-                        }}
-                        disabled={cancellingInvitation === invitation.id}
-                      >
-                        {cancellingInvitation === invitation.id ? (
-                          <Loader2 className="h-4 w-4 animate-spin" />
-                        ) : (
-                          <X className="h-4 w-4" />
-                        )}
-                      </Button>
-                    )}
-                  </div>
+                  <EntityRow
+                    key={invitation.id}
+                    href={`/admin/users/${invitation.invitedUser.id}`}
+                    kind="people"
+                    leading={<PersonIcon woka={invitation.woka} name={invitedUserName} />}
+                    title={invitedUserName}
+                    context={
+                      <StatLine
+                        items={[
+                          invitation.invitedUser.name ? invitation.invitedUser.email : null,
+                          `Invited by ${invitedBy}`,
+                          new Date(invitation.invitedAt).toLocaleDateString(),
+                        ]}
+                      />
+                    }
+                    meta={invitation.tags.length > 0 ? <RolePills roles={invitation.tags} /> : undefined}
+                    trailing={
+                      canManage ? (
+                        <Button
+                          size="icon"
+                          variant="outline"
+                          className="h-9 w-9"
+                          aria-label={`Cancel the invitation to ${invitedUserName}`}
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            handleCancelInvitation(invitation.id);
+                          }}
+                          disabled={cancellingInvitation === invitation.id}
+                        >
+                          {cancellingInvitation === invitation.id ? (
+                            <Loader2 className="animate-spin" aria-hidden="true" />
+                          ) : (
+                            <X aria-hidden="true" />
+                          )}
+                        </Button>
+                      ) : undefined
+                    }
+                  />
                 );
               })}
             </div>
           )}
-        </div>
+        </section>
       )}
-
       {/* Edit Member Dialog */}
       <Dialog open={!!editingMember} onOpenChange={(open) => !open && setEditingMember(null)}>
         <DialogContent className="rounded-lg">
           <DialogHeader>
-            <DialogTitle>Edit Member</DialogTitle>
+            <DialogTitle>Change role</DialogTitle>
             <DialogDescription>
-              Update tags for {editingMember?.user.name || editingMember?.user.email || 'this member'}
+              Choose a role for {editingMember?.user.name || editingMember?.user.email || 'this member'}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
-            <div>
-              <Label htmlFor="edit-role">Role</Label>
-              <Select value={editingTag} onValueChange={setEditingTag}>
-                <SelectTrigger id="edit-role" className="mt-1">
-                  <SelectValue placeholder="Select a role" />
-                </SelectTrigger>
-                <SelectContent>
-                  {AVAILABLE_TAGS.map(tag => (
-                    <SelectItem key={tag} value={tag}>
-                      <span className="capitalize">{tag}</span>
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+            <div className="space-y-1">
+              <Label id="edit-role-label">Role</Label>
+              <RoleChoice value={editingTag} onChange={setEditingTag} name="edit-role" labelledBy="edit-role-label" />
             </div>
             <div className="flex justify-end gap-2">
               <Button
@@ -561,7 +381,7 @@ export default function MemberList({ worldId, onRefresh }: MemberListProps) {
                     Saving...
                   </>
                 ) : (
-                  'Save Changes'
+                  'Save changes'
                 )}
               </Button>
             </div>
@@ -573,7 +393,7 @@ export default function MemberList({ worldId, onRefresh }: MemberListProps) {
       <AlertDialog open={!!deletingMember} onOpenChange={(open) => !open && setDeletingMember(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Remove Member</AlertDialogTitle>
+            <AlertDialogTitle>Remove member</AlertDialogTitle>
             <AlertDialogDescription>
               Are you sure you want to remove{' '}
               {deletingMember?.user.name || deletingMember?.user.email || 'this member'}? They will

@@ -10,7 +10,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { Checkbox } from '@/components/ui/checkbox';
+import { SettingSwitch } from '../../components/ds';
 import { isVisionCapableModel, type VisionSupportMode } from '@/lib/vision-models';
 
 export interface VisionConfigValues {
@@ -54,9 +54,9 @@ export function VisionConfigSection({ value, onChange }: VisionConfigSectionProp
   }, [isVisionEligible, value.defaultVision, onChange]);
 
   return (
-    <div className="space-y-4 rounded-lg border p-4">
+    <div className="space-y-4 rounded-xl border p-4">
       <div>
-        <h3 className="text-sm font-semibold">Vision &amp; image support</h3>
+        <h3 className="text-sm font-semibold">Images</h3>
         <p className="text-xs text-muted-foreground mt-1">
           Controls how this provider handles images — seeing them directly with its main model, or
           describing them for bots whose main model can&apos;t see.
@@ -69,7 +69,7 @@ export function VisionConfigSection({ value, onChange }: VisionConfigSectionProp
           value={value.supportsVision}
           onValueChange={(v) => onChange({ supportsVision: v as VisionSupportMode })}
         >
-          <SelectTrigger id="supportsVision">
+          <SelectTrigger id="supportsVision" className="h-11">
             <SelectValue placeholder="Select vision support" />
           </SelectTrigger>
           <SelectContent>
@@ -81,9 +81,7 @@ export function VisionConfigSection({ value, onChange }: VisionConfigSectionProp
         <p className="text-xs text-muted-foreground">
           {value.supportsVision === 'auto' ? (
             isVisionCapableModel(value.model) ? (
-              <span className="text-emerald-600">
-                ✓ Detected: this model sees images (matches a known vision model name)
-              </span>
+              'Detected: this model sees images (it matches a known vision model name).'
             ) : (
               'Auto — unknown models default to text-only (safe). Use "Yes" to force vision for proxy-renamed models.'
             )
@@ -100,6 +98,7 @@ export function VisionConfigSection({ value, onChange }: VisionConfigSectionProp
           <Label htmlFor="visionModel">Image description model</Label>
           <Input
             id="visionModel"
+            className="h-11"
             value={value.visionModel}
             onChange={(e) => onChange({ visionModel: e.target.value })}
             placeholder="e.g., deepseek-v4-flash-vision-exp"
@@ -111,42 +110,36 @@ export function VisionConfigSection({ value, onChange }: VisionConfigSectionProp
         </div>
       ) : (
         <p className="text-xs text-muted-foreground">
-          ✓ Main model already sees images — image description model not needed.
+          The main model already sees images, so no image description model is needed.
         </p>
       )}
 
-      <div className="flex flex-col gap-2">
-        <div className="flex items-center gap-2">
-          <Checkbox
-            id="defaultVision"
-            checked={value.defaultVision}
-            disabled={!isVisionEligible}
-            onCheckedChange={(checked) => onChange({ defaultVision: checked === true })}
-          />
-          <Label htmlFor="defaultVision" className={!isVisionEligible ? 'text-muted-foreground' : ''}>
-            Use as default vision provider
-          </Label>
-        </div>
-        <p className="text-xs text-muted-foreground">
-          {isVisionEligible
-            ? 'Bots with text-only models automatically use this provider to describe images.'
-            : 'This provider can\u2019t see or describe images yet — set a vision model or enable vision support first.'}
-        </p>
-      </div>
+      <SettingSwitch
+        id="defaultVision"
+        label="Default vision provider"
+        hint={
+          isVisionEligible
+            ? 'Bots with text-only models use this provider to describe images when several can.'
+            : 'This provider can\u2019t see or describe images yet. Set an image description model or turn on image support first.'
+        }
+        checked={value.defaultVision}
+        disabled={!isVisionEligible}
+        onChange={(checked) => onChange({ defaultVision: checked })}
+      />
 
       {!isVisionEligible && (
-        <p className="text-xs text-amber-600">
-          ⚠️ Bots using this provider get image URLs as text (no image descriptions).
+        <p className="text-xs text-muted-foreground">
+          Bots using this provider get image links as text, with no descriptions.
         </p>
       )}
       {hasDescriptionModel && (
-        <p className="text-xs text-emerald-600">
-          ✓ Bots with text-only models will use this model to describe images.
+        <p className="text-xs text-muted-foreground">
+          Bots with text-only models will use this model to describe images.
         </p>
       )}
       {value.defaultVision && isVisionEligible && (
-        <p className="text-xs text-emerald-600">
-          ✓ This provider is used automatically for image descriptions.
+        <p className="text-xs text-muted-foreground">
+          This provider is used automatically for image descriptions.
         </p>
       )}
     </div>

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { validateServiceToken } from '@/lib/service-tokens';
-import { requireAdminAuth } from '@/lib/admin-auth';
+import { botReadDenied } from '@/lib/access-scope';
 import { corsHeaders } from '@/lib/cors';
 
 export const runtime = 'nodejs';
@@ -37,11 +37,11 @@ export async function GET(
     // Try service token first, then admin auth
     const { validateServiceToken } = await import('@/lib/service-tokens');
     const isServiceToken = validateServiceToken(request);
-    if (!isServiceToken) {
-      await requireAdminAuth(request);
-    }
-
     const { id: botId } = await params;
+    if (!isServiceToken) {
+      const denied = await botReadDenied(request, botId, corsHeaders());
+      if (denied) return denied;
+    }
     const { searchParams } = new URL(request.url);
 
     // Parse query params

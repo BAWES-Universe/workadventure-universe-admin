@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
+import { FEATURED_FORBIDDEN, refusesFeaturedChange } from '@/lib/featured';
+import { wokaLayersFor } from '@/lib/woka-avatar';
 
 const updateUniverseSchema = z.object({
   slug: z.string().min(1).max(100).optional(),
@@ -103,8 +105,10 @@ export async function GET(
     }));
 
     // Allow viewing for anyone, but include ownership info
+    const ownerWoka = universe.owner ? await wokaLayersFor(universe.owner.id).catch(() => []) : [];
     const responseData = {
       ...universe,
+      owner: universe.owner ? { ...universe.owner, woka: ownerWoka } : universe.owner,
       worlds: worldsWithFavorites,
       canEdit: userId ? (isAdminToken || universe.ownerId === userId) : false,
     };
@@ -134,6 +138,7 @@ export async function PATCH(
       authHeader.replace('Bearer ', '').trim() === process.env.ADMIN_API_TOKEN;
     
     let userId: string | null = null;
+    let canFeature = Boolean(isAdminToken);
     
     if (!isAdminToken) {
       // Try to get user from session
@@ -143,6 +148,7 @@ export async function PATCH(
         return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
       }
       userId = sessionUser.id;
+      canFeature = sessionUser.isSuperAdmin;
     } else {
       // Admin token - require it
       requireAuth(request);
@@ -179,6 +185,10 @@ export async function PATCH(
         { error: 'Forbidden' },
         { status: 403 }
       );
+    }
+
+    if (refusesFeaturedChange(canFeature, data.featured, existing.featured)) {
+      return NextResponse.json({ error: FEATURED_FORBIDDEN }, { status: 403 });
     }
     
     // If using session auth, ensure user can only change owner to themselves

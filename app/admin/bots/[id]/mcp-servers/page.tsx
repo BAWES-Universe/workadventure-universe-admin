@@ -5,17 +5,7 @@ import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table';
-import { Badge } from '@/components/ui/badge';
 import { Switch } from '@/components/ui/switch';
 import {
   Dialog,
@@ -33,6 +23,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { EmptyCard, Figure, Figures, LoadError, LoadingRows, PageHeader, SectionHeader, SettingSwitch } from '../../../components/ds';
+import { Pill } from '../../bots-ui';
 import { summarizeTestResult, type McpTestResult } from '@/lib/mcp/test-result';
 import {
   AlertDialog,
@@ -50,11 +42,7 @@ import {
   Plus,
   Trash2,
   TestTube,
-  Wifi,
-  WifiOff,
   ExternalLink,
-  ArrowLeft,
-  Server,
 } from 'lucide-react';
 
 interface McpServer {
@@ -504,56 +492,53 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
     }
   }
 
-  if (!authChecked || (loading && servers.length === 0)) {
+  if (!authChecked || (loading && servers.length === 0 && !error)) {
     return (
-      <div className="flex items-center justify-center min-h-[400px]">
-        <Loader2 className="h-8 w-8 animate-spin" />
+      <div className="grid min-w-0 gap-6">
+        <LoadingRows label="MCP servers" rows={3} />
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="space-y-4 p-6">
-        <Button variant="ghost" onClick={() => router.back()}>
-          <ArrowLeft className="mr-2 h-4 w-4" /> Back
-        </Button>
-        <Alert variant="destructive">
-          <AlertDescription>{error}</AlertDescription>
-        </Alert>
+      <div className="grid min-w-0 gap-6">
+        {error === 'Bot not found' ? (
+          <EmptyCard kind="bot" title="This bot doesn’t exist." text="It may have been deleted." href="/admin/bots" action="All bots" />
+        ) : (
+          <LoadError label="this bot’s MCP servers" retry={fetchServers} />
+        )}
       </div>
     );
   }
 
   return (
-    <div className="space-y-6 p-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-4">
-          <Button variant="ghost" onClick={() => router.back()}>
-            <ArrowLeft className="mr-2 h-4 w-4" /> Back
-          </Button>
-          <div>
-            <h1 className="text-2xl font-bold">MCP Servers</h1>
-            <p className="text-muted-foreground text-sm">
-              Manage MCP (Model Context Protocol) servers for this bot
-            </p>
-          </div>
-        </div>
-
-        <Dialog open={addDialogOpen} onOpenChange={handleAddDialogOpenChange}>
-          <DialogTrigger asChild>
-            <Button disabled={servers.length >= 5}>
-              <Plus className="mr-2 h-4 w-4" /> Add Server
-            </Button>
-          </DialogTrigger>
-          <DialogContent className="sm:max-w-[500px]">
-            <DialogHeader>
-              <DialogTitle>Add MCP Server</DialogTitle>
-              <DialogDescription>
-                Connect an external MCP server to this bot.
-              </DialogDescription>
-            </DialogHeader>
+    <div className="grid min-w-0 gap-6">
+      <PageHeader
+        kind="bot"
+        title="MCP servers"
+        context={
+          <span>
+            An MCP (Model Context Protocol) server gives this bot extra tools. A bot can have up to five.
+          </span>
+        }
+        stats={
+          <Figures>
+            <Figure value={`${servers.length} of 5`} label="in use" />
+          </Figures>
+        }
+        actions={
+          <Dialog open={addDialogOpen} onOpenChange={handleAddDialogOpenChange}>
+            <DialogTrigger asChild>
+              <Button disabled={servers.length >= 5}>
+                <Plus aria-hidden="true" /> Add server
+              </Button>
+            </DialogTrigger>
+            <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-[500px]">
+              <DialogHeader>
+                <DialogTitle>Add MCP server</DialogTitle>
+                <DialogDescription>Connect an external MCP server so this bot can use its tools.</DialogDescription>
+              </DialogHeader>
 
             {formError && (
               <Alert variant="destructive">
@@ -563,8 +548,9 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
 
             <div className="grid gap-4 py-4">
               <div className="grid gap-2">
-                <Label htmlFor="name">Server Name</Label>
+                <Label htmlFor="name">Name</Label>
                 <Input
+                  className="h-11"
                   id="name"
                   placeholder="My MCP Server"
                   value={formData.name}
@@ -575,6 +561,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
               <div className="grid gap-2">
                 <Label htmlFor="serverUrl">Server URL</Label>
                 <Input
+                  className="h-11"
                   id="serverUrl"
                   placeholder="https://example.com/mcp"
                   value={formData.serverUrl}
@@ -583,18 +570,18 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
               </div>
 
               <div className="grid gap-2">
-                <Label htmlFor="authType">Authentication Type</Label>
+                <Label htmlFor="authType">Authentication</Label>
                 <Select
                   value={formData.authType}
                   onValueChange={(value) => setFormData({ ...formData, authType: value })}
                 >
-                  <SelectTrigger>
+                  <SelectTrigger id="authType" className="h-11">
                     <SelectValue placeholder="Select auth type" />
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="none">None</SelectItem>
-                    <SelectItem value="bearer">Bearer Token</SelectItem>
-                    <SelectItem value="api-key">API Key</SelectItem>
+                    <SelectItem value="bearer">Bearer token</SelectItem>
+                    <SelectItem value="api-key">API key</SelectItem>
                     <SelectItem value="oauth">OAuth (Connect)</SelectItem>
                   </SelectContent>
                 </Select>
@@ -603,9 +590,10 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
               {formData.authType !== 'none' && formData.authType !== 'oauth' && (
                 <div className="grid gap-2">
                   <Label htmlFor="authConfig">
-                    {formData.authType === 'bearer' ? 'Bearer Token' : 'API Key'}
+                    {formData.authType === 'bearer' ? 'Bearer token' : 'API key'}
                   </Label>
                   <Input
+                    className="h-11"
                     id="authConfig"
                     type="password"
                     placeholder={
@@ -622,7 +610,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                   {oauthDiscovery === 'discovering' && (
                     <div className="flex items-center gap-2 text-sm text-muted-foreground py-2">
                       <Loader2 className="h-4 w-4 animate-spin" />
-                      Discovering OAuth endpoints...
+                      Discovering OAuth endpoints…
                     </div>
                   )}
 
@@ -637,6 +625,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                       <div className="grid gap-2">
                         <Label htmlFor="oauthScopes">Scopes (optional)</Label>
                         <Input
+                          className="h-11"
                           id="oauthScopes"
                           placeholder="read write"
                           value={formData.oauthScopes || ''}
@@ -657,6 +646,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                       <div className="grid gap-2">
                         <Label htmlFor="oauthClientId">Client ID</Label>
                         <Input
+                          className="h-11"
                           id="oauthClientId"
                           placeholder="Client ID from the OAuth provider"
                           value={formData.oauthClientId || ''}
@@ -664,8 +654,9 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                         />
                       </div>
                       <div className="grid gap-2">
-                        <Label htmlFor="oauthClientSecret">Client Secret</Label>
+                        <Label htmlFor="oauthClientSecret">Client secret</Label>
                         <Input
+                          className="h-11"
                           id="oauthClientSecret"
                           type="password"
                           placeholder="Client secret from the OAuth provider"
@@ -676,6 +667,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                       <div className="grid gap-2">
                         <Label htmlFor="oauthScopes">Scopes (optional)</Label>
                         <Input
+                          className="h-11"
                           id="oauthScopes"
                           placeholder="read write"
                           value={formData.oauthScopes || ''}
@@ -693,6 +685,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                       <div className="grid gap-2">
                         <Label htmlFor="oauthAuthorizeUrl">Authorize URL</Label>
                         <Input
+                          className="h-11"
                           id="oauthAuthorizeUrl"
                           placeholder="https://app.provider.com/oauth/authorize"
                           value={formData.oauthAuthorizeUrl || ''}
@@ -702,6 +695,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                       <div className="grid gap-2">
                         <Label htmlFor="oauthTokenUrl">Token URL</Label>
                         <Input
+                          className="h-11"
                           id="oauthTokenUrl"
                           placeholder="https://app.provider.com/oauth/token"
                           value={formData.oauthTokenUrl || ''}
@@ -711,6 +705,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                       <div className="grid gap-2">
                         <Label htmlFor="oauthClientId">Client ID</Label>
                         <Input
+                          className="h-11"
                           id="oauthClientId"
                           placeholder="Client ID from the OAuth provider"
                           value={formData.oauthClientId || ''}
@@ -718,8 +713,9 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                         />
                       </div>
                       <div className="grid gap-2">
-                        <Label htmlFor="oauthClientSecret">Client Secret</Label>
+                        <Label htmlFor="oauthClientSecret">Client secret</Label>
                         <Input
+                          className="h-11"
                           id="oauthClientSecret"
                           type="password"
                           placeholder="Client secret from the OAuth provider"
@@ -730,6 +726,7 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                       <div className="grid gap-2">
                         <Label htmlFor="oauthScopes">Scopes (optional)</Label>
                         <Input
+                          className="h-11"
                           id="oauthScopes"
                           placeholder="read write"
                           value={formData.oauthScopes || ''}
@@ -743,10 +740,11 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
 
               {/* Extra Headers */}
               <div className="grid gap-2">
-                <Label>Extra Headers</Label>
+                <span className="text-sm font-medium leading-none">Extra headers</span>
                 {formData.headers.map((header, index) => (
                   <div key={index} className="flex items-center gap-2">
                     <Input
+                      aria-label="Header name"
                       placeholder="Header name"
                       value={header.key}
                       onChange={(e) => {
@@ -754,9 +752,10 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                         newHeaders[index] = { ...newHeaders[index], key: e.target.value };
                         setFormData({ ...formData, headers: newHeaders });
                       }}
-                      className="flex-1"
+                      className="h-11 min-w-0 flex-1"
                     />
                     <Input
+                      aria-label="Header value"
                       placeholder="Value"
                       type="password"
                       value={header.value}
@@ -765,11 +764,13 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                         newHeaders[index] = { ...newHeaders[index], value: e.target.value };
                         setFormData({ ...formData, headers: newHeaders });
                       }}
-                      className="flex-1"
+                      className="h-11 min-w-0 flex-1"
                     />
                     <Button
+                      type="button"
                       variant="ghost"
                       size="icon"
+                      className="h-11 w-11 shrink-0"
                       aria-label="Remove header"
                       onClick={() => {
                         setFormData({
@@ -783,8 +784,8 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                   </div>
                 ))}
                 <Button
+                  type="button"
                   variant="outline"
-                  size="sm"
                   onClick={() => {
                     setFormData({
                       ...formData,
@@ -794,248 +795,195 @@ export default function BotMcpServersPage({ params }: { params: Promise<{ id: st
                   className="w-fit"
                 >
                   <Plus className="mr-2 h-4 w-4" />
-                  Add Header
+                  Add header
                 </Button>
               </div>
 
-              <div className="flex items-center gap-2">
-                <Switch
-                  id="enabled"
-                  checked={formData.enabled}
-                  onCheckedChange={(checked) => setFormData({ ...formData, enabled: checked })}
-                />
-                <Label htmlFor="enabled">Enabled on creation</Label>
-              </div>
+              <SettingSwitch
+                id="enabled"
+                label="Enabled"
+                hint="On: the bot can use this server’s tools as soon as it’s added. Off: added but unused."
+                checked={formData.enabled}
+                onChange={(checked) => setFormData({ ...formData, enabled: checked })}
+              />
             </div>
 
-            <DialogFooter>
-              <Button variant="outline" onClick={() => handleAddDialogOpenChange(false)}>
-                Cancel
-              </Button>
-              <Button onClick={handleCreate} disabled={submitting || oauthDiscovery === 'discovering' || (formData.authType === 'oauth' && oauthDiscovery === 'idle') || !formData.name || !formData.serverUrl}>
-                {submitting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-                Add Server
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
-      </div>
+              <DialogFooter className="gap-2">
+                <Button type="button" variant="outline" className="h-11" onClick={() => handleAddDialogOpenChange(false)}>
+                  Cancel
+                </Button>
+                <Button
+                  className="h-11"
+                  onClick={handleCreate}
+                  disabled={submitting || oauthDiscovery === 'discovering' || (formData.authType === 'oauth' && oauthDiscovery === 'idle') || !formData.name || !formData.serverUrl}
+                >
+                  {submitting ? <Loader2 className="animate-spin" aria-hidden="true" /> : null}
+                  Add server
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+        }
+      />
 
-      {/* Server count badge */}
-      <div className="flex items-center gap-2 text-sm text-muted-foreground">
-        <Server className="h-4 w-4" />
-        <span>
-          {servers.length} / 5 MCP servers configured
-        </span>
-      </div>
-
-      {/* Server list */}
       {servers.length === 0 ? (
-        <Card>
-          <CardContent className="flex flex-col items-center justify-center py-12">
-            <Server className="h-12 w-12 text-muted-foreground mb-4" />
-            <p className="text-muted-foreground text-lg font-medium mb-1">No MCP servers configured</p>
-            <p className="text-muted-foreground text-sm mb-4">
-              Add an MCP server to extend this bot with custom tools and capabilities.
-            </p>
-            <Button onClick={() => setAddDialogOpen(true)}>
-                <Plus className="mr-2 h-4 w-4" /> Add Your First Server
-              </Button>
-          </CardContent>
-        </Card>
+        <div className="grid gap-3">
+          <EmptyCard kind="bot" title="No MCP servers yet." text="Add one to give this bot custom tools." />
+          <div>
+            <Button variant="outline" className="h-11" onClick={() => setAddDialogOpen(true)}>
+              <Plus aria-hidden="true" /> Add a server
+            </Button>
+          </div>
+        </div>
       ) : (
-        <Card>
-          <CardContent className="p-0">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Name</TableHead>
-                  <TableHead>URL</TableHead>
-                  <TableHead>Auth</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Tools</TableHead>
-                  <TableHead className="text-right">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {servers.map((server) => (
-                  <TableRow key={server.id}>
-                    <TableCell className="font-medium">{server.name}</TableCell>
-                    <TableCell className="max-w-[200px] truncate">
+        <section aria-labelledby="mcp-list" className="min-w-0">
+          <SectionHeader id="mcp-list" title="Servers" count={servers.length} />
+          <div className="grid min-w-0 gap-3">
+            {servers.map((server) => {
+              const live = testResults[server.id];
+              const summary = summarizeTestResult(
+                live ? live.result : server.lastTestResult,
+                {
+                  testedAt: live ? live.testedAt : server.lastTestedAt,
+                  // A stored result is judged against the connection's token state:
+                  // an expired but renewable token is flagged without a re-authorize
+                  // prompt, and a recorded verdict (which clears the expiry) is never
+                  // shown as green. A test run just now is newer than that state,
+                  // which is not reloaded after a test (a test can renew the token),
+                  // so it is shown as it came back.
+                  oauthExpiresAt: live ? null : server.oauthExpiresAt,
+                  reconnectRequired: live ? undefined : server.oauthReconnectRequired,
+                }
+              );
+              // A live success names the tools inline; a stored one does not.
+              const detail =
+                live && live.result.success && live.result.toolNames.length > 0
+                  ? `${summary.detail ?? `tested ${'just now'}`} · ${live.result.toolNames.join(', ')}`
+                  : summary.detail;
+              const toneClass =
+                summary.tone === 'ok'
+                  ? 'text-green-600 dark:text-green-400'
+                  : summary.tone === 'stale'
+                    ? 'text-amber-600 dark:text-amber-400'
+                    : summary.tone === 'error'
+                      ? 'text-red-600 dark:text-red-400'
+                      : 'text-muted-foreground';
+              return (
+                <article key={server.id} className="grid min-w-0 gap-4 rounded-2xl border bg-card p-4 sm:p-5">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0 space-y-1">
+                      <h3 className="orbit-display text-base font-semibold [overflow-wrap:anywhere]">{server.name}</h3>
                       <a
                         href={server.serverUrl}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="flex items-center gap-1 text-blue-500 hover:underline"
+                        className="inline-flex max-w-full items-center gap-1 text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
                       >
-                        {server.serverUrl}
-                        <ExternalLink className="h-3 w-3" />
+                        <span className="truncate">{server.serverUrl}</span>
+                        <ExternalLink className="h-3 w-3 shrink-0" aria-hidden="true" />
                       </a>
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant={server.authType === 'none' ? 'secondary' : 'outline'}>
-                        {server.authType}
-                      </Badge>
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex items-center gap-2">
-                        <Switch
-                          aria-label={`Toggle ${server.name} enabled`}
-                          checked={server.enabled}
-                          onCheckedChange={() => handleToggle(server)}
-                        />
-                        <span className="text-sm">
-                          {server.enabled ? (
-                            <span className="flex items-center gap-1 text-green-600">
-                              <Wifi className="h-3 w-3" /> Enabled
-                            </span>
-                          ) : (
-                            <span className="flex items-center gap-1 text-muted-foreground">
-                              <WifiOff className="h-3 w-3" /> Disabled
-                            </span>
-                          )}
+                      <div className="flex flex-wrap gap-1.5 pt-1">
+                        <Pill>{server.authType === 'none' ? 'No auth' : server.authType}</Pill>
+                        {server.authType === 'oauth' && server.oauthConnected && <Pill tone="ok">Connected</Pill>}
+                      </div>
+                    </div>
+                    <label className="flex min-h-11 items-center gap-2 text-sm">
+                      <Switch
+                        aria-label={`Toggle ${server.name} enabled`}
+                        checked={server.enabled}
+                        onCheckedChange={() => handleToggle(server)}
+                      />
+                      {server.enabled ? 'Enabled' : 'Disabled'}
+                    </label>
+                  </div>
+
+                  <div className="min-w-0 text-xs">
+                    <span className="font-medium text-muted-foreground">Tools: </span>
+                    {testingId === server.id ? (
+                      <span className="text-muted-foreground">Testing…</span>
+                    ) : (
+                      <>
+                        <span className={toneClass} title={detail}>
+                          {summary.label}
                         </span>
-                      </div>
-                    </TableCell>
-                    <TableCell>
+                        {detail && (
+                          <span className="mt-0.5 block break-all text-muted-foreground" title={detail}>
+                            {detail}
+                          </span>
+                        )}
+                      </>
+                    )}
+                    {server.authType === 'oauth' && server.oauthReconnectRequired && server.oauthReconnectReason && (
+                      <span className="mt-1 block text-amber-600 dark:text-amber-400">{server.oauthReconnectReason}</span>
+                    )}
+                  </div>
+
+                  <div className="flex flex-wrap gap-2 border-t pt-4">
+                    <Button
+                      variant="outline"
+                      className="h-11"
+                      onClick={() => handleTestConnection(server)}
+                      disabled={testingId === server.id}
+                    >
                       {testingId === server.id ? (
-                        <span className="text-xs text-muted-foreground">Testing…</span>
+                        <Loader2 className="animate-spin" aria-hidden="true" />
                       ) : (
-                        (() => {
-                          const live = testResults[server.id];
-                          const summary = summarizeTestResult(
-                            live ? live.result : server.lastTestResult,
-                            {
-                              testedAt: live ? live.testedAt : server.lastTestedAt,
-                              // A stored result is judged against the connection's token state:
-                              // an expired but renewable token is flagged without a re-authorize
-                              // prompt, and a recorded verdict (which clears the expiry) is never
-                              // shown as green. A test run just now is newer than that state,
-                              // which is not reloaded after a test (a test can renew the token),
-                              // so it is shown as it came back.
-                              oauthExpiresAt: live ? null : server.oauthExpiresAt,
-                              reconnectRequired: live ? undefined : server.oauthReconnectRequired,
-                            }
-                          );
-                          // A live success names the tools inline; a stored one does not.
-                          const detail =
-                            live && live.result.success && live.result.toolNames.length > 0
-                              ? `${summary.detail ?? `tested ${'just now'}`} · ${live.result.toolNames.join(', ')}`
-                              : summary.detail;
-                          const toneClass =
-                            summary.tone === 'ok'
-                              ? 'text-green-600'
-                              : summary.tone === 'stale'
-                                ? 'text-amber-600'
-                                : summary.tone === 'error'
-                                  ? 'text-red-600'
-                                  : 'text-muted-foreground';
-                          return (
-                            <div className="flex flex-col gap-0.5">
-                              <span className={`text-xs ${toneClass}`} title={detail}>
-                                {summary.label}
-                              </span>
-                              {detail && (
-                                <span
-                                  className="text-[10px] text-muted-foreground break-all"
-                                  title={detail}
-                                >
-                                  {detail}
-                                </span>
-                              )}
-                            </div>
-                          );
-                        })()
+                        <TestTube aria-hidden="true" />
                       )}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <div className="flex items-center justify-end gap-2">
+                      Test
+                    </Button>
+
+                    {server.authType === 'oauth' && !server.oauthConnected && (
+                      <Button
+                        variant="outline"
+                        className="h-11"
+                        onClick={() => handleOAuthConnect(server)}
+                        disabled={oauthConnectingId === server.id}
+                      >
+                        {oauthConnectingId === server.id && <Loader2 className="animate-spin" aria-hidden="true" />}
+                        {server.oauthReconnectRequired ? 'Reconnect' : 'Connect with OAuth'}
+                      </Button>
+                    )}
+
+                    <AlertDialog>
+                      <AlertDialogTrigger asChild>
                         <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => handleTestConnection(server)}
-                          disabled={testingId === server.id}
+                          variant="ghost"
+                          className="h-11 text-destructive hover:text-destructive"
+                          aria-label={`Delete ${server.name}`}
+                          onClick={() => setDeleteServerId(server.id)}
                         >
-                          {testingId === server.id ? (
-                            <Loader2 className="h-3 w-3 animate-spin" />
-                          ) : (
-                            <TestTube className="h-3 w-3" />
-                          )}
-                          <span className="ml-1">Test</span>
+                          <Trash2 aria-hidden="true" />
+                          Delete
                         </Button>
-
-                        {server.authType === 'oauth' && !server.oauthConnected && (
-                          <Button
-                            variant="secondary"
-                            size="sm"
-                            onClick={() => handleOAuthConnect(server)}
-                            disabled={oauthConnectingId === server.id}
+                      </AlertDialogTrigger>
+                      <AlertDialogContent>
+                        <AlertDialogHeader>
+                          <AlertDialogTitle>Delete MCP server</AlertDialogTitle>
+                          <AlertDialogDescription>
+                            Are you sure you want to delete &ldquo;{server.name}&rdquo;? This action cannot be
+                            undone. The bot will lose access to this MCP server&rsquo;s tools.
+                          </AlertDialogDescription>
+                        </AlertDialogHeader>
+                        <AlertDialogFooter>
+                          <AlertDialogCancel onClick={() => setDeleteServerId(null)}>
+                            Cancel
+                          </AlertDialogCancel>
+                          <AlertDialogAction
+                            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                            onClick={handleDelete}
                           >
-                            {oauthConnectingId === server.id ? (
-                              <Loader2 className="h-3 w-3 animate-spin" />
-                            ) : (
-                              <span className="text-xs">
-                                {server.oauthReconnectRequired ? 'Reconnect' : 'Connect with OAuth'}
-                              </span>
-                            )}
-                          </Button>
-                        )}
-
-                        {server.authType === 'oauth' && server.oauthReconnectRequired && server.oauthReconnectReason && (
-                          <span
-                            className="max-w-[240px] text-[10px] text-amber-600"
-                            title={server.oauthReconnectReason}
-                          >
-                            {server.oauthReconnectReason}
-                          </span>
-                        )}
-
-                        {server.authType === 'oauth' && server.oauthConnected && (
-                          <span className="inline-flex items-center gap-1 px-2 py-1 text-xs text-green-400 bg-green-500/10 rounded font-semibold">
-                            Connected ✓
-                          </span>
-                        )}
-
-                        <AlertDialog>
-                          <AlertDialogTrigger asChild>
-                            <Button
-                              variant="destructive"
-                              size="sm"
-                              aria-label={`Delete ${server.name}`}
-                              onClick={() => setDeleteServerId(server.id)}
-                            >
-                              <Trash2 className="h-3 w-3" />
-                            </Button>
-                          </AlertDialogTrigger>
-                          <AlertDialogContent>
-                            <AlertDialogHeader>
-                              <AlertDialogTitle>Delete MCP Server</AlertDialogTitle>
-                              <AlertDialogDescription>
-                                Are you sure you want to delete &ldquo;{server.name}&rdquo;? This action cannot be
-                                undone. The bot will lose access to this MCP server&rsquo;s tools.
-                              </AlertDialogDescription>
-                            </AlertDialogHeader>
-                            <AlertDialogFooter>
-                              <AlertDialogCancel onClick={() => setDeleteServerId(null)}>
-                                Cancel
-                              </AlertDialogCancel>
-                              <AlertDialogAction
-                                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                                onClick={handleDelete}
-                              >
-                                Delete
-                              </AlertDialogAction>
-                            </AlertDialogFooter>
-                          </AlertDialogContent>
-                        </AlertDialog>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
+                            Delete
+                          </AlertDialogAction>
+                        </AlertDialogFooter>
+                      </AlertDialogContent>
+                    </AlertDialog>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        </section>
       )}
     </div>
   );

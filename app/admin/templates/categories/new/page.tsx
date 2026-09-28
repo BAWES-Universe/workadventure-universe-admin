@@ -7,10 +7,9 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import { Checkbox } from '@/components/ui/checkbox';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { ChevronRight, AlertCircle, Loader2 } from 'lucide-react';
+import { AlertCircle, Loader2 } from 'lucide-react';
+import { PageHeader, SettingSwitch, Settings } from '../../../components/ds';
 
 export default function NewCategoryPage() {
   const router = useRouter();
@@ -107,25 +106,12 @@ export default function NewCategoryPage() {
   }
 
   return (
-    <div className="space-y-8">
-      <nav className="flex items-center space-x-2 text-sm text-muted-foreground">
-        <Link href="/admin" className="hover:text-foreground">
-          Dashboard
-        </Link>
-        <ChevronRight className="h-4 w-4" />
-        <Link href="/admin/templates" className="hover:text-foreground">
-          Template Management
-        </Link>
-        <ChevronRight className="h-4 w-4" />
-        <span className="text-foreground">New Category</span>
-      </nav>
-
-      <div className="space-y-1">
-        <h1 className="text-4xl font-bold tracking-tight">Create Category</h1>
-        <p className="text-muted-foreground text-lg">
-          Create a new template category to organize your room templates.
-        </p>
-      </div>
+    <div className="space-y-6">
+      <PageHeader
+        kind="category"
+        title="New category"
+        context={<span className="text-sm text-muted-foreground">A category groups room templates in the library.</span>}
+      />
 
       {error && (
         <Alert variant="destructive">
@@ -135,71 +121,70 @@ export default function NewCategoryPage() {
         </Alert>
       )}
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Category Details</CardTitle>
-          <CardDescription>
-            Enter the details for your new category.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={handleSubmit} className="space-y-6">
-            <div className="space-y-2">
-              <Label htmlFor="name">Name *</Label>
-              <Input
-                id="name"
-                value={formData.name}
-                onChange={(e) => {
-                  setFormData({ ...formData, name: e.target.value });
-                  if (!slugManuallyEdited) {
-                    setFormData(prev => ({ ...prev, slug: generateSlug(e.target.value) }));
-                  }
-                }}
-                placeholder="Work Rooms"
-                required
-              />
-            </div>
+      <div className="rounded-2xl border bg-card p-4 sm:p-5">
+        <form onSubmit={handleSubmit} className="space-y-6">
+          <div className="space-y-2">
+            <Label htmlFor="name">
+              Name <span className="text-destructive">*</span>
+            </Label>
+            <Input
+              id="name"
+              className="h-11"
+              value={formData.name}
+              onChange={(e) => {
+                setFormData({ ...formData, name: e.target.value });
+                if (!slugManuallyEdited) {
+                  setFormData(prev => ({ ...prev, slug: generateSlug(e.target.value) }));
+                }
+              }}
+              placeholder="Work Rooms"
+              required
+            />
+          </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="slug">Slug *</Label>
-              <Input
-                id="slug"
-                value={formData.slug}
-                onChange={(e) => {
-                  setFormData({ ...formData, slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') });
-                  setSlugManuallyEdited(true);
-                }}
-                placeholder="work"
-                required
-              />
-              <p className="text-xs text-muted-foreground">
-                URL-friendly identifier (lowercase, hyphens only)
-              </p>
-            </div>
+          <div className="space-y-2">
+            <Label htmlFor="slug">
+              Category key <span className="text-destructive">*</span>
+            </Label>
+            <Input
+              id="slug"
+              className="h-11"
+              value={formData.slug}
+              onChange={(e) => {
+                setFormData({ ...formData, slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '') });
+                setSlugManuallyEdited(true);
+              }}
+              placeholder="work"
+              required
+            />
+            <p className="text-xs text-muted-foreground">
+              Used by the templates API. Lowercase letters, numbers and dashes.
+            </p>
+          </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="description">Description</Label>
-              <Textarea
-                id="description"
-                value={formData.description}
-                onChange={(e) => setFormData({ ...formData, description: e.target.value })}
-                placeholder="Rooms designed for focused productivity..."
-                rows={3}
-              />
-            </div>
+          <div className="space-y-2">
+            <Label htmlFor="description">Description</Label>
+            <Textarea
+              id="description"
+              value={formData.description}
+              onChange={(e) => setFormData({ ...formData, description: e.target.value })}
+              placeholder="Rooms designed for focused productivity..."
+              rows={3}
+            />
+          </div>
 
+          <div className="grid gap-6 sm:grid-cols-2">
             <div className="space-y-2">
-              <Label htmlFor="icon">Icon (Emoji)</Label>
+              <Label htmlFor="icon">Icon (emoji)</Label>
               <Input
                 id="icon"
+                className="h-11"
                 value={formData.icon}
                 onChange={(e) => setFormData({ ...formData, icon: e.target.value })}
                 placeholder="🛠️"
                 maxLength={2}
               />
-              <p className="text-xs text-muted-foreground">
-                Single emoji to represent this category
-              </p>
+              <p className="text-xs text-muted-foreground">One emoji for this category.</p>
             </div>
 
             <div className="space-y-2">
@@ -207,46 +192,41 @@ export default function NewCategoryPage() {
               <Input
                 id="order"
                 type="number"
+                className="h-11"
                 value={formData.order}
                 onChange={(e) => setFormData({ ...formData, order: parseInt(e.target.value) || 0 })}
               />
-              <p className="text-xs text-muted-foreground">
-                Display order (lower numbers appear first)
-              </p>
+              <p className="text-xs text-muted-foreground">Lower numbers appear first.</p>
             </div>
+          </div>
 
-            <div className="flex items-center space-x-2">
-              <Checkbox
-                id="isActive"
-                checked={formData.isActive}
-                onCheckedChange={(checked) =>
-                  setFormData({ ...formData, isActive: checked === true })
-                }
-              />
-              <Label htmlFor="isActive" className="font-normal cursor-pointer">
-                Active
-              </Label>
-            </div>
+          <Settings label="Visibility">
+            <SettingSwitch
+              id="isActive"
+              label="Active"
+              hint="Shown in the template library. Off: hidden from people creating rooms."
+              checked={formData.isActive}
+              onChange={(checked) => setFormData({ ...formData, isActive: checked })}
+            />
+          </Settings>
 
-            <div className="flex gap-4">
-              <Button type="submit" disabled={loading || !formData.slug || !formData.name}>
-                {loading ? (
-                  <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Creating...
-                  </>
-                ) : (
-                  'Create Category'
-                )}
-              </Button>
-              <Button type="button" variant="outline" asChild>
-                <Link href="/admin/templates">Cancel</Link>
-              </Button>
-            </div>
-          </form>
-        </CardContent>
-      </Card>
+          <div className="flex flex-col-reverse gap-3 pt-2 sm:flex-row sm:justify-end">
+            <Button type="button" variant="outline" className="h-11" asChild>
+              <Link href="/admin/templates">Cancel</Link>
+            </Button>
+            <Button type="submit" className="h-11" disabled={loading || !formData.slug || !formData.name}>
+              {loading ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Creating...
+                </>
+              ) : (
+                'Create category'
+              )}
+            </Button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }
-

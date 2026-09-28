@@ -148,7 +148,7 @@ export function ImageUpload({ value, onChange, mapId, templateId, disabled, clas
 
   return (
     <div className={cn('space-y-2', className)}>
-      <Label>Preview Image</Label>
+      <Label htmlFor={fileInputId}>Preview image</Label>
       
       {/* File input - always present but hidden */}
       <input
@@ -162,68 +162,65 @@ export function ImageUpload({ value, onChange, mapId, templateId, disabled, clas
       />
       
       {preview ? (
-        <div className="relative group">
-          <div className="relative w-full h-48 border rounded-lg overflow-hidden bg-muted">
+        <div className="space-y-2">
+          <div className="relative h-48 w-full overflow-hidden rounded-xl border bg-muted">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src={preview}
               alt="Preview"
               className="w-full h-full object-contain pointer-events-none"
             />
-            {!disabled && (
-              <div 
-                className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2 z-10"
-              >
-                <label htmlFor={fileInputId} style={{ margin: 0 }}>
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    asChild
-                    disabled={uploading || disabled}
-                  >
-                    <span>
-                      <Upload className="h-4 w-4 mr-2" />
-                      Replace
-                    </span>
-                  </Button>
-                </label>
-                <Button
-                  type="button"
-                  variant="destructive"
-                  size="sm"
-                  onClick={handleRemove}
-                  disabled={uploading}
-                >
-                  <X className="h-4 w-4 mr-2" />
-                  Remove
-                </Button>
-              </div>
-            )}
           </div>
+          {!disabled && (
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                className="h-11"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={uploading || disabled}
+              >
+                <Upload className="h-4 w-4 mr-2" />
+                Replace
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                className="h-11 text-destructive hover:text-destructive"
+                onClick={handleRemove}
+                disabled={uploading}
+              >
+                <X className="h-4 w-4 mr-2" />
+                Remove
+              </Button>
+            </div>
+          )}
         </div>
       ) : (
-        <div
+        <button
+          type="button"
           className={cn(
-            'border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-colors',
+            'block w-full rounded-xl border-2 border-dashed p-8 text-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
             disabled || uploading
               ? 'bg-muted cursor-not-allowed opacity-50'
               : 'bg-muted/50 hover:bg-muted border-muted-foreground/25 hover:border-muted-foreground/50'
           )}
           onClick={() => !disabled && !uploading && fileInputRef.current?.click()}
+          disabled={disabled || uploading}
         >
           {uploading ? (
             <>
               <Loader2 className="h-8 w-8 animate-spin mx-auto mb-2 text-muted-foreground" />
-              <p className="text-sm text-muted-foreground">Uploading...</p>
+              <span className="block text-sm text-muted-foreground">Uploading...</span>
             </>
           ) : (
             <>
               <ImageIcon className="h-8 w-8 mx-auto mb-2 text-muted-foreground" />
-              <p className="text-sm font-medium mb-1">Click to upload</p>
-              <p className="text-xs text-muted-foreground">PNG, JPG, WebP, GIF up to 5MB</p>
+              <span className="block text-sm font-medium mb-1">Choose an image</span>
+              <span className="block text-xs text-muted-foreground">PNG, JPG, WebP, GIF up to 5MB</span>
             </>
           )}
-        </div>
+        </button>
       )}
 
       {error && (

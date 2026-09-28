@@ -1,15 +1,16 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Separator } from '@/components/ui/separator';
-import { Loader2, ArrowLeft, Users, Upload, Trash2, Save } from 'lucide-react';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { AlertCircle, Loader2, Users, Upload, Trash2, Save } from 'lucide-react';
 import SpriteSheetPreview from '@/components/sprite-preview';
+import { LoadError, LoadingRows, PageHeader, SettingSwitch, StatLine } from '../../../../components/ds';
+import { Pill } from '../../../components/set-pills';
 
 const LAYER_TYPES = ['woka', 'body', 'eyes', 'hair', 'clothes', 'hat', 'accessory'];
 
@@ -42,6 +43,7 @@ export default function LayerDetailPage() {
   const [layerType, setLayerType] = useState('body');
   const [position, setPosition] = useState(0);
   const [isActive, setIsActive] = useState(true);
+  const fileInput = useRef<HTMLInputElement>(null);
 
   // Usage stats
   const [usageCount, setUsageCount] = useState<number | null>(null);
@@ -154,160 +156,146 @@ export default function LayerDetailPage() {
     }
   }
 
+  const retry = () => { setError(null); setLoading(true); fetchLayer(); };
+
   if (checkingAuth || loading) {
     return (
-      <div className="flex items-center justify-center h-64">
-        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+      <div className="grid min-w-0 gap-6">
+        <PageHeader kind="avatar" title="Layer" />
+        <LoadingRows label="the layer" rows={3} />
       </div>
     );
   }
 
   if (error && !layer) {
     return (
-      <div className="max-w-lg mx-auto mt-16 text-center">
-        <p className="text-red-500 mb-4">{error}</p>
-        <Button variant="outline" onClick={() => router.push(`/admin/avatars/${setId}`)}>
-          <ArrowLeft className="h-4 w-4 mr-1" /> Back
-        </Button>
+      <div className="grid min-w-0 gap-6">
+        <PageHeader kind="avatar" title="Layer" />
+        <LoadError label="this layer" retry={retry} />
       </div>
     );
   }
 
   return (
-    <div className="max-w-2xl mx-auto space-y-6 py-8 px-4">
-      {/* Header */}
-      <div className="flex items-center gap-3">
-        <Button variant="ghost" size="icon" onClick={() => router.push(`/admin/avatars/${setId}`)}>
-          <ArrowLeft className="h-5 w-5" />
-        </Button>
-        <div>
-          <h1 className="text-xl font-semibold">{layer?.name || layer?.textureId}</h1>
-          <p className="text-xs text-muted-foreground font-mono">{layer?.textureId}</p>
-        </div>
-      </div>
+    <div className="grid min-w-0 gap-6">
+      <PageHeader
+        kind="avatar"
+        title={layer?.name || layer?.textureId || 'Layer'}
+        context={<StatLine items={['Layer', layer?.layer]} />}
+        status={
+          layer && (
+            <Pill>
+              <i aria-hidden="true" className={layer.isActive ? 'h-1.5 w-1.5 rounded-full bg-green-500' : 'h-1.5 w-1.5 rounded-full bg-muted-foreground/50'} />
+              {layer.isActive ? 'Active' : 'Inactive'}
+            </Pill>
+          )
+        }
+        actions={
+          <>
+            <Button className="h-11" onClick={handleSave} disabled={saving}>
+              {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+              Save
+            </Button>
+            <Button variant="outline" className="h-11 text-destructive hover:text-destructive" onClick={handleDelete}>
+              <Trash2 className="mr-2 h-4 w-4" /> Delete
+            </Button>
+          </>
+        }
+      />
 
       {error && (
-        <div className="bg-red-500/10 text-red-600 text-sm px-4 py-2 rounded-lg">{error}</div>
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
       )}
       {success && (
-        <div className="bg-emerald-500/10 text-emerald-600 text-sm px-4 py-2 rounded-lg">{success}</div>
+        <p className="text-sm text-muted-foreground" role="status">{success}</p>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+      <div className="grid min-w-0 grid-cols-1 gap-6 md:grid-cols-2">
         {/* Spritesheet preview */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-sm">Sprite Sheet</CardTitle>
-          </CardHeader>
-          <CardContent className="flex flex-col items-center">
+        <section aria-labelledby="sprite-sheet" className="min-w-0 rounded-2xl border bg-card p-4 sm:p-5">
+          <h2 id="sprite-sheet" className="orbit-display mb-4 text-base font-semibold">Sprite sheet</h2>
+          <div className="flex flex-col items-center">
             {layer && <SpriteSheetPreview url={layer.url} large />}
-          </CardContent>
-        </Card>
+          </div>
+          <p className="mt-4 flex items-center gap-2 text-sm text-muted-foreground">
+            <Users className="h-4 w-4" aria-hidden="true" />
+            {usageCount !== null ? (
+              <span>
+                <strong className="text-foreground">{usageCount.toLocaleString()}</strong> {usageCount === 1 ? 'person has' : 'people have'} this equipped
+              </span>
+            ) : (
+              'Counting who has it equipped...'
+            )}
+          </p>
+        </section>
 
-        {/* Info & controls */}
-        <div className="space-y-4">
-          {/* Usage stats */}
-          <Card>
-            <CardHeader className="py-3">
-              <CardTitle className="text-sm flex items-center gap-2">
-                <Users className="h-4 w-4" />
-                Usage
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="py-2">
-              {usageCount !== null ? (
-                <div>
-                  <span className="text-2xl font-bold">{usageCount}</span>
-                  <span className="text-sm text-muted-foreground ml-2">users have this equipped</span>
-                </div>
-              ) : (
-                <p className="text-sm text-muted-foreground">Loading...</p>
-              )}
-            </CardContent>
-          </Card>
+        {/* Form controls */}
+        <section aria-labelledby="texture-details" className="grid min-w-0 content-start gap-4 rounded-2xl border bg-card p-4 sm:p-5">
+          <h2 id="texture-details" className="orbit-display text-base font-semibold">Details</h2>
+          <div className="space-y-2">
+            <Label htmlFor="texture-name">Name</Label>
+            <Input id="texture-name" value={name} onChange={e => setName(e.target.value)} className="h-11" />
+          </div>
 
-          {/* Form controls */}
-          <Card>
-            <CardHeader className="py-3">
-              <CardTitle className="text-sm">Details</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-3 py-2">
-              {/* Name */}
-              <div className="space-y-1">
-                <Label className="text-xs">Name</Label>
-                <Input value={name} onChange={e => setName(e.target.value)} className="h-9 text-sm" />
-              </div>
+          <div className="space-y-2">
+            <Label htmlFor="texture-url">Image URL</Label>
+            <div className="flex gap-2">
+              <Input
+                id="texture-url"
+                value={url}
+                onChange={e => setUrl(e.target.value)}
+                className="h-11 flex-1 font-mono text-xs"
+                placeholder="http://... or S3 URL"
+              />
+              <Button type="button" variant="outline" className="h-11 shrink-0" onClick={() => fileInput.current?.click()}>
+                <Upload className="mr-2 h-4 w-4" />
+                Upload
+              </Button>
+              <input ref={fileInput} type="file" accept="image/*" onChange={handleUpload} className="hidden" tabIndex={-1} aria-hidden="true" />
+            </div>
+          </div>
 
-              {/* URL */}
-              <div className="space-y-1">
-                <Label className="text-xs">URL</Label>
-                <div className="flex gap-2">
-                  <Input
-                    value={url}
-                    onChange={e => setUrl(e.target.value)}
-                    className="h-9 text-xs font-mono flex-1"
-                    placeholder="http://... or S3 URL"
-                  />
-                  <label className="cursor-pointer">
-                    <Button variant="outline" size="icon" className="h-9 w-9" asChild>
-                      <span><Upload className="h-4 w-4" /></span>
-                    </Button>
-                    <input type="file" accept="image/*" onChange={handleUpload} className="hidden" />
-                  </label>
-                </div>
-              </div>
+          <div className="space-y-2">
+            <Label htmlFor="texture-layer">Layer type</Label>
+            <Select value={layerType} onValueChange={setLayerType}>
+              <SelectTrigger id="texture-layer" className="h-11 capitalize">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {LAYER_TYPES.map(t => (
+                  <SelectItem key={t} value={t} className="capitalize">{t}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
 
-              {/* Layer type */}
-              <div className="space-y-1">
-                <Label className="text-xs">Layer Type</Label>
-                <Select value={layerType} onValueChange={setLayerType}>
-                  <SelectTrigger className="h-9">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {LAYER_TYPES.map(t => (
-                      <SelectItem key={t} value={t}>{t}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
+          <div className="space-y-2">
+            <Label htmlFor="texture-position">Position</Label>
+            <Input
+              id="texture-position"
+              type="number"
+              min={0}
+              value={position}
+              onChange={e => setPosition(parseInt(e.target.value) || 0)}
+              className="h-11 w-24 text-center"
+            />
+          </div>
 
-              {/* Position */}
-              <div className="space-y-1">
-                <Label className="text-xs">Position</Label>
-                <Input
-                  type="number"
-                  min={0}
-                  value={position}
-                  onChange={e => setPosition(parseInt(e.target.value) || 0)}
-                  className="h-9 w-20 text-center"
-                />
-              </div>
+          <SettingSwitch
+            id="texture-active"
+            label="Active"
+            hint="Players can pick it. Off: it stays in the set but isn’t offered."
+            checked={isActive}
+            onChange={setIsActive}
+          />
 
-              {/* Active toggle */}
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={isActive}
-                  onChange={e => setIsActive(e.target.checked)}
-                  className="rounded border-border"
-                />
-                <span className="text-xs">Active</span>
-              </label>
-            </CardContent>
-          </Card>
-        </div>
-      </div>
-
-      {/* Actions */}
-      <div className="flex items-center gap-3 justify-end">
-        <Button variant="outline" size="sm" onClick={handleDelete} className="text-red-500 hover:text-red-600">
-          <Trash2 className="h-4 w-4 mr-1" /> Delete
-        </Button>
-        <Button size="sm" onClick={handleSave} disabled={saving}>
-          {saving ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : <Save className="h-4 w-4 mr-1" />}
-          Save
-        </Button>
+          <p className="text-xs text-muted-foreground">
+            Texture key <code className="rounded bg-muted px-1 font-mono text-foreground">{layer?.textureId}</code>
+          </p>
+        </section>
       </div>
     </div>
   );

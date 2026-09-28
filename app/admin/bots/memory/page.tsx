@@ -3,11 +3,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import AuthLink from '@/app/admin/auth-link';
-import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
 import {
   Table,
   TableBody,
@@ -16,8 +11,8 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { AlertCircle, Loader2, Brain, ArrowLeft, Search } from 'lucide-react';
-import { Badge } from '@/components/ui/badge';
+import { EmptyCard, LoadError, LoadingRows, PageHeader } from '../../components/ds';
+import { ApplyFilter, DateFilter, FilterRow, JsonDetails, ListPager, Panel, Pill, type PageInfo } from '../bots-ui';
 
 interface Memory {
   id: number;
@@ -39,33 +34,12 @@ interface Memory {
   updatedAt: Date;
 }
 
-interface Pagination {
-  page: number;
-  limit: number;
-  total: number;
-  totalPages: number;
-}
-
-// Skeleton loader
-function SkeletonRow() {
-  return (
-    <TableRow>
-      <TableCell><div className="h-4 w-24 bg-muted animate-pulse rounded" /></TableCell>
-      <TableCell><div className="h-4 w-32 bg-muted animate-pulse rounded" /></TableCell>
-      <TableCell><div className="h-4 w-20 bg-muted animate-pulse rounded" /></TableCell>
-      <TableCell><div className="h-4 w-40 bg-muted animate-pulse rounded" /></TableCell>
-      <TableCell><div className="h-4 w-40 bg-muted animate-pulse rounded" /></TableCell>
-      <TableCell><div className="h-4 w-32 bg-muted animate-pulse rounded" /></TableCell>
-    </TableRow>
-  );
-}
-
 export default function MemoryBrowsePage() {
   const router = useRouter();
   const [memory, setMemory] = useState<Memory[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [pagination, setPagination] = useState<Pagination | null>(null);
+  const [pagination, setPagination] = useState<PageInfo | null>(null);
   const [filters, setFilters] = useState({
     botId: '',
     userUuid: '',
@@ -155,199 +129,62 @@ export default function MemoryBrowsePage() {
     return new Date(date).toLocaleString();
   }
 
-  function formatNumber(num: number): string {
-    return new Intl.NumberFormat().format(num);
-  }
 
-  if (loading && memory.length === 0) {
-    return (
-      <div className="space-y-8">
-        <div className="flex items-center justify-between">
-          <div className="space-y-1">
-            <h1 className="text-4xl font-bold tracking-tight">Browse Memory</h1>
-            <p className="text-muted-foreground text-lg">
-              View and filter all bot memory entries
-            </p>
-          </div>
-        </div>
-        <Card>
-          <CardContent className="p-0">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Bot ID</TableHead>
-                  <TableHead>Player</TableHead>
-                  <TableHead>Last Updated</TableHead>
-                  <TableHead>Memories</TableHead>
-                  <TableHead>Emotions</TableHead>
-                  <TableHead>Created</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {[...Array(10)].map((_, i) => (
-                  <SkeletonRow key={i} />
-                ))}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
-      </div>
-    );
-  }
+  const filtered = Boolean(filters.botId || filters.userUuid || filters.userId || filters.startDate || filters.endDate);
 
   return (
-    <div className="space-y-8">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-4">
-          <Button variant="ghost" size="sm" asChild>
-            <AuthLink href="/admin/bots/database">
-              <ArrowLeft className="mr-2 h-4 w-4" />
-              Back
-            </AuthLink>
-          </Button>
-          <div className="space-y-1">
-            <h1 className="text-4xl font-bold tracking-tight">Browse Memory</h1>
-            <p className="text-muted-foreground text-lg">
-              View and filter all bot memory entries
-            </p>
-          </div>
-        </div>
-      </div>
+    <div className="grid min-w-0 gap-6">
+      <PageHeader
+        kind="bot"
+        title="Memory"
+        context={<span>What each bot remembers about the players it has met.</span>}
+      />
 
-      {error && (
-        <Alert variant="destructive">
-          <AlertCircle className="h-4 w-4" />
-          <AlertTitle>Error</AlertTitle>
-          <AlertDescription>
-            {error}
-            <Button
-              variant="outline"
-              size="sm"
-              className="ml-4"
-              onClick={fetchMemory}
-            >
-              Retry
-            </Button>
-          </AlertDescription>
-        </Alert>
-      )}
+      <FilterRow label="Filter memory" className="lg:grid-cols-5">
+        <ApplyFilter
+          id="botId"
+          label="Bot ID"
+          placeholder="Bot ID"
+          value={botIdInput}
+          onChange={setBotIdInput}
+          onApply={() => setFilters({ ...filters, botId: botIdInput, page: 1 })}
+        />
+        <ApplyFilter
+          id="userUuid"
+          label="User UUID"
+          placeholder="User UUID"
+          value={userUuidInput}
+          onChange={setUserUuidInput}
+          onApply={() => setFilters({ ...filters, userUuid: userUuidInput, page: 1 })}
+        />
+        <ApplyFilter
+          id="userId"
+          label="User ID"
+          placeholder="User ID"
+          value={userIdInput}
+          onChange={setUserIdInput}
+          onApply={() => setFilters({ ...filters, userId: userIdInput, page: 1 })}
+        />
+        <DateFilter id="startDate" label="From" value={filters.startDate} onChange={(startDate) => setFilters({ ...filters, startDate, page: 1 })} />
+        <DateFilter id="endDate" label="To" value={filters.endDate} onChange={(endDate) => setFilters({ ...filters, endDate, page: 1 })} />
+      </FilterRow>
 
-      {/* Filters */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Filters</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
-            <div className="space-y-2">
-              <Label htmlFor="botId">Bot ID</Label>
-              <div className="flex gap-2">
-                <Input
-                  id="botId"
-                  placeholder="Filter by bot ID..."
-                  value={botIdInput}
-                  onChange={(e) => setBotIdInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      setFilters({ ...filters, botId: botIdInput, page: 1 });
-                    }
-                  }}
-                />
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setFilters({ ...filters, botId: botIdInput, page: 1 })}
-                >
-                  <Search className="h-4 w-4" />
-                </Button>
-              </div>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="userUuid">User UUID</Label>
-              <div className="flex gap-2">
-                <Input
-                  id="userUuid"
-                  placeholder="Filter by user UUID..."
-                  value={userUuidInput}
-                  onChange={(e) => setUserUuidInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      setFilters({ ...filters, userUuid: userUuidInput, page: 1 });
-                    }
-                  }}
-                />
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setFilters({ ...filters, userUuid: userUuidInput, page: 1 })}
-                >
-                  <Search className="h-4 w-4" />
-                </Button>
-              </div>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="userId">User ID</Label>
-              <div className="flex gap-2">
-                <Input
-                  id="userId"
-                  placeholder="Filter by user ID..."
-                  value={userIdInput}
-                  onChange={(e) => setUserIdInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      setFilters({ ...filters, userId: userIdInput, page: 1 });
-                    }
-                  }}
-                />
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setFilters({ ...filters, userId: userIdInput, page: 1 })}
-                >
-                  <Search className="h-4 w-4" />
-                </Button>
-              </div>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="startDate">Start Date</Label>
-              <Input
-                id="startDate"
-                type="date"
-                value={filters.startDate}
-                onChange={(e) => setFilters({ ...filters, startDate: e.target.value, page: 1 })}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="endDate">End Date</Label>
-              <Input
-                id="endDate"
-                type="date"
-                value={filters.endDate}
-                onChange={(e) => setFilters({ ...filters, endDate: e.target.value, page: 1 })}
-              />
-            </div>
-          </div>
-        </CardContent>
-      </Card>
+      {error && <LoadError label="memory" retry={fetchMemory} />}
 
-      {/* Memory Table */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Memory Entries</CardTitle>
-        </CardHeader>
-        <CardContent className="p-0">
-          {memory.length === 0 ? (
-            <div className="py-12 text-center">
-              <Brain className="h-12 w-12 mx-auto mb-4 text-muted-foreground opacity-50" />
-              <h3 className="text-lg font-semibold mb-2">No memory entries found</h3>
-              <p className="text-sm text-muted-foreground">
-                {Object.values(filters).some(v => v && v !== '1' && v !== '50')
-                  ? 'Try adjusting your filters to see more results.'
-                  : 'No memory entries have been recorded yet.'}
-              </p>
-            </div>
-          ) : (
+      {loading && memory.length === 0 ? (
+        <LoadingRows label="memory entries" rows={5} />
+      ) : memory.length === 0 ? (
+        !error &&
+        (filtered ? (
+          <p className="text-sm text-muted-foreground" role="status">
+            No memory entries match these filters.
+          </p>
+        ) : (
+          <EmptyCard kind="bot" title="No memory yet." text="Bots remember players here once they have talked." />
+        ))
+      ) : (
             <>
+              <Panel>
               {/* Desktop Table View */}
               <div className="hidden md:block overflow-x-auto">
                 <Table>
@@ -384,7 +221,7 @@ export default function MemoryBrowsePage() {
                                   {mem.userId || mem.userUuid || 'N/A'}
                                 </div>
                                 {mem.isGuest && (
-                                  <Badge variant="outline" className="text-xs">Guest</Badge>
+                                  <Pill>Guest</Pill>
                                 )}
                               </>
                             ) : (
@@ -394,7 +231,7 @@ export default function MemoryBrowsePage() {
                                   {mem.userUuid || 'N/A'}
                                 </div>
                                 {mem.isGuest && (
-                                  <Badge variant="outline" className="text-xs">Guest</Badge>
+                                  <Pill>Guest</Pill>
                                 )}
                               </>
                             )}
@@ -403,24 +240,14 @@ export default function MemoryBrowsePage() {
                         <TableCell className="text-sm">{formatDate(mem.updatedAt)}</TableCell>
                         <TableCell>
                           {mem.memories ? (
-                            <details className="cursor-pointer">
-                              <summary className="text-sm text-muted-foreground">View</summary>
-                              <pre className="mt-2 text-xs bg-muted p-2 rounded overflow-auto max-w-md max-h-64">
-                                {JSON.stringify(mem.memories, null, 2)}
-                              </pre>
-                            </details>
+                            <JsonDetails label="View" value={mem.memories} />
                           ) : (
                             <span className="text-sm text-muted-foreground">—</span>
                           )}
                         </TableCell>
                         <TableCell>
                           {mem.emotions ? (
-                            <details className="cursor-pointer">
-                              <summary className="text-sm text-muted-foreground">View</summary>
-                              <pre className="mt-2 text-xs bg-muted p-2 rounded overflow-auto max-w-md max-h-64">
-                                {JSON.stringify(mem.emotions, null, 2)}
-                              </pre>
-                            </details>
+                            <JsonDetails label="View" value={mem.emotions} />
                           ) : (
                             <span className="text-sm text-muted-foreground">—</span>
                           )}
@@ -435,8 +262,8 @@ export default function MemoryBrowsePage() {
               {/* Mobile Card View */}
               <div className="md:hidden space-y-4 p-4">
                 {memory.map((mem) => (
-                  <Card key={mem.id}>
-                    <CardContent className="pt-6">
+                  <div key={mem.id} className="rounded-xl border p-4">
+                    <div>
                       <div className="space-y-3">
                         <div className="flex items-start justify-between">
                           <div className="space-y-1">
@@ -449,7 +276,7 @@ export default function MemoryBrowsePage() {
                             </AuthLink>
                           </div>
                           {mem.isGuest && (
-                            <Badge variant="outline" className="text-xs">Guest</Badge>
+                            <Pill>Guest</Pill>
                           )}
                         </div>
                         <div>
@@ -485,63 +312,23 @@ export default function MemoryBrowsePage() {
                         </div>
                         {mem.memories && (
                           <div>
-                            <details className="cursor-pointer">
-                              <summary className="text-sm font-medium text-muted-foreground">View Memories</summary>
-                              <pre className="mt-2 text-xs bg-muted p-2 rounded overflow-auto max-h-64">
-                                {JSON.stringify(mem.memories, null, 2)}
-                              </pre>
-                            </details>
+                            <JsonDetails label="View memories" value={mem.memories} />
                           </div>
                         )}
                         {mem.emotions && (
                           <div>
-                            <details className="cursor-pointer">
-                              <summary className="text-sm font-medium text-muted-foreground">View Emotions</summary>
-                              <pre className="mt-2 text-xs bg-muted p-2 rounded overflow-auto max-h-64">
-                                {JSON.stringify(mem.emotions, null, 2)}
-                              </pre>
-                            </details>
+                            <JsonDetails label="View emotions" value={mem.emotions} />
                           </div>
                         )}
                       </div>
-                    </CardContent>
-                  </Card>
+                    </div>
+                  </div>
                 ))}
               </div>
-
-              {/* Pagination */}
-              {pagination && pagination.totalPages > 1 && (
-                <div className="flex items-center justify-between p-4 border-t">
-                  <div className="text-sm text-muted-foreground">
-                    Showing {((pagination.page - 1) * pagination.limit) + 1} - {Math.min(pagination.page * pagination.limit, pagination.total)} of {formatNumber(pagination.total)} entries
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => handlePageChange(pagination.page - 1)}
-                      disabled={pagination.page === 1}
-                    >
-                      Previous
-                    </Button>
-                    <div className="text-sm text-muted-foreground">
-                      Page {pagination.page} of {pagination.totalPages}
-                    </div>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => handlePageChange(pagination.page + 1)}
-                      disabled={pagination.page >= pagination.totalPages}
-                    >
-                      Next
-                    </Button>
-                  </div>
-                </div>
-              )}
+              </Panel>
+              <ListPager pagination={pagination} noun={['entry', 'entries']} loading={loading} onChange={handlePageChange} />
             </>
-          )}
-        </CardContent>
-      </Card>
+      )}
     </div>
   );
 }

@@ -1,0 +1,14 @@
+.page { display: grid; gap: 34px; min-width: 0; }
+.lede { font-size: 13px; color: hsl(var(--muted-foreground)); }
+.section { display: grid; gap: 10px; min-width: 0; }
+.rules { display: grid; gap: 10px; }
+.rules li { display: flex; align-items: center; gap: 12px; font-size: 13px; line-height: 1.5; color: hsl(var(--foreground) / 0.85); }
+.rules strong { color: hsl(var(--foreground)); }
+.swatch { flex: none; width: 34px; height: 34px; border-radius: 10px; border: 1px solid hsl(var(--border)); }
+.kinds, .inline { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.kind { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; }
+.dot { width: 22px; height: 22px; border-radius: 50%; }
+.note { font-size: 12px; color: hsl(var(--muted-foreground)); }
+.frame { padding: 18px; border: 1px dashed hsl(var(--border)); border-radius: 18px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr)); gap: 12px; }
+.stack { display: grid; gap: 10px; }

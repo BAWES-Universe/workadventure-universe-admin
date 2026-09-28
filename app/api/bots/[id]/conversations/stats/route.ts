@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
-import { requireAdminAuth } from '@/lib/admin-auth';
+import { botReadDenied } from '@/lib/access-scope';
 import { corsHeaders } from '@/lib/cors';
 
 export const runtime = 'nodejs';
@@ -24,9 +24,9 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    await requireAdminAuth(request);
-
     const { id: botId } = await params;
+    const denied = await botReadDenied(request, botId, corsHeaders());
+    if (denied) return denied;
 
     // Get stats
     const [totalConversations, oldest, newest] = await Promise.all([

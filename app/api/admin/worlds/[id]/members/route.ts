@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { getSessionUser } from '@/lib/auth-session';
+import { withWokas } from '@/lib/woka-avatar';
 
 const inviteMemberSchema = z.object({
   userId: z.string().uuid(),
@@ -113,7 +114,7 @@ export async function GET(
     }));
 
     return NextResponse.json({ 
-      members: membersWithLastVisit,
+      members: await withWokas(membersWithLastVisit),
       canManage,
     });
   } catch (error) {

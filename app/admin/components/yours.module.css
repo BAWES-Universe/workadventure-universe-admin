@@ -1,0 +1,60 @@
+/* What's yours on You (see yours.tsx). Colour comes only from kinds and each universe's own colour. */
+.yours { display: grid; gap: 30px; min-width: 0; }
+.yours > section { min-width: 0; }
+.rows, .invitations { display: grid; }
+.invitations { margin-bottom: 8px; }
+.invitationLine { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px; color: hsl(var(--muted-foreground)); }
+.error { padding: 8px 12px; font-size: 12px; color: hsl(var(--destructive)); }
+.more { display: inline-flex; align-items: center; gap: 6px; min-height: 40px; margin-top: 8px; font-size: 12px; font-weight: 600; color: hsl(var(--muted-foreground)); }
+.more:hover { color: hsl(var(--foreground)); }
+
+.getStarted { display: grid; gap: 12px; padding: 18px; border: 1px solid hsl(var(--border)); border-radius: 20px; background: linear-gradient(160deg, rgb(134 41 252 / 0.1), transparent 45%), hsl(var(--card)); }
+.getStartedHead { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.getStartedHead h2 { font-size: 20px; font-weight: 700; }
+.hide { min-height: 44px; margin-left: 10px; padding: 0 12px; border-radius: 999px; font-size: 12px; font-weight: 600; color: hsl(var(--muted-foreground)); }
+.hide:hover { color: hsl(var(--foreground)); background: hsl(var(--foreground) / 0.06); }
+.getStartedHead > span { display: inline-flex; align-items: center; font-size: 12px; font-weight: 600; color: hsl(var(--muted-foreground)); font-variant-numeric: tabular-nums; }
+.progress { height: 4px; border-radius: 999px; background: hsl(var(--foreground) / 0.08); overflow: hidden; }
+.progress > span { display: block; height: 100%; border-radius: inherit; background: var(--status-live); transition: width 300ms var(--ease-out); }
+.steps { display: grid; gap: 4px; }
+.step { display: flex; align-items: center; gap: 12px; min-height: 60px; padding: 10px 12px; border-radius: 14px; transition: background 160ms; }
+a.step:hover { background: hsl(var(--foreground) / 0.05); }
+div.step[aria-disabled] { opacity: 0.6; }
+.stepMark { display: grid; place-items: center; flex: none; width: 28px; height: 28px; border-radius: 50%; border: 1.5px solid hsl(var(--foreground) / 0.25); font-size: 12px; font-weight: 700; }
+.stepMark[data-done] { border: 0; color: #fff; background: var(--status-live); }
+.stepText { display: grid; gap: 2px; flex: 1; min-width: 0; }
+.stepText strong { font-size: 14px; font-weight: 600; }
+.stepText > span { font-size: 12px; line-height: 1.5; color: hsl(var(--muted-foreground)); }
+li[data-done] .stepText strong { text-decoration: line-through; text-decoration-color: hsl(var(--foreground) / 0.35); color: hsl(var(--muted-foreground)); }
+.stepArrow { flex: none; color: hsl(var(--muted-foreground)); }
+
+.universes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.universe { --planet-color: #a78bfa; display: flex; flex-direction: column; justify-content: space-between; min-width: 0; min-height: 226px; padding: 21px; border-radius: 16px; background: hsl(var(--card)); border: 1px solid var(--atlas-line); position: relative; overflow: hidden; isolation: isolate; transition: border-color 240ms, transform 240ms; }
+.universe:hover { transform: translateY(-3px); border-color: color-mix(in srgb, var(--planet-color) 70%, transparent); }
+.universeTop { display: flex; justify-content: space-between; gap: 10px; position: relative; z-index: 2; color: var(--atlas-muted); text-transform: uppercase; font-size: 8px; letter-spacing: .14em; }
+.universeBottom { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; position: relative; z-index: 2; padding-top: 89px; }
+.universeBottom > div { min-width: 0; }
+.universeBottom h3 { font-family: var(--font-display); font-size: 21px; font-weight: 700; letter-spacing: -.035em; line-height: 1.25; overflow-wrap: anywhere; }
+.universeBottom p { color: var(--atlas-muted); margin-top: 7px; font-size: 11px; line-height: 1.7; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.cardArrow { flex-shrink: 0; color: var(--atlas-muted); transition: transform 200ms, color 200ms; }
+.universe:hover .cardArrow { color: hsl(var(--foreground)); transform: translate(2px, -2px); }
+.celestial { position: absolute; width: 204px; height: 154px; top: 21px; right: -16px; opacity: .8; pointer-events: none; transform: rotate(-28deg); transition: transform 600ms; }
+.planet { position: absolute; width: 77px; height: 77px; border-radius: 50%; top: 35px; left: 63px; background: radial-gradient(circle at 27% 25%, color-mix(in srgb, var(--planet-color) 35%, white), var(--planet-color) 20%, color-mix(in srgb, var(--planet-color) 40%, #1a1030) 56%, #15121b 85%); box-shadow: -4px -3px 22px color-mix(in srgb, var(--planet-color) 15%, transparent), inset 2px 1px 5px #ffffff33; }
+.orbitRing { position: absolute; width: 177px; height: 62px; border: 1px solid color-mix(in srgb, var(--planet-color) 35%, transparent); border-radius: 50%; top: 43px; left: 11px; transform: rotate(-14deg); }
+.orbitRing::after { content: ''; position: absolute; inset: -20px -8px; border: 1px solid color-mix(in srgb, var(--planet-color) 12%, transparent); border-radius: 50%; }
+.moon { position: absolute; width: 8px; height: 8px; border-radius: 50%; background: var(--planet-color); top: 48px; left: 15px; }
+.universe:hover .celestial { transform: rotate(-17deg) translateY(-3px); }
+.universeBottom .cardCount { margin-top: 8px; }
+.universe { --atlas-line: hsl(var(--border)); --atlas-muted: hsl(var(--muted-foreground)); }
+.universeTop { align-items: flex-start; text-transform: none; letter-spacing: 0; }
+.universe a, .universe:focus-visible { outline-offset: 4px; }
+@media (max-width: 440px) {
+  .universes { grid-template-columns: 1fr; }
+  .universe { min-height: 200px; padding: 18px; }
+  .universeBottom { padding-top: 76px; }
+  .celestial { right: 7px; top: 15px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .yours *, .yours *::before, .yours *::after { transition: none !important; }
+  .universe:hover, .universe:hover .celestial, .universe:hover .cardArrow { transform: none; }
+}

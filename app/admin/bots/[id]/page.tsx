@@ -1,12 +1,9 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, type ReactElement } from 'react';
 import { useRouter } from 'next/navigation';
-import AuthLink from '@/app/admin/auth-link';
+import Link from 'next/link';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import {
   Table,
@@ -16,12 +13,26 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { Badge } from '@/components/ui/badge';
-import { AlertCircle, Loader2, ArrowLeft, Activity, TrendingUp, DollarSign, AlertTriangle, BarChart3, MessageSquare, Heart, Clock } from 'lucide-react';
+import { AlertCircle, ChevronDown, Server } from 'lucide-react';
 import BotTexturePicker from '@/components/bot-texture-picker';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
+import {
+  EmptyCard,
+  EntityRow,
+  Figure,
+  Figures,
+  InContext,
+  LoadError,
+  LoadingRows,
+  PageHeader,
+  SectionHeader,
+  StatLine,
+  count,
+} from '../../components/ds';
+import { Pager } from '../../discover/discover-ui';
+import { DateFilter, Detail, FilterRow, Panel, Pill } from '../bots-ui';
 
 interface Bot {
   id: string;
@@ -202,6 +213,8 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
   const [conversationsLoading, setConversationsLoading] = useState(false);
   const [emotions, setEmotions] = useState<EmotionData[]>([]);
   const [emotionsLoading, setEmotionsLoading] = useState(false);
+  // A tab whose data didn't load says so, rather than looking empty.
+  const [tabErrors, setTabErrors] = useState<{ metrics?: boolean; conversations?: boolean; emotions?: boolean }>({});
   const [conversationPage, setConversationPage] = useState(1);
   const [usagePage, setUsagePage] = useState(1);
   const [usagePageSize] = useState(50);
@@ -317,6 +330,7 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
     if (!botId) return;
     try {
       setMetricsLoading(true);
+      setTabErrors((prev) => ({ ...prev, metrics: false }));
       const { authenticatedFetch } = await import('@/lib/client-auth');
       
       const params = new URLSearchParams();
@@ -350,6 +364,7 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
       } else {
         const errorText = await metricsResponse.text();
         console.error('Failed to fetch metrics:', metricsResponse.status, errorText);
+        setTabErrors((prev) => ({ ...prev, metrics: true }));
       }
 
       if (statsResponse.ok) {
@@ -361,6 +376,7 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
       }
     } catch (err) {
       console.error('Error fetching metrics:', err);
+      setTabErrors((prev) => ({ ...prev, metrics: true }));
     } finally {
       setMetricsLoading(false);
     }
@@ -370,6 +386,7 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
     if (!botId) return;
     try {
       setConversationsLoading(true);
+      setTabErrors((prev) => ({ ...prev, conversations: false }));
       const { authenticatedFetch } = await import('@/lib/client-auth');
       
       const params = new URLSearchParams();
@@ -386,9 +403,12 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
       if (response.ok) {
         const data = await response.json();
         setConversations(data.conversations || []);
+      } else {
+        setTabErrors((prev) => ({ ...prev, conversations: true }));
       }
     } catch (err) {
       console.error('Error fetching conversations:', err);
+      setTabErrors((prev) => ({ ...prev, conversations: true }));
     } finally {
       setConversationsLoading(false);
     }
@@ -412,14 +432,18 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
     if (!botId) return;
     try {
       setEmotionsLoading(true);
+      setTabErrors((prev) => ({ ...prev, emotions: false }));
       const { authenticatedFetch } = await import('@/lib/client-auth');
       const response = await authenticatedFetch(`/api/bots/${botId}/emotions`);
       if (response.ok) {
         const data = await response.json();
         setEmotions(data || []);
+      } else {
+        setTabErrors((prev) => ({ ...prev, emotions: true }));
       }
     } catch (err) {
       console.error('Error fetching emotions:', err);
+      setTabErrors((prev) => ({ ...prev, emotions: true }));
     } finally {
       setEmotionsLoading(false);
     }
@@ -501,47 +525,84 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
     }
   }
 
-  // Show loading spinner during initial load
+  const pager = (page: number, totalPages: number, total: number, noun: [string, string], onChange: (page: number) => void) => (
+    <Pager page={page} totalPages={totalPages} total={total} noun={noun} onChange={(next) => onChange(Math.max(1, Math.min(totalPages, next)))} />
+  );
+
   if (loading || initialLoad) {
     return (
-      <div className="space-y-8">
-        <div className="flex items-center justify-center py-12">
-          <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-        </div>
+      <div className="grid min-w-0 gap-6">
+        <LoadingRows label="the bot" rows={3} />
       </div>
     );
   }
 
-  // Only show "not found" if we've completed the initial load and bot is null
-  if (!bot && !initialLoad) {
+  // Nothing to show at all: the bot is gone (and left no usage), or it couldn't be loaded.
+  if (!bot && usage.length === 0) {
     return (
-      <div className="space-y-8">
-        <Alert variant="destructive">
-          <AlertCircle className="h-4 w-4" />
-          <AlertDescription>Bot not found</AlertDescription>
-        </Alert>
+      <div className="grid min-w-0 gap-6">
+        {error && error !== 'Bot not found' ? (
+          <LoadError label="this bot" retry={fetchBot} />
+        ) : (
+          <EmptyCard kind="bot" title="This bot doesn’t exist." text="It may have been deleted." href="/admin/bots" action="All bots" />
+        )}
       </div>
     );
   }
+
+  const dateFilters = (idPrefix: string, onChange: () => void) => (
+    <FilterRow label="Date range" className="lg:grid-cols-2">
+      <DateFilter
+        id={`${idPrefix}StartDate`}
+        label="From"
+        value={filters.startDate}
+        onChange={(startDate) => {
+          setFilters({ ...filters, startDate });
+          onChange();
+        }}
+      />
+      <DateFilter
+        id={`${idPrefix}EndDate`}
+        label="To"
+        value={filters.endDate}
+        onChange={(endDate) => {
+          setFilters({ ...filters, endDate });
+          onChange();
+        }}
+      />
+    </FilterRow>
+  );
 
   return (
-    <div className="space-y-8">
-      <div className="flex items-center justify-between">
-          <div className="flex items-center gap-4">
-          <Button variant="ghost" size="sm" asChild>
-            <AuthLink href="/admin/bots">
-              <ArrowLeft className="mr-2 h-4 w-4" />
-              Back to Bots
-            </AuthLink>
-          </Button>
-          <div className="space-y-1">
-            <h1 className="text-4xl font-bold tracking-tight">{bot ? bot.name : 'Bot Usage History'}</h1>
-            <p className="text-muted-foreground text-lg">
-              Bot details and usage history
-            </p>
-          </div>
-        </div>
-      </div>
+    <div className="grid min-w-0 gap-6">
+      <PageHeader
+        kind="bot"
+        title={bot ? bot.name : 'Deleted bot'}
+        context={
+          bot ? (
+            <InContext
+              parts={[
+                { label: bot.room.world.universe.name, href: `/admin/universes/${bot.room.world.universe.id}` },
+                { label: bot.room.world.name, href: `/admin/worlds/${bot.room.world.id}` },
+                { label: bot.room.name, href: `/admin/rooms/${bot.room.id}` },
+              ]}
+            />
+          ) : (
+            <span>Its usage history is kept below.</span>
+          )
+        }
+        status={bot ? <Pill tone={bot.enabled ? 'ok' : 'off'}>{bot.enabled ? 'Enabled' : 'Disabled'}</Pill> : undefined}
+        actions={
+          bot ? (
+            <Button variant="outline" asChild>
+              <Link href={`/admin/bots/${bot.id}/mcp-servers`}>
+                <Server aria-hidden="true" />
+                MCP servers
+              </Link>
+            </Button>
+          ) : undefined
+        }
+      />
 
       {error && (
         <Alert variant={error.includes('deleted') ? 'default' : 'destructive'}>
@@ -550,908 +611,454 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
         </Alert>
       )}
 
-      {/* Tabs */}
-      <Tabs value={activeTab} onValueChange={(value) => {
-          if (value === 'mcp-servers' && botId) {
-            window.location.href = `/admin/bots/${botId}/mcp-servers`;
-            return;
-          }
-          setActiveTab(value);
-        }} className="w-full">
-        <TabsList className="grid w-full grid-cols-6">
-          <TabsTrigger value="overview">Overview</TabsTrigger>
-          <TabsTrigger value="usage">Usage</TabsTrigger>
-          <TabsTrigger value="metrics">Metrics</TabsTrigger>
-          <TabsTrigger value="conversations">Conversations</TabsTrigger>
-          <TabsTrigger value="emotions">Emotions</TabsTrigger>
-          <TabsTrigger value="mcp-servers">MCP Servers</TabsTrigger>
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="min-w-0">
+        <TabsList className="flex h-auto w-full justify-start gap-1 overflow-x-auto rounded-xl p-1">
+          <TabsTrigger value="overview" className="min-h-11 shrink-0 px-4">Overview</TabsTrigger>
+          <TabsTrigger value="usage" className="min-h-11 shrink-0 px-4">Usage</TabsTrigger>
+          <TabsTrigger value="metrics" className="min-h-11 shrink-0 px-4">Metrics</TabsTrigger>
+          <TabsTrigger value="conversations" className="min-h-11 shrink-0 px-4">Conversations</TabsTrigger>
+          <TabsTrigger value="emotions" className="min-h-11 shrink-0 px-4">Emotions</TabsTrigger>
         </TabsList>
 
-        {/* Overview Tab */}
-        <TabsContent value="overview" className="space-y-6 animate-in fade-in-50 duration-200">
-      {/* Bot Details */}
-      {bot && (
-      <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
-        <Card>
-          <CardHeader>
-            <CardTitle>Basic Information</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div>
-              <div className="text-sm font-medium text-muted-foreground">Bot ID</div>
-              <div className="text-base font-mono text-sm">{bot.id}</div>
-            </div>
-            <div>
-              <div className="text-sm font-medium text-muted-foreground">Name</div>
-              <div className="text-base">{bot.name}</div>
-            </div>
-            {bot.description && (
-              <div>
-                <div className="text-sm font-medium text-muted-foreground">Description</div>
-                <div className="text-base">{bot.description}</div>
-              </div>
-            )}
-            <div>
-              <div className="text-sm font-medium text-muted-foreground">Status</div>
-              <Badge variant={bot.enabled ? 'default' : 'secondary'}>
-                {bot.enabled ? 'Enabled' : 'Disabled'}
-              </Badge>
-            </div>
-            {bot.aiProviderRef && (
-              <div>
-                <div className="text-sm font-medium text-muted-foreground">AI Provider</div>
-                <AuthLink
-                  href={`/admin/ai-providers/${bot.aiProviderRef}`}
-                  className="text-base text-primary hover:underline"
-                >
-                  {bot.aiProviderRef}
-                </AuthLink>
-              </div>
-            )}
-            <div>
-              <div className="text-sm font-medium text-muted-foreground">Behavior Type</div>
-              <Badge variant="outline">{bot.behaviorType}</Badge>
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Location</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div>
-              <div className="text-sm font-medium text-muted-foreground">Room</div>
-              <AuthLink
-                href={`/admin/rooms/${bot.room.id}`}
-                className="text-base text-primary hover:underline"
-              >
-                {bot.room.name}
-              </AuthLink>
-            </div>
-            <div>
-              <div className="text-sm font-medium text-muted-foreground">World</div>
-              <AuthLink
-                href={`/admin/worlds/${bot.room.world.id}`}
-                className="text-base text-primary hover:underline"
-              >
-                {bot.room.world.name}
-              </AuthLink>
-            </div>
-            <div>
-              <div className="text-sm font-medium text-muted-foreground">Universe</div>
-              <AuthLink
-                href={`/admin/universes/${bot.room.world.universe.id}`}
-                className="text-base text-primary hover:underline"
-              >
-                {bot.room.world.universe.name}
-              </AuthLink>
-            </div>
-            {bot.createdBy && (
-              <div>
-                <div className="text-sm font-medium text-muted-foreground">Created By</div>
-                <div className="text-base">{bot.createdBy.name || bot.createdBy.email}</div>
-              </div>
-            )}
-            <div>
-              <div className="text-sm font-medium text-muted-foreground">Created At</div>
-              <div className="text-base">{formatDate(bot.createdAt)}</div>
-            </div>
-          </CardContent>
-        </Card>
-
-        <BotTexturePicker
-          botId={bot.id}
-          currentTextureId={bot.characterTextureId}
-          onTextureChanged={fetchBot}
-        />
-      </div>
-      )}
-        </TabsContent>
-
-        {/* Usage Tab */}
-        <TabsContent value="usage" className="space-y-6 animate-in fade-in-50 duration-200">
-      {stats && (
-        <>
-              {/* Usage Statistics */}
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-5">
-            <Card>
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium">Total API Calls</CardTitle>
-                <Activity className="h-4 w-4 text-muted-foreground" />
-              </CardHeader>
-              <CardContent>
-                <div className="text-2xl font-bold">{formatNumber(stats.totalCalls)}</div>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium">Total Tokens</CardTitle>
-                <TrendingUp className="h-4 w-4 text-muted-foreground" />
-              </CardHeader>
-              <CardContent>
-                <div className="text-2xl font-bold">{formatNumber(stats.totalTokens)}</div>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium">Total Cost</CardTitle>
-                <DollarSign className="h-4 w-4 text-muted-foreground" />
-              </CardHeader>
-              <CardContent>
-                <div className="text-2xl font-bold">{formatCurrency(stats.totalCost)}</div>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium">Total Duration</CardTitle>
-                <Activity className="h-4 w-4 text-muted-foreground" />
-              </CardHeader>
-              <CardContent>
-                <div className="text-2xl font-bold">
-                  {formatDuration(stats.totalDuration)}
-                </div>
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium">Errors</CardTitle>
-                <AlertTriangle className="h-4 w-4 text-muted-foreground" />
-              </CardHeader>
-              <CardContent>
-                <div className="text-2xl font-bold">{formatNumber(stats.errorCount)}</div>
-                <p className="text-xs text-muted-foreground">
-                  {stats.totalCalls > 0
-                    ? `${((stats.errorCount / stats.totalCalls) * 100).toFixed(2)}% error rate`
-                    : 'N/A'}
-                </p>
-              </CardContent>
-            </Card>
-          </div>
-
-          {/* Usage by Provider */}
-          {Object.keys(stats.byProvider).length > 0 && (
-            <Card>
-              <CardHeader>
-                <CardTitle>Usage by Provider</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="space-y-4">
-                  {Object.values(stats.byProvider).map((provider) => (
-                    <div
-                      key={provider.providerId}
-                      className="flex items-center justify-between border-b pb-4 last:border-0"
-                    >
-                      <div>
-                        <AuthLink
-                          href={`/admin/ai-providers/${provider.providerId}`}
-                          className="font-semibold text-primary hover:underline"
-                        >
-                          {provider.providerName}
-                        </AuthLink>
-                        <div className="text-sm text-muted-foreground">
-                          {provider.providerType} • {provider.providerId}
-                        </div>
+        <TabsContent value="overview" className="mt-6 grid min-w-0 gap-6">
+          {bot ? (
+            <>
+              <section aria-labelledby="bot-details" className="min-w-0">
+                <SectionHeader id="bot-details" title="Details" />
+                <div className="rounded-2xl border bg-card p-4 sm:p-5">
+                  <dl className="grid gap-4 sm:grid-cols-2">
+                    {bot.description && (
+                      <div className="sm:col-span-2">
+                        <Detail label="Description">{bot.description}</Detail>
                       </div>
-                      <div className="text-right space-y-1">
-                        <div className="text-sm">
-                          {formatNumber(provider.calls)} calls • {formatNumber(provider.tokens)} tokens
-                        </div>
-                        <div className="text-sm font-medium">
-                          {formatCurrency(provider.cost)}
-                        </div>
-                        {provider.errors > 0 && (
-                          <div className="text-xs text-destructive">
-                            {provider.errors} errors
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  ))}
+                    )}
+                    <Detail label="AI provider">
+                      {bot.aiProviderRef ? (
+                        <Link href={`/admin/ai-providers/${bot.aiProviderRef}`} className="underline-offset-4 hover:underline">
+                          {bot.aiProviderRef}
+                        </Link>
+                      ) : (
+                        <span className="text-muted-foreground">None</span>
+                      )}
+                    </Detail>
+                    <Detail label="Behavior">{bot.behaviorType}</Detail>
+                    <Detail label="Room">
+                      <Link href={`/admin/rooms/${bot.room.id}`} className="underline-offset-4 hover:underline">
+                        {bot.room.name}
+                      </Link>
+                    </Detail>
+                    <Detail label="World">
+                      <Link href={`/admin/worlds/${bot.room.world.id}`} className="underline-offset-4 hover:underline">
+                        {bot.room.world.name}
+                      </Link>
+                    </Detail>
+                    <Detail label="Universe">
+                      <Link href={`/admin/universes/${bot.room.world.universe.id}`} className="underline-offset-4 hover:underline">
+                        {bot.room.world.universe.name}
+                      </Link>
+                    </Detail>
+                    {bot.createdBy && <Detail label="Created by">{bot.createdBy.name || bot.createdBy.email}</Detail>}
+                    <Detail label="Created">{formatDate(bot.createdAt)}</Detail>
+                  </dl>
+                  <details className="mt-4 border-t pt-4">
+                    <summary className="cursor-pointer text-sm text-muted-foreground hover:text-foreground">Advanced</summary>
+                    <dl className="mt-3">
+                      <Detail label="Bot ID">
+                        <code className="font-mono text-xs">{bot.id}</code>
+                      </Detail>
+                    </dl>
+                  </details>
                 </div>
-              </CardContent>
-            </Card>
-          )}
-        </>
-      )}
+              </section>
 
-      {/* Filters */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Filters</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-            <div className="space-y-2">
-                  <Label htmlFor="usageStartDate">Start Date</Label>
-              <Input
-                    id="usageStartDate"
-                type="date"
-                value={filters.startDate}
-                    onChange={(e) => {
-                      setFilters({ ...filters, startDate: e.target.value });
-                      setUsagePage(1);
-                    }}
-              />
-            </div>
-            <div className="space-y-2">
-                  <Label htmlFor="usageEndDate">End Date</Label>
-              <Input
-                    id="usageEndDate"
-                type="date"
-                value={filters.endDate}
-                    onChange={(e) => {
-                      setFilters({ ...filters, endDate: e.target.value });
-                      setUsagePage(1);
-                    }}
-              />
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Usage History Table */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Usage History</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {usage.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No usage data available</p>
+              <BotTexturePicker botId={bot.id} currentTextureId={bot.characterTextureId} onTextureChanged={fetchBot} />
+            </>
           ) : (
-                <>
-            <div className="overflow-x-auto">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Timestamp</TableHead>
-                    <TableHead>Provider</TableHead>
-                    <TableHead>API Calls</TableHead>
-                    <TableHead>Tokens</TableHead>
-                    <TableHead>Cost</TableHead>
-                    <TableHead>Duration</TableHead>
-                    <TableHead>Latency</TableHead>
-                    <TableHead>Status</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                        {usage
-                          .slice((usagePage - 1) * usagePageSize, usagePage * usagePageSize)
-                          .map((entry) => (
-                    <TableRow key={entry.id}>
-                      <TableCell>{formatDate(entry.timestamp)}</TableCell>
-                      <TableCell>
-                        <AuthLink
-                          href={`/admin/ai-providers/${entry.provider.providerId}`}
-                          className="text-primary hover:underline"
-                        >
-                          {entry.provider.name}
-                        </AuthLink>
-                      </TableCell>
-                      <TableCell>{formatNumber(entry.apiCalls)}</TableCell>
-                      <TableCell>{formatNumber(entry.tokensUsed)}</TableCell>
-                      <TableCell>
-                        {entry.cost ? formatCurrency(entry.cost) : 'N/A'}
-                      </TableCell>
-                      <TableCell>
-                        {entry.durationSeconds ? formatDuration(entry.durationSeconds) : 'N/A'}
-                      </TableCell>
-                      <TableCell>
-                        {entry.latency ? `${entry.latency}ms` : 'N/A'}
-                      </TableCell>
-                      <TableCell>
-                        {entry.error ? (
-                          <Badge variant="destructive">Error</Badge>
-                        ) : (
-                          <Badge variant="default">Success</Badge>
-                        )}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
-
-                  {/* Pagination */}
-                  {usage.length > usagePageSize && (
-                    <div className="flex items-center justify-between mt-4 pt-4 border-t">
-                      <div className="text-sm text-muted-foreground">
-                        Showing {((usagePage - 1) * usagePageSize) + 1} - {Math.min(usagePage * usagePageSize, usage.length)} of {displayedEntries} entries
-                        {totalEntries > displayedEntries && (
-                          <span className="ml-2 text-xs italic">
-                            (out of {formatNumber(totalEntries)} total)
-                          </span>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => setUsagePage(p => Math.max(1, p - 1))}
-                          disabled={usagePage === 1}
-                        >
-                          Previous
-                        </Button>
-                        <div className="text-sm text-muted-foreground">
-                          Page {usagePage} of {Math.ceil(usage.length / usagePageSize)}
-                        </div>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => setUsagePage(p => p + 1)}
-                          disabled={usagePage >= Math.ceil(usage.length / usagePageSize)}
-                        >
-                          Next
-                        </Button>
-                      </div>
-                    </div>
-                  )}
-                </>
+            <p className="text-sm text-muted-foreground">This bot was deleted. Its usage history is under Usage.</p>
           )}
-        </CardContent>
-      </Card>
         </TabsContent>
 
-        {/* Metrics Tab */}
-        <TabsContent value="metrics" className="space-y-6 animate-in fade-in-50 duration-200">
-          <Card>
-            <CardHeader>
-              <CardTitle>Date Range</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                <div className="space-y-2">
-                  <Label htmlFor="metricsStartDate">Start Date</Label>
-                  <Input
-                    id="metricsStartDate"
-                    type="date"
-                    value={filters.startDate}
-                    onChange={(e) => {
-                      setFilters({ ...filters, startDate: e.target.value });
-                      fetchMetrics();
-                    }}
+        <TabsContent value="usage" className="mt-6 grid min-w-0 gap-6">
+          {stats && (
+            <Figures>
+              <Figure value={stats.totalCalls} label="API calls" />
+              <Figure value={stats.totalTokens} label="tokens" />
+              <Figure value={formatCurrency(stats.totalCost)} label="cost" />
+              <Figure value={formatDuration(stats.totalDuration)} label="duration" />
+              <Figure
+                value={stats.errorCount}
+                label={stats.totalCalls > 0 ? `errors · ${((stats.errorCount / stats.totalCalls) * 100).toFixed(2)}% error rate` : 'errors'}
+              />
+            </Figures>
+          )}
+
+          {stats && Object.keys(stats.byProvider).length > 0 && (
+            <section aria-labelledby="usage-providers" className="min-w-0">
+              <SectionHeader id="usage-providers" title="By provider" count={Object.keys(stats.byProvider).length} />
+              <div className="grid min-w-0 gap-0.5">
+                {Object.values(stats.byProvider).map((provider) => (
+                  <EntityRow
+                    key={provider.providerId}
+                    href={`/admin/ai-providers/${provider.providerId}`}
+                    kind="provider"
+                    title={provider.providerName}
+                    context={<StatLine items={[provider.providerType, provider.providerId]} />}
+                    meta={
+                      <StatLine
+                        items={[
+                          count(provider.calls, 'call'),
+                          count(provider.tokens, 'token'),
+                          provider.errors > 0 && count(provider.errors, 'error'),
+                        ]}
+                      />
+                    }
+                    aside={<strong className="text-sm">{formatCurrency(provider.cost)}</strong>}
                   />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="metricsEndDate">End Date</Label>
-                  <Input
-                    id="metricsEndDate"
-                    type="date"
-                    value={filters.endDate}
-                    onChange={(e) => {
-                      setFilters({ ...filters, endDate: e.target.value });
-                      fetchMetrics();
-                    }}
-                  />
-                </div>
+                ))}
               </div>
-            </CardContent>
-          </Card>
+            </section>
+          )}
+
+          {dateFilters('usage', () => setUsagePage(1))}
+
+          <section aria-labelledby="usage-history" className="min-w-0">
+            <SectionHeader id="usage-history" title="Usage history" count={displayedEntries} />
+            {usage.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No usage in this range.</p>
+            ) : (
+              <>
+                <Panel>
+                  <div className="overflow-x-auto">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Time</TableHead>
+                          <TableHead>Provider</TableHead>
+                          <TableHead>API calls</TableHead>
+                          <TableHead>Tokens</TableHead>
+                          <TableHead>Cost</TableHead>
+                          <TableHead>Duration</TableHead>
+                          <TableHead>Latency</TableHead>
+                          <TableHead>Status</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {usage.slice((usagePage - 1) * usagePageSize, usagePage * usagePageSize).map((entry) => (
+                          <TableRow key={entry.id}>
+                            <TableCell>{formatDate(entry.timestamp)}</TableCell>
+                            <TableCell>
+                              <Link href={`/admin/ai-providers/${entry.provider.providerId}`} className="underline-offset-4 hover:underline">
+                                {entry.provider.name}
+                              </Link>
+                            </TableCell>
+                            <TableCell>{formatNumber(entry.apiCalls)}</TableCell>
+                            <TableCell>{formatNumber(entry.tokensUsed)}</TableCell>
+                            <TableCell>{entry.cost ? formatCurrency(entry.cost) : 'N/A'}</TableCell>
+                            <TableCell>{entry.durationSeconds ? formatDuration(entry.durationSeconds) : 'N/A'}</TableCell>
+                            <TableCell>{entry.latency ? `${entry.latency}ms` : 'N/A'}</TableCell>
+                            <TableCell>
+                              <Pill tone={entry.error ? 'bad' : 'ok'}>{entry.error ? 'Error' : 'Success'}</Pill>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                </Panel>
+                {pager(usagePage, Math.ceil(usage.length / usagePageSize), displayedEntries, ['entry', 'entries'], setUsagePage)}
+                {totalEntries > displayedEntries && (
+                  <p className="text-xs text-muted-foreground">
+                    Showing the latest {formatNumber(displayedEntries)} of {formatNumber(totalEntries)} entries.
+                  </p>
+                )}
+              </>
+            )}
+          </section>
+        </TabsContent>
+
+        <TabsContent value="metrics" className="mt-6 grid min-w-0 gap-6">
+          {dateFilters('metrics', fetchMetrics)}
 
           {metricsLoading ? (
-            <div className="flex items-center justify-center py-12">
-              <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-            </div>
+            <LoadingRows label="metrics" rows={3} />
+          ) : tabErrors.metrics ? (
+            <LoadError label="metrics" retry={fetchMetrics} />
           ) : !metrics || metrics.length === 0 ? (
-            <Card>
-              <CardContent className="py-12 text-center">
-                <BarChart3 className="h-12 w-12 mx-auto mb-4 text-muted-foreground opacity-50" />
-                <h3 className="text-lg font-semibold mb-2">No metrics available</h3>
-                <p className="text-sm text-muted-foreground">
-                  Metrics will appear here once the bot starts collecting performance data.
-                </p>
-              </CardContent>
-            </Card>
+            <EmptyCard kind="bot" title="No metrics yet." text="Metrics appear here once the bot starts collecting performance data." />
           ) : (
             <>
-              {/* Metric Summary Cards */}
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
-                {(() => {
-                  // Use stats from dedicated endpoint if available (more accurate)
-                  // Otherwise fall back to calculating from grouped metrics
-                  const avgResponseTime = metricsStats?.avgResponseTime ?? 
-                    (metrics.filter(m => m?.metrics?.responseTime != null && typeof m.metrics.responseTime === 'number' && m.metrics.responseTime > 0).length > 0
-                      ? metrics.filter(m => m?.metrics?.responseTime != null && typeof m.metrics.responseTime === 'number' && m.metrics.responseTime > 0)
-                          .reduce((sum, m) => sum + (m.metrics.responseTime || 0), 0) / 
-                        metrics.filter(m => m?.metrics?.responseTime != null && typeof m.metrics.responseTime === 'number' && m.metrics.responseTime > 0).length
-                      : 0);
-                  
-                  const totalTokens = metricsStats?.totalTokens ?? 
-                    metrics.reduce((sum, m) => {
-                      const tokenTotal = m?.metrics?.tokenUsage?.total;
-                      return sum + (tokenTotal != null && typeof tokenTotal === 'number' ? tokenTotal : 0);
-                    }, 0);
-                  
-                  const totalErrors = metricsStats?.totalErrors ?? 
-                    metrics.reduce((sum, m) => {
-                      const errorCount = m?.metrics?.errorCount;
-                      return sum + (errorCount != null && typeof errorCount === 'number' ? errorCount : 0);
-                    }, 0);
-                  
-                  const avgRepetition = metricsStats?.avgRepetition ?? 
-                    (metrics.filter(m => m?.metrics?.repetitionScore != null && typeof m.metrics.repetitionScore === 'number').length > 0
-                      ? metrics.filter(m => m?.metrics?.repetitionScore != null && typeof m.metrics.repetitionScore === 'number')
-                          .reduce((sum, m) => sum + (m.metrics.repetitionScore || 0), 0) / 
-                        metrics.filter(m => m?.metrics?.repetitionScore != null && typeof m.metrics.repetitionScore === 'number').length
-                      : 0);
+              {(() => {
+                // Use stats from dedicated endpoint if available (more accurate)
+                // Otherwise fall back to calculating from grouped metrics
+                const avgResponseTime = metricsStats?.avgResponseTime ??
+                  (metrics.filter(m => m?.metrics?.responseTime != null && typeof m.metrics.responseTime === 'number' && m.metrics.responseTime > 0).length > 0
+                    ? metrics.filter(m => m?.metrics?.responseTime != null && typeof m.metrics.responseTime === 'number' && m.metrics.responseTime > 0)
+                        .reduce((sum, m) => sum + (m.metrics.responseTime || 0), 0) /
+                      metrics.filter(m => m?.metrics?.responseTime != null && typeof m.metrics.responseTime === 'number' && m.metrics.responseTime > 0).length
+                    : 0);
 
-                  return (
-                    <>
-                      <Card>
-                        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                          <CardTitle className="text-sm font-medium">Avg Response Time</CardTitle>
-                          <Clock className="h-4 w-4 text-muted-foreground" />
-                        </CardHeader>
-                        <CardContent>
-                          <div className="text-2xl font-bold">{avgResponseTime.toFixed(0)}ms</div>
-                          {metricsStats && metricsStats.responseTimeCount === 0 && (
-                            <div className="text-xs text-muted-foreground mt-1">Not available - bot not sending this metric</div>
-                          )}
-                        </CardContent>
-                      </Card>
-                      <Card>
-                        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                          <CardTitle className="text-sm font-medium">Total Tokens</CardTitle>
-                          <TrendingUp className="h-4 w-4 text-muted-foreground" />
-                        </CardHeader>
-                        <CardContent>
-                          <div className="text-2xl font-bold">{formatNumber(totalTokens)}</div>
-                          {metricsStats && totalTokens === 0 && (
-                            <div className="text-xs text-muted-foreground mt-1">Not available - bot not sending this metric</div>
-                          )}
-                        </CardContent>
-                      </Card>
-                      <Card>
-                        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                          <CardTitle className="text-sm font-medium">Total Errors</CardTitle>
-                          <AlertTriangle className="h-4 w-4 text-muted-foreground" />
-                        </CardHeader>
-                        <CardContent>
-                          <div className="text-2xl font-bold">{formatNumber(totalErrors)}</div>
-                          {metricsStats && totalErrors === 0 && (
-                            <div className="text-xs text-muted-foreground mt-1">Not available - bot not sending this metric</div>
-                          )}
-                        </CardContent>
-                      </Card>
-                      <Card>
-                        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                          <CardTitle className="text-sm font-medium">Avg Repetition Score</CardTitle>
-                          <BarChart3 className="h-4 w-4 text-muted-foreground" />
-                        </CardHeader>
-                        <CardContent>
-                          <div className="text-2xl font-bold">{avgRepetition.toFixed(2)}</div>
-                          {metricsStats && metricsStats.repetitionCount === 0 && (
-                            <div className="text-xs text-muted-foreground mt-1">Not available - bot not sending this metric</div>
-                          )}
-                        </CardContent>
-                      </Card>
-                    </>
-                  );
-                })()}
-              </div>
+                const totalTokens = metricsStats?.totalTokens ??
+                  metrics.reduce((sum, m) => {
+                    const tokenTotal = m?.metrics?.tokenUsage?.total;
+                    return sum + (tokenTotal != null && typeof tokenTotal === 'number' ? tokenTotal : 0);
+                  }, 0);
 
-              {/* Response Time Chart */}
+                const totalErrors = metricsStats?.totalErrors ??
+                  metrics.reduce((sum, m) => {
+                    const errorCount = m?.metrics?.errorCount;
+                    return sum + (errorCount != null && typeof errorCount === 'number' ? errorCount : 0);
+                  }, 0);
+
+                const avgRepetition = metricsStats?.avgRepetition ??
+                  (metrics.filter(m => m?.metrics?.repetitionScore != null && typeof m.metrics.repetitionScore === 'number').length > 0
+                    ? metrics.filter(m => m?.metrics?.repetitionScore != null && typeof m.metrics.repetitionScore === 'number')
+                        .reduce((sum, m) => sum + (m.metrics.repetitionScore || 0), 0) /
+                      metrics.filter(m => m?.metrics?.repetitionScore != null && typeof m.metrics.repetitionScore === 'number').length
+                    : 0);
+
+                const notSent = [
+                  metricsStats && metricsStats.responseTimeCount === 0 && 'response time',
+                  metricsStats && totalTokens === 0 && 'tokens',
+                  metricsStats && totalErrors === 0 && 'errors',
+                  metricsStats && metricsStats.repetitionCount === 0 && 'repetition',
+                ].filter(Boolean);
+
+                return (
+                  <div className="grid gap-2">
+                    <Figures>
+                      <Figure value={`${avgResponseTime.toFixed(0)}ms`} label="avg response time" />
+                      <Figure value={totalTokens} label="tokens" />
+                      <Figure value={totalErrors} label="errors" />
+                      <Figure value={avgRepetition.toFixed(2)} label="avg repetition score" />
+                    </Figures>
+                    {notSent.length > 0 && (
+                      <p className="text-xs text-muted-foreground">Not sent by this bot: {notSent.join(', ')}.</p>
+                    )}
+                  </div>
+                );
+              })()}
+
               {metrics.some(m => m.metrics.responseTime) && (
-                <Card>
-                  <CardHeader>
-                    <CardTitle>Response Time Over Time</CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <ResponsiveContainer width="100%" height={300}>
-                      <LineChart data={metrics.filter(m => m.metrics.responseTime).map(m => ({
-                        time: new Date(m.timestamp).toLocaleString(),
-                        timestamp: m.timestamp,
-                        responseTime: m.metrics.responseTime,
-                      }))}>
-                        <CartesianGrid strokeDasharray="3 3" />
-                        <XAxis dataKey="time" tick={{ fontSize: 12 }} />
-                        <YAxis label={{ value: 'ms', angle: -90, position: 'insideLeft' }} />
-                        <Tooltip />
-                        <Legend />
-                        <Line type="monotone" dataKey="responseTime" stroke="#8884d8" name="Response Time (ms)" />
-                      </LineChart>
-                    </ResponsiveContainer>
-                  </CardContent>
-                </Card>
+                <ChartSection id="chart-response-time" title="Response time">
+                  <LineChart data={metrics.filter(m => m.metrics.responseTime).map(m => ({
+                    time: new Date(m.timestamp).toLocaleString(),
+                    timestamp: m.timestamp,
+                    responseTime: m.metrics.responseTime,
+                  }))}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="time" tick={{ fontSize: 12 }} />
+                    <YAxis label={{ value: 'ms', angle: -90, position: 'insideLeft' }} />
+                    <Tooltip />
+                    <Legend />
+                    <Line type="monotone" dataKey="responseTime" stroke="#4156f6" name="Response time (ms)" />
+                  </LineChart>
+                </ChartSection>
               )}
 
-              {/* Token Usage Chart */}
               {metrics.some(m => m.metrics.tokenUsage?.total) && (
-                <Card>
-                  <CardHeader>
-                    <CardTitle>Token Usage Over Time</CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <ResponsiveContainer width="100%" height={300}>
-                      <LineChart data={metrics.filter(m => m.metrics.tokenUsage?.total).map(m => ({
-                        time: new Date(m.timestamp).toLocaleString(),
-                        timestamp: m.timestamp,
-                        total: m.metrics.tokenUsage?.total || 0,
-                        prompt: m.metrics.tokenUsage?.prompt || 0,
-                        completion: m.metrics.tokenUsage?.completion || 0,
-                      }))}>
-                        <CartesianGrid strokeDasharray="3 3" />
-                        <XAxis dataKey="time" tick={{ fontSize: 12 }} />
-                        <YAxis label={{ value: 'Tokens', angle: -90, position: 'insideLeft' }} />
-                        <Tooltip />
-                        <Legend />
-                        <Line type="monotone" dataKey="total" stroke="#82ca9d" name="Total" />
-                        <Line type="monotone" dataKey="prompt" stroke="#8884d8" name="Prompt" />
-                        <Line type="monotone" dataKey="completion" stroke="#ffc658" name="Completion" />
-                      </LineChart>
-                    </ResponsiveContainer>
-                  </CardContent>
-                </Card>
+                <ChartSection id="chart-tokens" title="Token usage">
+                  <LineChart data={metrics.filter(m => m.metrics.tokenUsage?.total).map(m => ({
+                    time: new Date(m.timestamp).toLocaleString(),
+                    timestamp: m.timestamp,
+                    total: m.metrics.tokenUsage?.total || 0,
+                    prompt: m.metrics.tokenUsage?.prompt || 0,
+                    completion: m.metrics.tokenUsage?.completion || 0,
+                  }))}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="time" tick={{ fontSize: 12 }} />
+                    <YAxis label={{ value: 'Tokens', angle: -90, position: 'insideLeft' }} />
+                    <Tooltip />
+                    <Legend />
+                    <Line type="monotone" dataKey="total" stroke="#10b981" name="Total" />
+                    <Line type="monotone" dataKey="prompt" stroke="#4156f6" name="Prompt" />
+                    <Line type="monotone" dataKey="completion" stroke="#f59e0b" name="Completion" />
+                  </LineChart>
+                </ChartSection>
               )}
 
-              {/* Error Count Chart */}
               {metrics.some(m => m.metrics.errorCount) && (
-                <Card>
-                  <CardHeader>
-                    <CardTitle>Error Count Over Time</CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <ResponsiveContainer width="100%" height={300}>
-                      <LineChart data={metrics.filter(m => m.metrics.errorCount).map(m => ({
-                        time: new Date(m.timestamp).toLocaleString(),
-                        timestamp: m.timestamp,
-                        errorCount: m.metrics.errorCount || 0,
-                      }))}>
-                        <CartesianGrid strokeDasharray="3 3" />
-                        <XAxis dataKey="time" tick={{ fontSize: 12 }} />
-                        <YAxis label={{ value: 'Errors', angle: -90, position: 'insideLeft' }} />
-                        <Tooltip />
-                        <Legend />
-                        <Line type="monotone" dataKey="errorCount" stroke="#ff6b6b" name="Error Count" />
-                      </LineChart>
-                    </ResponsiveContainer>
-                  </CardContent>
-                </Card>
+                <ChartSection id="chart-errors" title="Errors">
+                  <LineChart data={metrics.filter(m => m.metrics.errorCount).map(m => ({
+                    time: new Date(m.timestamp).toLocaleString(),
+                    timestamp: m.timestamp,
+                    errorCount: m.metrics.errorCount || 0,
+                  }))}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="time" tick={{ fontSize: 12 }} />
+                    <YAxis label={{ value: 'Errors', angle: -90, position: 'insideLeft' }} />
+                    <Tooltip />
+                    <Legend />
+                    <Line type="monotone" dataKey="errorCount" stroke="#ef4444" name="Errors" />
+                  </LineChart>
+                </ChartSection>
               )}
             </>
           )}
         </TabsContent>
 
-        {/* Conversations Tab */}
-        <TabsContent value="conversations" className="space-y-6 animate-in fade-in-50 duration-200">
+        <TabsContent value="conversations" className="mt-6 grid min-w-0 gap-6">
           {conversationStats && (
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-              <Card>
-                <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                  <CardTitle className="text-sm font-medium">Total Conversations</CardTitle>
-                  <MessageSquare className="h-4 w-4 text-muted-foreground" />
-                </CardHeader>
-                <CardContent>
-                  <div className="text-2xl font-bold">{formatNumber(conversationStats.totalConversations)}</div>
-                </CardContent>
-              </Card>
-              <Card>
-                <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                  <CardTitle className="text-sm font-medium">Oldest</CardTitle>
-                  <Clock className="h-4 w-4 text-muted-foreground" />
-                </CardHeader>
-                <CardContent>
-                  <div className="text-sm">{new Date(conversationStats.oldestConversation).toLocaleDateString()}</div>
-                </CardContent>
-              </Card>
-              <Card>
-                <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                  <CardTitle className="text-sm font-medium">Newest</CardTitle>
-                  <Clock className="h-4 w-4 text-muted-foreground" />
-                </CardHeader>
-                <CardContent>
-                  <div className="text-sm">{new Date(conversationStats.newestConversation).toLocaleDateString()}</div>
-                </CardContent>
-              </Card>
-            </div>
+            <Figures>
+              <Figure value={conversationStats.totalConversations} label="conversations" />
+              <Figure value={new Date(conversationStats.oldestConversation).toLocaleDateString()} label="oldest" />
+              <Figure value={new Date(conversationStats.newestConversation).toLocaleDateString()} label="newest" />
+            </Figures>
           )}
 
-          <Card>
-            <CardHeader>
-              <CardTitle>Filters</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                <div className="space-y-2">
-                  <Label htmlFor="convStartDate">Start Date</Label>
-                  <Input
-                    id="convStartDate"
-                    type="date"
-                    value={filters.startDate}
-                    onChange={(e) => {
-                      setFilters({ ...filters, startDate: e.target.value });
-                      setConversationPage(1);
-                    }}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="convEndDate">End Date</Label>
-                  <Input
-                    id="convEndDate"
-                    type="date"
-                    value={filters.endDate}
-                    onChange={(e) => {
-                      setFilters({ ...filters, endDate: e.target.value });
-                      setConversationPage(1);
-                    }}
-                  />
-                </div>
-              </div>
-            </CardContent>
-          </Card>
+          {dateFilters('conv', () => setConversationPage(1))}
 
           {conversationsLoading ? (
-            <div className="flex items-center justify-center py-12">
-              <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-            </div>
+            <LoadingRows label="conversations" rows={4} />
+          ) : tabErrors.conversations ? (
+            <LoadError label="conversations" retry={fetchConversations} />
           ) : conversations.length === 0 ? (
-            <Card>
-              <CardContent className="py-12 text-center">
-                <MessageSquare className="h-12 w-12 mx-auto mb-4 text-muted-foreground opacity-50" />
-                <h3 className="text-lg font-semibold mb-2">No conversations yet</h3>
-                <p className="text-sm text-muted-foreground">
-                  Conversations will appear here once players interact with this bot.
-                </p>
-              </CardContent>
-            </Card>
+            <EmptyCard kind="bot" title="No conversations yet." text="Conversations appear here once players talk to this bot." />
           ) : (
-            <div className="space-y-4">
+            <div className="grid min-w-0 gap-2">
               {conversations.map((conv) => (
-                <Collapsible key={conv.id}>
-                  <Card>
-                    <CollapsibleTrigger className="w-full">
-                      <CardHeader>
-                        <div className="flex items-center justify-between">
-                          <div className="text-left">
-                            <CardTitle className="text-base">
-                              {conv.user?.name || conv.userName || conv.userUuid || 'Unknown User'}
-                            </CardTitle>
-                            <div className="text-sm text-muted-foreground mt-1">
-                              {formatRelativeTime(new Date(conv.endedAt).getTime())} • {conv.messageCount} messages • {formatConversationDuration(conv.startedAt, conv.endedAt)}
-                            </div>
-                            <div className="flex items-center gap-2 mt-2">
-                              <Badge variant={getConversationStatus(conv.startedAt, conv.endedAt) === 'active' ? 'default' : 'secondary'} className="text-xs">
-                                {getConversationStatus(conv.startedAt, conv.endedAt) === 'active' ? 'Active' : 'Completed'}
-                              </Badge>
-                              {conv.endReason && (
-                                <Badge variant="outline" className="text-xs">
-                                  {formatEndReason(conv.endReason)}
-                                </Badge>
-                              )}
-                              {conv.isGuest && (
-                                <Badge variant="outline" className="text-xs">Guest</Badge>
-                              )}
-                            </div>
-                          </div>
-                          <div className="text-sm text-muted-foreground">
-                            {new Date(conv.endedAt).toLocaleString()}
+                <Collapsible key={conv.id} className="min-w-0 rounded-2xl border bg-card">
+                  <CollapsibleTrigger className="group flex min-h-11 w-full items-start justify-between gap-3 rounded-2xl p-4 text-left hover:bg-muted/40">
+                    <span className="min-w-0 space-y-1.5">
+                      <strong className="block text-sm [overflow-wrap:anywhere]">
+                        {conv.user?.name || conv.userName || conv.userUuid || 'Unknown player'}
+                      </strong>
+                      <StatLine
+                        items={[
+                          formatRelativeTime(new Date(conv.endedAt).getTime()),
+                          count(conv.messageCount, 'message'),
+                          formatConversationDuration(conv.startedAt, conv.endedAt),
+                        ]}
+                      />
+                      <span className="flex flex-wrap gap-1.5">
+                        <Pill tone={getConversationStatus(conv.startedAt, conv.endedAt) === 'active' ? 'ok' : 'off'}>
+                          {getConversationStatus(conv.startedAt, conv.endedAt) === 'active' ? 'Active' : 'Completed'}
+                        </Pill>
+                        {conv.endReason && <Pill>{formatEndReason(conv.endReason)}</Pill>}
+                        {conv.isGuest && <Pill>Guest</Pill>}
+                      </span>
+                    </span>
+                    <span className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
+                      <span className="hidden sm:inline">{new Date(conv.endedAt).toLocaleString()}</span>
+                      <ChevronDown className="h-4 w-4 transition-transform group-data-[state=open]:rotate-180" aria-hidden="true" />
+                    </span>
+                  </CollapsibleTrigger>
+                  <CollapsibleContent>
+                    <div className="space-y-3 border-t p-4">
+                      {(conv.messages as Array<{ sender: string; message: string; timestamp: number }>).map((msg, idx) => (
+                        <div key={idx} className={`flex ${msg.sender === 'bot' ? 'justify-start' : 'justify-end'}`}>
+                          <div
+                            className={`max-w-[80%] rounded-xl p-3 ${
+                              msg.sender === 'bot' ? 'bg-muted' : 'bg-primary text-primary-foreground'
+                            }`}
+                          >
+                            <div className="mb-1 text-xs opacity-70">{msg.sender === 'bot' ? 'Bot' : 'Player'}</div>
+                            <div className="text-sm [overflow-wrap:anywhere]">{msg.message}</div>
+                            <div className="mt-1 text-xs opacity-70">{new Date(msg.timestamp).toLocaleTimeString()}</div>
                           </div>
                         </div>
-                      </CardHeader>
-                    </CollapsibleTrigger>
-                    <CollapsibleContent>
-                      <CardContent>
-                        <div className="space-y-3 pt-4 border-t">
-                          {(conv.messages as Array<{ sender: string; message: string; timestamp: number }>).map((msg, idx) => (
-                            <div
-                              key={idx}
-                              className={`flex ${msg.sender === 'bot' ? 'justify-start' : 'justify-end'}`}
-                            >
-                              <div
-                                className={`max-w-[80%] rounded-lg p-3 ${
-                                  msg.sender === 'bot'
-                                    ? 'bg-muted'
-                                    : 'bg-primary text-primary-foreground'
-                                }`}
-                              >
-                                <div className="text-xs opacity-70 mb-1">
-                                  {msg.sender === 'bot' ? 'Bot' : 'Player'}
-                                </div>
-                                <div className="text-sm">{msg.message}</div>
-                                <div className="text-xs opacity-70 mt-1">
-                                  {new Date(msg.timestamp).toLocaleTimeString()}
-                                </div>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </CardContent>
-                    </CollapsibleContent>
-                  </Card>
+                      ))}
+                    </div>
+                  </CollapsibleContent>
                 </Collapsible>
               ))}
 
-              {/* Pagination */}
-              {conversationStats && conversationStats.totalConversations > 50 && (
-                <div className="flex items-center justify-center gap-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setConversationPage(p => Math.max(1, p - 1))}
-                    disabled={conversationPage === 1}
-                  >
-                    Previous
-                  </Button>
-                  <div className="text-sm text-muted-foreground">
-                    Page {conversationPage} of {Math.ceil(conversationStats.totalConversations / 50)}
-                  </div>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setConversationPage(p => p + 1)}
-                    disabled={conversationPage >= Math.ceil(conversationStats.totalConversations / 50)}
-                  >
-                    Next
-                  </Button>
-                </div>
-              )}
+              {conversationStats &&
+                pager(
+                  conversationPage,
+                  Math.ceil(conversationStats.totalConversations / 50),
+                  conversationStats.totalConversations,
+                  ['conversation', 'conversations'],
+                  setConversationPage,
+                )}
             </div>
           )}
         </TabsContent>
 
-        {/* Emotions Tab */}
-        <TabsContent value="emotions" className="space-y-6 animate-in fade-in-50 duration-200">
+        <TabsContent value="emotions" className="mt-6 grid min-w-0 gap-6">
           {emotionsLoading ? (
-            <div className="flex items-center justify-center py-12">
-              <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-            </div>
+            <LoadingRows label="emotions" rows={2} />
+          ) : tabErrors.emotions ? (
+            <LoadError label="emotions" retry={fetchEmotions} />
           ) : emotions.length === 0 ? (
-            <Card>
-              <CardContent className="py-12 text-center">
-                <Heart className="h-12 w-12 mx-auto mb-4 text-muted-foreground opacity-50" />
-                <h3 className="text-lg font-semibold mb-2">No emotion data available</h3>
-                <p className="text-sm text-muted-foreground">
-                  Emotion data will appear here once the bot starts tracking emotional states.
-                </p>
-              </CardContent>
-            </Card>
+            <EmptyCard kind="bot" title="No emotions yet." text="Emotions appear here once the bot starts tracking how it and players feel." />
           ) : (
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <div className="grid min-w-0 gap-3 md:grid-cols-2">
               {emotions.map((emotion) => (
-                <Card key={emotion.userUuid}>
-                  <CardHeader>
-                    <CardTitle>
-                      {emotion.user?.name || emotion.userName || emotion.userUuid || 'Unknown User'}
-                    </CardTitle>
-                    {emotion.isGuest && (
-                      <Badge variant="outline" className="text-xs mt-1">Guest</Badge>
-                    )}
-                  </CardHeader>
-                  <CardContent className="space-y-6">
-                    {emotion.emotions.botEmotion && (
-                      <div>
-                        <div className="text-sm font-medium text-muted-foreground mb-4">Bot Emotion</div>
-                        <div className="grid grid-cols-2 gap-4">
-                          {Object.entries(emotion.emotions.botEmotion).map(([key, value]) => {
-                            // Values are already out of 100, so use directly (clamp to 0-100)
-                            const percentage = Math.min(100, Math.max(0, value as number));
-                            const circumference = 2 * Math.PI * 36; // radius = 36
-                            const offset = circumference - (percentage / 100) * circumference;
-                            
-                            return (
-                              <div key={key} className="flex flex-col items-center gap-2">
-                                <div className="relative w-20 h-20">
-                                  <svg className="w-20 h-20 transform -rotate-90" viewBox="0 0 80 80">
-                                    {/* Background circle */}
-                                    <circle
-                                      cx="40"
-                                      cy="40"
-                                      r="36"
-                                      stroke="currentColor"
-                                      strokeWidth="6"
-                                      fill="none"
-                                      className="text-muted"
-                                    />
-                                    {/* Progress circle */}
-                                    <circle
-                                      cx="40"
-                                      cy="40"
-                                      r="36"
-                                      stroke="currentColor"
-                                      strokeWidth="6"
-                                      fill="none"
-                                      strokeDasharray={circumference}
-                                      strokeDashoffset={offset}
-                                      strokeLinecap="round"
-                                      className="text-primary transition-all duration-500"
-                                    />
-                                  </svg>
-                                  <div className="absolute inset-0 flex items-center justify-center">
-                                    <span className="text-xs font-semibold">{Math.round(percentage)}%</span>
-                                  </div>
-                                </div>
-                                <span className="text-xs capitalize text-center text-muted-foreground">{key}</span>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    )}
-                    {emotion.emotions.personEmotion && (
-                      <div>
-                        <div className="text-sm font-medium text-muted-foreground mb-4">Person Emotion</div>
-                        <div className="grid grid-cols-2 gap-4">
-                          {Object.entries(emotion.emotions.personEmotion).map(([key, value]) => {
-                            // Values are already out of 100, so use directly (clamp to 0-100)
-                            const percentage = Math.min(100, Math.max(0, value as number));
-                            const circumference = 2 * Math.PI * 36; // radius = 36
-                            const offset = circumference - (percentage / 100) * circumference;
-                            
-                            return (
-                              <div key={key} className="flex flex-col items-center gap-2">
-                                <div className="relative w-20 h-20">
-                                  <svg className="w-20 h-20 transform -rotate-90" viewBox="0 0 80 80">
-                                    {/* Background circle */}
-                                    <circle
-                                      cx="40"
-                                      cy="40"
-                                      r="36"
-                                      stroke="currentColor"
-                                      strokeWidth="6"
-                                      fill="none"
-                                      className="text-muted"
-                                    />
-                                    {/* Progress circle */}
-                                    <circle
-                                      cx="40"
-                                      cy="40"
-                                      r="36"
-                                      stroke="currentColor"
-                                      strokeWidth="6"
-                                      fill="none"
-                                      strokeDasharray={circumference}
-                                      strokeDashoffset={offset}
-                                      strokeLinecap="round"
-                                      className="text-primary transition-all duration-500"
-                                    />
-                                  </svg>
-                                  <div className="absolute inset-0 flex items-center justify-center">
-                                    <span className="text-xs font-semibold">{Math.round(percentage)}%</span>
-                                  </div>
-                                </div>
-                                <span className="text-xs capitalize text-center text-muted-foreground">{key}</span>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    )}
-                    {emotion.lastEmotionUpdate && (
-                      <div className="text-xs text-muted-foreground pt-2 border-t">
-                        Last updated: {formatRelativeTime(emotion.lastEmotionUpdate)}
-                      </div>
-                    )}
-                  </CardContent>
-                </Card>
+                <article key={emotion.userUuid} className="min-w-0 space-y-5 rounded-2xl border bg-card p-4 sm:p-5">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="orbit-display text-base font-semibold [overflow-wrap:anywhere]">
+                      {emotion.user?.name || emotion.userName || emotion.userUuid || 'Unknown player'}
+                    </h3>
+                    {emotion.isGuest && <Pill>Guest</Pill>}
+                  </div>
+                  {emotion.emotions.botEmotion && <EmotionRings title="Bot emotion" values={emotion.emotions.botEmotion} />}
+                  {emotion.emotions.personEmotion && <EmotionRings title="Player emotion" values={emotion.emotions.personEmotion} />}
+                  {emotion.lastEmotionUpdate && (
+                    <p className="border-t pt-2 text-xs text-muted-foreground">
+                      Last updated {formatRelativeTime(emotion.lastEmotionUpdate).toLowerCase()}
+                    </p>
+                  )}
+                </article>
               ))}
             </div>
           )}
         </TabsContent>
       </Tabs>
+    </div>
+  );
+}
+
+function ChartSection({ id, title, children }: { id: string; title: string; children: ReactElement }) {
+  return (
+    <section aria-labelledby={id} className="min-w-0">
+      <SectionHeader id={id} title={title} />
+      <Panel className="p-4">
+        <ResponsiveContainer width="100%" height={300}>
+          {children}
+        </ResponsiveContainer>
+      </Panel>
+    </section>
+  );
+}
+
+/** Each emotion as a ring, 0–100. */
+function EmotionRings({ title, values }: { title: string; values: Record<string, number> }) {
+  const circumference = 2 * Math.PI * 36;
+  return (
+    <div>
+      <div className="mb-4 text-sm font-medium text-muted-foreground">{title}</div>
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
+        {Object.entries(values).map(([key, value]) => {
+          // Values are already out of 100, so use directly (clamp to 0-100)
+          const percentage = Math.min(100, Math.max(0, value as number));
+          const offset = circumference - (percentage / 100) * circumference;
+          return (
+            <div key={key} className="flex flex-col items-center gap-2">
+              <div className="relative h-20 w-20">
+                <svg className="h-20 w-20 -rotate-90 transform" viewBox="0 0 80 80" aria-hidden="true">
+                  <circle cx="40" cy="40" r="36" stroke="currentColor" strokeWidth="6" fill="none" className="text-muted" />
+                  <circle
+                    cx="40"
+                    cy="40"
+                    r="36"
+                    stroke="currentColor"
+                    strokeWidth="6"
+                    fill="none"
+                    strokeDasharray={circumference}
+                    strokeDashoffset={offset}
+                    strokeLinecap="round"
+                    className="text-foreground/80 transition-all duration-500"
+                  />
+                </svg>
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <span className="text-xs font-semibold">{Math.round(percentage)}%</span>
+                </div>
+              </div>
+              <span className="text-center text-xs capitalize text-muted-foreground">{key}</span>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
