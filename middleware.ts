@@ -3,7 +3,12 @@ import type { NextRequest } from 'next/server';
 
 /** Admin pages are a non-sensitive client shell. Authentication is enforced by
  * every data API with an opaque Authorization credential. This is intentional:
- * third-party cookies are unavailable in several supported iframe browsers. */
+ * third-party cookies are unavailable in several supported iframe browsers.
+ *
+ * Note: Mobile deep-link callbacks (bawes://callback) are intercepted and handled
+ * at the OS layer on Android and iOS and routed directly into the native Capacitor
+ * WebView. They do not trigger server-side Next.js route matching or middleware blocks.
+ * Subsequent API requests from mobile WebViews pass through cleanly. */
 export function middleware(request: NextRequest) {
   const response = NextResponse.next();
   response.headers.set('Referrer-Policy', 'no-referrer');
