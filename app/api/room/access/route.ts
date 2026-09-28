@@ -5,6 +5,7 @@ import { authenticateRequest } from '@/lib/oidc';
 import { prisma } from '@/lib/db';
 import { resolveTextureUrls, resolveCompanionTexture } from '@/lib/avatar-catalog-validator';
 import { notifyRoomAccess } from '@/lib/discord';
+import { isBotIdentifier } from '@/lib/bot-visitor';
 import type { FetchMemberDataByUuidSuccessResponse, ErrorApiData } from '@/types/workadventure';
 
 export async function GET(request: NextRequest) {
@@ -371,29 +372,33 @@ export async function GET(request: NextRequest) {
       // But if user has membership tags, they're not really a guest
       const actualIsGuestForAnalytics = !user || (user.isGuest && membershipTags.length === 0);
       
-      await (prisma as any).roomAccess.create({
-        data: {
-          userUuid: finalUuid,
-          userId: user?.id || null,
-          ipAddress: ipAddress,
-          userName: user ? (user.name || userName) : userName,
-          userEmail: user ? (user.email || userEmail) : userEmail,
-          isGuest: actualIsGuestForAnalytics,
-          isAuthenticated: isAuthenticated,
-          hasMembership: membershipTags.length > 0,
-          membershipTags: membershipTags,
-          universeId: worldData.universeId,
-          worldId: worldData.id,
-          roomId: roomData.id,
-          universeSlug: universe,
-          worldSlug: world,
-          roomSlug: room,
-          playUri: playUri,
-        },
-      }).catch((error: unknown) => {
-        // Log but don't fail the request if analytics logging fails
-        console.error('Failed to log room access analytics:', error);
-      });
+      // Bots join rooms through this same check. Their joins are reconnects, not visits, so they aren't recorded.
+      // (The Discord notification below still goes out as before.)
+      if (!isBotIdentifier(finalUuid)) {
+        await (prisma as any).roomAccess.create({
+          data: {
+            userUuid: finalUuid,
+            userId: user?.id || null,
+            ipAddress: ipAddress,
+            userName: user ? (user.name || userName) : userName,
+            userEmail: user ? (user.email || userEmail) : userEmail,
+            isGuest: actualIsGuestForAnalytics,
+            isAuthenticated: isAuthenticated,
+            hasMembership: membershipTags.length > 0,
+            membershipTags: membershipTags,
+            universeId: worldData.universeId,
+            worldId: worldData.id,
+            roomId: roomData.id,
+            universeSlug: universe,
+            worldSlug: world,
+            roomSlug: room,
+            playUri: playUri,
+          },
+        }).catch((error: unknown) => {
+          // Log but don't fail the request if analytics logging fails
+          console.error('Failed to log room access analytics:', error);
+        });
+      }
       
       // Build response
       const response: FetchMemberDataByUuidSuccessResponse = {
