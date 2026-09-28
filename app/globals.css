@@ -400,7 +400,7 @@ a[href] {
 .orbit-menu-sections a:hover, .orbit-menu-sections a[aria-current] { background: hsl(var(--accent)); color: hsl(var(--accent-foreground)); }
 .orbit-tool-icon { flex-shrink: 0; display: grid; place-items: center; width: 32px; height: 32px; border: 1px solid hsl(var(--border)); border-radius: 50%; color: hsl(var(--muted-foreground)); }
 .orbit-tool-arrow { margin-left: auto; flex-shrink: 0; opacity: .5; }
-.orbit-menu-account { max-width: 420px; border-top: 1px solid hsl(var(--border)); padding-top: 16px; }
+.orbit-menu-account { display: grid; gap: 10px; border-top: 1px solid hsl(var(--border)); padding-top: 16px; }
 .orbit-no-results { padding: 20px 0; font-size: 13px; color: hsl(var(--muted-foreground)); }
 .orbit-icon-button { display: inline-flex; width: 44px; height: 44px; align-items: center; justify-content: center; flex-shrink: 0; border-radius: 50%; color: hsl(var(--foreground)); }
 .orbit-icon-button:hover { background: hsl(var(--muted)); }

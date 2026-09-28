@@ -8,7 +8,6 @@ import { authenticatedFetch } from '@/lib/client-auth';
 import { universeColour } from '@/lib/universe-colour';
 import { useAdminBootstrap } from '../admin-bootstrap-context';
 import { isNamed, isRecord, useCollection, type Collection } from '../hooks/use-collection';
-import { useGuidanceDismissed } from '../hooks/use-guidance-dismissed';
 import {
   EmptyCard,
   EntityRow,
@@ -22,7 +21,6 @@ import {
   count,
   hueStyle,
 } from './ds';
-import { QuestLogSection } from './quests/quest-log-section';
 import styles from './yours.module.css';
 
 interface MyUniverse {
@@ -68,10 +66,10 @@ function List<T>({ collection, label, empty, children }: { collection: { result:
 }
 
 /**
- * What's yours, on You: a first-steps guide for someone new, your universes, the worlds you're a member of (with any
- * invitation to answer right here), and the rooms you starred. Finding new places is Space's job, not this page's.
+ * What's yours, on You: your universes, the worlds you're a member of (with any invitation to answer right here), and
+ * the rooms you starred. First steps are the game's quests now; finding new places is Space's job.
  */
-export default function Yours({ profileComplete }: { profileComplete: boolean | null }) {
+export default function Yours() {
   const { mine } = useAdminBootstrap();
   const universes = useCollection(`/api/admin/universes?scope=my&limit=${SHOWN}`, 'universes', isUniverse);
   const memberships = useCollection('/api/memberships/my', 'memberships', isMembership);
@@ -82,40 +80,15 @@ export default function Yours({ profileComplete }: { profileComplete: boolean | 
   const hasWorld = memberships.result.status === 'ready' ? memberships.result.items.length > 0 : (mine?.worlds ?? 0) > 0;
   const hasStar = stars.result.status === 'ready' ? stars.result.items.length > 0 : (mine?.stars ?? 0) > 0;
   const universeTotal = mine?.universes ?? (universes.result.status === 'ready' ? universes.result.items.length : 0);
-  // A world you run (you own its universe, or you're its admin): where "Invite someone" leads.
-  const runWorld =
-    memberships.result.status === 'ready'
-      ? memberships.result.items.find((membership) => membership.isUniverseOwner || membership.tags.includes('admin'))
-      : undefined;
-  const ownsWorld = (mine?.ownedWorlds ?? 0) > 0 || Boolean(runWorld?.isUniverseOwner);
-  const sentInvitation = (mine?.invitationsSent ?? 0) > 0;
   // With one universe, "Create a world" goes straight to it; with several, the form asks which.
   const onlyUniverse =
     universes.result.status === 'ready' && universes.result.items.length === 1 && (mine?.universes ?? 1) === 1
       ? universes.result.items[0]
       : null;
   const newWorldHref = onlyUniverse ? `/admin/worlds/new?universeId=${encodeURIComponent(onlyUniverse.id)}` : '/admin/worlds/new';
-  const [hidden, hide] = useGuidanceDismissed('getStarted');
-  const allDone = profileComplete === true && ownsUniverse && ownsWorld && sentInvitation && hasStar;
 
   return (
     <div className={styles.yours} data-testid="yours">
-      {!allDone && hidden === false && (
-        <GetStarted
-          profileComplete={profileComplete}
-          ownsUniverse={ownsUniverse}
-          ownsWorld={ownsWorld}
-          sentInvitation={sentInvitation}
-          hasStar={hasStar}
-          inviteHref={runWorld ? `/admin/worlds/${runWorld.world.id}?tab=members` : null}
-          newWorldHref={newWorldHref}
-          onHide={hide}
-        />
-      )}
-
-      {/* The player's quest log, from the game. */}
-      <QuestLogSection />
-
       <section aria-labelledby="universes-heading">
         <SectionHeader
           id="universes-heading"
@@ -372,100 +345,5 @@ function Invitations({
         </p>
       )}
     </div>
-  );
-}
-
-/**
- * For someone new: five steps, each one tap, each ticked by the real thing (your profile, a universe you own, a world
- * in it, an invitation you sent, a star), never by just being a member of someone else's world. It stays until every
- * step is done or you hide it.
- */
-function GetStarted({
-  profileComplete,
-  ownsUniverse,
-  ownsWorld,
-  sentInvitation,
-  hasStar,
-  inviteHref,
-  newWorldHref,
-  onHide,
-}: {
-  profileComplete: boolean | null;
-  ownsUniverse: boolean;
-  ownsWorld: boolean;
-  sentInvitation: boolean;
-  hasStar: boolean;
-  /** Where to invite people: the members of a world you run, when there is one. */
-  inviteHref: string | null;
-  /** Where "Create a world" leads: straight to your universe when you have one. */
-  newWorldHref: string;
-  onHide: () => void;
-}) {
-  const steps = [
-    { done: profileComplete === true, title: 'Set up your profile', text: 'A few words and your links, so people know who they’re meeting.', href: '/admin/you?edit=profile' },
-    { done: ownsUniverse, title: 'Create your universe', text: 'Your own corner of the Universe, to hold your worlds.', href: '/admin/universes/new?next=world' },
-    {
-      done: ownsWorld,
-      title: 'Create a world',
-      text: ownsUniverse ? 'A world in your universe. You’re its admin.' : 'After your universe.',
-      href: ownsUniverse ? newWorldHref : undefined,
-    },
-    {
-      done: sentInvitation,
-      title: 'Invite someone',
-      text: inviteHref ? 'As a member, editor or admin of your world.' : 'After your world.',
-      href: inviteHref ?? undefined,
-    },
-    { done: hasStar, title: 'Star a room you like', text: 'Keep a way back to it, one tap from a visit.', href: '/admin/discover/rooms' },
-  ];
-  const doneCount = steps.filter((step) => step.done).length;
-  return (
-    <section className={styles.getStarted} aria-labelledby="get-started-heading" data-testid="get-started">
-      <div className={styles.getStartedHead}>
-        <h2 id="get-started-heading" className="orbit-display">
-          Get started
-        </h2>
-        <span>
-          {doneCount} of {steps.length}
-          <button type="button" className={styles.hide} onClick={onHide}>
-            Hide
-          </button>
-        </span>
-      </div>
-      <div className={styles.progress} aria-hidden="true">
-        <span style={{ width: `${(doneCount / steps.length) * 100}%` }} />
-      </div>
-      <ol className={styles.steps}>
-        {steps.map((step, index) => {
-          const body = (
-            <>
-              <span className={styles.stepMark} data-done={step.done || undefined} aria-hidden="true">
-                {step.done ? <Check size={14} /> : index + 1}
-              </span>
-              <span className={styles.stepText}>
-                <strong>{step.title}</strong>
-                <span>{step.text}</span>
-              </span>
-              {step.href && !step.done && <ArrowUpRight className={styles.stepArrow} size={16} aria-hidden="true" />}
-            </>
-          );
-          return (
-            <li key={step.title} data-done={step.done || undefined}>
-              {step.href && !step.done ? (
-                <Link href={step.href} className={styles.step}>
-                  {body}
-                  <span className="sr-only">{step.done ? '(done)' : ''}</span>
-                </Link>
-              ) : (
-                <div className={styles.step} aria-disabled={!step.done && !step.href ? true : undefined}>
-                  {body}
-                  {step.done && <span className="sr-only">(done)</span>}
-                </div>
-              )}
-            </li>
-          );
-        })}
-      </ol>
-    </section>
   );
 }

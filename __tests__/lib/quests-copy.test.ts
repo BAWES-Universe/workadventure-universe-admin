@@ -11,6 +11,7 @@ const PARAMETERS: Partial<Record<(typeof QUEST_COPY_KEYS)[number], string[]>> = 
   'stamps.badge': ['stamp'],
   'log.fromHost': ['host', 'room'],
   'log.here': ['room'],
+  'log.progress': ['done', 'total'],
 };
 
 describe('vendored quest copy', () => {

@@ -33,9 +33,10 @@ export const QUEST_COPY_KEYS = [
   'stamps.explore',
   'stamps.build',
   'stamps.badge',
-  'log.tracked',
-  'log.accepted',
+  'log.inProgress',
   'log.done',
+  'log.onMap',
+  'log.progress',
   'log.fromHost',
   'log.here',
 ] as const;

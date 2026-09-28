@@ -26,10 +26,34 @@
 .stretched { color: inherit; outline: none; }
 .stretched::after { content: ''; position: absolute; inset: 0; border-radius: inherit; }
 .stretched:focus-visible::after { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
-.group { display: grid; gap: 8px; }
-.group + .group { margin-top: 16px; }
-.groupTitle { font-size: 12px; font-weight: 600; color: hsl(var(--muted-foreground)); }
-.log { display: grid; }
+
+/* ─── Badges and quests on You, under the profile: one compact card; side by side when the card is wide ─── */
+.badges { display: grid; gap: 14px; min-width: 0; padding: 16px; border: 1px solid hsl(var(--border)); border-radius: 22px; background: hsl(var(--card)); container-type: inline-size; }
+.badgesHead { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.badgesHead h2 { font-size: 18px; font-weight: 700; }
+.badgesHead > span { font-size: 12px; color: hsl(var(--muted-foreground)); font-variant-numeric: tabular-nums; }
+.badgesBody { display: grid; gap: 14px; min-width: 0; }
+.badgeRow { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.badge { display: grid; justify-items: center; align-content: start; gap: 6px; padding: 10px 4px 8px; border-radius: 16px; text-align: center; font-size: 12px; font-weight: 600; line-height: 1.3; color: hsl(var(--muted-foreground)); overflow-wrap: anywhere; }
+/* Earned: in colour, on a soft gold glow, like a stamp just pressed. */
+.badge[data-earned] { color: hsl(var(--foreground)); background: radial-gradient(circle 44px at 50% 38px, rgb(233 199 76 / 0.2), transparent); }
+.now { display: grid; gap: 6px; min-width: 0; }
+.now h3 { font-size: 12px; font-weight: 600; color: hsl(var(--muted-foreground)); }
+.now ul { display: grid; gap: 6px; }
+.now li { display: flex; align-items: center; gap: 10px; min-height: 52px; padding: 8px 12px; border-radius: 14px; background: hsl(var(--foreground) / 0.04); }
+.nowDot { flex: none; width: 8px; height: 8px; border-radius: 50%; border: 2px solid hsl(var(--muted-foreground) / 0.6); }
+/* The one on the game's map: amber, as its marker there. */
+.nowDot[data-tracked] { border-color: #f5a623; background: #f5a623; box-shadow: 0 0 0 3px rgb(245 166 35 / 0.18); }
+.nowText { display: grid; gap: 2px; min-width: 0; flex: 1; }
+.nowText strong { font-size: 13px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
+.nowText span { font-size: 12px; color: hsl(var(--muted-foreground)); overflow-wrap: anywhere; }
+.onMap { flex: none; padding: 3px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; color: #b45309; background: rgb(245 166 35 / 0.14); }
+:global(.dark) .onMap { color: #fbbf24; }
+.badgesHint { font-size: 12px; line-height: 1.5; color: hsl(var(--muted-foreground)); }
+@container (min-width: 560px) {
+  .badgesBody { grid-template-columns: minmax(0, 300px) minmax(0, 1fr); align-items: start; gap: 20px; }
+  .badgesBody > :nth-child(2) { padding-inline-start: 20px; border-inline-start: 1px solid hsl(var(--border)); }
+}
 
 /* ─── The owner's form: numbered sections; the preview beside them from lg, after them below ─── */
 .form { display: grid; gap: 28px; grid-template-areas: 'preset' 'targets' 'preview' 'publish'; min-width: 0; }

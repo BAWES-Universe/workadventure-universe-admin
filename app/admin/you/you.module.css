@@ -1,10 +1,4 @@
 .page { display: grid; gap: 30px; min-width: 0; }
-.settings { display: grid; gap: 4px; }
-.settings h2 { font-size: 18px; font-weight: 700; margin-bottom: 6px; }
-.settingRow { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; min-height: 64px; padding: 12px 0; border-top: 1px solid hsl(var(--border)); }
-.settingRow > span { display: grid; gap: 3px; min-width: 0; }
-.settingRow strong { font-size: 14px; font-weight: 600; }
-.settingRow > span > span { font-size: 12px; color: hsl(var(--muted-foreground)); overflow-wrap: anywhere; }
-.themeControl { border: 1px solid hsl(var(--border)); border-radius: 999px !important; background: transparent !important; }
-.themeControl > button { border-radius: 999px; }
+/* The profile and its badges read as one block: what people see when they click you. */
+.top { display: grid; gap: 12px; min-width: 0; }
 .page a:focus-visible, .page button:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 5px; }
