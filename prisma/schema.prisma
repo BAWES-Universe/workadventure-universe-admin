@@ -1110,6 +1110,8 @@ model QuestObservationApplication {
   attemptId     String                  @map("attempt_id")
   objectiveId   String                  @map("objective_id")
   outcome       QuestApplicationOutcome
+  /// The objective's count right after this application, so a retry answers with the count of the first time.
+  countAfter    Int                     @default(0) @map("count_after")
   /// For a unique-entity set: the entity credited, unique per attempt and objective.
   entityKey     String?                 @map("entity_key") @db.VarChar(128)
   createdAt     DateTime                @default(now()) @map("created_at")

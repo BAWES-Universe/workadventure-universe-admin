@@ -106,6 +106,7 @@ async function recordApplication(
       attemptId: progress.attemptId,
       objectiveId: objective.id,
       outcome,
+      countAfter: count,
       entityKey,
     },
   });
@@ -228,7 +229,7 @@ async function applyToProgress(db: QuestDb, applying: Applying, action: string):
   }
 }
 
-function summarise(observationId: string, reused: boolean, rows: Array<{ outcome: QuestApplicationOutcome; objective: { key: string; threshold: number }; attempt: { progress: { id: string; definitionId: string; definition: { key: string }; status: string; objectives: Array<{ objectiveId: string; count: number }> } | null }; objectiveId: string }>): ObservationResult {
+function summarise(observationId: string, reused: boolean, rows: Array<{ outcome: QuestApplicationOutcome; countAfter: number; objective: { key: string; threshold: number }; attempt: { progress: { id: string; definitionId: string; definition: { key: string } } | null } }>): ObservationResult {
   const applications: ObservationApplied[] = [];
   const completed = new Set<string>();
   for (const row of rows) {
@@ -240,7 +241,7 @@ function summarise(observationId: string, reused: boolean, rows: Array<{ outcome
       questKey: progress.definition.key,
       objectiveKey: row.objective.key,
       outcome: row.outcome,
-      count: progress.objectives.find((candidate) => candidate.objectiveId === row.objectiveId)?.count ?? 0,
+      count: row.countAfter,
       threshold: row.objective.threshold,
     });
     if (row.outcome === 'COMPLETED') completed.add(progress.id);
@@ -253,7 +254,7 @@ const appliedInclude = {
   attempt: {
     select: {
       progress: {
-        select: { id: true, definitionId: true, status: true, definition: { select: { key: true } }, objectives: { select: { objectiveId: true, count: true } } },
+        select: { id: true, definitionId: true, definition: { select: { key: true } } },
       },
     },
   },

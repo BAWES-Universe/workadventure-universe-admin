@@ -158,6 +158,7 @@ CREATE TABLE "quest_observation_applications" (
     "attempt_id" TEXT NOT NULL,
     "objective_id" TEXT NOT NULL,
     "outcome" "quest_application_outcome" NOT NULL,
+    "count_after" INTEGER NOT NULL DEFAULT 0,
     "entity_key" VARCHAR(128),
     "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 

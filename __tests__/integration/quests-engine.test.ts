@@ -142,6 +142,9 @@ describe('the observation inbox', () => {
 
     const second = await observe(alice, 'twin-2', 'twin-action');
     expect(second.applications).toEqual([expect.objectContaining({ questKey: two.key, outcome: 'COMPLETED', count: 2 })]);
+    // A late retry of the first event still answers with the counts of the first time.
+    const late = await observe(alice, 'twin-1', 'twin-action');
+    expect(late.applications.find((application) => application.questKey === two.key)).toMatchObject({ outcome: 'ADVANCED', count: 1 });
     expect(await prisma.questRewardGrant.count({ where: { actorId: alice, badgeId: { in: ['twin-1', 'twin-2'] } } })).toBe(2);
   });
 
