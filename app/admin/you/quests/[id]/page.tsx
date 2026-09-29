@@ -16,7 +16,7 @@ import styles from '../../../components/quests/quests.module.css';
  */
 export default function QuestPage() {
   const params = useParams<{ id: string }>();
-  const id = decodeURIComponent(String(params?.id ?? ''));
+  const id = String(params?.id ?? '');
   const { quests } = useChapter();
   const quest = quests.find((candidate) => candidate.id === id);
   if (!quest) {

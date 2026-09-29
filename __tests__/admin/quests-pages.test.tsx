@@ -372,6 +372,11 @@ describe('The Quests page and a quest’s page', () => {
     expect(screen.queryByTestId('quest-next-step')).toBeNull();
     unmount();
     mockParams = { id: 'nope' };
+    const missing = render(<QuestPage />);
+    expect(screen.getByTestId('quest-missing')).toBeTruthy();
+    missing.unmount();
+    // The router hands the segment over decoded: a bare "%" is just an id that isn't a quest, not a crash.
+    mockParams = { id: '%' };
     render(<QuestPage />);
     expect(screen.getByTestId('quest-missing')).toBeTruthy();
   });
