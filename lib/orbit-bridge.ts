@@ -18,7 +18,7 @@ export const ORBIT_BRIDGE_VERSION = 1 as const;
 export const ORBIT_BRIDGE_CAPABILITIES = ['navigate', 'event', 'view'] as const;
 
 /** Pages the game may ask for. Anything else lands on Orbit's home. */
-export const ORBIT_NAVIGATE_INTENTS = ['new-universe', 'world-members', 'visit-card'] as const;
+export const ORBIT_NAVIGATE_INTENTS = ['new-universe', 'world-members', 'visit-card', 'user-profile'] as const;
 
 /**
  * The two sizes of Orbit's window inside the game: the compact companion panel (the default) and the full-screen
