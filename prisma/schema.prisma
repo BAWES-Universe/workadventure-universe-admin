@@ -8,39 +8,47 @@ datasource db {
 
 // Users
 model User {
-  id           String   @id @default(uuid())
-  uuid         String   @unique // WorkAdventure user identifier
-  email        String?  @unique
-  name         String?
-  matrixChatId String?  @map("matrix_chat_id") // Matrix ID: "@user:matrix.org"
-  lastIpAddress String? @map("last_ip_address") // Last known IP address
-  isGuest      Boolean  @default(false) @map("is_guest") // True for unauthenticated guest users
-  createdAt    DateTime @default(now()) @map("created_at")
-  updatedAt    DateTime @updatedAt @map("updated_at")
+  id            String   @id @default(uuid())
+  uuid          String   @unique // WorkAdventure user identifier
+  email         String?  @unique
+  name          String?
+  matrixChatId  String?  @map("matrix_chat_id") // Matrix ID: "@user:matrix.org"
+  lastIpAddress String?  @map("last_ip_address") // Last known IP address
+  isGuest       Boolean  @default(false) @map("is_guest") // True for unauthenticated guest users
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
 
   // Relations
-  ownedUniverses    Universe[]        @relation("UniverseOwner")
-  worldMemberships  WorldMember[]
-  bans              Ban[]             @relation("BannedUser")
-  bannedBy          Ban[]             @relation("BannedBy")
-  avatars           UserAvatar[]
-  favorites         Favorite[]
-  followers         Follow[]          @relation("Follower")
-  following         Follow[]          @relation("Following")
-  friendships1      Friendship[]      @relation("User1")
-  friendships2      Friendship[]      @relation("User2")
-  requestedFriendships Friendship[]   @relation("RequestedBy")
-  roomAccesses      RoomAccess[]
-  visitCard         VisitCard?
-  membershipInvitationsSent MembershipInvitation[] @relation("InvitedBy")
-  membershipInvitationsReceived MembershipInvitation[] @relation("InvitedUser")
-  botsCreated       Bot[] @relation("BotCreatedBy")
-  botsUpdated       Bot[] @relation("BotUpdatedBy")
-  botConversations BotsConversation[]
-  botMemories      BotsMemory[]
-  avatarGrants     UserAvatarGrant[]
-  avatarSetAuditLogs AvatarSetAuditLog[]
-  preferences      UserPreference[]
+  ownedUniverses                Universe[]                    @relation("UniverseOwner")
+  worldMemberships              WorldMember[]
+  bans                          Ban[]                         @relation("BannedUser")
+  bannedBy                      Ban[]                         @relation("BannedBy")
+  avatars                       UserAvatar[]
+  favorites                     Favorite[]
+  followers                     Follow[]                      @relation("Follower")
+  following                     Follow[]                      @relation("Following")
+  friendships1                  Friendship[]                  @relation("User1")
+  friendships2                  Friendship[]                  @relation("User2")
+  requestedFriendships          Friendship[]                  @relation("RequestedBy")
+  roomAccesses                  RoomAccess[]
+  visitCard                     VisitCard?
+  membershipInvitationsSent     MembershipInvitation[]        @relation("InvitedBy")
+  membershipInvitationsReceived MembershipInvitation[]        @relation("InvitedUser")
+  botsCreated                   Bot[]                         @relation("BotCreatedBy")
+  botsUpdated                   Bot[]                         @relation("BotUpdatedBy")
+  botConversations              BotsConversation[]
+  botMemories                   BotsMemory[]
+  avatarGrants                  UserAvatarGrant[]
+  avatarSetAuditLogs            AvatarSetAuditLog[]
+  preferences                   UserPreference[]
+  questAttempts                 QuestAttempt[]                @relation("QuestAttemptActor")
+  questProgress                 QuestProgress[]               @relation("QuestProgressActor")
+  questObservations             QuestObservation[]            @relation("QuestObservationActor")
+  questApplications             QuestObservationApplication[] @relation("QuestApplicationActor")
+  questGrants                   QuestRewardGrant[]            @relation("QuestGrantActor")
+  questTracking                 QuestTrackedSelection?        @relation("QuestTrackingActor")
+  questGuidance                 QuestGuidancePreference[]     @relation("QuestGuidanceActor")
+  questPartnerLinks             QuestPartnerLink[]            @relation("QuestPartnerLinkActor")
 
   @@map("users")
 }
@@ -63,22 +71,22 @@ model UserPreference {
 
 // Universes
 model Universe {
-  id          String   @id @default(uuid())
-  slug        String   @unique // URL identifier: "my-universe"
-  name        String
-  description String?
-  ownerId     String   @map("owner_id")
-  isPublic    Boolean  @default(true) @map("is_public")
-  featured    Boolean  @default(false) // For discovery
-  thumbnailUrl String? @map("thumbnail_url")
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  id           String   @id @default(uuid())
+  slug         String   @unique // URL identifier: "my-universe"
+  name         String
+  description  String?
+  ownerId      String   @map("owner_id")
+  isPublic     Boolean  @default(true) @map("is_public")
+  featured     Boolean  @default(false) // For discovery
+  thumbnailUrl String?  @map("thumbnail_url")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
 
   // Relations
-  owner      User      @relation("UniverseOwner", fields: [ownerId], references: [id], onDelete: Cascade)
-  worlds     World[]
-  bans       Ban[]
-  favorites  Favorite[]
+  owner        User         @relation("UniverseOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  worlds       World[]
+  bans         Ban[]
+  favorites    Favorite[]
   roomAccesses RoomAccess[]
 
   @@map("universes")
@@ -86,27 +94,27 @@ model Universe {
 
 // Worlds
 model World {
-  id          String   @id @default(uuid())
-  universeId  String   @map("universe_id")
-  slug        String   // URL identifier: "office-world"
-  name        String
-  description String?
-  isPublic    Boolean  @default(true) @map("is_public")
-  featured    Boolean  @default(false) // For discovery
-  thumbnailUrl String? @map("thumbnail_url")
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  id           String   @id @default(uuid())
+  universeId   String   @map("universe_id")
+  slug         String // URL identifier: "office-world"
+  name         String
+  description  String?
+  isPublic     Boolean  @default(true) @map("is_public")
+  featured     Boolean  @default(false) // For discovery
+  thumbnailUrl String?  @map("thumbnail_url")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
 
   // Relations
-  universe   Universe     @relation(fields: [universeId], references: [id], onDelete: Cascade)
-  rooms      Room[]
-  members    WorldMember[]
-  bans       Ban[]
-  avatars    UserAvatar[]
-  favorites  Favorite[]
-  roomAccesses RoomAccess[]
+  universe              Universe               @relation(fields: [universeId], references: [id], onDelete: Cascade)
+  rooms                 Room[]
+  members               WorldMember[]
+  bans                  Ban[]
+  avatars               UserAvatar[]
+  favorites             Favorite[]
+  roomAccesses          RoomAccess[]
   membershipInvitations MembershipInvitation[]
-  avatarScopes AvatarSetScope[]
+  avatarScopes          AvatarSetScope[]
 
   @@unique([universeId, slug]) // Slug unique within universe
   @@map("worlds")
@@ -114,25 +122,25 @@ model World {
 
 // Rooms
 model Room {
-  id          String   @id @default(uuid())
-  worldId     String   @map("world_id")
-  slug        String   // URL identifier: "lobby"
-  name        String
-  description String?
-  mapUrl      String?  @map("map_url") // External TMJ URL (e.g., GitHub Pages)
-  wamUrl      String?  @map("wam_url") // WAM file URL in map-storage (created via PUT)
-  templateMapId String? @map("template_map_id") // Reference to template map if created from template
-  authenticationMandatory Boolean @default(false) @map("authentication_mandatory")
-  isPublic    Boolean  @default(true) @map("is_public")
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  id                      String   @id @default(uuid())
+  worldId                 String   @map("world_id")
+  slug                    String // URL identifier: "lobby"
+  name                    String
+  description             String?
+  mapUrl                  String?  @map("map_url") // External TMJ URL (e.g., GitHub Pages)
+  wamUrl                  String?  @map("wam_url") // WAM file URL in map-storage (created via PUT)
+  templateMapId           String?  @map("template_map_id") // Reference to template map if created from template
+  authenticationMandatory Boolean  @default(false) @map("authentication_mandatory")
+  isPublic                Boolean  @default(true) @map("is_public")
+  createdAt               DateTime @default(now()) @map("created_at")
+  updatedAt               DateTime @updatedAt @map("updated_at")
 
   // Relations
-  world      World      @relation(fields: [worldId], references: [id], onDelete: Cascade)
-  templateMap RoomTemplateMap? @relation(fields: [templateMapId], references: [id], onDelete: SetNull)
-  favorites  Favorite[]
+  world        World            @relation(fields: [worldId], references: [id], onDelete: Cascade)
+  templateMap  RoomTemplateMap? @relation(fields: [templateMapId], references: [id], onDelete: SetNull)
+  favorites    Favorite[]
   roomAccesses RoomAccess[]
-  bots       Bot[]
+  bots         Bot[]
 
   @@unique([worldId, slug]) // Slug unique within world
   @@map("rooms")
@@ -151,23 +159,23 @@ model RoomAccess {
   hasMembership   Boolean  @default(false) @map("has_membership") // true if has WorldMember record
   membershipTags  String[] @map("membership_tags") // Tags from membership if exists
 
-  universeId      String   @map("universe_id")
-  worldId         String   @map("world_id")
-  roomId          String   @map("room_id")
+  universeId String @map("universe_id")
+  worldId    String @map("world_id")
+  roomId     String @map("room_id")
 
-  universeSlug    String   @map("universe_slug")
-  worldSlug       String   @map("world_slug")
-  roomSlug        String   @map("room_slug")
+  universeSlug String @map("universe_slug")
+  worldSlug    String @map("world_slug")
+  roomSlug     String @map("room_slug")
 
-  playUri         String   @map("play_uri") // Full play URI
+  playUri String @map("play_uri") // Full play URI
 
-  accessedAt      DateTime @default(now()) @map("accessed_at")
+  accessedAt DateTime @default(now()) @map("accessed_at")
 
   // Relations
-  user            User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
-  universe        Universe @relation(fields: [universeId], references: [id], onDelete: Cascade)
-  world           World    @relation(fields: [worldId], references: [id], onDelete: Cascade)
-  room            Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  user     User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  universe Universe @relation(fields: [universeId], references: [id], onDelete: Cascade)
+  world    World    @relation(fields: [worldId], references: [id], onDelete: Cascade)
+  room     Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
 
   @@index([universeId, accessedAt])
   @@index([worldId, accessedAt])
@@ -181,11 +189,11 @@ model RoomAccess {
 
 // World Memberships
 model WorldMember {
-  id        String   @id @default(uuid())
-  userId    String   @map("user_id")
-  worldId   String   @map("world_id")
-  tags      String[] // Array of tags: ["admin", "editor", "member"]
-  joinedAt  DateTime @default(now()) @map("joined_at")
+  id       String   @id @default(uuid())
+  userId   String   @map("user_id")
+  worldId  String   @map("world_id")
+  tags     String[] // Array of tags: ["admin", "editor", "member"]
+  joinedAt DateTime @default(now()) @map("joined_at")
 
   // Relations
   user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -199,22 +207,22 @@ model WorldMember {
 
 // Bans
 model Ban {
-  id        String    @id @default(uuid())
-  userId    String?   @map("user_id")
-  universeId String?  @map("universe_id")
-  worldId   String?   @map("world_id")
-  ipAddress String?   @map("ip_address") // IPv4 or IPv6
-  reason    String?
-  bannedById String?  @map("banned_by")
-  bannedAt  DateTime  @default(now()) @map("banned_at")
-  expiresAt DateTime? @map("expires_at") // NULL = permanent
-  isActive  Boolean   @default(true) @map("is_active")
+  id         String    @id @default(uuid())
+  userId     String?   @map("user_id")
+  universeId String?   @map("universe_id")
+  worldId    String?   @map("world_id")
+  ipAddress  String?   @map("ip_address") // IPv4 or IPv6
+  reason     String?
+  bannedById String?   @map("banned_by")
+  bannedAt   DateTime  @default(now()) @map("banned_at")
+  expiresAt  DateTime? @map("expires_at") // NULL = permanent
+  isActive   Boolean   @default(true) @map("is_active")
 
   // Relations
-  user      User?     @relation("BannedUser", fields: [userId], references: [id], onDelete: Cascade)
-  universe  Universe? @relation(fields: [universeId], references: [id], onDelete: SetNull)
-  world     World?    @relation(fields: [worldId], references: [id], onDelete: SetNull)
-  bannedBy  User?     @relation("BannedBy", fields: [bannedById], references: [id])
+  user     User?     @relation("BannedUser", fields: [userId], references: [id], onDelete: Cascade)
+  universe Universe? @relation(fields: [universeId], references: [id], onDelete: SetNull)
+  world    World?    @relation(fields: [worldId], references: [id], onDelete: SetNull)
+  bannedBy User?     @relation("BannedBy", fields: [bannedById], references: [id])
 
   @@index([userId])
   @@index([ipAddress])
@@ -224,12 +232,12 @@ model Ban {
 
 // User Avatars & Companions
 model UserAvatar {
-  id              String   @id @default(uuid())
-  userId          String   @map("user_id")
-  worldId         String   @map("world_id")
-  textureIds      String[] @map("texture_ids") // Array of texture IDs: ["male1", "hat1"]
-  companionTextureId String? @map("companion_texture_id")
-  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at")
+  id                 String   @id @default(uuid())
+  userId             String   @map("user_id")
+  worldId            String   @map("world_id")
+  textureIds         String[] @map("texture_ids") // Array of texture IDs: ["male1", "hat1"]
+  companionTextureId String?  @map("companion_texture_id")
+  updatedAt          DateTime @default(now()) @updatedAt @map("updated_at")
 
   // Relations
   user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -241,18 +249,18 @@ model UserAvatar {
 
 // Favorites (for future social features)
 model Favorite {
-  id         String    @id @default(uuid())
-  userId     String    @map("user_id")
-  universeId String?   @map("universe_id")
-  worldId    String?   @map("world_id")
-  roomId     String?   @map("room_id")
+  id          String   @id @default(uuid())
+  userId      String   @map("user_id")
+  universeId  String?  @map("universe_id")
+  worldId     String?  @map("world_id")
+  roomId      String?  @map("room_id")
   favoritedAt DateTime @default(now()) @map("favorited_at")
 
   // Relations
-  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   universe Universe? @relation(fields: [universeId], references: [id], onDelete: Cascade)
-  world    World?   @relation(fields: [worldId], references: [id], onDelete: Cascade)
-  room     Room?    @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  world    World?    @relation(fields: [worldId], references: [id], onDelete: Cascade)
+  room     Room?     @relation(fields: [roomId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([roomId])
@@ -263,10 +271,10 @@ model Favorite {
 
 // Follows (for future social features)
 model Follow {
-  id         String   @id @default(uuid())
-  followerId String   @map("follower_id")
-  followingId String @map("following_id")
-  followedAt DateTime @default(now()) @map("followed_at")
+  id          String   @id @default(uuid())
+  followerId  String   @map("follower_id")
+  followingId String   @map("following_id")
+  followedAt  DateTime @default(now()) @map("followed_at")
 
   // Relations
   follower  User @relation("Follower", fields: [followerId], references: [id], onDelete: Cascade)
@@ -280,18 +288,18 @@ model Follow {
 
 // Friendships (for future social features)
 model Friendship {
-  id         String    @id @default(uuid())
-  user1Id    String    @map("user1_id")
-  user2Id    String    @map("user2_id")
-  status     String    @default("pending") // pending, accepted, blocked
-  requestedById String? @map("requested_by")
-  createdAt  DateTime  @default(now()) @map("created_at")
-  acceptedAt DateTime? @map("accepted_at")
+  id            String    @id @default(uuid())
+  user1Id       String    @map("user1_id")
+  user2Id       String    @map("user2_id")
+  status        String    @default("pending") // pending, accepted, blocked
+  requestedById String?   @map("requested_by")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  acceptedAt    DateTime? @map("accepted_at")
 
   // Relations
-  user1       User   @relation("User1", fields: [user1Id], references: [id], onDelete: Cascade)
-  user2       User   @relation("User2", fields: [user2Id], references: [id], onDelete: Cascade)
-  requestedBy User?  @relation("RequestedBy", fields: [requestedById], references: [id])
+  user1       User  @relation("User1", fields: [user1Id], references: [id], onDelete: Cascade)
+  user2       User  @relation("User2", fields: [user2Id], references: [id], onDelete: Cascade)
+  requestedBy User? @relation("RequestedBy", fields: [requestedById], references: [id])
 
   @@unique([user1Id, user2Id])
   @@index([user1Id])
@@ -303,8 +311,8 @@ model Friendship {
 model VisitCard {
   id        String   @id @default(uuid())
   userId    String   @unique @map("user_id")
-  bio       String?  // Optional bio/description
-  links     Json     // Array of { label: string, url: string } objects
+  bio       String? // Optional bio/description
+  links     Json // Array of { label: string, url: string } objects
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
@@ -315,15 +323,15 @@ model VisitCard {
 
 // Membership Invitations
 model MembershipInvitation {
-  id            String   @id @default(uuid())
-  worldId       String   @map("world_id")
-  invitedUserId String   @map("invited_user_id")
-  invitedByUserId String  @map("invited_by_user_id")
-  status        String   @default("pending") // pending, accepted, rejected, cancelled
-  tags          String[] // Tags that will be assigned when accepted
-  message       String?
-  invitedAt     DateTime @default(now()) @map("invited_at")
-  respondedAt   DateTime? @map("responded_at")
+  id              String    @id @default(uuid())
+  worldId         String    @map("world_id")
+  invitedUserId   String    @map("invited_user_id")
+  invitedByUserId String    @map("invited_by_user_id")
+  status          String    @default("pending") // pending, accepted, rejected, cancelled
+  tags            String[] // Tags that will be assigned when accepted
+  message         String?
+  invitedAt       DateTime  @default(now()) @map("invited_at")
+  respondedAt     DateTime? @map("responded_at")
 
   // Relations
   world       World @relation(fields: [worldId], references: [id], onDelete: Cascade)
@@ -344,13 +352,13 @@ model RoomTemplateCategory {
   slug        String   @unique
   name        String
   description String?
-  icon        String?  // emoji
+  icon        String? // emoji
   order       Int      @default(0)
   isActive    Boolean  @default(true) @map("is_active")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
-  templates   RoomTemplate[]
+  templates RoomTemplate[]
 
   @@map("room_template_categories")
 }
@@ -369,37 +377,37 @@ model RoomTemplate {
   visibility       String   @default("public")
   isFeatured       Boolean  @default(false) @map("is_featured")
   authorId         String?  @map("author_id")
-  isActive          Boolean  @default(true) @map("is_active")
+  isActive         Boolean  @default(true) @map("is_active")
   createdAt        DateTime @default(now()) @map("created_at")
   updatedAt        DateTime @updatedAt @map("updated_at")
 
-  category         RoomTemplateCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
-  maps             RoomTemplateMap[]
+  category RoomTemplateCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  maps     RoomTemplateMap[]
 
   @@map("room_templates")
 }
 
 // Room Template Maps (Actual Selectable Maps)
 model RoomTemplateMap {
-  id                  String   @id @default(uuid())
-  templateId          String   @map("template_id")
-  slug                String
-  name                String
-  description         String?
-  mapUrl              String   @map("map_url")
-  previewImageUrl     String?  @map("preview_image_url")
-  sizeLabel           String?  @map("size_label")
-  orientation         String   @default("orthogonal")
-  tileSize            Int      @default(32) @map("tile_size")
+  id                   String   @id @default(uuid())
+  templateId           String   @map("template_id")
+  slug                 String
+  name                 String
+  description          String?
+  mapUrl               String   @map("map_url")
+  previewImageUrl      String?  @map("preview_image_url")
+  sizeLabel            String?  @map("size_label")
+  orientation          String   @default("orthogonal")
+  tileSize             Int      @default(32) @map("tile_size")
   recommendedWorldTags String[] @map("recommended_world_tags")
-  authorId            String?  @map("author_id")
-  order               Int      @default(0)
-  isActive            Boolean  @default(true) @map("is_active")
-  createdAt           DateTime @default(now()) @map("created_at")
-  updatedAt           DateTime @updatedAt @map("updated_at")
+  authorId             String?  @map("author_id")
+  order                Int      @default(0)
+  isActive             Boolean  @default(true) @map("is_active")
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
 
-  template            RoomTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
-  rooms               Room[]
+  template RoomTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  rooms    Room[]
 
   @@unique([templateId, slug])
   @@index([templateId])
@@ -408,25 +416,25 @@ model RoomTemplateMap {
 
 // Bots
 model Bot {
-  id                  String   @id @default(uuid())
-  roomId              String   @map("room_id")
-  name                String   @db.VarChar(100)
-  description         String?
-  characterTextureId  String?  @map("character_texture_id") @db.VarChar(100)
-  enabled             Boolean  @default(true)
-  behaviorType        String   @default("idle") @map("behavior_type") @db.VarChar(20)
-  behaviorConfig      Json     @default("{}") @map("behavior_config")
-  chatInstructions    String?  @map("chat_instructions")
+  id                   String   @id @default(uuid())
+  roomId               String   @map("room_id")
+  name                 String   @db.VarChar(100)
+  description          String?
+  characterTextureId   String?  @map("character_texture_id") @db.VarChar(100)
+  enabled              Boolean  @default(true)
+  behaviorType         String   @default("idle") @map("behavior_type") @db.VarChar(20)
+  behaviorConfig       Json     @default("{}") @map("behavior_config")
+  chatInstructions     String?  @map("chat_instructions")
   movementInstructions String?  @map("movement_instructions")
-  aiProviderRef       String?  @map("ai_provider_ref") @db.VarChar(100)
-  createdAt           DateTime @default(now()) @map("created_at")
-  updatedAt           DateTime @updatedAt @map("updated_at")
-  createdById         String?  @map("created_by_id")
+  aiProviderRef        String?  @map("ai_provider_ref") @db.VarChar(100)
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
+  createdById          String?  @map("created_by_id")
   updatedById          String?  @map("updated_by_id")
 
-  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
-  createdBy User? @relation("BotCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
-  updatedBy User? @relation("BotUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
+  room       Room           @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  createdBy  User?          @relation("BotCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  updatedBy  User?          @relation("BotUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
   mcpServers BotMcpServer[]
 
   @@index([roomId])
@@ -435,18 +443,18 @@ model Bot {
 
 // Bot MCP Servers
 model BotMcpServer {
-  id          String   @id @default(uuid())
-  botId       String   @map("bot_id")
-  name        String   @db.VarChar(255)
-  serverUrl   String   @map("server_url") @db.Text
-  authType    String   @default("none") @map("auth_type") @db.VarChar(20)   // none | bearer | api-key
-  authConfig  String?  @map("auth_config") @db.Text                          // encrypted JSON
-  headers     Json?                                                          // extra headers key-value pairs
-  enabled     Boolean  @default(true)
-  lastTestedAt   DateTime?  @map("last_tested_at")
-  lastTestResult Json?      @map("last_test_result")
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  id             String    @id @default(uuid())
+  botId          String    @map("bot_id")
+  name           String    @db.VarChar(255)
+  serverUrl      String    @map("server_url") @db.Text
+  authType       String    @default("none") @map("auth_type") @db.VarChar(20) // none | bearer | api-key
+  authConfig     String?   @map("auth_config") @db.Text // encrypted JSON
+  headers        Json? // extra headers key-value pairs
+  enabled        Boolean   @default(true)
+  lastTestedAt   DateTime? @map("last_tested_at")
+  lastTestResult Json?     @map("last_test_result")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
 
   bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
 
@@ -456,26 +464,26 @@ model BotMcpServer {
 
 // AI Providers
 model BotsAiProvider {
-  providerId        String   @id @map("provider_id") @db.VarChar(50)
-  name              String   @db.VarChar(255)
-  type              String   @db.VarChar(50)
-  enabled           Boolean  @default(false)
-  endpoint          String?  @db.Text
-  apiKeyEncrypted   String?  @map("api_key_encrypted") @db.Text
-  model             String?  @db.VarChar(255)
-  temperature       Decimal? @db.Decimal(3, 2) @default(0.7)
-  maxTokens         Int?     @map("max_tokens") @default(500)
-  supportsStreaming Boolean  @default(true) @map("supports_streaming")
+  providerId        String    @id @map("provider_id") @db.VarChar(50)
+  name              String    @db.VarChar(255)
+  type              String    @db.VarChar(50)
+  enabled           Boolean   @default(false)
+  endpoint          String?   @db.Text
+  apiKeyEncrypted   String?   @map("api_key_encrypted") @db.Text
+  model             String?   @db.VarChar(255)
+  temperature       Decimal?  @default(0.7) @db.Decimal(3, 2)
+  maxTokens         Int?      @default(500) @map("max_tokens")
+  supportsStreaming Boolean   @default(true) @map("supports_streaming")
   supportsVision    Boolean?  @map("supports_vision") // null=auto (regex), true=force vision, false=force text-only
   visionModel       String?   @map("vision_model") @db.VarChar(255) // model used when this provider describes images
   defaultVision     Boolean   @default(false) @map("default_vision") // preferred vision provider when bots need image descriptions
-  settings          Json?    @default("{}")
-  tested            Boolean  @default(false)
+  settings          Json?     @default("{}")
+  tested            Boolean   @default(false)
   testedAt          DateTime? @map("tested_at")
-  createdAt         DateTime @default(now()) @map("created_at")
-  updatedAt         DateTime @updatedAt @map("updated_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
 
-  usage             BotsAiUsage[]
+  usage BotsAiUsage[]
 
   @@index([enabled])
   @@index([type])
@@ -495,7 +503,7 @@ model BotsAiUsage {
   error           Boolean  @default(false)
   timestamp       DateTime @default(now())
 
-  provider        BotsAiProvider @relation(fields: [providerId], references: [providerId], onDelete: Cascade)
+  provider BotsAiProvider @relation(fields: [providerId], references: [providerId], onDelete: Cascade)
 
   @@index([botId])
   @@index([providerId])
@@ -534,7 +542,7 @@ model BotsConversation {
   endReason    String?  @map("end_reason") @db.VarChar(50)
   createdAt    DateTime @default(now()) @map("created_at")
 
-  user         User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
 
   @@index([botId, createdAt])
   @@index([userUuid])
@@ -562,19 +570,19 @@ model BotsTestResult {
 
 // Bot Memory
 model BotsMemory {
-  id              Int       @id @default(autoincrement())
-  botId           String    @map("bot_id") @db.VarChar(255)
-  userUuid        String    @map("user_uuid") @db.VarChar(255)
-  userId          String?   @map("user_id")
-  userName        String?   @map("user_name") @db.VarChar(255)
-  isGuest         Boolean   @default(true) @map("is_guest")
-  memories        Json?
-  emotions        Json?
+  id                Int       @id @default(autoincrement())
+  botId             String    @map("bot_id") @db.VarChar(255)
+  userUuid          String    @map("user_uuid") @db.VarChar(255)
+  userId            String?   @map("user_id")
+  userName          String?   @map("user_name") @db.VarChar(255)
+  isGuest           Boolean   @default(true) @map("is_guest")
+  memories          Json?
+  emotions          Json?
   lastEmotionUpdate DateTime? @map("last_emotion_update")
-  createdAt       DateTime  @default(now()) @map("created_at")
-  updatedAt       DateTime  @updatedAt @map("updated_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
 
-  user            User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
 
   @@unique([botId, userUuid])
   @@index([botId])
@@ -599,26 +607,26 @@ model BotsMemory {
 //   "universe"  -> available inside one universe
 //   "world"     -> available inside one world
 model AvatarSet {
-  id          String   @id @default(uuid())
-  slug        String   @unique // e.g. "default", "zoo-animals", "museum-staff"
+  id          String  @id @default(uuid())
+  slug        String  @unique // e.g. "default", "zoo-animals", "museum-staff"
   name        String
   description String?
 
   // What kind of assets this set provides
   // "woka" | "companion" | "mixed"
-  kind        String   @default("woka")
+  kind String @default("woka")
 
   // Lifecycle: "draft" | "active" | "archived"
-  lifecycle   String   @default("draft")
+  lifecycle String @default("draft")
 
   // Who sees this in the player picker
   // "public" | "hidden" | "restricted" | "assigned_only"
-  visibility  String   @default("public")
+  visibility String @default("public")
 
   // Commercial / ownership metadata (for future monetisation)
   // "platform" | "partner" | "internal" | "client"
   sourceOwnerType  String  @default("platform") @map("source_owner_type")
-  partnerRef       String? @map("partner_ref")       // external partner/client id
+  partnerRef       String? @map("partner_ref") // external partner/client id
   campaignCode     String? @map("campaign_code")
   // "free" | "subscription" | "purchase" | "sponsored" | "custom_contract"
   monetizationType String  @default("free") @map("monetization_type")
@@ -626,21 +634,21 @@ model AvatarSet {
   licenseNotes     String? @map("license_notes")
 
   // Availability window (null = no limit)
-  availableFrom DateTime? @map("available_from")
+  availableFrom  DateTime? @map("available_from")
   availableUntil DateTime? @map("available_until")
 
   // Display order in admin and picker
-  position    Int      @default(0)
+  position Int @default(0)
 
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
   // Relations
-  layers       AvatarLayer[]
-  companions   AvatarCompanion[]
-  scopes       AvatarSetScope[]
-  policies     AvatarEntitlementPolicy[]
-  userGrants   UserAvatarGrant[]
+  layers     AvatarLayer[]
+  companions AvatarCompanion[]
+  scopes     AvatarSetScope[]
+  policies   AvatarEntitlementPolicy[]
+  userGrants UserAvatarGrant[]
 
   @@index([lifecycle, visibility])
   @@map("avatar_sets")
@@ -650,25 +658,25 @@ model AvatarSet {
 // layer values mirror the woka.json top-level keys:
 //   "woka" | "body" | "eyes" | "hair" | "clothes" | "hat" | "accessory"
 model AvatarLayer {
-  id          String  @id @default(uuid())
-  avatarSetId String  @map("avatar_set_id")
+  id          String @id @default(uuid())
+  avatarSetId String @map("avatar_set_id")
 
   // The texture ID used by WorkAdventure (e.g. "male1", "hair23")
-  textureId   String  @map("texture_id")
+  textureId String @map("texture_id")
 
   // Which customisation layer this belongs to
-  layer       String  // "woka"|"body"|"eyes"|"hair"|"clothes"|"hat"|"accessory"
+  layer String // "woka"|"body"|"eyes"|"hair"|"clothes"|"hat"|"accessory"
 
-  name        String?
+  name     String?
   // Full URL or play-relative path — stored as-is, resolved at runtime
-  url         String
-  position    Int     @default(0)
-  isActive    Boolean @default(true) @map("is_active")
+  url      String
+  position Int     @default(0)
+  isActive Boolean @default(true) @map("is_active")
 
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
-  avatarSet   AvatarSet @relation(fields: [avatarSetId], references: [id], onDelete: Cascade)
+  avatarSet AvatarSet @relation(fields: [avatarSetId], references: [id], onDelete: Cascade)
 
   @@unique([avatarSetId, textureId])
   @@index([avatarSetId, layer])
@@ -687,10 +695,10 @@ model AvatarCompanion {
   position    Int     @default(0)
   isActive    Boolean @default(true) @map("is_active")
 
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
 
-  avatarSet   AvatarSet @relation(fields: [avatarSetId], references: [id], onDelete: Cascade)
+  avatarSet AvatarSet @relation(fields: [avatarSetId], references: [id], onDelete: Cascade)
 
   @@unique([avatarSetId, textureId])
   @@index([avatarSetId])
@@ -702,16 +710,16 @@ model AvatarCompanion {
 // scopeType "universe" -> scopeId = Universe.id
 // scopeType "world"    -> scopeId = World.id
 model AvatarSetScope {
-  id          String  @id @default(uuid())
-  avatarSetId String  @map("avatar_set_id")
-  scopeType   String  @map("scope_type") // "platform" | "universe" | "world"
-  scopeId     String  @default("") @map("scope_id") // "" for platform scope
+  id          String @id @default(uuid())
+  avatarSetId String @map("avatar_set_id")
+  scopeType   String @map("scope_type") // "platform" | "universe" | "world"
+  scopeId     String @default("") @map("scope_id") // "" for platform scope
 
   // Optional: a direct World FK so Prisma can validate world-level scopes
-  worldId     String? @map("world_id")
+  worldId String? @map("world_id")
 
-  avatarSet   AvatarSet @relation(fields: [avatarSetId], references: [id], onDelete: Cascade)
-  world       World?    @relation(fields: [worldId], references: [id], onDelete: Cascade)
+  avatarSet AvatarSet @relation(fields: [avatarSetId], references: [id], onDelete: Cascade)
+  world     World?    @relation(fields: [worldId], references: [id], onDelete: Cascade)
 
   @@unique([avatarSetId, scopeType, scopeId])
   @@index([avatarSetId])
@@ -728,8 +736,8 @@ model AvatarSetScope {
 //   "subscription_plan"-> for future paid club feature
 //   "external_contract"-> for partner API grants
 model AvatarEntitlementPolicy {
-  id          String  @id @default(uuid())
-  avatarSetId String  @map("avatar_set_id")
+  id          String @id @default(uuid())
+  avatarSetId String @map("avatar_set_id")
 
   subjectType  String  @map("subject_type")
   subjectValue String? @map("subject_value") // tag name, user id, domain, plan id, etc.
@@ -738,15 +746,15 @@ model AvatarEntitlementPolicy {
   // "select"         -> can pick in player woka picker
   // "assign_to_bot"  -> admin can assign to bots
   // "manage"         -> full admin control over the set
-  action      String  @default("select")
+  action String @default("select")
 
   // Optional world scope override for tag-based policies
-  worldId     String? @map("world_id")
+  worldId String? @map("world_id")
 
-  isActive    Boolean @default(true) @map("is_active")
-  createdAt   DateTime @default(now()) @map("created_at")
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
 
-  avatarSet   AvatarSet @relation(fields: [avatarSetId], references: [id], onDelete: Cascade)
+  avatarSet AvatarSet @relation(fields: [avatarSetId], references: [id], onDelete: Cascade)
 
   @@index([avatarSetId])
   @@index([subjectType, subjectValue])
@@ -756,23 +764,23 @@ model AvatarEntitlementPolicy {
 // UserAvatarGrant — direct per-user grants (overrides visibility rules).
 // Use for: celebrity custom character, contest winner, support/gift grants.
 model UserAvatarGrant {
-  id          String   @id @default(uuid())
-  userId      String   @map("user_id")
-  avatarSetId String   @map("avatar_set_id")
+  id          String @id @default(uuid())
+  userId      String @map("user_id")
+  avatarSetId String @map("avatar_set_id")
 
   // "select" | "assigned_only" (admin forced their outfit)
-  grantType   String   @default("select") @map("grant_type")
+  grantType String @default("select") @map("grant_type")
 
   // Optional note for audit purposes (e.g. "Contest winner May 2026")
-  note        String?
+  note String?
 
-  expiresAt   DateTime? @map("expires_at") // null = permanent
-  grantedAt   DateTime  @default(now()) @map("granted_at")
-  revokedAt   DateTime? @map("revoked_at")
-  isActive    Boolean   @default(true) @map("is_active")
+  expiresAt DateTime? @map("expires_at") // null = permanent
+  grantedAt DateTime  @default(now()) @map("granted_at")
+  revokedAt DateTime? @map("revoked_at")
+  isActive  Boolean   @default(true) @map("is_active")
 
-  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  avatarSet   AvatarSet @relation(fields: [avatarSetId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  avatarSet AvatarSet @relation(fields: [avatarSetId], references: [id], onDelete: Cascade)
 
   @@index([userId, isActive])
   @@index([avatarSetId])
@@ -783,25 +791,444 @@ model UserAvatarGrant {
 // avatarSetId is a plain field (no FK constraint) so audit records survive the
 // deletion of the set they reference.
 model AvatarSetAuditLog {
-  id          Int      @id @default(autoincrement())
-  avatarSetId String   @map("avatar_set_id")
-  actorId     String?  @map("actor_id") // User.id who made the change
+  id          Int     @id @default(autoincrement())
+  avatarSetId String  @map("avatar_set_id")
+  actorId     String? @map("actor_id") // User.id who made the change
 
   // e.g. "set.created", "set.published", "set.archived",
   //      "layer.added", "layer.removed", "scope.added",
   //      "policy.added", "policy.removed", "grant.issued", "grant.revoked"
-  action      String
+  action String
 
   // JSON snapshot of what changed: { before: {...}, after: {...} }
-  diff        Json?
+  diff Json?
 
-  createdAt   DateTime @default(now()) @map("created_at")
+  createdAt DateTime @default(now()) @map("created_at")
 
   // actor relation preserved — audit logs still reference the user who acted
-  actor       User?     @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  actor User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
 
   @@index([avatarSetId, createdAt])
   @@index([actorId, createdAt])
   @@index([createdAt])
   @@map("avatar_set_audit_logs")
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Quests (Quests & Orbit 3A): a ledger that records every quest action once, applies one action to several quests
+// exactly once each, and never grants a reward twice. Behaviour lives in lib/quests/engine/. Retention per table is
+// in lib/quests/engine/retention.ts; account deletion is lib/quests/engine/deletion.ts.
+// ---------------------------------------------------------------------------------------------------------------------
+
+enum QuestScopeType {
+  PLATFORM
+  UNIVERSE
+  WORLD
+  ROOM
+
+  @@map("quest_scope_type")
+}
+
+enum QuestVersionStatus {
+  DRAFT
+  PUBLISHED
+  RETIRED
+
+  @@map("quest_version_status")
+}
+
+enum QuestRecurrence {
+  ONCE
+  DAILY
+  WEEKLY
+
+  @@map("quest_recurrence")
+}
+
+enum QuestAggregation {
+  STATE
+  UNIQUE_SET
+  EVENT_COUNT
+  DURATION
+  COUNTER
+
+  @@map("quest_aggregation")
+}
+
+/// Who observed the action, from the least to the most trusted. Bounds what an observation can complete or grant.
+enum QuestEvidence {
+  CLIENT
+  MAP_SCRIPT
+  PARTNER
+  SERVER
+
+  @@map("quest_evidence")
+}
+
+enum QuestCreditTiming {
+  IMMEDIATE
+  ON_COMPLETION
+
+  @@map("quest_credit_timing")
+}
+
+enum QuestProgressStatus {
+  ACCEPTED
+  COMPLETED
+  EXPIRED
+  RETIRED
+  PAUSED
+  STOPPED
+
+  @@map("quest_progress_status")
+}
+
+enum QuestApplicationOutcome {
+  ADVANCED
+  SATISFIED
+  COMPLETED
+  DUPLICATE
+  RATE_LIMITED
+  EVIDENCE_TOO_WEAK
+  OUT_OF_BOUNDS
+
+  @@map("quest_application_outcome")
+}
+
+enum QuestRewardKind {
+  BADGE
+  POINTS
+
+  @@map("quest_reward_kind")
+}
+
+enum QuestGuidanceState {
+  KNOWN
+  DISMISSED
+
+  @@map("quest_guidance_state")
+}
+
+/// Retention: lives as long as its scope (platform quests for ever). Never updated after creation; a definition is retired by retiring its versions.
+model QuestDefinition {
+  id          String         @id @default(uuid())
+  scopeType   QuestScopeType @map("scope_type")
+  /// The universe, world or room id; "" for the platform scope (as AvatarSetScope), never null, so keys stay unique there too.
+  scopeId     String         @default("") @map("scope_id")
+  /// Unique within its scope, e.g. "welcome.meet".
+  key         String         @db.VarChar(64)
+  createdById String?        @map("created_by_id")
+  createdAt   DateTime       @default(now()) @map("created_at")
+  /// Paused by its owner: nothing new is accepted and observations are not applied; progress is kept.
+  pausedAt    DateTime?      @map("paused_at")
+
+  versions QuestVersion[]
+  progress QuestProgress[]
+
+  @@unique([scopeType, scopeId, key])
+  @@index([scopeType, scopeId])
+  @@map("quest_definitions")
+}
+
+/// Retention: as long as its definition. A published version is immutable (the engine refuses edits); a new version supersedes it.
+model QuestVersion {
+  id           String             @id @default(uuid())
+  definitionId String             @map("definition_id")
+  number       Int
+  status       QuestVersionStatus @default(DRAFT)
+  purpose      String?            @db.VarChar(200)
+  title        String?            @db.VarChar(80)
+  order        Int                @default(0)
+  recurrence   QuestRecurrence    @default(ONCE)
+  createdAt    DateTime           @default(now()) @map("created_at")
+  publishedAt  DateTime?          @map("published_at")
+  retiredAt    DateTime?          @map("retired_at")
+
+  definition   QuestDefinition               @relation(fields: [definitionId], references: [id], onDelete: Cascade)
+  objectives   QuestObjective[]
+  rewardRules  QuestRewardRule[]
+  attempts     QuestAttempt[]
+  progress     QuestProgress[]
+  applications QuestObservationApplication[]
+  grants       QuestRewardGrant[]
+
+  @@unique([definitionId, number])
+  @@index([definitionId, status])
+  @@map("quest_versions")
+}
+
+/// Retention: as long as its version.
+model QuestObjective {
+  id                    String            @id @default(uuid())
+  versionId             String            @map("version_id")
+  key                   String            @db.VarChar(64)
+  order                 Int               @default(0)
+  /// The action an observation names, e.g. "hello-exchanged". Never an objective id: the engine picks objectives.
+  action                String            @db.VarChar(64)
+  aggregation           QuestAggregation
+  /// The least trusted evidence that may advance it.
+  evidence              QuestEvidence     @default(CLIENT)
+  creditTiming          QuestCreditTiming @default(IMMEDIATE) @map("credit_timing")
+  /// Count, distinct entities, seconds or units needed. 1 for a state predicate.
+  threshold             Int               @default(1)
+  /// Null: any subject. { kind: "entity", id } or { kind: "role", role: "host" }.
+  target                Json?
+  /// Objectives sharing a group satisfy the quest when any one of them is satisfied.
+  anyOfGroup            String?           @map("any_of_group") @db.VarChar(64)
+  requiredForCompletion Boolean           @default(true) @map("required_for_completion")
+
+  version      QuestVersion                  @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  progress     QuestObjectiveProgress[]
+  applications QuestObservationApplication[]
+
+  @@unique([versionId, key])
+  @@index([action])
+  @@map("quest_objectives")
+}
+
+/// Retention: as long as its version. A grant references the rule for ever, so a rule is never deleted on its own.
+model QuestRewardRule {
+  id           String          @id @default(uuid())
+  versionId    String          @map("version_id")
+  key          String          @db.VarChar(64)
+  kind         QuestRewardKind
+  /// Points, or 1 for a badge. Finite, positive, bounded (lib/quests/engine/limits.ts).
+  value        Int             @default(1)
+  /// The badge (stamp) id, for a badge.
+  badgeId      String?         @map("badge_id") @db.VarChar(64)
+  /// The least trusted evidence that may cause this grant.
+  evidence     QuestEvidence   @default(CLIENT)
+  /// Null: granted when the quest completes. An objective's key: granted when that objective is satisfied (if its credit timing is immediate; otherwise at completion).
+  objectiveKey String?         @map("objective_key") @db.VarChar(64)
+
+  version QuestVersion       @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  grants  QuestRewardGrant[]
+
+  @@unique([versionId, key])
+  @@map("quest_reward_rules")
+}
+
+/// Retention: deleted with the account. One per recurrence window (UTC); a one-shot quest has one.
+model QuestAttempt {
+  id        String    @id @default(uuid())
+  versionId String    @map("version_id")
+  actorId   String    @map("actor_id")
+  startsAt  DateTime  @map("starts_at")
+  endsAt    DateTime? @map("ends_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  version      QuestVersion                  @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  actor        User                          @relation("QuestAttemptActor", fields: [actorId], references: [id], onDelete: Cascade)
+  progress     QuestProgress?
+  applications QuestObservationApplication[]
+  grants       QuestRewardGrant[]
+
+  @@unique([versionId, actorId, startsAt])
+  @@index([actorId])
+  @@map("quest_attempts")
+}
+
+/// Retention: deleted with the account.
+model QuestProgress {
+  id           String              @id @default(uuid())
+  definitionId String              @map("definition_id")
+  versionId    String              @map("version_id")
+  attemptId    String              @unique @map("attempt_id")
+  actorId      String              @map("actor_id")
+  status       QuestProgressStatus @default(ACCEPTED)
+  pauseReason  String?             @map("pause_reason") @db.VarChar(64)
+  acceptedAt   DateTime            @default(now()) @map("accepted_at")
+  completedAt  DateTime?           @map("completed_at")
+  /// Removed from the person's log; the record and its grants stay.
+  hiddenAt     DateTime?           @map("hidden_at")
+  updatedAt    DateTime            @updatedAt @map("updated_at")
+
+  definition QuestDefinition          @relation(fields: [definitionId], references: [id], onDelete: Cascade)
+  version    QuestVersion             @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  attempt    QuestAttempt             @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  actor      User                     @relation("QuestProgressActor", fields: [actorId], references: [id], onDelete: Cascade)
+  objectives QuestObjectiveProgress[]
+  tracking   QuestTrackedSelection[]
+
+  @@index([actorId, status])
+  @@index([definitionId, actorId])
+  @@map("quest_progress")
+}
+
+/// Retention: deleted with the account.
+model QuestObjectiveProgress {
+  id          String    @id @default(uuid())
+  progressId  String    @map("progress_id")
+  objectiveId String    @map("objective_id")
+  /// Events, distinct entities, seconds or units so far; never above the objective's threshold.
+  count       Int       @default(0)
+  satisfiedAt DateTime? @map("satisfied_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  progress  QuestProgress  @relation(fields: [progressId], references: [id], onDelete: Cascade)
+  objective QuestObjective @relation(fields: [objectiveId], references: [id], onDelete: Cascade)
+
+  @@unique([progressId, objectiveId])
+  @@map("quest_objective_progress")
+}
+
+/// The observation inbox. Retention: deleted with the account. Unique per source and event id, so a retry reuses it. Names the action, never an objective.
+model QuestObservation {
+  id         String        @id @default(uuid())
+  source     QuestEvidence
+  /// Which producer of that class: "game" for the client, a partner's id, a map script's id.
+  sourceId   String        @map("source_id") @db.VarChar(64)
+  eventId    String        @map("event_id") @db.VarChar(128)
+  actorId    String        @map("actor_id")
+  action     String        @db.VarChar(64)
+  /// The entity the action was about (a person's uuid, an area id, an entity id), when there is one.
+  subject    String?       @db.VarChar(128)
+  /// The room the action happened in; applicability is resolved from it.
+  roomId     String?       @map("room_id")
+  occurredAt DateTime      @map("occurred_at")
+  receivedAt DateTime      @default(now()) @map("received_at")
+  /// Set once its applications are recorded; a retry that finds it set returns them instead of applying again.
+  appliedAt  DateTime?     @map("applied_at")
+  /// Minimal typed evidence: { seconds } or { amount }, bounded.
+  evidence   Json?
+
+  actor        User                          @relation("QuestObservationActor", fields: [actorId], references: [id], onDelete: Cascade)
+  applications QuestObservationApplication[]
+  grants       QuestRewardGrant[]
+
+  @@unique([source, sourceId, eventId])
+  @@index([actorId, receivedAt])
+  @@map("quest_observations")
+}
+
+/// One observation applied to one objective of one attempt, exactly once. Retention: deleted with the account.
+model QuestObservationApplication {
+  id            String                  @id @default(uuid())
+  observationId String                  @map("observation_id")
+  actorId       String                  @map("actor_id")
+  versionId     String                  @map("version_id")
+  attemptId     String                  @map("attempt_id")
+  objectiveId   String                  @map("objective_id")
+  outcome       QuestApplicationOutcome
+  /// For a unique-entity set: the entity credited, unique per attempt and objective.
+  entityKey     String?                 @map("entity_key") @db.VarChar(128)
+  createdAt     DateTime                @default(now()) @map("created_at")
+
+  observation QuestObservation @relation(fields: [observationId], references: [id], onDelete: Cascade)
+  actor       User             @relation("QuestApplicationActor", fields: [actorId], references: [id], onDelete: Cascade)
+  version     QuestVersion     @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  attempt     QuestAttempt     @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  objective   QuestObjective   @relation(fields: [objectiveId], references: [id], onDelete: Cascade)
+
+  @@unique([observationId, actorId, attemptId, objectiveId])
+  @@unique([attemptId, objectiveId, entityKey])
+  @@index([actorId, createdAt])
+  @@map("quest_observation_applications")
+}
+
+/// Retention: deleted with the account. Unique per actor, attempt and rule: a reward is never granted twice.
+model QuestRewardGrant {
+  id            String          @id @default(uuid())
+  actorId       String          @map("actor_id")
+  attemptId     String          @map("attempt_id")
+  ruleId        String          @map("rule_id")
+  versionId     String          @map("version_id")
+  observationId String?         @map("observation_id")
+  evidence      QuestEvidence
+  kind          QuestRewardKind
+  value         Int
+  badgeId       String?         @map("badge_id") @db.VarChar(64)
+  grantedAt     DateTime        @default(now()) @map("granted_at")
+  revokedAt     DateTime?       @map("revoked_at")
+  revokeReason  String?         @map("revoke_reason") @db.VarChar(200)
+
+  actor       User              @relation("QuestGrantActor", fields: [actorId], references: [id], onDelete: Cascade)
+  attempt     QuestAttempt      @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  rule        QuestRewardRule   @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  version     QuestVersion      @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  observation QuestObservation? @relation(fields: [observationId], references: [id], onDelete: SetNull)
+
+  @@unique([actorId, attemptId, ruleId])
+  @@index([actorId, badgeId])
+  @@map("quest_reward_grants")
+}
+
+/// The one quest a person follows on the map. Retention: deleted with the account.
+model QuestTrackedSelection {
+  actorId    String   @id @map("actor_id")
+  progressId String?  @map("progress_id")
+  revision   Int      @default(0)
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  actor    User           @relation("QuestTrackingActor", fields: [actorId], references: [id], onDelete: Cascade)
+  progress QuestProgress? @relation(fields: [progressId], references: [id], onDelete: SetNull)
+
+  @@map("quest_tracked_selections")
+}
+
+/// "I know this": a capability learned anywhere is not taught again. Retention: deleted with the account.
+model QuestGuidancePreference {
+  id            String             @id @default(uuid())
+  actorId       String             @map("actor_id")
+  capabilityKey String             @map("capability_key") @db.VarChar(64)
+  state         QuestGuidanceState
+  updatedAt     DateTime           @updatedAt @map("updated_at")
+
+  actor User @relation("QuestGuidanceActor", fields: [actorId], references: [id], onDelete: Cascade)
+
+  @@unique([actorId, capabilityKey])
+  @@map("quest_guidance_preferences")
+}
+
+/// Who plays the host role in a scope (room, then world, then universe). Retention: as long as its scope. Set by part 4's settings; the engine resolves role targets through it.
+model QuestHostBinding {
+  id        String         @id @default(uuid())
+  scopeType QuestScopeType @map("scope_type")
+  scopeId   String         @map("scope_id")
+  /// A binding for one quest (its key) only; "" binds the scope's host for every quest.
+  questKey  String         @default("") @map("quest_key") @db.VarChar(64)
+  /// "bot" or "area".
+  hostKind  String         @map("host_kind") @db.VarChar(16)
+  /// The bot's id, or the area's id.
+  hostId    String         @map("host_id") @db.VarChar(128)
+  updatedAt DateTime       @updatedAt @map("updated_at")
+
+  @@unique([scopeType, scopeId, questKey])
+  @@map("quest_host_bindings")
+}
+
+/// A person's link to a partner (part 6 fills it in). Retention: unlinked when the account is deleted.
+model QuestPartnerLink {
+  id              String    @id @default(uuid())
+  actorId         String?   @map("actor_id")
+  partnerId       String    @map("partner_id") @db.VarChar(64)
+  externalSubject String    @map("external_subject") @db.VarChar(128)
+  createdAt       DateTime  @default(now()) @map("created_at")
+  unlinkedAt      DateTime? @map("unlinked_at")
+
+  actor User? @relation("QuestPartnerLinkActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@unique([partnerId, externalSubject])
+  @@index([actorId])
+  @@map("quest_partner_links")
+}
+
+/// Grants, revocations and deletions. Retention: kept; a deleted account's rows carry a non-reversible token instead of its id.
+model QuestAuditLog {
+  id           String   @id @default(uuid())
+  /// "grant", "revoke", "delete-account", "publish", "retire".
+  action       String   @db.VarChar(32)
+  /// The person the entry is about: their id, or a one-way token after deletion.
+  subjectToken String   @map("subject_token") @db.VarChar(128)
+  /// Who did it (a user id, "system", or a partner id).
+  byToken      String   @map("by_token") @db.VarChar(128)
+  source       String?  @db.VarChar(64)
+  ruleId       String?  @map("rule_id")
+  versionId    String?  @map("version_id")
+  reason       String?  @db.VarChar(200)
+  details      Json?
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([subjectToken, createdAt])
+  @@map("quest_audit_log")
 }
