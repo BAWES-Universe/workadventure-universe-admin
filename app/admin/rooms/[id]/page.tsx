@@ -27,6 +27,7 @@ import { TemplateLibrary } from '@/components/templates/TemplateLibrary';
 import { TemplateDetail } from '@/components/templates/TemplateDetail';
 import { cn } from '@/lib/utils';
 import { timeAgo } from '@/lib/time-ago';
+import { RoomQuests } from '../../components/quests/room-quests';
 import { EmptyCard, EntityRow, Figure, Figures, InContext, KindIcon, LoadingRows, PageHeader, RolePills, SectionHeader, SettingSwitch, Settings, StatLine, StatusPill } from '../../components/ds';
 
 interface Room {
@@ -126,11 +127,25 @@ export default function RoomDetailPage() {
   const [isSuperAdmin, setIsSuperAdmin] = useState(false);
   const [currentRoomPath, setCurrentRoomPath] = useState<string | null>(null);
   const [togglingStar, setTogglingStar] = useState(false);
-  const [activeTab, setActiveTab] = useState<'details' | 'analytics'>('details');
+  const [activeTab, setActiveTab] = useState<'details' | 'analytics' | 'quests'>('details');
   const [visitorsPage, setVisitorsPage] = useState(1);
   const visitorsPerPage = 10;
   
   const { wa, isReady: waReady, navigateToRoom } = useWorkAdventure();
+
+  // The Quests tab keeps its place in the address (?tab=quests), so Back from a quest page lands on it.
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get('tab') === 'quests') setActiveTab('quests');
+  }, []);
+  function selectTab(tab: 'details' | 'analytics' | 'quests') {
+    setActiveTab(tab);
+    const url = new URL(window.location.href);
+    if ((url.searchParams.get('tab') === 'quests') === (tab === 'quests')) return;
+    if (tab === 'quests') url.searchParams.set('tab', 'quests');
+    else url.searchParams.delete('tab');
+    // null lets Next's patched replaceState sync its router, so a later refresh keeps ?tab.
+    window.history.replaceState(null, '', url);
+  }
   
   const [formData, setFormData] = useState({
     slug: '',
@@ -512,6 +527,9 @@ export default function RoomDetailPage() {
 
   const visits = typeof analytics?.totalAccesses === 'number' ? analytics.totalAccesses : null;
   const canEdit = room.canEdit !== false;
+  // Quests are only for those who can edit the room.
+  const showQuests = canEdit;
+  const shownTab = activeTab === 'quests' && !showQuests ? 'details' : activeTab;
 
   return (
     <div className="space-y-8">
@@ -938,15 +956,22 @@ export default function RoomDetailPage() {
       ) : (
         <>
           <nav className="flex flex-wrap gap-x-6 border-b border-border" aria-label="Room sections">
-            <button type="button" onClick={() => setActiveTab('details')} className={tabClass(activeTab === 'details')}>
+            <button type="button" onClick={() => selectTab('details')} className={tabClass(shownTab === 'details')}>
               Details
             </button>
-            <button type="button" onClick={() => setActiveTab('analytics')} className={tabClass(activeTab === 'analytics')}>
+            <button type="button" onClick={() => selectTab('analytics')} className={tabClass(shownTab === 'analytics')}>
               Visitors
             </button>
+            {showQuests && (
+              <button type="button" onClick={() => selectTab('quests')} className={tabClass(shownTab === 'quests')}>
+                Quests
+              </button>
+            )}
           </nav>
 
-          {activeTab === 'details' && (
+          {shownTab === 'quests' && <RoomQuests roomId={room.id} />}
+
+          {shownTab === 'details' && (
             <section aria-labelledby="room-about" className="space-y-2">
               <SectionHeader id="room-about" title="About" />
               {room.description ? (
@@ -957,7 +982,7 @@ export default function RoomDetailPage() {
             </section>
           )}
 
-          {activeTab === 'analytics' && (
+          {shownTab === 'analytics' && (
             <section aria-labelledby="room-visitors">
               {analyticsLoading ? (
                 <LoadingRows label="visitors" rows={3} />

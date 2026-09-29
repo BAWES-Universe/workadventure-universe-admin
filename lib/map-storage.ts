@@ -201,3 +201,28 @@ export async function createWamFile(
   }
 }
 
+
+/**
+ * Reads a room's WAM file from map-storage, or null when it can't be read (missing, unauthorised, not JSON, slow).
+ * Read only: never creates or changes the file.
+ */
+export async function readWamFile(
+  publicMapStorageUrl: string,
+  wamPath: string,
+  apiToken: string,
+  timeoutMs = 5000
+): Promise<Partial<WAMFileFormat> | null> {
+  try {
+    const baseUrl = publicMapStorageUrl.replace(/\/$/, '');
+    const response = await fetch(`${baseUrl}/${wamPath}`, {
+      method: 'GET',
+      headers: { 'Authorization': `Bearer ${apiToken}` },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!response.ok) return null;
+    const data: unknown = await response.json();
+    return typeof data === 'object' && data !== null ? (data as Partial<WAMFileFormat>) : null;
+  } catch {
+    return null;
+  }
+}

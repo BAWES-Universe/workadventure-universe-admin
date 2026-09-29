@@ -1,11 +1,11 @@
 /** @jest-environment jsdom */
 
 import React from 'react';
-import { render } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 
 /**
- * The profile opens as a form only when someone asked to edit it (the game's "Edit my profile", Get started's
- * "Set up your profile"), and the address drops that ask at once, so Back, a reload or a later visit shows the profile.
+ * The profile opens as a form only when someone asked to edit it (the game's "Edit my profile"), and the address drops
+ * that ask at once, so Back, a reload or a later visit shows the profile.
  */
 
 let search = '';
@@ -22,8 +22,10 @@ jest.mock('@/app/admin/components/profile-card', () => ({
   },
 }));
 jest.mock('@/app/admin/components/yours', () => ({ __esModule: true, default: () => null }));
-jest.mock('@/app/admin/components/shell/theme-choice', () => ({ ThemeChoice: () => null }));
-jest.mock('@/app/admin/logout-button', () => ({ __esModule: true, default: () => null }));
+jest.mock('@/app/admin/components/quests/you-quests', () => ({
+  YouQuests: () => <div data-testid="you-quests" />,
+  YouBadges: () => <div data-testid="you-badges" />,
+}));
 jest.mock('@/app/admin/admin-bootstrap-context', () => ({ useAdminBootstrap: () => ({ user: { id: 'u', uuid: 'u', name: 'Me', email: null, tags: [], isSuperAdmin: false }, mine: null }) }));
 
 import YouPage from '@/app/admin/you/page';
@@ -46,5 +48,14 @@ describe('You and the edit intent', () => {
     render(<YouPage />);
     expect(cardProps[0].startEditing).toBe(true);
     expect(replace).toHaveBeenCalledWith('/admin/you', { scroll: false });
+  });
+
+  it('puts your quests and, apart, your badges right under the profile, and no settings: they are in the Orbit Menu', () => {
+    search = '';
+    render(<YouPage />);
+    expect(screen.getByTestId('you-quests')).toBeTruthy();
+    expect(screen.getByTestId('you-badges')).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: 'Settings' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Sign out/ })).toBeNull();
   });
 });

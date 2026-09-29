@@ -15,10 +15,10 @@ import { z } from 'zod';
 export const ORBIT_BRIDGE_VERSION = 1 as const;
 
 /** What this Orbit can do over the bridge (sent in `orbit-bridge-ready`). */
-export const ORBIT_BRIDGE_CAPABILITIES = ['navigate', 'event', 'view'] as const;
+export const ORBIT_BRIDGE_CAPABILITIES = ['navigate', 'event', 'view', 'quests'] as const;
 
 /** Pages the game may ask for. Anything else lands on Orbit's home. */
-export const ORBIT_NAVIGATE_INTENTS = ['new-universe', 'world-members', 'visit-card'] as const;
+export const ORBIT_NAVIGATE_INTENTS = ['new-universe', 'world-members', 'visit-card', 'quest'] as const;
 
 /**
  * The two sizes of Orbit's window inside the game: the compact companion panel (the default) and the full-screen
@@ -74,7 +74,33 @@ export const orbitEventSchema = z.object({
 
 export type OrbitBridgeInit = z.infer<typeof orbitBridgeInitSchema>;
 export type OrbitNavigate = z.infer<typeof orbitNavigateSchema>;
+/**
+ * The player's quest log, from a game that offers quests (the proof slice): what You shows under Quests. Display
+ * only, bounded, and replaced whole by the next one; nothing in it is stored on the server.
+ */
+export const ORBIT_QUEST_STATUSES = ['tracked', 'accepted', 'done'] as const;
+export const ORBIT_QUEST_STAMPS = ['first-hello', 'explorer', 'builder'] as const;
+export const orbitQuestEntrySchema = z.object({
+  id: z.string().min(1).max(64),
+  title: z.string().min(1).max(80),
+  status: z.enum(ORBIT_QUEST_STATUSES),
+  stamp: z.enum(ORBIT_QUEST_STAMPS).optional(),
+  giver: z.string().min(1).max(64).optional(),
+  room: z.string().max(80),
+  // What to do, in the game's words ("Find the Courtyard"); older games don't send it.
+  objective: z.string().min(1).max(120).optional(),
+});
+export const orbitQuestStateSchema = z.object({
+  type: z.literal('orbit-quest-state'),
+  version: z.literal(ORBIT_BRIDGE_VERSION),
+  // The game sends {type, version, entries}; a revision, when present, must be the current one.
+  roomRevision: roomRevision.optional(),
+  entries: z.array(orbitQuestEntrySchema).max(8),
+});
+
 export type OrbitEvent = z.infer<typeof orbitEventSchema>;
+export type OrbitQuestEntry = z.infer<typeof orbitQuestEntrySchema>;
+export type OrbitQuestState = z.infer<typeof orbitQuestStateSchema>;
 export type OrbitViewChange = z.infer<typeof orbitViewSchema>;
 
 export type OrbitBridgeAckError = 'stale-revision' | 'not-ready';
@@ -106,7 +132,8 @@ export type IncomingBridgeMessage =
   | { kind: 'init'; message: OrbitBridgeInit }
   | { kind: 'navigate'; message: OrbitNavigate }
   | { kind: 'event'; message: OrbitEvent }
-  | { kind: 'view'; message: OrbitViewChange };
+  | { kind: 'view'; message: OrbitViewChange }
+  | { kind: 'quest-state'; message: OrbitQuestState };
 
 /**
  * Accept a message only from the game: exact origin, the parent window, and a known, well-formed message.
@@ -125,6 +152,8 @@ export function parseBridgeMessage(
   if (orbitEvent.success) return { kind: 'event', message: orbitEvent.data };
   const view = orbitViewSchema.safeParse(event.data);
   if (view.success) return { kind: 'view', message: view.data };
+  const questState = orbitQuestStateSchema.safeParse(event.data);
+  if (questState.success) return { kind: 'quest-state', message: questState.data };
   return null;
 }
 

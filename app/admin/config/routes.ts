@@ -34,6 +34,9 @@ export const ROUTES: RouteDefinition[] = [
   { pattern: '/admin/worlds/[id]', title: 'World', parent: '/admin/space' },
   { pattern: '/admin/rooms/new', title: 'New room', parent: '/admin/space' },
   { pattern: '/admin/rooms/[id]', title: 'Room', parent: '/admin/space' },
+  // The quests proof slice (flagged; the pages say so when it is off).
+  { pattern: '/admin/rooms/[id]/quests/new', title: 'New quest', parent: '/admin/rooms/[id]' },
+  { pattern: '/admin/rooms/[id]/quests/welcome', title: 'Welcome chapter', parent: '/admin/rooms/[id]' },
   { pattern: '/admin/stars', title: 'Stars', parent: '/admin/you' },
   { pattern: '/admin/memberships', title: 'Memberships', parent: '/admin/you' },
   { pattern: '/admin/invitations/[id]', title: 'Invitation', parent: '/admin/you' },
@@ -54,6 +57,8 @@ export const ROUTES: RouteDefinition[] = [
 
   // You
   { pattern: '/admin/profile', title: 'Profile', parent: '/admin/you' },
+  { pattern: '/admin/you/quests', title: 'Quests', parent: '/admin/you' },
+  { pattern: '/admin/you/quests/[id]', title: 'Quest', parent: '/admin/you/quests' },
 
   // Admin (super admin)
   { pattern: '/admin/style', title: 'Orbit style', parent: '/admin' },

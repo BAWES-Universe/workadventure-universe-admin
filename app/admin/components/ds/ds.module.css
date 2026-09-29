@@ -17,6 +17,8 @@
 .pill[data-status='waiting'] { border-color: rgb(245 158 11 / 0.55); color: #92400e; }
 :global(.dark) .pill[data-status='waiting'] { color: #fbbf24; }
 .pill[data-status='waiting'] .statusDot { background: var(--status-waiting); }
+.pill[data-status='published'] .statusDot { background: var(--status-live); box-shadow: 0 0 0 3px rgb(34 197 94 / 0.18); }
+.pill[data-status='paused'] .statusDot { background: hsl(var(--muted-foreground)); }
 
 /* Rows and cards: the whole thing is one link (the stretched ::after); `trailing` sits above it. */
 /* Every item in a list is a card: a compact one (a row) or a full one with a description. Same surface, border, radius. */

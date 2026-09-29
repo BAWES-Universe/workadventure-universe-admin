@@ -8,26 +8,6 @@
 .more { display: inline-flex; align-items: center; gap: 6px; min-height: 40px; margin-top: 8px; font-size: 12px; font-weight: 600; color: hsl(var(--muted-foreground)); }
 .more:hover { color: hsl(var(--foreground)); }
 
-.getStarted { display: grid; gap: 12px; padding: 18px; border: 1px solid hsl(var(--border)); border-radius: 20px; background: linear-gradient(160deg, rgb(134 41 252 / 0.1), transparent 45%), hsl(var(--card)); }
-.getStartedHead { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
-.getStartedHead h2 { font-size: 20px; font-weight: 700; }
-.hide { min-height: 44px; margin-left: 10px; padding: 0 12px; border-radius: 999px; font-size: 12px; font-weight: 600; color: hsl(var(--muted-foreground)); }
-.hide:hover { color: hsl(var(--foreground)); background: hsl(var(--foreground) / 0.06); }
-.getStartedHead > span { display: inline-flex; align-items: center; font-size: 12px; font-weight: 600; color: hsl(var(--muted-foreground)); font-variant-numeric: tabular-nums; }
-.progress { height: 4px; border-radius: 999px; background: hsl(var(--foreground) / 0.08); overflow: hidden; }
-.progress > span { display: block; height: 100%; border-radius: inherit; background: var(--status-live); transition: width 300ms var(--ease-out); }
-.steps { display: grid; gap: 4px; }
-.step { display: flex; align-items: center; gap: 12px; min-height: 60px; padding: 10px 12px; border-radius: 14px; transition: background 160ms; }
-a.step:hover { background: hsl(var(--foreground) / 0.05); }
-div.step[aria-disabled] { opacity: 0.6; }
-.stepMark { display: grid; place-items: center; flex: none; width: 28px; height: 28px; border-radius: 50%; border: 1.5px solid hsl(var(--foreground) / 0.25); font-size: 12px; font-weight: 700; }
-.stepMark[data-done] { border: 0; color: #fff; background: var(--status-live); }
-.stepText { display: grid; gap: 2px; flex: 1; min-width: 0; }
-.stepText strong { font-size: 14px; font-weight: 600; }
-.stepText > span { font-size: 12px; line-height: 1.5; color: hsl(var(--muted-foreground)); }
-li[data-done] .stepText strong { text-decoration: line-through; text-decoration-color: hsl(var(--foreground) / 0.35); color: hsl(var(--muted-foreground)); }
-.stepArrow { flex: none; color: hsl(var(--muted-foreground)); }
-
 .universes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .universe { --planet-color: #a78bfa; display: flex; flex-direction: column; justify-content: space-between; min-width: 0; min-height: 226px; padding: 21px; border-radius: 16px; background: hsl(var(--card)); border: 1px solid var(--atlas-line); position: relative; overflow: hidden; isolation: isolate; transition: border-color 240ms, transform 240ms; }
 .universe:hover { transform: translateY(-3px); border-color: color-mix(in srgb, var(--planet-color) 70%, transparent); }

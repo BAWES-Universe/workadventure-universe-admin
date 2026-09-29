@@ -20,6 +20,7 @@ jest.mock('@/lib/client-auth', () => ({
 }));
 
 import OrbitBridge from '@/app/admin/components/orbit-bridge';
+import { getQuestLog, resetQuestLog } from '@/lib/quests/quest-log';
 
 const revision = 'rev-aaaaaaaaaaaaaaaa';
 const otherRevision = 'rev-bbbbbbbbbbbbbbbb';
@@ -53,7 +54,7 @@ describe('OrbitBridge', () => {
 
   it('tells the game it is ready once mounted (after sign-in)', () => {
     render(<OrbitBridge onRefresh={jest.fn()} />);
-    expect(posted).toContainEqual({ type: 'orbit-bridge-ready', version: 1, capabilities: ['navigate', 'event', 'view'] });
+    expect(posted).toContainEqual({ type: 'orbit-bridge-ready', version: 1, capabilities: ['navigate', 'event', 'view', 'quests'] });
   });
 
   it('answers not-ready to a request before the game said which visit it is', () => {
@@ -108,5 +109,31 @@ describe('OrbitBridge', () => {
     expect(heard).toHaveBeenCalledTimes(1);
     expect(posted).toContainEqual(expect.objectContaining({ requestId: 'r2', ok: true }));
     window.removeEventListener('orbit:refresh', heard);
+  });
+
+  describe('the quest log', () => {
+    const entry = { id: 'welcome.explore', title: 'Find the Courtyard', status: 'tracked', stamp: 'explorer', room: 'Lobby' };
+    const questState = (roomRevision: string | undefined = revision) => ({ type: 'orbit-quest-state', version: 1, roomRevision, entries: [entry] });
+
+    beforeEach(() => resetQuestLog());
+    afterEach(() => resetQuestLog());
+
+    it('asks the game for it and keeps the latest one from this visit', () => {
+      render(<OrbitBridge onRefresh={jest.fn()} />);
+      expect(posted).toContainEqual(expect.objectContaining({ type: 'orbit-bridge-ready', capabilities: ['navigate', 'event', 'view', 'quests'] }));
+      fromGame(questState());
+      expect(getQuestLog()).toBeNull();
+      init();
+      fromGame(questState(otherRevision));
+      expect(getQuestLog()).toBeNull();
+      fromGame(questState());
+      expect(getQuestLog()).toEqual([entry]);
+      // As the game sends it: no revision, taken as this visit's.
+      resetQuestLog();
+      fromGame({ type: 'orbit-quest-state', version: 1, entries: [entry] });
+      expect(getQuestLog()).toEqual([entry]);
+      // Display only: nothing is answered.
+      expect(posted.filter((message) => (message as { type: string }).type === 'orbit-bridge-ack')).toHaveLength(0);
+    });
   });
 });

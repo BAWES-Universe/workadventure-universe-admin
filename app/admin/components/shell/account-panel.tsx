@@ -34,8 +34,8 @@ export function Avatar({ user, className }: { user: AccountPanelUser; className?
 }
 
 /**
- * Who is signed in, the appearance choice and Sign out. The sidebar's foot, the menu's foot and the You page share
- * it; `compact` is the sidebar's single-row version.
+ * Who is signed in, the appearance choice and Sign out: the foot of the Orbit Menu and of the sidebar. `compact` is
+ * the sidebar's narrow version.
  */
 export function AccountPanel({ user, compact = false }: { user: AccountPanelUser; compact?: boolean }) {
   const label = user.name || user.email || 'Signed in';

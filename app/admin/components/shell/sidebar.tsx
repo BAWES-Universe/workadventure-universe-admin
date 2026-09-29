@@ -7,6 +7,7 @@ import { Menu } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { DESTINATIONS, getNavItems, getNavSections, isNavItemActive, type NavUser } from '../../config/navigation';
 import { useOrbitFrame } from '../../orbit-frame-context';
+import { AccountPanel } from './account-panel';
 import { OrbitWordmark } from './orbit-mark';
 import { ShortcutHint } from './shortcut-hint';
 import { rootOf } from './root-of';
@@ -107,6 +108,10 @@ export function Sidebar({ user }: { user: NavUser }) {
           </div>
         ))}
       </nav>
+      {/* As at the menu's foot: who is signed in, the appearance and Sign out. */}
+      <div className="border-t border-border/60 p-3" data-testid="sidebar-account">
+        <AccountPanel user={user} compact />
+      </div>
     </aside>
   );
 }

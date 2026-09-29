@@ -387,7 +387,20 @@ describe('AdminShell', () => {
     for (const label of ['Your universes', 'Stars', 'Memberships', 'Profile', 'Room templates', 'People']) {
       expect(menu.textContent).toContain(label);
     }
-    // The account, theme and sign-out live on You, not in the menu.
-    expect(menu.textContent).not.toContain('Sign out');
+    // At its foot: who is signed in, the appearance and Sign out.
+    const account = within(menu).getByTestId('orbit-menu-account');
+    expect(within(account).getByRole('radiogroup', { name: 'Appearance' })).toBeTruthy();
+    expect(within(account).getByRole('button', { name: /Sign out/ })).toBeTruthy();
+  });
+
+  it('finds the account from the menu search', async () => {
+    await renderShell('/admin');
+    fireEvent.click(screen.getByTestId('orbit-menu-button'));
+    const menu = await screen.findByRole('dialog');
+    fireEvent.change(within(menu).getByRole('searchbox'), { target: { value: 'dark' } });
+    expect(within(menu).getByTestId('orbit-menu-account')).toBeTruthy();
+    expect(within(menu).queryByText(/Nothing matches/)).toBeNull();
+    fireEvent.change(within(menu).getByRole('searchbox'), { target: { value: 'bots' } });
+    expect(within(menu).queryByTestId('orbit-menu-account')).toBeNull();
   });
 });

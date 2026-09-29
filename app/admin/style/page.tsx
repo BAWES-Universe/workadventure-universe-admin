@@ -24,6 +24,8 @@ import {
   count,
   type Kind,
 } from '../components/ds';
+import { QuestStamp } from '../components/quests/quest-stamp';
+import { questCopy } from '@/lib/quests/copy';
 import styles from './style.module.css';
 
 const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
@@ -94,7 +96,26 @@ export default function StylePage() {
           <StatusPill status="featured" />
           <StatusPill status="live" />
           <StatusPill status="waiting" />
+          <StatusPill status="published" />
+          <StatusPill status="paused" />
           <RolePills roles={['member', 'owner', 'admin', 'editor']} />
+        </div>
+      </section>
+
+      <section className={styles.section} aria-labelledby="stamps">
+        <SectionHeader id="stamps" title="Quest stamps" />
+        <p className={styles.note}>Lavender ring, gold glyph, tilted like an ink stamp; faded until earned. Always named beside it.</p>
+        <div className={styles.kinds}>
+          {(['meet', 'explore', 'build'] as const).map((path) => (
+            <span key={path} className={styles.kind}>
+              <QuestStamp path={path} />
+              {questCopy(`stamps.${path}`)}
+            </span>
+          ))}
+          <span className={styles.kind}>
+            <QuestStamp path="explore" size="sm" muted />
+            Not earned yet
+          </span>
         </div>
       </section>
 

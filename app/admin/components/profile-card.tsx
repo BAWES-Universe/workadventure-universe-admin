@@ -41,21 +41,18 @@ export function profileLinkError(link: ProfileLink): string | null {
 /**
  * Your profile as other people see it when they click you in the game or find you in Users: your name, a few words
  * and your links, edited in place. A new name reaches the game too. An empty profile says what it's for and invites
- * you to set it up. Nothing here is private: your email lives elsewhere on You.
+ * you to set it up. Nothing here is private: your email lives in the Orbit Menu.
  */
 export function ProfileCard({
   user,
   startEditing = false,
   stats,
-  onLoaded,
   onEditEnd,
 }: {
   user: { name: string | null };
   startEditing?: boolean;
   /** What people can see about what you've made and joined ("Owns 2 universes · …"). */
   stats?: ReactNode;
-  /** Whether the profile has anything in it yet (for You's first steps). */
-  onLoaded?: (complete: boolean) => void;
   /** Editing ended (saved or cancelled): lets the page drop an `?edit=profile` intent. */
   onEditEnd?: () => void;
 }) {
@@ -67,7 +64,7 @@ export function ProfileCard({
   const nameRef = useRef<HTMLInputElement>(null);
   const onEditEndRef = useRef(onEditEnd);
   onEditEndRef.current = onEditEnd;
-  // An edit intent can arrive while You is already open (a first-steps link, the game): open the form then too.
+  // An edit intent can arrive while You is already open (the game): open the form then too.
   useEffect(() => {
     if (startEditing) setEditing(true);
   }, [startEditing]);
@@ -87,8 +84,6 @@ export function ProfileCard({
   const [attempt, setAttempt] = useState(0);
   const [woka, setWoka] = useState<string[]>([]);
   const headingId = useId();
-  const onLoadedRef = useRef(onLoaded);
-  onLoadedRef.current = onLoaded;
 
   useEffect(() => {
     let cancelled = false;
@@ -107,7 +102,6 @@ export function ProfileCard({
         setForm(profile);
         setWoka(Array.isArray(data.woka) ? data.woka.filter((url: unknown): url is string => typeof url === 'string') : []);
         setStatus('ready');
-        onLoadedRef.current?.(Boolean(profile.bio || profile.links.length));
       })
       .catch(() => {
         if (!cancelled) setStatus('error');
@@ -163,7 +157,6 @@ export function ProfileCard({
       }
       const next = { name, bio: form.bio.trim(), links };
       setSaved(next);
-      onLoadedRef.current?.(Boolean(next.bio || next.links.length));
       setForm(next);
       discard();
       stopEditing();
