@@ -23,18 +23,23 @@ export function objectiveSatisfied(progress: LoadedProgress, objective: LoadedOb
   return progress.objectives.some((row) => row.objectiveId === objective.id && row.satisfiedAt !== null);
 }
 
-/** An any-of group is met when one of its members is; every other required objective must be met itself. */
+/**
+ * An any-of group is met when any one of its members is (the same rule openObjectives uses to close the others), and
+ * it is required when any member is. Every other required objective must be met itself. Publishing refuses a group
+ * that mixes required and optional members, so the two readings never differ in practice.
+ */
 export function questComplete(progress: LoadedProgress): boolean {
-  const required = progress.version.objectives.filter((objective) => objective.requiredForCompletion);
-  const groups = new Map<string, boolean>();
-  for (const objective of required) {
+  const groups = new Map<string, { required: boolean; met: boolean }>();
+  for (const objective of progress.version.objectives) {
+    const met = objectiveSatisfied(progress, objective);
     if (!objective.anyOfGroup) {
-      if (!objectiveSatisfied(progress, objective)) return false;
+      if (objective.requiredForCompletion && !met) return false;
       continue;
     }
-    groups.set(objective.anyOfGroup, (groups.get(objective.anyOfGroup) ?? false) || objectiveSatisfied(progress, objective));
+    const group = groups.get(objective.anyOfGroup) ?? { required: false, met: false };
+    groups.set(objective.anyOfGroup, { required: group.required || objective.requiredForCompletion, met: group.met || met });
   }
-  return [...groups.values()].every(Boolean);
+  return [...groups.values()].every((group) => !group.required || group.met);
 }
 
 /** Objectives that are still open for this action: not satisfied, and not in a group another member already met. */

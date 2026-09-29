@@ -22,6 +22,18 @@ describe('validateVersionSpec', () => {
     expect(paths({ ...good, objectives: [{ ...good.objectives[0], target: { kind: 'role', role: 'boss' } as never }] })).toContain('objectives[0].target');
   });
 
+  it('an any-of group is all required or all optional', () => {
+    const mixed: VersionSpec = {
+      ...good,
+      objectives: [
+        { key: 'a', action: 'x', aggregation: 'STATE', anyOfGroup: 'g' },
+        { key: 'b', action: 'y', aggregation: 'STATE', anyOfGroup: 'g', requiredForCompletion: false },
+      ],
+    };
+    expect(paths(mixed)).toEqual(['objectives[1].requiredForCompletion']);
+    expect(paths({ ...mixed, objectives: [mixed.objectives[0], { ...mixed.objectives[1], requiredForCompletion: true }] })).toEqual([]);
+  });
+
   it('bounds reward values by the evidence they ask for', () => {
     expect(paths({ ...good, rewards: [{ key: 'p', kind: 'POINTS', value: 10 }] })).toEqual([]);
     expect(paths({ ...good, rewards: [{ key: 'p', kind: 'POINTS', value: 11 }] })).toContain('rewards[0].value');

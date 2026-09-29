@@ -107,6 +107,16 @@ export function validateVersionSpec(spec: VersionSpec): SpecProblem[] {
     }
     if (typeof objective.key === 'string') requiredEvidence.set(objective.key, objective.evidence ?? 'CLIENT');
   });
+  const groupRequired = new Map<string, boolean>();
+  objectives.forEach((objective, index) => {
+    if (typeof objective.anyOfGroup !== 'string') return;
+    const required = objective.requiredForCompletion ?? true;
+    const seen = groupRequired.get(objective.anyOfGroup);
+    if (seen === undefined) groupRequired.set(objective.anyOfGroup, required);
+    else if (seen !== required) {
+      problems.push({ path: `objectives[${index}].requiredForCompletion`, message: 'Every member of an any-of group is required, or none is.' });
+    }
+  });
   if (!objectives.some((objective) => objective.requiredForCompletion ?? true)) {
     problems.push({ path: 'objectives', message: 'At least one objective must be required for completion.' });
   }
