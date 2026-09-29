@@ -45,7 +45,9 @@
 .actions { display: flex; flex-wrap: wrap; gap: 10px; }
 .card a:focus-visible, .card button:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 3px; }
 @media (max-width: 440px) {
-  .card { padding: 18px; }
+  /* Tighter sides only: the banner stays flush with the card's top, as on wider screens. */
+  .card { padding: 0 18px 18px; }
+  .banner { margin: 0 -18px; }
   .linkRow { grid-template-columns: minmax(0, 1fr) 44px; }
   .linkRow > :nth-child(2) { grid-column: 1; grid-row: 2; }
   .linkRow > .remove { grid-row: 1 / span 2; grid-column: 2; }

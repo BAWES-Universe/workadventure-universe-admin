@@ -297,6 +297,51 @@ Get all rooms in the same world.
 
 ---
 
+### GET /api/room/sameUniverse
+
+Every room the player may see in the universe of `roomUrl`, grouped by world, for the game's "Explore" list.
+The current world comes first, then the others by total visits. In each world the current room comes first, then
+the others by visits. A private world or room is listed only for its members, the universe owner and super admins;
+the current world's public rooms are always listed.
+
+**Request:**
+- Method: `GET`
+- Headers: `Authorization: Bearer {token}`
+- Query Parameters:
+  - `roomUrl` (required): Room URL (`/@/universe/world/room`)
+  - `userUuid` (optional): the player's WorkAdventure uuid, used for private worlds and rooms
+
+**Response:** `200 OK`
+```json
+{
+  "universeName": "Acme",
+  "worlds": [
+    {
+      "name": "Office",
+      "slug": "office",
+      "thumbnailUrl": "https://cdn.example.com/office.png",
+      "isCurrent": true,
+      "rooms": [
+        {
+          "name": "Lobby",
+          "roomUrl": "http://play.workadventure.localhost/@/acme/office/lobby",
+          "description": "Say hello",
+          "stars": 4,
+          "visits": 120,
+          "peakHourUtc": 14,
+          "isCurrent": true
+        }
+      ]
+    }
+  ]
+}
+```
+
+`peakHourUtc` is the busiest UTC hour (0-23) over every visit, and is absent for a room nobody has visited.
+`thumbnailUrl` and `description` are absent when not set.
+
+---
+
 ### GET /api/room/tags
 
 Get all tags used in a room (for autocomplete).
