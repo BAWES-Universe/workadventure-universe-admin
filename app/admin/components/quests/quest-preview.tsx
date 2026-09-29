@@ -160,15 +160,12 @@ export function QuestPreview(props: QuestPreviewProps) {
                 <span className={styles.logSection}>{copy.log.available}</span>
                 {copy.options.map((option) => (
                   <div key={option.path} className={styles.optionRow}>
-                    <span className={styles.portrait}>{host.kind === 'bot' ? <Bot size={15} /> : <SquareDashed size={15} />}</span>
+                    <QuestStamp path={option.path} size="sm" />
                     <span className={styles.optionText}>
                       <strong>{option.title}</strong>
                       <span>{option.objective}</span>
-                      <span className={styles.meta}>
-                        {copy.origin} · {option.minutes}
-                      </span>
                     </span>
-                    <QuestStamp path={option.path} size="sm" />
+                    <span className={styles.minutes}>{option.minutes}</span>
                   </div>
                 ))}
               </div>

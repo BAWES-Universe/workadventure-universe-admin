@@ -188,7 +188,6 @@
 .payoffText { display: grid; gap: 2px; min-width: 0; }
 .logHead { display: grid; gap: 1px; flex: 1; min-width: 0; }
 .logSection { font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--game-secondary); }
-.meta { font-size: 11px; color: rgb(255 255 255 / 0.6); }
 .objectiveLine { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; }
 .objectiveLine::before { content: ''; flex: none; width: 6px; height: 6px; border-radius: 50%; background: #f5a623; }
 .rewardLine { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: #e9c74c; --quest-stamp-ring: #c4b5fd; --quest-stamp-glyph: #e9c74c; }
