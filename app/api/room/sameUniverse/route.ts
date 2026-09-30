@@ -160,10 +160,11 @@ async function viewerFor(userUuid: string | null): Promise<SessionUser | null> {
   if (!userUuid) return null;
   const user = await prisma.user.findUnique({
     where: { uuid: userUuid },
-    select: { id: true, uuid: true, email: true, name: true },
+    select: { id: true, uuid: true, email: true, name: true, isGuest: true },
   });
-  if (!user) return null;
-  return { ...user, tags: [], isSuperAdmin: isSuperAdmin(user.email) };
+  if (!user || user.isGuest) return null;
+  const { id, uuid, email, name } = user;
+  return { id, uuid, email, name, tags: [], isSuperAdmin: isSuperAdmin(email) };
 }
 
 /**
