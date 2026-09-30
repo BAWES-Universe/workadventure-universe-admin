@@ -113,7 +113,7 @@ export async function GET(request: NextRequest) {
       .filter(({ rooms }) => rooms.length > 0);
 
     const roomIds = worlds.flatMap(({ rooms }) => rooms.map((room) => room.id));
-    const [activity, stars] = await Promise.all([roomActivity(universe.id), roomStars(roomIds)]);
+    const [activity, stars] = await Promise.all([roomActivity(universe.id, roomIds), roomStars(roomIds)]);
 
     const response: UniverseRoomsResponse = {
       universeName: universe.name,
@@ -160,21 +160,27 @@ async function viewerFor(userUuid: string | null): Promise<SessionUser | null> {
   if (!userUuid) return null;
   const user = await prisma.user.findUnique({
     where: { uuid: userUuid },
-    select: { id: true, uuid: true, email: true, name: true },
+    select: { id: true, uuid: true, email: true, name: true, isGuest: true },
   });
-  if (!user) return null;
-  return { ...user, tags: [], isSuperAdmin: isSuperAdmin(user.email) };
+  if (!user || user.isGuest) return null;
+  const { id, uuid, email, name } = user;
+  return { id, uuid, email, name, tags: [], isSuperAdmin: isSuperAdmin(email) };
 }
 
 /**
- * Every visit to the universe's rooms counted by room and UTC hour in the database (at most 24 rows per room), folded
+ * Every visit to the given (visible) rooms counted by room and UTC hour in the database (at most 24 rows per room), folded
  * into each room's total and busiest hour. Ties go to the earlier hour, as in utcHourBuckets.
  */
-async function roomActivity(universeId: string): Promise<Map<string, { visits: number; peakHourUtc: number }>> {
+async function roomActivity(
+  universeId: string,
+  roomIds: string[],
+): Promise<Map<string, { visits: number; peakHourUtc: number }>> {
+  if (roomIds.length === 0) return new Map();
   const rows = await prisma.$queryRaw<Array<{ room_id: string; hour: number; count: bigint | number }>>(Prisma.sql`
     SELECT room_id, EXTRACT(HOUR FROM accessed_at)::int AS hour, COUNT(*) AS count
     FROM room_accesses
     WHERE universe_id = ${universeId}
+      AND room_id IN (${Prisma.join(roomIds)})
     GROUP BY 1, 2`);
 
   const byRoom = new Map<string, { visits: number; peakHourUtc: number; peakCount: number }>();

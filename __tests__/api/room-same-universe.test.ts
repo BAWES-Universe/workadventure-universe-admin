@@ -157,6 +157,23 @@ describe('GET /api/room/sameUniverse', () => {
     expect(db.user.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { uuid: 'uuid-member' } }));
   });
 
+  it('treats a guest as anonymous, even with a world membership', async () => {
+    db.user.findUnique.mockResolvedValue({
+      id: 'u-guest',
+      uuid: 'uuid-guest',
+      email: null,
+      name: 'Guest',
+      isGuest: true,
+    });
+    db.worldMember.findMany.mockResolvedValue([{ worldId: 'w-private' }]);
+
+    const asGuest = await (await GET(req({ roomUrl: ROOM_URL, userUuid: 'uuid-guest' }))).json();
+    db.user.findUnique.mockResolvedValue(null);
+    const anonymous = await (await GET(req({ roomUrl: ROOM_URL }))).json();
+    expect(asGuest).toEqual(anonymous);
+    expect(asGuest.worlds.map((w: { slug: string }) => w.slug)).not.toContain('backstage');
+  });
+
   it('shows private worlds and rooms to the universe owner', async () => {
     db.user.findUnique.mockResolvedValue({ id: 'u-owner', uuid: 'uuid-owner', email: 'o@example.test', name: 'O' });
 
