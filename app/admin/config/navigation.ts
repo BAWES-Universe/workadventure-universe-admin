@@ -1,7 +1,6 @@
 import {
   Orbit,
   Telescope,
-  Sparkles,
   Earth,
   Users,
   UserCircle,
@@ -16,6 +15,7 @@ import {
   DoorOpen,
 } from 'lucide-react';
 import { LucideIcon } from 'lucide-react';
+import { Planet } from '@/app/admin/components/ds/planet-icon';
 
 export type NavGroup = 'menu' | 'discover' | 'my' | 'admin';
 
@@ -46,13 +46,13 @@ export const NAV_ITEMS: NavItem[] = [
   { href: '/admin/templates', label: 'Room templates', icon: FolderOpen },
 
   // Personalize section
-  { href: '/admin/universes', label: 'Your universes', icon: Sparkles, group: 'my' },
+  { href: '/admin/universes', label: 'Your universes', icon: Planet, group: 'my' },
   { href: '/admin/stars', label: 'Stars', icon: Star, group: 'my' },
   { href: '/admin/memberships', label: 'Memberships', icon: Mail, requiresAuth: true, group: 'my' },
   { href: '/admin/you', label: 'Profile', icon: UserCircle, requiresAuth: true, group: 'my' },
 
   // Discover section
-  { href: '/admin/discover/universes', label: 'Universes', icon: Sparkles, group: 'discover' },
+  { href: '/admin/discover/universes', label: 'Universes', icon: Planet, group: 'discover' },
   { href: '/admin/discover/worlds', label: 'Worlds', icon: Earth, group: 'discover' },
   { href: '/admin/discover/rooms', label: 'Rooms', icon: DoorOpen, group: 'discover' },
   { href: '/admin/users', label: 'People', icon: Users, group: 'discover' },

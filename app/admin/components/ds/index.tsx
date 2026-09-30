@@ -13,12 +13,13 @@
 
 import Link from 'next/link';
 import type { CSSProperties, ReactNode } from 'react';
-import { ArrowUpRight, Bot, Cpu, DoorOpen, Earth, Globe2, LayoutTemplate, Lock, Map as MapIcon, Shirt, Sparkles, Star, Tags, Users, type LucideIcon } from 'lucide-react';
+import { ArrowUpRight, Bot, Cpu, DoorOpen, Earth, Globe2, LayoutTemplate, Lock, Map as MapIcon, Shirt, Star, Tags, Users, type LucideIcon } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { timeAgo } from '@/lib/time-ago';
 import { universeColour } from '@/lib/universe-colour';
 import { Switch } from '@/components/ui/switch';
 import styles from './ds.module.css';
+import { Planet } from './planet-icon';
 
 /** What players meet: each has its own colour. */
 export type EntityKind = 'universe' | 'world' | 'room' | 'star' | 'people';
@@ -27,7 +28,7 @@ export type ToolKind = 'template' | 'category' | 'map' | 'bot' | 'provider' | 'a
 export type Kind = EntityKind | ToolKind;
 
 export const KIND_ICON: Record<Kind, LucideIcon> = {
-  universe: Sparkles,
+  universe: Planet,
   world: Earth,
   room: DoorOpen,
   star: Star,
