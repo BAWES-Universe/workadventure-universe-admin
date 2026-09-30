@@ -83,6 +83,17 @@ const nextConfig: NextConfig = {
         ],
       },
       {
+        // Public images the game loads cross-origin: the tab favicon is redrawn on a canvas (red dot while in a
+        // proximity bubble), which needs CORS headers or the canvas is tainted.
+        source: '/assets/:path*',
+        headers: [
+          {
+            key: 'Access-Control-Allow-Origin',
+            value: '*',
+          },
+        ],
+      },
+      {
         // Also handle root /admin path
         source: '/admin',
         headers: [
