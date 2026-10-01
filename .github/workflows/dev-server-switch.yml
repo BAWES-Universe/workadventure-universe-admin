@@ -70,6 +70,27 @@ jobs:
               exit 1 ;;
           esac
 
+      # Before changing anything, prove the token can read every dev app. Coolify needs the
+      # `read` permission for this and for the deployment status checked later, `write` to
+      # change the tag and `deploy` to deploy.
+      - name: Check the token can reach every dev app
+        run: |
+          bad=""
+          while read -r image uuid; do
+            [ -n "$image" ] || continue
+            rm -f /tmp/app.json
+            code=$(curl -sS -o /tmp/app.json -w '%{http_code}' -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
+              "${COOLIFY_BASE}/api/v1/applications/${uuid}" || true)
+            if [ "$code" != 200 ]; then
+              echo "::error::$image ($uuid): HTTP $code $(jq -r '.message // empty' /tmp/app.json 2>/dev/null)"
+              bad="$bad $image"
+            fi
+          done <<< "$APPS"
+          if [ -n "$bad" ]; then
+            echo "::error::Dev was not switched. The DEV_COOLIFY_TOKEN needs read, write and deploy permissions in the Universe Dev team, and the app uuids must belong to that team."
+            exit 1
+          fi
+
       - name: Log in to GHCR
         uses: docker/login-action@v4
         with:
@@ -119,8 +140,17 @@ jobs:
             fi
             status=""
             for _ in $(seq 1 120); do
-              status=$(curl -sS -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
-                "${COOLIFY_BASE}/api/v1/deployments/${id}" | jq -r '.status // empty')
+              rm -f /tmp/deployment.json
+              code=$(curl -sS -o /tmp/deployment.json -w '%{http_code}' -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
+                "${COOLIFY_BASE}/api/v1/deployments/${id}" || true)
+              case "$code" in
+                200) status=$(jq -r '.status // empty' /tmp/deployment.json) ;;
+                401|403|404)
+                  # Waiting will not fix these; say why instead of timing out.
+                  status="unreadable-http-$code"
+                  echo "::error::$image: HTTP $code reading deployment $id: $(jq -r '.message // empty' /tmp/deployment.json 2>/dev/null)"
+                  break ;;
+              esac
               case "$status" in
                 finished|failed|cancelled*) break ;;
               esac
