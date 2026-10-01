@@ -1,0 +1,249 @@
+name: Dev server switch
+
+# Points the dev server's Orbit app (orbit.dev.bawes.net) at one image tag and redeploys it.
+# Called by dev-server.yml (the `on-dev` label) and by docker-build.yml (fresh develop builds).
+# It only changes which image tag the app runs: environment variables are never touched, so the
+# dev/prod separation checked by the env gate is unchanged.
+#
+# Dev Orbit runs `npx prisma migrate deploy` after every deploy, so switching to a PR applies that
+# PR's migrations to the dev database, and they stay there when dev returns to develop. To undo
+# them, restore the golden snapshot with dev-reset on the dev box.
+#
+# It uses DEV_COOLIFY_TOKEN, a token from the "Universe Dev" Coolify team. Coolify scopes a
+# token to its team, so this token cannot read or deploy any production app.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Image tag dev Orbit should run (for example develop)
+        required: true
+        type: string
+      pr:
+        description: Pull request number that now holds dev, if any (gets a receipt comment)
+        required: false
+        type: string
+        default: ''
+      sha:
+        description: Commit the tag was built from, shown in the receipt
+        required: false
+        type: string
+        default: ''
+      mode:
+        description: >-
+          Who dev belongs to, checked again once this run holds the switch lock. `pr`: the PR
+          in `pr` must still be open and hold on-dev. `free`: no open PR may hold on-dev.
+          `manual`: a switch run by hand, no check.
+        required: true
+        type: string
+    secrets:
+      DEV_COOLIFY_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  switch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # One switch at a time, whichever path started it. Never cancel one half-way: a cancelled
+    # switch would leave some apps on the old tag and some on the new one.
+    concurrency:
+      group: dev-server-orbit-switch
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: read
+      pull-requests: write
+    env:
+      TAG: ${{ inputs.tag }}
+      # Set explicitly, never borrowed from the production COOLIFY_BASE secret.
+      COOLIFY_BASE: ${{ vars.DEV_COOLIFY_BASE }}
+      COOLIFY_TOKEN: ${{ secrets.DEV_COOLIFY_TOKEN }}
+      APPS: |
+        workadventure-universe-admin ${{ vars.DEV_COOLIFY_ORBIT_UUID }}
+    steps:
+      - name: Check configuration
+        run: |
+          missing=""
+          [ -n "$COOLIFY_TOKEN" ] || missing="$missing DEV_COOLIFY_TOKEN(secret)"
+          [ -n "$COOLIFY_BASE" ] || missing="$missing DEV_COOLIFY_BASE(variable)"
+          while read -r image uuid; do
+            [ -n "$image" ] || continue
+            [ -n "$uuid" ] || missing="$missing uuid-for-$image"
+          done <<< "$APPS"
+          if [ -n "$missing" ]; then
+            echo "::error::Dev server switch is not configured yet. Missing:$missing"
+            exit 1
+          fi
+          # Only the tags dev builds write are allowed: the moving `develop`, or `<branch>-<7-hex sha>`.
+          # Production's `main`, `sha-<sha>`, `latest` and version tags never pass.
+          if [ "$TAG" = develop ]; then
+            :
+          elif [[ "$TAG" =~ ^[A-Za-z0-9._-]+-[0-9a-f]{7}$ ]] && ! [[ "$TAG" =~ ^(sha|main|master)-[0-9a-f]{7}$ ]]; then
+            :
+          else
+            echo "::error::Refusing tag '$TAG': only develop or <branch>-<sha7> tags go on dev through this workflow"
+            exit 1
+          fi
+
+      # The caller decided who holds dev before this run waited for the switch lock, and the
+      # on-dev label may have moved since. Check again now, holding the lock, before any change.
+      - name: Check dev is still this run's to switch
+        id: slot
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MODE: ${{ inputs.mode }}
+          PR: ${{ inputs.pr }}
+        run: |
+          set -euo pipefail
+          go=true
+          # Every GitHub read is a plain assignment, so a failed call fails this step instead of
+          # being read as "label gone" or "dev is free".
+          case "$MODE" in
+            pr)
+              [ -n "$PR" ] || { echo "::error::mode pr needs the pr input"; exit 1; }
+              labels=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json labels,state \
+                       --jq 'select(.state == "OPEN") | .labels[].name')
+              if ! grep -qx on-dev <<< "$labels"; then
+                echo "#$PR is closed or no longer holds on-dev; not switching."
+                go=false
+              fi
+              ;;
+            free)
+              held=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --label on-dev --json number --jq '.[].number')
+              if [ -n "$held" ]; then
+                echo "PR $(echo $held) holds on-dev; leaving dev on it."
+                go=false
+              fi
+              ;;
+            manual) ;;
+            *) echo "::error::Unknown mode '$MODE' (expected pr, free or manual)"; exit 1 ;;
+          esac
+          echo "go=$go" >> "$GITHUB_OUTPUT"
+
+      # Before changing anything, prove the token can read every dev app. Coolify needs the
+      # `read` permission for this and for the deployment status checked later, `write` to
+      # change the tag and `deploy` to deploy.
+      - name: Check the token can reach every dev app
+        if: steps.slot.outputs.go == 'true'
+        run: |
+          bad=""
+          while read -r image uuid; do
+            [ -n "$image" ] || continue
+            rm -f /tmp/app.json
+            code=$(curl -sS -o /tmp/app.json -w '%{http_code}' -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
+              "${COOLIFY_BASE}/api/v1/applications/${uuid}" || true)
+            if [ "$code" != 200 ]; then
+              echo "::error::$image ($uuid): HTTP $code $(jq -r '.message // empty' /tmp/app.json 2>/dev/null)"
+              bad="$bad $image"
+            fi
+          done <<< "$APPS"
+          if [ -n "$bad" ]; then
+            echo "::error::Dev was not switched. The DEV_COOLIFY_TOKEN needs read, write and deploy permissions in the Universe Dev team, and the app uuids must belong to that team."
+            exit 1
+          fi
+
+      - name: Log in to GHCR
+        if: steps.slot.outputs.go == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check every image exists
+        if: steps.slot.outputs.go == 'true'
+        run: |
+          while read -r image uuid; do
+            [ -n "$image" ] || continue
+            ref="ghcr.io/bawes-universe/${image}:${TAG}"
+            if ! docker buildx imagetools inspect "$ref" > /dev/null; then
+              echo "::error::$ref does not exist, so dev was not switched"
+              exit 1
+            fi
+            echo "found $ref"
+          done <<< "$APPS"
+
+      # One app at a time, in the order of APPS: each is switched, deployed and confirmed before
+      # the next one starts. The whole switch shares one 25-minute budget, inside the job's
+      # 30-minute timeout.
+      - name: Switch, deploy and confirm each app
+        if: steps.slot.outputs.go == 'true'
+        run: |
+          set -uo pipefail
+          deadline=$(( $(date +%s) + 25 * 60 ))
+          # get <api path> <out file>: prints the HTTP code, 000 when the request itself failed
+          get() { curl -sS --max-time 20 -o "$2" -w '%{http_code}' -H "Authorization: Bearer ${COOLIFY_TOKEN}" "${COOLIFY_BASE}$1" || true; }
+          send() { curl -sS --max-time 30 --fail-with-body -H "Authorization: Bearer ${COOLIFY_TOKEN}" -H 'Content-Type: application/json' "$@"; }
+          fail() { echo "::error::$1"; exit 1; }
+          while read -r image uuid; do
+            [ -n "$image" ] || continue
+            echo "Setting $image ($uuid) to $TAG"
+            send -X PATCH "${COOLIFY_BASE}/api/v1/applications/${uuid}" \
+              -d "$(jq -cn --arg tag "$TAG" '{docker_registry_image_tag: $tag}')" > /dev/null \
+              || fail "$image: Coolify refused the tag change"
+            body=$(send -X POST "${COOLIFY_BASE}/api/v1/deploy?uuid=${uuid}") || fail "$image: deploy request failed: ${body:-no reply}"
+            id=$(jq -r '.deployments[0].deployment_uuid // empty' <<< "$body")
+            [ -n "$id" ] || fail "$image: Coolify returned no deployment id: $body"
+
+            misses=0
+            while :; do
+              [ "$(date +%s)" -lt "$deadline" ] || fail "$image: deployment $id did not finish within the 25-minute budget"
+              rm -f /tmp/deployment.json
+              code=$(get "/api/v1/deployments/${id}" /tmp/deployment.json)
+              status=""
+              [ "$code" = 200 ] && status=$(jq -r '.status // empty' /tmp/deployment.json 2>/dev/null)
+              case "$code:$status" in
+                200:finished) break ;;
+                200:failed|200:cancelled*) fail "$image: deployment $id ended '$status'; its log is in Coolify" ;;
+                401:*|403:*|404:*) fail "$image: HTTP $code reading deployment $id: $(head -c 300 /tmp/deployment.json 2>/dev/null)" ;;
+                200:?*) misses=0 ;;  # queued, in_progress
+                *)
+                  misses=$((misses + 1))
+                  echo "::warning::$image: unreadable deployment status (HTTP $code): $(head -c 300 /tmp/deployment.json 2>/dev/null)"
+                  [ "$misses" -lt 3 ] || fail "$image: three unreadable status replies in a row for deployment $id"
+                  ;;
+              esac
+              sleep 10
+            done
+
+            # Confirm Coolify now holds the new tag. Its running status is refreshed by a periodic
+            # check, so a stale value right after a deploy is only reported, not failed on.
+            # Retry a failed read a few times: the deploy itself has already finished.
+            for _ in 1 2 3; do
+              rm -f /tmp/app.json
+              code=$(get "/api/v1/applications/${uuid}" /tmp/app.json)
+              [ "$code" = 200 ] && break
+              sleep 5
+            done
+            [ "$code" = 200 ] || fail "$image: HTTP $code reading the app after deployment $id finished: $(head -c 300 /tmp/app.json 2>/dev/null)"
+            got_tag=$(jq -r '.docker_registry_image_tag // empty' /tmp/app.json 2>/dev/null)
+            app_status=$(jq -r '.status // empty' /tmp/app.json 2>/dev/null)
+            echo "$image: finished, tag '$got_tag', status '${app_status:-unknown}'"
+            [ "$got_tag" = "$TAG" ] || fail "$image: Coolify reports tag '$got_tag' after the deploy, expected '$TAG'"
+            case "$app_status" in
+              running*) ;;
+              *) echo "::warning::$image: Coolify status is '${app_status:-unknown}' right after the deploy" ;;
+            esac
+          done <<< "$APPS"
+
+      - name: Receipt on the pull request
+        if: steps.slot.outputs.go == 'true' && inputs.pr != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ inputs.pr }}
+          SHA: ${{ inputs.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          marker='<!-- dev-server-receipt -->'
+          body=$(printf '%s\n**On dev:** https://orbit.dev.bawes.net now runs this PR%s (Orbit image `%s`). The game at https://dev.bawes.net uses it. [Switch log](%s)\n\nRemove the `on-dev` label, merge or close the PR to return dev Orbit to `develop`.' \
+            "$marker" "${SHA:+ at ${SHA::7}}" "$TAG" "$RUN_URL")
+          existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --paginate \
+            --jq ".[] | select(.body | startswith(\"$marker\")) | .id" | tail -1)
+          if [ -n "$existing" ]; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${existing}" -f body="$body" > /dev/null
+          else
+            gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body "$body"
+          fi
