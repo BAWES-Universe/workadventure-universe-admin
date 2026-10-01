@@ -63,6 +63,8 @@
 .recentHeading > span { color: hsl(var(--muted-foreground)); font-family: var(--font-mono); font-size: 10px; }
 .recentGrid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: start; }
 .notice { position: relative; padding: 18px; border: 1px solid var(--signal-line); border-radius: 18px; background: var(--signal-wash); }
+/* In dark mode the amber wash alone over the page read as grey on navy and brown on ink, so it sits on the card colour like the room cards. */
+:global(.dark) .notice { background: linear-gradient(118deg, hsl(var(--card)) 20%, var(--signal-wash)), hsl(var(--card)); }
 .noticeTop { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .notice h2, .notice h3 { position: relative; margin: 7px 0 9px; font-family: var(--font-display); font-size: 22px; font-weight: 700; letter-spacing: -.02em; line-height: 1.2; }
 .notice p { color: hsl(var(--muted-foreground)); font-size: 12px; line-height: 1.6; }
