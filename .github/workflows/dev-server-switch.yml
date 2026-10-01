@@ -1,0 +1,153 @@
+name: Dev server switch
+
+# Points the dev server's Orbit app (orbit.dev.bawes.net) at one image tag and redeploys it.
+# Called by dev-server.yml (the `on-dev` label) and by docker-build.yml (fresh develop builds).
+# Dev Orbit runs `prisma migrate deploy` on every deploy, so a PR's migrations apply to the dev
+# database and stay there after dev returns to develop (the dev reset restores a clean copy). It only changes which image tag the app runs: environment
+# variables are never touched, so the dev/prod separation checked by the env gate is unchanged.
+#
+# It uses DEV_COOLIFY_TOKEN, a token from the "Universe Dev" Coolify team. Coolify scopes a
+# token to its team, so this token cannot read or deploy any production app.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Image tag dev Orbit should run (for example develop)
+        required: true
+        type: string
+      pr:
+        description: Pull request number that now holds dev, if any (gets a receipt comment)
+        required: false
+        type: string
+        default: ''
+      sha:
+        description: Commit the tag was built from, shown in the receipt
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  switch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # One switch at a time, whichever path started it. Never cancel one half-way: a cancelled
+    # switch would leave some apps on the old tag and some on the new one.
+    concurrency:
+      group: dev-server-orbit-switch
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: read
+      pull-requests: write
+    env:
+      TAG: ${{ inputs.tag }}
+      COOLIFY_BASE: ${{ vars.DEV_COOLIFY_BASE || secrets.COOLIFY_BASE }}
+      COOLIFY_TOKEN: ${{ secrets.DEV_COOLIFY_TOKEN }}
+      APPS: |
+        workadventure-universe-admin ${{ vars.DEV_COOLIFY_ORBIT_UUID }}
+    steps:
+      - name: Check configuration
+        run: |
+          missing=""
+          [ -n "$COOLIFY_TOKEN" ] || missing="$missing DEV_COOLIFY_TOKEN(secret)"
+          [ -n "$COOLIFY_BASE" ] || missing="$missing DEV_COOLIFY_BASE(variable)"
+          while read -r image uuid; do
+            [ -n "$image" ] || continue
+            [ -n "$uuid" ] || missing="$missing uuid-for-$image"
+          done <<< "$APPS"
+          if [ -n "$missing" ]; then
+            echo "::error::Dev server switch is not configured yet. Missing:$missing"
+            exit 1
+          fi
+          case "$TAG" in
+            ''|main|master|latest|v[0-9]*|sha-*)
+              echo "::error::Refusing tag '$TAG': production tags never go on dev through this workflow"
+              exit 1 ;;
+          esac
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check every image exists
+        run: |
+          while read -r image uuid; do
+            [ -n "$image" ] || continue
+            ref="ghcr.io/bawes-universe/${image}:${TAG}"
+            if ! docker buildx imagetools inspect "$ref" > /dev/null; then
+              echo "::error::$ref does not exist, so dev was not switched"
+              exit 1
+            fi
+            echo "found $ref"
+          done <<< "$APPS"
+
+      - name: Switch and deploy
+        id: deploy
+        run: |
+          set -euo pipefail
+          api() { curl -sS --fail-with-body -H "Authorization: Bearer ${COOLIFY_TOKEN}" -H 'Content-Type: application/json' "$@"; }
+          deployments=""
+          while read -r image uuid; do
+            [ -n "$image" ] || continue
+            echo "Setting $image ($uuid) to $TAG"
+            api -X PATCH "${COOLIFY_BASE}/api/v1/applications/${uuid}" \
+              -d "$(jq -cn --arg tag "$TAG" '{docker_registry_image_tag: $tag}')" > /dev/null
+            id=$(api -X POST "${COOLIFY_BASE}/api/v1/deploy?uuid=${uuid}" | jq -r '.deployments[0].deployment_uuid // empty')
+            deployments="$deployments $image:$id"
+          done <<< "$APPS"
+          echo "deployments=$deployments" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for the deployments
+        env:
+          DEPLOYMENTS: ${{ steps.deploy.outputs.deployments }}
+        run: |
+          set -uo pipefail
+          failed=""
+          for entry in $DEPLOYMENTS; do
+            image="${entry%%:*}"; id="${entry#*:}"
+            if [ -z "$id" ]; then
+              echo "::warning::No deployment id for $image; check it in Coolify"
+              continue
+            fi
+            status=""
+            for _ in $(seq 1 120); do
+              status=$(curl -sS -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
+                "${COOLIFY_BASE}/api/v1/deployments/${id}" | jq -r '.status // empty')
+              case "$status" in
+                finished|failed|cancelled*) break ;;
+              esac
+              sleep 10
+            done
+            echo "$image: ${status:-unknown}"
+            [ "$status" = "finished" ] || failed="$failed $image(${status:-timed out})"
+          done
+          if [ -n "$failed" ]; then
+            echo "::error::Dev deploy did not finish for:$failed"
+            exit 1
+          fi
+
+      - name: Receipt on the pull request
+        if: inputs.pr != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ inputs.pr }}
+          SHA: ${{ inputs.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          marker='<!-- dev-server-receipt -->'
+          body=$(printf '%s\n**On dev:** https://dev.bawes.net now runs this PR%s (Orbit image `%s`, https://orbit.dev.bawes.net). [Switch log](%s)\n\nRemove the `on-dev` label, merge or close the PR to return dev Orbit to `develop`.' \
+            "$marker" "${SHA:+ at ${SHA::7}}" "$TAG" "$RUN_URL")
+          existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --paginate \
+            --jq ".[] | select(.body | startswith(\"$marker\")) | .id" | tail -1)
+          if [ -n "$existing" ]; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${existing}" -f body="$body" > /dev/null
+          else
+            gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body "$body"
+          fi

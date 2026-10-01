@@ -114,6 +114,47 @@ jobs:
         run: echo "Image pushed with digest ${{ steps.meta.outputs.digest }}"
 
   # ─────────────────────────────────────────────────
+  # Dev server: a fresh develop build goes on
+  # orbit.dev.bawes.net, unless a PR holds dev
+  # (`on-dev` label). See dev-server.yml.
+  # ─────────────────────────────────────────────────
+  dev-server-check:
+    if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      free: ${{ steps.check.outputs.free }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEV_TOKEN_SET: ${{ secrets.DEV_COOLIFY_TOKEN != '' }}
+        run: |
+          if [ "$DEV_TOKEN_SET" != true ]; then
+            echo "DEV_COOLIFY_TOKEN is not set yet; skipping the dev server."
+            echo "free=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          held=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --label on-dev --json number --jq 'length')
+          if [ "$held" = 0 ]; then free=true; else free=false; echo "A PR holds on-dev; dev stays on it."; fi
+          echo "free=$free" >> "$GITHUB_OUTPUT"
+
+  dev-server:
+    needs: dev-server-check
+    if: needs.dev-server-check.outputs.free == 'true'
+    permissions:
+      contents: read
+      packages: read
+      pull-requests: write
+    uses: ./.github/workflows/dev-server-switch.yml
+    with:
+      tag: develop
+    secrets: inherit
+
+  # ─────────────────────────────────────────────────
   # Release: auto-version, tag, and GitHub Release
   # Runs only on push to main (not PRs, not tags)
   # ─────────────────────────────────────────────────
