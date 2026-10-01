@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
+import { hiddenSystemOwnerId, notSystemRoom } from '@/lib/system-user';
 import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { z } from 'zod';
@@ -33,6 +34,7 @@ export async function GET(
     
     // Check if user is super admin for full access
     const userIsSuperAdmin = user ? isSuperAdmin(user.email) : false;
+    const hidden = await hiddenSystemOwnerId();
     
     const map = await prisma.roomTemplateMap.findUnique({
       where: { id },
@@ -42,8 +44,9 @@ export async function GET(
             category: true,
           },
         },
+        // Rooms using the map; System's not counted once they are hidden
         _count: {
-          select: { rooms: true },
+          select: { rooms: hidden ? { where: notSystemRoom(hidden) } : true },
         },
       },
     });

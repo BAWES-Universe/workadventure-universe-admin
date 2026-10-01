@@ -3,8 +3,8 @@ import { Prisma } from '@prisma/client';
 import { getViewer, isPrivileged, unauthorizedResponse } from '@/lib/access-scope';
 import { prisma } from '@/lib/db';
 import { wokaLayersForMany } from '@/lib/woka-avatar';
+import { NOT_SYSTEM_USER, NOT_SYSTEM_USER_SQL } from '@/lib/system-user';
 
-const SYSTEM_USER_EMAIL = 'system@workadventure.local';
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
 
@@ -53,16 +53,8 @@ export async function GET(request: NextRequest) {
           ],
         }
       : {};
-    // Viewers who cannot see emails cannot tell the internal system account
-    // apart by its address, so it is left out of their list server-side.
-    const visibleWhere: Prisma.UserWhereInput = canSeeEmail
-      ? searchWhere
-      : {
-          AND: [
-            searchWhere,
-            { OR: [{ email: null }, { email: { not: SYSTEM_USER_EMAIL } }] },
-          ],
-        };
+    // The internal System account is nobody: it is left out of everyone's list, server-side.
+    const visibleWhere: Prisma.UserWhereInput = { AND: [searchWhere, NOT_SYSTEM_USER] };
     const where: Prisma.UserWhereInput = excludeGuests ? { AND: [visibleWhere, { isGuest: false }] } : visibleWhere;
 
     const conditions: Prisma.Sql[] = [];
@@ -75,9 +67,7 @@ export async function GET(request: NextRequest) {
       ];
       conditions.push(Prisma.sql`(${Prisma.join(fields, ' OR ')})`);
     }
-    if (!canSeeEmail) {
-      conditions.push(Prisma.sql`(u.email IS NULL OR u.email <> ${SYSTEM_USER_EMAIL})`);
-    }
+    conditions.push(NOT_SYSTEM_USER_SQL);
     if (excludeGuests) {
       conditions.push(Prisma.sql`u.is_guest = false`);
     }

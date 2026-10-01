@@ -5,6 +5,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import HerePanel from '@/app/admin/components/here-panel';
 import RecentlyVisited from '@/app/admin/components/recently-visited';
 import { WorkAdventureContext } from '@/app/admin/workadventure-context';
+import { AdminBootstrapProvider, type AdminBootstrap } from '@/app/admin/admin-bootstrap-context';
 import { localHourFromUtc, localPeakHour } from '@/lib/analytics-peak';
 import { isSummariesUrl, summariesBody } from '../helpers/summaries';
 
@@ -145,5 +146,42 @@ describe('Where you are, when it fails', () => {
     fireEvent.click(retry);
     expect(screen.queryByText('No room information available')).toBeNull();
     expect(await screen.findByText('Headquarters')).toBeTruthy();
+  });
+});
+
+describe('Where you are: the start map and unlisted rooms', () => {
+  const resolved = responses['/api/admin/rooms/from-play-uri'];
+  afterEach(() => {
+    responses['/api/admin/rooms/from-play-uri'] = resolved;
+  });
+  const withStartRoom = (startRoom: string | null, children: React.ReactNode) => (
+    <AdminBootstrapProvider
+      value={{ version: 1, user: { id: 'u', uuid: 'u', name: 'Me', email: null, tags: [], isSuperAdmin: false }, stats: { universes: 0, worlds: 0, rooms: 0, users: 0 }, startRoom } as AdminBootstrap}
+    >
+      {children}
+    </AdminBootstrapProvider>
+  );
+
+  it('calls the configured START_ROOM_URL the start map', async () => {
+    render(withStartRoom('@/bawes/office/headquarters', inGame(<HerePanel />)));
+    expect(await screen.findByText('The start map')).toBeTruthy();
+    expect(screen.queryByTestId('room-card-here')).toBeNull();
+  });
+
+  it('shows the room itself when the start room is elsewhere', async () => {
+    render(withStartRoom('@/default/default/default', inGame(<HerePanel />)));
+    expect(await screen.findByTestId('room-card-here')).toBeTruthy();
+    expect(screen.queryByText('The start map')).toBeNull();
+  });
+
+  it('says a room isn’t listed, without naming its owner', async () => {
+    responses['/api/admin/rooms/from-play-uri'] = { ...hq, unlisted: true };
+    render(withStartRoom('@/mine/office/lobby', inGame(<HerePanel />)));
+    const notice = (await screen.findByText("A room that isn't listed")).closest('[role="status"]') as HTMLElement;
+    expect(notice.textContent).toContain("This room isn't listed anywhere in Orbit.");
+    expect(notice.textContent).toContain('You are here');
+    expect(notice.querySelector('a')?.getAttribute('href')).toBe('/admin/space');
+    expect(notice.textContent).not.toMatch(/System/);
+    expect(screen.queryByTestId('room-card-here')).toBeNull();
   });
 });

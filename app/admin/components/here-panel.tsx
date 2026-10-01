@@ -6,6 +6,7 @@ import { ArrowUpRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { authenticatedFetch } from '@/lib/client-auth';
 import { useWorkAdventure } from '../workadventure-context';
+import { useStartRoom } from '../admin-bootstrap-context';
 import { OrbitalIllustration, RoomCard, RoomCardSkeleton, type RoomCardRoom } from './room-card';
 import styles from './room-card.module.css';
 
@@ -17,6 +18,8 @@ interface ApiRoom {
   world: { id: string; name: string; slug: string; universe: { id: string; name: string; slug: string } };
   _count?: { favorites?: number };
   accessedAt?: string;
+  /** One of System's rooms, kept out of every list now that the start room is elsewhere. */
+  unlisted?: boolean;
 }
 
 function toCardRoom(room: ApiRoom): RoomCardRoom {
@@ -32,11 +35,15 @@ function toCardRoom(room: ApiRoom): RoomCardRoom {
   };
 }
 
-/** The start map is where everyone lands; it isn't a place of anyone's, so Home stays neutral there. */
-export function isStartMap(playUri: string): boolean {
+/**
+ * The start map (START_ROOM_URL, as `@/universe/world/room`) is where everyone lands; it isn't a place of anyone's,
+ * so Home stays neutral there.
+ */
+export function isStartMap(playUri: string, startRoom: string | null = '@/default/default/default'): boolean {
+  if (!startRoom) return false;
   try {
     const path = new URL(playUri).pathname.split('/').filter(Boolean);
-    return path[0] === '@' && path[1] === 'default' && path[2] === 'default' && path[3] === 'default';
+    return path.length >= 4 && path.slice(0, 4).join('/') === startRoom;
   } catch {
     return false;
   }
@@ -69,6 +76,7 @@ function Notice({ eyebrow, title, children, action }: { eyebrow: string; title: 
  */
 export default function HerePanel({ onShown }: { onShown?: (roomIds: string[]) => void }) {
   const { wa, isReady, isLoading, error } = useWorkAdventure();
+  const startRoom = useStartRoom();
   const [located, setLocated] = useState<Located>({ kind: 'loading' });
   const [previous, setPrevious] = useState<{ currentId: string; room: ApiRoom | null; failed?: boolean }>({ currentId: '', room: null });
   // Asking again after a failure (the room lookup, or the room before it).
@@ -94,7 +102,7 @@ export default function HerePanel({ onShown }: { onShown?: (roomIds: string[]) =
           if (!cancelled) setLocated({ kind: 'failed' });
           return;
         }
-        const start = isStartMap(playUri);
+        const start = isStartMap(playUri, startRoom);
         const response = await authenticatedFetch(`/api/admin/rooms/from-play-uri?playUri=${encodeURIComponent(playUri)}`);
         if (cancelled) return;
         if (!response.ok) {
@@ -123,7 +131,7 @@ export default function HerePanel({ onShown }: { onShown?: (roomIds: string[]) =
     return () => {
       cancelled = true;
     };
-  }, [wa, isReady, unavailable, attempt]);
+  }, [wa, isReady, unavailable, attempt, startRoom]);
 
   const roomId = located.kind === 'room' ? located.room.id : null;
   const previousRoom = roomId && previous.currentId === roomId ? previous.room : null;
@@ -163,6 +171,21 @@ export default function HerePanel({ onShown }: { onShown?: (roomIds: string[]) =
         }
       >
         <p>Where everyone lands. Pick a universe to visit, or make one of your own.</p>
+      </Notice>
+    );
+  } else if (located.kind === 'room' && located.room.unlisted) {
+    current = (
+      <Notice
+        eyebrow="You are here"
+        title="A room that isn't listed"
+        action={
+          <Link href="/admin/space" className={styles.detailsLink}>
+            Explore Space
+            <ArrowUpRight size={15} aria-hidden="true" />
+          </Link>
+        }
+      >
+        <p>This room isn&apos;t listed anywhere in Orbit.</p>
       </Notice>
     );
   } else if (located.kind === 'unknown') {

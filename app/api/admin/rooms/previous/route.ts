@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
+import { hiddenSystemOwnerId, notSystemUniverse } from '@/lib/system-user';
 
 // GET /api/admin/rooms/previous - Get previous location for current user (visited within 1 hour before current location)
 export async function GET(request: NextRequest) {
@@ -46,7 +47,9 @@ export async function GET(request: NextRequest) {
 
     const oneHourAgo = new Date(currentTime.getTime() - 60 * 60 * 1000); // 1 hour before current access
 
-    // Get the user's most recent access before the current one (within 1 hour)
+    // Get the user's most recent access before the current one (within 1 hour), never in System's spaces once
+    // they are hidden
+    const hidden = await hiddenSystemOwnerId();
     const previousAccess = await prisma.roomAccess.findFirst({
       where: {
         OR: [
@@ -54,6 +57,7 @@ export async function GET(request: NextRequest) {
           { userUuid: sessionUser.uuid },
         ],
         roomId: { not: currentRoomId }, // Don't include current room
+        ...(hidden ? { universe: notSystemUniverse(hidden) } : {}),
         accessedAt: {
           gte: oneHourAgo,
           lt: currentTime, // Before current access

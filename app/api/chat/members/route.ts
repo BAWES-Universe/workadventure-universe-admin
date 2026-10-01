@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { parsePlayUri } from '@/lib/utils';
 import { prisma } from '@/lib/db';
+import { NOT_SYSTEM_USER } from '@/lib/system-user';
 import type { WorldChatMembersData } from '@/types/workadventure';
 
 export async function GET(request: NextRequest) {
@@ -38,12 +39,13 @@ export async function GET(request: NextRequest) {
       );
     }
     
-    // Get world members with Matrix chat IDs
+    // Get world members with Matrix chat IDs (never the System account)
     const members = await prisma.worldMember.findMany({
       where: {
         worldId: worldData.id,
         user: {
           AND: [
+            NOT_SYSTEM_USER,
             { matrixChatId: { not: null } },
             searchText ? {
               OR: [
