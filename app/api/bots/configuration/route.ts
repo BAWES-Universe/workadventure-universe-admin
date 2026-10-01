@@ -121,6 +121,19 @@ export async function GET(request: NextRequest) {
     // Get user ID from various auth methods
     const { userId, isAdminToken, userEmail } = await getUserIdFromRequest(request);
 
+    // The list carries every bot's room URL and chat instructions, so only the bot server (admin token)
+    // and super admins may read it.
+    if (!isAdminToken && !(userId && isSuperAdmin(userEmail))) {
+      const response = NextResponse.json(
+        { error: userId ? 'Forbidden' : 'Unauthorized' },
+        { status: userId ? 403 : 401 }
+      );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
+    }
+
     if (isAdminToken) {
       // Admin token - require it
       requireAuth(request);
