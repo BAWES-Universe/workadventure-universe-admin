@@ -266,16 +266,15 @@ export async function GET(request: NextRequest) {
           ],
           appName: "Universe",
           shortAppName: "Universe",
-          themeColor: "#000000"
+          themeColor: "#14121E"
         },
         group: group,
         policy: roomData.isPublic ? "public" : "private",
 
         showPoweredBy: false,
-        // The game builds its whole dark UI colour (buttons, menus, sidebar, device list) from this value.
-        // #04152E makes it exactly Orbit's navy card colour #1B2A41; #000000 gave a see-through black.
-        // It also tints the login, avatar and camera-setup screens behind their background image.
-        backgroundColor: "#04152E",
+        // Universe ink (#14121e, as on bawes.net). The game paints its panels, menus and first frame in this
+        // exact colour; it also tints the login, avatar and camera-setup screens behind their background image.
+        backgroundColor: "#14121E",
         primaryColor: "#4056F6",
         backgroundSceneImage: `${baseUrl}/assets/background-1920x1080.png`,
         errorSceneLogo: `${baseUrl}/assets/logo-300x250.png`,
