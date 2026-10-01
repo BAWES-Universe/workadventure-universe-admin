@@ -67,11 +67,16 @@ jobs:
             echo "::error::Dev server switch is not configured yet. Missing:$missing"
             exit 1
           fi
-          case "$TAG" in
-            ''|main|master|latest|v[0-9]*|sha-*)
-              echo "::error::Refusing tag '$TAG': production tags never go on dev through this workflow"
-              exit 1 ;;
-          esac
+          # Only the tags dev builds write are allowed: the moving `develop`, or `<branch>-<7-hex sha>`.
+          # Production's `main`, `sha-<sha>`, `latest` and version tags never pass.
+          if [ "$TAG" = develop ]; then
+            :
+          elif [[ "$TAG" =~ ^[A-Za-z0-9._-]+-[0-9a-f]{7}$ ]] && ! [[ "$TAG" =~ ^(sha|main|master)-[0-9a-f]{7}$ ]]; then
+            :
+          else
+            echo "::error::Refusing tag '$TAG': only develop or <branch>-<sha7> tags go on dev through this workflow"
+            exit 1
+          fi
 
       # Before changing anything, prove the token can read every dev app. Coolify needs the
       # `read` permission for this and for the deployment status checked later, `write` to
@@ -178,7 +183,7 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           marker='<!-- dev-server-receipt -->'
-          body=$(printf '%s\n**On dev:** https://dev.bawes.net now runs this PR%s (Orbit image `%s`, https://orbit.dev.bawes.net). [Switch log](%s)\n\nRemove the `on-dev` label, merge or close the PR to return dev Orbit to `develop`.' \
+          body=$(printf '%s\n**On dev:** https://orbit.dev.bawes.net now runs this PR%s (Orbit image `%s`). The game at https://dev.bawes.net uses it. [Switch log](%s)\n\nRemove the `on-dev` label, merge or close the PR to return dev Orbit to `develop`.' \
             "$marker" "${SHA:+ at ${SHA::7}}" "$TAG" "$RUN_URL")
           existing=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --paginate \
             --jq ".[] | select(.body | startswith(\"$marker\")) | .id" | tail -1)
