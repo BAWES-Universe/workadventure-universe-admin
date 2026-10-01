@@ -58,19 +58,16 @@ jobs:
         run: |
           set -euo pipefail
           branch=""; pr=""
-          # True when another open PR still holds the label, so returning to default would
-          # throw that PR off dev.
-          label_held_elsewhere() {
-            gh pr list --repo "$GITHUB_REPOSITORY" --state open --label "$LABEL" --json number \
-              --jq "[.[] | select(.number != ${PR:-0})] | length > 0" | grep -q true
-          }
+          # Every GitHub read is a plain assignment, so a failed call fails this step (set -e)
+          # instead of being read as "no PR holds the label".
+          holders=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --label "$LABEL" --json number --jq ".[].number")
 
           if [ "$EVENT" = workflow_dispatch ]; then
             branch="$INPUT_BRANCH"
           elif [ "$ACTION" = labeled ] && [ "$EVENT_LABEL" = "$LABEL" ]; then
             branch="$HEAD_REF"; pr="$PR"
             # Single slot: take the label off every other open PR.
-            for other in $(gh pr list --repo "$GITHUB_REPOSITORY" --state open --label "$LABEL" --json number --jq ".[].number"); do
+            for other in $holders; do
               [ "$other" = "$PR" ] && continue
               gh pr edit "$other" --repo "$GITHUB_REPOSITORY" --remove-label "$LABEL"
               gh pr comment "$other" --repo "$GITHUB_REPOSITORY" --body "Dev was taken over by #$PR, so this PR is no longer on dev. Add \`$LABEL\` again to put it back."
@@ -79,7 +76,9 @@ jobs:
             branch="$HEAD_REF"; pr="$PR"
           elif { [ "$ACTION" = unlabeled ] && [ "$EVENT_LABEL" = "$LABEL" ]; } || \
                { [ "$ACTION" = closed ] && [ "$HAS_LABEL" = true ]; }; then
-            if label_held_elsewhere; then
+            # Another open PR still holding the label keeps dev; returning to default would throw it off.
+            others=$(printf '%s\n' $holders | grep -vx "${PR:-0}" || true)
+            if [ -n "$others" ]; then
               echo "Another PR holds $LABEL; leaving dev on it."
             else
               branch="$DEFAULT_BRANCH"
@@ -160,8 +159,10 @@ jobs:
         run: |
           go=true
           if [ -n "$PR" ]; then
-            if ! gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json labels,state \
-                 --jq "select(.state == \"OPEN\") | .labels[].name" | grep -qx "$LABEL"; then
+            # A plain assignment, so a failed call fails the step instead of reading as "label gone".
+            labels=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json labels,state \
+                     --jq "select(.state == \"OPEN\") | .labels[].name")
+            if ! grep -qx "$LABEL" <<< "$labels"; then
               echo "#$PR no longer holds $LABEL; not switching."
               go=false
             fi

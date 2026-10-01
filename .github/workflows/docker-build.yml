@@ -133,6 +133,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DEV_TOKEN_SET: ${{ secrets.DEV_COOLIFY_TOKEN != '' }}
         run: |
+          set -euo pipefail
           if [ "$DEV_TOKEN_SET" != true ]; then
             echo "DEV_COOLIFY_TOKEN is not set yet; skipping the dev server."
             echo "free=false" >> "$GITHUB_OUTPUT"
