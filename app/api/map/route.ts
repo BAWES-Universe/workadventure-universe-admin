@@ -272,7 +272,10 @@ export async function GET(request: NextRequest) {
         policy: roomData.isPublic ? "public" : "private",
 
         showPoweredBy: false,
-        backgroundColor: "#000000",
+        // The game builds its whole dark UI colour (buttons, menus, sidebar, device list) from this value.
+        // #04152E makes it exactly Orbit's navy card colour #1B2A41; #000000 gave a see-through black.
+        // It also tints the login, avatar and camera-setup screens behind their background image.
+        backgroundColor: "#04152E",
         primaryColor: "#4056F6",
         backgroundSceneImage: `${baseUrl}/assets/background-1920x1080.png`,
         errorSceneLogo: `${baseUrl}/assets/logo-300x250.png`,
