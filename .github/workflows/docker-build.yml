@@ -153,7 +153,10 @@ jobs:
     uses: ./.github/workflows/dev-server-switch.yml
     with:
       tag: develop
-    secrets: inherit
+      # Checked again inside the switch lock: a PR may take on-dev while this run waits.
+      mode: free
+    secrets:
+      DEV_COOLIFY_TOKEN: ${{ secrets.DEV_COOLIFY_TOKEN }}
 
   # ─────────────────────────────────────────────────
   # Release: auto-version, tag, and GitHub Release

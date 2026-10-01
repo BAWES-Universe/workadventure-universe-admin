@@ -44,6 +44,7 @@ jobs:
     outputs:
       branch: ${{ steps.decide.outputs.branch }}
       pr: ${{ steps.decide.outputs.pr }}
+      mode: ${{ steps.decide.outputs.mode }}
     steps:
       - id: decide
         env:
@@ -57,15 +58,15 @@ jobs:
           INPUT_BRANCH: ${{ inputs.branch }}
         run: |
           set -euo pipefail
-          branch=""; pr=""
+          branch=""; pr=""; mode=""
           # Every GitHub read is a plain assignment, so a failed call fails this step (set -e)
           # instead of being read as "no PR holds the label".
           holders=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --label "$LABEL" --json number --jq ".[].number")
 
           if [ "$EVENT" = workflow_dispatch ]; then
-            branch="$INPUT_BRANCH"
+            branch="$INPUT_BRANCH"; mode=manual
           elif [ "$ACTION" = labeled ] && [ "$EVENT_LABEL" = "$LABEL" ]; then
-            branch="$HEAD_REF"; pr="$PR"
+            branch="$HEAD_REF"; pr="$PR"; mode=pr
             # Single slot: take the label off every other open PR.
             for other in $holders; do
               [ "$other" = "$PR" ] && continue
@@ -73,7 +74,7 @@ jobs:
               gh pr comment "$other" --repo "$GITHUB_REPOSITORY" --body "Dev was taken over by #$PR, so this PR is no longer on dev. Add \`$LABEL\` again to put it back."
             done
           elif [ "$ACTION" = synchronize ] && [ "$HAS_LABEL" = true ]; then
-            branch="$HEAD_REF"; pr="$PR"
+            branch="$HEAD_REF"; pr="$PR"; mode=pr
           elif { [ "$ACTION" = unlabeled ] && [ "$EVENT_LABEL" = "$LABEL" ]; } || \
                { [ "$ACTION" = closed ] && [ "$HAS_LABEL" = true ]; }; then
             # Another open PR still holding the label keeps dev; returning to default would throw it off.
@@ -81,17 +82,23 @@ jobs:
             if [ -n "$others" ]; then
               echo "Another PR holds $LABEL; leaving dev on it."
             else
-              branch="$DEFAULT_BRANCH"
+              branch="$DEFAULT_BRANCH"; mode=free
             fi
           fi
 
-          if [ "$branch" = main ] || [ "$branch" = master ]; then
-            echo "::error::$branch is the production branch; it never goes on dev through this workflow"
+          # A branch's images are tagged `<branch>` and `<branch>-<sha7>`, with anything outside
+          # [A-Za-z0-9._-] replaced by '-'. Refuse a branch whose tags would overwrite a production
+          # tag (main, latest, sha-<sha7>, version numbers) before its build is started.
+          ref_tag=$(printf '%s' "$branch" | sed -E 's/[^A-Za-z0-9._-]+/-/g')
+          if [[ "$ref_tag" =~ ^(main|master|latest|sha)$ ]] || [[ "$ref_tag" =~ ^sha-[0-9a-f]{7}$ ]] \
+             || [[ "$ref_tag" =~ ^[0-9]+\.[0-9]+ ]]; then
+            echo "::error::Branch '$branch' would be tagged like a production image; it never goes on dev through this workflow"
             exit 1
           fi
           echo "branch=$branch" >> "$GITHUB_OUTPUT"
           echo "pr=$pr" >> "$GITHUB_OUTPUT"
-          echo "Decision: branch='${branch:-none}' pr='${pr:-none}'"
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "Decision: branch='${branch:-none}' pr='${pr:-none}' mode='${mode:-none}'"
 
   build:
     needs: decide
@@ -118,15 +125,22 @@ jobs:
             exit 0
           fi
 
-          started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          # Note the build runs that already exist, so the one this dispatch starts is the first
+          # new id (no reliance on clocks).
+          runs() {
+            gh run list --repo "$GITHUB_REPOSITORY" --workflow docker-build.yml \
+              --branch "$BRANCH" --event workflow_dispatch --limit "$1" --json databaseId,createdAt
+          }
+          before=$(runs 50)
           gh workflow run docker-build.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH"
           run_id=""
           for _ in $(seq 1 30); do
-            run_id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow docker-build.yml \
-              --branch "$BRANCH" --event workflow_dispatch --limit 5 --json databaseId,createdAt \
-              --jq "[.[] | select(.createdAt >= \"$started\")] | sort_by(.createdAt) | last | .databaseId // empty")
-            [ -n "$run_id" ] && break
             sleep 5
+            after=$(runs 20)
+            run_id=$(jq -r --argjson before "$before" \
+              '[.[] | select(.databaseId as $id | $before | map(.databaseId) | index($id) | not)]
+               | sort_by(.createdAt) | first | .databaseId // empty' <<< "$after")
+            [ -n "$run_id" ] && break
           done
           if [ -z "$run_id" ]; then
             echo "::error::Could not find the image build for $BRANCH"
@@ -142,36 +156,11 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
-  # A PR may have lost the label (another PR took dev) while its images were building.
-  recheck:
-    needs: [decide, build]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: read
-    outputs:
-      go: ${{ steps.recheck.outputs.go }}
-    steps:
-      - id: recheck
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR: ${{ needs.decide.outputs.pr }}
-        run: |
-          go=true
-          if [ -n "$PR" ]; then
-            # A plain assignment, so a failed call fails the step instead of reading as "label gone".
-            labels=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json labels,state \
-                     --jq "select(.state == \"OPEN\") | .labels[].name")
-            if ! grep -qx "$LABEL" <<< "$labels"; then
-              echo "#$PR no longer holds $LABEL; not switching."
-              go=false
-            fi
-          fi
-          echo "go=$go" >> "$GITHUB_OUTPUT"
-
+  # The switch checks again, once it holds the switch lock, that dev is still this run's to
+  # change: a PR may lose the label (another PR took dev) while its images are building.
   switch:
-    needs: [decide, build, recheck]
-    if: needs.recheck.outputs.go == 'true'
+    needs: [decide, build]
+    if: needs.decide.outputs.branch != ''
     permissions:
       contents: read
       packages: read
@@ -181,4 +170,6 @@ jobs:
       tag: ${{ needs.build.outputs.tag }}
       pr: ${{ needs.decide.outputs.pr }}
       sha: ${{ needs.build.outputs.sha }}
-    secrets: inherit
+      mode: ${{ needs.decide.outputs.mode }}
+    secrets:
+      DEV_COOLIFY_TOKEN: ${{ secrets.DEV_COOLIFY_TOKEN }}

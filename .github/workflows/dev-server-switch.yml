@@ -29,6 +29,16 @@ on:
         required: false
         type: string
         default: ''
+      mode:
+        description: >-
+          Who dev belongs to, checked again once this run holds the switch lock. `pr`: the PR
+          in `pr` must still be open and hold on-dev. `free`: no open PR may hold on-dev.
+          `manual`: a switch run by hand, no check.
+        required: true
+        type: string
+    secrets:
+      DEV_COOLIFY_TOKEN:
+        required: false
 
 permissions:
   contents: read
@@ -78,10 +88,46 @@ jobs:
             exit 1
           fi
 
+      # The caller decided who holds dev before this run waited for the switch lock, and the
+      # on-dev label may have moved since. Check again now, holding the lock, before any change.
+      - name: Check dev is still this run's to switch
+        id: slot
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MODE: ${{ inputs.mode }}
+          PR: ${{ inputs.pr }}
+        run: |
+          set -euo pipefail
+          go=true
+          # Every GitHub read is a plain assignment, so a failed call fails this step instead of
+          # being read as "label gone" or "dev is free".
+          case "$MODE" in
+            pr)
+              [ -n "$PR" ] || { echo "::error::mode pr needs the pr input"; exit 1; }
+              labels=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json labels,state \
+                       --jq 'select(.state == "OPEN") | .labels[].name')
+              if ! grep -qx on-dev <<< "$labels"; then
+                echo "#$PR is closed or no longer holds on-dev; not switching."
+                go=false
+              fi
+              ;;
+            free)
+              held=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --label on-dev --json number --jq '.[].number')
+              if [ -n "$held" ]; then
+                echo "PR $(echo $held) holds on-dev; leaving dev on it."
+                go=false
+              fi
+              ;;
+            manual) ;;
+            *) echo "::error::Unknown mode '$MODE' (expected pr, free or manual)"; exit 1 ;;
+          esac
+          echo "go=$go" >> "$GITHUB_OUTPUT"
+
       # Before changing anything, prove the token can read every dev app. Coolify needs the
       # `read` permission for this and for the deployment status checked later, `write` to
       # change the tag and `deploy` to deploy.
       - name: Check the token can reach every dev app
+        if: steps.slot.outputs.go == 'true'
         run: |
           bad=""
           while read -r image uuid; do
@@ -100,6 +146,7 @@ jobs:
           fi
 
       - name: Log in to GHCR
+        if: steps.slot.outputs.go == 'true'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
@@ -107,6 +154,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Check every image exists
+        if: steps.slot.outputs.go == 'true'
         run: |
           while read -r image uuid; do
             [ -n "$image" ] || continue
@@ -122,6 +170,7 @@ jobs:
       # the next one starts. The whole switch shares one 25-minute budget, inside the job's
       # 30-minute timeout.
       - name: Switch, deploy and confirm each app
+        if: steps.slot.outputs.go == 'true'
         run: |
           set -uo pipefail
           deadline=$(( $(date +%s) + 25 * 60 ))
@@ -162,8 +211,14 @@ jobs:
 
             # Confirm Coolify now holds the new tag. Its running status is refreshed by a periodic
             # check, so a stale value right after a deploy is only reported, not failed on.
-            rm -f /tmp/app.json
-            get "/api/v1/applications/${uuid}" /tmp/app.json > /dev/null
+            # Retry a failed read a few times: the deploy itself has already finished.
+            for _ in 1 2 3; do
+              rm -f /tmp/app.json
+              code=$(get "/api/v1/applications/${uuid}" /tmp/app.json)
+              [ "$code" = 200 ] && break
+              sleep 5
+            done
+            [ "$code" = 200 ] || fail "$image: HTTP $code reading the app after deployment $id finished: $(head -c 300 /tmp/app.json 2>/dev/null)"
             got_tag=$(jq -r '.docker_registry_image_tag // empty' /tmp/app.json 2>/dev/null)
             app_status=$(jq -r '.status // empty' /tmp/app.json 2>/dev/null)
             echo "$image: finished, tag '$got_tag', status '${app_status:-unknown}'"
@@ -175,7 +230,7 @@ jobs:
           done <<< "$APPS"
 
       - name: Receipt on the pull request
-        if: inputs.pr != ''
+        if: steps.slot.outputs.go == 'true' && inputs.pr != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ inputs.pr }}
