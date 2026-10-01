@@ -45,7 +45,8 @@ jobs:
       pull-requests: write
     env:
       TAG: ${{ inputs.tag }}
-      COOLIFY_BASE: ${{ vars.DEV_COOLIFY_BASE || secrets.COOLIFY_BASE }}
+      # Set explicitly, never borrowed from the production COOLIFY_BASE secret.
+      COOLIFY_BASE: ${{ vars.DEV_COOLIFY_BASE }}
       COOLIFY_TOKEN: ${{ secrets.DEV_COOLIFY_TOKEN }}
       APPS: |
         workadventure-universe-admin ${{ vars.DEV_COOLIFY_ORBIT_UUID }}
