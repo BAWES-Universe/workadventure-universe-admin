@@ -107,6 +107,17 @@ export async function GET(
     // Get user ID from various auth methods
     const { userId, isAdminToken, userEmail } = await getUserIdFromRequest(request);
 
+    if (!isAdminToken && !userId) {
+      const response = NextResponse.json(
+        { error: 'Unauthorized' },
+        { status: 401 }
+      );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
+    }
+
     if (isAdminToken) {
       // Admin token - require it
       requireAuth(request);
@@ -149,10 +160,20 @@ export async function GET(
       return response;
     }
 
-    // Check permission for sensitive data
+    // A session user may only read bots in rooms they can manage (the config carries chat instructions)
     let hasPermission = false;
-    if (includeSensitive && userId) {
+    if (userId) {
       hasPermission = await canManageBots(userId, bot.roomId) || isSuperAdmin(userEmail);
+      if (!hasPermission) {
+        const response = NextResponse.json(
+          { error: 'Forbidden' },
+          { status: 403 }
+        );
+        Object.entries(corsHeaders()).forEach(([key, value]) => {
+          response.headers.set(key, value);
+        });
+        return response;
+      }
     }
 
     // Transform to server format
