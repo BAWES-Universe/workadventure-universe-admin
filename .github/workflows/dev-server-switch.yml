@@ -2,9 +2,12 @@ name: Dev server switch
 
 # Points the dev server's Orbit app (orbit.dev.bawes.net) at one image tag and redeploys it.
 # Called by dev-server.yml (the `on-dev` label) and by docker-build.yml (fresh develop builds).
-# Dev Orbit runs `prisma migrate deploy` on every deploy, so a PR's migrations apply to the dev
-# database and stay there after dev returns to develop (the dev reset restores a clean copy). It only changes which image tag the app runs: environment
-# variables are never touched, so the dev/prod separation checked by the env gate is unchanged.
+# It only changes which image tag the app runs: environment variables are never touched, so the
+# dev/prod separation checked by the env gate is unchanged.
+#
+# Dev Orbit runs `npx prisma migrate deploy` after every deploy, so switching to a PR applies that
+# PR's migrations to the dev database, and they stay there when dev returns to develop. To undo
+# them, restore the golden snapshot with dev-reset on the dev box.
 #
 # It uses DEV_COOLIFY_TOKEN, a token from the "Universe Dev" Coolify team. Coolify scopes a
 # token to its team, so this token cannot read or deploy any production app.
@@ -110,59 +113,61 @@ jobs:
             echo "found $ref"
           done <<< "$APPS"
 
-      - name: Switch and deploy
-        id: deploy
+      # One app at a time, in the order of APPS: each is switched, deployed and confirmed before
+      # the next one starts. The whole switch shares one 25-minute budget, inside the job's
+      # 30-minute timeout.
+      - name: Switch, deploy and confirm each app
         run: |
-          set -euo pipefail
-          api() { curl -sS --fail-with-body -H "Authorization: Bearer ${COOLIFY_TOKEN}" -H 'Content-Type: application/json' "$@"; }
-          deployments=""
+          set -uo pipefail
+          deadline=$(( $(date +%s) + 25 * 60 ))
+          # get <api path> <out file>: prints the HTTP code, 000 when the request itself failed
+          get() { curl -sS --max-time 20 -o "$2" -w '%{http_code}' -H "Authorization: Bearer ${COOLIFY_TOKEN}" "${COOLIFY_BASE}$1" || true; }
+          send() { curl -sS --max-time 30 --fail-with-body -H "Authorization: Bearer ${COOLIFY_TOKEN}" -H 'Content-Type: application/json' "$@"; }
+          fail() { echo "::error::$1"; exit 1; }
           while read -r image uuid; do
             [ -n "$image" ] || continue
             echo "Setting $image ($uuid) to $TAG"
-            api -X PATCH "${COOLIFY_BASE}/api/v1/applications/${uuid}" \
-              -d "$(jq -cn --arg tag "$TAG" '{docker_registry_image_tag: $tag}')" > /dev/null
-            id=$(api -X POST "${COOLIFY_BASE}/api/v1/deploy?uuid=${uuid}" | jq -r '.deployments[0].deployment_uuid // empty')
-            deployments="$deployments $image:$id"
-          done <<< "$APPS"
-          echo "deployments=$deployments" >> "$GITHUB_OUTPUT"
+            send -X PATCH "${COOLIFY_BASE}/api/v1/applications/${uuid}" \
+              -d "$(jq -cn --arg tag "$TAG" '{docker_registry_image_tag: $tag}')" > /dev/null \
+              || fail "$image: Coolify refused the tag change"
+            body=$(send -X POST "${COOLIFY_BASE}/api/v1/deploy?uuid=${uuid}") || fail "$image: deploy request failed: ${body:-no reply}"
+            id=$(jq -r '.deployments[0].deployment_uuid // empty' <<< "$body")
+            [ -n "$id" ] || fail "$image: Coolify returned no deployment id: $body"
 
-      - name: Wait for the deployments
-        env:
-          DEPLOYMENTS: ${{ steps.deploy.outputs.deployments }}
-        run: |
-          set -uo pipefail
-          failed=""
-          for entry in $DEPLOYMENTS; do
-            image="${entry%%:*}"; id="${entry#*:}"
-            if [ -z "$id" ]; then
-              echo "::warning::No deployment id for $image; check it in Coolify"
-              continue
-            fi
-            status=""
-            for _ in $(seq 1 120); do
+            misses=0
+            while :; do
+              [ "$(date +%s)" -lt "$deadline" ] || fail "$image: deployment $id did not finish within the 25-minute budget"
               rm -f /tmp/deployment.json
-              code=$(curl -sS -o /tmp/deployment.json -w '%{http_code}' -H "Authorization: Bearer ${COOLIFY_TOKEN}" \
-                "${COOLIFY_BASE}/api/v1/deployments/${id}" || true)
-              case "$code" in
-                200) status=$(jq -r '.status // empty' /tmp/deployment.json) ;;
-                401|403|404)
-                  # Waiting will not fix these; say why instead of timing out.
-                  status="unreadable-http-$code"
-                  echo "::error::$image: HTTP $code reading deployment $id: $(jq -r '.message // empty' /tmp/deployment.json 2>/dev/null)"
-                  break ;;
-              esac
-              case "$status" in
-                finished|failed|cancelled*) break ;;
+              code=$(get "/api/v1/deployments/${id}" /tmp/deployment.json)
+              status=""
+              [ "$code" = 200 ] && status=$(jq -r '.status // empty' /tmp/deployment.json 2>/dev/null)
+              case "$code:$status" in
+                200:finished) break ;;
+                200:failed|200:cancelled*) fail "$image: deployment $id ended '$status'; its log is in Coolify" ;;
+                401:*|403:*|404:*) fail "$image: HTTP $code reading deployment $id: $(head -c 300 /tmp/deployment.json 2>/dev/null)" ;;
+                200:?*) misses=0 ;;  # queued, in_progress
+                *)
+                  misses=$((misses + 1))
+                  echo "::warning::$image: unreadable deployment status (HTTP $code): $(head -c 300 /tmp/deployment.json 2>/dev/null)"
+                  [ "$misses" -lt 3 ] || fail "$image: three unreadable status replies in a row for deployment $id"
+                  ;;
               esac
               sleep 10
             done
-            echo "$image: ${status:-unknown}"
-            [ "$status" = "finished" ] || failed="$failed $image(${status:-timed out})"
-          done
-          if [ -n "$failed" ]; then
-            echo "::error::Dev deploy did not finish for:$failed"
-            exit 1
-          fi
+
+            # Confirm Coolify now holds the new tag. Its running status is refreshed by a periodic
+            # check, so a stale value right after a deploy is only reported, not failed on.
+            rm -f /tmp/app.json
+            get "/api/v1/applications/${uuid}" /tmp/app.json > /dev/null
+            got_tag=$(jq -r '.docker_registry_image_tag // empty' /tmp/app.json 2>/dev/null)
+            app_status=$(jq -r '.status // empty' /tmp/app.json 2>/dev/null)
+            echo "$image: finished, tag '$got_tag', status '${app_status:-unknown}'"
+            [ "$got_tag" = "$TAG" ] || fail "$image: Coolify reports tag '$got_tag' after the deploy, expected '$TAG'"
+            case "$app_status" in
+              running*) ;;
+              *) echo "::warning::$image: Coolify status is '${app_status:-unknown}' right after the deploy" ;;
+            esac
+          done <<< "$APPS"
 
       - name: Receipt on the pull request
         if: inputs.pr != ''
