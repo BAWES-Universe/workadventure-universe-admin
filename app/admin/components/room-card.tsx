@@ -40,7 +40,7 @@ export function OrbitalIllustration({ small = false }: { small?: boolean }) {
       <path d="M116 60c30-12 58 15 59 45M108 80c26-9 43 7 44 33M131 53c9 18 13 44 4 73" stroke="currentColor" strokeOpacity="0.2" strokeWidth="0.6" />
       <ellipse cx="147" cy="93" rx="114" ry="36" transform="rotate(-26 147 93)" stroke="currentColor" strokeOpacity="0.5" strokeWidth="0.8" />
       <ellipse cx="147" cy="93" rx="133" ry="51" transform="rotate(-26 147 93)" stroke="currentColor" strokeOpacity="0.13" strokeWidth="0.6" />
-      <circle cx="50" cy="126" r="4" fill="var(--brand-gold)" />
+      <circle cx="50" cy="126" r="4" fill="var(--brand-blue)" />
       <circle cx="235" cy="49" r="2" fill="currentColor" fillOpacity="0.5" />
       <path d="M45 55h8m-4-4v8M226 144h6m-3-3v6" stroke="currentColor" strokeOpacity="0.45" strokeWidth="0.8" />
     </svg>
@@ -56,13 +56,14 @@ function VisitTime({ value }: { value: string }) {
   );
 }
 
-const EYEBROW: Record<Kind, string> = { here: 'You are here', previous: 'Before this', trail: 'On your trail' };
+// Recently visited cards need no label: the section says what they are.
+const EYEBROW: Record<Exclude<Kind, 'trail'>, string> = { here: 'You are here', previous: 'Before this' };
 
 /**
  * A room at a glance: where it is, what it is, how popular it is and who was there last, the same on every card.
  * The whole card opens the room's page, which has its details and Visit.
  */
-export function RoomCard({ room, kind, index }: { room: RoomCardRoom; kind: Kind; index?: number }) {
+export function RoomCard({ room, kind }: { room: RoomCardRoom; kind: Kind }) {
   const { analytics, loading, failed, retry } = useRoomAnalytics(room.id);
   const titleId = useId();
   const here = kind === 'here';
@@ -70,32 +71,33 @@ export function RoomCard({ room, kind, index }: { room: RoomCardRoom; kind: Kind
   const you = analytics?.lastVisitedByUser?.accessedAt ?? room.accessedAt ?? null;
   const latest = analytics?.lastVisitedOverall ?? null;
   const variant = here ? styles.current : kind === 'previous' ? styles.previous : styles.recent;
+  const stars = (
+    <span className={styles.stars} aria-label={`${room.favorites ?? 0} ${room.favorites === 1 ? 'star' : 'stars'}`}>
+      <Star size={13} aria-hidden="true" />
+      {(room.favorites ?? 0).toLocaleString()}
+    </span>
+  );
 
   return (
     <article className={cn(styles.card, variant, 'orbit-kind-wash')} data-kind="room" aria-labelledby={titleId} data-testid={`room-card-${kind}`}>
       {here && <OrbitalIllustration />}
-      <div className={styles.cardTop}>
-        <span className={styles.eyebrow}>
-          {here && <i className={styles.presence} />}
-          {EYEBROW[kind]}
-        </span>
-        {kind === 'trail' && index !== undefined && (
-          <span className={styles.ordinal} aria-hidden="true">
-            {String(index + 1).padStart(2, '0')}
+      {kind !== 'trail' && (
+        <div className={styles.cardTop}>
+          <span className={styles.eyebrow}>
+            {here && <i className={styles.presence} />}
+            {EYEBROW[kind]}
           </span>
-        )}
-        <span className={styles.stars} aria-label={`${room.favorites ?? 0} ${room.favorites === 1 ? 'star' : 'stars'}`}>
-          <Star size={13} aria-hidden="true" />
-          {(room.favorites ?? 0).toLocaleString()}
-        </span>
-      </div>
+          {stars}
+        </div>
+      )}
 
-      <div className={styles.place}>
+      <div className={cn(styles.place, kind === 'trail' && styles.placeTop)}>
         <div className={styles.placeWords}>
           <p className={styles.coordinates}>
             <span>{room.universe.name}</span>
             <span aria-hidden="true">/</span>
             <span>{room.world.name}</span>
+            {kind === 'trail' && stars}
           </p>
           <div className={styles.nameRow}>
             <span className="orbit-kind" data-kind="room" aria-hidden="true">

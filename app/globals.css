@@ -88,30 +88,31 @@
   }
 
   .dark {
-    /* The chat's navy: #111b2c behind, #1b2a41 cards. */
-    --background: 218 44% 12%;
+    /* Universe ink, the colour of bawes.net and of the game's panels: #14121e behind, a step lighter for cards.
+       The game opens Orbit in a frame over its own #14121e glass, so the two meet without a seam. */
+    --background: 250 25% 9.4%;
     --foreground: 0 0% 100%;
-    --card: 216 41% 18%;
+    --card: 250 22% 15%;
     --card-foreground: 0 0% 100%;
-    --popover: 216 41% 16%;
+    --popover: 250 22% 13%;
     --popover-foreground: 0 0% 100%;
-    --primary: 216 33% 94%;
-    --primary-foreground: 218 44% 12%;
-    --secondary: 216 30% 22%;
+    --primary: 250 30% 95%;
+    --primary-foreground: 250 25% 9.4%;
+    --secondary: 250 20% 19%;
     --secondary-foreground: 0 0% 100%;
-    --muted: 216 30% 21%;
-    --muted-foreground: 216 20% 72%;
-    --accent: 230 45% 26%;
+    --muted: 250 20% 18%;
+    --muted-foreground: 250 15% 74%;
+    --accent: 258 40% 26%;
     --accent-foreground: 0 0% 100%;
     --destructive: 0 72% 56%;
     --destructive-foreground: 0 0% 100%;
-    --border: 216 28% 26%;
-    --input: 216 28% 28%;
+    --border: 250 18% 23%;
+    --input: 250 18% 25%;
     --ring: 233 91% 66%;
 
-    --surface-elevated: 216 41% 20%;
-    --surface-sunken: 218 48% 9%;
-    --shadow-color: 218 60% 4%;
+    --surface-elevated: 250 22% 17%;
+    --surface-sunken: 250 40% 6%;
+    --shadow-color: 250 50% 3%;
   }
 }
 
