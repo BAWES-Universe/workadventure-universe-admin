@@ -51,6 +51,8 @@ describe('startRoomPath', () => {
     expect(startRoomPath()).toBe('@/mine/office/lobby');
     process.env.START_ROOM_URL = '@/mine/office/lobby';
     expect(startRoomPath()).toBe('@/mine/office/lobby');
+    process.env.START_ROOM_URL = 'https://play.example.com/@/mine/office/lobby';
+    expect(startRoomPath()).toBe('@/mine/office/lobby');
   });
 
   it('is null for a full map URL or anything that is not a room path', () => {

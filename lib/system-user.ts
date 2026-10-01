@@ -16,10 +16,19 @@ export const NOT_SYSTEM_USER_SQL = Prisma.sql`(u.email IS NULL OR u.email <> ${S
 
 const DEFAULT_START_ROOM = '@/default/default/default';
 
-/** START_ROOM_URL as `@/universe/world/room`, or null when it is not a room path (a full map URL, say). */
+/**
+ * START_ROOM_URL as `@/universe/world/room` (also from a full play URL such as `https://host/@/u/w/r`), or null when
+ * it is not a room path (a map file URL, say).
+ */
 export function startRoomPath(): string | null {
-  const value = (process.env.START_ROOM_URL || DEFAULT_START_ROOM).trim();
-  if (/^https?:\/\//i.test(value)) return null;
+  let value = (process.env.START_ROOM_URL || DEFAULT_START_ROOM).trim();
+  if (/^https?:\/\//i.test(value)) {
+    try {
+      value = new URL(value).pathname;
+    } catch {
+      return null;
+    }
+  }
   const parts = value.split('/').filter(Boolean);
   return parts.length >= 4 && parts[0] === '@' ? parts.slice(0, 4).join('/') : null;
 }
