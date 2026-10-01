@@ -54,17 +54,12 @@ export default function UsersPage() {
       }
 
       const data = await response.json();
-      const rawUsers: User[] = data.users || [];
-      // Hide system user from list
-      const visibleUsers = rawUsers.filter(
-        (user) => user.email !== 'system@workadventure.local',
-      );
-      const totalFromApi = data.pagination?.total ?? visibleUsers.length;
-      const systemUsersOnPage = rawUsers.length - visibleUsers.length;
+      // The server leaves the System account out, before counting and paging.
+      const users: User[] = data.users || [];
       return {
-        users: visibleUsers,
+        users,
         totalPages: data.pagination?.totalPages || 1,
-        total: Math.max(0, totalFromApi - systemUsersOnPage),
+        total: data.pagination?.total ?? users.length,
       };
     },
     { debounceMs: 250, initialQuery },

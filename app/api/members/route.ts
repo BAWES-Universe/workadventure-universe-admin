@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { parsePlayUri } from '@/lib/utils';
 import { prisma } from '@/lib/db';
+import { NOT_SYSTEM_USER } from '@/lib/system-user';
 import type { MemberData } from '@/types/workadventure';
 
 export async function GET(request: NextRequest) {
@@ -38,16 +39,21 @@ export async function GET(request: NextRequest) {
       );
     }
     
-    // Get members
+    // Get members (never the System account)
     const members = await prisma.worldMember.findMany({
       where: {
         worldId: worldData.id,
         user: searchText ? {
-          OR: [
-            { name: { contains: searchText, mode: 'insensitive' } },
-            { email: { contains: searchText, mode: 'insensitive' } },
+          AND: [
+            NOT_SYSTEM_USER,
+            {
+              OR: [
+                { name: { contains: searchText, mode: 'insensitive' } },
+                { email: { contains: searchText, mode: 'insensitive' } },
+              ],
+            },
           ],
-        } : undefined,
+        } : NOT_SYSTEM_USER,
       },
       include: {
         user: {

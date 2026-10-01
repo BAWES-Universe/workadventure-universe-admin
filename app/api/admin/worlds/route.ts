@@ -3,6 +3,7 @@ import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { FEATURED_FORBIDDEN, refusesFeaturedChange } from '@/lib/featured';
+import { andNotSystemOwnedSql, hiddenSystemOwnerId, notSystemWorld } from '@/lib/system-user';
 
 const createWorldSchema = z.object({
   universeId: z.string().uuid(),
@@ -44,6 +45,9 @@ export async function GET(request: NextRequest) {
     const universeId = searchParams.get('universeId');
     const scope = searchParams.get('scope') || 'my';
     
+    // System's worlds, when they are hidden from lists (the start room is elsewhere); null otherwise
+    const hidden = await hiddenSystemOwnerId();
+
     const where: any = {};
     
     if (search) {
@@ -97,6 +101,9 @@ export async function GET(request: NextRequest) {
     } else if (universeId) {
       // Admin token - can filter by any universe
       where.universeId = universeId;
+    } else if (hidden) {
+      // Admin token, all worlds: all but System's
+      Object.assign(where, notSystemWorld(hidden));
     }
     
     // For discover scope, featured first (super admins pin them), then by total accesses (descending)
@@ -118,6 +125,7 @@ export async function GET(request: NextRequest) {
             LEFT JOIN room_accesses ra ON r.id = ra.room_id
             WHERE w.is_public = true AND u.is_public = true
             AND NOT (u.slug = 'default' AND w.slug = 'default')
+            ${andNotSystemOwnedSql(hidden)}
             AND (w.name ILIKE ${`%${search}%`} OR w.slug ILIKE ${`%${search}%`} OR w.description ILIKE ${`%${search}%`})
             GROUP BY w.id
             ORDER BY w.featured DESC, access_count DESC, w.created_at DESC
@@ -133,6 +141,7 @@ export async function GET(request: NextRequest) {
             LEFT JOIN room_accesses ra ON r.id = ra.room_id
             WHERE w.is_public = true AND u.is_public = true
             AND NOT (u.slug = 'default' AND w.slug = 'default')
+            ${andNotSystemOwnedSql(hidden)}
             GROUP BY w.id
             ORDER BY w.featured DESC, access_count DESC, w.created_at DESC
             LIMIT ${limit} OFFSET ${(page - 1) * limit}
@@ -149,6 +158,7 @@ export async function GET(request: NextRequest) {
             LEFT JOIN universes u ON w.universe_id = u.id
             WHERE w.is_public = true AND u.is_public = true
             AND NOT (u.slug = 'default' AND w.slug = 'default')
+            ${andNotSystemOwnedSql(hidden)}
             AND (w.name ILIKE ${`%${search}%`} OR w.slug ILIKE ${`%${search}%`} OR w.description ILIKE ${`%${search}%`})
           `
         : prisma.$queryRaw<Array<{ count: bigint }>>`
@@ -157,6 +167,7 @@ export async function GET(request: NextRequest) {
             LEFT JOIN universes u ON w.universe_id = u.id
             WHERE w.is_public = true AND u.is_public = true
             AND NOT (u.slug = 'default' AND w.slug = 'default')
+            ${andNotSystemOwnedSql(hidden)}
           `;
       const totalResult = await totalQuery;
       total = Number(totalResult[0]?.count || 0);

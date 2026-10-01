@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getViewer, isPrivileged, viewerUserId, unauthorizedResponse, forbiddenResponse } from '@/lib/access-scope';
 import { prisma } from '@/lib/db';
+import { hiddenSystemOwnerId, notSystemUniverse } from '@/lib/system-user';
 
 export async function GET(
   request: NextRequest,
@@ -85,10 +86,11 @@ export async function GET(
       select: { accessedAt: true },
     });
     
-    // Get most visited rooms
+    // Get most visited rooms, never System's once they are hidden
+    const hidden = await hiddenSystemOwnerId();
     const roomStats = await prisma.roomAccess.groupBy({
       by: ['roomId'],
-      where,
+      where: hidden ? { ...where, universe: notSystemUniverse(hidden) } : where,
       _count: { roomId: true },
       orderBy: { _count: { roomId: 'desc' } },
       take: 5,

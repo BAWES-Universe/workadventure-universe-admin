@@ -23,7 +23,14 @@ export type AdminMine = {
   /** Invitations you've sent, whatever the answer; absent from an older server. */
   invitationsSent?: number;
 };
-export type AdminBootstrap = { version: 1; user: AdminUser; stats: AdminStats; mine?: AdminMine };
+export type AdminBootstrap = {
+  version: 1;
+  user: AdminUser;
+  stats: AdminStats;
+  mine?: AdminMine;
+  /** START_ROOM_URL as `@/universe/world/room`; null when it is a map URL; absent from an older server. */
+  startRoom?: string | null;
+};
 
 const AdminBootstrapContext = createContext<AdminBootstrap | null>(null);
 
@@ -35,6 +42,12 @@ export function useAdminBootstrap(): AdminBootstrap {
   const value = useContext(AdminBootstrapContext);
   if (!value) throw new Error('useAdminBootstrap must be used inside AdminBootstrapProvider');
   return value;
+}
+
+/** Where everyone lands, as `@/universe/world/room`; the built-in default outside the shell or from an older server. */
+export function useStartRoom(): string | null {
+  const startRoom = useContext(AdminBootstrapContext)?.startRoom;
+  return startRoom === undefined ? '@/default/default/default' : startRoom;
 }
 
 /** Whether the signed-in person is a super admin; false outside the shell (a test, a sign-in page). */
