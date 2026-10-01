@@ -3,6 +3,7 @@ import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { FEATURED_FORBIDDEN, refusesFeaturedChange } from '@/lib/featured';
+import { andNotSystemOwnedSql, hiddenSystemOwnerId } from '@/lib/system-user';
 
 const createUniverseSchema = z.object({
   slug: z.string().min(1).max(100),
@@ -46,6 +47,9 @@ export async function GET(request: NextRequest) {
     const ownerId = searchParams.get('ownerId');
     const scope = searchParams.get('scope') || 'my';
     
+    // System's universes, when they are hidden from lists (the start room is elsewhere); null otherwise
+    const hidden = await hiddenSystemOwnerId();
+
     const where: any = {};
     
     if (search) {
@@ -62,6 +66,9 @@ export async function GET(request: NextRequest) {
       // - Otherwise, return all universes (subject to search filters)
       if (ownerId) {
         where.ownerId = ownerId;
+      } else if (hidden) {
+        // …except System's, once the start room is elsewhere
+        where.ownerId = { not: hidden };
       }
     } else if (userId) {
       // Session-based callers: support scopes
@@ -96,6 +103,7 @@ export async function GET(request: NextRequest) {
             LEFT JOIN room_accesses ra ON r.id = ra.room_id
             WHERE u.is_public = true
             AND u.slug != 'default'
+            ${andNotSystemOwnedSql(hidden)}
             AND (u.name ILIKE ${`%${search}%`} OR u.slug ILIKE ${`%${search}%`} OR u.description ILIKE ${`%${search}%`})
             GROUP BY u.id
             ORDER BY u.featured DESC, access_count DESC, u.created_at DESC
@@ -111,6 +119,7 @@ export async function GET(request: NextRequest) {
             LEFT JOIN room_accesses ra ON r.id = ra.room_id
             WHERE u.is_public = true
             AND u.slug != 'default'
+            ${andNotSystemOwnedSql(hidden)}
             GROUP BY u.id
             ORDER BY u.featured DESC, access_count DESC, u.created_at DESC
             LIMIT ${limit} OFFSET ${(page - 1) * limit}
@@ -126,6 +135,7 @@ export async function GET(request: NextRequest) {
             FROM universes u
             WHERE u.is_public = true
             AND u.slug != 'default'
+            ${andNotSystemOwnedSql(hidden)}
             AND (u.name ILIKE ${`%${search}%`} OR u.slug ILIKE ${`%${search}%`} OR u.description ILIKE ${`%${search}%`})
           `
         : prisma.$queryRaw<Array<{ count: bigint }>>`
@@ -133,6 +143,7 @@ export async function GET(request: NextRequest) {
             FROM universes u
             WHERE u.is_public = true
             AND u.slug != 'default'
+            ${andNotSystemOwnedSql(hidden)}
           `;
       const totalResult = await totalQuery;
       total = Number(totalResult[0]?.count || 0);

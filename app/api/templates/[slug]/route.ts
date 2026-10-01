@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
+import { hiddenSystemOwnerId, notSystemRoom } from '@/lib/system-user';
 
 // GET /api/templates/[slug]
 // Public endpoint - no authentication required
@@ -10,6 +11,7 @@ export async function GET(
   try {
     const { slug } = await params;
 
+    const hidden = await hiddenSystemOwnerId();
     const template = await prisma.roomTemplate.findUnique({
       where: {
         slug,
@@ -40,9 +42,10 @@ export async function GET(
             sizeLabel: true,
             recommendedWorldTags: true,
             order: true,
+            // Rooms using the map; System's not counted once they are hidden
             _count: {
               select: {
-                rooms: true,
+                rooms: hidden ? { where: notSystemRoom(hidden) } : true,
               },
             },
           },
