@@ -90,14 +90,14 @@
   .dark {
     /* Universe ink, the colour of bawes.net and of the game's panels: #14121e behind, a step lighter for cards.
        The game opens Orbit in a frame over its own #14121e glass, so the two meet without a seam. */
-    --background: 250 25% 9%;
+    --background: 250 25% 9.4%;
     --foreground: 0 0% 100%;
     --card: 250 22% 15%;
     --card-foreground: 0 0% 100%;
     --popover: 250 22% 13%;
     --popover-foreground: 0 0% 100%;
     --primary: 250 30% 95%;
-    --primary-foreground: 250 25% 9%;
+    --primary-foreground: 250 25% 9.4%;
     --secondary: 250 20% 19%;
     --secondary-foreground: 0 0% 100%;
     --muted: 250 20% 18%;
