@@ -29,9 +29,16 @@ RUN rm -f next-env.d.ts || true
 ARG NEXT_PUBLIC_PLAY_URL
 ENV NEXT_PUBLIC_PLAY_URL=$NEXT_PUBLIC_PLAY_URL
 
+# Optional browser Sentry settings, passed only by dev-server builds. When empty they are
+# unset before the build, so a build without them produces the same bundle as before.
+ARG NEXT_PUBLIC_SENTRY_DSN_ADMIN
+ARG NEXT_PUBLIC_SENTRY_ENVIRONMENT
+
 # DATABASE_URL is required during build for Prisma Client initialization
 # Use a dummy value since we're not connecting to a database during build
-RUN DATABASE_URL="postgresql://dummy:dummy@dummy:5432/dummy" npm run build
+RUN [ -n "$NEXT_PUBLIC_SENTRY_DSN_ADMIN" ] || unset NEXT_PUBLIC_SENTRY_DSN_ADMIN; \
+    [ -n "$NEXT_PUBLIC_SENTRY_ENVIRONMENT" ] || unset NEXT_PUBLIC_SENTRY_ENVIRONMENT; \
+    DATABASE_URL="postgresql://dummy:dummy@dummy:5432/dummy" npm run build
 
 # Stage 3: Runtime
 FROM node:20.19-alpine AS runner
