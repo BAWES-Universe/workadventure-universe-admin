@@ -57,11 +57,10 @@ export default function RecentlyVisited({ limit = 4, excludeRoomIds = [] }: { li
         </div>
       ) : (
         <div className={styles.recentGrid}>
-          {shown.map((room, index) => (
+          {shown.map((room) => (
             <RoomCard
               key={room.roomId}
               kind="trail"
-              index={index}
               room={{
                 id: room.roomId,
                 name: room.roomName,

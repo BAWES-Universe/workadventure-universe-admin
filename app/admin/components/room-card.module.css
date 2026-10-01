@@ -1,23 +1,27 @@
-.location, .recentSection { --signal-accent: #b45309; --signal-line: hsl(var(--border)); --signal-wash: rgb(245 158 11 / .06); min-width: 0; container-type: inline-size; }
-:global(.dark) .location, :global(.dark) .recentSection { --signal-accent: var(--kind-room-solid); --signal-line: hsl(var(--border)); --signal-wash: rgb(245 158 11 / .07); }
+/* Where you are wears the same violet wash as the game chat's "Say hi in person" card; links stay neutral, as
+   everywhere in Orbit. "You are here" is in bawes.net's headline gradient (Orbit's purple → blue in light mode, where
+   the pale one wouldn't read). */
+.location, .recentSection { --signal-accent: #7c3aed; --signal-line: hsl(var(--border)); --here-text: var(--brand-gradient); --here-wash: linear-gradient(145deg, rgb(134 41 252 / .08), rgb(65 86 246 / .05) 55%, rgb(233 199 76 / .04)); --here-edge: rgb(124 58 237 / .25); --here-glow: 0 10px 30px -18px rgb(134 41 252 / .35); min-width: 0; container-type: inline-size; }
+:global(.dark) .location, :global(.dark) .recentSection { --signal-accent: var(--kind-universe-solid); --here-text: linear-gradient(120deg, #c4b5fd 0%, #a78bfa 30%, #fbbf24 70%, #f59e0b 100%); --here-wash: linear-gradient(145deg, rgb(134 41 252 / .14), rgb(65 86 246 / .08) 55%, rgb(233 199 76 / .06)); --here-edge: rgb(167 139 250 / .22); --here-glow: 0 0 32px -12px rgb(134 41 252 / .45); }
 .card { position: relative; isolation: isolate; display: flex; flex-direction: column; min-width: 0; overflow: hidden; padding: 15px 17px 12px; border: 1px solid var(--signal-line); border-radius: 18px; background: hsl(var(--card)); transition: border-color 160ms, transform 160ms; }
-.card:focus-within, .card:hover { border-color: color-mix(in srgb, var(--signal-accent) 44%, transparent); }
-.card a:focus-visible, .card button:focus-visible, .card summary:focus-visible, .notice a:focus-visible, .notice button:focus-visible { outline: 2px solid var(--signal-accent); outline-offset: 3px; border-radius: 3px; }
-.current { padding: 17px 18px 14px; border-radius: 18px; background: linear-gradient(118deg, hsl(var(--card)) 20%, var(--signal-wash)), hsl(var(--card)); }
-.current::after { content: ''; pointer-events: none; position: absolute; z-index: -1; width: 68%; height: 160px; right: 0; top: 0; background-image: radial-gradient(var(--signal-accent) .65px, transparent .8px); background-size: 26px 26px; opacity: .18; mask-image: linear-gradient(100deg, transparent, #000); }
+.card:focus-within, .card:hover { border-color: hsl(var(--foreground) / 0.22); }
+.card a:focus-visible, .card button:focus-visible, .card summary:focus-visible, .notice a:focus-visible, .notice button:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 3px; border-radius: 3px; }
+.current { padding: 17px 18px 14px; border-radius: 18px; border-color: var(--here-edge); background: var(--here-wash), hsl(var(--card)); box-shadow: var(--here-glow); }
 .cardTop { display: flex; align-items: center; gap: 8px; min-height: 16px; }
-.eyebrow { display: inline-flex; align-items: center; gap: 7px; color: var(--signal-accent); font-size: 10px; font-weight: 650; letter-spacing: .13em; text-transform: uppercase; }
+.eyebrow { display: inline-flex; align-items: center; gap: 7px; color: hsl(var(--muted-foreground)); font-size: 10px; font-weight: 600; letter-spacing: .16em; text-transform: uppercase; }
+.current .eyebrow, .location .notice .eyebrow { font-size: 11px; font-weight: 700; background-image: var(--here-text); -webkit-background-clip: text; background-clip: text; color: transparent; }
 .presence { width: 6px; height: 6px; border-radius: 50%; background: var(--status-live); box-shadow: 0 0 0 4px rgb(34 197 94 / .18); }
-.stars { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; color: var(--signal-accent); font-size: 11px; font-variant-numeric: tabular-nums; }
-.ordinal { color: hsl(var(--muted-foreground)); font-family: var(--font-mono); font-size: 10px; opacity: .65; }
+.stars { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; color: hsl(var(--muted-foreground)); font-size: 11px; font-variant-numeric: tabular-nums; }
+.stars svg { color: var(--kind-star-solid); }
 .place { padding-top: 9px; }
+.placeTop { padding-top: 0; }
 .placeWords { min-width: 0; }
 .coordinates { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 5px; margin: 0 0 7px; color: hsl(var(--muted-foreground)); font-size: 12px; line-height: 1.4; }
 .coordinates a { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .coordinates a:hover { color: hsl(var(--foreground)); }
 .coordinates > span[aria-hidden] { opacity: .6; }
+.coordinates .stars { flex: none; }
 .roomName { margin: 0; font-family: var(--font-display); font-size: 19px; font-weight: 700; letter-spacing: -.02em; line-height: 1.15; overflow-wrap: anywhere; }
-.roomName a:hover { color: var(--signal-accent); }
 .current .place { padding-top: 17px; }
 .current .roomName { max-width: 16ch; font-size: clamp(26px, 7cqi, 34px); font-weight: 700; letter-spacing: -.03em; text-shadow: 0 1px 10px hsl(var(--card)); }
 .description { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; margin: 6px 0 0; color: hsl(var(--muted-foreground)); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
@@ -34,17 +38,17 @@
 .visitHistory strong, .peakDetail strong { font-weight: 450; color: hsl(var(--foreground)); }
 .visitHistory .noVisits { color: hsl(var(--muted-foreground)); font-style: italic; }
 .activityStatus { margin: 0; color: hsl(var(--muted-foreground)); font-size: 12px; line-height: 1.5; }
-.retry { display: inline; min-height: 44px; padding: 0 4px; color: var(--signal-accent); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+.retry { display: inline; min-height: 44px; padding: 0 4px; color: hsl(var(--foreground)); font-weight: 600; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
 .detailsLink { display: inline-flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 44px; color: hsl(var(--foreground)); font-size: 11px; }
-.detailsLink:hover { color: var(--signal-accent); }
-.detailsLink svg { color: var(--signal-accent); transition: transform 160ms ease; }
+.detailsLink svg { color: hsl(var(--muted-foreground)); transition: transform 160ms ease, color 160ms ease; }
+.detailsLink:hover svg { color: hsl(var(--foreground)); }
 .detailsLink:hover svg { transform: translate(2px, -2px); }
 .accessSummary { display: flex; align-items: baseline; gap: 5px; color: hsl(var(--muted-foreground)); font-size: 11px; }
 .accessSummary strong { font-size: 15px; font-weight: 450; font-variant-numeric: tabular-nums; color: hsl(var(--foreground)); }
 .disclosure { margin-top: 0; border-top: 1px solid var(--signal-line); }
 .disclosure summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 44px; cursor: pointer; color: hsl(var(--muted-foreground)); font-size: 12px; list-style: none; }
 .disclosure summary::-webkit-details-marker { display: none; }
-.disclosure summary svg { color: var(--signal-accent); }
+.disclosure summary svg { color: hsl(var(--muted-foreground)); }
 .disclosure[open] summary svg { transform: rotate(180deg); }
 .disclosureBody { padding-bottom: 3px; }
 .disclosureBody .coordinates { margin: 1px 0 12px; }
@@ -62,14 +66,15 @@
 .recentHeading p { margin: 3px 0 0; color: hsl(var(--muted-foreground)); font-size: 11px; }
 .recentHeading > span { color: hsl(var(--muted-foreground)); font-family: var(--font-mono); font-size: 10px; }
 .recentGrid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: start; }
-.notice { position: relative; padding: 18px; border: 1px solid var(--signal-line); border-radius: 18px; background: var(--signal-wash); }
+.notice { position: relative; padding: 18px; border: 1px solid var(--signal-line); border-radius: 18px; background: hsl(var(--card)); }
+.location .notice { border-color: var(--here-edge); background: var(--here-wash), hsl(var(--card)); box-shadow: var(--here-glow); }
 .noticeTop { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .notice h2, .notice h3 { position: relative; margin: 7px 0 9px; font-family: var(--font-display); font-size: 22px; font-weight: 700; letter-spacing: -.02em; line-height: 1.2; }
 .notice p { color: hsl(var(--muted-foreground)); font-size: 12px; line-height: 1.6; }
-.notice .detailsLink { color: var(--signal-accent); }
+.notice .detailsLink { font-size: 12px; font-weight: 700; color: hsl(var(--foreground)); }
 .roomUri { overflow-wrap: anywhere; font-family: var(--font-mono); font-size: 10px !important; }
 /* The card's own colours while it loads, with a faint light passing over. */
-.skeleton { position: relative; overflow: hidden; height: 170px; border-radius: 18px; background: linear-gradient(118deg, hsl(var(--card)) 20%, var(--signal-wash)), hsl(var(--card)); border: 1px solid var(--signal-line); }
+.skeleton { position: relative; overflow: hidden; height: 170px; border-radius: 18px; background: hsl(var(--card)); border: 1px solid var(--signal-line); }
 .skeleton::after { content: ''; position: absolute; inset: 0; background: linear-gradient(100deg, transparent 20%, color-mix(in oklab, hsl(var(--foreground)) 5%, transparent) 45%, transparent 70%); background-size: 200% 100%; animation: shimmer 1.6s linear infinite; }
 @keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
 @media (prefers-reduced-motion: reduce) { .skeleton::after { animation: none; } }
@@ -95,6 +100,6 @@
 /* The whole card is the room's link: the overlay spans the article (the only positioned box above it). */
 .cardLink::after { content: ''; position: absolute; inset: 0; z-index: 2; border-radius: inherit; }
 .cardLink:focus-visible { outline: none; }
-.cardLink:focus-visible::after { outline: 2px solid var(--signal-accent); outline-offset: -2px; }
+.cardLink:focus-visible::after { outline: 2px solid hsl(var(--ring)); outline-offset: -2px; }
 .retry { position: relative; z-index: 3; }
 @container (min-width: 430px) { .current { padding: 18px 21px 14px; } }
