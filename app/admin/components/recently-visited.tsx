@@ -37,6 +37,10 @@ export default function RecentlyVisited({ limit = 4, excludeRoomIds = [] }: { li
 
   const shown = rooms?.filter((room) => !excludeRoomIds.includes(room.roomId)).slice(0, limit) ?? null;
 
+  // Every room you visited is already on a card above: an empty section here would read like a second, broken
+  // history. The empty message stays for someone who hasn't visited anything yet.
+  if (rooms !== null && rooms.length > 0 && shown?.length === 0) return null;
+
   return (
     <section className={styles.recentSection} data-testid="recently-visited" aria-labelledby="recent-heading">
       <SectionHeader id="recent-heading" title="Recently visited" count={shown?.length} />
@@ -57,11 +61,10 @@ export default function RecentlyVisited({ limit = 4, excludeRoomIds = [] }: { li
         </div>
       ) : (
         <div className={styles.recentGrid}>
-          {shown.map((room, index) => (
+          {shown.map((room) => (
             <RoomCard
               key={room.roomId}
               kind="trail"
-              index={index}
               room={{
                 id: room.roomId,
                 name: room.roomName,

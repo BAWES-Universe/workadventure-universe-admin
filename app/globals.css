@@ -81,37 +81,47 @@
     --duration-base: 220ms;
     --duration-slow: 320ms;
 
-    /* The shell's own measurements */
-    --topbar-height: 3.5rem;
+    /* The shell's own measurements. The bar lines up with the game's buttons beside the frame: the game's tools
+       capsule is 64px tall, so the bar is too (72px on a touch screen, below). The dock is the game's 64px pill. */
+    --topbar-height: 4rem;
     --bottombar-height: 4rem;
     --safe-bottom: env(safe-area-inset-bottom, 0px);
   }
 
   .dark {
-    /* The chat's navy: #111b2c behind, #1b2a41 cards. */
-    --background: 218 44% 12%;
+    /* Universe ink, the colour of bawes.net and of the game's panels: #14121e behind, a step lighter for cards.
+       The game opens Orbit in a frame over its own #14121e glass, so the two meet without a seam. */
+    --background: 250 25% 9.4%;
     --foreground: 0 0% 100%;
-    --card: 216 41% 18%;
+    --card: 250 22% 15%;
     --card-foreground: 0 0% 100%;
-    --popover: 216 41% 16%;
+    --popover: 250 22% 13%;
     --popover-foreground: 0 0% 100%;
-    --primary: 216 33% 94%;
-    --primary-foreground: 218 44% 12%;
-    --secondary: 216 30% 22%;
+    --primary: 250 30% 95%;
+    --primary-foreground: 250 25% 9.4%;
+    --secondary: 250 20% 19%;
     --secondary-foreground: 0 0% 100%;
-    --muted: 216 30% 21%;
-    --muted-foreground: 216 20% 72%;
-    --accent: 230 45% 26%;
+    --muted: 250 20% 18%;
+    --muted-foreground: 250 15% 74%;
+    --accent: 258 40% 26%;
     --accent-foreground: 0 0% 100%;
     --destructive: 0 72% 56%;
     --destructive-foreground: 0 0% 100%;
-    --border: 216 28% 26%;
-    --input: 216 28% 28%;
+    --border: 250 18% 23%;
+    --input: 250 18% 25%;
     --ring: 233 91% 66%;
 
-    --surface-elevated: 216 41% 20%;
-    --surface-sunken: 218 48% 9%;
-    --shadow-color: 218 60% 4%;
+    --surface-elevated: 250 22% 17%;
+    --surface-sunken: 250 40% 6%;
+    --shadow-color: 250 50% 3%;
+  }
+
+  /* A phone or tablet: the game holds its close button 4px off the top of the screen, so the bar is 4px taller and
+     the Menu button sits level with it. */
+  @media (pointer: coarse) {
+    :root {
+      --topbar-height: 4.5rem;
+    }
   }
 }
 
@@ -404,15 +414,28 @@ a[href] {
   .orbit-menu-sections ul { grid-template-columns: minmax(0, 1fr); }
 }
 
+/* The dock: the game's own ink pill (its bar and chat buttons), floating 4px off the edges of the frame like the
+   game's bar, so the two line up at the bottom of a phone. The active place is the gradient pill of the game's tabs. */
+.orbit-dock { left: 4px; right: 4px; bottom: calc(4px + var(--safe-bottom)); }
+.orbit-dock-track {
+  background: linear-gradient(160deg, rgb(31 28 47 / .92), rgb(20 18 30 / .94));
+  box-shadow: 0 1px 0 rgb(255 255 255 / .08) inset, 0 0 0 1px rgb(167 139 250 / .18);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  /* Always the game's ink, in the light theme too, so it keeps the dark theme's text colours. */
+  --foreground: 0 0% 100%;
+  --muted-foreground: 250 15% 74%;
+}
+.orbit-dock-pill { top: .5rem; bottom: .5rem; width: calc((100% - 1rem) / var(--dock-slots)); background-image: var(--brand-gradient); box-shadow: 0 6px 18px -6px rgb(134 41 252 / .9); }
+
 /* A 33% desktop panel with a mouse is a companion panel, not a pretend phone: Home · Spaces · You sit under the
-   bar as a strip instead of at the bottom. */
+   bar as a strip instead of at the bottom, the same pill 8px inside the frame. */
 @media (hover: hover) and (pointer: fine) and (min-width: 430px) and (max-width: 1023px) {
-  .orbit-dock { position: sticky; top: var(--topbar-height); bottom: auto; border-top: 0; border-bottom: 1px solid hsl(var(--border) / .6); padding-bottom: 0 !important; }
+  .orbit-dock { position: sticky; top: var(--topbar-height); bottom: auto; padding: 8px; }
   /* The menu's own You · Orbit · Space buttons are 44px: the strip matches them. */
-  .orbit-dock > div { height: 3.75rem !important; }
-  .orbit-dock-pill { top: 0.5rem !important; bottom: 0.5rem !important; }
-  .orbit-dock a { flex-direction: row; gap: 7px; font-size: 14px; }
-  .orbit-dock a svg { width: 18px; height: 18px; }
+  .orbit-dock-track { padding: 4px; }
+  .orbit-dock-pill { top: 4px; bottom: 4px; left: 4px; width: calc((100% - 8px) / var(--dock-slots)); }
+  .orbit-dock a { height: 44px; }
   .orbit-dock-space { padding-bottom: 2rem !important; }
 }
 

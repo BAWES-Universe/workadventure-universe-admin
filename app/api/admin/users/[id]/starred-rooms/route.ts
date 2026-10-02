@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getViewer, isPrivileged, memberWorldIdsOf } from '@/lib/access-scope';
 import { canSeeRoom } from '@/lib/room-visibility';
 import { prisma } from '@/lib/db';
+import { hiddenSystemOwnerId, notSystemRoom } from '@/lib/system-user';
 
 export async function GET(
   request: NextRequest,
@@ -16,13 +17,15 @@ export async function GET(
 
     const { id } = await params;
     
-    // Get all favorites for this user that are rooms
+    // Get all favorites for this user that are rooms, never System's once they are hidden
+    const hidden = await hiddenSystemOwnerId();
     const favorites = await prisma.favorite.findMany({
       where: {
         userId: id,
         roomId: {
           not: null,
         },
+        ...(hidden ? { room: notSystemRoom(hidden) } : {}),
       },
       include: {
         room: {

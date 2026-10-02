@@ -206,16 +206,16 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
             {provider.temperature !== null && <Field label="Temperature">{provider.temperature}</Field>}
             {provider.maxTokens !== null && <Field label="Max tokens">{provider.maxTokens}</Field>}
             <Field label="Streaming">{provider.supportsStreaming ? 'Yes' : 'No'}</Field>
-            <Field label="Images">
-              {seesImages ? 'Sees images' : 'Text only'}
+            <Field label="Vision">
+              {seesImages ? 'Vision-capable' : 'Text-only'}
               <span className="text-xs text-muted-foreground">
                 {provider.supportsVision === null
-                  ? ` (auto${provider.model && isVisionCapableModel(provider.model) ? ', detected from the model name' : ''})`
-                  : ' (set by hand)'}
+                  ? ` (auto${provider.model && isVisionCapableModel(provider.model) ? ' — detected from model name' : ''})`
+                  : ' (manually forced)'}
               </span>
             </Field>
-            {provider.visionModel && <Field label="Image description model">{provider.visionModel}</Field>}
-            {provider.defaultVision && <Field label="Default vision provider">Yes, used automatically to describe images</Field>}
+            {provider.visionModel && <Field label="Vision model">{provider.visionModel}</Field>}
+            {provider.defaultVision && <Field label="Default vision provider">Yes — used automatically to describe images</Field>}
             <Field label="Last tested">
               {provider.tested && provider.testedAt ? new Date(provider.testedAt).toLocaleString() : 'Not tested yet'}
             </Field>

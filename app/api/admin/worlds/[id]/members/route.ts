@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { getSessionUser } from '@/lib/auth-session';
 import { withWokas } from '@/lib/woka-avatar';
+import { NOT_SYSTEM_USER } from '@/lib/system-user';
 
 const inviteMemberSchema = z.object({
   userId: z.string().uuid(),
@@ -58,8 +59,9 @@ export async function GET(
     // Check permissions for management (but allow viewing for anyone)
     const canManage = await canManageWorldMembers(id, sessionUser.id);
 
+    // The System account is nobody, so it never shows as a member
     const members = await prisma.worldMember.findMany({
-      where: { worldId: id },
+      where: { worldId: id, user: NOT_SYSTEM_USER },
       include: {
         user: {
           select: {

@@ -85,6 +85,7 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
                 user: data.user,
                 stats: current?.stats ?? { universes: 0, worlds: 0, rooms: 0, users: 0 },
                 mine: current?.mine,
+                startRoom: current?.startRoom,
               },
         );
       })
