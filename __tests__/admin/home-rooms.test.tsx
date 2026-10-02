@@ -191,6 +191,16 @@ describe('Where you are: the start map and unlisted rooms', () => {
     expect(screen.queryByText('The start map')).toBeNull();
   });
 
+  it('still shows the room before this on a start map Orbit doesn’t know, and keeps it out of Recently visited', async () => {
+    responses['/api/admin/rooms/from-play-uri'] = undefined;
+    const onShown = jest.fn();
+    render(withStartRoom('@/bawes/office/headquarters', inGame(<HerePanel onShown={onShown} />)));
+    expect(await screen.findByText('The start map')).toBeTruthy();
+    const before = await screen.findByTestId('room-card-previous');
+    expect(before.textContent).toContain('Creative Hub');
+    await waitFor(() => expect(onShown).toHaveBeenLastCalledWith(['r-hub']));
+  });
+
   it('says a room isn’t listed, without naming its owner', async () => {
     responses['/api/admin/rooms/from-play-uri'] = { ...hq, unlisted: true };
     render(withStartRoom('@/mine/office/lobby', inGame(<HerePanel />)));

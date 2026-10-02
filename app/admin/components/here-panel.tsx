@@ -52,7 +52,7 @@ export function isStartMap(playUri: string, startRoom: string | null = '@/defaul
 type Located =
   | { kind: 'loading' }
   | { kind: 'failed' }
-  | { kind: 'room'; room: ApiRoom; start: boolean }
+  | { kind: 'room'; room: ApiRoom; playUri: string; start: boolean }
   | { kind: 'unknown'; playUri: string; start: boolean };
 
 function Notice({ eyebrow, title, children, action }: { eyebrow: string; title: string; children?: React.ReactNode; action?: React.ReactNode }) {
@@ -78,7 +78,8 @@ export default function HerePanel({ onShown }: { onShown?: (roomIds: string[]) =
   const { wa, isReady, isLoading, error } = useWorkAdventure();
   const startRoom = useStartRoom();
   const [located, setLocated] = useState<Located>({ kind: 'loading' });
-  const [previous, setPrevious] = useState<{ currentId: string; room: ApiRoom | null; failed?: boolean }>({ currentId: '', room: null });
+  // Keyed by the play link it was asked for, so an old answer never shows under a newer room.
+  const [previous, setPrevious] = useState<{ playUri: string; room: ApiRoom | null; failed?: boolean }>({ playUri: '', room: null });
   // Asking again after a failure (the room lookup, or the room before it).
   const [attempt, setAttempt] = useState(0);
   const unavailable = Boolean(error) || (!isReady && !isLoading);
@@ -105,22 +106,27 @@ export default function HerePanel({ onShown }: { onShown?: (roomIds: string[]) =
         const start = isStartMap(playUri, startRoom);
         const response = await authenticatedFetch(`/api/admin/rooms/from-play-uri?playUri=${encodeURIComponent(playUri)}`);
         if (cancelled) return;
-        if (!response.ok) {
+        let room: ApiRoom | null = null;
+        if (response.ok) {
+          room = (await response.json()) as ApiRoom;
+          if (cancelled) return;
+          setLocated({ kind: 'room', room, playUri, start });
+        } else if (response.status === 404) {
+          setLocated({ kind: 'unknown', playUri, start });
+        } else {
           // Only "not found" means Orbit doesn't know the room; anything else is a failure worth retrying.
-          setLocated(response.status === 404 ? { kind: 'unknown', playUri, start } : { kind: 'failed' });
+          setLocated({ kind: 'failed' });
           return;
         }
-        const room = (await response.json()) as ApiRoom;
-        if (cancelled) return;
-        setLocated({ kind: 'room', room, start });
 
-        const before = await authenticatedFetch(`/api/admin/rooms/previous?currentRoomId=${encodeURIComponent(room.id)}`);
+        // Asked even where Orbit doesn't know the room (often the start map): the room you just left still shows.
+        const query = `playUri=${encodeURIComponent(playUri)}${room ? `&currentRoomId=${encodeURIComponent(room.id)}` : ''}`;
+        const before = await authenticatedFetch(`/api/admin/rooms/previous?${query}`);
         if (cancelled) return;
-        // Keyed by the room it was asked for, so an old answer never shows under a newer room.
         if (before.ok) {
-          setPrevious({ currentId: room.id, room: ((await before.json()) as { room: ApiRoom | null }).room ?? null });
+          setPrevious({ playUri, room: ((await before.json()) as { room: ApiRoom | null }).room ?? null });
         } else {
-          setPrevious({ currentId: room.id, room: null, failed: before.status !== 404 });
+          setPrevious({ playUri, room: null, failed: before.status !== 404 });
         }
       } catch (cause) {
         console.error('[Here] Could not resolve the current room', cause);
@@ -134,7 +140,9 @@ export default function HerePanel({ onShown }: { onShown?: (roomIds: string[]) =
   }, [wa, isReady, unavailable, attempt, startRoom]);
 
   const roomId = located.kind === 'room' ? located.room.id : null;
-  const previousRoom = roomId && previous.currentId === roomId ? previous.room : null;
+  const herePlayUri = located.kind === 'room' || located.kind === 'unknown' ? located.playUri : null;
+  const previousFor = herePlayUri !== null && previous.playUri === herePlayUri ? previous : null;
+  const previousRoom = previousFor?.room ?? null;
   const previousId = previousRoom?.id ?? null;
   useEffect(() => {
     onShown?.([roomId, previousId].filter((id): id is string => Boolean(id)));
@@ -210,7 +218,7 @@ export default function HerePanel({ onShown }: { onShown?: (roomIds: string[]) =
             <RoomCard room={toCardRoom(previousRoom)} kind="previous" />
           </div>
         )}
-        {roomId && previous.currentId === roomId && previous.failed && (
+        {previousFor?.failed && (
           <p className={styles.activityStatus} role="status">
             Couldn&apos;t load the room before this.{' '}
             <button type="button" className={styles.retry} onClick={retry}>
