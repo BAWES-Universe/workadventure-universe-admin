@@ -9,16 +9,18 @@ jest.mock('@/lib/db', () => ({
   prisma: {
     $queryRaw: jest.fn(),
     universe: { findMany: jest.fn(), count: jest.fn(), findUnique: jest.fn() },
-    world: { findMany: jest.fn(), count: jest.fn(), findFirst: jest.fn() },
+    world: { findMany: jest.fn(), count: jest.fn(), findFirst: jest.fn(), findUnique: jest.fn() },
     room: { findMany: jest.fn(), count: jest.fn(), findFirst: jest.fn() },
     user: { findUnique: jest.fn(), count: jest.fn() },
     favorite: { groupBy: jest.fn(), count: jest.fn() },
     worldMember: { findMany: jest.fn(), count: jest.fn() },
     membershipInvitation: { count: jest.fn() },
+    roomAccess: { findMany: jest.fn() },
   },
 }));
 jest.mock('@/lib/auth', () => ({ requireAuth: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
+jest.mock('@/lib/woka-avatar', () => ({ withWokas: jest.fn(async (rows: unknown) => rows) }));
 jest.mock('@/lib/auth-token', () => ({ getSessionId: jest.fn(() => 'sid'), getSessionData: jest.fn() }));
 jest.mock('@/lib/system-user', () => ({ ...jest.requireActual('@/lib/system-user'), hiddenSystemOwnerId: jest.fn() }));
 
@@ -33,6 +35,9 @@ import { GET as recentRooms } from '@/app/api/admin/rooms/recent/route';
 import { GET as fromPlayUri } from '@/app/api/admin/rooms/from-play-uri/route';
 import { GET as bootstrap } from '@/app/api/admin/bootstrap/route';
 import { GET as members } from '@/app/api/members/route';
+import { GET as myMemberships } from '@/app/api/memberships/my/route';
+import { GET as worldMembers } from '@/app/api/admin/worlds/[id]/members/route';
+import { GET as managedWorlds } from '@/app/api/admin/worlds/managed/route';
 
 type Mocked = Record<string, jest.Mock>;
 const db = prisma as unknown as {
@@ -44,6 +49,7 @@ const db = prisma as unknown as {
   favorite: Mocked;
   worldMember: Mocked;
   membershipInvitation: Mocked;
+  roomAccess: Mocked;
 };
 const hidden = hiddenSystemOwnerId as jest.Mock;
 
@@ -201,6 +207,12 @@ describe('Bootstrap', () => {
     expect(db.room.count.mock.calls[0][0]).toEqual({ where: { world: { universe: { ownerId: { not: 'sys' } } } } });
     expect(db.universe.findUnique).not.toHaveBeenCalled();
     expect(body.stats).toEqual({ universes: 3, worlds: 4, rooms: 5, users: 7 });
+    expect(db.worldMember.count.mock.calls[0][0]).toEqual({
+      where: { userId: 'me', world: { universe: { ownerId: { not: 'sys' } } } },
+    });
+    expect(db.favorite.count.mock.calls[0][0]).toEqual({
+      where: { userId: 'me', roomId: { not: null }, room: { world: { universe: { ownerId: { not: 'sys' } } } } },
+    });
     expect(body.startRoom).toBe('@/default/default/default');
   });
 
@@ -219,5 +231,42 @@ describe('Game member search', () => {
     await members(adminToken(`/api/members?playUri=${encodeURIComponent('https://play.test/@/u/w/r')}`));
     expect(db.worldMember.findMany.mock.calls[0][0].where.user.AND[0]).toEqual(NOT_SYSTEM_USER);
     expect(db.worldMember.findMany.mock.calls[1][0].where.user).toEqual(NOT_SYSTEM_USER);
+  });
+});
+
+describe('Your worlds and the worlds you manage', () => {
+  beforeEach(() => {
+    (getSessionUser as jest.Mock).mockResolvedValue({ id: 'me' });
+    db.worldMember.findMany.mockResolvedValue([]);
+    db.world.findMany.mockResolvedValue([]);
+    db.roomAccess.findMany.mockResolvedValue([]);
+  });
+
+  it('leave out System’s worlds once hidden', async () => {
+    hidden.mockResolvedValue('sys');
+    await myMemberships(session('/api/memberships/my'));
+    await managedWorlds(session('/api/admin/worlds/managed'));
+    const notSystem = { universe: { ownerId: { not: 'sys' } } };
+    expect(db.worldMember.findMany.mock.calls[0][0].where).toEqual({ userId: 'me', world: notSystem });
+    expect(db.world.findMany.mock.calls[0][0].where.universe).toEqual(notSystem.universe);
+  });
+
+  it('are unchanged while the start room is still System’s', async () => {
+    hidden.mockResolvedValue(null);
+    await myMemberships(session('/api/memberships/my'));
+    await managedWorlds(session('/api/admin/worlds/managed'));
+    expect(db.worldMember.findMany.mock.calls[0][0].where).toEqual({ userId: 'me', world: {} });
+    expect(db.world.findMany.mock.calls[0][0].where.universe).toBeUndefined();
+  });
+});
+
+describe('A world’s members', () => {
+  it('never include the System account', async () => {
+    (getSessionUser as jest.Mock).mockResolvedValue({ id: 'me' });
+    db.world.findUnique.mockResolvedValue({ universe: { ownerId: 'owner' }, members: [] });
+    db.worldMember.findMany.mockResolvedValue([]);
+    db.roomAccess.findMany.mockResolvedValue([]);
+    await worldMembers(session('/api/admin/worlds/w/members'), { params: Promise.resolve({ id: 'w' }) });
+    expect(db.worldMember.findMany.mock.calls[0][0].where).toEqual({ worldId: 'w', user: NOT_SYSTEM_USER });
   });
 });

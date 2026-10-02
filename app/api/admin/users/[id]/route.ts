@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getViewer, isPrivileged, viewerUserId, unauthorizedResponse } from '@/lib/access-scope';
 import { prisma } from '@/lib/db';
 import { wokaLayersFor } from '@/lib/woka-avatar';
+import { hiddenSystemOwnerId, notSystemWorld } from '@/lib/system-user';
 
 // GET /api/admin/users/[id] - Get a single user
 export async function GET(
@@ -20,6 +21,8 @@ export async function GET(
     const privileged = isPrivileged(viewer);
     const isSelf = viewerUserId(viewer) === id;
     const canSeeContact = privileged || isSelf;
+    // Their memberships leave out System's worlds once they are hidden
+    const hidden = await hiddenSystemOwnerId();
     const user = await prisma.user.findUnique({
       where: { id },
       select: {
@@ -61,6 +64,7 @@ export async function GET(
           orderBy: { createdAt: 'desc' },
         },
         worldMemberships: {
+          where: { world: notSystemWorld(hidden) },
           include: {
             world: {
               select: {
@@ -90,7 +94,7 @@ export async function GET(
         _count: {
           select: {
             ownedUniverses: true,
-            worldMemberships: true,
+            worldMemberships: { where: { world: notSystemWorld(hidden) } },
             bans: true,
             favorites: true,
             avatars: true,
