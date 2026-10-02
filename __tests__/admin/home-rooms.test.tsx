@@ -126,6 +126,23 @@ describe('Home rooms keep their numbers', () => {
     expect(cards[0].textContent).toContain('Creative Hub');
   });
 
+  it('hides Recently visited when every room in it is already shown above', async () => {
+    const { container } = render(inGame(<RecentlyVisited excludeRoomIds={['r-hq', 'r-hub']} />));
+    await waitFor(() => expect(container.querySelector('[data-testid="recently-visited"]')).toBeNull());
+    expect(screen.queryByText('Rooms you visit will show up here.')).toBeNull();
+  });
+
+  it('still invites someone with no visits at all to discover rooms', async () => {
+    const saved = responses['/api/admin/rooms/recent'];
+    responses['/api/admin/rooms/recent'] = { rooms: [] };
+    try {
+      render(inGame(<RecentlyVisited excludeRoomIds={[]} />));
+      expect(await screen.findByText('Rooms you visit will show up here.')).toBeTruthy();
+    } finally {
+      responses['/api/admin/rooms/recent'] = saved;
+    }
+  });
+
   it("takes Peak from all visits (the server's hour buckets), on the viewer's clock", () => {
     // 16:00 UTC is the busiest bucket; the card shows that hour in local time, whatever one page of visits says.
     const expected = localHourFromUtc(16);
