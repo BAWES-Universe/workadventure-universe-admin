@@ -45,8 +45,8 @@ export async function GET(request: NextRequest) {
     hidden ? null : prisma.world.findFirst({ where: { slug: 'default', universe: { slug: 'default' } }, select: { id: true } }),
     hidden ? null : prisma.room.findFirst({ where: { slug: 'default', world: { slug: 'default', universe: { slug: 'default' } } }, select: { id: true } }),
     prisma.universe.count({ where: { ownerId: session.userId } }),
-    prisma.worldMember.count({ where: { userId: session.userId } }),
-    prisma.favorite.count({ where: { userId: session.userId, roomId: { not: null } } }),
+    prisma.worldMember.count({ where: { userId: session.userId, world: notSystemWorld(hidden) } }),
+    prisma.favorite.count({ where: { userId: session.userId, roomId: { not: null }, ...(hidden ? { room: notSystemRoom(hidden) } : {}) } }),
     prisma.membershipInvitation.count({ where: { invitedUserId: session.userId, status: 'pending' } }),
     // For You's first steps: worlds in universes you own, and invitations you've sent (any answer).
     prisma.world.count({ where: { universe: { ownerId: session.userId } } }),
