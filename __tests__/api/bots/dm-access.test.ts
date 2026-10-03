@@ -6,7 +6,7 @@ import { isSuperAdmin } from '@/lib/super-admin';
 jest.mock('@/lib/db', () => ({
   prisma: {
     bot: { findUnique: jest.fn() },
-    user: { findFirst: jest.fn() },
+    user: { findMany: jest.fn() },
     ban: { findFirst: jest.fn() },
     worldMember: { findMany: jest.fn() },
   },
@@ -47,7 +47,7 @@ describe('GET /api/bots/:id/dm-access', () => {
     jest.clearAllMocks();
     process.env.BOT_SERVICE_TOKEN = TOKEN;
     (prisma.bot.findUnique as jest.Mock).mockResolvedValue(botRecord());
-    (prisma.user.findFirst as jest.Mock).mockResolvedValue(alice);
+    (prisma.user.findMany as jest.Mock).mockResolvedValue([alice]);
     (prisma.ban.findFirst as jest.Mock).mockResolvedValue(null);
     (prisma.worldMember.findMany as jest.Mock).mockResolvedValue([]);
     (isSuperAdmin as jest.Mock).mockReturnValue(false);
@@ -67,7 +67,7 @@ describe('GET /api/bots/:id/dm-access', () => {
     const res = await GET(request('@alice:example.org'), params);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ allowed: true, reason: null, user: { uuid: 'uuid-alice', name: 'Alice', isGuest: false } });
-    expect(prisma.user.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { matrixChatId: '@alice:example.org' } }));
+    expect(prisma.user.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { matrixChatId: '@alice:example.org' } }));
   });
 
   it('refuses an unknown bot, a disabled bot and an unknown Matrix ID', async () => {
@@ -77,9 +77,14 @@ describe('GET /api/bots/:id/dm-access', () => {
     (prisma.bot.findUnique as jest.Mock).mockResolvedValueOnce(botRecord({ enabled: false }));
     expect((await (await GET(request('@alice:example.org'), params)).json()).reason).toBe('bot_disabled');
 
-    (prisma.user.findFirst as jest.Mock).mockResolvedValueOnce(null);
+    (prisma.user.findMany as jest.Mock).mockResolvedValueOnce([]);
     const body = await (await GET(request('@stranger:example.org'), params)).json();
     expect(body).toEqual({ allowed: false, reason: 'unknown_person', user: null });
+  });
+
+  it('refuses a Matrix ID that two accounts claim', async () => {
+    (prisma.user.findMany as jest.Mock).mockResolvedValue([alice, { ...alice, id: 'user-2', uuid: 'uuid-mallory' }]);
+    expect(await (await GET(request('@alice:example.org'), params)).json()).toEqual({ allowed: false, reason: 'ambiguous_person', user: null });
   });
 
   it('refuses a person banned from the world, universe or everywhere', async () => {

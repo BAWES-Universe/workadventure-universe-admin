@@ -54,14 +54,20 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       return NextResponse.json({ allowed: false, reason: 'bot_disabled', user: null });
     }
 
-    const person = await prisma.user.findFirst({
+    // The game reports each person's Matrix ID when they connect, so two accounts can claim the same one. Refuse
+    // rather than guess, or one person's messages would land in the other's memory with the bot.
+    const people = await prisma.user.findMany({
       where: { matrixChatId: chatId },
-      orderBy: { isGuest: 'asc' },
+      take: 2,
       select: { id: true, uuid: true, name: true, email: true, isGuest: true },
     });
-    if (!person) {
+    if (people.length === 0) {
       return NextResponse.json({ allowed: false, reason: 'unknown_person', user: null });
     }
+    if (people.length > 1) {
+      return NextResponse.json({ allowed: false, reason: 'ambiguous_person', user: null });
+    }
+    const person = people[0];
 
     const world = bot.room.world;
     const ban = await prisma.ban.findFirst({
