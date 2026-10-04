@@ -27,6 +27,7 @@ import { activityStats } from '@/lib/analytics-peak';
 import { EmptyCard, EntityCard, EntityRow, Figure, Figures, InContext, LoadError, LoadingRows, PageHeader, RolePills, SectionHeader, SettingSwitch, Settings, StatLine, StatusPill, VisitLine } from '../../components/ds';
 import InviteMemberDialog from '../../components/invite-member-dialog';
 import MemberList from '../../components/member-list';
+import WorldSafety, { useWorldSafety, waitingCount } from '../../components/world-safety';
 import { PersonIcon } from '../../components/profile-card';
 import { useEntitySummaries } from '../../hooks/use-entity-summaries';
 
@@ -72,9 +73,9 @@ interface Visit {
   room: { id: string; name: string };
 }
 
-const TAB_CLASS = 'py-3 px-1 border-b-2 font-medium text-sm';
+const TAB_CLASS = 'orbit-press inline-flex h-10 items-center rounded-full px-4 text-sm font-semibold transition-colors';
 const tabClass = (active: boolean) =>
-  `${TAB_CLASS} ${active ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'}`;
+  `${TAB_CLASS} ${active ? 'bg-[image:var(--brand-gradient)] text-white shadow-[0_6px_18px_-8px_rgb(134_41_252/0.8)]' : 'text-muted-foreground hover:bg-muted/50 hover:text-foreground'}`;
 
 /** useSearchParams needs a Suspense boundary above it (the tab comes from ?tab=). */
 export default function WorldDetailPage() {
@@ -101,10 +102,14 @@ function WorldDetail() {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [currentUser, setCurrentUser] = useState<any>(null);
-  // The game can open Orbit straight on a world's members (`?tab=members`, see lib/orbit-bridge.ts).
-  const [activeTab, setActiveTab] = useState<'details' | 'analytics' | 'members'>(
-    searchParams.get('tab') === 'members' ? 'members' : 'details',
+  // The game can open Orbit straight on a world's members (`?tab=members`, see lib/orbit-bridge.ts); the home's
+  // report card opens its Safety tab (`?tab=safety`).
+  const [activeTab, setActiveTab] = useState<'details' | 'analytics' | 'members' | 'safety'>(
+    searchParams.get('tab') === 'members' ? 'members' : searchParams.get('tab') === 'safety' ? 'safety' : 'details',
   );
+  // Reports and bans, only for the people who run this world; everyone else gets no Safety tab
+  const safety = useWorldSafety(id);
+  const waiting = waitingCount(safety.data);
   const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
   const [visitorsPage, setVisitorsPage] = useState(1);
   const visitorsPerPage = 10;
@@ -410,7 +415,7 @@ function WorldDetail() {
         </Card>
       ) : (
         <>
-          <nav className="flex flex-wrap gap-x-6 border-b border-border" aria-label="World sections">
+          <nav className="flex flex-wrap gap-1.5" aria-label="World sections">
             <button type="button" onClick={() => setActiveTab('details')} className={tabClass(activeTab === 'details')}>
               Details
             </button>
@@ -420,7 +425,24 @@ function WorldDetail() {
             <button type="button" onClick={() => setActiveTab('members')} className={tabClass(activeTab === 'members')}>
               Members
             </button>
+            {(safety.data || safety.failed) && (
+              <button type="button" onClick={() => setActiveTab('safety')} className={tabClass(activeTab === 'safety')}>
+                Safety
+                {waiting > 0 && (
+                  <span
+                    className={`ml-1.5 inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-[11px] font-bold tabular-nums text-white ${activeTab === 'safety' ? 'bg-white/20' : 'bg-[image:var(--brand-gradient)]'}`}
+                  >
+                    {waiting}
+                    <span className="sr-only"> waiting</span>
+                  </span>
+                )}
+              </button>
+            )}
           </nav>
+
+          {activeTab === 'safety' && (
+            <WorldSafety worldId={id} worldName={world.name} data={safety.data} failed={safety.failed} reload={safety.reload} />
+          )}
 
           {activeTab === 'details' && (
             <>

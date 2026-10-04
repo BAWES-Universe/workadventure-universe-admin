@@ -6,6 +6,7 @@ import { prisma } from '@/lib/db';
 import { resolveTextureUrls, resolveCompanionTexture } from '@/lib/avatar-catalog-validator';
 import { notifyRoomAccess } from '@/lib/discord';
 import { isBotIdentifier } from '@/lib/bot-visitor';
+import { bansCoveringWorld } from '@/lib/moderation';
 import type { FetchMemberDataByUuidSuccessResponse, ErrorApiData } from '@/types/workadventure';
 
 export async function GET(request: NextRequest) {
@@ -221,27 +222,9 @@ export async function GET(request: NextRequest) {
       // Check if user is banned (by userId if authenticated, or by IP)
       const ban = await prisma.ban.findFirst({
         where: {
-          isActive: true,
           AND: [
-            {
-              OR: [
-                ...(user ? [{ userId: user.id }] : []),
-                { ipAddress: ipAddress },
-              ],
-            },
-            {
-              OR: [
-                { worldId: worldData.id },
-                { universeId: worldData.universeId },
-                { worldId: null, universeId: null }, // Global ban
-              ],
-            },
-            {
-              OR: [
-                { expiresAt: null },
-                { expiresAt: { gt: new Date() } },
-              ],
-            },
+            bansCoveringWorld(worldData),
+            { OR: [...(user ? [{ userId: user.id }] : []), { ipAddress: ipAddress }] },
           ],
         },
       });
