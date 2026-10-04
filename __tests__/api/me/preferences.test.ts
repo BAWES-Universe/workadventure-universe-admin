@@ -113,6 +113,13 @@ describe('/api/me/preferences', () => {
     expect(prisma.userPreference.upsert).not.toHaveBeenCalled();
   });
 
+  it('accepts people settings only with one of their allowed values', async () => {
+    expect((await put({ key: 'people.ringFrom', value: 'everyone' })).status).toBe(400);
+    expect((await put({ key: 'people.findableByName', value: 'yes' })).status).toBe(400);
+    expect(prisma.userPreference.upsert).not.toHaveBeenCalled();
+    expect((await put({ key: 'people.ringFrom', value: 'nobody' })).status).toBe(200);
+  });
+
   it('rejects a missing value and invalid JSON', async () => {
     expect((await put({ key: 'orbit.introSeen' })).status).toBe(400);
     expect((await put('{not json')).status).toBe(400);
