@@ -295,6 +295,36 @@ describe('AdminShell', () => {
     expect(mockRouter.replace).toHaveBeenCalledTimes(1);
   });
 
+  it('a page that sends you on before it has settled still leaves itself out of Back', async () => {
+    function SaveButton() {
+      const replacePage = useReplacePage();
+      return (
+        <button type="button" onClick={() => replacePage('/admin/rooms/r-9')}>
+          save
+        </button>
+      );
+    }
+    const page = () => (
+      <AdminShell>
+        <div>page content</div>
+        <SaveButton />
+      </AdminShell>
+    );
+    const view = await renderShell('/admin/space');
+    act(() => {
+      mockPathname = '/admin/rooms/new';
+      view.rerender(page());
+    });
+    // Sent on in the same task, before the form has counted as a page.
+    fireEvent.click(screen.getByText('save'));
+    act(() => {
+      mockPathname = '/admin/rooms/r-9';
+      view.rerender(page());
+    });
+    await endTask();
+    expect(screen.getByTestId('orbit-back').textContent).toContain('Space');
+  });
+
   it('Try again shows the loader, not the last error', async () => {
     mockPathname = '/admin';
     render(

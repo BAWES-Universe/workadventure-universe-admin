@@ -172,6 +172,9 @@ function ShellChrome({
       return;
     }
     lastPath.current = pathname;
+    // The replace flag belongs to this page: read it now, so a page still settling can't take it.
+    const replaced = replacing.current;
+    replacing.current = false;
     let settled = false;
     const settle = () => {
       if (settled) return;
@@ -192,15 +195,14 @@ function ShellChrome({
           behind.current = [];
           ahead.current = [];
         }
-      } else if (!replacing.current) {
+      } else if (!replaced) {
         behind.current.push(previous);
         ahead.current = [];
       }
       popping.current = false;
-      replacing.current = false;
       setBehindTop(behind.current[behind.current.length - 1] ?? null);
     };
-    if (popping.current || replacing.current) {
+    if (popping.current || replaced) {
       settle();
       return;
     }
