@@ -25,6 +25,7 @@ export async function GET(request: NextRequest) {
       authHeader.replace('Bearer ', '').trim() === process.env.ADMIN_API_TOKEN;
     
     let userId: string | null = null;
+    let isSuperAdmin = false;
     
     if (!isAdminToken) {
       // Try to get user from session
@@ -34,6 +35,7 @@ export async function GET(request: NextRequest) {
         return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
       }
       userId = sessionUser.id;
+      isSuperAdmin = sessionUser.isSuperAdmin;
     } else {
       // Admin token - require it
       requireAuth(request);
@@ -272,6 +274,11 @@ export async function GET(request: NextRequest) {
       const totalFavorites = favoritesCountMap.get(universe.id) || 0;
       return {
         ...universe,
+        // Owners' emails are private: only the owner, super admins and the game server see them
+        owner: universe.owner && {
+          ...universe.owner,
+          email: isAdminToken || isSuperAdmin || universe.owner.id === userId ? universe.owner.email : null,
+        },
         _count: {
           ...universe._count,
           rooms: totalRooms,

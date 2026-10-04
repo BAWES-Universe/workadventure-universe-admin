@@ -65,12 +65,10 @@ interface Bot {
   createdBy: {
     id: string;
     name: string | null;
-    email: string | null;
   } | null;
   updatedBy: {
     id: string;
     name: string | null;
-    email: string | null;
   } | null;
 }
 
@@ -657,7 +655,7 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
                         {bot.room.world.universe.name}
                       </Link>
                     </Detail>
-                    {bot.createdBy && <Detail label="Created by">{bot.createdBy.name || bot.createdBy.email}</Detail>}
+                    {bot.createdBy?.name && <Detail label="Created by">{bot.createdBy.name}</Detail>}
                     <Detail label="Created">{formatDate(bot.createdAt)}</Detail>
                   </dl>
                   <details className="mt-4 border-t pt-4">
