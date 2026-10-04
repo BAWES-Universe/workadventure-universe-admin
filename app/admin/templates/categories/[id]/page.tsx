@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { useRouter, useParams } from 'next/navigation';
+import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
@@ -29,6 +29,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Loader2, Plus, Edit, Trash2, AlertCircle } from 'lucide-react';
 import { EmptyCard, EntityCard, LoadError, PageHeader, SectionHeader, SettingSwitch, Settings, StatLine, StatusPill, count } from '../../../components/ds';
 import { InactivePill } from '../../components/template-bits';
+import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
 interface Category {
   id: string;
@@ -57,7 +58,7 @@ interface Template {
 }
 
 export default function CategoryDetailPage() {
-  const router = useRouter();
+  const replacePage = useReplacePage();
   const params = useParams();
   const categoryId = params?.id as string;
   const [category, setCategory] = useState<Category | null>(null);
@@ -144,11 +145,11 @@ export default function CategoryDetailPage() {
             };
             categorySlug = foundCategory.slug;
           } else {
-            router.push('/admin/templates');
+            replacePage('/admin/templates');
             return;
           }
         } else {
-          router.push('/admin/templates');
+          replacePage('/admin/templates');
           return;
         }
       }
@@ -233,7 +234,7 @@ export default function CategoryDetailPage() {
         throw new Error(data.error || 'Failed to delete category');
       }
 
-      router.push('/admin/templates');
+      replacePage('/admin/templates');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to delete category');
       setIsDeleteDialogOpen(false);

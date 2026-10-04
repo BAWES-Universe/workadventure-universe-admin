@@ -18,6 +18,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { AlertCircle, Loader2 } from 'lucide-react';
 import { InContext, PageHeader, SettingSwitch, Settings } from '../../../components/ds';
 import { ImageUpload } from '@/components/templates/ImageUpload';
+import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
 interface Template {
   id: string;
@@ -32,6 +33,7 @@ interface Template {
 
 function NewMapPageContent() {
   const router = useRouter();
+  const replacePage = useReplacePage();
   const searchParams = useSearchParams();
   const templateIdParam = searchParams.get('templateId');
   
@@ -81,7 +83,7 @@ function NewMapPageContent() {
       }
       const data = await response.json();
       if (!data.user?.isSuperAdmin) {
-        router.push('/admin/templates');
+        replacePage('/admin/templates');
         return;
       }
     } catch (err) {
@@ -171,7 +173,7 @@ function NewMapPageContent() {
       }
 
       const data = await response.json();
-      router.push(`/admin/templates/maps/${data.id}`);
+      replacePage(`/admin/templates/maps/${data.id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create map');
       setLoading(false);

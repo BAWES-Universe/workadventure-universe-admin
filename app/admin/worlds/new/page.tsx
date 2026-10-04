@@ -16,6 +16,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Card, CardContent } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { AlertCircle, Loader2, AlertTriangle } from 'lucide-react';
+import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
 interface Universe {
   id: string;
@@ -40,6 +41,7 @@ const upgradeWorldDraft = (saved: unknown) => upgradeFormDraft(saved, EMPTY_WORL
 
 function NewWorldPageContent() {
   const router = useRouter();
+  const replacePage = useReplacePage();
   const searchParams = useSearchParams();
   const universeIdParam = searchParams.get('universeId');
 
@@ -189,7 +191,7 @@ function NewWorldPageContent() {
 
       const world = await response.json();
       discardDraft();
-      router.push(`/admin/worlds/${world.id}`);
+      replacePage(`/admin/worlds/${world.id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create world');
     } finally {

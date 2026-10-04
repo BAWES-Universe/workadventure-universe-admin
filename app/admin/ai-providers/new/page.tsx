@@ -1,7 +1,6 @@
 'use client';
 
 import { useState } from 'react';
-import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -15,6 +14,7 @@ import {
   fromVisionMode,
   type VisionSupportMode,
 } from '@/lib/vision-models';
+import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
 const PROVIDER_TYPES = [
   { value: 'lmstudio', label: 'LMStudio' },
@@ -25,7 +25,7 @@ const PROVIDER_TYPES = [
 ];
 
 export default function NewProviderPage() {
-  const router = useRouter();
+  const replacePage = useReplacePage();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -72,7 +72,7 @@ export default function NewProviderPage() {
         throw new Error(errorData.error || 'Failed to create provider');
       }
 
-      router.push('/admin/ai-providers');
+      replacePage('/admin/ai-providers');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
     } finally {

@@ -18,9 +18,9 @@ jest.mock('next/link', () => ({
 }));
 
 let search = new URLSearchParams();
-const push = jest.fn();
+const replace = jest.fn();
 jest.mock('next/navigation', () => ({
-  useRouter: () => ({ push, replace: jest.fn(), back: jest.fn(), prefetch: jest.fn() }),
+  useRouter: () => ({ push: jest.fn(), replace, back: jest.fn(), prefetch: jest.fn() }),
   useSearchParams: () => search,
 }));
 
@@ -65,7 +65,7 @@ const UNIVERSE_B = { id: 'ub', name: 'Beta', slug: 'beta' };
 
 beforeEach(() => {
   fetchMock.mockReset();
-  push.mockReset();
+  replace.mockReset();
   search = new URLSearchParams();
   window.sessionStorage.clear();
 });
@@ -97,7 +97,7 @@ describe('New world without a universe in the address', () => {
     const create = screen.getByRole('button', { name: 'Create world' });
     expect((create as HTMLButtonElement).disabled).toBe(false);
     fireEvent.click(create);
-    await waitFor(() => expect(push).toHaveBeenCalledWith('/admin/worlds/new-id'));
+    await waitFor(() => expect(replace).toHaveBeenCalledWith('/admin/worlds/new-id'));
     expect(posted('/api/admin/worlds')).toMatchObject({ universeId: 'ua', name: 'Head Office', slug: 'head-office' });
     expect(posted('/api/admin/worlds')).not.toHaveProperty('addressEdited');
   });
@@ -112,7 +112,7 @@ describe('New world without a universe in the address', () => {
     fireEvent.click(beta);
     expect((beta as HTMLInputElement).checked).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: 'Create world' }));
-    await waitFor(() => expect(push).toHaveBeenCalled());
+    await waitFor(() => expect(replace).toHaveBeenCalled());
     expect(posted('/api/admin/worlds')).toMatchObject({ universeId: 'ub', slug: 'studio' });
   });
 
@@ -163,18 +163,18 @@ describe('New universe on the way to a world', () => {
     // The owner comes from /api/auth/me; wait until it's set before submitting.
     await new Promise((resolve) => setTimeout(resolve, 0));
     fireEvent.click(screen.getByRole('button', { name: 'Create universe' }));
-    await waitFor(() => expect(push).toHaveBeenCalled());
+    await waitFor(() => expect(replace).toHaveBeenCalled());
   }
 
   it('continues to the new world in it when asked to', async () => {
     search = new URLSearchParams('next=world');
     await create();
-    expect(push).toHaveBeenCalledWith('/admin/worlds/new?universeId=new-id');
+    expect(replace).toHaveBeenCalledWith('/admin/worlds/new?universeId=new-id');
   });
 
   it('otherwise opens the universe, as before', async () => {
     await create();
-    expect(push).toHaveBeenCalledWith('/admin/universes/new-id');
+    expect(replace).toHaveBeenCalledWith('/admin/universes/new-id');
     expect(posted('/api/admin/universes')).toMatchObject({ name: 'Mine', slug: 'mine', ownerId: 'me' });
   });
 });

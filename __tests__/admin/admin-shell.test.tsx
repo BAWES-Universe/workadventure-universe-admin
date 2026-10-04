@@ -4,6 +4,7 @@ import React from 'react';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import AdminShell from '@/app/admin/admin-shell';
 import { WorkAdventureContext } from '@/app/admin/workadventure-context';
+import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
 let mockPathname = '/admin';
 const mockRouter = { back: jest.fn(), replace: jest.fn(), push: jest.fn(), refresh: jest.fn() };
@@ -90,6 +91,9 @@ async function renderShell(pathname = '/admin') {
   return view;
 }
 
+// A page that looks new counts once the task that rendered it ends (a popstate may still be on its way).
+const endTask = () => act(() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
+
 describe('AdminShell', () => {
   beforeEach(() => {
     mockPathname = '/admin';
@@ -173,6 +177,7 @@ describe('AdminShell', () => {
         </AdminShell>,
       );
     });
+    await endTask();
     fireEvent.click(screen.getByTestId('orbit-back'));
     expect(mockRouter.back).toHaveBeenCalledTimes(1);
     expect(mockRouter.replace).not.toHaveBeenCalled();
@@ -180,7 +185,7 @@ describe('AdminShell', () => {
 
   it('Back is named after the page it returns to, and survives Back then Forward', async () => {
     const view = await renderShell('/admin/stars');
-    const go = (path: string, pop = false) =>
+    const go = async (path: string, pop = false) => {
       act(() => {
         if (pop) window.dispatchEvent(new PopStateEvent('popstate'));
         mockPathname = path;
@@ -190,11 +195,13 @@ describe('AdminShell', () => {
           </AdminShell>,
         );
       });
-    go('/admin/rooms/r-1');
+      await endTask();
+    };
+    await go('/admin/rooms/r-1');
     // Opened from Stars: Back says Stars, not the room's usual parent.
     expect(screen.getByTestId('orbit-back').textContent).toContain('Stars');
-    go('/admin/stars', true); // browser Back
-    go('/admin/rooms/r-1', true); // browser Forward
+    await go('/admin/stars', true); // browser Back
+    await go('/admin/rooms/r-1', true); // browser Forward
     expect(screen.getByTestId('orbit-back').textContent).toContain('Stars');
     fireEvent.click(screen.getByTestId('orbit-back'));
     expect(mockRouter.back).toHaveBeenCalledTimes(1);
@@ -203,7 +210,7 @@ describe('AdminShell', () => {
 
   it('Back pressed twice before a render walks two steps, and Forward comes back along them', async () => {
     const view = await renderShell('/admin/stars');
-    const go = (path: string, pops = 0) =>
+    const go = async (path: string, pops = 0) => {
       act(() => {
         for (let i = 0; i < pops; i += 1) window.dispatchEvent(new PopStateEvent('popstate'));
         mockPathname = path;
@@ -213,15 +220,79 @@ describe('AdminShell', () => {
           </AdminShell>,
         );
       });
-    go('/admin/rooms/r-1');
-    go('/admin/worlds/w-1');
-    go('/admin/stars', 2); // two quick Backs, one render
+      await endTask();
+    };
+    await go('/admin/rooms/r-1');
+    await go('/admin/worlds/w-1');
+    await go('/admin/stars', 2); // two quick Backs, one render
     expect(screen.getByTestId('orbit-back').textContent).not.toContain('Room');
-    go('/admin/rooms/r-1', 1); // Forward
+    await go('/admin/rooms/r-1', 1); // Forward
     expect(screen.getByTestId('orbit-back').textContent).toContain('Stars');
-    go('/admin/worlds/w-1', 1); // Forward again
+    await go('/admin/worlds/w-1', 1); // Forward again
     fireEvent.click(screen.getByTestId('orbit-back'));
     expect(mockRouter.back).toHaveBeenCalledTimes(1);
+  });
+
+  it('a Back the page shows before the browser’s popstate arrives still counts as Back', async () => {
+    const view = await renderShell('/admin/stars');
+    const render = (path: string) => {
+      mockPathname = path;
+      view.rerender(
+        <AdminShell>
+          <div>page content</div>
+        </AdminShell>,
+      );
+    };
+    act(() => render('/admin/rooms/r-1'));
+    await endTask();
+    act(() => render('/admin/worlds/w-1'));
+    await endTask();
+    // Next renders the page first, then the browser's popstate reaches Orbit, in the same task.
+    act(() => render('/admin/rooms/r-1'));
+    act(() => {
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    });
+    await endTask();
+    expect(screen.getByTestId('orbit-back').textContent).toContain('Stars');
+    expect(screen.getByTestId('orbit-back').textContent).not.toContain('World');
+  });
+
+  it('a page that sends you on in its own place leaves it out of Back', async () => {
+    function SaveButton() {
+      const replacePage = useReplacePage();
+      return (
+        <button type="button" onClick={() => replacePage('/admin/rooms/r-9')}>
+          save
+        </button>
+      );
+    }
+    const page = () => (
+      <AdminShell>
+        <div>page content</div>
+        <SaveButton />
+      </AdminShell>
+    );
+    const view = await renderShell('/admin/space');
+    act(() => {
+      mockPathname = '/admin/rooms/new';
+      view.rerender(page());
+    });
+    await endTask();
+    expect(screen.getByTestId('orbit-back').textContent).toContain('Space');
+    fireEvent.click(screen.getByText('save'));
+    expect(mockRouter.replace).toHaveBeenCalledWith('/admin/rooms/r-9');
+    expect(mockRouter.push).not.toHaveBeenCalled();
+    act(() => {
+      mockPathname = '/admin/rooms/r-9';
+      view.rerender(page());
+    });
+    await endTask();
+    // The new room took the form's place: Back goes to Space, not to an empty form.
+    expect(screen.getByTestId('orbit-back').textContent).toContain('Space');
+    expect(screen.getByTestId('orbit-back').textContent).not.toContain('New room');
+    fireEvent.click(screen.getByTestId('orbit-back'));
+    expect(mockRouter.back).toHaveBeenCalledTimes(1);
+    expect(mockRouter.replace).toHaveBeenCalledTimes(1);
   });
 
   it('Try again shows the loader, not the last error', async () => {

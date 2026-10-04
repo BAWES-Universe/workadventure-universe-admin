@@ -22,6 +22,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
+import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
 interface TableStats {
   table: string;
@@ -44,6 +45,7 @@ interface DatabaseStats {
 
 export default function BotDatabasePage() {
   const router = useRouter();
+  const replacePage = useReplacePage();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [stats, setStats] = useState<DatabaseStats | null>(null);
@@ -74,7 +76,7 @@ export default function BotDatabasePage() {
       }
       const userData = await response.json();
       if (!userData.user?.isSuperAdmin) {
-        router.push('/admin');
+        replacePage('/admin');
         return;
       }
       fetchStats();
@@ -91,7 +93,7 @@ export default function BotDatabasePage() {
 
       if (!response.ok) {
         if (response.status === 401 || response.status === 403) {
-          router.push('/admin');
+          replacePage('/admin');
           return;
         }
         throw new Error('Failed to fetch database stats');

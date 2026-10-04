@@ -231,7 +231,8 @@ export default function UserDetailPage() {
 
       if (!response.ok) {
         if (response.status === 404) {
-          router.push('/admin/users');
+          // Gone, private or not yours: the page says so in place, with Back still there.
+          setUser(null);
           return;
         }
         throw new Error('Failed to fetch user');

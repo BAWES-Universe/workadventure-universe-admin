@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button';
 import { BarChart3, Loader2, Plus } from 'lucide-react';
 import { EmptyCard, EntityRow, LoadError, LoadingRows, PageHeader, StatLine } from '../components/ds';
 import { EnabledPill, providerTypeLabel } from './components/provider-state';
+import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
 interface AiProvider {
   providerId: string;
@@ -23,6 +24,7 @@ interface AiProvider {
 
 export default function AiProvidersPage() {
   const router = useRouter();
+  const replacePage = useReplacePage();
   const [providers, setProviders] = useState<AiProvider[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -43,7 +45,7 @@ export default function AiProvidersPage() {
       }
       const userData = await response.json();
       if (!userData.user?.isSuperAdmin) {
-        router.push('/admin');
+        replacePage('/admin');
         return;
       }
       fetchProviders();
@@ -61,7 +63,7 @@ export default function AiProvidersPage() {
 
       if (!response.ok) {
         if (response.status === 401 || response.status === 403) {
-          router.push('/admin');
+          replacePage('/admin');
           return;
         }
         throw new Error('Failed to fetch providers');
