@@ -4,6 +4,7 @@ import { POST as act } from '@/app/api/friends/action/route';
 import { GET as search } from '@/app/api/friends/search/route';
 import { GET as getSettings, PUT as putSettings } from '@/app/api/friends/settings/route';
 import { GET as relationship } from '@/app/api/friends/relationship/route';
+import { POST as places } from '@/app/api/friends/places/route';
 import { MAX_OPEN_REQUESTS } from '@/lib/friends';
 import { addUser, db } from '../../helpers/friends-db';
 
@@ -206,12 +207,17 @@ describe('/api/friends', () => {
       expect(db.preferences.find((p) => p.key === 'people.ringFrom')?.value).toBe('nobody');
     });
 
-    it('a friend who hides their location shows shareLocation false', async () => {
+    it('a friend who hides their location shows shareLocation false and no last seen', async () => {
       shareWorld('a', 'b');
       await action('a', 'b', 'request');
       await action('b', 'a', 'accept');
+      const at = new Date('2026-10-04T10:00:00Z');
+      db.visits.push({ userId: 'b', worldId: 'w1', worldName: 'Main Hall', accessedAt: new Date('2026-10-03T10:00:00Z') });
+      db.visits.push({ userId: 'b', worldId: 'w1', worldName: 'Main Hall', accessedAt: at });
+      expect((await friendsOf('a')).friends[0]).toEqual(expect.objectContaining({ shareLocation: true, lastSeenAt: at.toISOString() }));
+
       await send(putSettings, '/settings', 'PUT', { userUuid: 'uuid-b', settings: { friendsSeeLocation: false } });
-      expect((await friendsOf('a')).friends[0].shareLocation).toBe(false);
+      expect((await friendsOf('a')).friends[0]).toEqual(expect.objectContaining({ shareLocation: false, lastSeenAt: null }));
     });
   });
 
@@ -246,6 +252,22 @@ describe('/api/friends', () => {
       expect((await get(search, '/search', { userUuid: 'uuid-a', q: ' b ' })).status).toBe(400);
       expect((await get(search, '/search', { userUuid: 'uuid-a', q: 'b'.repeat(65) })).status).toBe(400);
     });
+  });
+
+  it('places names Universe rooms and leaves other links unnamed', async () => {
+    db.rooms.push({ universe: 'bawes', universeName: 'Bawes', world: 'hub', worldName: 'Hub', slug: 'lobby', name: 'Main Hall' });
+    const known = 'https://play.example/@/bawes/hub/lobby';
+    const res = await send(places, '/places', 'POST', { playUris: [known, 'https://play.example/@/bawes/hub/gone', 'https://play.example/~/maps/x.wam'] });
+    expect(await res.json()).toEqual({
+      places: {
+        [known]: { universe: 'Bawes', world: 'Hub', room: 'Main Hall' },
+        'https://play.example/@/bawes/hub/gone': null,
+        'https://play.example/~/maps/x.wam': null,
+      },
+    });
+    expect((await send(places, '/places', 'POST', { playUris: Array(51).fill(known) })).status).toBe(400);
+    expect((await send(places, '/places', 'POST', { playUris: [1] })).status).toBe(400);
+    expect((await send(places, '/places', 'POST', { playUris: [known] }, {} as typeof auth)).status).toBe(401);
   });
 
   it('relationship returns the pair and the target ring and location settings', async () => {

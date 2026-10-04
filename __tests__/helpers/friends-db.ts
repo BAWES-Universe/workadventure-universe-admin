@@ -19,7 +19,9 @@ export const db = {
   preferences: [] as { userId: string; key: string; value: unknown }[],
   members: [] as { userId: string; worldId: string; worldName: string; universeName: string }[],
   visits: [] as { userId: string; worldId: string; worldName: string; accessedAt: Date }[],
+  rooms: [] as { universe: string; universeName: string; world: string; worldName: string; slug: string; name: string }[],
   reset() {
+    this.rooms.length = 0;
     this.users.length = 0;
     this.friendships.length = 0;
     this.preferences.length = 0;
@@ -100,7 +102,21 @@ export const fakePrisma = {
     findMany: jest.fn(async ({ where }: { where: Where }) =>
       db.members.filter((m) => matches(m, where)).map((m) => ({ userId: m.userId, worldId: m.worldId, world: { name: m.worldName } }))),
   },
+  room: {
+    findMany: jest.fn(async ({ where }: { where: { OR: { slug: string; world: { slug: string; universe: { slug: string } } }[] } }) =>
+      db.rooms
+        .filter((r) => where.OR.some((w) => w.slug === r.slug && w.world.slug === r.world && w.world.universe.slug === r.universe))
+        .map((r) => ({ slug: r.slug, name: r.name, world: { slug: r.world, name: r.worldName, universe: { slug: r.universe, name: r.universeName } } }))),
+  },
   roomAccess: {
+    groupBy: jest.fn(async ({ where }: { where: Where }) => {
+      const latest = new Map<string, Date>();
+      for (const v of db.visits.filter((visit) => matches(visit, where))) {
+        const seen = latest.get(v.userId);
+        if (!seen || v.accessedAt > seen) latest.set(v.userId, v.accessedAt);
+      }
+      return [...latest].map(([userId, accessedAt]) => ({ userId, _max: { accessedAt } }));
+    }),
     findMany: jest.fn(async ({ where }: { where: Where }) =>
       db.visits.filter((v) => matches(v, where)).map((v) => ({ userId: v.userId, worldId: v.worldId, world: { name: v.worldName } }))),
   },

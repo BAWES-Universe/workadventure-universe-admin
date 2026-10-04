@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from './db';
+import { parsePlayUri } from './utils';
 import {
   PEOPLE_PREFERENCE_KEYS,
   peopleSettingsFromRows,
@@ -185,7 +186,15 @@ async function findPair(aId: string, bId: string) {
 }
 
 export interface FriendsList {
-  friends: { uuid: string; name: string | null; chatId: string | null; shareLocation: boolean; since: string | null }[];
+  friends: {
+    uuid: string;
+    name: string | null;
+    chatId: string | null;
+    shareLocation: boolean;
+    since: string | null;
+    /** When they last entered a room, or null when they hide where they are. */
+    lastSeenAt: string | null;
+  }[];
   incoming: { uuid: string; name: string | null; sharedWorld: string | null; requestedAt: string }[];
   outgoing: { uuid: string; name: string | null; sentAt: string }[];
   blocked: { uuid: string; name: string | null }[];
@@ -206,7 +215,9 @@ export async function listFriends(me: Account): Promise<FriendsList> {
 
   const friendRows = rows.filter((row) => row.status === 'accepted');
   const incomingRows = rows.filter((row) => row.status === 'pending' && row.requestedById !== me.id);
-  const settings = await loadPeopleSettingsFor(friendRows.map((row) => otherId(me.id, row)));
+  const friendIds = friendRows.map((row) => otherId(me.id, row));
+  const settings = await loadPeopleSettingsFor(friendIds);
+  const lastSeen = await lastRoomEntries(friendIds.filter((id) => settings.get(id)?.friendsSeeLocation !== false));
   const shared = await sharedWorldNames(me.id, incomingRows.map((row) => otherId(me.id, row)));
 
   const list: FriendsList = { friends: [], incoming: [], outgoing: [], blocked: [] };
@@ -222,6 +233,7 @@ export async function listFriends(me: Account): Promise<FriendsList> {
         chatId: user.matrixChatId,
         shareLocation: settings.get(id)?.friendsSeeLocation ?? true,
         since: row.acceptedAt?.toISOString() ?? null,
+        lastSeenAt: lastSeen.get(id)?.toISOString() ?? null,
       });
     } else if (relationship === 'request_received' && row.status === 'pending') {
       list.incoming.push({ uuid: user.uuid, name: user.name, sharedWorld: shared.get(id) ?? null, requestedAt: row.createdAt.toISOString() });
@@ -238,6 +250,59 @@ export async function listFriends(me: Account): Promise<FriendsList> {
   list.outgoing.sort(byName);
   list.blocked.sort(byName);
   return list;
+}
+
+/** Each user's latest room entry. */
+async function lastRoomEntries(userIds: string[]): Promise<Map<string, Date>> {
+  const result = new Map<string, Date>();
+  if (userIds.length === 0) return result;
+  const rows = await prisma.roomAccess.groupBy({
+    by: ['userId'],
+    where: { userId: { in: userIds } },
+    _max: { accessedAt: true },
+  });
+  for (const row of rows) if (row.userId && row._max.accessedAt) result.set(row.userId, row._max.accessedAt);
+  return result;
+}
+
+export const MAX_PLACES = 50;
+
+export interface PlaceNames {
+  universe: string;
+  world: string;
+  room: string;
+}
+
+/** Display names for room links, for showing where friends are. Unknown or malformed links map to null. */
+export async function placeNames(playUris: string[]): Promise<Record<string, PlaceNames | null>> {
+  const result: Record<string, PlaceNames | null> = {};
+  const slugs = new Map<string, { universe: string; world: string; room: string }>();
+  for (const playUri of new Set(playUris)) {
+    result[playUri] = null;
+    try {
+      const { universe, world, room } = parsePlayUri(playUri);
+      slugs.set(playUri, { universe, world, room });
+    } catch {
+      // Not a Universe room link (a /_/ or /~/ map): no names to show.
+    }
+  }
+  if (slugs.size === 0) return result;
+
+  const rooms = await prisma.room.findMany({
+    where: {
+      OR: [...slugs.values()].map(({ universe, world, room }) => ({
+        slug: room,
+        world: { slug: world, universe: { slug: universe } },
+      })),
+    },
+    select: { slug: true, name: true, world: { select: { slug: true, name: true, universe: { select: { slug: true, name: true } } } } },
+  });
+  for (const [playUri, wanted] of slugs) {
+    const found = rooms.find((room) =>
+      room.slug === wanted.room && room.world.slug === wanted.world && room.world.universe.slug === wanted.universe);
+    if (found) result[playUri] = { universe: found.world.universe.name, world: found.world.name, room: found.name };
+  }
+  return result;
 }
 
 /** Applies `action` from `me` towards `target` and returns how the pair looks afterwards. */
