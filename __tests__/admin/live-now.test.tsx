@@ -111,7 +111,7 @@ describe('Live now', () => {
     expect(container.textContent).toBe('');
     unmount();
     render(<LiveNowView view={empty} layout="space" />);
-    expect(screen.getByText(/Nobody is in a place you can enter right now/)).toBeTruthy();
+    expect(screen.getByText(/Nobody is in a room you can enter right now/)).toBeTruthy();
   });
 
   it('is left out entirely while the game can’t say', async () => {

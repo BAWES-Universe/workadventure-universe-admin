@@ -4,7 +4,7 @@ import { LiveNowView } from '../components/live/live-now';
 import { LoadingRows } from '../components/ds';
 import { useLive } from '../hooks/use-live';
 
-/** Live now, all of it: every place with people in it right now, and everyone online, as you may see them. */
+/** Live now, all of it: every room with people in it right now, and everyone online, as you may see them. */
 export default function LivePage() {
   const live = useLive();
   return (

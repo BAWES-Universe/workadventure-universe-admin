@@ -2,17 +2,18 @@
 
 import Link from 'next/link';
 import { useContext, useMemo, useState } from 'react';
-import { EyeOff, Footprints } from 'lucide-react';
+import { EyeOff } from 'lucide-react';
 import type { LiveStatus, LivePlace, LiveView } from '@/lib/live-presence';
 import { cn } from '@/lib/utils';
 import { WorkAdventureContext } from '../../workadventure-context';
 import { useLive } from '../../hooks/use-live';
 import { Context, KindIcon, SectionHeader } from '../ds';
 import { WokaAvatar } from '../profile-card';
+import { DoorEnterIcon } from './door-enter-icon';
 import styles from './live.module.css';
 
 /**
- * Live now: the rooms with people in them right now, and who is where. Only places you could enter, only people who
+ * Live now: the rooms with people in them right now, and who is where. Only rooms you could enter, only people who
  * share where they are. Left out entirely while the game can't say, rather than claiming nobody is online.
  */
 
@@ -21,11 +22,11 @@ const FACES = 4;
 const EVERYWHERE = 'everywhere';
 
 type Layout =
-  /** Space: places beside People online on a wide screen, above them otherwise. */
+  /** Space: rooms beside People online on a wide screen, above them otherwise. */
   | 'space'
   /** Orbit home, wide: a column of its own beside Here and Recently visited. */
   | 'home-column'
-  /** Orbit home, narrow: places only, under Here; nothing when nobody is around. */
+  /** Orbit home, narrow: rooms only, under Here; nothing when nobody is around. */
   | 'home-inline'
   /** The Live now page: everything. */
   | 'all';
@@ -59,7 +60,7 @@ function VisitButton({
   const { ready, visit } = useVisit();
   const children = (
     <>
-      {className === styles.go && <Footprints size={14} aria-hidden="true" />}
+      {className === styles.go && <DoorEnterIcon size={14} />}
       {label}
     </>
   );
@@ -181,7 +182,7 @@ function Note() {
     <p className={styles.note}>
       <EyeOff size={13} aria-hidden="true" />
       <span>
-        Only people who share where they are, in places you can enter.{' '}
+        Only people who share where they are, in rooms you can enter.{' '}
         <Link href="/admin/you#live-settings">Hide where you are</Link>
       </span>
     </p>
@@ -224,7 +225,7 @@ export function LiveNowView({ view, layout }: { view: LiveView; layout: Layout }
       <SectionHeader id={`live-${layout}-heading`} title="Live now" count={total} action={seeAll} />
       {!empty && <Chips universes={universes} value={active} onChange={setPicked} />}
       {empty ? (
-        <p className={styles.empty}>Nobody is in a place you can enter right now. When people come in, they show up here.</p>
+        <p className={styles.empty}>Nobody is in a room you can enter right now. When people come in, they show up here.</p>
       ) : (
         <div
           className={layout === 'all' ? styles.placesGrid : layout === 'home-column' ? styles.places : styles.placesScroll}
