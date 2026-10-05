@@ -248,11 +248,11 @@ jobs:
             -H "Authorization: Bearer ${COOLIFY_TOKEN}" -H 'Content-Type: application/json' \
             -d '{"delete_unused_volumes":false,"delete_unused_networks":false}' \
             "${COOLIFY_BASE}/api/v1/servers/${SERVER_UUID}/docker-cleanup/run" || true)
-          if [ "$code" = 200 ]; then
-            echo "Cleanup started: $(jq -r '.message // empty' /tmp/cleanup.json 2>/dev/null)"
-          else
-            echo "::warning::Dev server cleanup was not started (HTTP $code): $(head -c 300 /tmp/cleanup.json 2>/dev/null)"
-          fi
+          # Coolify v4.3.23 answers 200 once the job is queued; any 2xx counts as started.
+          case "$code" in
+            2??) echo "Cleanup started: $(jq -r '.message // empty' /tmp/cleanup.json 2>/dev/null)" ;;
+            *) echo "::warning::Dev server cleanup was not started (HTTP $code): $(head -c 300 /tmp/cleanup.json 2>/dev/null)" ;;
+          esac
 
       - name: Receipt on the pull request
         if: steps.slot.outputs.go == 'true' && inputs.pr != ''
