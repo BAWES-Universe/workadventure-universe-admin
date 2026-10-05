@@ -37,7 +37,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const { id } = await params;
     if (!(await canModerateWorld(sessionUser, id))) return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
 
-    const reportInclude = { room: { select: { name: true } }, handledBy: { select: { name: true, email: true } } } as const;
+    const reportInclude = { room: { select: { name: true } }, handledBy: { select: { name: true } } } as const;
     const [open, done, bans] = await Promise.all([
       prisma.report.findMany({ where: { worldId: id, status: 'open' }, include: reportInclude, orderBy: { createdAt: 'desc' } }),
       prisma.report.findMany({
@@ -48,7 +48,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       }),
       prisma.ban.findMany({
         where: { worldId: id, isActive: true, OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] },
-        include: { user: { select: { id: true, uuid: true } }, bannedBy: { select: { name: true, email: true } } },
+        include: { user: { select: { id: true, uuid: true } }, bannedBy: { select: { name: true } } },
         orderBy: { bannedAt: 'desc' },
       }),
     ]);
@@ -60,7 +60,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       ]),
       ...bans.flatMap((ban) => (ban.user ? [{ userId: ban.user.id, uuid: ban.user.uuid }] : [])),
     ]);
-    const by = (user: { name: string | null; email: string | null } | null) => user?.name || user?.email || 'an admin';
+    // Admins are named, never shown by email: an admin without a name is just "an admin"
+    const by = (user: { name: string | null } | null) => user?.name || 'an admin';
 
     // Open reports, one card per reported player, newest report first
     const openGroups = new Map<string, { key: string; userId: string | null; uuid: string; reports: typeof open }>();
