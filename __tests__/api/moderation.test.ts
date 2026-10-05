@@ -188,9 +188,38 @@ describe('the Safety tab’s actions', () => {
     expect(data).toMatchObject({ userId: sam.id, worldId: office.id, reason: 'Spamming links in Lobby', bannedById: admin.id });
     expect(data.expiresAt.getTime() - before).toBeGreaterThanOrEqual(7 * 24 * 60 * 60 * 1000 - 1000);
     expect(db.report.updateMany.mock.calls[0][0]).toMatchObject({
-      where: { worldId: office.id, status: 'open', reportedUserId: sam.id },
+      where: { worldId: office.id, status: 'open', OR: [{ reportedUserId: sam.id }, { reportedUserId: null, reportedUuid: sam.uuid }] },
       data: { status: 'banned', handledById: admin.id },
     });
+  });
+
+  it('close the reports a banned player had before Orbit knew them, and those since', async () => {
+    session.mockResolvedValue(admin);
+    db.world.findUnique.mockResolvedValue({ universe: { ownerId: 'u-khalid' } });
+    db.worldMember.findFirst.mockResolvedValue({ id: 'm-1' });
+    db.user.findFirst.mockResolvedValue(sam);
+    db.world.findFirst.mockResolvedValue(null);
+
+    const response = await safety({ action: 'ban', person: `uuid:${sam.uuid}`, duration: '1d' });
+
+    expect(response.status).toBe(200);
+    expect(db.report.updateMany.mock.calls[0][0].where.OR).toEqual([
+      { reportedUserId: sam.id },
+      { reportedUserId: null, reportedUuid: sam.uuid },
+    ]);
+  });
+
+  it('leave a ban that already ran out alone', async () => {
+    session.mockResolvedValue(admin);
+    db.world.findUnique.mockResolvedValue({ universe: { ownerId: 'u-khalid' } });
+    db.worldMember.findFirst.mockResolvedValue({ id: 'm-1' });
+    db.ban.findFirst.mockResolvedValue(null);
+
+    const response = await safety({ action: 'lift', banId: '7c9e6679-7425-40de-944b-e07fc1f90ae7' });
+
+    expect(response.status).toBe(404);
+    expect(db.ban.findFirst.mock.calls[0][0].where.OR).toEqual([{ expiresAt: null }, { expiresAt: { gt: expect.any(Date) } }]);
+    expect(db.ban.update).not.toHaveBeenCalled();
   });
 
   it('never ban the universe’s owner', async () => {
