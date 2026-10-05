@@ -93,6 +93,13 @@ describe('a ban made in the game', () => {
     expect(data).not.toHaveProperty('universeId');
   });
 
+  it('refuses an address that is not a room with a 400', async () => {
+    const response = await banFromGame(request('http://play.test/@/bawes/%E0%A4%A/lobby'));
+
+    expect(response.status).toBe(400);
+    expect(db.ban.create).not.toHaveBeenCalled();
+  });
+
   it('bans nobody when the world is unknown, rather than everywhere', async () => {
     db.user.findFirst.mockResolvedValue(sam);
     db.world.findFirst.mockResolvedValue(null);
@@ -129,6 +136,15 @@ describe('a report from the game', () => {
       reporterUserId: 'u-lina',
       comment: 'Spamming links',
     });
+  });
+
+  it('needs the world it came from', async () => {
+    const response = await report(
+      json('http://orbit.test/api/report', { reportedUserUuid: 'uuid-sam', reporterUserUuid: 'uuid-lina', reportWorldSlug: '' }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(db.report.create).not.toHaveBeenCalled();
   });
 
   it('is dropped quietly once a player has sent too many in an hour', async () => {

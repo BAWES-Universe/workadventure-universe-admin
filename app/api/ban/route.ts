@@ -5,6 +5,16 @@ import { prisma } from '@/lib/db';
 import type { AdminBannedData } from '@/types/workadventure';
 import { bansCoveringWorld } from '@/lib/moderation';
 
+/** The universe and world a room address names, or null when it isn't a room address (answered with a 400). */
+function worldOf(address: string): { universe: string; world: string } | null {
+  try {
+    const { universe, world } = parsePlayUri(address);
+    return { universe, world };
+  } catch {
+    return null;
+  }
+}
+
 export async function GET(request: NextRequest) {
   try {
     requireAuth(request);
@@ -21,7 +31,11 @@ export async function GET(request: NextRequest) {
       );
     }
     
-    const { universe, world } = parsePlayUri(roomUrl);
+    const address = worldOf(roomUrl);
+    if (!address) {
+      return NextResponse.json({ error: 'roomUrl is not a room address' }, { status: 400 });
+    }
+    const { universe, world } = address;
     
     // Find user
     const user = await prisma.user.findFirst({
@@ -91,7 +105,11 @@ export async function POST(request: NextRequest) {
       );
     }
     
-    const { universe, world } = parsePlayUri(playUri);
+    const address = worldOf(playUri);
+    if (!address) {
+      return NextResponse.json({ error: 'playUri is not a room address' }, { status: 400 });
+    }
+    const { universe, world } = address;
     
     // Find user to ban
     const userToBan = await prisma.user.findFirst({
