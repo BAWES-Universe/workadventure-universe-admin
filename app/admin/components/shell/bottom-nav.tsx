@@ -2,11 +2,9 @@
 
 import type { CSSProperties } from 'react';
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
 import { cn } from '@/lib/utils';
 import { DESTINATIONS } from '../../config/navigation';
 import { useOrbitFrame } from '../../orbit-frame-context';
-import { rootOf } from './root-of';
 
 /**
  * You, Orbit and Space on the three root pages, within a thumb's reach on a phone and as a strip under the bar on
@@ -14,9 +12,7 @@ import { rootOf } from './root-of';
  * is at the top-left, beside the game's own buttons. Hidden on the wide layout, where the sidebar takes over.
  */
 export function BottomNav() {
-  const pathname = usePathname();
-  const { route } = useOrbitFrame();
-  const root = rootOf(pathname);
+  const { route, section: root } = useOrbitFrame();
   if (route.parent !== null) return null;
   const activeIndex = DESTINATIONS.findIndex((item) => item.href === root);
   const slots = DESTINATIONS.length;

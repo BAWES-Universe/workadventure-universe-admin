@@ -1,14 +1,12 @@
 'use client';
 
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
 import { Search } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { DESTINATIONS } from '../../config/navigation';
 import { useOrbitFrame } from '../../orbit-frame-context';
 import { OrbitMark } from './orbit-mark';
 import { ShortcutHint } from './shortcut-hint';
-import { rootOf } from './root-of';
 
 /**
  * The wide layout's rail: You, Orbit and Space, and the Orbit Menu at the foot for every other page and tool. Shown
@@ -16,9 +14,7 @@ import { rootOf } from './root-of';
  * rest of the width.
  */
 export function Sidebar() {
-  const pathname = usePathname();
-  const root = rootOf(pathname);
-  const { menuOpen, setMenuOpen } = useOrbitFrame();
+  const { section: root, menuOpen, setMenuOpen } = useOrbitFrame();
 
   return (
     <aside

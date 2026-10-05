@@ -7,7 +7,6 @@ import { useEffect, useState } from 'react';
 import { ArrowUpRight, Search, X } from 'lucide-react';
 import { DESTINATIONS, getNavItems, getNavSections, isNavItemActive, type NavUser } from '../../config/navigation';
 import { useOrbitFrame } from '../../orbit-frame-context';
-import { rootOf } from './root-of';
 
 /**
  * Everything Orbit has, from the Orbit Menu button at the top-left or Ctrl/Cmd+K: You, Orbit and Space, then every tool, searchable.
@@ -15,10 +14,9 @@ import { rootOf } from './root-of';
  */
 export function MenuSheet({ user }: { user: NavUser }) {
   const pathname = usePathname();
-  const { menuOpen, setMenuOpen } = useOrbitFrame();
+  const { section: root, menuOpen, setMenuOpen } = useOrbitFrame();
   const [query, setQuery] = useState('');
   const items = getNavItems(user);
-  const root = rootOf(pathname);
   const normalized = query.trim().toLocaleLowerCase();
   const sections = getNavSections(user)
     .map((section) => ({

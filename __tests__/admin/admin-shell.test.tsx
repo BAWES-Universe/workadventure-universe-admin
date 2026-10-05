@@ -351,6 +351,50 @@ describe('AdminShell', () => {
     expect(menu.textContent).toContain('Your universes');
   });
 
+  it('keeps the section you came from lit on a universe, world or room, and gives it back on Back', async () => {
+    const view = await renderShell('/admin/space');
+    const go = (path: string, pop = false) =>
+      act(() => {
+        if (pop) window.dispatchEvent(new PopStateEvent('popstate'));
+        mockPathname = path;
+        view.rerender(
+          <AdminShell>
+            <div>page content</div>
+          </AdminShell>,
+        );
+      });
+    const lit = () =>
+      Array.from(screen.getByRole('navigation', { name: 'Orbit sections' }).querySelectorAll('[aria-current="page"]')).map(
+        (link) => link.textContent,
+      );
+    // From Space, a universe and its world stay under Space (a universe used to light You).
+    go('/admin/universes/u-1');
+    expect(lit()).toEqual(['Space']);
+    go('/admin/worlds/w-1');
+    expect(lit()).toEqual(['Space']);
+    // From Your universes, the same pages stay under You.
+    go('/admin/universes');
+    expect(lit()).toEqual(['You']);
+    go('/admin/universes/u-1');
+    expect(lit()).toEqual(['You']);
+    go('/admin/rooms/r-1');
+    expect(lit()).toEqual(['You']);
+    // Back returns each page with the section it had.
+    go('/admin/universes/u-1', true);
+    expect(lit()).toEqual(['You']);
+    go('/admin/universes', true);
+    expect(lit()).toEqual(['You']);
+    go('/admin');
+    go('/admin/rooms/r-1');
+    expect(lit()).toEqual(['Orbit']);
+  });
+
+  it('puts a universe opened first thing under Space', async () => {
+    await renderShell('/admin/universes/u-1');
+    const rail = screen.getByRole('navigation', { name: 'Orbit sections' });
+    expect(Array.from(rail.querySelectorAll('[aria-current="page"]')).map((link) => link.textContent)).toEqual(['Space']);
+  });
+
   it('Ctrl+K and Cmd+K open and close the menu, from any page', async () => {
     await renderShell('/admin/worlds/w-1');
     expect(screen.queryByRole('dialog')).toBeNull();

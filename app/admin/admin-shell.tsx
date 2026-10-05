@@ -11,6 +11,7 @@ import OrbitBridge from './components/orbit-bridge';
 import { AdminBootstrapProvider, type AdminBootstrap } from './admin-bootstrap-context';
 import { OrbitFrameProvider, type OrbitFrameState } from './orbit-frame-context';
 import { resolveRoute } from './config/routes';
+import { sectionOf } from './components/shell/root-of';
 import WorkAdventureProvider from './workadventure-provider';
 import { useWorkAdventure } from './workadventure-context';
 import { OrbitLoader } from './components/shell/orbit-loader';
@@ -156,6 +157,11 @@ function ShellChrome({
   const popping = useRef(false);
   const replacing = useRef(false);
   const [behindTop, setBehindTop] = useState<string | null>(null);
+  // The section lit in the rail and menu (Home, Space or You). A universe, world, room or person is reached from more
+  // than one, so it keeps the section you came from; Back and Forward return each page to the section it had.
+  const [lastSection, setLastSection] = useState(() => sectionOf(pathname, null));
+  const sectionByPath = useRef(new Map<string, string>());
+  const section = sectionOf(pathname, lastSection);
 
   useEffect(() => {
     const onPopState = () => {
@@ -169,8 +175,13 @@ function ShellChrome({
     const previous = lastPath.current;
     if (pathname === previous) {
       popping.current = false;
+      sectionByPath.current.set(pathname, lastSection);
       return;
     }
+    const remembered = popping.current ? sectionByPath.current.get(pathname) : undefined;
+    const lit = remembered ?? sectionOf(pathname, lastSection);
+    sectionByPath.current.set(pathname, lit);
+    setLastSection(lit);
     if (popping.current) {
       // Several Back or Forward presses can land before one render: walk as many steps as the browser did.
       const back = behind.current.lastIndexOf(pathname);
@@ -195,6 +206,8 @@ function ShellChrome({
     replacing.current = false;
     lastPath.current = pathname;
     setBehindTop(behind.current[behind.current.length - 1] ?? null);
+    // The section is read as it was when this address arrived, not on every change of it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pathname]);
 
   const goBack = useCallback(() => {
@@ -254,8 +267,8 @@ function ShellChrome({
   }, [menuOpen, closeOrbit]);
 
   const frame: OrbitFrameState = useMemo(
-    () => ({ inFrame, view, route, goBack, backLabel, closeOrbit, menuOpen, setMenuOpen }),
-    [inFrame, view, route, goBack, backLabel, closeOrbit, menuOpen],
+    () => ({ inFrame, view, route, section, goBack, backLabel, closeOrbit, menuOpen, setMenuOpen }),
+    [inFrame, view, route, section, goBack, backLabel, closeOrbit, menuOpen],
   );
 
   return (

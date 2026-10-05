@@ -14,6 +14,8 @@ export interface OrbitFrameState {
   view: OrbitView;
   /** The page shown, and where Back goes from it. */
   route: ResolvedRoute;
+  /** The section lit in the rail and menu: `/admin`, `/admin/space` or `/admin/you`. */
+  section: string;
   /** Back: the previous Orbit page when there is one, else the page's parent. */
   goBack: () => void;
   /** Where Back goes, by name: the page behind, or the page's parent. */
