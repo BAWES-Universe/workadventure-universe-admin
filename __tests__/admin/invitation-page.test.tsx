@@ -94,33 +94,61 @@ describe('The invitation page', () => {
     expect(within(actions).getByRole('button', { name: 'Decline' })).toBeTruthy();
   });
 
-  it('shows as many members as fit in one row, the last slot counting the rest', async () => {
-    const members = Array.from({ length: 8 }, (_, i) => ({ id: `u-${i}`, name: `Member ${i}`, woka: [] }));
-    const width = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth');
-    const observers: ResizeObserverCallback[] = [];
-    const previous = globalThis.ResizeObserver;
-    globalThis.ResizeObserver = class {
-      constructor(callback: ResizeObserverCallback) {
-        observers.push(callback);
-      }
-      observe() {}
-      unobserve() {}
-      disconnect() {}
-    } as unknown as typeof ResizeObserver;
-    // A phone's row: 4 slots of 64px.
-    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get: () => 260 });
-    try {
-      routeDetail({ invitation: invitation({ world: { ...invitation().world, counts: { rooms: 3, members: 12 }, members } }) });
-      renderPage();
-      const row = await screen.findByTestId('invitation-members');
-      await waitFor(() => expect(row.querySelectorAll('li')).toHaveLength(4));
-      expect(row.textContent).toContain('Member 2');
-      expect(row.textContent).not.toContain('Member 3');
-      expect(row.textContent).toContain('+9 more members');
-    } finally {
-      if (width) Object.defineProperty(HTMLElement.prototype, 'clientWidth', width);
-      globalThis.ResizeObserver = previous;
-    }
+  it('shows members as faces, highest role first as sent, and their count beyond those sent', async () => {
+    const members = [
+      { id: 'u-sara', name: 'Sara', tags: ['owner', 'admin'], woka: [] },
+      { id: 'u-omar', name: 'Omar', tags: ['editor'], woka: [] },
+      { id: 'u-lina', name: 'Lina', tags: ['member'], woka: [] },
+    ];
+    routeDetail({ invitation: invitation({ world: { ...invitation().world, counts: { rooms: 3, members: 12 }, members } }) });
+    renderPage();
+    const row = await screen.findByTestId('invitation-members');
+    const faces = within(row).getAllByRole('button');
+    expect(faces.map((face) => face.getAttribute('aria-label'))).toEqual(['Sara, Owner', 'Omar, Editor', 'Lina, Member']);
+    expect(row.textContent).toContain('+9 more members');
+  });
+
+  it('opens a member’s visit card over the page, goes through members, and closes from outside or with Escape', async () => {
+    const members = [
+      {
+        id: 'u-sara',
+        name: 'Sara',
+        tags: ['admin'],
+        woka: [],
+        bio: 'I run the booths.',
+        links: [{ label: 'Site', url: 'https://sara.test' }],
+      },
+      { id: 'u-omar', name: 'Omar', tags: ['member'], woka: [], bio: null, links: [] },
+    ];
+    routeDetail({ invitation: invitation({ world: { ...invitation().world, counts: { rooms: 3, members: 2 }, members } }) });
+    renderPage();
+    const row = await screen.findByTestId('invitation-members');
+    expect(screen.queryByTestId('member-card')).toBeNull();
+
+    fireEvent.click(within(row).getByRole('button', { name: 'Sara, Admin' }));
+    let card = screen.getByTestId('member-card');
+    expect(card.textContent).toContain('I run the booths.');
+    expect(within(card).getByRole('link', { name: /Site/ }).getAttribute('href')).toBe('https://sara.test');
+    expect(within(card).getByRole('link', { name: /Open profile/ }).getAttribute('href')).toBe('/admin/users/u-sara');
+    expect(card.textContent).toContain('1 of 2');
+    // It floats: it is laid over the page, not in its flow.
+    expect(card.parentElement?.className).toMatch(/absolute/);
+
+    fireEvent.click(within(card).getByRole('button', { name: 'Next member' }));
+    card = screen.getByTestId('member-card');
+    expect(card.textContent).toContain('Omar hasn’t written anything about themselves yet.');
+    expect(card.textContent).toContain('2 of 2');
+
+    fireEvent.pointerDown(document.body);
+    expect(screen.queryByTestId('member-card')).toBeNull();
+
+    fireEvent.click(within(row).getByRole('button', { name: 'Omar, Member' }));
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.queryByTestId('member-card')).toBeNull();
+
+    fireEvent.click(within(row).getByRole('button', { name: 'Omar, Member' }));
+    fireEvent.click(within(screen.getByTestId('member-card')).getByRole('button', { name: 'Close card' }));
+    expect(screen.queryByTestId('member-card')).toBeNull();
   });
 
   it('says who invited you to become what', async () => {

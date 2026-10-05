@@ -18,10 +18,11 @@ import {
   StatusPill,
   count,
 } from '../../components/ds';
-import { PersonIcon, WokaAvatar } from '../../components/profile-card';
+import { PersonIcon } from '../../components/profile-card';
 import { ORBIT_REFRESH_EVENT } from '../../components/orbit-bridge';
 import { useWorkAdventure } from '../../workadventure-context';
 import { DeclineWithConfirm, declineInvitation, describeRole, roleLabel } from '../invitation-role';
+import { MembersCards, type InvitationMember } from '../members-cards';
 
 interface Person {
   id: string;
@@ -47,7 +48,7 @@ interface InvitationDetail {
     universe: { id: string; name: string; slug: string };
     counts: { rooms: number; members: number };
     firstRoom: { slug: string; name: string } | null;
-    members: Person[];
+    members: InvitationMember[];
   };
 }
 
@@ -209,8 +210,14 @@ export default function InvitationPage() {
           {world.description && <p className="text-[15px] text-foreground/85">{world.description}</p>}
           {world.members.length > 0 && (
             <div className="space-y-2 border-t border-border pt-3">
-              <p className="text-xs font-semibold text-muted-foreground">Members</p>
-              <MembersRow members={world.members} total={world.counts.members} />
+              <p className="text-xs font-semibold text-muted-foreground">
+                Members<span className="font-normal"> · tap someone to see their card</span>
+              </p>
+              <MembersCards
+                members={world.members}
+                total={world.counts.members}
+                worldHref={world.isPublic ? `/admin/worlds/${world.id}` : null}
+              />
             </div>
           )}
         </div>
@@ -242,54 +249,6 @@ export default function InvitationPage() {
         </section>
       )}
     </div>
-  );
-}
-
-/** What the role lets you do, in plain words; a custom role by name. */
-/** Each member's slot: a 56px column plus the 8px gap. */
-const MEMBER_SLOT = 64;
-
-/**
- * One row of members' Wokas, as many as the width holds (about 4 on a phone, 6 in the side panel, 8 full screen),
- * the last slot saying how many more when they don't all fit.
- */
-function MembersRow({ members, total }: { members: Person[]; total: number }) {
-  const ref = useRef<HTMLUListElement>(null);
-  const [slots, setSlots] = useState<number | null>(null);
-  useEffect(() => {
-    const list = ref.current;
-    if (!list || typeof ResizeObserver === 'undefined') return;
-    const measure = () => {
-      const width = list.clientWidth;
-      if (width > 0) setSlots(Math.max(2, Math.floor((width + 8) / MEMBER_SLOT)));
-    };
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(list);
-    return () => observer.disconnect();
-  }, []);
-  // Until measured (or with no layout at all), show what came; the server sends at most a handful.
-  const fits = slots ?? members.length + 1;
-  const allFit = total <= fits && members.length === total;
-  const shown = allFit ? members : members.slice(0, Math.max(1, fits - 1));
-  const more = total - shown.length;
-  return (
-    <ul ref={ref} className="flex gap-2 overflow-hidden" data-testid="invitation-members">
-      {shown.map((member) => (
-        <li key={member.id} className="grid w-14 flex-none justify-items-center gap-1 text-center">
-          <WokaAvatar layers={member.woka ?? []} name={member.name ?? ''} size={44} />
-          <span className="w-full truncate text-[11px] text-foreground/85">{member.name || 'A member'}</span>
-        </li>
-      ))}
-      {more > 0 && (
-        <li className="grid w-14 flex-none justify-items-center">
-          <span className="grid h-11 w-11 place-items-center rounded-full border border-border text-xs font-semibold text-muted-foreground">
-            +{more}
-            <span className="sr-only"> more members</span>
-          </span>
-        </li>
-      )}
-    </ul>
   );
 }
 
