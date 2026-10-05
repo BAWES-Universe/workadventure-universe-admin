@@ -8,7 +8,7 @@ import { Prisma } from '@prisma/client';
 jest.mock('@/lib/db', () => ({
   prisma: {
     $queryRaw: jest.fn(),
-    universe: { findMany: jest.fn(), count: jest.fn(), findUnique: jest.fn() },
+    universe: { findMany: jest.fn(), count: jest.fn(), findUnique: jest.fn(), findFirst: jest.fn() },
     world: { findMany: jest.fn(), count: jest.fn(), findFirst: jest.fn(), findUnique: jest.fn() },
     room: { findMany: jest.fn(), count: jest.fn(), findFirst: jest.fn() },
     user: { findUnique: jest.fn(), count: jest.fn() },
@@ -191,7 +191,7 @@ describe('Bootstrap', () => {
     db.universe.count.mockResolvedValue(3);
     db.world.count.mockResolvedValue(4);
     db.room.count.mockResolvedValue(5);
-    db.universe.findUnique.mockResolvedValue({ id: 'u-default' });
+    db.universe.findFirst.mockResolvedValue({ id: 'u-default' });
     db.world.findFirst.mockResolvedValue({ id: 'w-default' });
     db.room.findFirst.mockResolvedValue({ id: 'r-default' });
     db.favorite.count.mockResolvedValue(0);
@@ -205,8 +205,14 @@ describe('Bootstrap', () => {
     expect(db.user.count).toHaveBeenCalledWith({ where: NOT_SYSTEM_USER });
     expect(db.universe.count.mock.calls[0][0]).toEqual({ where: { ownerId: { not: 'sys' } } });
     expect(db.room.count.mock.calls[0][0]).toEqual({ where: { world: { universe: { ownerId: { not: 'sys' } } } } });
-    expect(db.universe.findUnique).not.toHaveBeenCalled();
-    expect(body.stats).toEqual({ universes: 3, worlds: 4, rooms: 5, users: 7 });
+    // The default space is looked up among others' spaces only: System's own default is already out of the counts.
+    expect(db.universe.findFirst.mock.calls[0][0].where).toEqual({ AND: [{ slug: 'default' }, { ownerId: { not: 'sys' } }] });
+    expect(db.room.findFirst.mock.calls[0][0].where).toEqual({
+      AND: [
+        { slug: 'default', world: { slug: 'default', universe: { slug: 'default' } } },
+        { world: { universe: { ownerId: { not: 'sys' } } } },
+      ],
+    });
     expect(db.worldMember.count.mock.calls[0][0]).toEqual({
       where: { userId: 'me', world: { universe: { ownerId: { not: 'sys' } } } },
     });
@@ -214,6 +220,21 @@ describe('Bootstrap', () => {
       where: { userId: 'me', roomId: { not: null }, room: { world: { universe: { ownerId: { not: 'sys' } } } } },
     });
     expect(body.startRoom).toBe('@/default/default/default');
+  });
+
+  it('leaves System’s default space alone once hidden, since the counts already leave it out', async () => {
+    hidden.mockResolvedValue('sys');
+    db.universe.findFirst.mockResolvedValue(null);
+    db.world.findFirst.mockResolvedValue(null);
+    db.room.findFirst.mockResolvedValue(null);
+    const body = await (await bootstrap(session('/api/admin/bootstrap'))).json();
+    expect(body.stats).toEqual({ universes: 3, worlds: 4, rooms: 5, users: 7 });
+  });
+
+  it('subtracts a default space someone else owns once System’s spaces are hidden, like the lists do', async () => {
+    hidden.mockResolvedValue('sys');
+    const body = await (await bootstrap(session('/api/admin/bootstrap'))).json();
+    expect(body.stats).toEqual({ universes: 2, worlds: 3, rooms: 4, users: 7 });
   });
 
   it('subtracts the default room as before while nothing is hidden', async () => {

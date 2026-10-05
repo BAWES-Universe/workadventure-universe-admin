@@ -15,7 +15,7 @@ export async function GET(request: NextRequest) {
   const session = sessionId ? await getSessionData(sessionId) : null;
   if (!session) return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
 
-  // Once the start room is elsewhere, System's spaces leave the counts; until then only the default room is left out.
+  // Once the start room is elsewhere, System's spaces leave the counts. The built-in default space is always left out.
   const hidden = await hiddenSystemOwnerId();
   const [
     user,
@@ -41,9 +41,16 @@ export async function GET(request: NextRequest) {
     prisma.world.count({ where: notSystemWorld(hidden) }),
     prisma.room.count({ where: notSystemRoom(hidden) }),
     prisma.user.count({ where: NOT_SYSTEM_USER }),
-    hidden ? null : prisma.universe.findUnique({ where: { slug: 'default' }, select: { id: true } }),
-    hidden ? null : prisma.world.findFirst({ where: { slug: 'default', universe: { slug: 'default' } }, select: { id: true } }),
-    hidden ? null : prisma.room.findFirst({ where: { slug: 'default', world: { slug: 'default', universe: { slug: 'default' } } }, select: { id: true } }),
+    // The default space, unless it is System's and the counts already leave it out.
+    prisma.universe.findFirst({ where: { AND: [{ slug: 'default' }, notSystemUniverse(hidden)] }, select: { id: true } }),
+    prisma.world.findFirst({
+      where: { AND: [{ slug: 'default', universe: { slug: 'default' } }, notSystemWorld(hidden)] },
+      select: { id: true },
+    }),
+    prisma.room.findFirst({
+      where: { AND: [{ slug: 'default', world: { slug: 'default', universe: { slug: 'default' } } }, notSystemRoom(hidden)] },
+      select: { id: true },
+    }),
     prisma.universe.count({ where: { ownerId: session.userId } }),
     prisma.worldMember.count({ where: { userId: session.userId, world: notSystemWorld(hidden) } }),
     prisma.favorite.count({ where: { userId: session.userId, roomId: { not: null }, ...(hidden ? { room: notSystemRoom(hidden) } : {}) } }),
