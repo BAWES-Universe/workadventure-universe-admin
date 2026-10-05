@@ -18,7 +18,7 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const { reportedUserUuid, reportedUserComment, reporterUserUuid, reportWorldSlug } = body;
 
-    if (typeof reportedUserUuid !== 'string' || typeof reporterUserUuid !== 'string' || typeof reportWorldSlug !== 'string' || !reportedUserUuid || !reporterUserUuid) {
+    if (typeof reportedUserUuid !== 'string' || typeof reporterUserUuid !== 'string' || typeof reportWorldSlug !== 'string' || !reportedUserUuid || !reporterUserUuid || !reportWorldSlug) {
       return NextResponse.json(
         { error: 'reportedUserUuid, reporterUserUuid, and reportWorldSlug are required' },
         { status: 400 }

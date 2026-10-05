@@ -93,6 +93,13 @@ describe('a ban made in the game', () => {
     expect(data).not.toHaveProperty('universeId');
   });
 
+  it('refuses an address that is not a room with a 400', async () => {
+    const response = await banFromGame(request('http://play.test/@/bawes/%E0%A4%A/lobby'));
+
+    expect(response.status).toBe(400);
+    expect(db.ban.create).not.toHaveBeenCalled();
+  });
+
   it('bans nobody when the world is unknown, rather than everywhere', async () => {
     db.user.findFirst.mockResolvedValue(sam);
     db.world.findFirst.mockResolvedValue(null);
@@ -129,6 +136,15 @@ describe('a report from the game', () => {
       reporterUserId: 'u-lina',
       comment: 'Spamming links',
     });
+  });
+
+  it('needs the world it came from', async () => {
+    const response = await report(
+      json('http://orbit.test/api/report', { reportedUserUuid: 'uuid-sam', reporterUserUuid: 'uuid-lina', reportWorldSlug: '' }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(db.report.create).not.toHaveBeenCalled();
   });
 
   it('is dropped quietly once a player has sent too many in an hour', async () => {
@@ -226,6 +242,7 @@ describe('the Safety tab’s actions', () => {
     db.world.findUnique.mockResolvedValue({ universe: { ownerId: 'u-khalid' } });
     db.worldMember.findFirst.mockResolvedValue({ id: 'm-1' });
     db.user.findFirst.mockResolvedValue(sam);
+    db.report.updateMany.mockResolvedValue({ count: 2 });
 
     const response = await safety({ action: 'dismiss', person: sam.id });
 
@@ -241,11 +258,24 @@ describe('the Safety tab’s actions', () => {
     db.world.findUnique.mockResolvedValue({ universe: { ownerId: 'u-khalid' } });
     db.worldMember.findFirst.mockResolvedValue({ id: 'm-1' });
     db.user.findFirst.mockResolvedValue(null);
+    db.report.updateMany.mockResolvedValue({ count: 1 });
 
     const response = await safety({ action: 'dismiss', person: 'uuid:guest-1' });
 
     expect(response.status).toBe(200);
     expect(db.report.updateMany.mock.calls[0][0].where.OR).toEqual([{ reportedUserId: null, reportedUuid: 'guest-1' }]);
+  });
+
+  it('say so when there is nothing left to dismiss, as when the player was deleted after the list loaded', async () => {
+    session.mockResolvedValue(admin);
+    db.world.findUnique.mockResolvedValue({ universe: { ownerId: 'u-khalid' } });
+    db.worldMember.findFirst.mockResolvedValue({ id: 'm-1' });
+    db.user.findFirst.mockResolvedValue(null);
+    db.report.updateMany.mockResolvedValue({ count: 0 });
+
+    const response = await safety({ action: 'dismiss', person: sam.id });
+
+    expect(response.status).toBe(404);
   });
 
   it('leave a ban that already ran out alone', async () => {
