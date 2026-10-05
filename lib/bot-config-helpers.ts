@@ -159,6 +159,7 @@ export async function transformBotToServerFormat(
     aiProviderRef: bot.aiProviderRef || null,
     chatInstructions: bot.chatInstructions || null,
     movementInstructions: bot.movementInstructions || null,
+    toolTimeoutSeconds: bot.toolTimeoutSeconds ?? null,
   };
   
   // Include parsed AI provider data only if requested and user has permission

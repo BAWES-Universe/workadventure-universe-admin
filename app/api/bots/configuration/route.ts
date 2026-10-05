@@ -7,6 +7,7 @@ import { isSuperAdmin } from '@/lib/super-admin';
 import { parsePlayUri } from '@/lib/utils';
 import { validateAccessToken } from '@/lib/oidc';
 import { resolveRoomIdFromPlayUri, transformBotToServerFormat } from '@/lib/bot-config-helpers';
+import { toolTimeoutSecondsSchema } from '@/lib/bot-tool-timeout';
 import { z } from 'zod';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Prisma
@@ -45,6 +46,7 @@ const botConfigSchema = z.object({
   chatInstructions: z.string().optional().nullable(),
   movementInstructions: z.string().optional().nullable(),
   aiProviderRef: z.string().max(100, 'aiProviderRef must be at most 100 characters').optional().nullable(),
+  toolTimeoutSeconds: toolTimeoutSecondsSchema,
 });
 
 // Helper function to get user ID from various auth methods
@@ -409,6 +411,7 @@ export async function POST(request: NextRequest) {
       chatInstructions: validatedData.chatInstructions ?? null,
       movementInstructions: validatedData.movementInstructions ?? null,
       aiProviderRef: validatedData.aiProviderRef ?? null,
+      toolTimeoutSeconds: validatedData.toolTimeoutSeconds ?? null,
       updatedById: userId ?? null,
     };
 
@@ -434,6 +437,8 @@ export async function POST(request: NextRequest) {
         movementInstructions:
           'movementInstructions' in body ? data.movementInstructions : undefined,
         aiProviderRef: 'aiProviderRef' in body ? data.aiProviderRef : undefined,
+        toolTimeoutSeconds:
+          'toolTimeoutSeconds' in body ? data.toolTimeoutSeconds : undefined,
       };
       // behaviorConfig merge (always, not only when provided): the JSON
       // embeds behaviorType (required by the schema, always present in the

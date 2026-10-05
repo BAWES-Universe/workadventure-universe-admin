@@ -287,6 +287,47 @@ describe('/api/bots/configuration', () => {
     });
   });
 
+  describe('tool timeout (Patience)', () => {
+    const botId = '00000000-0000-4000-8000-000000000001';
+
+    it('saves the tool timeout on create', async () => {
+      const response = await POST(configRequest({ ...validBody, toolTimeoutSeconds: 180 }));
+
+      expect(response.status).toBe(201);
+      const data = (prisma.bot.create as jest.Mock).mock.calls[0][0].data;
+      expect(data.toolTimeoutSeconds).toBe(180);
+    });
+
+    it('stores null on create when no tool timeout is given, so the default applies', async () => {
+      await POST(configRequest(validBody));
+
+      const data = (prisma.bot.create as jest.Mock).mock.calls[0][0].data;
+      expect(data.toolTimeoutSeconds).toBeNull();
+    });
+
+    it('keeps the saved tool timeout when an update omits it', async () => {
+      await POST(configRequest({ ...validBody, botId }));
+
+      const data = (prisma.bot.update as jest.Mock).mock.calls[0][0].data;
+      expect(data.toolTimeoutSeconds).toBeUndefined();
+    });
+
+    it('updates and clears the tool timeout', async () => {
+      await POST(configRequest({ ...validBody, botId, toolTimeoutSeconds: 15 }));
+      expect((prisma.bot.update as jest.Mock).mock.calls[0][0].data.toolTimeoutSeconds).toBe(15);
+
+      await POST(configRequest({ ...validBody, botId, toolTimeoutSeconds: null }));
+      expect((prisma.bot.update as jest.Mock).mock.calls[1][0].data.toolTimeoutSeconds).toBeNull();
+    });
+
+    it.each([0, 4, 601, 30.5, '90'])('rejects an invalid tool timeout (%p)', async (value) => {
+      const response = await POST(configRequest({ ...validBody, toolTimeoutSeconds: value }));
+
+      expect(response.status).toBe(400);
+      expect(prisma.bot.create).not.toHaveBeenCalled();
+    });
+  });
+
   describe('IDOR guard — cross-room bot update (session user path)', () => {
     const botId = '00000000-0000-4000-8000-000000000002';
 
