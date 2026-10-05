@@ -242,6 +242,7 @@ describe('the Safety tab’s actions', () => {
     db.world.findUnique.mockResolvedValue({ universe: { ownerId: 'u-khalid' } });
     db.worldMember.findFirst.mockResolvedValue({ id: 'm-1' });
     db.user.findFirst.mockResolvedValue(sam);
+    db.report.updateMany.mockResolvedValue({ count: 2 });
 
     const response = await safety({ action: 'dismiss', person: sam.id });
 
@@ -257,11 +258,24 @@ describe('the Safety tab’s actions', () => {
     db.world.findUnique.mockResolvedValue({ universe: { ownerId: 'u-khalid' } });
     db.worldMember.findFirst.mockResolvedValue({ id: 'm-1' });
     db.user.findFirst.mockResolvedValue(null);
+    db.report.updateMany.mockResolvedValue({ count: 1 });
 
     const response = await safety({ action: 'dismiss', person: 'uuid:guest-1' });
 
     expect(response.status).toBe(200);
     expect(db.report.updateMany.mock.calls[0][0].where.OR).toEqual([{ reportedUserId: null, reportedUuid: 'guest-1' }]);
+  });
+
+  it('say so when there is nothing left to dismiss, as when the player was deleted after the list loaded', async () => {
+    session.mockResolvedValue(admin);
+    db.world.findUnique.mockResolvedValue({ universe: { ownerId: 'u-khalid' } });
+    db.worldMember.findFirst.mockResolvedValue({ id: 'm-1' });
+    db.user.findFirst.mockResolvedValue(null);
+    db.report.updateMany.mockResolvedValue({ count: 0 });
+
+    const response = await safety({ action: 'dismiss', person: sam.id });
+
+    expect(response.status).toBe(404);
   });
 
   it('leave a ban that already ran out alone', async () => {

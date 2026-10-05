@@ -166,7 +166,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       };
 
       if (body.action === 'dismiss') {
-        await prisma.report.updateMany({ where: openReports, data: { status: 'dismissed', handledById: sessionUser.id, handledAt: now } });
+        const { count } = await prisma.report.updateMany({ where: openReports, data: { status: 'dismissed', handledById: sessionUser.id, handledAt: now } });
+        // Nothing left to dismiss: another admin handled them, or the player's account was deleted since the list loaded
+        if (count === 0) return NextResponse.json({ error: 'Those reports changed since you opened this page. Refresh to see the latest.' }, { status: 404 });
         return NextResponse.json({ ok: true });
       }
 
