@@ -2,13 +2,14 @@
 
 import Link from 'next/link';
 import { useContext, useMemo, useState } from 'react';
-import { EyeOff, Footprints } from 'lucide-react';
+import { EyeOff } from 'lucide-react';
 import type { LiveStatus, LivePlace, LiveView } from '@/lib/live-presence';
 import { cn } from '@/lib/utils';
 import { WorkAdventureContext } from '../../workadventure-context';
 import { useLive } from '../../hooks/use-live';
 import { Context, KindIcon, SectionHeader } from '../ds';
 import { WokaAvatar } from '../profile-card';
+import { DoorEnterIcon } from './door-enter-icon';
 import styles from './live.module.css';
 
 /**
@@ -59,7 +60,7 @@ function VisitButton({
   const { ready, visit } = useVisit();
   const children = (
     <>
-      {className === styles.go && <Footprints size={14} aria-hidden="true" />}
+      {className === styles.go && <DoorEnterIcon size={14} />}
       {label}
     </>
   );
