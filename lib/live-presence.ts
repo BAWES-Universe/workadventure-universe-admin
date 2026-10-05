@@ -236,7 +236,8 @@ export async function buildLiveView(snapshot: PresenceSnapshot, viewer: SessionU
       name: room.name,
       world: { id: room.world.id, name: room.world.name },
       universe: { id: room.world.universe.id, name: room.world.universe.name },
-      playPath: `/@/${room.world.universe.slug}/${room.world.slug}/${room.slug}`,
+      // Each slug encoded, so the game reads back the same three, whatever characters they hold.
+      playPath: `/@/${[room.world.universe.slug, room.world.slug, room.slug].map(encodeURIComponent).join('/')}`,
       count,
       guests: visitors.guests,
       bots: visitors.bots,
