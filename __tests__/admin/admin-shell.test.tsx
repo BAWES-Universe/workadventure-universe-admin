@@ -460,7 +460,8 @@ describe('AdminShell', () => {
 
   it('keeps the section you came from lit on a universe, world or room, and gives it back on Back', async () => {
     const view = await renderShell('/admin/space');
-    const go = (path: string, pop = false) =>
+    // Each step ends its task, as a click or Back in the browser does, so the page settles before the next one.
+    const go = async (path: string, pop = false) => {
       act(() => {
         if (pop) window.dispatchEvent(new PopStateEvent('popstate'));
         mockPathname = path;
@@ -470,30 +471,63 @@ describe('AdminShell', () => {
           </AdminShell>,
         );
       });
+      await endTask();
+    };
     const lit = () =>
       Array.from(screen.getByRole('navigation', { name: 'Orbit sections' }).querySelectorAll('[aria-current="page"]')).map(
         (link) => link.textContent,
       );
     // From Space, a universe and its world stay under Space (a universe used to light You).
-    go('/admin/universes/u-1');
+    await go('/admin/universes/u-1');
     expect(lit()).toEqual(['Space']);
-    go('/admin/worlds/w-1');
+    await go('/admin/worlds/w-1');
     expect(lit()).toEqual(['Space']);
     // From Your universes, the same pages stay under You.
-    go('/admin/universes');
+    await go('/admin/universes');
     expect(lit()).toEqual(['You']);
-    go('/admin/universes/u-1');
+    await go('/admin/universes/u-1');
     expect(lit()).toEqual(['You']);
-    go('/admin/rooms/r-1');
+    await go('/admin/rooms/r-1');
     expect(lit()).toEqual(['You']);
     // Back returns each page with the section it had.
-    go('/admin/universes/u-1', true);
+    await go('/admin/universes/u-1', true);
     expect(lit()).toEqual(['You']);
-    go('/admin/universes', true);
+    await go('/admin/universes', true);
     expect(lit()).toEqual(['You']);
-    go('/admin');
-    go('/admin/rooms/r-1');
+    await go('/admin');
+    await go('/admin/rooms/r-1');
     expect(lit()).toEqual(['Orbit']);
+  });
+
+  it('remembers the section of each visit, when the same page was opened from two places', async () => {
+    const view = await renderShell('/admin/space');
+    // Each step ends its task, as a click or Back in the browser does, so the page settles before the next one.
+    const go = async (path: string, pop = false) => {
+      act(() => {
+        if (pop) window.dispatchEvent(new PopStateEvent('popstate'));
+        mockPathname = path;
+        view.rerender(
+          <AdminShell>
+            <div>page content</div>
+          </AdminShell>,
+        );
+      });
+      await endTask();
+    };
+    const lit = () =>
+      Array.from(screen.getByRole('navigation', { name: 'Orbit sections' }).querySelectorAll('[aria-current="page"]')).map(
+        (link) => link.textContent,
+      );
+    await go('/admin/universes/u-1'); // from Space
+    await go('/admin/universes');
+    await go('/admin/universes/u-1'); // the same universe, now from You
+    expect(lit()).toEqual(['You']);
+    await go('/admin/universes', true);
+    await go('/admin/universes/u-1', true); // Back to the first visit
+    expect(lit()).toEqual(['Space']);
+    await go('/admin/space', true);
+    await go('/admin/universes/u-1', true); // Forward to the first visit again
+    expect(lit()).toEqual(['Space']);
   });
 
   it('puts a universe opened first thing under Space', async () => {

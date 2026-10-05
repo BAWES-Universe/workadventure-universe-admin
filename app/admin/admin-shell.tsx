@@ -34,6 +34,12 @@ function loginRedirect() {
  * re-checks the session in the background (Home also refreshes its numbers); only a session that is gone sends
  * you to sign in.
  */
+/** A page in Orbit's own history, and the section it was lit under. */
+interface HistoryEntry {
+  path: string;
+  section: string;
+}
+
 export default function AdminShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [bootstrap, setBootstrap] = useState<AdminBootstrap | null>(null);
@@ -147,21 +153,20 @@ function ShellChrome({
   const inFrame = useMemo(() => isInsideFrame(), []);
   const route = useMemo(() => resolveRoute(pathname), [pathname]);
 
-  // Orbit's own history this visit: the pages behind (Back) and ahead (Forward), as addresses. A popstate is read by
-  // comparing the new address with both ends, so Back and Forward (the browser's, or ours) keep the stacks right.
-  // A page we don't recognise from either end starts a fresh path. Back goes to the page behind when there is one,
-  // named after it; otherwise the page's parent takes the current page's place.
-  const behind = useRef<string[]>([]);
-  const ahead = useRef<string[]>([]);
+  // Orbit's own history this visit: the pages behind (Back) and ahead (Forward), as addresses, each with the section
+  // it was lit under. A popstate is read by comparing the new address with both ends, so Back and Forward (the
+  // browser's, or ours) keep the stacks right. A page we don't recognise from either end starts a fresh path. Back
+  // goes to the page behind when there is one, named after it; otherwise the page's parent takes the current page's
+  // place.
+  const behind = useRef<HistoryEntry[]>([]);
+  const ahead = useRef<HistoryEntry[]>([]);
   const lastPath = useRef(pathname);
   const popping = useRef(false);
   const replacing = useRef(false);
   const [behindTop, setBehindTop] = useState<string | null>(null);
   // The section lit in the rail and menu (Home, Space or You). A universe, world, room or person is reached from more
-  // than one, so it keeps the section you came from; Back and Forward return each page to the section it had.
+  // than one, so it keeps the section you came from; Back and Forward return each visit to the section it had.
   const [lastSection, setLastSection] = useState(() => sectionOf(pathname, null));
-  const sectionByPath = useRef(new Map<string, string>());
-  // The latest settled section, for a page that settles before the one before it has rendered.
   const litSection = useRef(lastSection);
   const section = sectionOf(pathname, lastSection);
 
@@ -174,10 +179,9 @@ function ShellChrome({
   }, []);
 
   useEffect(() => {
-    const previous = lastPath.current;
-    if (pathname === previous) {
+    const previousPath = lastPath.current;
+    if (pathname === previousPath) {
       popping.current = false;
-      sectionByPath.current.set(pathname, litSection.current);
       return;
     }
     lastPath.current = pathname;
@@ -188,23 +192,20 @@ function ShellChrome({
     const settle = () => {
       if (settled) return;
       settled = true;
-      // Back and Forward give a page the section it had; a new page takes its own, or keeps yours (sectionOf).
-      const remembered = popping.current ? sectionByPath.current.get(pathname) : undefined;
-      const lit = remembered ?? sectionOf(pathname, litSection.current);
-      litSection.current = lit;
-      sectionByPath.current.set(pathname, lit);
-      setLastSection(lit);
+      // The page before is read at settle time: one still settling has taken its section by now.
+      const previous: HistoryEntry = { path: previousPath, section: litSection.current };
+      let lit: string | null = null;
       if (popping.current) {
         // Several Back or Forward presses can land before one render: walk as many steps as the browser did.
-        const back = behind.current.lastIndexOf(pathname);
-        const forward = ahead.current.lastIndexOf(pathname);
+        const back = behind.current.findLastIndex((entry) => entry.path === pathname);
+        const forward = ahead.current.findLastIndex((entry) => entry.path === pathname);
         if (back !== -1) {
           const passed = behind.current.splice(back);
-          passed.shift();
+          lit = passed.shift()!.section;
           ahead.current.push(previous, ...passed.reverse());
         } else if (forward !== -1) {
           const passed = ahead.current.splice(forward);
-          passed.shift();
+          lit = passed.shift()!.section;
           behind.current.push(previous, ...passed.reverse());
         } else {
           behind.current = [];
@@ -214,8 +215,11 @@ function ShellChrome({
         behind.current.push(previous);
         ahead.current = [];
       }
+      lit ??= sectionOf(pathname, previous.section);
+      litSection.current = lit;
+      setLastSection(lit);
       popping.current = false;
-      setBehindTop(behind.current[behind.current.length - 1] ?? null);
+      setBehindTop(behind.current[behind.current.length - 1]?.path ?? null);
     };
     if (popping.current || replaced) {
       settle();
