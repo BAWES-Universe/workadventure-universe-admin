@@ -214,6 +214,11 @@ export default function MapDetailPage() {
     }
   }, [roomsPage, roomsSortBy]);
 
+  // A new create-room dialog starts with no world picked
+  useEffect(() => {
+    if (isCreateRoomDialogOpen) setSelectedWorldId('');
+  }, [isCreateRoomDialogOpen]);
+
   // Reset formData when edit dialog opens
   useEffect(() => {
     if (isEditDialogOpen && map) {

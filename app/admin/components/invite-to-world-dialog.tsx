@@ -59,6 +59,10 @@ export default function InviteToWorldDialog({
 
   useEffect(() => {
     if (open && userId) {
+      // Each open starts blank: a cancelled invite doesn't come back.
+      setSelectedWorldId('');
+      setSelectedTag('member');
+      setMessage('');
       fetchWorlds();
       setError(null);
     }

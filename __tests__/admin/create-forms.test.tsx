@@ -329,6 +329,53 @@ describe('Creation drafts', () => {
   });
 });
 
+describe('Cancel on a create form', () => {
+  const WORLD = { id: 'w1', name: 'Office', slug: 'office', universe: { id: 'ua', name: 'Alpha', slug: 'alpha' } };
+
+  async function typeThenCancel(draftKey: string) {
+    fireEvent.change(await screen.findByLabelText(/Name/), { target: { value: 'Members only' } });
+    await waitFor(() => expect(readDraft<{ name: string }>(draftKey)?.name).toBe('Members only'));
+    fireEvent.click(screen.getByRole('link', { name: 'Cancel' }));
+    expect(readDraft(draftKey)).toBeNull();
+  }
+
+  it('throws away a new world’s draft, so the page opens empty next time', async () => {
+    search = new URLSearchParams('universeId=ua');
+    route({ '/api/admin/universes': { universes: [UNIVERSE_A] } });
+    const { unmount } = render(<NewWorldPage />);
+    await typeThenCancel('world.new:ua');
+    unmount();
+    render(<NewWorldPage />);
+    await screen.findByLabelText(/Name/);
+    expect((screen.getByLabelText(/Name/) as HTMLInputElement).value).toBe('');
+    expect(screen.queryByTestId('draft-notice')).toBeNull();
+  });
+
+  it('throws away a new universe’s draft', async () => {
+    route({});
+    render(<NewUniversePage />);
+    await typeThenCancel('universe.new');
+  });
+
+  it('throws away a new room’s draft', async () => {
+    search = new URLSearchParams('worldId=w1');
+    route({ '/api/admin/worlds/w1': WORLD });
+    render(<NewRoomPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Custom map (advanced)' }));
+    await typeThenCancel('room.new:w1');
+  });
+
+  it('leaving any other way still keeps the draft', async () => {
+    search = new URLSearchParams('universeId=ua');
+    route({ '/api/admin/universes': { universes: [UNIVERSE_A] } });
+    const { unmount } = render(<NewWorldPage />);
+    fireEvent.change(await screen.findByLabelText(/Name/), { target: { value: 'Members only' } });
+    await waitFor(() => expect(readDraft<{ name: string }>('world.new:ua')?.name).toBe('Members only'));
+    unmount();
+    expect(readDraft<{ name: string }>('world.new:ua')?.name).toBe('Members only');
+  });
+});
+
 describe('upgradeFormDraft', () => {
   const EMPTY = { v: FORM_DRAFT_VERSION, name: '', slug: '', addressEdited: false, templateMapId: null as string | null };
 
