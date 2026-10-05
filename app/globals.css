@@ -24,6 +24,12 @@
     border-color: hsl(var(--border));
   }
 
+  /* Tailwind v4 gives buttons the arrow cursor; here anything you can press shows the hand, as links do. */
+  button:not(:disabled),
+  [role='button']:not([aria-disabled='true']) {
+    cursor: pointer;
+  }
+
   :root {
     --background: 220 30% 97%;
     --foreground: 218 40% 12%;
