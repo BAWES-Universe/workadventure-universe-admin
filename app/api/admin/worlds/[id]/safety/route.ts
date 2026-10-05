@@ -149,10 +149,20 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const now = new Date();
 
     if (body.action === 'dismiss' || body.action === 'ban') {
-      const reported = body.person.startsWith('uuid:')
-        ? { reportedUserId: null, reportedUuid: body.person.slice(5) }
-        : { reportedUserId: body.person };
-      const openReports = { worldId: id, status: 'open', ...reported };
+      const byUuid = body.person.startsWith('uuid:');
+      // The player's Orbit record, if Orbit knows them by now
+      const user = await prisma.user.findFirst({
+        where: byUuid ? { uuid: body.person.slice(5) } : { id: body.person },
+        select: { id: true, uuid: true },
+      });
+      // Every open report about them in this world: by game uuid from before Orbit knew them, and by Orbit id since
+      const openReports = {
+        worldId: id,
+        status: 'open',
+        OR: user
+          ? [{ reportedUserId: user.id }, { reportedUserId: null, reportedUuid: user.uuid }]
+          : [byUuid ? { reportedUserId: null, reportedUuid: body.person.slice(5) } : { reportedUserId: body.person }],
+      };
 
       if (body.action === 'dismiss') {
         await prisma.report.updateMany({ where: openReports, data: { status: 'dismissed', handledById: sessionUser.id, handledAt: now } });
@@ -160,10 +170,6 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       }
 
       // A ban needs the player's Orbit record; someone reported only by a game uuid Orbit never saw can't be banned
-      const user = await prisma.user.findFirst({
-        where: 'reportedUserId' in reported && reported.reportedUserId ? { id: reported.reportedUserId } : { uuid: body.person.slice(5) },
-        select: { id: true, uuid: true },
-      });
       if (!user) return NextResponse.json({ error: 'Player not found' }, { status: 404 });
       if (user.id === sessionUser.id) return NextResponse.json({ error: 'You can’t ban yourself' }, { status: 400 });
       const owner = await prisma.world.findFirst({ where: { id, universe: { ownerId: user.id } }, select: { id: true } });
@@ -184,15 +190,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
             expiresAt: banEndsAt(body.duration, now),
           },
         }),
-        // Every open report about them in this world: from before Orbit knew them (by game uuid) and since
-        prisma.report.updateMany({
-          where: {
-            worldId: id,
-            status: 'open',
-            OR: [{ reportedUserId: user.id }, { reportedUserId: null, reportedUuid: user.uuid }],
-          },
-          data: { status: 'banned', handledById: sessionUser.id, handledAt: now },
-        }),
+        prisma.report.updateMany({ where: openReports, data: { status: 'banned', handledById: sessionUser.id, handledAt: now } }),
       ]);
       const sentOut = await sendOutOfWorld(user.uuid, id);
       return NextResponse.json({ ok: true, sentOut });

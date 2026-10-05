@@ -209,6 +209,33 @@ describe('the Safety tab’s actions', () => {
     ]);
   });
 
+  it('dismiss every open report about a player, from before Orbit knew them and since', async () => {
+    session.mockResolvedValue(admin);
+    db.world.findUnique.mockResolvedValue({ universe: { ownerId: 'u-khalid' } });
+    db.worldMember.findFirst.mockResolvedValue({ id: 'm-1' });
+    db.user.findFirst.mockResolvedValue(sam);
+
+    const response = await safety({ action: 'dismiss', person: sam.id });
+
+    expect(response.status).toBe(200);
+    expect(db.report.updateMany.mock.calls[0][0]).toMatchObject({
+      where: { worldId: office.id, status: 'open', OR: [{ reportedUserId: sam.id }, { reportedUserId: null, reportedUuid: sam.uuid }] },
+      data: { status: 'dismissed', handledById: admin.id },
+    });
+  });
+
+  it('dismiss a guest Orbit never saw by their game uuid', async () => {
+    session.mockResolvedValue(admin);
+    db.world.findUnique.mockResolvedValue({ universe: { ownerId: 'u-khalid' } });
+    db.worldMember.findFirst.mockResolvedValue({ id: 'm-1' });
+    db.user.findFirst.mockResolvedValue(null);
+
+    const response = await safety({ action: 'dismiss', person: 'uuid:guest-1' });
+
+    expect(response.status).toBe(200);
+    expect(db.report.updateMany.mock.calls[0][0].where.OR).toEqual([{ reportedUserId: null, reportedUuid: 'guest-1' }]);
+  });
+
   it('leave a ban that already ran out alone', async () => {
     session.mockResolvedValue(admin);
     db.world.findUnique.mockResolvedValue({ universe: { ownerId: 'u-khalid' } });
