@@ -265,6 +265,12 @@ describe('/api/friends', () => {
         'https://play.example/~/maps/x.wam': null,
       },
     });
+    db.rooms.push({ universe: 'bawes', universeName: 'Bawes', world: 'hub', worldName: 'Hub', slug: 'café corner', name: 'Café' });
+    const encoded = 'https://play.example/@/bawes/hub/caf%C3%A9%20corner';
+    const malformed = 'https://play.example/@/bawes/hub/50%';
+    expect(await (await send(places, '/places', 'POST', { playUris: [encoded, malformed] })).json()).toEqual({
+      places: { [encoded]: { universe: 'Bawes', world: 'Hub', room: 'Café' }, [malformed]: null },
+    });
     expect((await send(places, '/places', 'POST', { playUris: Array(51).fill(known) })).status).toBe(400);
     expect((await send(places, '/places', 'POST', { playUris: [1] })).status).toBe(400);
     expect((await send(places, '/places', 'POST', { playUris: [known] }, {} as typeof auth)).status).toBe(401);
