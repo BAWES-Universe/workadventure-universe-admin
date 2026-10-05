@@ -42,7 +42,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
             thumbnailUrl: true,
             universe: { select: { id: true, name: true, slug: true } },
             _count: { select: { rooms: true, members: true } },
-            rooms: { select: { slug: true }, orderBy: { createdAt: 'asc' }, take: 1 },
+            rooms: { select: { slug: true, name: true }, orderBy: { createdAt: 'asc' }, take: 1 },
             members: {
               select: { user: { select: { id: true, name: true } } },
               orderBy: { joinedAt: 'asc' },
@@ -85,7 +85,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
           thumbnailUrl: world.thumbnailUrl,
           universe: world.universe,
           counts: { rooms: world._count.rooms, members: world._count.members },
-          firstRoom: world.rooms[0] ? { slug: world.rooms[0].slug } : null,
+          firstRoom: world.rooms[0] ? { slug: world.rooms[0].slug, name: world.rooms[0].name } : null,
           members: people.map((person) => ({ id: person.id, name: person.name, woka: wokas.get(person.id) ?? [] })),
         },
       },

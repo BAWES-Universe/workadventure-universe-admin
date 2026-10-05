@@ -40,7 +40,7 @@ const record = {
     thumbnailUrl: null,
     universe: { id: 'un-1', name: 'Plugn', slug: 'plugn' },
     _count: { rooms: 3, members: 9 },
-    rooms: [{ slug: 'lobby' }],
+    rooms: [{ slug: 'lobby', name: 'Lobby' }],
     members: [
       { user: { id: 'u-sara', name: 'Sara' } },
       { user: { id: 'u-omar', name: 'Omar' } },
@@ -83,7 +83,7 @@ describe('GET /api/memberships/invitations/[id]', () => {
         thumbnailUrl: null,
         universe: { id: 'un-1', name: 'Plugn', slug: 'plugn' },
         counts: { rooms: 3, members: 9 },
-        firstRoom: { slug: 'lobby' },
+        firstRoom: { slug: 'lobby', name: 'Lobby' },
       },
     });
     expect(invitation.invitedAt).toBeTruthy();

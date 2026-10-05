@@ -21,6 +21,8 @@ import {
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Loader2, AlertCircle, UserPlus } from 'lucide-react';
 import { useToast } from '@/components/ui/toast';
+import { cn } from '@/lib/utils';
+import { BUILT_IN_ROLES } from '../invitations/invitation-role';
 
 interface World {
   id: string;
@@ -37,17 +39,22 @@ interface InviteToWorldDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   userId: string;
+  /** Who is being invited, for the title and the toast. */
+  userName?: string;
   onInviteSent: () => void;
 }
 
-const AVAILABLE_TAGS = ['admin', 'editor', 'member'];
+/** Member first: the usual answer, and the one that gives the least. */
+const ROLE_CHOICES = [...BUILT_IN_ROLES].reverse();
 
 export default function InviteToWorldDialog({
   open,
   onOpenChange,
   userId,
+  userName,
   onInviteSent,
 }: InviteToWorldDialogProps) {
+  const who = userName || 'this person';
   const [worlds, setWorlds] = useState<World[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -56,6 +63,7 @@ export default function InviteToWorldDialog({
   const [message, setMessage] = useState('');
   const [sending, setSending] = useState(false);
   const { addToast } = useToast();
+  const selectedWorld = worlds.find((world) => world.id === selectedWorldId);
 
   useEffect(() => {
     if (open && userId) {
@@ -108,7 +116,7 @@ export default function InviteToWorldDialog({
 
       // Show toast and close immediately
       addToast({
-        description: 'Invitation sent successfully!',
+        description: `Invitation sent to ${who}.`,
         variant: 'success',
       });
       
@@ -131,9 +139,9 @@ export default function InviteToWorldDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="rounded-lg">
         <DialogHeader>
-          <DialogTitle>Invite to World</DialogTitle>
+          <DialogTitle>Invite {who} to become a member</DialogTitle>
           <DialogDescription>
-            Select a world to invite this user to.
+            Members can enter the world’s members-only rooms. Public rooms are open to everyone, no invitation needed.
           </DialogDescription>
         </DialogHeader>
 
@@ -154,7 +162,7 @@ export default function InviteToWorldDialog({
               <Label htmlFor="world">World</Label>
               <Select value={selectedWorldId} onValueChange={setSelectedWorldId}>
                 <SelectTrigger id="world" className="mt-1">
-                  <SelectValue placeholder="Select a world" />
+                  <SelectValue placeholder="Pick a world" />
                 </SelectTrigger>
                 <SelectContent>
                   {worlds.length === 0 ? (
@@ -174,34 +182,61 @@ export default function InviteToWorldDialog({
 
             {selectedWorldId && (
               <>
-                <div>
-                  <Label htmlFor="role">Role</Label>
-                  <Select value={selectedTag} onValueChange={setSelectedTag}>
-                    <SelectTrigger id="role" className="mt-1">
-                      <SelectValue placeholder="Select a role" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {AVAILABLE_TAGS.map(tag => (
-                        <SelectItem key={tag} value={tag}>
-                          <span className="capitalize">{tag}</span>
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
+                <fieldset>
+                  <legend className="text-sm font-medium">As</legend>
+                  <div className="mt-1 grid gap-2" role="radiogroup">
+                    {ROLE_CHOICES.map((role) => {
+                      const picked = selectedTag === role.tag;
+                      return (
+                        <button
+                          key={role.tag}
+                          type="button"
+                          role="radio"
+                          aria-checked={picked}
+                          onClick={() => setSelectedTag(role.tag)}
+                          className={cn(
+                            'flex items-start gap-3 rounded-2xl border p-3 text-left transition-colors',
+                            picked ? 'border-[#8629fc] bg-[#8629fc]/10' : 'border-foreground/15 hover:border-foreground/30 hover:bg-foreground/5',
+                          )}
+                        >
+                          <span
+                            className={cn(
+                              'mt-0.5 grid h-4 w-4 flex-none place-items-center rounded-full border',
+                              picked ? 'border-[#8629fc]' : 'border-foreground/40',
+                            )}
+                            aria-hidden="true"
+                          >
+                            {picked && <span className="h-2 w-2 rounded-full bg-[image:var(--brand-gradient)]" />}
+                          </span>
+                          <span>
+                            <span className="block text-sm font-semibold capitalize">{role.tag}</span>
+                            <span className="block text-[13px] text-muted-foreground">Can {role.can}.</span>
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </fieldset>
 
                 <div>
-                  <Label htmlFor="invite-message">Message (Optional)</Label>
+                  <Label htmlFor="invite-message">Message (optional)</Label>
                   <Textarea
                     id="invite-message"
                     rows={3}
                     value={message}
                     onChange={(e) => setMessage(e.target.value)}
-                    placeholder="Add a personal message to the invitation..."
+                    placeholder="Say why you’re inviting them"
                     className="mt-1"
                   />
                 </div>
               </>
+            )}
+
+            {selectedWorld && (
+              <p className="text-sm text-muted-foreground" data-testid="invite-summary">
+                {who} gets an invitation and becomes {selectedTag === 'admin' ? 'an Admin' : selectedTag === 'editor' ? 'an Editor' : 'a Member'}{' '}
+                of {selectedWorld.name} once they accept.
+              </p>
             )}
 
             <div className="flex justify-end gap-2">
@@ -215,12 +250,12 @@ export default function InviteToWorldDialog({
                 {sending ? (
                   <>
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Sending...
+                    Sending…
                   </>
                 ) : (
                   <>
                     <UserPlus className="mr-2 h-4 w-4" />
-                    Send Invitation
+                    Send invitation
                   </>
                 )}
               </Button>

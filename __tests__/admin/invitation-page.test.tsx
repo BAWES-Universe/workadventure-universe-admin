@@ -46,7 +46,7 @@ function invitation(overrides: Record<string, unknown> = {}) {
       thumbnailUrl: null,
       universe: { id: 'un-1', name: 'Plugn', slug: 'plugn' },
       counts: { rooms: 3, members: 9 },
-      firstRoom: { slug: 'lobby' },
+      firstRoom: { slug: 'lobby', name: 'Lobby' },
       members: [{ id: 'u-sara', name: 'Sara', woka: ['https://play.test/sara.png'] }],
     },
     ...overrides,
@@ -123,6 +123,13 @@ describe('The invitation page', () => {
     }
   });
 
+  it('says who invited you to become what', async () => {
+    routeDetail({ invitation: invitation({ tags: ['editor'] }) });
+    renderPage();
+    const lead = await screen.findByTestId('invitation-lead');
+    expect(lead.textContent).toMatch(/invited you to become an editor of Studio\. Accept to join its members\./);
+  });
+
   it('describes a custom role by name', async () => {
     routeDetail({ invitation: invitation({ tags: ['dj'] }) });
     renderPage();
@@ -139,10 +146,11 @@ describe('The invitation page', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Accept' }));
     const done = await screen.findByTestId('invitation-accepted');
     expect(done.textContent).toMatch(/You’re a member of Studio/);
+    expect(done.textContent).toMatch(/Visiting takes you to Lobby, the world’s first room\./);
     expect(fetchMock).toHaveBeenCalledWith('/api/memberships/invitations/inv-1/accept', { method: 'POST' });
     expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/accept'))).toHaveLength(1);
     expect(within(done).getByRole('link', { name: 'Open Studio’s page' }).getAttribute('href')).toBe('/admin/worlds/w-1');
-    await act(async () => fireEvent.click(within(done).getByRole('button', { name: 'Visit Studio' })));
+    await act(async () => fireEvent.click(within(done).getByRole('button', { name: 'Go to Lobby' })));
     expect(wa.navigateToRoom).toHaveBeenCalledWith('/@/plugn/studio/lobby');
     expect((refresh.mock.calls[0][0] as CustomEvent).detail).toEqual({ topic: 'memberships' });
     expect(screen.queryByTestId('invitation-actions')).toBeNull();
@@ -154,7 +162,7 @@ describe('The invitation page', () => {
     renderPage(game(false));
     fireEvent.click(await screen.findByRole('button', { name: 'Accept' }));
     await screen.findByTestId('invitation-accepted');
-    expect(screen.queryByRole('button', { name: /Visit/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Go to/ })).toBeNull();
   });
 
   it('declining asks first, then says it is done', async () => {

@@ -448,7 +448,7 @@ export default function UserDetailPage() {
           canInvite ? (
             <Button onClick={() => setInviteDialogOpen(true)} className="h-10 shrink-0 gap-2 px-4">
               <UserPlus size={15} aria-hidden="true" />
-              Invite to a world
+              Invite as member
             </Button>
           ) : undefined
         }
@@ -710,6 +710,7 @@ export default function UserDetailPage() {
       )}
 
       <InviteToWorldDialog
+        userName={user.name || undefined}
         open={inviteDialogOpen}
         onOpenChange={setInviteDialogOpen}
         userId={id}

@@ -21,7 +21,7 @@ import {
 import { PersonIcon, WokaAvatar } from '../../components/profile-card';
 import { ORBIT_REFRESH_EVENT } from '../../components/orbit-bridge';
 import { useWorkAdventure } from '../../workadventure-context';
-import { DeclineWithConfirm, declineInvitation, describeRole } from '../invitation-role';
+import { DeclineWithConfirm, declineInvitation, describeRole, roleLabel } from '../invitation-role';
 
 interface Person {
   id: string;
@@ -46,7 +46,7 @@ interface InvitationDetail {
     thumbnailUrl: string | null;
     universe: { id: string; name: string; slug: string };
     counts: { rooms: number; members: number };
-    firstRoom: { slug: string } | null;
+    firstRoom: { slug: string; name: string } | null;
     members: Person[];
   };
 }
@@ -172,6 +172,12 @@ export default function InvitationPage() {
         </section>
       ) : (
         invitation.status !== 'pending' && <Answered invitation={invitation} />
+      )}
+
+      {waiting && (
+        <p className="text-[15px] text-foreground/85" data-testid="invitation-lead">
+          {inviterName} invited you to become {roleLabel(invitation.tags)} of {world.name}. Accept to join its members.
+        </p>
       )}
 
       <section aria-labelledby="invitation-from" className="space-y-3">
@@ -337,6 +343,9 @@ function Accepted({ invitation }: { invitation: InvitationDetail }) {
       <p className="text-[15px] font-semibold" role="status">
         You’re a member of {world.name}
       </p>
+      {world.firstRoom && (
+        <p className="text-sm text-muted-foreground">Visiting takes you to {world.firstRoom.name}, the world’s first room.</p>
+      )}
       {error && (
         <p className="text-sm text-destructive" role="alert">
           {error}
@@ -345,7 +354,7 @@ function Accepted({ invitation }: { invitation: InvitationDetail }) {
       <div className="flex flex-wrap gap-2">
         {isReady && roomUrl && (
           <Button type="button" className="h-11 px-6" disabled={going} onClick={() => void visit()} data-testid="invitation-visit">
-            {going ? 'Going…' : `Visit ${world.name}`}
+            {going ? 'Going…' : `Go to ${world.firstRoom?.name ?? world.name}`}
           </Button>
         )}
         <Button asChild variant="outline" className="h-11 px-5">
