@@ -17,6 +17,7 @@ import {
 } from '../components/ds';
 import { isNamed, isRecord, useCollection, type Collection } from '../hooks/use-collection';
 import { WokaAvatar } from '../components/profile-card';
+import { LiveNow } from '../components/live/live-now';
 import styles from './space.module.css';
 
 interface Universe {
@@ -114,6 +115,8 @@ export default function SpacePage() {
           Nothing matches “{search}”. Try a shorter word, or a person’s name.
         </p>
       )}
+
+      {!searching && <LiveNow layout="space" />}
 
       <Section
         id="space-universes"
