@@ -113,8 +113,9 @@ export function resetPresenceCache(): void {
   inFlight = null;
 }
 
+/** A room's address as one map key. JSON keeps the three slugs apart even when a slug holds a "/". */
 function slugKey(universe: string, world: string, room: string): string {
-  return `${universe}/${world}/${room}`;
+  return JSON.stringify([universe, world, room]);
 }
 
 function keyOf(playUri: string): string | null {
@@ -169,7 +170,7 @@ export async function buildLiveView(snapshot: PresenceSnapshot, viewer: SessionU
   const rooms = await prisma.room.findMany({
     where: {
       OR: keys.map((key) => {
-        const [universe, world, room] = key.split('/');
+        const [universe, world, room] = JSON.parse(key) as [string, string, string];
         return { slug: room, world: { slug: world, universe: { slug: universe } } };
       }),
     },
