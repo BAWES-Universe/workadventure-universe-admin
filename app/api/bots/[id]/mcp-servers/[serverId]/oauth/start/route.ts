@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { resolveRequestedScopes } from '@/lib/mcp/oauth-token';
 import { getSessionUser } from '@/lib/auth-session';
-import { isSuperAdmin } from '@/lib/super-admin';
+import { canManageBotMcpServers } from '@/lib/bot-permissions';
 import { decryptApiKey, encryptApiKey } from '@/lib/encryption';
 import { getOAuthCallbackUrl, getOAuthCallbackBase, validateOAuthCallbackUrl } from '@/lib/oauth-callback';
 import crypto from 'crypto';
@@ -77,22 +77,20 @@ export async function GET(
     // Load the MCP server config
     const server = await prisma.botMcpServer.findUnique({
       where: { id: serverId },
-      include: { bot: { select: { id: true, createdById: true, name: true } } },
+      include: { bot: { select: { id: true, createdById: true, roomId: true, name: true } } },
     });
 
     if (!server || server.botId !== botId) {
       return NextResponse.json({ error: 'Server not found' }, { status: 404, headers: corsHeaders(request) });
     }
 
-    // Gate: admin token or bot owner
+    // Gate: admin token, or someone who can manage this bot's MCP servers
     if (!isAdminToken) {
       const actorUser = await prisma.user.findUnique({
         where: { id: userId! },
         select: { email: true },
       });
-      const isOwner = server.bot.createdById === userId;
-      const isSuper = actorUser ? isSuperAdmin(actorUser.email) : false;
-      if (!isOwner && !isSuper) {
+      if (!(await canManageBotMcpServers(userId!, actorUser?.email ?? null, server.bot))) {
         return NextResponse.json({ error: 'Forbidden' }, { status: 403, headers: corsHeaders(request) });
       }
     }
