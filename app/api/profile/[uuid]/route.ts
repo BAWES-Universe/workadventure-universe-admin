@@ -46,12 +46,16 @@ const LINK_ICON = `<svg class="link-icon" fill="none" stroke="currentColor" view
  * Someone's profile: their words and links. Embedded (the game's card under their avatar and name), it sits straight
  * on the game's dark panel with no name of its own and no page colour: it declares a dark scheme, as the panel is,
  * so the browser never paints the frame white behind it. On its own it is a small dark page with the name.
+ * Someone who has written nothing and added no links gets no line saying so: the embedded card is then empty and
+ * zero high, so the game's popup simply ends under their name.
  */
 function renderHTML(data: { name?: string; bio?: string; links: Array<{ label: string; url: string }> }, isEmbedded: boolean) {
   const name = escapeHtml(data.name);
   const bio = escapeHtml(data.bio);
   const links = data.links ?? [];
   const empty = !data.bio && links.length === 0;
+  // Nothing to show inside the game's card: no padding either, or the card would leave an empty band.
+  const hideBody = isEmbedded && empty;
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -75,7 +79,6 @@ function renderHTML(data: { name?: string; bio?: string; links: Array<{ label: s
     .link-item:focus-visible { outline: 2px solid #8b5cf6; outline-offset: 2px; }
     .link-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .link-icon { flex: none; width: 16px; height: 16px; color: rgb(255 255 255 / 0.6); }
-    .empty { font-size: 14px; color: rgb(255 255 255 / 0.55); text-align: center; }
     @media (prefers-reduced-motion: reduce) { .link-item { transition: none; } }
   </style>
   ${isEmbedded ? `
@@ -117,7 +120,7 @@ function renderHTML(data: { name?: string; bio?: string; links: Array<{ label: s
   ` : ''}
 </head>
 <body>
-  <main class="profile">
+  ${hideBody ? '' : `<main class="profile">
     ${!isEmbedded && name ? `<h1>${name}</h1>` : ''}
     ${bio ? `<p class="bio">${bio}</p>` : ''}
     ${links.length > 0 ? `
@@ -131,8 +134,7 @@ function renderHTML(data: { name?: string; bio?: string; links: Array<{ label: s
         `).join('')}
       </nav>
     ` : ''}
-    ${empty ? '<p class="empty">No profile yet.</p>' : ''}
-  </main>
+  </main>`}
 </body>
 </html>`;
 }
