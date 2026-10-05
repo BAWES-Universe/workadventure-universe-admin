@@ -13,7 +13,7 @@ jest.mock('@/lib/db', () => ({
     room: { findMany: jest.fn(), count: jest.fn(), findFirst: jest.fn() },
     user: { findUnique: jest.fn(), count: jest.fn() },
     favorite: { groupBy: jest.fn(), count: jest.fn() },
-    worldMember: { findMany: jest.fn(), count: jest.fn() },
+    worldMember: { findMany: jest.fn(), findUnique: jest.fn(), count: jest.fn() },
     membershipInvitation: { count: jest.fn() },
     roomAccess: { findMany: jest.fn() },
   },
@@ -284,7 +284,8 @@ describe('Your worlds and the worlds you manage', () => {
 describe('A world’s members', () => {
   it('never include the System account', async () => {
     (getSessionUser as jest.Mock).mockResolvedValue({ id: 'me' });
-    db.world.findUnique.mockResolvedValue({ universe: { ownerId: 'owner' }, members: [] });
+    // A public world in a public universe, so anyone signed in may see its members
+    db.world.findUnique.mockResolvedValue({ id: 'w', isPublic: true, universe: { isPublic: true, ownerId: 'owner' }, members: [] });
     db.worldMember.findMany.mockResolvedValue([]);
     db.roomAccess.findMany.mockResolvedValue([]);
     await worldMembers(session('/api/admin/worlds/w/members'), { params: Promise.resolve({ id: 'w' }) });
