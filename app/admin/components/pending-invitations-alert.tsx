@@ -8,7 +8,9 @@ import { PersonIcon } from './profile-card';
 import { Button } from '@/components/ui/button';
 import { authenticatedFetch } from '@/lib/client-auth';
 import { timeAgo } from '@/lib/time-ago';
+import { INVITATIONS_DISMISSED_KEY } from '@/lib/user-preferences';
 import { DeclineWithConfirm, declineInvitation, roleLabel } from '../invitations/invitation-role';
+import { announceAttentionChanged } from './shell/attention-badge';
 
 interface Invitation {
   id: string;
@@ -19,8 +21,6 @@ interface Invitation {
   invitedAt: string;
 }
 
-/** Where the dismissal lives on the account (see lib/user-preferences.ts), so it holds on every device. */
-export const INVITATIONS_DISMISSED_KEY = 'guidance.dismissed.invitations';
 /** The most recent dismissed invitation ids kept; older ones are gone from the account anyway. */
 const DISMISSED_IDS_KEPT = 40;
 
@@ -45,6 +45,7 @@ async function writeDismissed(ids: string[]): Promise<void> {
   } catch {
     // The dismissal still holds for this visit.
   }
+  announceAttentionChanged();
 }
 
 /**

@@ -3,6 +3,7 @@
 import { useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { authenticatedFetch } from '@/lib/client-auth';
+import { announceAttentionChanged } from '../components/shell/attention-badge';
 
 /**
  * What an invitation's role lets you do, in plain words. Kept in one place so it can later read from the world's
@@ -40,6 +41,7 @@ export function roleLabel(tags: string[] | null | undefined): string {
 export async function declineInvitation(id: string, worldName: string): Promise<void> {
   const response = await authenticatedFetch(`/api/memberships/invitations/${id}/reject`, { method: 'POST' });
   if (!response.ok) throw new Error(`Couldn’t decline the invitation to ${worldName}. Try again.`);
+  announceAttentionChanged();
 }
 
 /**
