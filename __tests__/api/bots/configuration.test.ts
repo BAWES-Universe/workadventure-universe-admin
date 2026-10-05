@@ -328,6 +328,47 @@ describe('/api/bots/configuration', () => {
     });
   });
 
+  describe('companion', () => {
+    const botId = '00000000-0000-4000-8000-000000000001';
+
+    it('saves the companion on create', async () => {
+      const response = await POST(configRequest({ ...validBody, companionTextureId: 'dog1' }));
+
+      expect(response.status).toBe(201);
+      const data = (prisma.bot.create as jest.Mock).mock.calls[0][0].data;
+      expect(data.companionTextureId).toBe('dog1');
+    });
+
+    it('stores null on create when no companion is given', async () => {
+      await POST(configRequest(validBody));
+
+      const data = (prisma.bot.create as jest.Mock).mock.calls[0][0].data;
+      expect(data.companionTextureId).toBeNull();
+    });
+
+    it('keeps the saved companion when an update omits it', async () => {
+      await POST(configRequest({ ...validBody, botId }));
+
+      const data = (prisma.bot.update as jest.Mock).mock.calls[0][0].data;
+      expect(data.companionTextureId).toBeUndefined();
+    });
+
+    it('updates and clears the companion', async () => {
+      await POST(configRequest({ ...validBody, botId, companionTextureId: 'cat2' }));
+      expect((prisma.bot.update as jest.Mock).mock.calls[0][0].data.companionTextureId).toBe('cat2');
+
+      await POST(configRequest({ ...validBody, botId, companionTextureId: null }));
+      expect((prisma.bot.update as jest.Mock).mock.calls[1][0].data.companionTextureId).toBeNull();
+    });
+
+    it('rejects a companion id longer than 100 characters', async () => {
+      const response = await POST(configRequest({ ...validBody, companionTextureId: 'x'.repeat(101) }));
+
+      expect(response.status).toBe(400);
+      expect(prisma.bot.create).not.toHaveBeenCalled();
+    });
+  });
+
   describe('IDOR guard — cross-room bot update (session user path)', () => {
     const botId = '00000000-0000-4000-8000-000000000002';
 

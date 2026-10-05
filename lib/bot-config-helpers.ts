@@ -160,6 +160,7 @@ export async function transformBotToServerFormat(
     chatInstructions: bot.chatInstructions || null,
     movementInstructions: bot.movementInstructions || null,
     toolTimeoutSeconds: bot.toolTimeoutSeconds ?? null,
+    companionTextureId: bot.companionTextureId ?? null,
   };
   
   // Include parsed AI provider data only if requested and user has permission
