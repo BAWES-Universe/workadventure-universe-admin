@@ -218,7 +218,10 @@ export async function GET(request: NextRequest) {
         // Only include mapUrl if wamUrl is not available (as fallback)
         ...(!wamUrl && { mapUrl: roomData.mapUrl }),
         editable: editable,
-        authenticationMandatory: roomData.authenticationMandatory || false,
+        // Members-only rooms ask guests to sign in first, so Orbit can then check whether they are members
+        authenticationMandatory:
+          roomData.authenticationMandatory ||
+          !(roomData.isPublic && roomData.world.isPublic && roomData.world.universe.isPublic),
         roomName: roomData.name,
         metatags: {
           title: "Universe | " + roomData.world.universe.name + " > " + roomData.world.name + " > " + roomData.name,
