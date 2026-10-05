@@ -90,6 +90,19 @@ export default function CategoryDetailPage() {
     }
   }, [categoryId]);
 
+  // Reset formData when edit dialog opens, so a cancelled edit doesn't come back
+  useEffect(() => {
+    if (isEditDialogOpen && category) {
+      setFormData({
+        name: category.name,
+        description: category.description || '',
+        icon: category.icon || '',
+        order: category.order,
+        isActive: category.isActive,
+      });
+    }
+  }, [isEditDialogOpen, category]);
+
   async function fetchData() {
     try {
       setLoading(true);

@@ -108,6 +108,24 @@ export default function TemplateDetailPage() {
     }
   }, [params.id]);
 
+  // Reset formData when edit dialog opens, so a cancelled edit doesn't come back
+  useEffect(() => {
+    if (isEditDialogOpen && template) {
+      setFormData({
+        categoryId: template.category.id,
+        name: template.name,
+        shortDescription: template.shortDescription || '',
+        philosophy: template.philosophy || '',
+        purpose: template.purpose || '',
+        whoItsFor: template.whoItsFor || '',
+        typicalUseCases: template.typicalUseCases.join('\n'),
+        visibility: template.visibility,
+        isFeatured: template.isFeatured,
+        isActive: template.isActive,
+      });
+    }
+  }, [isEditDialogOpen, template]);
+
   async function fetchData() {
     try {
       setLoading(true);

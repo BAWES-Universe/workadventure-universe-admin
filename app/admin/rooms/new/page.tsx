@@ -675,7 +675,7 @@ function NewRoomPageContent() {
 
             <div className="flex flex-col-reverse gap-3 pt-2 sm:flex-row sm:justify-end">
               <Button type="button" variant="outline" className="h-11" asChild>
-                <Link href={formData.worldId ? `/admin/worlds/${formData.worldId}` : '/admin'}>
+                <Link href={formData.worldId ? `/admin/worlds/${formData.worldId}` : '/admin'} onClick={discardDraft}>
                   Cancel
                 </Link>
               </Button>

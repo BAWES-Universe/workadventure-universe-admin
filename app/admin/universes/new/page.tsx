@@ -275,7 +275,9 @@ function NewUniversePageContent() {
 
             <div className="flex flex-col-reverse gap-3 pt-2 sm:flex-row sm:justify-end">
               <Button type="button" variant="outline" className="h-11" asChild>
-                <Link href="/admin/universes">Cancel</Link>
+                <Link href="/admin/universes" onClick={discardDraft}>
+                  Cancel
+                </Link>
               </Button>
               <Button type="submit" className="h-11" disabled={loading}>
                 {loading ? (
