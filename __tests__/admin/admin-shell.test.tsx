@@ -53,6 +53,12 @@ jest.mock('@/lib/orbit-frame', () => ({
   isInsideFrame: () => true,
   postToGame: jest.fn(),
 }));
+// The count on You has its own fetch and tests (attention-badge.test.tsx); here it would answer the shell's requests.
+jest.mock('@/app/admin/components/shell/attention-badge', () => ({
+  AttentionBadge: () => null,
+  useAttentionCount: () => 0,
+  announceAttentionChanged: () => undefined,
+}));
 let mockOnRefresh: (() => void) | null = null;
 jest.mock('@/app/admin/components/orbit-bridge', () => ({
   __esModule: true,

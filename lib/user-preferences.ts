@@ -5,6 +5,9 @@
 
 export const PREFERENCE_VALUE_MAX_BYTES = 2048;
 
+/** Invitations dismissed on Orbit home, `{ ids }`: hidden there and left out of the count on You. */
+export const INVITATIONS_DISMISSED_KEY = 'guidance.dismissed.invitations';
+
 const FIXED_PREFERENCE_KEYS = new Set(['orbit.introSeen', 'quests.invitationDeclined']);
 
 /** `guidance.dismissed.<id>`: id is 1-64 chars of letters, digits, `_` or `-`. */

@@ -7,6 +7,7 @@ import { cn } from '@/lib/utils';
 import { DESTINATIONS } from '../../config/navigation';
 import { useOrbitFrame } from '../../orbit-frame-context';
 import { rootOf } from './root-of';
+import { AttentionBadge, useAttentionCount } from './attention-badge';
 
 /**
  * You, Orbit and Space on the three root pages, within a thumb's reach on a phone and as a strip under the bar on
@@ -17,6 +18,7 @@ export function BottomNav() {
   const pathname = usePathname();
   const { route } = useOrbitFrame();
   const root = rootOf(pathname);
+  const attention = useAttentionCount();
   if (route.parent !== null) return null;
   const activeIndex = DESTINATIONS.findIndex((item) => item.href === root);
   const slots = DESTINATIONS.length;
@@ -51,6 +53,7 @@ export function BottomNav() {
                 active ? 'text-white' : 'text-muted-foreground hover:text-foreground',
               )}
             >
+              {item.href === '/admin/you' && <AttentionBadge count={attention} className="left-[calc(50%-2.4rem)] top-1" />}
               <Icon className="h-[18px] w-[18px]" strokeWidth={active ? 2.4 : 2} aria-hidden="true" />
               {item.label}
             </Link>
