@@ -7,6 +7,7 @@ import { validateAccessToken } from '@/lib/oidc';
 import { parsePlayUri } from '@/lib/utils';
 import { z } from 'zod';
 import { checkAiProviderRef } from '@/lib/ai-provider-ref';
+import { toolTimeoutSecondsSchema } from '@/lib/bot-tool-timeout';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Prisma
 export const runtime = 'nodejs';
@@ -106,6 +107,7 @@ const updateBotSchema = z.object({
   chatInstructions: z.string().optional().nullable(),
   movementInstructions: z.string().optional().nullable(),
   aiProviderRef: z.string().max(100, 'aiProviderRef must be at most 100 characters').optional().nullable(),
+  toolTimeoutSeconds: toolTimeoutSecondsSchema,
 });
 
 // Helper function to transform bot data from database to API response (snake_case to camelCase)
@@ -122,6 +124,7 @@ function transformBot(bot: any) {
     chatInstructions: bot.chatInstructions,
     movementInstructions: bot.movementInstructions,
     aiProviderRef: bot.aiProviderRef,
+    toolTimeoutSeconds: bot.toolTimeoutSeconds ?? null,
     createdAt: bot.createdAt,
     updatedAt: bot.updatedAt,
     // Who made or last changed a bot is shown by name only: people's emails are private
@@ -454,6 +457,7 @@ export async function PUT(
     if (validatedData.chatInstructions !== undefined) updateData.chatInstructions = validatedData.chatInstructions;
     if (validatedData.movementInstructions !== undefined) updateData.movementInstructions = validatedData.movementInstructions;
     if (validatedData.aiProviderRef !== undefined) updateData.aiProviderRef = validatedData.aiProviderRef;
+    if (validatedData.toolTimeoutSeconds !== undefined) updateData.toolTimeoutSeconds = validatedData.toolTimeoutSeconds;
 
     // Update bot (updatedAt is automatically updated by Prisma)
     // Always update updatedById when any field changes

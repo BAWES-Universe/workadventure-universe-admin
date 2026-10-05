@@ -7,6 +7,7 @@ import { parsePlayUri } from '@/lib/utils';
 import { validateAccessToken } from '@/lib/oidc';
 import { z } from 'zod';
 import { checkAiProviderRef } from '@/lib/ai-provider-ref';
+import { toolTimeoutSecondsSchema } from '@/lib/bot-tool-timeout';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Prisma
 export const runtime = 'nodejs';
@@ -44,6 +45,7 @@ const createBotSchema = z.object({
   chatInstructions: z.string().optional().nullable(),
   movementInstructions: z.string().optional().nullable(),
   aiProviderRef: z.string().max(100, 'aiProviderRef must be at most 100 characters').optional().nullable(),
+  toolTimeoutSeconds: toolTimeoutSecondsSchema,
 });
 
 // Helper function to transform bot data from database to API response (snake_case to camelCase)
@@ -60,6 +62,7 @@ function transformBot(bot: any) {
     chatInstructions: bot.chatInstructions,
     movementInstructions: bot.movementInstructions,
     aiProviderRef: bot.aiProviderRef,
+    toolTimeoutSeconds: bot.toolTimeoutSeconds ?? null,
     createdAt: bot.createdAt,
     updatedAt: bot.updatedAt,
     // Who made or last changed a bot is shown by name only: people's emails are private
@@ -479,6 +482,7 @@ export async function POST(request: NextRequest) {
         chatInstructions: validatedData.chatInstructions ?? null,
         movementInstructions: validatedData.movementInstructions ?? null,
         aiProviderRef: validatedData.aiProviderRef ?? null,
+        toolTimeoutSeconds: validatedData.toolTimeoutSeconds ?? null,
         createdById: userId ?? null,
         updatedById: userId ?? null,
       },
