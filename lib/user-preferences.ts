@@ -8,7 +8,10 @@ export const PREFERENCE_VALUE_MAX_BYTES = 2048;
 /** Invitations dismissed on Orbit home, `{ ids }`: hidden there and left out of the count on You. */
 export const INVITATIONS_DISMISSED_KEY = 'guidance.dismissed.invitations';
 
-const FIXED_PREFERENCE_KEYS = new Set(['orbit.introSeen', 'quests.invitationDeclined']);
+/** Live now's own switch: true drops you out of Live now and its counts (see lib/live-presence.ts). */
+export const HIDE_LOCATION_KEY = 'people.hideLocation';
+
+const FIXED_PREFERENCE_KEYS = new Set(['orbit.introSeen', 'quests.invitationDeclined', HIDE_LOCATION_KEY]);
 
 /** `guidance.dismissed.<id>`: id is 1-64 chars of letters, digits, `_` or `-`. */
 const GUIDANCE_DISMISSED_KEY = /^guidance\.dismissed\.[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
