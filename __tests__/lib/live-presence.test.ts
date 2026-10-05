@@ -90,7 +90,7 @@ describe('buildLiveView', () => {
     expect(view.people.find((person) => person.name === 'Omar')?.place.name).toBe('Vault');
   });
 
-  it('keeps a room whose slug holds a "/"', async () => {
+  it('keeps a room whose slug holds a "/", and encodes it in the path to the room', async () => {
     const room = { ...ROOMS[0], id: 'r-team', name: 'Team A', slug: 'team/a' };
     db.room.findMany.mockResolvedValue([room]);
     const uri = `${PLAY}/@/acme/office/team%2Fa`;
@@ -101,7 +101,7 @@ describe('buildLiveView', () => {
     expect(db.room.findMany.mock.calls[0][0].where.OR).toEqual([
       { slug: 'team/a', world: { slug: 'office', universe: { slug: 'acme' } } },
     ]);
-    expect(view.places.map((place) => place.name)).toEqual(['Team A']);
+    expect(view.places).toMatchObject([{ name: 'Team A', playPath: '/@/acme/office/team%2Fa' }]);
     expect(view.people.map((person) => person.name)).toEqual(['Sara']);
   });
 
