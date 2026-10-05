@@ -11,9 +11,11 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Loader2, AlertCircle } from 'lucide-react';
 import { LoadingRows, PageHeader } from '../../components/ds';
+import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
 export default function NewAvatarSetPage() {
   const router = useRouter();
+  const replacePage = useReplacePage();
   const [checkingAuth, setCheckingAuth] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -69,7 +71,7 @@ export default function NewAvatarSetPage() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Failed to create set');
-      router.push(`/admin/avatars/${data.id}`);
+      replacePage(`/admin/avatars/${data.id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save');
     } finally {

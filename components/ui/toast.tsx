@@ -55,8 +55,10 @@ export function useToast() {
 }
 
 function ToastContainer({ toasts, removeToast }: { toasts: Toast[]; removeToast: (id: string) => void }) {
+  // As wide as the screen allows less a 1rem margin each side, so on a phone or the game's side panel it never
+  // runs off the left edge.
   return (
-    <div className="fixed top-4 right-4 z-[100] flex flex-col gap-2 w-full max-w-sm">
+    <div className="fixed top-4 right-4 z-[100] flex w-[calc(100%-2rem)] max-w-sm flex-col gap-2">
       {toasts.map((toast) => (
         <ToastItem key={toast.id} toast={toast} onClose={() => removeToast(toast.id)} />
       ))}

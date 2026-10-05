@@ -231,7 +231,8 @@ export default function UserDetailPage() {
 
       if (!response.ok) {
         if (response.status === 404) {
-          router.push('/admin/users');
+          // Gone, private or not yours: the page says so in place, with Back still there.
+          setUser(null);
           return;
         }
         throw new Error('Failed to fetch user');
@@ -448,7 +449,7 @@ export default function UserDetailPage() {
           canInvite ? (
             <Button onClick={() => setInviteDialogOpen(true)} className="h-10 shrink-0 gap-2 px-4">
               <UserPlus size={15} aria-hidden="true" />
-              Invite to a world
+              Invite as member
             </Button>
           ) : undefined
         }
@@ -710,6 +711,7 @@ export default function UserDetailPage() {
       )}
 
       <InviteToWorldDialog
+        userName={user.name || undefined}
         open={inviteDialogOpen}
         onOpenChange={setInviteDialogOpen}
         userId={id}

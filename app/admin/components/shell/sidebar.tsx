@@ -7,6 +7,7 @@ import { DESTINATIONS } from '../../config/navigation';
 import { useOrbitFrame } from '../../orbit-frame-context';
 import { OrbitMark } from './orbit-mark';
 import { ShortcutHint } from './shortcut-hint';
+import { AttentionBadge, useAttentionCount } from './attention-badge';
 
 /**
  * The wide layout's rail: You, Orbit and Space, and the Orbit Menu at the foot for every other page and tool. Shown
@@ -15,6 +16,7 @@ import { ShortcutHint } from './shortcut-hint';
  */
 export function Sidebar() {
   const { section: root, menuOpen, setMenuOpen } = useOrbitFrame();
+  const attention = useAttentionCount();
 
   return (
     <aside
@@ -40,13 +42,14 @@ export function Sidebar() {
                   href={item.href}
                   aria-current={active ? 'page' : undefined}
                   className={cn(
-                    'orbit-press flex h-[62px] w-[66px] flex-col items-center justify-center gap-1 rounded-2xl text-[11px] font-semibold transition-colors',
+                    'orbit-press relative flex h-[62px] w-[66px] flex-col items-center justify-center gap-1 rounded-2xl text-[11px] font-semibold transition-colors',
                     active
                       ? 'text-white shadow-[0_6px_18px_-6px_rgb(134_41_252_/_.9)]'
                       : 'text-muted-foreground hover:bg-muted hover:text-foreground',
                   )}
                   style={active ? { backgroundImage: 'var(--brand-gradient)' } : undefined}
                 >
+                  {item.href === '/admin/you' && <AttentionBadge count={attention} className="left-1.5 top-1" />}
                   <Icon className="h-[22px] w-[22px]" strokeWidth={active ? 2.4 : 2} aria-hidden="true" />
                   {item.label}
                 </Link>

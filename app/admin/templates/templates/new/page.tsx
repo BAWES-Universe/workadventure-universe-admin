@@ -17,6 +17,7 @@ import {
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { AlertCircle, Loader2 } from 'lucide-react';
 import { EmptyCard, InContext, LoadError, LoadingRows, PageHeader, SettingSwitch, Settings } from '../../../components/ds';
+import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
 interface Category {
   id: string;
@@ -27,6 +28,7 @@ interface Category {
 
 function NewTemplatePageContent() {
   const router = useRouter();
+  const replacePage = useReplacePage();
   const searchParams = useSearchParams();
   const categoryIdParam = searchParams.get('categoryId');
   
@@ -77,7 +79,7 @@ function NewTemplatePageContent() {
       }
       const data = await response.json();
       if (!data.user?.isSuperAdmin) {
-        router.push('/admin/templates');
+        replacePage('/admin/templates');
         return;
       }
     } catch (err) {
@@ -179,7 +181,7 @@ function NewTemplatePageContent() {
       }
 
       const data = await response.json();
-      router.push(`/admin/templates/templates/${data.id}`);
+      replacePage(`/admin/templates/templates/${data.id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create template');
       setLoading(false);

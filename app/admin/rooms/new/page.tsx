@@ -16,6 +16,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { AlertCircle, Loader2, ArrowLeft } from 'lucide-react';
 import { TemplateLibrary } from '@/components/templates/TemplateLibrary';
 import { TemplateDetail } from '@/components/templates/TemplateDetail';
+import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
 interface World {
   id: string;
@@ -61,6 +62,7 @@ function upgradeRoomDraft(saved: unknown, empty: RoomDraft): RoomDraft | null {
 
 function NewRoomPageContent() {
   const router = useRouter();
+  const replacePage = useReplacePage();
   const searchParams = useSearchParams();
   const worldIdParam = searchParams.get('worldId');
   const templateMapIdParam = searchParams.get('templateMapId');
@@ -378,7 +380,7 @@ function NewRoomPageContent() {
 
       const room = await response.json();
       discardDraft();
-      router.push(`/admin/rooms/${room.id}`);
+      replacePage(`/admin/rooms/${room.id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create room');
     } finally {
@@ -673,7 +675,7 @@ function NewRoomPageContent() {
 
             <div className="flex flex-col-reverse gap-3 pt-2 sm:flex-row sm:justify-end">
               <Button type="button" variant="outline" className="h-11" asChild>
-                <Link href={formData.worldId ? `/admin/worlds/${formData.worldId}` : '/admin'}>
+                <Link href={formData.worldId ? `/admin/worlds/${formData.worldId}` : '/admin'} onClick={discardDraft}>
                   Cancel
                 </Link>
               </Button>

@@ -105,14 +105,18 @@ export async function requireAdminSession(): Promise<{ userId: string }> {
 export async function requireSuperAdminSession(): Promise<{ userId: string }> {
   const { userId } = await requireAdminSession();
 
-  const user = await prisma.user.findUnique({
-    where: { id: userId },
-    select: { email: true },
-  });
-
-  if (!user || !isSuperAdmin(user.email)) {
+  if (!(await isSuperAdminUser(userId))) {
     throw new Error('Forbidden');
   }
 
   return { userId };
+}
+
+/** Whether this user is a super admin (their email is in SUPER_ADMINS). */
+export async function isSuperAdminUser(userId: string): Promise<boolean> {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { email: true },
+  });
+  return !!user && isSuperAdmin(user.email);
 }

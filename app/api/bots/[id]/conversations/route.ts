@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { requireServiceToken } from '@/lib/service-tokens';
-import { botReadDenied } from '@/lib/access-scope';
+import { botReadDenied, getViewer, isPrivileged } from '@/lib/access-scope';
 import { corsHeaders } from '@/lib/cors';
 
 export const runtime = 'nodejs';
@@ -272,6 +272,8 @@ export async function GET(
     const { id: botId } = await params;
     const denied = await botReadDenied(request, botId, corsHeaders());
     if (denied) return denied;
+    // Visitors' emails are only for super admins, as in access logs; room managers see names
+    const showEmails = isPrivileged(await getViewer(request));
     const { searchParams } = new URL(request.url);
 
     // Parse query params
@@ -312,7 +314,7 @@ export async function GET(
           user: {
             select: {
               id: true,
-              email: true,
+              email: showEmails,
               name: true,
               uuid: true,
             },

@@ -7,6 +7,7 @@ import { isSuperAdmin } from '@/lib/super-admin';
 import { parsePlayUri } from '@/lib/utils';
 import { validateAccessToken } from '@/lib/oidc';
 import { resolveRoomIdFromPlayUri, transformBotToServerFormat } from '@/lib/bot-config-helpers';
+import { checkAiProviderRef } from '@/lib/ai-provider-ref';
 import { z } from 'zod';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Prisma
@@ -384,6 +385,30 @@ export async function POST(request: NextRequest) {
           });
           return response;
         }
+      }
+    }
+
+    // The provider ref must name an existing provider (unchanged refs on an update are let through)
+    if ('aiProviderRef' in body && validatedData.aiProviderRef) {
+      const currentProvider = validatedData.botId
+        ? await prisma.bot.findUnique({
+            where: { id: validatedData.botId },
+            select: { aiProviderRef: true },
+          })
+        : null;
+      const providerError = await checkAiProviderRef(
+        validatedData.aiProviderRef,
+        currentProvider?.aiProviderRef
+      );
+      if (providerError) {
+      const response = NextResponse.json(
+        { error: providerError },
+        { status: 400 }
+      );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
       }
     }
 

@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { EntityRow, Figure, Figures, LoadError, LoadingRows, PageHeader, SectionHeader, StatLine, count } from '../../components/ds';
 import { providerTypeLabel } from '../components/provider-state';
+import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
 interface UsageStats {
   totalCalls: number;
@@ -37,6 +38,7 @@ interface UsageStats {
 
 export default function AiUsagePage() {
   const router = useRouter();
+  const replacePage = useReplacePage();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [stats, setStats] = useState<UsageStats | null>(null);
@@ -71,7 +73,7 @@ export default function AiUsagePage() {
       }
       const userData = await response.json();
       if (!userData.user?.isSuperAdmin) {
-        router.push('/admin');
+        replacePage('/admin');
         return;
       }
       fetchUsage();
@@ -95,7 +97,7 @@ export default function AiUsagePage() {
 
       if (!response.ok) {
         if (response.status === 401 || response.status === 403) {
-          router.push('/admin');
+          replacePage('/admin');
           return;
         }
         throw new Error('Failed to fetch usage data');

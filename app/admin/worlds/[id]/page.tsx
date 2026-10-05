@@ -29,6 +29,7 @@ import InviteMemberDialog from '../../components/invite-member-dialog';
 import MemberList from '../../components/member-list';
 import { PersonIcon } from '../../components/profile-card';
 import { useEntitySummaries } from '../../hooks/use-entity-summaries';
+import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
 interface World {
   id: string;
@@ -87,6 +88,7 @@ export default function WorldDetailPage() {
 
 function WorldDetail() {
   const router = useRouter();
+  const replacePage = useReplacePage();
   const params = useParams();
   const id = params.id as string;
   const searchParams = useSearchParams();
@@ -164,7 +166,8 @@ function WorldDetail() {
 
       if (!response.ok) {
         if (response.status === 404) {
-          router.push('/admin/worlds');
+          // Gone, private or not yours: the page says so in place, with Back still there.
+          setWorld(null);
           return;
         }
         throw new Error('Failed to fetch world');
@@ -249,7 +252,7 @@ function WorldDetail() {
         throw new Error('Failed to delete world');
       }
 
-      router.push(`/admin/universes/${world?.universe.id}`);
+      replacePage(`/admin/universes/${world?.universe.id}`);
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to delete world');
       setDeleting(false);

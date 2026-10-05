@@ -15,6 +15,7 @@ import TextureCard from '@/components/texture-card';
 import { KindIcon, LoadError, LoadingRows, PageHeader, StatLine, count } from '../../components/ds';
 import { KIND_LABELS, LifecyclePill, Pill, VisibilityPill } from '../components/set-pills';
 import { PlaceName, PlaceSearch, type PlaceType } from '../components/scope-picker';
+import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -60,6 +61,7 @@ const LAYER_TYPES = ['woka', 'body', 'eyes', 'hair', 'clothes', 'hat', 'accessor
 
 export default function AvatarSetDetailPage() {
   const router = useRouter();
+  const replacePage = useReplacePage();
   const params = useParams();
   const setId = params?.id as string;
 
@@ -217,7 +219,7 @@ export default function AvatarSetDetailPage() {
         throw new Error(data.error || 'Cannot delete');
       }
       if (!res.ok) throw new Error('Delete failed');
-      router.push('/admin/avatars');
+      replacePage('/admin/avatars');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Delete failed');
       setDeleteConfirmOpen(false);

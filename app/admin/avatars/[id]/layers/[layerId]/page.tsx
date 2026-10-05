@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { useRouter, useParams } from 'next/navigation';
+import { useParams } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -11,6 +11,7 @@ import { AlertCircle, Loader2, Users, Upload, Trash2, Save } from 'lucide-react'
 import SpriteSheetPreview from '@/components/sprite-preview';
 import { LoadError, LoadingRows, PageHeader, SettingSwitch, StatLine } from '../../../../components/ds';
 import { Pill } from '../../../components/set-pills';
+import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
 const LAYER_TYPES = ['woka', 'body', 'eyes', 'hair', 'clothes', 'hat', 'accessory'];
 
@@ -25,7 +26,7 @@ interface LayerData {
 }
 
 export default function LayerDetailPage() {
-  const router = useRouter();
+  const replacePage = useReplacePage();
   const params = useParams();
   const setId = params?.id as string;
   const layerId = params?.layerId as string;
@@ -125,7 +126,7 @@ export default function LayerDetailPage() {
     try {
       const { authenticatedFetch } = await import('@/lib/client-auth');
       await authenticatedFetch(`/api/admin/avatar-sets/${setId}/layers/${layerId}`, { method: 'DELETE' });
-      router.push(`/admin/avatars/${setId}`);
+      replacePage(`/admin/avatars/${setId}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to delete');
     }

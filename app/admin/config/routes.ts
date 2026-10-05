@@ -42,6 +42,7 @@ export const ROUTES: RouteDefinition[] = [
   { pattern: '/admin/discover/universes', title: 'Discover Universes', parent: '/admin/space' },
   { pattern: '/admin/discover/worlds', title: 'Discover Worlds', parent: '/admin/space' },
   { pattern: '/admin/discover/rooms', title: 'Discover Rooms', parent: '/admin/space' },
+  { pattern: '/admin/live', title: 'Live now', parent: '/admin/space' },
   { pattern: '/admin/users', title: 'People', parent: '/admin/space' },
   { pattern: '/admin/users/[id]', title: 'Person', parent: '/admin/users' },
   { pattern: '/admin/templates', title: 'Room templates', parent: '/admin/space' },
