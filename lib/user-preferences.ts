@@ -1,3 +1,5 @@
+import { isPeopleSettingKey, isValidPeopleSetting } from './people-settings';
+
 /**
  * Per-user Orbit preferences. Only allowlisted keys can be read or written, and
  * each value is capped so the table cannot be used as general-purpose storage.
@@ -17,7 +19,13 @@ const FIXED_PREFERENCE_KEYS = new Set(['orbit.introSeen', 'quests.invitationDecl
 const GUIDANCE_DISMISSED_KEY = /^guidance\.dismissed\.[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
 export function isAllowedPreferenceKey(key: unknown): key is string {
-  return typeof key === 'string' && (FIXED_PREFERENCE_KEYS.has(key) || GUIDANCE_DISMISSED_KEY.test(key));
+  return typeof key === 'string'
+    && (FIXED_PREFERENCE_KEYS.has(key) || GUIDANCE_DISMISSED_KEY.test(key) || isPeopleSettingKey(key));
+}
+
+/** Keys with a fixed set of values (the `people.*` settings) only accept those; other keys accept any JSON. */
+export function isAllowedPreferenceValue(key: string, value: unknown): boolean {
+  return isPeopleSettingKey(key) ? isValidPeopleSetting(key, value) : true;
 }
 
 /** Serialized size in bytes, or null when the value is not JSON-serializable. */

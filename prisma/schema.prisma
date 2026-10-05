@@ -283,7 +283,7 @@ model Friendship {
   id         String    @id @default(uuid())
   user1Id    String    @map("user1_id")
   user2Id    String    @map("user2_id")
-  status     String    @default("pending") // pending, accepted, blocked
+  status     String    @default("pending") // pending, ignored, accepted, blocked (see lib/friends.ts)
   requestedById String? @map("requested_by")
   createdAt  DateTime  @default(now()) @map("created_at")
   acceptedAt DateTime? @map("accepted_at")
