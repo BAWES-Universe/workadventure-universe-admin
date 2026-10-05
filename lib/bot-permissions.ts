@@ -1,4 +1,5 @@
 import { prisma } from '@/lib/db';
+import { isSuperAdmin } from '@/lib/super-admin';
 
 /**
  * Checks if a user can manage bots in a specific room
@@ -47,3 +48,22 @@ export async function canManageBots(userId: string, roomId: string): Promise<boo
   return !!hasEditPermission;
 }
 
+
+/**
+ * Checks if a user can see and change a bot's MCP servers.
+ * Returns true for whoever created the bot, anyone who can manage bots in its
+ * room (see canManageBots), and super admins.
+ */
+export async function canManageBotMcpServers(
+  userId: string,
+  userEmail: string | null,
+  bot: { createdById: string | null; roomId: string }
+): Promise<boolean> {
+  if (bot.createdById === userId) {
+    return true;
+  }
+  if (isSuperAdmin(userEmail)) {
+    return true;
+  }
+  return canManageBots(userId, bot.roomId);
+}
