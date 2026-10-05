@@ -14,8 +14,9 @@ export function rootOf(pathname: string): string {
 /**
  * Pages you reach from more than one of Home, Space and You: a universe, world, room or person, and the forms that
  * make one. They stay under the section you opened them from (a universe opened in Space keeps Space lit, the same one
- * opened from Your universes keeps You lit). Opened first thing, with nothing before, they sit under Space: the
- * places and people out there.
+ * opened from Your universes keeps You lit). Opened first thing, with nothing before, each takes the section of
+ * the page given here: a universe, world, room or person sits under Space (the places and people out there), a
+ * new universe or world under You (making your own), and a new room under Space (it follows its world).
  */
 const SHARED: Record<string, string> = {
   '/admin/universes/[id]': '/admin/space',
