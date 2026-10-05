@@ -29,6 +29,7 @@ import { timeAgo } from '@/lib/time-ago';
 import { activityStats } from '@/lib/analytics-peak';
 import { useEntitySummaries } from '../../hooks/use-entity-summaries';
 import { EmptyCard, EntityCard, EntityRow, Figure, Figures, KindIcon, LoadError, LoadingRows, PageHeader, RolePills, SectionHeader, SettingSwitch, Settings, StatLine, StatusPill, VisitLine, count } from '../../components/ds';
+import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
 interface Universe {
   id: string;
@@ -63,6 +64,7 @@ interface Universe {
 
 export default function UniverseDetailPage() {
   const router = useRouter();
+  const replacePage = useReplacePage();
   const params = useParams();
   const id = params.id as string;
   
@@ -122,7 +124,8 @@ export default function UniverseDetailPage() {
 
       if (!response.ok) {
         if (response.status === 404) {
-          router.push('/admin/universes');
+          // Gone, private or not yours: the page says so in place, with Back still there.
+          setUniverse(null);
           return;
         }
         throw new Error('Failed to fetch universe');
@@ -226,7 +229,7 @@ export default function UniverseDetailPage() {
         throw new Error('Failed to delete universe');
       }
 
-      router.push('/admin/universes');
+      replacePage('/admin/universes');
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to delete universe');
       setDeleting(false);
@@ -239,15 +242,7 @@ export default function UniverseDetailPage() {
   }
 
   if (!universe) {
-    return (
-      <div className="space-y-8">
-        <Alert variant="destructive">
-          <AlertCircle className="h-4 w-4" />
-          <AlertTitle>Not Found</AlertTitle>
-          <AlertDescription>Universe not found</AlertDescription>
-        </Alert>
-      </div>
-    );
+    return <EmptyCard kind="universe" title="Universe not found." text="It may have been deleted, or you may not have access to it." />;
   }
 
   const isOwner = !!currentUser && currentUser.id === universe.ownerId;

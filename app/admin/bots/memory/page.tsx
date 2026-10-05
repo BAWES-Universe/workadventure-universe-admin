@@ -13,6 +13,7 @@ import {
 } from '@/components/ui/table';
 import { EmptyCard, LoadError, LoadingRows, PageHeader } from '../../components/ds';
 import { ApplyFilter, DateFilter, FilterRow, JsonDetails, ListPager, Panel, Pill, type PageInfo } from '../bots-ui';
+import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
 interface Memory {
   id: number;
@@ -36,6 +37,7 @@ interface Memory {
 
 export default function MemoryBrowsePage() {
   const router = useRouter();
+  const replacePage = useReplacePage();
   const [memory, setMemory] = useState<Memory[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -76,7 +78,7 @@ export default function MemoryBrowsePage() {
       }
       const userData = await response.json();
       if (!userData.user?.isSuperAdmin) {
-        router.push('/admin');
+        replacePage('/admin');
         return;
       }
       fetchMemory();
@@ -103,7 +105,7 @@ export default function MemoryBrowsePage() {
 
       if (!response.ok) {
         if (response.status === 401 || response.status === 403) {
-          router.push('/admin');
+          replacePage('/admin');
           return;
         }
         throw new Error('Failed to fetch memory');
@@ -118,7 +120,7 @@ export default function MemoryBrowsePage() {
     } finally {
       setLoading(false);
     }
-  }, [filters, router]);
+  }, [filters, replacePage]);
 
   const handlePageChange = (newPage: number) => {
     setFilters({ ...filters, page: newPage });

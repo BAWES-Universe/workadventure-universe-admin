@@ -9,6 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Database, Server } from 'lucide-react';
 import { Context, EmptyCard, EntityCard, LoadError, LoadingRows, PageHeader, StatLine } from '../components/ds';
 import { FilterField, FilterRow, ListPager, Pill, type PageInfo } from './bots-ui';
+import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
 interface Bot {
   id: string;
@@ -40,6 +41,7 @@ interface Bot {
 
 export default function BotsPage() {
   const router = useRouter();
+  const replacePage = useReplacePage();
   const [bots, setBots] = useState<Bot[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -76,7 +78,7 @@ export default function BotsPage() {
       }
       const userData = await response.json();
       if (!userData.user?.isSuperAdmin) {
-        router.push('/admin');
+        replacePage('/admin');
         return;
       }
       fetchBots();
@@ -100,7 +102,7 @@ export default function BotsPage() {
 
       if (!response.ok) {
         if (response.status === 401 || response.status === 403) {
-          router.push('/admin');
+          replacePage('/admin');
           return;
         }
         throw new Error('Failed to fetch bots');

@@ -171,30 +171,48 @@ function ShellChrome({
       popping.current = false;
       return;
     }
-    if (popping.current) {
-      // Several Back or Forward presses can land before one render: walk as many steps as the browser did.
-      const back = behind.current.lastIndexOf(pathname);
-      const forward = ahead.current.lastIndexOf(pathname);
-      if (back !== -1) {
-        const passed = behind.current.splice(back);
-        passed.shift();
-        ahead.current.push(previous, ...passed.reverse());
-      } else if (forward !== -1) {
-        const passed = ahead.current.splice(forward);
-        passed.shift();
-        behind.current.push(previous, ...passed.reverse());
-      } else {
-        behind.current = [];
+    lastPath.current = pathname;
+    // The replace flag belongs to this page: read it now, so a page still settling can't take it.
+    const replaced = replacing.current;
+    replacing.current = false;
+    let settled = false;
+    const settle = () => {
+      if (settled) return;
+      settled = true;
+      if (popping.current) {
+        // Several Back or Forward presses can land before one render: walk as many steps as the browser did.
+        const back = behind.current.lastIndexOf(pathname);
+        const forward = ahead.current.lastIndexOf(pathname);
+        if (back !== -1) {
+          const passed = behind.current.splice(back);
+          passed.shift();
+          ahead.current.push(previous, ...passed.reverse());
+        } else if (forward !== -1) {
+          const passed = ahead.current.splice(forward);
+          passed.shift();
+          behind.current.push(previous, ...passed.reverse());
+        } else {
+          behind.current = [];
+          ahead.current = [];
+        }
+      } else if (!replaced) {
+        behind.current.push(previous);
         ahead.current = [];
       }
-    } else if (!replacing.current) {
-      behind.current.push(previous);
-      ahead.current = [];
+      popping.current = false;
+      setBehindTop(behind.current[behind.current.length - 1] ?? null);
+    };
+    if (popping.current || replaced) {
+      settle();
+      return;
     }
-    popping.current = false;
-    replacing.current = false;
-    lastPath.current = pathname;
-    setBehindTop(behind.current[behind.current.length - 1] ?? null);
+    // Next can render a Back or Forward before the browser's popstate reaches us, in the same task: a page that looks
+    // new waits for the end of that task before it counts as one. Another page before then settles this one first.
+    const timer = window.setTimeout(settle);
+    return () => {
+      window.clearTimeout(timer);
+      settle();
+    };
   }, [pathname]);
 
   const goBack = useCallback(() => {
@@ -208,6 +226,15 @@ function ShellChrome({
       router.replace(route.parent);
     }
   }, [router, route.parent]);
+  // A page sends you on in its own place (a saved form, a deleted thing): the history keeps what was behind it.
+  const replacePage = useCallback(
+    (path: string) => {
+      // The same page with another query never reaches the history above, so it must not leave the flag set.
+      if (path.split(/[?#]/)[0] !== lastPath.current) replacing.current = true;
+      router.replace(path);
+    },
+    [router],
+  );
   // What Back says: the page it really returns to.
   const backLabel = behindTop ? resolveRoute(behindTop).title : route.parentTitle;
 
@@ -254,8 +281,8 @@ function ShellChrome({
   }, [menuOpen, closeOrbit]);
 
   const frame: OrbitFrameState = useMemo(
-    () => ({ inFrame, view, route, goBack, backLabel, closeOrbit, menuOpen, setMenuOpen }),
-    [inFrame, view, route, goBack, backLabel, closeOrbit, menuOpen],
+    () => ({ inFrame, view, route, goBack, backLabel, replacePage, closeOrbit, menuOpen, setMenuOpen }),
+    [inFrame, view, route, goBack, backLabel, replacePage, closeOrbit, menuOpen],
   );
 
   return (

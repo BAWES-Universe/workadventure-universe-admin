@@ -10,9 +10,11 @@ import { Textarea } from '@/components/ui/textarea';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { AlertCircle, Loader2 } from 'lucide-react';
 import { PageHeader, SettingSwitch, Settings } from '../../../components/ds';
+import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
 export default function NewCategoryPage() {
   const router = useRouter();
+  const replacePage = useReplacePage();
   const [checkingAuth, setCheckingAuth] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -52,7 +54,7 @@ export default function NewCategoryPage() {
       }
       const data = await response.json();
       if (!data.user?.isSuperAdmin) {
-        router.push('/admin/templates');
+        replacePage('/admin/templates');
         return;
       }
     } catch (err) {
@@ -90,7 +92,7 @@ export default function NewCategoryPage() {
       }
 
       const data = await response.json();
-      router.push(`/admin/templates/categories/${data.id}`);
+      replacePage(`/admin/templates/categories/${data.id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create category');
       setLoading(false);

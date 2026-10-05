@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { useRouter, useParams } from 'next/navigation';
+import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
@@ -36,6 +36,7 @@ import {
 import { Loader2, Plus, Edit, Trash2, AlertCircle } from 'lucide-react';
 import { EmptyCard, InContext, LoadError, PageHeader, SectionHeader, SettingSwitch, Settings, StatLine, StatusPill, count } from '../../../components/ds';
 import { FactPill, InactivePill, MapCard } from '../../components/template-bits';
+import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
 interface Template {
   id: string;
@@ -73,7 +74,7 @@ interface TemplateMap {
 }
 
 export default function TemplateDetailPage() {
-  const router = useRouter();
+  const replacePage = useReplacePage();
   const params = useParams();
   const [template, setTemplate] = useState<Template | null>(null);
   const [maps, setMaps] = useState<TemplateMap[]>([]);
@@ -146,7 +147,7 @@ export default function TemplateDetailPage() {
         
         if (!templateResponse.ok) {
           if (templateResponse.status === 404) {
-            router.push('/admin/templates');
+            replacePage('/admin/templates');
             return;
           }
           throw new Error('Failed to fetch template');
@@ -193,15 +194,15 @@ export default function TemplateDetailPage() {
               setTemplate(detailData.template);
               setMaps(detailData.template.maps || []);
             } else {
-              router.push('/admin/templates');
+              replacePage('/admin/templates');
               return;
             }
           } else {
-            router.push('/admin/templates');
+            replacePage('/admin/templates');
             return;
           }
         } else {
-          router.push('/admin/templates');
+          replacePage('/admin/templates');
           return;
         }
         
@@ -284,7 +285,7 @@ export default function TemplateDetailPage() {
         throw new Error(data.error || 'Failed to delete template');
       }
 
-      router.push(`/admin/templates/categories/${template.category.id}`);
+      replacePage(`/admin/templates/categories/${template.category.id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to delete template');
       setIsDeleteDialogOpen(false);

@@ -28,6 +28,7 @@ import { TemplateDetail } from '@/components/templates/TemplateDetail';
 import { cn } from '@/lib/utils';
 import { timeAgo } from '@/lib/time-ago';
 import { EmptyCard, EntityRow, Figure, Figures, InContext, KindIcon, LoadingRows, PageHeader, RolePills, SectionHeader, SettingSwitch, Settings, StatLine, StatusPill } from '../../components/ds';
+import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
 interface Room {
   id: string;
@@ -109,6 +110,7 @@ function StaticRow({ title, context, meta, woka }: { title: string; context?: Re
 
 export default function RoomDetailPage() {
   const router = useRouter();
+  const replacePage = useReplacePage();
   const params = useParams();
   const id = params.id as string;
   
@@ -199,7 +201,8 @@ export default function RoomDetailPage() {
 
       if (!response.ok) {
         if (response.status === 404) {
-          router.push('/admin/rooms');
+          // Gone, private or not yours: the page says so in place, with Back still there.
+          setRoom(null);
           return;
         }
         throw new Error('Failed to fetch room');
@@ -373,7 +376,7 @@ export default function RoomDetailPage() {
         throw new Error('Failed to delete room');
       }
 
-      router.push(`/admin/worlds/${room?.world.id}`);
+      replacePage(`/admin/worlds/${room?.world.id}`);
     } catch (err) {
       alert(err instanceof Error ? err.message : 'Failed to delete room');
       setDeleting(false);

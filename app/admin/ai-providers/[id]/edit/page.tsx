@@ -1,7 +1,6 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -27,6 +26,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
+import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
 const PROVIDER_TYPES = [
   { value: 'lmstudio', label: 'LMStudio' },
@@ -37,7 +37,7 @@ const PROVIDER_TYPES = [
 ];
 
 export default function EditProviderPage({ params }: { params: Promise<{ id: string }> }) {
-  const router = useRouter();
+  const replacePage = useReplacePage();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -82,7 +82,7 @@ export default function EditProviderPage({ params }: { params: Promise<{ id: str
 
       if (!response.ok) {
         if (response.status === 404) {
-          router.push('/admin/ai-providers');
+          replacePage('/admin/ai-providers');
           return;
         }
         throw new Error('Failed to fetch provider');
@@ -151,7 +151,7 @@ export default function EditProviderPage({ params }: { params: Promise<{ id: str
         throw new Error(errorData.error || 'Failed to update provider');
       }
 
-      router.push(`/admin/ai-providers/${providerId}`);
+      replacePage(`/admin/ai-providers/${providerId}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
     } finally {
@@ -170,7 +170,7 @@ export default function EditProviderPage({ params }: { params: Promise<{ id: str
         throw new Error('Failed to delete provider');
       }
 
-      router.push('/admin/ai-providers');
+      replacePage('/admin/ai-providers');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
     }
