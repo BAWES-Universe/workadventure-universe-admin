@@ -32,9 +32,9 @@ describe('AttentionBadge', () => {
     const { rerender } = render(<AttentionBadge count={0} />);
     expect(screen.queryByTestId('attention-badge')).toBeNull();
     rerender(<AttentionBadge count={1} />);
-    expect(screen.getByTestId('attention-badge')).toHaveTextContent('1 thing waits for your answer');
+    expect(screen.getByTestId('attention-badge').textContent).toBe('11 thing waits for your answer');
     rerender(<AttentionBadge count={120} />);
-    expect(screen.getByTestId('attention-badge')).toHaveTextContent(/^99\+120 things wait for your answer$/);
+    expect(screen.getByTestId('attention-badge').textContent).toBe('99+120 things wait for your answer');
   });
 
   it('shares one request between the rail and the bottom bar, and follows answers and Orbit refreshes', async () => {
@@ -48,11 +48,11 @@ describe('AttentionBadge', () => {
     await waitFor(() => expect(screen.getAllByTestId('attention-badge')).toHaveLength(2));
     expect(mockAuthenticatedFetch).toHaveBeenCalledTimes(1);
     expect(mockAuthenticatedFetch).toHaveBeenCalledWith('/api/me/attention', undefined);
-    expect(screen.getAllByTestId('attention-badge')[0]).toHaveTextContent(/^2/);
+    expect(screen.getAllByTestId('attention-badge')[0].textContent).toMatch(/^2/);
 
     mockAuthenticatedFetch.mockImplementation(() => answer(1));
     act(() => announceAttentionChanged());
-    await waitFor(() => expect(screen.getAllByTestId('attention-badge')[0]).toHaveTextContent(/^1/));
+    await waitFor(() => expect(screen.getAllByTestId('attention-badge')[0].textContent).toMatch(/^1/));
 
     mockAuthenticatedFetch.mockImplementation(() => answer(0));
     act(() => {
