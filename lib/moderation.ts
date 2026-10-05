@@ -42,10 +42,12 @@ export function bansCoveringWorld(world: { id: string; universeId: string }): Pr
 export function parseWorldAddress(playUri: string): { universe: string; world: string; room: string } | null {
   try {
     const url = new URL(playUri, 'http://play.invalid');
-    const [at, universe, world, room] = url.pathname.split('/').filter(Boolean);
+    // The URL keeps non-ASCII slugs percent-encoded; the database has them as written
+    const [at, universe, world, room] = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
     if (at !== '@' || !universe || !world) return null;
     return { universe, world, room: room ?? '' };
   } catch {
+    // Not a URL, or a malformed %-sequence: no world
     return null;
   }
 }
