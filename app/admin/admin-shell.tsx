@@ -260,12 +260,12 @@ function ShellChrome({
 
   return (
     <OrbitFrameProvider value={frame}>
-      <div className="min-h-dvh bg-background" style={{ ['--sidebar-width' as string]: '15.5rem' }}>
+      <div className="min-h-dvh bg-background" style={{ ['--sidebar-width' as string]: '5.5rem' }}>
         <div className="orbit-orbs" aria-hidden="true">
           <i />
           <i />
         </div>
-        <Sidebar user={user} />
+        <Sidebar />
         <div className="flex min-h-dvh flex-col lg:pl-[var(--sidebar-width)]">
           <TopBar isSuperAdmin={Boolean(user?.isSuperAdmin)} />
           {/* Before the page in the DOM, so that as a strip under the bar (a desktop panel) it sticks there. */}

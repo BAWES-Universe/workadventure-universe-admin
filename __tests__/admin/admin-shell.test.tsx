@@ -338,6 +338,19 @@ describe('AdminShell', () => {
     expect(links[1].getAttribute('aria-current')).toBe('page');
   });
 
+  it('on the wide layout, a rail of You, Orbit and Space with the Menu at its foot, and the page named in the bar', async () => {
+    await renderShell('/admin/space');
+    const rail = screen.getByRole('navigation', { name: 'Orbit sections' });
+    const links = Array.from(rail.querySelectorAll('a'));
+    expect(links.map((link) => link.textContent)).toEqual(['You', 'Orbit', 'Space']);
+    expect(links[2].getAttribute('aria-current')).toBe('page');
+    expect(screen.getByTestId('orbit-title').textContent).toBe('Space');
+    // Every other page and tool is one step away.
+    fireEvent.click(screen.getByTestId('sidebar-find'));
+    const menu = await screen.findByRole('dialog');
+    expect(menu.textContent).toContain('Your universes');
+  });
+
   it('Ctrl+K and Cmd+K open and close the menu, from any page', async () => {
     await renderShell('/admin/worlds/w-1');
     expect(screen.queryByRole('dialog')).toBeNull();
