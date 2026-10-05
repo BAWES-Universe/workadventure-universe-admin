@@ -126,20 +126,24 @@ jobs:
           fi
 
           # Note the build runs that already exist, so the one this dispatch starts is the first
-          # new id (no reliance on clocks).
+          # run with a higher id. Run ids only grow; a plain "not seen before" test is not enough,
+          # because the run list can leave out an older run and then return it later (on
+          # 2026-10-05 that put a morning game build on dev). The start time guards an empty list.
           runs() {
             gh run list --repo "$GITHUB_REPOSITORY" --workflow docker-build.yml \
               --branch "$BRANCH" --event workflow_dispatch --limit "$1" --json databaseId,createdAt
           }
           before=$(runs 50)
+          max_before=$(jq '[.[].databaseId] | max // 0' <<< "$before")
+          not_before=$(date -u -d '-2 minutes' +%Y-%m-%dT%H:%M:%SZ)
           gh workflow run docker-build.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH"
           run_id=""
           for _ in $(seq 1 30); do
             sleep 5
             after=$(runs 20)
-            run_id=$(jq -r --argjson before "$before" \
-              '[.[] | select(.databaseId as $id | $before | map(.databaseId) | index($id) | not)]
-               | sort_by(.createdAt) | first | .databaseId // empty' <<< "$after")
+            run_id=$(jq -r --argjson max "$max_before" --arg since "$not_before" \
+              '[.[] | select(.databaseId > $max and .createdAt >= $since)]
+               | sort_by(.databaseId) | first | .databaseId // empty' <<< "$after")
             [ -n "$run_id" ] && break
           done
           if [ -z "$run_id" ]; then
