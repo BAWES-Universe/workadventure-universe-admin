@@ -22,7 +22,7 @@ jest.mock('@/lib/auth', () => ({ requireAuth: jest.fn(), getClientIp: () => '127
 
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
-import { banEndsAt, bansCoveringWorld } from '@/lib/moderation';
+import { banEndsAt, bansCoveringWorld, parseWorldAddress } from '@/lib/moderation';
 import { POST as banFromGame } from '@/app/api/ban/route';
 import { POST as report } from '@/app/api/report/route';
 import { POST as appeal } from '@/app/api/ban/appeal/route';
@@ -62,6 +62,18 @@ describe('ban length and reach', () => {
       { worldId: null, universeId: office.universeId },
       { worldId: null, universeId: null },
     ]);
+  });
+});
+
+describe('a play address', () => {
+  it('names its world as the database has it, even when the slugs are percent-encoded', () => {
+    expect(parseWorldAddress('https://play.test/@/bawes/caf%C3%A9/lobby')).toEqual({ universe: 'bawes', world: 'café', room: 'lobby' });
+    expect(parseWorldAddress('https://play.test/@/bawes/café/lobby')).toEqual({ universe: 'bawes', world: 'café', room: 'lobby' });
+  });
+
+  it('names no world when it is malformed', () => {
+    expect(parseWorldAddress('https://play.test/@/bawes/%E0%A4%A/lobby')).toBeNull();
+    expect(parseWorldAddress('https://play.test/rooms/lobby')).toBeNull();
   });
 });
 
