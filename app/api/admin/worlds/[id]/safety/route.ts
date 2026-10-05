@@ -184,13 +184,24 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
             expiresAt: banEndsAt(body.duration, now),
           },
         }),
-        prisma.report.updateMany({ where: openReports, data: { status: 'banned', handledById: sessionUser.id, handledAt: now } }),
+        // Every open report about them in this world: from before Orbit knew them (by game uuid) and since
+        prisma.report.updateMany({
+          where: {
+            worldId: id,
+            status: 'open',
+            OR: [{ reportedUserId: user.id }, { reportedUserId: null, reportedUuid: user.uuid }],
+          },
+          data: { status: 'banned', handledById: sessionUser.id, handledAt: now },
+        }),
       ]);
       const sentOut = await sendOutOfWorld(user.uuid, id);
       return NextResponse.json({ ok: true, sentOut });
     }
 
-    const ban = await prisma.ban.findFirst({ where: { id: body.banId, worldId: id, isActive: true } });
+    // Only a ban still in force, as the Banned list shows: one that ran out has nothing left to lift or answer
+    const ban = await prisma.ban.findFirst({
+      where: { id: body.banId, worldId: id, isActive: true, OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
+    });
     if (!ban) return NextResponse.json({ error: 'Ban not found' }, { status: 404 });
 
     if (body.action === 'lift') {
