@@ -389,6 +389,34 @@ describe('AdminShell', () => {
     expect(lit()).toEqual(['Orbit']);
   });
 
+  it('remembers the section of each visit, when the same page was opened from two places', async () => {
+    const view = await renderShell('/admin/space');
+    const go = (path: string, pop = false) =>
+      act(() => {
+        if (pop) window.dispatchEvent(new PopStateEvent('popstate'));
+        mockPathname = path;
+        view.rerender(
+          <AdminShell>
+            <div>page content</div>
+          </AdminShell>,
+        );
+      });
+    const lit = () =>
+      Array.from(screen.getByRole('navigation', { name: 'Orbit sections' }).querySelectorAll('[aria-current="page"]')).map(
+        (link) => link.textContent,
+      );
+    go('/admin/universes/u-1'); // from Space
+    go('/admin/universes');
+    go('/admin/universes/u-1'); // the same universe, now from You
+    expect(lit()).toEqual(['You']);
+    go('/admin/universes', true);
+    go('/admin/universes/u-1', true); // Back to the first visit
+    expect(lit()).toEqual(['Space']);
+    go('/admin/space', true);
+    go('/admin/universes/u-1', true); // Forward to the first visit again
+    expect(lit()).toEqual(['Space']);
+  });
+
   it('puts a universe opened first thing under Space', async () => {
     await renderShell('/admin/universes/u-1');
     const rail = screen.getByRole('navigation', { name: 'Orbit sections' });
