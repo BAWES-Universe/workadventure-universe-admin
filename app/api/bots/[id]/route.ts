@@ -590,10 +590,21 @@ export async function DELETE(
       }
     }
 
-    // Delete bot
-    await prisma.bot.delete({
+    // Delete bot. deleteMany, not delete: when two deletes of the same bot overlap (a double tap), the second finds
+    // nothing left to delete; that is "not found", not a server error.
+    const { count } = await prisma.bot.deleteMany({
       where: { id },
     });
+    if (count === 0) {
+      const response = NextResponse.json(
+        { error: 'Bot not found' },
+        { status: 404 }
+      );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
+    }
 
     // Return 204 No Content on success
     const response = new NextResponse(null, { status: 204 });
