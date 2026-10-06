@@ -7,6 +7,7 @@ import { getPlayOrigin, requestOrigin } from '@/lib/origin-policy';
 import {
   PREFERENCE_VALUE_MAX_BYTES,
   isAllowedPreferenceKey,
+  isAllowedPreferenceValue,
   preferenceValueSize,
 } from '@/lib/user-preferences';
 
@@ -93,6 +94,7 @@ export async function PUT(request: NextRequest) {
   const { key, value } = body as { key?: unknown; value?: unknown };
   if (!isAllowedPreferenceKey(key)) return respond(request, { error: 'Unknown preference key' }, 400);
   if (value === undefined || value === null) return respond(request, { error: 'Preference value required' }, 400);
+  if (!isAllowedPreferenceValue(key, value)) return respond(request, { error: 'Invalid preference value' }, 400);
 
   const size = preferenceValueSize(value);
   if (size === null) return respond(request, { error: 'Preference value must be JSON' }, 400);

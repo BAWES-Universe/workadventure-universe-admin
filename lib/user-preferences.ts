@@ -17,6 +17,11 @@ export function isAllowedPreferenceKey(key: unknown): key is string {
   return typeof key === 'string' && (FIXED_PREFERENCE_KEYS.has(key) || GUIDANCE_DISMISSED_KEY.test(key));
 }
 
+/** Live now hides someone only for exactly `true`, so its switch only accepts true or false; other keys accept any JSON. */
+export function isAllowedPreferenceValue(key: string, value: unknown): boolean {
+  return key === HIDE_LOCATION_KEY ? typeof value === 'boolean' : true;
+}
+
 /** Serialized size in bytes, or null when the value is not JSON-serializable. */
 export function preferenceValueSize(value: unknown): number | null {
   try {
