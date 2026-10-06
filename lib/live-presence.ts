@@ -120,8 +120,9 @@ function slugKey(universe: string, world: string, room: string): string {
 
 function keyOf(playUri: string): string | null {
   try {
+    // parsePlayUri already decodes each slug; decoding again would break a slug holding a "%".
     const { universe, world, room } = parsePlayUri(playUri);
-    return slugKey(decodeURIComponent(universe), decodeURIComponent(world), decodeURIComponent(room));
+    return slugKey(universe, world, room);
   } catch {
     return null;
   }

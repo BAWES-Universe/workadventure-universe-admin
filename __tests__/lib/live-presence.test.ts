@@ -105,6 +105,20 @@ describe('buildLiveView', () => {
     expect(view.people.map((person) => person.name)).toEqual(['Sara']);
   });
 
+  it('keeps a room whose slug holds a "%"', async () => {
+    const room = { ...ROOMS[0], id: 'r-sale', name: 'Sale', slug: '50%-off' };
+    db.room.findMany.mockResolvedValue([room]);
+    const uri = `${PLAY}/@/acme/office/50%25-off`;
+    const view = await buildLiveView(
+      { generatedAt: 1, users: [{ uuid: 'sara', status: 'online', woka: [], sessions: [{ playUri: uri, since: 1 }] }], rooms: {} },
+      viewer,
+    );
+    expect(db.room.findMany.mock.calls[0][0].where.OR).toEqual([
+      { slug: '50%-off', world: { slug: 'office', universe: { slug: 'acme' } } },
+    ]);
+    expect(view.places).toMatchObject([{ name: 'Sale', playPath: '/@/acme/office/50%25-off' }]);
+  });
+
   it('makes Woka layers absolute against the game and keeps the status', async () => {
     const view = await buildLiveView(snapshot(), viewer);
     expect(view.people[0]).toMatchObject({ status: 'busy', woka: [`${PLAY}/woka/sara.png`] });

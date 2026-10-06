@@ -266,10 +266,16 @@ describe('/api/friends', () => {
       },
     });
     db.rooms.push({ universe: 'bawes', universeName: 'Bawes', world: 'hub', worldName: 'Hub', slug: 'café corner', name: 'Café' });
+    db.rooms.push({ universe: 'bawes', universeName: 'Bawes', world: 'hub', worldName: 'Hub', slug: '50%-off', name: 'Sale' });
     const encoded = 'https://play.example/@/bawes/hub/caf%C3%A9%20corner';
+    const percent = 'https://play.example/@/bawes/hub/50%25-off';
     const malformed = 'https://play.example/@/bawes/hub/50%';
-    expect(await (await send(places, '/places', 'POST', { playUris: [encoded, malformed] })).json()).toEqual({
-      places: { [encoded]: { universe: 'Bawes', world: 'Hub', room: 'Café' }, [malformed]: null },
+    expect(await (await send(places, '/places', 'POST', { playUris: [encoded, percent, malformed] })).json()).toEqual({
+      places: {
+        [encoded]: { universe: 'Bawes', world: 'Hub', room: 'Café' },
+        [percent]: { universe: 'Bawes', world: 'Hub', room: 'Sale' },
+        [malformed]: null,
+      },
     });
     expect((await send(places, '/places', 'POST', { playUris: Array(51).fill(known) })).status).toBe(400);
     expect((await send(places, '/places', 'POST', { playUris: [1] })).status).toBe(400);

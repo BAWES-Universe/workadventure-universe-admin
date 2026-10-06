@@ -280,13 +280,8 @@ export async function placeNames(playUris: string[]): Promise<Record<string, Pla
   for (const playUri of new Set(playUris)) {
     result[playUri] = null;
     try {
-      // The link's path is percent-encoded ("caf%C3%A9"); the database has the slug as typed ("café").
-      const { universe, world, room } = parsePlayUri(playUri);
-      slugs.set(playUri, {
-        universe: decodeURIComponent(universe),
-        world: decodeURIComponent(world),
-        room: decodeURIComponent(room),
-      });
+      // The link's path is percent-encoded ("caf%C3%A9"); parsePlayUri gives the slugs as typed ("café").
+      slugs.set(playUri, parsePlayUri(playUri));
     } catch {
       // Not a Universe room link (a /_/ or /~/ map), or a malformed one: no names to show.
     }
