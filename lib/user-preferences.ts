@@ -23,8 +23,12 @@ export function isAllowedPreferenceKey(key: unknown): key is string {
     && (FIXED_PREFERENCE_KEYS.has(key) || GUIDANCE_DISMISSED_KEY.test(key) || isPeopleSettingKey(key));
 }
 
-/** Keys with a fixed set of values (the `people.*` settings) only accept those; other keys accept any JSON. */
+/**
+ * Keys with a fixed set of values (the `people.*` settings and the Live now switch) only accept those; other keys
+ * accept any JSON. Live now hides someone only for exactly `true`, so a "true" string must not get stored.
+ */
 export function isAllowedPreferenceValue(key: string, value: unknown): boolean {
+  if (key === HIDE_LOCATION_KEY) return typeof value === 'boolean';
   return isPeopleSettingKey(key) ? isValidPeopleSetting(key, value) : true;
 }
 

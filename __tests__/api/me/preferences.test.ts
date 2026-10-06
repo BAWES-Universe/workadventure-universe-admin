@@ -120,6 +120,13 @@ describe('/api/me/preferences', () => {
     expect((await put({ key: 'people.ringFrom', value: 'nobody' })).status).toBe(200);
   });
 
+  it('accepts the Live now switch only as true or false', async () => {
+    expect((await put({ key: 'people.hideLocation', value: 'true' })).status).toBe(400);
+    expect((await put({ key: 'people.hideLocation', value: 1 })).status).toBe(400);
+    expect(prisma.userPreference.upsert).not.toHaveBeenCalled();
+    expect((await put({ key: 'people.hideLocation', value: true })).status).toBe(200);
+  });
+
   it('rejects a missing value and invalid JSON', async () => {
     expect((await put({ key: 'orbit.introSeen' })).status).toBe(400);
     expect((await put('{not json')).status).toBe(400);
