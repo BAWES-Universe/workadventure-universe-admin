@@ -464,6 +464,8 @@ model Bot {
   aiProviderRef       String?  @map("ai_provider_ref") @db.VarChar(100)
   // How long the bot waits for a tool to answer, in seconds. Null = the bot server's default (90 s).
   toolTimeoutSeconds  Int?     @map("tool_timeout_seconds")
+  // The companion (pet) that walks with the bot: a companion texture id from the room's companion list, or none.
+  companionTextureId  String?  @map("companion_texture_id") @db.VarChar(100)
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
   createdById         String?  @map("created_by_id")

@@ -48,6 +48,7 @@ const botConfigSchema = z.object({
   movementInstructions: z.string().optional().nullable(),
   aiProviderRef: z.string().max(100, 'aiProviderRef must be at most 100 characters').optional().nullable(),
   toolTimeoutSeconds: toolTimeoutSecondsSchema,
+  companionTextureId: z.string().max(100, 'companionTextureId must be at most 100 characters').optional().nullable(),
 });
 
 // Helper function to get user ID from various auth methods
@@ -437,6 +438,7 @@ export async function POST(request: NextRequest) {
       movementInstructions: validatedData.movementInstructions ?? null,
       aiProviderRef: validatedData.aiProviderRef ?? null,
       toolTimeoutSeconds: validatedData.toolTimeoutSeconds ?? null,
+      companionTextureId: validatedData.companionTextureId ?? null,
       updatedById: userId ?? null,
     };
 
@@ -464,6 +466,8 @@ export async function POST(request: NextRequest) {
         aiProviderRef: 'aiProviderRef' in body ? data.aiProviderRef : undefined,
         toolTimeoutSeconds:
           'toolTimeoutSeconds' in body ? data.toolTimeoutSeconds : undefined,
+        companionTextureId:
+          'companionTextureId' in body ? data.companionTextureId : undefined,
       };
       // behaviorConfig merge (always, not only when provided): the JSON
       // embeds behaviorType (required by the schema, always present in the

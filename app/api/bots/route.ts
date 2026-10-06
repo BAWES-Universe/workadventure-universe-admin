@@ -46,6 +46,7 @@ const createBotSchema = z.object({
   movementInstructions: z.string().optional().nullable(),
   aiProviderRef: z.string().max(100, 'aiProviderRef must be at most 100 characters').optional().nullable(),
   toolTimeoutSeconds: toolTimeoutSecondsSchema,
+  companionTextureId: z.string().max(100, 'companionTextureId must be at most 100 characters').optional().nullable(),
 });
 
 // Helper function to transform bot data from database to API response (snake_case to camelCase)
@@ -63,6 +64,7 @@ function transformBot(bot: any) {
     movementInstructions: bot.movementInstructions,
     aiProviderRef: bot.aiProviderRef,
     toolTimeoutSeconds: bot.toolTimeoutSeconds ?? null,
+    companionTextureId: bot.companionTextureId ?? null,
     createdAt: bot.createdAt,
     updatedAt: bot.updatedAt,
     // Who made or last changed a bot is shown by name only: people's emails are private
@@ -483,6 +485,7 @@ export async function POST(request: NextRequest) {
         movementInstructions: validatedData.movementInstructions ?? null,
         aiProviderRef: validatedData.aiProviderRef ?? null,
         toolTimeoutSeconds: validatedData.toolTimeoutSeconds ?? null,
+        companionTextureId: validatedData.companionTextureId ?? null,
         createdById: userId ?? null,
         updatedById: userId ?? null,
       },
