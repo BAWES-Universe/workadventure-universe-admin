@@ -65,6 +65,7 @@ export function Sidebar() {
         onClick={() => setMenuOpen(!menuOpen)}
         aria-expanded={menuOpen}
         aria-controls="orbit-menu"
+        aria-label="Menu and search"
         aria-keyshortcuts="Control+K Meta+K"
         className="orbit-press flex h-[62px] w-[66px] flex-col items-center justify-center gap-1 rounded-2xl border border-foreground/15 text-[11px] font-semibold text-muted-foreground transition-colors hover:border-foreground/30 hover:text-foreground"
         data-testid="sidebar-find"

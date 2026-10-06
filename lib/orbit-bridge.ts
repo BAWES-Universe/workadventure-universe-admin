@@ -15,7 +15,7 @@ import { z } from 'zod';
 export const ORBIT_BRIDGE_VERSION = 1 as const;
 
 /** What this Orbit can do over the bridge (sent in `orbit-bridge-ready`). */
-export const ORBIT_BRIDGE_CAPABILITIES = ['navigate', 'event', 'view'] as const;
+export const ORBIT_BRIDGE_CAPABILITIES = ['navigate', 'event', 'view', 'menu'] as const;
 
 /** Pages the game may ask for. Anything else lands on Orbit's home. */
 export const ORBIT_NAVIGATE_INTENTS = ['new-universe', 'world-members', 'visit-card', 'user-profile'] as const;
@@ -72,6 +72,13 @@ export const orbitEventSchema = z.object({
   topic: z.enum(ORBIT_EVENT_TOPICS),
 });
 
+export const orbitMenuSchema = z.object({
+  type: z.literal('orbit-menu'),
+  version: z.literal(ORBIT_BRIDGE_VERSION),
+  requestId,
+  roomRevision,
+});
+
 export type OrbitBridgeInit = z.infer<typeof orbitBridgeInitSchema>;
 export type OrbitNavigate = z.infer<typeof orbitNavigateSchema>;
 export type OrbitEvent = z.infer<typeof orbitEventSchema>;
@@ -106,7 +113,8 @@ export type IncomingBridgeMessage =
   | { kind: 'init'; message: OrbitBridgeInit }
   | { kind: 'navigate'; message: OrbitNavigate }
   | { kind: 'event'; message: OrbitEvent }
-  | { kind: 'view'; message: OrbitViewChange };
+  | { kind: 'view'; message: OrbitViewChange }
+  | { kind: 'menu'; message: z.infer<typeof orbitMenuSchema> };
 
 /**
  * Accept a message only from the game: exact origin, the parent window, and a known, well-formed message.
@@ -123,6 +131,8 @@ export function parseBridgeMessage(
   if (navigate.success) return { kind: 'navigate', message: navigate.data };
   const orbitEvent = orbitEventSchema.safeParse(event.data);
   if (orbitEvent.success) return { kind: 'event', message: orbitEvent.data };
+  const menu = orbitMenuSchema.safeParse(event.data);
+  if (menu.success) return { kind: 'menu', message: menu.data };
   const view = orbitViewSchema.safeParse(event.data);
   if (view.success) return { kind: 'view', message: view.data };
   return null;

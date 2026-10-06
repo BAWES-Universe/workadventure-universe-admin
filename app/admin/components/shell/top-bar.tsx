@@ -1,6 +1,6 @@
 'use client';
 
-import { ChevronLeft, Menu, ShieldCheck } from 'lucide-react';
+import { ChevronLeft, Search, ShieldCheck } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useOrbitFrame } from '../../orbit-frame-context';
 import { ShortcutHint } from './shortcut-hint';
@@ -35,8 +35,8 @@ export function TopBar({ isSuperAdmin = false }: { isSuperAdmin?: boolean }) {
               className="orbit-press relative inline-flex h-12 shrink-0 items-center gap-2 rounded-full border border-foreground/15 pl-3 pr-4 text-sm font-semibold transition-colors hover:border-foreground/30 hover:bg-foreground/5 lg:hidden"
               data-testid="orbit-menu-button"
             >
-              <Menu className="h-[18px] w-[18px]" aria-hidden="true" />
-              Orbit Menu
+              <Search className="h-[18px] w-[18px]" aria-hidden="true" />
+              Menu & search
               <ShortcutHint placement="beside" />
             </button>
             {/* The page's own heading is for screen readers; this is the same name, seen. */}
@@ -60,6 +60,13 @@ export function TopBar({ isSuperAdmin = false }: { isSuperAdmin?: boolean }) {
           </button>
         )}
 
+        {!isRoot && (
+          <button type="button" onClick={() => setMenuOpen(!menuOpen)} aria-label="Menu and search"
+            aria-expanded={menuOpen} aria-controls="orbit-menu" aria-keyshortcuts="Control+K Meta+K"
+            className="orbit-icon-button shrink-0 lg:hidden" data-testid="orbit-detail-menu-button">
+            <Search size={18} aria-hidden="true" />
+          </button>
+        )}
         {isSuperAdmin && (
           // You see admin tools other people don't; kept clear of the game's own buttons in the full-screen view.
           <span

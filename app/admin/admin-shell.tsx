@@ -124,8 +124,7 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
   return (
     <AdminBootstrapProvider value={bootstrap}>
       <WorkAdventureProvider>
-        <OrbitBridge onRefresh={refreshFromGame} onView={setView} />
-        <ShellChrome view={view} user={bootstrap.user} error={error} retry={load}>
+        <ShellChrome view={view} user={bootstrap.user} error={error} retry={load} onRefresh={refreshFromGame} onView={setView}>
           {children}
         </ShellChrome>
       </WorkAdventureProvider>
@@ -139,17 +138,26 @@ function ShellChrome({
   user,
   error,
   retry,
+  onRefresh,
+  onView,
 }: {
   children: React.ReactNode;
   view: OrbitView;
   user: AdminBootstrap['user'];
   error: string | null;
   retry: () => void;
+  onRefresh: () => void;
+  onView: (view: OrbitView) => void;
 }) {
   const pathname = usePathname();
   const router = useRouter();
   const { wa } = useWorkAdventure();
   const [menuOpen, setMenuOpen] = useState(false);
+  const openMenu = useCallback(() => {
+    // Never cover an edit/confirmation dialog with a second modal.
+    if (document.querySelector('[role="dialog"][data-state="open"]:not(#orbit-menu), [role="alertdialog"][data-state="open"]')) return;
+    setMenuOpen(true);
+  }, []);
   const inFrame = useMemo(() => isInsideFrame(), []);
   const route = useMemo(() => resolveRoute(pathname), [pathname]);
 
@@ -270,7 +278,7 @@ function ShellChrome({
   // focus, and with nothing above the page, Orbit closes. Keys pressed here never reach the game.
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented) return;
+      if (event.defaultPrevented || event.isComposing || event.repeat) return;
       // Ctrl+K (Cmd+K on a Mac) opens and closes the menu from anywhere, unless another dialog is open.
       if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'k') {
         const otherDialog = document.querySelector('[role="dialog"][data-state="open"]:not(#orbit-menu), [role="alertdialog"][data-state="open"]');
@@ -306,6 +314,7 @@ function ShellChrome({
 
   return (
     <OrbitFrameProvider value={frame}>
+      <OrbitBridge onRefresh={onRefresh} onView={onView} onMenu={openMenu} />
       <div className="min-h-dvh bg-background" style={{ ['--sidebar-width' as string]: '5.5rem' }}>
         <div className="orbit-orbs" aria-hidden="true">
           <i />

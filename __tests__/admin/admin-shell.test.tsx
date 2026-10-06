@@ -431,7 +431,7 @@ describe('AdminShell', () => {
     expect(screen.queryByRole('button', { name: /full screen|expand|maximi/i })).toBeNull();
     const bar = screen.getByRole('banner');
     const menuButton = bar.querySelector('button');
-    expect(menuButton?.textContent).toContain('Orbit Menu');
+    expect(menuButton?.textContent).toContain('Menu & search');
     // Its shortcut is on the button as keycaps (shown on hover, only with a keyboard and a mouse).
     const keys = Array.from(menuButton?.querySelectorAll('kbd') ?? []).map((key) => key.textContent);
     expect(keys).toEqual(['Ctrl', 'K']);
@@ -582,10 +582,49 @@ describe('AdminShell', () => {
     for (const label of ['Avatar sets', 'Bots', 'AI providers', 'AI usage', 'Bot database', 'MCP servers']) {
       expect(menu.textContent).toContain(label);
     }
-    for (const label of ['Your universes', 'Stars', 'Memberships', 'Profile', 'Room templates', 'People']) {
+    for (const label of ['Your universes', 'Stars', 'Memberships', 'You', 'Room templates', 'People']) {
       expect(menu.textContent).toContain(label);
     }
     // The account, theme and sign-out live on You, not in the menu.
     expect(menu.textContent).not.toContain('Sign out');
   });
+
+  it('opens the same menu from a detail page without replacing its content or history', async () => {
+    await renderShell('/admin/worlds/w-1');
+    fireEvent.click(screen.getByTestId('orbit-detail-menu-button'));
+    expect(await screen.findByRole('dialog')).toBeTruthy();
+    expect(screen.getByText('page content')).toBeTruthy();
+    expect(mockRouter.push).not.toHaveBeenCalled();
+    expect(mockRouter.replace).not.toHaveBeenCalled();
+    expect(mockRouter.back).not.toHaveBeenCalled();
+  });
+
+  it('focuses the single search input and moves to results with the arrow keys', async () => {
+    await renderShell('/admin');
+    const opener = screen.getByTestId('orbit-menu-button');
+    opener.focus();
+    fireEvent.click(opener);
+    const input = await screen.findByRole('searchbox', { name: 'Find people, places or tools' });
+    expect(document.activeElement).toBe(input);
+    fireEvent.keyDown(input, { key: 'ArrowDown' });
+    expect(document.activeElement?.textContent).toBe('You');
+    fireEvent.keyDown(document.activeElement!, { key: 'ArrowUp' });
+    expect(document.activeElement).toBe(input);
+    fireEvent.click(screen.getByRole('button', { name: 'Close the menu' }));
+    await waitFor(() => expect(document.activeElement).toBe(opener));
+  });
+
+  it('does not force open a touch keyboard when the menu opens', async () => {
+    const previous = window.matchMedia;
+    window.matchMedia = jest.fn().mockReturnValue({ matches: true });
+    try {
+      await renderShell('/admin');
+      fireEvent.click(screen.getByTestId('orbit-menu-button'));
+      const dialog = await screen.findByRole('dialog');
+      expect(document.activeElement).toBe(dialog);
+    } finally {
+      window.matchMedia = previous;
+    }
+  });
+
 });

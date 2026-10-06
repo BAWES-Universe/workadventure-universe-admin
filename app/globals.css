@@ -547,3 +547,20 @@ a[href] {
     min-width: 44px;
   }
 }
+
+/* Disposable unified-menu experiment: all new search UI lives inside the existing menu. */
+.orbit-menu-scopes { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 12px; }
+.orbit-menu-scopes button { padding: 8px 10px; min-height: 40px; border-radius: 8px; font-size: 12px; color: hsl(var(--muted-foreground)); }
+.orbit-menu-scopes button[aria-pressed=true] { color: hsl(var(--foreground)); background: hsl(var(--accent)); }
+.orbit-menu-results { display: grid; gap: 20px; margin-top: 24px; }
+.orbit-menu-result-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.orbit-menu-result-heading > a { font-size: 12px; color: hsl(var(--muted-foreground)); padding: 8px 0; }
+.orbit-menu-result { display: flex; align-items: center; gap: 12px; min-height: 56px; border-radius: 10px; padding: 8px; font-size: 14px; }
+.orbit-menu-result > svg { flex-shrink: 0; }
+.orbit-menu-result:hover, .orbit-menu-result:focus-visible { background: hsl(var(--accent)); }
+.orbit-menu-hint { font-size: 12px; line-height: 1.6; color: hsl(var(--muted-foreground)); margin-top: 12px; }
+.orbit-menu-hint button { text-decoration: underline; padding: 8px; }
+.orbit-menu-kind-people { color: var(--kind-people-solid); }
+.orbit-menu-kind-room { color: var(--kind-room-solid); }
+.orbit-menu-kind-world { color: var(--kind-world-solid); }
+.orbit-menu-kind-universe { color: var(--kind-universe-solid); }

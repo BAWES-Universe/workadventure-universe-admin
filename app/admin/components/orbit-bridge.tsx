@@ -66,8 +66,10 @@ async function resolvePage(intent: string, params: Record<string, string> | unde
 export default function OrbitBridge({
   onRefresh,
   onView,
+  onMenu,
 }: {
   onRefresh: () => void;
+  onMenu?: () => void;
   /** The game said which view (compact or full-screen) its frame is in. */
   onView?: (view: OrbitView) => void;
 }) {
@@ -75,10 +77,12 @@ export default function OrbitBridge({
   const roomRevision = useRef<string | null>(null);
   const onRefreshRef = useRef(onRefresh);
   const onViewRef = useRef(onView);
+  const onMenuRef = useRef(onMenu);
   useEffect(() => {
     onRefreshRef.current = onRefresh;
     onViewRef.current = onView;
-  }, [onRefresh, onView]);
+    onMenuRef.current = onMenu;
+  }, [onRefresh, onView, onMenu]);
 
   useEffect(() => {
     if (!isInsideFrame()) return;
@@ -117,6 +121,12 @@ export default function OrbitBridge({
       if (roomRevision.current === null) return ack(requestId, revision, 'not-ready');
       // A request from an earlier room or connection is refused.
       if (revision !== roomRevision.current) return ack(requestId, revision, 'stale-revision');
+
+      if (parsed.kind === 'menu') {
+        onMenuRef.current?.();
+        ack(requestId, revision);
+        return;
+      }
 
       if (parsed.kind === 'navigate') {
         const { intent, params } = parsed.message;

@@ -53,7 +53,7 @@ describe('OrbitBridge', () => {
 
   it('tells the game it is ready once mounted (after sign-in)', () => {
     render(<OrbitBridge onRefresh={jest.fn()} />);
-    expect(posted).toContainEqual({ type: 'orbit-bridge-ready', version: 1, capabilities: ['navigate', 'event', 'view'] });
+    expect(posted).toContainEqual({ type: 'orbit-bridge-ready', version: 1, capabilities: ['navigate', 'event', 'view', 'menu'] });
   });
 
   it('answers not-ready to a request before the game said which visit it is', () => {
@@ -86,6 +86,63 @@ describe('OrbitBridge', () => {
     await waitFor(() => expect(mockPush).toHaveBeenCalledWith('/admin/universes/new'));
     expect(mockFetch).toHaveBeenCalledWith('/api/orbit-bridge/resolve', expect.objectContaining({ method: 'POST' }));
     expect(posted).toContainEqual(expect.objectContaining({ requestId: 'r1', ok: true }));
+  });
+
+  it("opens the same menu without resolving or navigating a page", () => {
+    const onMenu = jest.fn();
+    render(<OrbitBridge onRefresh={jest.fn()} onMenu={onMenu} />);
+    init();
+    fromGame({
+      type: "orbit-menu",
+      version: 1,
+      requestId: "menu1",
+      roomRevision: revision,
+    });
+    expect(onMenu).toHaveBeenCalledTimes(1);
+    expect(mockPush).not.toHaveBeenCalled();
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(posted).toContainEqual(
+      expect.objectContaining({ requestId: "menu1", ok: true })
+    );
+  });
+
+  it("rejects menu requests from stale rooms, other windows and wrong origins", () => {
+    const onMenu = jest.fn();
+    render(<OrbitBridge onRefresh={jest.fn()} onMenu={onMenu} />);
+    init();
+    fromGame({
+      type: "orbit-menu",
+      version: 1,
+      requestId: "stale",
+      roomRevision: otherRevision,
+    });
+    fromGame(
+      {
+        type: "orbit-menu",
+        version: 1,
+        requestId: "evil",
+        roomRevision: revision,
+      },
+      "https://evil.example.test"
+    );
+    act(() =>
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          data: {
+            type: "orbit-menu",
+            version: 1,
+            requestId: "window",
+            roomRevision: revision,
+          },
+          origin: GAME,
+          source: null,
+        })
+      )
+    );
+    expect(onMenu).not.toHaveBeenCalled();
+    expect(posted).toContainEqual(
+      expect.objectContaining({ requestId: "stale", error: "stale-revision" })
+    );
   });
 
   it('falls back to home when resolving fails', async () => {
