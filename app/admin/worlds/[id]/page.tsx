@@ -29,6 +29,7 @@ import InviteMemberDialog from '../../components/invite-member-dialog';
 import MemberList from '../../components/member-list';
 import WorldSafety, { useWorldSafety, waitingCount } from '../../components/world-safety';
 import { PersonIcon } from '../../components/profile-card';
+import RecentVisitors from '../../components/recent-visitors';
 import { useEntitySummaries } from '../../hooks/use-entity-summaries';
 import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
@@ -449,6 +450,7 @@ function WorldDetail() {
 
           {activeTab === 'details' && (
             <>
+              <RecentVisitors scope="world" id={id} />
               {(world.description || world.thumbnailUrl) && (
                 <section aria-labelledby="world-about" className="space-y-3">
                   <SectionHeader id="world-about" title="About" />

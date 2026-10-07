@@ -1,43 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
-import { CARD_STAMPS, loadPassport, type Stamp } from '@/lib/passport';
-import { SHARING_KEYS, sharePassportFromRows } from '@/lib/people-settings';
+import { CARD_STAMPS, visibleStamps, type Stamp } from '@/lib/passport';
 import { universeColour } from '@/lib/universe-colour';
 
 export const dynamic = 'force-dynamic';
-
-/**
- * The stamps this viewer may see on someone's card: public worlds only, and only if they show their passport to
- * everyone (or to friends, and the viewer is signed in to Orbit and is one). The card in the game has no Orbit session
- * of its own, so a friends-only passport shows there only when the browser sends one.
- */
-async function stampsFor(request: NextRequest, userId: string, limit: number): Promise<Stamp[]> {
-  const rows = await prisma.userPreference.findMany({
-    where: { userId, key: { in: [...SHARING_KEYS] } },
-    select: { key: true, value: true },
-  });
-  const audience = sharePassportFromRows(rows);
-  if (audience === 'nobody') return [];
-  if (audience === 'friends') {
-    const viewer = await getSessionUser(request);
-    if (!viewer) return [];
-    if (viewer.id !== userId) {
-      const friendship = await prisma.friendship.findFirst({
-        where: {
-          status: 'accepted',
-          OR: [
-            { user1Id: viewer.id, user2Id: userId },
-            { user1Id: userId, user2Id: viewer.id },
-          ],
-        },
-        select: { id: true },
-      });
-      if (!friendship) return [];
-    }
-  }
-  return (await loadPassport(userId, { owner: false })).stamps.slice(0, limit);
-}
 
 async function getProfileData(request: NextRequest, uuid: string, limit: number) {
   const user = await prisma.user.findUnique({
@@ -54,7 +21,9 @@ async function getProfileData(request: NextRequest, uuid: string, limit: number)
     select: { bio: true, links: true },
   });
   // The passport is an extra: if it can't be read, the card is still bio and links.
-  const stamps = await stampsFor(request, user.id, limit).catch((error) => {
+  // The card in the game has no Orbit session of its own, so a friends-only passport shows there only when the browser sends one.
+  const viewer = await getSessionUser(request).catch(() => null);
+  const stamps = await visibleStamps(viewer?.id ?? null, user.id, limit).catch((error) => {
     console.error('[Profile] Passport failed:', error);
     return [] as Stamp[];
   });

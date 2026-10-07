@@ -1,4 +1,5 @@
 import { prisma } from '@/lib/db';
+import { SHARING_KEYS, sharePassportFromRows } from '@/lib/people-settings';
 
 /**
  * Your passport: one stamp for every world you have been to, from the room visits Orbit already records. Someone
@@ -73,4 +74,34 @@ export async function loadPassport(userId: string, options: { owner: boolean }):
     since: stamps.reduce((first, stamp) => (stamp.since < first ? stamp.since : first), stamps[0].since),
     days: Number(rows[0]?.days ?? 0),
   };
+}
+
+/**
+ * The stamps `viewerId` (null when not signed in) may see on `userId`'s card: public worlds only, and only if they show
+ * their passport to everyone, or to friends and the viewer is one. Their own, a person always sees in full on You, not here.
+ */
+export async function visibleStamps(viewerId: string | null, userId: string, limit: number): Promise<Stamp[]> {
+  const rows = await prisma.userPreference.findMany({
+    where: { userId, key: { in: [...SHARING_KEYS] } },
+    select: { key: true, value: true },
+  });
+  const audience = sharePassportFromRows(rows);
+  if (audience === 'nobody') return [];
+  if (audience === 'friends') {
+    if (!viewerId) return [];
+    if (viewerId !== userId) {
+      const friendship = await prisma.friendship.findFirst({
+        where: {
+          status: 'accepted',
+          OR: [
+            { user1Id: viewerId, user2Id: userId },
+            { user1Id: userId, user2Id: viewerId },
+          ],
+        },
+        select: { id: true },
+      });
+      if (!friendship) return [];
+    }
+  }
+  return (await loadPassport(userId, { owner: false })).stamps.slice(0, limit);
 }
