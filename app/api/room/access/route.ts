@@ -406,6 +406,8 @@ export async function GET(request: NextRequest) {
             worldSlug: world,
             roomSlug: room,
             playUri: playUri,
+            // A guest has no saved outfit, so the one they picked is kept with the visit; a person's account has theirs.
+            textureIds: actualIsGuestForAnalytics && isTexturesValid ? characterTextureIds : [],
           },
         }).catch((error: unknown) => {
           // Log but don't fail the request if analytics logging fails

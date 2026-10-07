@@ -9,7 +9,12 @@ import { withWokas } from '@/lib/woka-avatar';
  */
 
 export interface RecentVisitor {
-  userId: string;
+  /** One per person: their account id, or for a guest the id their browser keeps. */
+  key: string;
+  /** Their account, or null for a guest (no profile to open). */
+  userId: string | null;
+  /** Someone without an account, shown by the name they typed and the Woka they picked. */
+  guest: boolean;
   name: string;
   woka: string[];
   /** When they last came, an ISO date. */
@@ -25,8 +30,8 @@ export const RECENT_VISITORS = 8;
 /** Enough visits to find that many different people. */
 const LOOK_BACK = 200;
 
-export async function loadRecentVisitors(viewer: Viewer, scope: AccessScope): Promise<RecentVisitor[]> {
-  if ((await accessDetailFor(viewer, scope)) === 'minimal') return [];
+/** The people with an account who came by, newest first, each once. */
+async function memberVisits(viewer: Viewer, scope: AccessScope) {
   const me = viewerUserId(viewer);
   const visits = await prisma.roomAccess.findMany({
     where: { ...scope, userId: me ? { not: me } : { not: null } },
@@ -48,13 +53,77 @@ export async function loadRecentVisitors(viewer: Viewer, scope: AccessScope): Pr
     latest.push(visit);
     if (latest.length === RECENT_VISITORS) break;
   }
-  const withFaces = await withWokas(latest.map((visit) => ({ userId: visit.userId })));
-  return latest.map((visit, index) => ({
-    userId: visit.userId as string,
-    name: visit.user?.name?.trim() || visit.userName?.trim() || 'Someone',
+  return latest;
+}
+
+/**
+ * The guests who came by under a name they typed, newest first, each once (by the id their browser keeps). A guest's
+ * name and outfit come from the visit that has them; visits from before they were saved have neither, so those guests
+ * stay out of the row (they still count in the Guests chip).
+ */
+async function guestVisits(scope: AccessScope) {
+  const visits = await prisma.roomAccess.findMany({
+    where: { ...scope, userUuid: { not: null }, userName: { not: null }, OR: [{ userId: null }, { user: { isGuest: true } }] },
+    orderBy: { accessedAt: 'desc' },
+    take: LOOK_BACK,
+    select: {
+      userUuid: true,
+      userName: true,
+      textureIds: true,
+      accessedAt: true,
+      room: { select: { id: true, name: true } },
+    },
+  });
+  const byGuest = new Map<string, { name: string; textureIds: string[]; at: Date; room: { id: string; name: string } }>();
+  for (const visit of visits) {
+    const uuid = visit.userUuid as string;
+    const name = visit.userName?.trim();
+    if (!name || name === uuid) continue;
+    const known = byGuest.get(uuid);
+    if (known) {
+      if (known.textureIds.length === 0 && visit.textureIds.length > 0) known.textureIds = visit.textureIds;
+      continue;
+    }
+    if (byGuest.size === RECENT_VISITORS) continue;
+    byGuest.set(uuid, { name, textureIds: visit.textureIds, at: visit.accessedAt, room: { id: visit.room.id, name: visit.room.name } });
+  }
+  return [...byGuest.entries()].map(([uuid, guest]) => ({ uuid, ...guest }));
+}
+
+export async function loadRecentVisitors(viewer: Viewer, scope: AccessScope): Promise<RecentVisitor[]> {
+  if ((await accessDetailFor(viewer, scope)) === 'minimal') return [];
+  const [members, guests] = await Promise.all([memberVisits(viewer, scope), guestVisits(scope)]);
+  const people = [
+    ...members.map((visit) => ({
+      key: visit.userId as string,
+      userId: visit.userId as string,
+      guest: false,
+      name: visit.user?.name?.trim() || visit.userName?.trim() || 'Someone',
+      at: visit.accessedAt,
+      room: { id: visit.room.id, name: visit.room.name },
+      face: { userId: visit.userId as string } as { userId: string | null; userUuid?: string; isGuest?: boolean; textureIds?: string[] },
+    })),
+    ...guests.map((guest) => ({
+      key: guest.uuid,
+      userId: null as string | null,
+      guest: true,
+      name: guest.name,
+      at: guest.at,
+      room: guest.room,
+      face: { userId: null, userUuid: guest.uuid, isGuest: true, textureIds: guest.textureIds },
+    })),
+  ]
+    .sort((a, b) => b.at.getTime() - a.at.getTime())
+    .slice(0, RECENT_VISITORS);
+  const withFaces = await withWokas(people.map((person) => person.face));
+  return people.map((person, index) => ({
+    key: person.key,
+    userId: person.userId,
+    guest: person.guest,
+    name: person.name,
     woka: withFaces[index].woka ?? [],
-    at: visit.accessedAt.toISOString(),
-    room: { id: visit.room.id, name: visit.room.name },
+    at: person.at.toISOString(),
+    room: person.room,
   }));
 }
 

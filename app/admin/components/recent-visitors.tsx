@@ -5,7 +5,7 @@ import { useEffect, useState } from 'react';
 import { authenticatedFetch } from '@/lib/client-auth';
 import { ArrowRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { timeAgo } from '@/lib/time-ago';
+import { timeAgo, timeAgoShort } from '@/lib/time-ago';
 import type { RecentVisitor } from '@/lib/recent-visitors';
 import type { Stamp } from '@/lib/passport';
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from '@/components/ui/sheet';
@@ -67,16 +67,18 @@ function VisitorSheet({ visitor, onClose }: { visitor: RecentVisitor | null; onC
               <div>
                 <SheetTitle className={styles.name}>{visitor.name}</SheetTitle>
                 <SheetDescription className={styles.when}>
-                  Here {timeAgo(new Date(visitor.at))} · {visitor.room.name}
+                  {visitor.guest && 'Guest · '}Here {timeAgo(new Date(visitor.at))} · {visitor.room.name}
                 </SheetDescription>
               </div>
             </div>
             {profile?.bio && <p className={styles.bio}>{profile.bio}</p>}
             {profile && <ProfileLinks links={profile.links} />}
             {profile && profile.stamps.length > 0 && <Stamps stamps={profile.stamps} className={`${passportStyles.stamps} ${styles.stamps}`} />}
-            <Link href={`/admin/users/${visitor.userId}`} className={styles.full}>
-              Full profile
-            </Link>
+            {visitor.userId && (
+              <Link href={`/admin/users/${visitor.userId}`} className={styles.full}>
+                Full profile
+              </Link>
+            )}
           </>
         )}
       </SheetContent>
@@ -139,17 +141,17 @@ export default function RecentVisitors({ scope, id, onOpenVisitors }: { scope: S
           </li>
         )}
         {visitors.map((visitor) => (
-          <li key={visitor.userId}>
+          <li key={visitor.key}>
             <button
               type="button"
               className={styles.face}
-              data-picked={picked?.userId === visitor.userId}
-              aria-label={`${visitor.name}, ${timeAgo(new Date(visitor.at))}`}
+              data-picked={picked?.key === visitor.key}
+              aria-label={`${visitor.name}, ${visitor.guest ? 'guest, ' : ''}${timeAgo(new Date(visitor.at))}`}
               onClick={() => setPicked(visitor)}
             >
               <WokaAvatar layers={visitor.woka} name={visitor.name} size={44} tinted />
               <strong>{visitor.name}</strong>
-              <span>{timeAgo(new Date(visitor.at))}</span>
+              <span>{visitor.guest ? `Guest · ${timeAgoShort(new Date(visitor.at))}` : timeAgo(new Date(visitor.at))}</span>
             </button>
           </li>
         ))}
