@@ -142,6 +142,8 @@ export async function GET(
       ? await prisma.favorite.groupBy({
           by: ['universeId'],
           where: {
+            // Stars on the place itself are counted apart; this is its rooms' stars.
+            roomId: { not: null },
             universeId: { in: universeIds },
           },
           _count: {
@@ -160,6 +162,8 @@ export async function GET(
       ? await prisma.favorite.groupBy({
           by: ['worldId'],
           where: {
+            // Stars on the place itself are counted apart; this is its rooms' stars.
+            roomId: { not: null },
             worldId: { in: worldIds },
           },
           _count: {

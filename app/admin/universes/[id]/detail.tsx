@@ -4,7 +4,7 @@ import { useIsSuperAdmin } from '../../admin-bootstrap-context';
 
 import { PersonIcon } from '../../components/profile-card';
 import RecentVisitors from '../../components/recent-visitors';
-import { AddButton, By, PlaceHero, Rank, SectionHead, StarTotal, VisitButton, WorldGroups, playPathOf, type WorldGroupData } from '../../components/place-hero';
+import { AddButton, By, PlaceHero, Rank, SectionHead, StarButton, VisitButton, WorldGroups, playPathOf, type WorldGroupData } from '../../components/place-hero';
 
 import { useState, useEffect, useMemo } from 'react';
 import { useRouter, useParams } from 'next/navigation';
@@ -29,7 +29,7 @@ import { ChevronRight, AlertCircle, Loader2, Plus, Edit, Trash2, ChevronLeft } f
 import { timeAgo } from '@/lib/time-ago';
 import { activityStats } from '@/lib/analytics-peak';
 import { useEntitySummaries } from '../../hooks/use-entity-summaries';
-import { useHere, useUniverseRank, useWorldRooms } from '../../hooks/use-place-data';
+import { useHere, useStarToggle, useUniverseRank, useWorldRooms } from '../../hooks/use-place-data';
 import { EmptyCard, EntityCard, EntityRow, Figure, Figures, InContext, KindIcon, LoadError, LoadingRows, PageHeader, RolePills, SectionHeader, SettingSwitch, Settings, StatLine, StatusPill, VisitLine, count } from '../../components/ds';
 import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
@@ -44,6 +44,9 @@ interface Universe {
   thumbnailUrl: string | null;
   createdAt: string;
   canEdit?: boolean;
+  /** Stars on the universe itself, and whether you gave one. */
+  starCount?: number;
+  isStarred?: boolean;
   owner: {
     id: string;
     name: string | null;
@@ -61,6 +64,8 @@ interface Universe {
       members: number;
       favorites?: number;
     };
+    /** Stars on the world itself. */
+    starCount?: number;
   }>;
 }
 
@@ -85,6 +90,11 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
   const { here, known: hereKnown, byRoom } = useHere('universe', id);
   const worldRooms = useWorldRooms(worldIds);
   const rank = useUniverseRank(id, universe?.isPublic === true);
+  const star = useStarToggle(
+    `/api/admin/universes/${id}/favorite`,
+    universe ? { isStarred: !!universe.isStarred, starCount: universe.starCount ?? 0 } : null,
+    (next) => setUniverse((current) => (current ? { ...current, ...next } : current)),
+  );
   const roomIds = useMemo(() => Object.values(worldRooms).flatMap((world) => world.rooms.map((room) => room.id)), [worldRooms]);
   const roomSummaries = useEntitySummaries('rooms', roomIds);
   const [currentUser, setCurrentUser] = useState<any>(null);
@@ -270,8 +280,7 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
       name: world.name,
       rooms: world._count.rooms ?? 0,
       members: world._count.members ?? 0,
-      // Stars sit on rooms: a world's total is its rooms' stars once they are loaded.
-      favorites: loaded ? loaded.rooms.reduce((sum, room) => sum + (room._count?.favorites ?? 0), 0) : null,
+      favorites: world.starCount ?? 0,
       roomList: loaded
         ? loaded.rooms.map((room) => {
             const activity = roomSummaries.summary(room.id);
@@ -291,7 +300,6 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
   // Visit opens the first room of the first world.
   const startWorld = worlds.find((world) => worldRooms[world.id]?.rooms.length);
   const startRoom = startWorld ? worldRooms[startWorld.id].rooms[0] : undefined;
-  const stars = worldGroups.every((group) => group.favorites !== null) ? worldGroups.reduce((sum, group) => sum + (group.favorites ?? 0), 0) : null;
 
   return (
     <div className="space-y-8">
@@ -326,7 +334,7 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
             {startWorld && startRoom && (
               <VisitButton hero playPath={playPathOf(universe.slug, startWorld.slug, startRoom.slug)} roomId={startRoom.id} name={startRoom.name} />
             )}
-            {stars !== null && <StarTotal count={stars} />}
+            {currentUser && <StarButton count={universe.starCount ?? 0} starred={!!universe.isStarred} onClick={star.toggle} disabled={star.busy} />}
           </>
         }
         manageLine={`${isOwner ? 'You own this universe · c' : 'C'}reated ${new Date(universe.createdAt).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}`}

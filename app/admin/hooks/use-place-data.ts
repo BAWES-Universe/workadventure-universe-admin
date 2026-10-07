@@ -152,3 +152,31 @@ export function useUniverseRank(universeId: string, enabled: boolean): { positio
   }, [universeId, enabled]);
   return rank;
 }
+
+export interface StarState {
+  isStarred: boolean;
+  starCount: number;
+}
+
+/** Stars or unstars a universe or world right away, putting it back if the server says no. */
+export function useStarToggle(path: string, state: StarState | null, apply: (next: StarState) => void) {
+  const [busy, setBusy] = useState(false);
+  const toggle = async () => {
+    if (!state || busy) return;
+    const before = state;
+    apply({ isStarred: !before.isStarred, starCount: Math.max(0, before.starCount + (before.isStarred ? -1 : 1)) });
+    setBusy(true);
+    try {
+      const response = await authenticatedFetch(path, { method: 'POST' });
+      if (!response.ok) throw new Error('Failed to toggle star');
+      const data = await response.json();
+      apply({ isStarred: !!data.isStarred, starCount: typeof data.starCount === 'number' ? data.starCount : before.starCount });
+    } catch (error) {
+      apply(before);
+      alert(error instanceof Error ? error.message : 'Failed to toggle star');
+    } finally {
+      setBusy(false);
+    }
+  };
+  return { toggle, busy };
+}

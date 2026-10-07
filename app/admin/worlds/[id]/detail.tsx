@@ -28,12 +28,12 @@ import { EmptyCard, EntityCard, EntityRow, Figure, Figures, InContext, LoadError
 import InviteMemberDialog from '../../components/invite-member-dialog';
 import MemberList from '../../components/member-list';
 import MembersRow from '../../components/members-row';
-import { AddButton, Crumb, PlaceHero, RoomRows, SectionHead, StarTotal, VisitButton, playPathOf, type RoomRowData } from '../../components/place-hero';
+import { AddButton, Crumb, PlaceHero, RoomRows, SectionHead, StarButton, VisitButton, playPathOf, type RoomRowData } from '../../components/place-hero';
 import WorldSafety, { useWorldSafety, waitingCount } from '../../components/world-safety';
 import { PersonIcon } from '../../components/profile-card';
 import RecentVisitors from '../../components/recent-visitors';
 import { useEntitySummaries } from '../../hooks/use-entity-summaries';
-import { useHere, useMembersPreview } from '../../hooks/use-place-data';
+import { useHere, useMembersPreview, useStarToggle } from '../../hooks/use-place-data';
 import { formatHour } from '../../hooks/use-room-analytics';
 import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
@@ -46,6 +46,9 @@ interface World {
   featured: boolean;
   thumbnailUrl: string | null;
   canEdit?: boolean;
+  /** Stars on the world itself, and whether you gave one. */
+  starCount?: number;
+  isStarred?: boolean;
   universe: {
     id: string;
     name: string;
@@ -134,6 +137,11 @@ function WorldDetail({ view }: { view: WorldView }) {
   const worldSummaries = useEntitySummaries('worlds', useMemo(() => [id], [id]));
   const { here, known: hereKnown, byRoom } = useHere('world', id);
   const membersPreview = useMembersPreview(id);
+  const star = useStarToggle(
+    `/api/admin/worlds/${id}/favorite`,
+    world ? { isStarred: !!world.isStarred, starCount: world.starCount ?? 0 } : null,
+    (next) => setWorld((current) => (current ? { ...current, ...next } : current)),
+  );
   
   const isSuperAdmin = useIsSuperAdmin();
   const [formData, setFormData] = useState({
@@ -311,7 +319,6 @@ function WorldDetail({ view }: { view: WorldView }) {
     };
   });
   const startRoom = world.rooms[0];
-  const stars = world.rooms.reduce((sum, room) => sum + (room._count?.favorites ?? 0), 0);
   // Your roles in this world: its members' tags, and owner when the universe is yours.
   const yourRoles = currentUser && world.universe.ownerId === currentUser.id ? ['owner'] : (membersPreview?.yourTags ?? []);
   const peakHour = summary?.peakHour ?? null;
@@ -365,7 +372,7 @@ function WorldDetail({ view }: { view: WorldView }) {
             {startRoom && (
               <VisitButton hero playPath={playPathOf(universeSlug, world.slug, startRoom.slug)} roomId={startRoom.id} name={startRoom.name} />
             )}
-            <StarTotal count={stars} />
+            {currentUser && <StarButton count={world.starCount ?? 0} starred={!!world.isStarred} onClick={star.toggle} disabled={star.busy} />}
           </>
         }
         manageLine={!isEditing && world.canEdit === true ? 'You run this world' : undefined}

@@ -215,16 +215,6 @@ export function Rank({ position, of }: { position: number; of: number }) {
   );
 }
 
-/** A universe's or world's stars: the stars of its rooms added up. Only rooms are starred, so this only counts. */
-export function StarTotal({ count }: { count: number }) {
-  return (
-    <span className={cn(styles.stars, styles.starTotal)} aria-label={`${count} ${count === 1 ? 'star' : 'stars'} on its rooms`}>
-      <Star size={18} aria-hidden="true" />
-      {count}
-    </span>
-  );
-}
-
 export function StarButton({
   count,
   starred,
@@ -318,7 +308,8 @@ export interface WorldGroupData {
   name: string;
   rooms: number;
   members: number;
-  favorites: number | null;
+  /** Stars on the world itself. */
+  favorites: number;
   /** Null while a world's rooms are on their way, or when the universe has too many worlds to ask for each. */
   roomList: RoomRowData[] | null;
 }
@@ -334,7 +325,7 @@ export function WorldGroups({ worlds, canEdit }: { worlds: WorldGroupData[]; can
               <strong>{world.name}</strong>
               <span>{world.rooms} {world.rooms === 1 ? 'room' : 'rooms'} · {world.members} {world.members === 1 ? 'member' : 'members'}</span>
             </Link>
-            {world.favorites !== null && world.favorites > 0 && <span className={styles.stars}><Star size={15} aria-hidden="true" />{world.favorites}</span>}
+            {world.favorites > 0 && <span className={styles.stars}><Star size={15} aria-hidden="true" />{world.favorites}</span>}
           </div>
           {world.roomList && <RoomRows rooms={world.roomList} />}
           {canEdit && <AddButton href={`/admin/rooms/new?worldId=${world.id}`}>Create room in {world.name}</AddButton>}
