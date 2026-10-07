@@ -182,19 +182,22 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
     }
   }
   
+  // Once the universe has loaded (not each time it changes, e.g. a star: that would send the visitors list back to page 1).
+  const universeLoaded = universe !== null;
   useEffect(() => {
-    if (universe) {
+    if (universeLoaded) {
       // Fetch analytics on initial load to show totalAccesses count
       fetchAnalytics(1);
     }
-  }, [universe, id]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [universeLoaded, id]);
 
   useEffect(() => {
-    if (activeTab === 'analytics' && universe) {
+    if (activeTab === 'analytics' && universeLoaded) {
       // Fetch analytics when switching to analytics tab or changing page
       fetchAnalytics(visitorsPage);
     }
-  }, [visitorsPage, activeTab, universe]);
+  }, [visitorsPage, activeTab, universeLoaded]);
 
   async function handleSave() {
     setSaving(true);

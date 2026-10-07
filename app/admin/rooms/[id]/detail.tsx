@@ -183,19 +183,22 @@ export function RoomDetailPage({ view = 'details' }: { view?: 'details' | 'visit
     fetchRoom();
   }, [id]);
 
+  // Once the room has loaded (not each time it changes, e.g. a star: that would send the visitors list back to page 1).
+  const roomLoaded = room !== null;
   useEffect(() => {
-    if (room) {
+    if (roomLoaded) {
       // Fetch analytics on initial load to show totalAccesses count
       fetchAnalytics(1);
     }
-  }, [room, id]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roomLoaded, id]);
 
   useEffect(() => {
-    if (activeTab === 'analytics' && room) {
+    if (activeTab === 'analytics' && roomLoaded) {
       // Fetch analytics when switching to analytics tab or changing page
       fetchAnalytics(visitorsPage);
     }
-  }, [visitorsPage, activeTab, room]);
+  }, [visitorsPage, activeTab, roomLoaded]);
 
   useEffect(() => {
     if (room && wa && waReady) {

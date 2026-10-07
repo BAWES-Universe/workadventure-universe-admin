@@ -158,19 +158,22 @@ function WorldDetail({ view }: { view: WorldView }) {
     fetchWorld();
   }, [id]);
 
+  // Once the world has loaded (not each time it changes, e.g. a star: that would send the visitors list back to page 1).
+  const worldLoaded = world !== null;
   useEffect(() => {
-    if (world) {
+    if (worldLoaded) {
       // Fetch analytics on initial load to show totalAccesses count
       fetchAnalytics(1);
     }
-  }, [world, id]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [worldLoaded, id]);
 
   useEffect(() => {
-    if (activeTab === 'analytics' && world) {
+    if (activeTab === 'analytics' && worldLoaded) {
       // Fetch analytics when switching to analytics tab or changing page
       fetchAnalytics(visitorsPage);
     }
-  }, [visitorsPage, activeTab, world]);
+  }, [visitorsPage, activeTab, worldLoaded]);
 
   async function checkAuth() {
     try {
