@@ -1,9 +1,45 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
+import { getSessionUser } from '@/lib/auth-session';
+import { CARD_STAMPS, loadPassport, type Stamp } from '@/lib/passport';
+import { SHARING_KEYS, sharePassportFromRows } from '@/lib/people-settings';
+import { universeColour } from '@/lib/universe-colour';
 
 export const dynamic = 'force-dynamic';
 
-async function getProfileData(uuid: string) {
+/**
+ * The stamps this viewer may see on someone's card: public worlds only, and only if they show their passport to
+ * everyone (or to friends, and the viewer is signed in to Orbit and is one). The card in the game has no Orbit session
+ * of its own, so a friends-only passport shows there only when the browser sends one.
+ */
+async function stampsFor(request: NextRequest, userId: string, limit: number): Promise<Stamp[]> {
+  const rows = await prisma.userPreference.findMany({
+    where: { userId, key: { in: [...SHARING_KEYS] } },
+    select: { key: true, value: true },
+  });
+  const audience = sharePassportFromRows(rows);
+  if (audience === 'nobody') return [];
+  if (audience === 'friends') {
+    const viewer = await getSessionUser(request);
+    if (!viewer) return [];
+    if (viewer.id !== userId) {
+      const friendship = await prisma.friendship.findFirst({
+        where: {
+          status: 'accepted',
+          OR: [
+            { user1Id: viewer.id, user2Id: userId },
+            { user1Id: userId, user2Id: viewer.id },
+          ],
+        },
+        select: { id: true },
+      });
+      if (!friendship) return [];
+    }
+  }
+  return (await loadPassport(userId, { owner: false })).stamps.slice(0, limit);
+}
+
+async function getProfileData(request: NextRequest, uuid: string, limit: number) {
   const user = await prisma.user.findUnique({
     where: { uuid },
     select: { id: true, name: true },
@@ -17,16 +53,23 @@ async function getProfileData(uuid: string) {
     where: { userId: user.id },
     select: { bio: true, links: true },
   });
+  // The passport is an extra: if it can't be read, the card is still bio and links.
+  const stamps = await stampsFor(request, user.id, limit).catch((error) => {
+    console.error('[Profile] Passport failed:', error);
+    return [] as Stamp[];
+  });
   
-  if (!visitCard) {
+  // Someone with a passport but no card yet still shows their stamps; someone with neither has no profile.
+  if (!visitCard && stamps.length === 0) {
     return null;
   }
   
   return {
     name: user.name ?? undefined,
-    bio: visitCard.bio ?? undefined,
+    bio: visitCard?.bio ?? undefined,
     // Web links only, so an old javascript: or data: address never runs for whoever opens the profile.
-    links: ((visitCard.links || []) as Array<{ label: string; url: string }>).filter((link) => /^https?:\/\//i.test(link.url)),
+    links: ((visitCard?.links || []) as Array<{ label: string; url: string }>).filter((link) => /^https?:\/\//i.test(link.url)),
+    stamps,
   };
 }
 
@@ -40,6 +83,23 @@ function escapeHtml(text: string | null | undefined): string {
     .replace(/'/g, '&#039;');
 }
 
+const EARTH_ICON = `<svg class="stamp-icon" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.54 15H17a2 2 0 0 0-2 2v4.54"/><path d="M7 3.34V5a3 3 0 0 0 3 3a2 2 0 0 1 2 2c0 1.1.9 2 2 2a2 2 0 0 0 2-2c0-1.1.9-2 2-2h3.17"/><path d="M11 21.95V18a2 2 0 0 0-2-2a2 2 0 0 1-2-2v-1a2 2 0 0 0-2-2H2.05"/><circle cx="12" cy="12" r="10"/></svg>`;
+const TILTS = [-4, 3, -2, 4, -3, 2];
+
+/** One stamp per world, tilted a little, in its universe's colour. */
+function renderStamps(stamps: Stamp[]): string {
+  if (stamps.length === 0) return '';
+  return `<ul class="stamps" aria-label="Passport">${stamps
+    .map(
+      (stamp, index) => `<li class="stamp" style="--c: ${universeColour(stamp.universe.id)}; --r: ${TILTS[index % TILTS.length]}deg">
+        ${EARTH_ICON}
+        <strong>${escapeHtml(stamp.world)}</strong>
+        <em>${stamp.visits} ${stamp.visits === 1 ? 'visit' : 'visits'}</em>
+      </li>`,
+    )
+    .join('')}</ul>`;
+}
+
 const LINK_ICON = `<svg class="link-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>`;
 
 /**
@@ -49,11 +109,11 @@ const LINK_ICON = `<svg class="link-icon" fill="none" stroke="currentColor" view
  * Someone who has written nothing and added no links gets no line saying so: the embedded card is then empty and
  * zero high, so the game's popup simply ends under their name.
  */
-function renderHTML(data: { name?: string; bio?: string; links: Array<{ label: string; url: string }> }, isEmbedded: boolean) {
+function renderHTML(data: { name?: string; bio?: string; links: Array<{ label: string; url: string }>; stamps: Stamp[] }, isEmbedded: boolean) {
   const name = escapeHtml(data.name);
   const bio = escapeHtml(data.bio);
   const links = data.links ?? [];
-  const empty = !data.bio && links.length === 0;
+  const empty = !data.bio && links.length === 0 && data.stamps.length === 0;
   // Nothing to show inside the game's card: no padding either, or the card would leave an empty band.
   const hideBody = isEmbedded && empty;
 
@@ -79,6 +139,12 @@ function renderHTML(data: { name?: string; bio?: string; links: Array<{ label: s
     .link-item:focus-visible { outline: 2px solid #8b5cf6; outline-offset: 2px; }
     .link-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .link-icon { flex: none; width: 16px; height: 16px; color: rgb(255 255 255 / 0.6); }
+    .stamps { list-style: none; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; padding: 8px 6px 6px; }
+    .stamp { position: relative; display: grid; justify-items: center; align-content: center; gap: 2px; min-height: 96px; padding: 8px 6px; text-align: center; border-radius: 18px; border: 2px dashed color-mix(in srgb, var(--c) 70%, transparent); background: radial-gradient(circle at 50% 30%, color-mix(in srgb, var(--c) 22%, transparent), transparent 70%); transform: rotate(var(--r)); min-width: 0; }
+    .stamp::after { content: ''; position: absolute; inset: 4px; border-radius: 14px; border: 1px solid color-mix(in srgb, var(--c) 35%, transparent); pointer-events: none; }
+    .stamp-icon { width: 18px; height: 18px; color: #2dd4bf; }
+    .stamp strong { max-width: 100%; margin-top: 2px; font-size: 13px; font-weight: 700; letter-spacing: 0.02em; text-transform: uppercase; overflow-wrap: anywhere; }
+    .stamp em { font-style: normal; font-size: 11px; font-weight: 700; color: color-mix(in srgb, var(--c) 75%, white); }
     @media (prefers-reduced-motion: reduce) { .link-item { transition: none; } }
   </style>
   ${isEmbedded ? `
@@ -134,6 +200,7 @@ function renderHTML(data: { name?: string; bio?: string; links: Array<{ label: s
         `).join('')}
       </nav>
     ` : ''}
+    ${renderStamps(data.stamps)}
   </main>`}
 </body>
 </html>`;
@@ -146,7 +213,8 @@ export async function GET(
   const { uuid: uuidRaw } = await params;
   const uuid = decodeURIComponent(uuidRaw);
   
-  const data = await getProfileData(uuid);
+  const isEmbeddedRequest = request.nextUrl.searchParams.get('embed') === 'true';
+  const data = await getProfileData(request, uuid, isEmbeddedRequest ? CARD_STAMPS : 6);
   
   if (!data) {
     const accept = request.headers.get('accept') || '';

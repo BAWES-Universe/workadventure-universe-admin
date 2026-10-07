@@ -6,6 +6,7 @@ import { ChevronRight } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useAdminBootstrap } from '../admin-bootstrap-context';
 import { StatLine, count } from '../components/ds';
+import { ActivitySection, PassportSection } from '../components/passport';
 import { ProfileCard } from '../components/profile-card';
 import { ThemeChoice } from '../components/shell/theme-choice';
 import Yours from '../components/yours';
@@ -54,6 +55,8 @@ function You() {
           )
         }
       />
+      <PassportSection />
+      <ActivitySection />
       <Yours profileComplete={profileComplete} />
       <section className={styles.settings} aria-labelledby="settings-heading">
         <h2 id="settings-heading" className="orbit-display">
