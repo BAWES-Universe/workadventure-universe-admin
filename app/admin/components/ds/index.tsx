@@ -187,6 +187,7 @@ export function EntityRow({
   context,
   meta,
   aside,
+  titleAside,
   trailing,
   leading,
   tone,
@@ -204,6 +205,8 @@ export function EntityRow({
   leading?: ReactNode;
   /** Quiet information at the end (a star count, a role). */
   aside?: ReactNode;
+  /** Small pills on the name's own line (roles), after the name. */
+  titleAside?: ReactNode;
   /** Controls of their own, kept out of the row's link. */
   trailing?: ReactNode;
   testId?: string;
@@ -218,9 +221,18 @@ export function EntityRow({
     >
       {leading ?? <KindIcon kind={kind} universeId={universeId} />}
       <div className={styles.rowText}>
-        <Link href={href} className={styles.stretched}>
-          <strong>{title}</strong>
-        </Link>
+        {titleAside ? (
+          <div className={styles.titleLine}>
+            <Link href={href} className={styles.stretched}>
+              <strong>{title}</strong>
+            </Link>
+            {titleAside}
+          </div>
+        ) : (
+          <Link href={href} className={styles.stretched}>
+            <strong>{title}</strong>
+          </Link>
+        )}
         {context}
         {meta}
       </div>

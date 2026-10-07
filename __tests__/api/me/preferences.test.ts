@@ -127,6 +127,18 @@ describe('/api/me/preferences', () => {
     expect((await put({ key: 'people.hideLocation', value: true })).status).toBe(200);
   });
 
+  it('accepts the two sharing choices only as Everyone, Friends or No one', async () => {
+    for (const key of ['people.shareRoom', 'people.sharePassport']) {
+      expect((await put({ key, value: 'strangers' })).status).toBe(400);
+      expect((await put({ key, value: true })).status).toBe(400);
+    }
+    expect(prisma.userPreference.upsert).not.toHaveBeenCalled();
+    for (const value of ['everyone', 'friends', 'nobody']) {
+      expect((await put({ key: 'people.shareRoom', value })).status).toBe(200);
+      expect((await put({ key: 'people.sharePassport', value })).status).toBe(200);
+    }
+  });
+
   it('rejects a missing value and invalid JSON', async () => {
     expect((await put({ key: 'orbit.introSeen' })).status).toBe(400);
     expect((await put('{not json')).status).toBe(400);

@@ -1,0 +1,18 @@
+.page { display: grid; gap: 18px; max-width: 620px; min-width: 0; }
+.title { margin: 0; font-family: var(--font-display); font-size: 26px; font-weight: 700; letter-spacing: -.02em; }
+.lede { margin: 4px 0 0; font-size: 14px; color: hsl(var(--muted-foreground)); }
+.roomNote { display: flex; align-items: flex-start; gap: 12px; padding: 14px 16px; border-radius: 20px; border: 1px solid rgb(45 212 191 / .45); background: rgb(45 212 191 / .07); }
+.roomNote svg { flex: none; margin-top: 2px; color: #5eead4; }
+.roomNote p { margin: 0; font-size: 14px; }
+.card { display: grid; padding: 6px 16px; border-radius: 20px; border: 1px solid hsl(var(--border)); background: hsl(var(--card)); min-width: 0; }
+.line { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; }
+.line + .line { border-top: 1px solid hsl(var(--border)); }
+.line > div:first-child { flex: 1 1 0; min-width: 0; }
+.q { margin: 0; font-size: 16px; font-weight: 700; }
+.hint { margin: 0; font-size: 13px; color: hsl(var(--muted-foreground)); }
+.pickWrap { position: relative; flex: none; }
+.pick { display: inline-flex; align-items: center; gap: 4px; min-height: 44px; padding: 0 12px 0 14px; border-radius: 999px; border: 1px solid hsl(var(--foreground) / .18); background: transparent; color: inherit; font-size: 14px; font-weight: 600; }
+.pick:disabled { opacity: .6; }
+.menu { position: absolute; z-index: 20; right: 0; top: calc(100% + 6px); min-width: 170px; margin: 0; padding: 6px; list-style: none; display: grid; gap: 2px; border-radius: 16px; border: 1px solid hsl(var(--border)); background: hsl(var(--popover)); box-shadow: 0 18px 50px -12px rgb(0 0 0 / .6); }
+.option { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; min-height: 44px; padding: 0 12px; border: 0; border-radius: 12px; background: transparent; color: inherit; font-size: 14px; font-weight: 600; text-align: left; }
+.option[aria-selected='true'] { background-image: var(--brand-gradient); color: #fff; }

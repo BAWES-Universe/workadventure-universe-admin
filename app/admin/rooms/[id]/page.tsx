@@ -2,6 +2,7 @@
 
 import { localPeakHour } from '@/lib/analytics-peak';
 import { PersonIcon } from '../../components/profile-card';
+import RecentVisitors from '../../components/recent-visitors';
 
 import { useState, useEffect, type ReactNode } from 'react';
 import { useRouter, useParams } from 'next/navigation';
@@ -948,6 +949,8 @@ export default function RoomDetailPage() {
               Visitors
             </button>
           </nav>
+
+          {activeTab === 'details' && <RecentVisitors scope="room" id={id} onOpenVisitors={() => setActiveTab('analytics')} />}
 
           {activeTab === 'details' && (
             <section aria-labelledby="room-about" className="space-y-2">

@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useContext, useMemo, useState } from 'react';
-import { EyeOff } from 'lucide-react';
+import { ArrowUpRight, EyeOff } from 'lucide-react';
 import type { LiveStatus, LivePlace, LiveView } from '@/lib/live-presence';
 import { cn } from '@/lib/utils';
 import { WorkAdventureContext } from '../../workadventure-context';
@@ -101,7 +101,7 @@ function PlaceCard({ place }: { place: LivePlace }) {
       <div className={styles.placeBottom}>
         <span className={styles.stack}>
           {faces.map((person) => (
-            <WokaAvatar key={person.uuid} layers={person.woka} name={person.name} size={34} />
+            <WokaAvatar key={person.uuid} layers={person.woka} name={person.name} size={34} tinted />
           ))}
           {more > 0 && <span className={styles.more}>+{more}</span>}
         </span>
@@ -183,9 +183,43 @@ function Note() {
       <EyeOff size={13} aria-hidden="true" />
       <span>
         Only people who share where they are, in rooms you can enter.{' '}
-        <Link href="/admin/you#live-settings">Hide where you are</Link>
+        <Link href="/admin/sharing">Sharing</Link>
       </span>
     </p>
+  );
+}
+
+/** "A, B, C and D"; past four rooms, the first three and how many more. */
+function roomNames(names: string[]): string {
+  const shown = names.length > 4 ? names.slice(0, 3) : names;
+  const rest = names.length - shown.length;
+  const list = rest > 0 ? [...shown, `${rest} more`] : shown;
+  return list.length === 1 ? list[0] : `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}`;
+}
+
+/** Orbit's top line: how many people are live and in how many rooms, which rooms, and a few faces; opens Live now. Nothing when nobody is around. */
+export function LiveStrip({ view }: { view: LiveView }) {
+  const people = view.places.reduce((sum, place) => sum + place.count, 0);
+  if (view.places.length === 0 || people === 0) return null;
+  const rooms = view.places.length;
+  const faces = view.places.flatMap((place) => place.people).slice(0, 4);
+  return (
+    <Link href="/admin/live" className={cn('orbit-press', styles.strip)} data-testid="live-strip">
+      <i className={styles.stripDot} aria-hidden="true" />
+      <p className={styles.stripText}>
+        <b>
+          {people} {people === 1 ? 'person' : 'people'} live in {rooms} {rooms === 1 ? 'room' : 'rooms'}
+        </b>
+        <small>{roomNames(view.places.map((place) => place.name))}</small>
+      </p>
+      <span className={styles.stripFaces} aria-hidden="true">
+        {faces.map((person) => (
+          <WokaAvatar key={person.uuid} layers={person.woka} name={person.name} size={26} tinted />
+        ))}
+        {people > faces.length && <span className={styles.more}>+{people - faces.length}</span>}
+      </span>
+      <ArrowUpRight size={18} className={styles.stripArrow} aria-hidden="true" />
+    </Link>
   );
 }
 

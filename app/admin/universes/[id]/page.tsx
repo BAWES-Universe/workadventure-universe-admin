@@ -3,6 +3,7 @@
 import { useIsSuperAdmin } from '../../admin-bootstrap-context';
 
 import { PersonIcon } from '../../components/profile-card';
+import RecentVisitors from '../../components/recent-visitors';
 
 import { useState, useEffect, useMemo } from 'react';
 import { useRouter, useParams } from 'next/navigation';
@@ -399,6 +400,7 @@ export default function UniverseDetailPage() {
           <TabsContent value="details" className="mt-0 space-y-8">
           {activeTab === 'details' && (
             <>
+              <RecentVisitors scope="universe" id={id} onOpenVisitors={() => setActiveTab('analytics')} />
               <section className="space-y-3" aria-labelledby="universe-about">
                 <SectionHeader id="universe-about" title="About" />
                 {universe.description && (

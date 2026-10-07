@@ -263,8 +263,8 @@ describe('The invitations card on Orbit', () => {
     routeList([listed('i1', 'Studio')]);
     render(<PendingInvitationsAlert />);
     const card = await screen.findByTestId('pending-invitations');
-    expect(card.textContent).toMatch(/Sara invited you to Studio in Plugn/);
-    expect(card.textContent).toMatch(/as a member/);
+    expect(card.textContent).toMatch(/Sara invited you to Studio/);
+    expect(card.textContent).toMatch(/Plugn · as a member/);
     expect(within(card).getByTestId('pending-invitation-message').textContent).toContain('Join us for standup');
     expect(within(card).getByRole('link', { name: 'View invitation' }).getAttribute('href')).toBe('/admin/invitations/i1');
     fireEvent.click(within(card).getByRole('button', { name: 'Decline' }));

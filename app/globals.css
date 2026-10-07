@@ -390,13 +390,7 @@ a[href] {
 .orbit-hero h1 > span, .orbit-gradient-text { background-image: var(--brand-gradient); -webkit-background-clip: text; background-clip: text; color: transparent; }
 .orbit-hero > p { font-size: 13px; color: hsl(var(--muted-foreground)); margin-top: 6px; }
 .orbit-home { display: grid; gap: 32px; min-width: 0; max-width: 760px; }
-/* Orbit home with Live now: its own column on a wide screen. */
-.orbit-home-split { display: grid; gap: 28px; min-width: 0; }
-.orbit-home-split > *, .orbit-home > * { min-width: 0; }
-@media (min-width: 1280px) {
-  .orbit-home-split { grid-template-columns: minmax(0, 1fr) 380px; align-items: start; }
-  .orbit-home-split .orbit-home { max-width: none; align-content: start; }
-}
+.orbit-home > * { min-width: 0; }
 
 /* ─── The menu: every destination and tool, searchable ─── */
 .orbit-menu-overlay { position: fixed; inset: 0; z-index: 50; background: rgb(5 3 12 / .65); backdrop-filter: blur(5px); }

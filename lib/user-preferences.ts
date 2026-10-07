@@ -1,4 +1,4 @@
-import { isPeopleSettingKey, isValidPeopleSetting } from './people-settings';
+import { HIDE_LOCATION_KEY, SHARE_PASSPORT_KEY, SHARE_ROOM_KEY, isAudience, isPeopleSettingKey, isValidPeopleSetting } from './people-settings';
 
 /**
  * Per-user Orbit preferences. Only allowlisted keys can be read or written, and
@@ -7,13 +7,18 @@ import { isPeopleSettingKey, isValidPeopleSetting } from './people-settings';
 
 export const PREFERENCE_VALUE_MAX_BYTES = 2048;
 
-/** Invitations dismissed on Orbit home, `{ ids }`: hidden there and left out of the count on You. */
+/** Invitations dismissed on Orbit home, `{ ids }`: hidden there and left out of the count on the Orbit tab. */
 export const INVITATIONS_DISMISSED_KEY = 'guidance.dismissed.invitations';
 
-/** Live now's own switch: true drops you out of Live now and its counts (see lib/live-presence.ts). */
-export const HIDE_LOCATION_KEY = 'people.hideLocation';
+export { HIDE_LOCATION_KEY, SHARE_PASSPORT_KEY, SHARE_ROOM_KEY };
 
-const FIXED_PREFERENCE_KEYS = new Set(['orbit.introSeen', 'quests.invitationDeclined', HIDE_LOCATION_KEY]);
+const FIXED_PREFERENCE_KEYS = new Set([
+  'orbit.introSeen',
+  'quests.invitationDeclined',
+  HIDE_LOCATION_KEY,
+  SHARE_ROOM_KEY,
+  SHARE_PASSPORT_KEY,
+]);
 
 /** `guidance.dismissed.<id>`: id is 1-64 chars of letters, digits, `_` or `-`. */
 const GUIDANCE_DISMISSED_KEY = /^guidance\.dismissed\.[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
@@ -24,11 +29,12 @@ export function isAllowedPreferenceKey(key: unknown): key is string {
 }
 
 /**
- * Keys with a fixed set of values (the `people.*` settings and the Live now switch) only accept those; other keys
+ * Keys with a fixed set of values (the `people.*` settings, the Live now switch and the two sharing choices) only accept those; other keys
  * accept any JSON. Live now hides someone only for exactly `true`, so a "true" string must not get stored.
  */
 export function isAllowedPreferenceValue(key: string, value: unknown): boolean {
   if (key === HIDE_LOCATION_KEY) return typeof value === 'boolean';
+  if (key === SHARE_ROOM_KEY || key === SHARE_PASSPORT_KEY) return isAudience(value);
   return isPeopleSettingKey(key) ? isValidPeopleSetting(key, value) : true;
 }
 

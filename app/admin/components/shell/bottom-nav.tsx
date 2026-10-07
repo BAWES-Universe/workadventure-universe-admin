@@ -49,7 +49,7 @@ export function BottomNav() {
                 active ? 'text-white' : 'text-muted-foreground hover:text-foreground',
               )}
             >
-              {item.href === '/admin/you' && <AttentionBadge count={attention} className="left-[calc(50%-2.4rem)] top-1" />}
+              {item.href === '/admin' && <AttentionBadge count={attention} className="left-[calc(50%-3rem)] top-1" />}
               <Icon className="h-[18px] w-[18px]" strokeWidth={active ? 2.4 : 2} aria-hidden="true" />
               {item.label}
             </Link>

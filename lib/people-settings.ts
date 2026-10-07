@@ -3,6 +3,40 @@
  * the `people.*` keys, so the existing preference allowlist and size cap apply.
  */
 
+/** Live now's old switch, `true` = hidden. Still read, so anyone who had it on stays private. */
+export const HIDE_LOCATION_KEY = 'people.hideLocation';
+/** Who sees which room you are in: everyone, friends, or no one. Replaces the two switches above and `friendsSeeLocation`. */
+export const SHARE_ROOM_KEY = 'people.shareRoom';
+/** Who sees your passport: everyone, friends, or no one. */
+export const SHARE_PASSPORT_KEY = 'people.sharePassport';
+
+export type Audience = 'everyone' | 'friends' | 'nobody';
+export const AUDIENCES: readonly Audience[] = ['everyone', 'friends', 'nobody'];
+export const isAudience = (value: unknown): value is Audience => typeof value === 'string' && (AUDIENCES as readonly string[]).includes(value);
+
+/** Every key a person's sharing is read from, the legacy ones included. */
+export const SHARING_KEYS = [SHARE_ROOM_KEY, SHARE_PASSPORT_KEY, HIDE_LOCATION_KEY, 'people.friendsSeeLocation'] as const;
+
+type Row = { key: string; value: unknown };
+
+/**
+ * Who sees which room someone is in. The new choice wins; without it, the two old switches decide: either one off
+ * (hidden from Live now, or friends not seeing where they are) means no one, the cautious reading.
+ */
+export function shareRoomFromRows(rows: ReadonlyArray<Row>): Audience {
+  const chosen = rows.find((row) => row.key === SHARE_ROOM_KEY)?.value;
+  if (isAudience(chosen)) return chosen;
+  const hidden = rows.some((row) => row.key === HIDE_LOCATION_KEY && row.value === true);
+  const friendsBlind = rows.some((row) => row.key === 'people.friendsSeeLocation' && row.value === false);
+  return hidden || friendsBlind ? 'nobody' : 'everyone';
+}
+
+/** Who sees someone's passport; everyone until they choose otherwise. */
+export function sharePassportFromRows(rows: ReadonlyArray<Row>): Audience {
+  const chosen = rows.find((row) => row.key === SHARE_PASSPORT_KEY)?.value;
+  return isAudience(chosen) ? chosen : 'everyone';
+}
+
 export const PEOPLE_PREFERENCE_KEYS = {
   ringFrom: 'people.ringFrom',
   friendRequestsFrom: 'people.friendRequestsFrom',
@@ -59,5 +93,7 @@ export function peopleSettingsFromRows(rows: ReadonlyArray<{ key: string; value:
       (settings as unknown as Record<string, unknown>)[field] = row.value;
     }
   }
+  // Friends see where someone is unless they share their room with no one: one choice, read here as a yes or no.
+  settings.friendsSeeLocation = shareRoomFromRows(rows) !== 'nobody';
   return settings;
 }

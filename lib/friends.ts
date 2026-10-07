@@ -3,6 +3,9 @@ import { prisma } from './db';
 import { parsePlayUri } from './utils';
 import {
   PEOPLE_PREFERENCE_KEYS,
+  SHARE_ROOM_KEY,
+  SHARING_KEYS,
+  shareRoomFromRows,
   peopleSettingsFromRows,
   type PeopleSettings,
 } from './people-settings';
@@ -116,7 +119,7 @@ export async function loadPeopleSettings(userId: string): Promise<PeopleSettings
 /** Settings for several users in one query. Every id gets an entry, with defaults where nothing is stored. */
 export async function loadPeopleSettingsFor(userIds: string[]): Promise<Map<string, PeopleSettings>> {
   const rows = userIds.length === 0 ? [] : await prisma.userPreference.findMany({
-    where: { userId: { in: userIds }, key: { in: Object.values(PEOPLE_PREFERENCE_KEYS) } },
+    where: { userId: { in: userIds }, key: { in: [...Object.values(PEOPLE_PREFERENCE_KEYS), ...SHARING_KEYS] } },
     select: { userId: true, key: true, value: true },
   });
   const result = new Map<string, PeopleSettings>();
@@ -125,9 +128,24 @@ export async function loadPeopleSettingsFor(userIds: string[]): Promise<Map<stri
 }
 
 export async function savePeopleSettings(userId: string, changes: Partial<PeopleSettings>): Promise<PeopleSettings> {
-  const writes = (Object.keys(changes) as (keyof PeopleSettings)[]).map((field) => {
+  const { friendsSeeLocation, ...direct } = changes;
+  // The game's "Friends see where I am" switch is one reading of Sharing's room choice: off is no one; on from off
+  // is everyone, and from friends or everyone it leaves the choice as it was.
+  if (friendsSeeLocation !== undefined) {
+    const rows = await prisma.userPreference.findMany({ where: { userId, key: { in: [...SHARING_KEYS] } }, select: { key: true, value: true } });
+    const current = shareRoomFromRows(rows);
+    const next = friendsSeeLocation ? (current === 'nobody' ? 'everyone' : current) : 'nobody';
+    if (next !== current || !rows.some((row) => row.key === SHARE_ROOM_KEY)) {
+      await prisma.userPreference.upsert({
+        where: { userId_key: { userId, key: SHARE_ROOM_KEY } },
+        create: { userId, key: SHARE_ROOM_KEY, value: next },
+        update: { value: next },
+      });
+    }
+  }
+  const writes = (Object.keys(direct) as (keyof typeof direct)[]).map((field) => {
     const key = PEOPLE_PREFERENCE_KEYS[field];
-    const value = changes[field] as Prisma.InputJsonValue;
+    const value = direct[field] as Prisma.InputJsonValue;
     return prisma.userPreference.upsert({
       where: { userId_key: { userId, key } },
       create: { userId, key, value },
