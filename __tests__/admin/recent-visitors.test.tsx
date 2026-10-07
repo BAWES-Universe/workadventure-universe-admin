@@ -54,6 +54,27 @@ describe('Recent visitors', () => {
     expect(sara.style.background).toBe('rgb(153, 121, 77)');
   });
 
+  it('ends the row with See all, and puts See all by the title too, both opening the full paged list', async () => {
+    const open = jest.fn();
+    serve({ '/api/admin/recent-visitors': { visitors, guests: 0 } });
+    render(<RecentVisitors scope="universe" id="u1" onOpenVisitors={open} />);
+    const section = await screen.findByTestId('recent-visitors');
+    const tile = within(section).getByTestId('recent-visitors-see-all-tile');
+    const items = section.querySelectorAll('ul > li');
+    expect(items[items.length - 1].contains(tile)).toBe(true);
+    expect(tile.textContent).toContain('See all');
+    fireEvent.click(tile);
+    fireEvent.click(within(section).getByTestId('recent-visitors-see-all'));
+    expect(open).toHaveBeenCalledTimes(2);
+  });
+
+  it('has no See all when there is nowhere to go from it', async () => {
+    serve({ '/api/admin/recent-visitors': { visitors, guests: 0 } });
+    render(<RecentVisitors scope="universe" id="u1" />);
+    const section = await screen.findByTestId('recent-visitors');
+    expect(within(section).queryByText('See all')).toBeNull();
+  });
+
   it('puts a Guests chip first, with how many different guests this week, and opens the Visitors tab', async () => {
     const open = jest.fn();
     serve({ '/api/admin/recent-visitors': { visitors, guests: 12 } });

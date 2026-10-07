@@ -26,3 +26,11 @@
 .sheet > button:last-child svg { width: 20px; height: 20px; }
 /* Faces are circles, as on the member cards. */
 .face :global([data-testid='woka-avatar']), .top :global([data-testid='woka-avatar']) { border-radius: 50% !important; }
+
+.head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 44px; }
+.seeAllPill { display: inline-flex; align-items: center; min-height: 44px; padding: 0 14px; border: 1px solid hsl(var(--foreground) / 0.15); border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+.seeAllPill:hover { border-color: hsl(var(--foreground) / 0.3); background: hsl(var(--foreground) / 0.05); }
+.seeAllPill:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
+.seeAllCircle { display: grid; place-items: center; width: 44px; height: 44px; box-sizing: border-box; border-radius: 50%; border: 1px solid hsl(var(--border)); background: hsl(var(--muted)); color: hsl(var(--foreground)); }
+/* On a wide screen nothing depends on swiping: the row wraps to fit. */
+@media (min-width: 768px) { .visitors { flex-wrap: wrap; overflow: visible; margin: 0; padding: 4px 0; } }

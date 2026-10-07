@@ -101,7 +101,7 @@ function PlaceCard({ place }: { place: LivePlace }) {
       <div className={styles.placeBottom}>
         <span className={styles.stack}>
           {faces.map((person) => (
-            <WokaAvatar key={person.uuid} layers={person.woka} name={person.name} size={34} />
+            <WokaAvatar key={person.uuid} layers={person.woka} name={person.name} size={34} tinted />
           ))}
           {more > 0 && <span className={styles.more}>+{more}</span>}
         </span>
@@ -214,7 +214,7 @@ export function LiveStrip({ view }: { view: LiveView }) {
       </p>
       <span className={styles.stripFaces} aria-hidden="true">
         {faces.map((person) => (
-          <WokaAvatar key={person.uuid} layers={person.woka} name={person.name} size={26} />
+          <WokaAvatar key={person.uuid} layers={person.woka} name={person.name} size={26} tinted />
         ))}
         {people > faces.length && <span className={styles.more}>+{people - faces.length}</span>}
       </span>

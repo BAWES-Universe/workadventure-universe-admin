@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { authenticatedFetch } from '@/lib/client-auth';
+import { ArrowRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { timeAgo } from '@/lib/time-ago';
 import type { RecentVisitor } from '@/lib/recent-visitors';
@@ -109,9 +110,16 @@ export default function RecentVisitors({ scope, id, onOpenVisitors }: { scope: S
   if (visitors.length === 0 && guests === 0) return null;
   return (
     <section className={styles.section} aria-labelledby={`recent-visitors-${scope}`} data-testid="recent-visitors">
-      <h2 id={`recent-visitors-${scope}`} className="orbit-display text-lg font-bold">
-        Recent visitors
-      </h2>
+      <div className={styles.head}>
+        <h2 id={`recent-visitors-${scope}`} className="orbit-display text-lg font-bold">
+          Recent visitors
+        </h2>
+        {onOpenVisitors && (
+          <button type="button" className={cn('orbit-press', styles.seeAllPill)} onClick={onOpenVisitors} data-testid="recent-visitors-see-all">
+            See all
+          </button>
+        )}
+      </div>
       <p className={styles.note}>Who came by lately, newest first. Past visits, not who is online.{guests > 0 && ' Guests are people without an account.'}</p>
       <ul className={styles.visitors}>
         {guests > 0 && (
@@ -145,6 +153,17 @@ export default function RecentVisitors({ scope, id, onOpenVisitors }: { scope: S
             </button>
           </li>
         ))}
+        {onOpenVisitors && (
+          <li>
+            <button type="button" className={cn(styles.face, styles.seeAll)} aria-label="See all visitors" onClick={onOpenVisitors} data-testid="recent-visitors-see-all-tile">
+              <span className={styles.seeAllCircle} aria-hidden="true">
+                <ArrowRight size={20} />
+              </span>
+              <strong>See all</strong>
+              <span>visitors</span>
+            </button>
+          </li>
+        )}
       </ul>
       <VisitorSheet visitor={picked} onClose={() => setPicked(null)} />
     </section>
