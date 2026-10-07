@@ -380,7 +380,7 @@ export function RoomDetailPage({ view = 'details' }: { view?: 'details' | 'visit
       }
 
       const updated = await response.json();
-      setRoom(updated);
+      setRoom((current) => (current ? { ...current, ...updated } : updated));
       setIsEditing(false);
       await fetchRoom();
     } catch (err) {

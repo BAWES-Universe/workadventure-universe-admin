@@ -224,7 +224,7 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
       }
 
       const updated = await response.json();
-      setUniverse(updated);
+      setUniverse((current) => (current ? { ...current, ...updated } : updated));
       setIsEditing(false);
       await fetchUniverse();
     } catch (err) {

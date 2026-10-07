@@ -259,7 +259,7 @@ function WorldDetail({ view }: { view: WorldView }) {
       }
 
       const updated = await response.json();
-      setWorld(updated);
+      setWorld((current) => (current ? { ...current, ...updated } : updated));
       setIsEditing(false);
       await fetchWorld();
     } catch (err) {
