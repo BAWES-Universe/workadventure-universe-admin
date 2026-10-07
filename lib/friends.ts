@@ -421,7 +421,7 @@ export interface SearchResult {
 }
 
 /**
- * Players who chose to be findable by name. Blocks in either direction hide the pair from each other.
+ * Players who haven't turned off being findable by name. Blocks in either direction hide the pair from each other.
  * Universes are where the player is a member, at most two, to tell people with the same name apart.
  */
 export async function searchPeople(me: Account, rawQuery: string): Promise<SearchResult[]> {
@@ -434,7 +434,8 @@ export async function searchPeople(me: Account, rawQuery: string): Promise<Searc
       isGuest: false,
       id: { not: me.id },
       name: { contains: query, mode: 'insensitive' },
-      preferences: { some: { key: PEOPLE_PREFERENCE_KEYS.findableByName, value: { equals: true } } },
+      // Findable unless they switched it off: nothing is stored until someone changes the default.
+      NOT: { preferences: { some: { key: PEOPLE_PREFERENCE_KEYS.findableByName, value: { equals: false } } } },
     },
     select: {
       id: true,

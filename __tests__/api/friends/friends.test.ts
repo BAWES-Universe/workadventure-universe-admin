@@ -37,7 +37,7 @@ async function friendsOf(id: string) {
   return res.json();
 }
 
-/** Both are members of the same world, so the default "people who share a world" lets them send requests. */
+/** Both are members of the same world, which is what the "Shared worlds" request setting needs. */
 function shareWorld(...ids: string[]) {
   for (const id of ids) db.members.push({ userId: id, worldId: 'w1', worldName: 'Main Hall', universeName: 'Bawes' });
 }
@@ -158,7 +158,13 @@ describe('/api/friends', () => {
     expect(db.friendships).toHaveLength(0);
   });
 
-  it('by default only people who share a world can send a request', async () => {
+  it('by default anyone signed in can send a request', async () => {
+    expect((await action('a', 'b', 'request')).body).toEqual({ relationship: 'request_sent' });
+    expect((await friendsOf('b')).incoming[0].sharedWorld).toBeNull();
+  });
+
+  it('with "Shared worlds" only people who share a world can send a request', async () => {
+    await send(putSettings, '/settings', 'PUT', { userUuid: 'uuid-b', settings: { friendRequestsFrom: 'shared_world' } });
     expect(await action('a', 'b', 'request')).toEqual({ status: 403, body: { error: 'no_shared_world' } });
 
     // A visit to the same world in the last 30 days counts.
@@ -168,10 +174,7 @@ describe('/api/friends', () => {
     expect((await friendsOf('b')).incoming[0].sharedWorld).toBe('Cafe');
   });
 
-  it('respects "anyone" and "nobody" for friend requests', async () => {
-    await send(putSettings, '/settings', 'PUT', { userUuid: 'uuid-b', settings: { friendRequestsFrom: 'anyone' } });
-    expect((await action('a', 'b', 'request')).body).toEqual({ relationship: 'request_sent' });
-
+  it('respects "nobody" for friend requests', async () => {
     shareWorld('a', 'c');
     await send(putSettings, '/settings', 'PUT', { userUuid: 'uuid-c', settings: { friendRequestsFrom: 'nobody' } });
     expect(await action('a', 'c', 'request')).toEqual({ status: 403, body: { error: 'not_accepting_requests' } });
@@ -189,10 +192,10 @@ describe('/api/friends', () => {
   });
 
   describe('settings', () => {
-    it('start at the safe defaults', async () => {
+    it('start at the defaults', async () => {
       const res = await get(getSettings, '/settings', { userUuid: 'uuid-a' });
       expect(await res.json()).toEqual({
-        settings: { ringFrom: 'friends', friendRequestsFrom: 'shared_world', findableByName: false, friendsSeeLocation: true },
+        settings: { ringFrom: 'friends', friendRequestsFrom: 'anyone', findableByName: true, friendsSeeLocation: true },
       });
     });
 
@@ -224,12 +227,14 @@ describe('/api/friends', () => {
   describe('search', () => {
     beforeEach(async () => {
       addUser('d', 'Bilal Two');
+      db.preferences.push({ userId: 'd', key: 'people.findableByName', value: false });
       db.members.push({ userId: 'b', worldId: 'w1', worldName: 'Main Hall', universeName: 'Bawes' });
       db.members.push({ userId: 'b', worldId: 'w2', worldName: 'Lab', universeName: 'Other' });
       db.members.push({ userId: 'b', worldId: 'w3', worldName: 'Third', universeName: 'Third' });
     });
 
-    it('finds only people who opted in, with up to two universes', async () => {
+    it('finds people unless they turned it off, with up to two universes', async () => {
+      await send(putSettings, '/settings', 'PUT', { userUuid: 'uuid-b', settings: { findableByName: false } });
       expect(await (await get(search, '/search', { userUuid: 'uuid-a', q: 'bil' })).json()).toEqual({ results: [] });
 
       await send(putSettings, '/settings', 'PUT', { userUuid: 'uuid-b', settings: { findableByName: true } });
@@ -239,9 +244,12 @@ describe('/api/friends', () => {
       });
     });
 
+    it('finds someone who never touched the setting', async () => {
+      const res = await get(search, '/search', { userUuid: 'uuid-a', q: 'bil' });
+      expect((await res.json()).results.map((r: { uuid: string }) => r.uuid)).toEqual(['uuid-b']);
+    });
+
     it('hides blocked pairs in both directions and never returns yourself', async () => {
-      await send(putSettings, '/settings', 'PUT', { userUuid: 'uuid-b', settings: { findableByName: true } });
-      await send(putSettings, '/settings', 'PUT', { userUuid: 'uuid-a', settings: { findableByName: true } });
       await action('b', 'a', 'block');
       expect((await (await get(search, '/search', { userUuid: 'uuid-a', q: 'bil' })).json()).results).toEqual([]);
       expect((await (await get(search, '/search', { userUuid: 'uuid-b', q: 'ali' })).json()).results).toEqual([]);

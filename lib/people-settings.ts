@@ -54,11 +54,11 @@ export interface PeopleSettings {
   friendsSeeLocation: boolean;
 }
 
-/** What a new user gets: only friends can ring, requests from people who share a world, not findable by name. */
+/** What a new user gets: only friends can ring, anyone signed in can send a request, findable by name. */
 export const DEFAULT_PEOPLE_SETTINGS: PeopleSettings = {
   ringFrom: 'friends',
-  friendRequestsFrom: 'shared_world',
-  findableByName: false,
+  friendRequestsFrom: 'anyone',
+  findableByName: true,
   friendsSeeLocation: true,
 };
 
