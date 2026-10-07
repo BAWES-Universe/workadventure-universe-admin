@@ -43,6 +43,17 @@ describe('Recent visitors', () => {
     expect(fetchMock).toHaveBeenCalledWith('/api/admin/recent-visitors?scope=universe&id=u1');
   });
 
+  it('draws each face on the colour the game gives that name, with a solid chip and no dashed lines', async () => {
+    serve({ '/api/admin/recent-visitors': { visitors, guests: 3 } });
+    render(<RecentVisitors scope="universe" id="u1" />);
+    const section = await screen.findByTestId('recent-visitors');
+    const omar = within(within(section).getByRole('button', { name: 'Omar, 1 minute ago' })).getByTestId('woka-avatar');
+    expect(omar.getAttribute('data-tinted')).toBe('true');
+    expect(omar.style.background).toBe('rgb(153, 123, 77)');
+    const sara = within(within(section).getByRole('button', { name: 'Sara, 4 minutes ago' })).getByTestId('woka-avatar');
+    expect(sara.style.background).toBe('rgb(153, 121, 77)');
+  });
+
   it('puts a Guests chip first, with how many different guests this week, and opens the Visitors tab', async () => {
     const open = jest.fn();
     serve({ '/api/admin/recent-visitors': { visitors, guests: 12 } });

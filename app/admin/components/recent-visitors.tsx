@@ -62,7 +62,7 @@ function VisitorSheet({ visitor, onClose }: { visitor: RecentVisitor | null; onC
         {visitor && (
           <>
             <div className={styles.top}>
-              <WokaAvatar layers={visitor.woka} name={visitor.name} size={76} />
+              <WokaAvatar layers={visitor.woka} name={visitor.name} size={76} tinted />
               <div>
                 <SheetTitle className={styles.name}>{visitor.name}</SheetTitle>
                 <SheetDescription className={styles.when}>
@@ -139,7 +139,7 @@ export default function RecentVisitors({ scope, id, onOpenVisitors }: { scope: S
               aria-label={`${visitor.name}, ${timeAgo(new Date(visitor.at))}`}
               onClick={() => setPicked(visitor)}
             >
-              <WokaAvatar layers={visitor.woka} name={visitor.name} size={44} />
+              <WokaAvatar layers={visitor.woka} name={visitor.name} size={44} tinted />
               <strong>{visitor.name}</strong>
               <span>{timeAgo(new Date(visitor.at))}</span>
             </button>
