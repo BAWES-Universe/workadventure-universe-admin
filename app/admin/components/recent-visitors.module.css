@@ -7,7 +7,7 @@
 .face span { font-size: 11px; white-space: nowrap; color: hsl(var(--muted-foreground)); }
 .face[data-picked='true'] :global([data-testid='woka-avatar']) { box-shadow: 0 0 0 3px hsl(var(--background)), 0 0 0 5px #a78bfa; }
 .guests { margin-right: 6px; padding-right: 10px; border-right: 1px solid hsl(var(--border)); border-radius: 14px 0 0 14px; }
-.guestCount { display: grid; place-items: center; width: 44px; height: 44px; box-sizing: border-box; border-radius: 50%; border: 2px dashed hsl(var(--muted-foreground) / .6); font-family: var(--font-display); font-size: 16px; font-weight: 700; color: hsl(var(--foreground)); }
+.guestCount { display: grid; place-items: center; width: 44px; height: 44px; box-sizing: border-box; border-radius: 50%; border: 1px solid hsl(var(--border)); background: hsl(var(--muted)); font-family: var(--font-display); font-size: 16px; font-weight: 700; color: hsl(var(--foreground)); }
 .guests .guestCount { font-size: 16px; color: hsl(var(--foreground)); }
 .note { margin: 0; font-size: 12px; color: hsl(var(--muted-foreground)); }
 .section { display: grid; gap: 8px; min-width: 0; }
