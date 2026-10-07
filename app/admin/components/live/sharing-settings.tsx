@@ -1,9 +1,8 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { Check, ChevronDown } from 'lucide-react';
 import { authenticatedFetch } from '@/lib/client-auth';
-import { cn } from '@/lib/utils';
 import {
   SHARE_PASSPORT_KEY,
   SHARE_ROOM_KEY,
@@ -60,26 +59,111 @@ function useSharing() {
   return { choices, failed, change };
 }
 
-/** A pill that opens the three answers. */
+/**
+ * The dropdown that opens the three answers, behaving like the game's device list: it closes on a tap or click anywhere
+ * else (which also closes it when the other one is opened), on Escape and on Tab; arrow keys move, Enter picks, and the
+ * list opens upward when there is no room under the field.
+ */
 function AudiencePick({ id, label, value, disabled, onPick }: { id: string; label: string; value: Audience | null; disabled: boolean; onPick: (value: Audience) => void }) {
   const [open, setOpen] = useState(false);
+  const [upward, setUpward] = useState(false);
+  const root = useRef<HTMLDivElement>(null);
+  const head = useRef<HTMLButtonElement>(null);
+  const panel = useRef<HTMLUListElement>(null);
+
+  const close = (refocus = true) => {
+    setOpen(false);
+    if (refocus) head.current?.focus();
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    const outside = (event: PointerEvent) => {
+      if (!root.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setOpen(false);
+        head.current?.focus();
+      }
+    };
+    window.addEventListener('pointerdown', outside);
+    window.addEventListener('keydown', escape);
+    return () => {
+      window.removeEventListener('pointerdown', outside);
+      window.removeEventListener('keydown', escape);
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (disabled) setOpen(false);
+  }, [disabled]);
+
+  const options = () => (panel.current ? Array.from(panel.current.querySelectorAll<HTMLButtonElement>('[role=option]')) : []);
+  const focusOption = (index: number) => {
+    const buttons = options();
+    buttons[Math.min(Math.max(index, 0), buttons.length - 1)]?.focus();
+  };
+
+  const show = () => {
+    if (disabled || !head.current) return;
+    const rect = head.current.getBoundingClientRect();
+    const listHeight = CHOICES.length * 46 + 12;
+    setUpward(rect.bottom + listHeight + 8 > window.innerHeight && rect.top - listHeight - 8 > 0);
+    setOpen(true);
+  };
+
+  // Opening puts the focus on the chosen row
+  useEffect(() => {
+    if (open) focusOption(Math.max(0, CHOICES.indexOf(value as Audience)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  const onHeadKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (['ArrowDown', 'ArrowUp'].includes(event.key)) {
+      event.preventDefault();
+      if (open) close();
+      else show();
+    }
+  };
+
+  const onPanelKeyDown = (event: ReactKeyboardEvent<HTMLUListElement>) => {
+    const buttons = options();
+    const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+    let handled = true;
+    if (event.key === 'ArrowDown') focusOption(index + 1);
+    else if (event.key === 'ArrowUp') focusOption(index - 1);
+    else if (event.key === 'Home') focusOption(0);
+    else if (event.key === 'End') focusOption(buttons.length - 1);
+    else if (event.key === 'Escape') close();
+    else if (event.key === 'Tab') {
+      close(false);
+      handled = false;
+    } else handled = false;
+    if (handled) event.preventDefault();
+  };
+
   return (
-    <div className={styles.pickWrap}>
+    <div className={styles.pickWrap} ref={root}>
       <button
         type="button"
-        className={cn('orbit-press', styles.pick)}
+        ref={head}
+        className={styles.pick}
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-labelledby={`${id}-label ${id}-value`}
         disabled={disabled}
-        onClick={() => setOpen((current) => !current)}
+        onClick={() => (open ? close() : show())}
+        onKeyDown={onHeadKeyDown}
         data-testid={id}
       >
-        <span id={`${id}-value`}>{value ? LABEL[value] : '…'}</span>
-        <ChevronDown size={16} aria-hidden="true" />
+        <span id={`${id}-value`} className={styles.value}>
+          {value ? LABEL[value] : '…'}
+        </span>
+        <ChevronDown size={16} className={styles.chevron} data-open={open} aria-hidden="true" />
       </button>
       {open && (
-        <ul className={styles.menu} role="listbox" aria-label={label}>
+        <ul className={styles.menu} data-upward={upward} role="listbox" aria-label={label} ref={panel} onKeyDown={onPanelKeyDown}>
           {CHOICES.map((choice) => (
             <li key={choice} role="presentation">
               <button
@@ -88,12 +172,12 @@ function AudiencePick({ id, label, value, disabled, onPick }: { id: string; labe
                 aria-selected={choice === value}
                 className={styles.option}
                 onClick={() => {
-                  setOpen(false);
-                  onPick(choice);
+                  close();
+                  if (choice !== value) onPick(choice);
                 }}
               >
-                {LABEL[choice]}
-                {choice === value && <Check size={16} aria-hidden="true" />}
+                <span className={styles.optionLabel}>{LABEL[choice]}</span>
+                {choice === value && <Check size={18} aria-hidden="true" />}
               </button>
             </li>
           ))}
