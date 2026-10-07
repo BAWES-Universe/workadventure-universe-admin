@@ -4,7 +4,7 @@ import { useIsSuperAdmin } from '../../admin-bootstrap-context';
 
 import { PersonIcon } from '../../components/profile-card';
 import RecentVisitors from '../../components/recent-visitors';
-import { AddButton, By, PlaceHero, SectionHead, StarTotal, VisitButton, WorldGroups, playPathOf, type WorldGroupData } from '../../components/place-hero';
+import { AddButton, By, PlaceHero, Rank, SectionHead, StarTotal, VisitButton, WorldGroups, playPathOf, type WorldGroupData } from '../../components/place-hero';
 
 import { useState, useEffect, useMemo } from 'react';
 import { useRouter, useParams } from 'next/navigation';
@@ -29,7 +29,7 @@ import { ChevronRight, AlertCircle, Loader2, Plus, Edit, Trash2, ChevronLeft } f
 import { timeAgo } from '@/lib/time-ago';
 import { activityStats } from '@/lib/analytics-peak';
 import { useEntitySummaries } from '../../hooks/use-entity-summaries';
-import { useHere, useWorldRooms } from '../../hooks/use-place-data';
+import { useHere, useUniverseRank, useWorldRooms } from '../../hooks/use-place-data';
 import { EmptyCard, EntityCard, EntityRow, Figure, Figures, InContext, KindIcon, LoadError, LoadingRows, PageHeader, RolePills, SectionHeader, SettingSwitch, Settings, StatLine, StatusPill, VisitLine, count } from '../../components/ds';
 import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
@@ -84,6 +84,7 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
   const universeSummaries = useEntitySummaries('universes', useMemo(() => [id], [id]));
   const { here, known: hereKnown, byRoom } = useHere('universe', id);
   const worldRooms = useWorldRooms(worldIds);
+  const rank = useUniverseRank(id, universe?.isPublic === true);
   const roomIds = useMemo(() => Object.values(worldRooms).flatMap((world) => world.rooms.map((room) => room.id)), [worldRooms]);
   const roomSummaries = useEntitySummaries('rooms', roomIds);
   const [currentUser, setCurrentUser] = useState<any>(null);
@@ -318,6 +319,7 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
           { value: worlds.length, label: worlds.length === 1 ? 'world' : 'worlds' },
           { value: worlds.reduce((sum, world) => sum + (world._count.rooms ?? 0), 0), label: 'rooms' },
         ]}
+        rank={rank ? <Rank position={rank.position} of={rank.of} /> : undefined}
         here={here}
         actions={
           <>

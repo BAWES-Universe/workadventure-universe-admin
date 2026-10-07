@@ -132,3 +132,23 @@ export function useWorldRooms(worldIds: readonly string[]): Record<string, World
   }, [key]);
   return worlds;
 }
+
+/** Where a public universe stands this week by visits, or null (private, no visits, or the server can't say). */
+export function useUniverseRank(universeId: string, enabled: boolean): { position: number; of: number } | null {
+  const [rank, setRank] = useState<{ position: number; of: number } | null>(null);
+  useEffect(() => {
+    if (!enabled) return;
+    let cancelled = false;
+    authenticatedFetch(`/api/admin/universes/${universeId}/rank`)
+      .then(async (response) => {
+        if (!response.ok || cancelled) return;
+        const body = await response.json();
+        if (!cancelled) setRank(body.rank && Number.isFinite(body.rank.position) && Number.isFinite(body.rank.of) ? body.rank : null);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [universeId, enabled]);
+  return rank;
+}
