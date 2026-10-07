@@ -20,7 +20,8 @@ export interface ActivityEvent {
 const PER_SOURCE = 20;
 export const MAX_EVENTS = 8;
 
-function role(tags: string[]): string {
+function role(tags: string[] | null): string {
+  tags ??= [];
   if (tags.includes('admin')) return 'an admin';
   if (tags.includes('editor')) return 'an editor';
   return 'a member';

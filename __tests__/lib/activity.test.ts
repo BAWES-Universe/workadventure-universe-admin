@@ -77,6 +77,13 @@ describe('loadActivity', () => {
     expect((await loadActivity('me'))[0].text).toBe('Someone invited you to Workshop as a member');
   });
 
+  it('reads an invitation with no tags as a member, not an error', async () => {
+    db.membershipInvitation.findMany.mockResolvedValue([
+      { id: 'i1', invitedAt: at('2026-10-07T05:00:00Z'), tags: null, world: { id: 'w', name: 'Workshop' }, invitedBy: { name: 'Mishari' } },
+    ]);
+    expect((await loadActivity('me'))[0].text).toBe('Mishari invited you to Workshop as a member');
+  });
+
   it('keeps only the latest few', async () => {
     db.favorite.findMany.mockResolvedValue(
       Array.from({ length: 15 }, (_, index) => ({
