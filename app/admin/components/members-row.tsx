@@ -27,7 +27,7 @@ export default function MembersRow({ worldId, preview, onInvite }: { worldId: st
           {canManage && onInvite && (
             <Button variant="outline" className="h-11 rounded-full px-4 text-xs" onClick={onInvite}>
               <UserPlus aria-hidden="true" />
-              Invite as member
+              Invite member
             </Button>
           )}
           <Link href={all} className={cn('orbit-press', styles.seeAllPill)}>
