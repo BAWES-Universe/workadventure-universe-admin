@@ -400,7 +400,7 @@ export default function UniverseDetailPage() {
           <TabsContent value="details" className="mt-0 space-y-8">
           {activeTab === 'details' && (
             <>
-              <RecentVisitors scope="universe" id={id} />
+              <RecentVisitors scope="universe" id={id} onOpenVisitors={() => setActiveTab('analytics')} />
               <section className="space-y-3" aria-labelledby="universe-about">
                 <SectionHeader id="universe-about" title="About" />
                 {universe.description && (

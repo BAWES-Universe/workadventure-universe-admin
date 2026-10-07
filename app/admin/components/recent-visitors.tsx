@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { authenticatedFetch } from '@/lib/client-auth';
+import { cn } from '@/lib/utils';
 import { timeAgo } from '@/lib/time-ago';
 import type { RecentVisitor } from '@/lib/recent-visitors';
 import type { Stamp } from '@/lib/passport';
@@ -86,30 +87,49 @@ function VisitorSheet({ visitor, onClose }: { visitor: RecentVisitor | null; onC
  * Who came by lately: a row of faces, newest first, each with a name and how long ago. Tapping one opens their profile
  * card. Past visits, not who is online. Nothing at all when there is nobody to show, or the viewer may not see who.
  */
-export default function RecentVisitors({ scope, id }: { scope: Scope; id: string }) {
+export default function RecentVisitors({ scope, id, onOpenVisitors }: { scope: Scope; id: string; onOpenVisitors?: () => void }) {
   const [visitors, setVisitors] = useState<RecentVisitor[]>([]);
+  const [guests, setGuests] = useState(0);
   const [picked, setPicked] = useState<RecentVisitor | null>(null);
   useEffect(() => {
     let cancelled = false;
     authenticatedFetch(`/api/admin/recent-visitors?scope=${scope}&id=${encodeURIComponent(id)}`)
       .then(async (response) => {
         if (!response.ok) return;
-        const data = (await response.json()) as { visitors?: RecentVisitor[] };
-        if (!cancelled && Array.isArray(data.visitors)) setVisitors(data.visitors);
+        const data = (await response.json()) as { visitors?: RecentVisitor[]; guests?: number };
+        if (cancelled) return;
+        if (Array.isArray(data.visitors)) setVisitors(data.visitors);
+        if (typeof data.guests === 'number' && data.guests > 0) setGuests(data.guests);
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
   }, [scope, id]);
-  if (visitors.length === 0) return null;
+  if (visitors.length === 0 && guests === 0) return null;
   return (
     <section className={styles.section} aria-labelledby={`recent-visitors-${scope}`} data-testid="recent-visitors">
       <h2 id={`recent-visitors-${scope}`} className="orbit-display text-lg font-bold">
         Recent visitors
       </h2>
-      <p className={styles.note}>Who came by lately, newest first. Past visits, not who is online.</p>
+      <p className={styles.note}>Who came by lately, newest first. Past visits, not who is online.{guests > 0 && ' Guests are people without an account.'}</p>
       <ul className={styles.visitors}>
+        {guests > 0 && (
+          <li>
+            <button
+              type="button"
+              className={cn(styles.face, styles.guests)}
+              aria-label={`${guests} ${guests === 1 ? 'guest' : 'guests'} this week. See the Visitors tab`}
+              onClick={onOpenVisitors}
+            >
+              <span className={styles.guestCount} aria-hidden="true">
+                {guests}
+              </span>
+              <strong>{guests === 1 ? 'Guest' : 'Guests'}</strong>
+              <span>this week</span>
+            </button>
+          </li>
+        )}
         {visitors.map((visitor) => (
           <li key={visitor.userId}>
             <button

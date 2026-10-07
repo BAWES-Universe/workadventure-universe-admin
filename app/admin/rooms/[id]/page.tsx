@@ -950,7 +950,7 @@ export default function RoomDetailPage() {
             </button>
           </nav>
 
-          {activeTab === 'details' && <RecentVisitors scope="room" id={id} />}
+          {activeTab === 'details' && <RecentVisitors scope="room" id={id} onOpenVisitors={() => setActiveTab('analytics')} />}
 
           {activeTab === 'details' && (
             <section aria-labelledby="room-about" className="space-y-2">

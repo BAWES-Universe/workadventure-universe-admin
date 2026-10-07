@@ -17,6 +17,9 @@ export interface RecentVisitor {
   room: { id: string; name: string };
 }
 
+/** How far back the guest count looks. */
+export const GUEST_DAYS = 7;
+
 /** The faces in the row. */
 export const RECENT_VISITORS = 8;
 /** Enough visits to find that many different people. */
@@ -53,4 +56,24 @@ export async function loadRecentVisitors(viewer: Viewer, scope: AccessScope): Pr
     at: visit.accessedAt.toISOString(),
     room: { id: visit.room.id, name: visit.room.name },
   }));
+}
+
+/**
+ * How many different guests (people without an account) came by in the last week, for the "Guests" chip. A guest is
+ * counted once however often they came back; a guest is told apart by their browser id, so someone on a new device
+ * counts again. Only for people who manage the place, like the faces; 0 for anyone else.
+ */
+export async function loadGuestsThisWeek(viewer: Viewer, scope: AccessScope): Promise<number> {
+  if ((await accessDetailFor(viewer, scope)) === 'minimal') return 0;
+  const since = new Date(Date.now() - GUEST_DAYS * 24 * 60 * 60 * 1000);
+  const guests = await prisma.roomAccess.groupBy({
+    by: ['userUuid'],
+    where: {
+      ...scope,
+      accessedAt: { gte: since },
+      userUuid: { not: null },
+      OR: [{ userId: null }, { user: { isGuest: true } }],
+    },
+  });
+  return guests.length;
 }

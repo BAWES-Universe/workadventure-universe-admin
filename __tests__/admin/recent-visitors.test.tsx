@@ -43,6 +43,38 @@ describe('Recent visitors', () => {
     expect(fetchMock).toHaveBeenCalledWith('/api/admin/recent-visitors?scope=universe&id=u1');
   });
 
+  it('puts a Guests chip first, with how many different guests this week, and opens the Visitors tab', async () => {
+    const open = jest.fn();
+    serve({ '/api/admin/recent-visitors': { visitors, guests: 12 } });
+    render(<RecentVisitors scope="universe" id="u1" onOpenVisitors={open} />);
+    const section = await screen.findByTestId('recent-visitors');
+    const chip = within(section).getByRole('button', { name: '12 guests this week. See the Visitors tab' });
+    expect(chip.textContent).toContain('12');
+    expect(chip.textContent).toContain('Guests');
+    expect(chip.textContent).toContain('this week');
+    // First in the row, ahead of the faces.
+    expect(section.querySelector('ul li:first-child button')).toBe(chip);
+    expect(section.textContent).toContain('Guests are people without an account.');
+    fireEvent.click(chip);
+    expect(open).toHaveBeenCalledTimes(1);
+  });
+
+  it('says "Guest" for one, and still shows the chip when only guests came by', async () => {
+    serve({ '/api/admin/recent-visitors': { visitors: [], guests: 1 } });
+    render(<RecentVisitors scope="room" id="r1" />);
+    const chip = await screen.findByRole('button', { name: '1 guest this week. See the Visitors tab' });
+    expect(chip.textContent).toContain('Guest');
+    expect(chip.textContent).not.toContain('Guests');
+  });
+
+  it('has no chip, and no guest note, when no guests came', async () => {
+    serve({ '/api/admin/recent-visitors': { visitors, guests: 0 } });
+    render(<RecentVisitors scope="universe" id="u1" />);
+    const section = await screen.findByTestId('recent-visitors');
+    expect(within(section).queryByText('this week')).toBeNull();
+    expect(section.textContent).not.toContain('Guests are people');
+  });
+
   it('is left out when there is nobody to show, or it cannot be read', async () => {
     serve({ '/api/admin/recent-visitors': { visitors: [] } });
     const { container, unmount } = render(<RecentVisitors scope="world" id="w1" />);

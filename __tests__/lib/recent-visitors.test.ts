@@ -1,7 +1,7 @@
 /**
  * Recent visitors: each person once, newest first, and only for people who manage the place.
  */
-jest.mock('@/lib/db', () => ({ prisma: { roomAccess: { findMany: jest.fn() } } }));
+jest.mock('@/lib/db', () => ({ prisma: { roomAccess: { findMany: jest.fn(), groupBy: jest.fn() } } }));
 jest.mock('@/lib/access-scope', () => ({
   accessDetailFor: jest.fn(),
   viewerUserId: (viewer: { kind: string; user?: { id: string } } | null) => (viewer?.kind === 'user' ? viewer.user!.id : null),
@@ -12,9 +12,10 @@ jest.mock('@/lib/woka-avatar', () => ({
 
 import { prisma } from '@/lib/db';
 import { accessDetailFor, type Viewer } from '@/lib/access-scope';
-import { loadRecentVisitors, RECENT_VISITORS } from '@/lib/recent-visitors';
+import { GUEST_DAYS, loadGuestsThisWeek, loadRecentVisitors, RECENT_VISITORS } from '@/lib/recent-visitors';
 
 const findMany = prisma.roomAccess.findMany as jest.Mock;
+const groupBy = prisma.roomAccess.groupBy as jest.Mock;
 const detail = accessDetailFor as jest.Mock;
 const viewer = { kind: 'user', user: { id: 'me', uuid: 'me-uuid', email: null, name: 'Me', tags: [], isSuperAdmin: false } } as Viewer;
 
@@ -79,5 +80,26 @@ describe('loadRecentVisitors', () => {
   it('stops at eight faces', async () => {
     findMany.mockResolvedValue(Array.from({ length: 20 }, (_, index) => visit(`p${index}`, index)));
     expect(await loadRecentVisitors(viewer, { universeId: 'u1' })).toHaveLength(RECENT_VISITORS);
+  });
+});
+
+describe('loadGuestsThisWeek', () => {
+  it('counts the different guests of the last week, from their visits, once each', async () => {
+    groupBy.mockResolvedValue([{ userUuid: 'g1' }, { userUuid: 'g2' }, { userUuid: 'g3' }]);
+    expect(await loadGuestsThisWeek(viewer, { worldId: 'w1' })).toBe(3);
+    const args = groupBy.mock.calls[0][0];
+    expect(args.by).toEqual(['userUuid']);
+    expect(args.where.worldId).toBe('w1');
+    expect(args.where.userUuid).toEqual({ not: null });
+    expect(args.where.OR).toEqual([{ userId: null }, { user: { isGuest: true } }]);
+    const days = (Date.now() - args.where.accessedAt.gte.getTime()) / 86_400_000;
+    expect(days).toBeGreaterThan(GUEST_DAYS - 0.01);
+    expect(days).toBeLessThan(GUEST_DAYS + 0.01);
+  });
+
+  it('is 0, without looking, for anyone who does not manage the place', async () => {
+    detail.mockResolvedValue('minimal');
+    expect(await loadGuestsThisWeek(viewer, { universeId: 'u1' })).toBe(0);
+    expect(groupBy).not.toHaveBeenCalled();
   });
 });

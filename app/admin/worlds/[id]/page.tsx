@@ -450,7 +450,7 @@ function WorldDetail() {
 
           {activeTab === 'details' && (
             <>
-              <RecentVisitors scope="world" id={id} />
+              <RecentVisitors scope="world" id={id} onOpenVisitors={() => setActiveTab('analytics')} />
               {(world.description || world.thumbnailUrl) && (
                 <section aria-labelledby="world-about" className="space-y-3">
                   <SectionHeader id="world-about" title="About" />

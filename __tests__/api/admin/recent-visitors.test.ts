@@ -2,7 +2,7 @@ import { NextRequest } from 'next/server';
 import { GET as getVisitors } from '@/app/api/admin/recent-visitors/route';
 import { GET as getPassport } from '@/app/api/admin/users/[id]/passport/route';
 import { getViewer } from '@/lib/access-scope';
-import { loadRecentVisitors } from '@/lib/recent-visitors';
+import { loadGuestsThisWeek, loadRecentVisitors } from '@/lib/recent-visitors';
 import { visibleStamps } from '@/lib/passport';
 
 jest.mock('@/lib/access-scope', () => ({
@@ -10,7 +10,7 @@ jest.mock('@/lib/access-scope', () => ({
   viewerUserId: (viewer: { kind: string; user?: { id: string } } | null) => (viewer?.kind === 'user' ? viewer.user!.id : null),
   unauthorizedResponse: () => new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 }),
 }));
-jest.mock('@/lib/recent-visitors', () => ({ loadRecentVisitors: jest.fn() }));
+jest.mock('@/lib/recent-visitors', () => ({ loadRecentVisitors: jest.fn(), loadGuestsThisWeek: jest.fn() }));
 jest.mock('@/lib/passport', () => ({ CARD_STAMPS: 3, visibleStamps: jest.fn() }));
 
 const viewer = { kind: 'user', user: { id: 'me' } };
@@ -19,6 +19,7 @@ const get = (query: string) => new NextRequest(`http://localhost:3333/api/admin/
 beforeEach(() => {
   jest.resetAllMocks();
   (getViewer as jest.Mock).mockResolvedValue(viewer);
+  (loadGuestsThisWeek as jest.Mock).mockResolvedValue(0);
 });
 
 describe('/api/admin/recent-visitors', () => {
@@ -28,6 +29,14 @@ describe('/api/admin/recent-visitors', () => {
       expect((await getVisitors(get(`?scope=${scope}&id=abc`))).status).toBe(200);
       expect((loadRecentVisitors as jest.Mock).mock.calls.at(-1)).toEqual([viewer, { [key]: 'abc' }]);
     }
+  });
+
+  it('says how many different guests came this week, for the same place', async () => {
+    (loadRecentVisitors as jest.Mock).mockResolvedValue([]);
+    (loadGuestsThisWeek as jest.Mock).mockResolvedValue(12);
+    const response = await getVisitors(get('?scope=world&id=abc'));
+    expect(await response.json()).toEqual({ visitors: [], guests: 12 });
+    expect((loadGuestsThisWeek as jest.Mock).mock.calls[0]).toEqual([viewer, { worldId: 'abc' }]);
   });
 
   it('wants someone signed in, a known scope and an id', async () => {
