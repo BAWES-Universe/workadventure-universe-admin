@@ -49,3 +49,15 @@
 .split { display: grid; gap: 32px; min-width: 0; }
 @media (min-width: 1280px) { .split { grid-template-columns: minmax(0, 1fr) 380px; } }
 .column { display: grid; gap: 24px; align-content: start; min-width: 0; padding: 16px; border: 1px solid hsl(var(--border)); border-radius: 22px; background: hsl(var(--card) / .55); }
+
+/* Orbit's top line: green-edged card, one row, 64px tall; the faces here are circles. */
+.strip { display: flex; align-items: center; gap: 12px; min-height: 64px; padding: 10px 14px; border-radius: 18px; border: 1px solid rgb(74 222 128 / .3); background: linear-gradient(120deg, rgb(74 222 128 / .08), transparent 70%), hsl(var(--card)); color: hsl(var(--foreground)); text-decoration: none; }
+.stripText { flex: 1; min-width: 0; margin: 0; font-size: 14px; }
+.stripText b { font-weight: 700; }
+.stripText small { display: block; font-size: 12px; color: hsl(var(--muted-foreground)); }
+.stripDot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 0 3px rgb(34 197 94 / .2); }
+.stripFaces { display: flex; align-items: center; flex: none; }
+.stripFaces > * { margin-left: -8px; box-shadow: 0 0 0 2px hsl(var(--card)); border-radius: 50%; }
+.stripFaces > :first-child { margin-left: 0; }
+.stripFaces :global([data-testid='woka-avatar']) { border-radius: 50%; }
+.stripArrow { flex: none; color: hsl(var(--muted-foreground)); }

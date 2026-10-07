@@ -6,6 +6,7 @@ jest.mock('@/lib/db', () => ({
     room: { findMany: jest.fn() },
     worldMember: { findMany: jest.fn() },
     user: { findMany: jest.fn() },
+    friendship: { findMany: jest.fn() },
   },
 }));
 
@@ -57,13 +58,14 @@ beforeEach(() => {
   process.env.PLAY_URL = PLAY;
   db.room.findMany.mockResolvedValue(ROOMS);
   db.worldMember.findMany.mockResolvedValue([]);
+  db.friendship.findMany.mockResolvedValue([]);
   db.user.findMany.mockImplementation(({ where }: { where: { uuid: { in: string[] } } }) =>
     Promise.resolve(
       [
-        { uuid: 'me', name: 'Me', preferences: [] },
-        { uuid: 'sara', name: 'Sara', preferences: [] },
-        { uuid: 'hidden', name: 'Hidden', preferences: [{ value: true }] },
-        { uuid: 'omar', name: 'Omar', preferences: [] },
+        { id: 'u-me', uuid: 'me', name: 'Me', preferences: [] },
+        { id: 'u-sara', uuid: 'sara', name: 'Sara', preferences: [] },
+        { id: 'u-hidden', uuid: 'hidden', name: 'Hidden', preferences: [{ key: 'people.shareRoom', value: 'nobody' }] },
+        { id: 'u-omar', uuid: 'omar', name: 'Omar', preferences: [] },
       ].filter((user) => where.uuid.in.includes(user.uuid)),
     ),
   );
@@ -81,6 +83,37 @@ describe('buildLiveView', () => {
     // Me, Sara, 2 guests and a bot; the hidden person is in neither the faces nor the count.
     expect(lobby).toMatchObject({ count: 5, guests: 2, bots: 1, here: true, playPath: '/@/acme/office/lobby' });
     expect(lobby.people.map((person) => person.uuid)).toEqual(['sara', 'me']);
+  });
+
+  it('still honours the older "hide where I am" switch', async () => {
+    db.user.findMany.mockResolvedValue([
+      { id: 'u-me', uuid: 'me', name: 'Me', preferences: [] },
+      { id: 'u-sara', uuid: 'sara', name: 'Sara', preferences: [{ key: 'people.hideLocation', value: true }] },
+      { id: 'u-hidden', uuid: 'hidden', name: 'Hidden', preferences: [] },
+    ]);
+    const view = await buildLiveView(snapshot(), viewer);
+    expect(view.people.map((person) => person.name)).toEqual(['Hidden']);
+  });
+
+  it('shows someone who shares with friends only to their friends', async () => {
+    db.user.findMany.mockResolvedValue([
+      { id: 'u-me', uuid: 'me', name: 'Me', preferences: [] },
+      { id: 'u-sara', uuid: 'sara', name: 'Sara', preferences: [{ key: 'people.shareRoom', value: 'friends' }] },
+      { id: 'u-hidden', uuid: 'hidden', name: 'Hidden', preferences: [{ key: 'people.shareRoom', value: 'friends' }] },
+    ]);
+    db.friendship.findMany.mockResolvedValue([{ user1Id: 'u-me', user2Id: 'u-sara' }]);
+    const view = await buildLiveView(snapshot(), viewer);
+    expect(view.people.map((person) => person.name)).toEqual(['Sara']);
+    const [lobby] = view.places;
+    // Me, Sara, 2 guests and a bot; the friends-only stranger is in neither the faces nor the count.
+    expect(lobby.count).toBe(5);
+  });
+
+  it('always shows you to yourself, even when you share with no one', async () => {
+    db.user.findMany.mockResolvedValue([{ id: 'u-me', uuid: 'me', name: 'Me', preferences: [{ key: 'people.shareRoom', value: 'nobody' }] }]);
+    const [lobby] = (await buildLiveView(snapshot(), viewer)).places;
+    expect(lobby.here).toBe(true);
+    expect(lobby.people.map((person) => person.uuid)).toEqual(['me']);
   });
 
   it('shows a private world to its members', async () => {

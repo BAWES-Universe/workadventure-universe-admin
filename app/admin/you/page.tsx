@@ -1,11 +1,12 @@
 'use client';
 
 import { Suspense, useEffect, useState } from 'react';
+import Link from 'next/link';
+import { ChevronRight } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useAdminBootstrap } from '../admin-bootstrap-context';
 import { StatLine, count } from '../components/ds';
 import { ProfileCard } from '../components/profile-card';
-import { HideLocationSetting } from '../components/live/hide-location-setting';
 import { ThemeChoice } from '../components/shell/theme-choice';
 import Yours from '../components/yours';
 import LogoutButton from '../logout-button';
@@ -65,7 +66,13 @@ function You() {
           </span>
           <ThemeChoice className={styles.themeControl} />
         </div>
-        <HideLocationSetting rowClassName={styles.settingRow} />
+        <Link href="/admin/sharing" className={`orbit-press ${styles.settingRow}`}>
+          <span>
+            <strong>Sharing</strong>
+            <span>Who sees which room you’re in, and your passport.</span>
+          </span>
+          <ChevronRight size={18} aria-hidden="true" />
+        </Link>
         <div className={styles.settingRow}>
           <span>
             <strong>Account</strong>

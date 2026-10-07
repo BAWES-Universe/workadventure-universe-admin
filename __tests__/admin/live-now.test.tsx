@@ -2,8 +2,8 @@
 
 import React from 'react';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { LiveNow, LiveNowView } from '@/app/admin/components/live/live-now';
-import { HideLocationSetting } from '@/app/admin/components/live/hide-location-setting';
+import { LiveNow, LiveNowView, LiveStrip } from '@/app/admin/components/live/live-now';
+import { SharingSettings } from '@/app/admin/components/live/sharing-settings';
 import { WorkAdventureContext } from '@/app/admin/workadventure-context';
 import type { LivePlace, LiveView } from '@/lib/live-presence';
 
@@ -122,21 +122,80 @@ describe('Live now', () => {
   });
 });
 
-describe('Hide where I am', () => {
-  it('reads and saves the switch on your account', async () => {
-    fetchMock.mockImplementation((url: string, init?: RequestInit) =>
-      Promise.resolve({ ok: true, json: async () => (init?.method === 'PUT' ? {} : { preferences: {} }) }),
+describe('The Live now strip', () => {
+  it('says how many people are live in how many rooms, names the rooms, and opens Live now', () => {
+    render(<LiveStrip view={view} />);
+    const strip = screen.getByTestId('live-strip');
+    expect(strip.getAttribute('href')).toBe('/admin/live');
+    // The hall counts 4 (two people and two bots), the arcade 1.
+    expect(within(strip).getByText('5 people live in 2 rooms')).toBeTruthy();
+    expect(within(strip).getByText('Main Hall and Arcade')).toBeTruthy();
+  });
+
+  it('names three rooms and counts the rest past four', () => {
+    const many: LiveView = {
+      ...view,
+      places: ['A', 'B', 'C', 'D', 'E'].map((name) => place(name, `Room ${name}`, BAWES, [person(name)])),
+    };
+    render(<LiveStrip view={many} />);
+    expect(screen.getByText('Room A, Room B, Room C and 2 more')).toBeTruthy();
+  });
+
+  it('says it in the singular, and stays out when nobody is around', () => {
+    const one: LiveView = { ...view, places: [place('solo', 'Solo', BAWES, [person('Dana')])] };
+    const { container, unmount } = render(<LiveStrip view={one} />);
+    expect(within(container).getByText('1 person live in 1 room')).toBeTruthy();
+    unmount();
+    const none = render(<LiveStrip view={{ available: true, generatedAt: 1, places: [], people: [] }} />);
+    expect(none.container.textContent).toBe('');
+  });
+});
+
+describe('Sharing', () => {
+  const answer = (preferences: Record<string, unknown>) =>
+    fetchMock.mockImplementation((_url: string, init?: RequestInit) =>
+      Promise.resolve({ ok: true, json: async () => (init?.method === 'PUT' ? {} : { preferences }) }),
     );
-    render(<HideLocationSetting />);
-    const toggle = screen.getByTestId('hide-location');
-    await waitFor(() => expect(toggle.hasAttribute('disabled')).toBe(false));
-    fireEvent.click(toggle);
+
+  it('starts at Everyone for both lines when nothing was ever chosen', async () => {
+    answer({});
+    render(<SharingSettings />);
+    await waitFor(() => expect(within(screen.getByTestId('share-room')).getByText('Everyone')).toBeTruthy());
+    expect(within(screen.getByTestId('share-passport')).getByText('Everyone')).toBeTruthy();
+  });
+
+  it('reads the older "hide where I am" switch as No one', async () => {
+    answer({ 'people.hideLocation': true });
+    render(<SharingSettings />);
+    await waitFor(() => expect(within(screen.getByTestId('share-room')).getByText('No one')).toBeTruthy());
+  });
+
+  it('saves a new choice the moment it is picked', async () => {
+    answer({});
+    render(<SharingSettings />);
+    const pick = screen.getByTestId('share-room');
+    await waitFor(() => expect(pick.hasAttribute('disabled')).toBe(false));
+    fireEvent.click(pick);
+    fireEvent.click(screen.getByRole('option', { name: 'Friends' }));
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith('/api/me/preferences', {
         method: 'PUT',
-        body: JSON.stringify({ key: 'people.hideLocation', value: true }),
+        body: JSON.stringify({ key: 'people.shareRoom', value: 'friends' }),
       }),
     );
-    expect(screen.getByText(/Nobody sees which room you’re in/)).toBeTruthy();
+    expect(within(pick).getByText('Friends')).toBeTruthy();
+  });
+
+  it('puts the old choice back when saving fails', async () => {
+    fetchMock.mockImplementation((_url: string, init?: RequestInit) =>
+      Promise.resolve(init?.method === 'PUT' ? { ok: false, status: 500, json: async () => ({}) } : { ok: true, json: async () => ({ preferences: {} }) }),
+    );
+    render(<SharingSettings />);
+    const pick = screen.getByTestId('share-passport');
+    await waitFor(() => expect(pick.hasAttribute('disabled')).toBe(false));
+    fireEvent.click(pick);
+    fireEvent.click(screen.getByRole('option', { name: 'No one' }));
+    await waitFor(() => expect(screen.getByText(/Couldn’t save that/)).toBeTruthy());
+    expect(within(pick).getByText('Everyone')).toBeTruthy();
   });
 });

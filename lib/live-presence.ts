@@ -4,12 +4,13 @@ import type { SessionUser } from '@/lib/auth-session';
 import { memberWorldIdsOf } from '@/lib/access-scope';
 import { canSeeRoom } from '@/lib/room-visibility';
 import { parsePlayUri } from '@/lib/utils';
-import { HIDE_LOCATION_KEY } from '@/lib/user-preferences';
+import { HIDE_LOCATION_KEY, SHARING_KEYS, shareRoomFromRows } from '@/lib/people-settings';
 
 /**
  * Live now: who is in Universe right now and where, read from the game server's live directory (the pusher's
  * `GET /presence`) and narrowed to what one person may see. Only rooms they could enter; a private world's people only
- * for its members; anyone who hides where they are is left out, from the counts too.
+ * for its members; anyone who shares their room with no one is left out, from the counts too, and anyone who shares it
+ * with friends only shows to their friends.
  */
 
 export { HIDE_LOCATION_KEY };
@@ -194,7 +195,7 @@ export async function buildLiveView(snapshot: PresenceSnapshot, viewer: SessionU
   const memberWorldIds = await memberWorldIdsOf(viewer.id, [...new Set(rooms.map((room) => room.world.id))]);
   const visibleRooms = rooms.filter((room) => canSeeRoom(room, viewer, memberWorldIds));
 
-  // The people in those rooms, by name, minus anyone who hides where they are (you always see yourself).
+  // The people in those rooms, by name, minus anyone who doesn't share their room with you (you always see yourself).
   const uuids = new Set<string>();
   for (const room of visibleRooms) {
     for (const entry of usersByKey.get(slugKey(room.world.universe.slug, room.world.slug, room.slug)) ?? []) {
@@ -204,15 +205,33 @@ export async function buildLiveView(snapshot: PresenceSnapshot, viewer: SessionU
   const people = uuids.size
     ? await prisma.user.findMany({
         where: { uuid: { in: [...uuids] }, isGuest: false },
-        select: { uuid: true, name: true, preferences: { where: { key: HIDE_LOCATION_KEY }, select: { value: true } } },
+        select: { id: true, uuid: true, name: true, preferences: { where: { key: { in: [...SHARING_KEYS] } }, select: { key: true, value: true } } },
       })
     : [];
+  // Friends only: who among them is the viewer's friend.
+  const friendsOnly = people.filter((person) => shareRoomFromRows(person.preferences) === 'friends').map((person) => person.id);
+  const friendIds = new Set(
+    friendsOnly.length === 0 || !viewer.id
+      ? []
+      : (
+          await prisma.friendship.findMany({
+            where: {
+              status: 'accepted',
+              OR: [
+                { user1Id: viewer.id, user2Id: { in: friendsOnly } },
+                { user2Id: viewer.id, user1Id: { in: friendsOnly } },
+              ],
+            },
+            select: { user1Id: true, user2Id: true },
+          })
+        ).map((row) => (row.user1Id === viewer.id ? row.user2Id : row.user1Id)),
+  );
   const snapshotByUuid = new Map(snapshot.users.map((user) => [user.uuid, user]));
   const shown = new Map<string, LivePerson>();
   for (const person of people) {
-    const hidden = person.preferences.some((preference) => preference.value === true);
+    const share = shareRoomFromRows(person.preferences);
     const you = person.uuid === viewer.uuid;
-    if (hidden && !you) continue;
+    if (!you && (share === 'nobody' || (share === 'friends' && !friendIds.has(person.id)))) continue;
     const live = snapshotByUuid.get(person.uuid);
     if (!live) continue;
     shown.set(person.uuid, {
