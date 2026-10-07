@@ -280,9 +280,9 @@ export async function GET(request: NextRequest) {
         backgroundColor: "#14121E",
         primaryColor: "#4056F6",
         backgroundSceneImage: `${baseUrl}/assets/background-1920x1080.png`,
-        errorSceneLogo: `${baseUrl}/assets/logo-300x250.png`,
+        errorSceneLogo: `${baseUrl}/assets/logo-300x250.svg`,
         loadingLogo: `${baseUrl}/assets/loading-logo.png`,
-        loginSceneLogo: `${baseUrl}/assets/logo-300x150.png`,
+        loginSceneLogo: `${baseUrl}/assets/logo-300x150.svg`,
         
         // Include modules array to tell WorkAdventure which modules to load
         modules: isAuthenticated ? ["admin-api","teleport","bots"] : ["teleport","bots"],
