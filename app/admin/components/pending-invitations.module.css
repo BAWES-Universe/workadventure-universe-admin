@@ -1,0 +1,16 @@
+/* The invitation card: the world's teal, who invited you, the message in its own box, both buttons on one row. */
+.card { position: relative; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 12px; padding: 16px 16px 16px 14px; border-radius: 20px; border: 1px solid rgb(45 212 191 / .28); background: linear-gradient(135deg, rgb(45 212 191 / .10), rgb(134 41 252 / .08) 60%, transparent), hsl(var(--card)); }
+.face { grid-row: span 2; align-self: start; }
+.title { margin: 0; padding-right: 36px; font-size: 15px; font-weight: 600; line-height: 1.35; }
+.title b { font-weight: 700; }
+.world { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; vertical-align: bottom; }
+.world svg { color: var(--kind-world-solid); }
+.meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; font-size: 12px; color: hsl(var(--muted-foreground)); }
+.message { grid-column: 1 / -1; margin: 6px 0 0; padding: 8px 12px; border-radius: 12px; background: hsl(var(--foreground) / .05); font-size: 13px; font-style: italic; color: hsl(var(--foreground) / .85); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.error { grid-column: 1 / -1; margin: 4px 0 0; font-size: 14px; color: hsl(var(--destructive)); }
+.actions { grid-column: 1 / -1; display: flex; gap: 8px; margin-top: 10px; }
+.actions > * { flex: 1 1 0; justify-content: center; min-width: 0; }
+@media (min-width: 640px) { .actions > * { flex: 0 0 auto; padding-inline: 22px; } }
+.several { position: relative; display: grid; gap: 12px; padding: 16px 48px 16px 16px; border-radius: 20px; border: 1px solid rgb(45 212 191 / .28); background: linear-gradient(135deg, rgb(45 212 191 / .10), rgb(134 41 252 / .08) 60%, transparent), hsl(var(--card)); }
+
+.face :global([data-testid='woka-avatar']) { border-radius: 50% !important; }

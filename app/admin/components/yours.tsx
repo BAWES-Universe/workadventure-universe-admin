@@ -29,6 +29,7 @@ interface MyUniverse {
   name: string;
   description?: string | null;
   isPublic: boolean;
+  featured?: boolean;
   _count?: { worlds?: number; rooms?: number };
 }
 interface MyMembership {
@@ -194,7 +195,7 @@ export default function Yours({ profileComplete }: { profileComplete: boolean | 
                       ]}
                     />
                   }
-                  aside={<RolePills roles={[...(membership.isUniverseOwner ? ['owner'] : []), ...membership.tags]} />}
+                  titleAside={<RolePills roles={[...(membership.isUniverseOwner ? ['owner'] : []), ...membership.tags]} />}
                 />
               ))}
             </div>
@@ -258,7 +259,10 @@ function UniverseCard({ universe }: { universe: MyUniverse }) {
       </div>
       <div className={styles.universeTop}>
         <KindIcon kind="universe" universeId={universe.id} />
-        <StatusPill status={universe.isPublic ? 'public' : 'private'} />
+        <span className={styles.universePills}>
+          <StatusPill status={universe.isPublic ? 'public' : 'private'} />
+          {universe.featured && <StatusPill status="featured" />}
+        </span>
       </div>
       <div className={styles.universeBottom}>
         <div>
