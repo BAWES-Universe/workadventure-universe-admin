@@ -65,8 +65,9 @@ export const fakePrisma = {
       return user ? pick(user, select) : null;
     }),
     findMany: jest.fn(async ({ where, take }: { where: Where; take?: number }) => {
-      const { preferences, name, ...rest } = where as Where & {
+      const { preferences, NOT, name, ...rest } = where as Where & {
         preferences?: { some: { key: string; value: { equals: unknown } } };
+        NOT?: { preferences: { some: { key: string; value: { equals: unknown } } } };
         name?: { contains: string };
       };
       let users = db.users.filter((u) => matches(u, rest));
@@ -74,6 +75,10 @@ export const fakePrisma = {
       if (preferences) {
         const { key, value } = preferences.some;
         users = users.filter((u) => db.preferences.some((p) => p.userId === u.id && p.key === key && p.value === value.equals));
+      }
+      if (NOT) {
+        const { key, value } = NOT.preferences.some;
+        users = users.filter((u) => !db.preferences.some((p) => p.userId === u.id && p.key === key && p.value === value.equals));
       }
       users = [...users].sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
       return users.slice(0, take ?? users.length).map((u) => ({
