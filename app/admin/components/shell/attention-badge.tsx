@@ -52,15 +52,17 @@ export function useAttentionCount(): number {
   return useSyncExternalStore(subscribe, () => current, () => 0);
 }
 
-/** The count as the game's chat badge draws it: the Universe gradient, top-left of its button, with an ink ring. */
+/** The count in the gold of a raised hand, with ink text and an ink ring, so it stands out on the dark bar and on the
+ * purple of the selected tab alike. Callers place it just left of the Orbit icon, never over it. */
 export function AttentionBadge({ count, className }: { count: number; className?: string }) {
   if (count <= 0) return null;
   return (
     <span
-      className={`pointer-events-none absolute z-10 flex h-5 min-w-5 items-center justify-center rounded-full px-1 text-[11px] font-bold leading-none tabular-nums text-white ${className ?? ''}`}
+      className={`pointer-events-none absolute z-10 flex h-5 min-w-5 items-center justify-center rounded-full px-1 text-[11px] font-bold leading-none tabular-nums ${className ?? ''}`}
       style={{
-        backgroundImage: 'var(--brand-gradient)',
-        boxShadow: '0 0 0 2px hsl(var(--background)), 0 2px 8px -2px rgba(134, 41, 252, 0.8)',
+        background: '#F5C451',
+        color: '#0A0814',
+        boxShadow: '0 0 0 2px #0A0814, 0 2px 8px -2px rgba(245, 196, 81, 0.8)',
       }}
       data-testid="attention-badge"
     >

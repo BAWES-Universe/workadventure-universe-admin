@@ -13,7 +13,7 @@ export async function OPTIONS(request: NextRequest) {
 }
 
 /**
- * GET /api/me/attention - how many things wait for the caller's answer, for the count on Orbit's You and the game's
+ * GET /api/me/attention - how many things wait for the caller's answer, for the count on Orbit's Orbit tab and the game's
  * Orbit button. Invitations for now: pending ones, less those dismissed on Orbit home. It only goes down when an
  * item is answered or dismissed, never just for being seen.
  */

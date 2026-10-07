@@ -7,7 +7,7 @@ import { isPeopleSettingKey, isValidPeopleSetting } from './people-settings';
 
 export const PREFERENCE_VALUE_MAX_BYTES = 2048;
 
-/** Invitations dismissed on Orbit home, `{ ids }`: hidden there and left out of the count on You. */
+/** Invitations dismissed on Orbit home, `{ ids }`: hidden there and left out of the count on the Orbit tab. */
 export const INVITATIONS_DISMISSED_KEY = 'guidance.dismissed.invitations';
 
 /** Live now's own switch: true drops you out of Live now and its counts (see lib/live-presence.ts). */

@@ -49,7 +49,7 @@ export function Sidebar() {
                   )}
                   style={active ? { backgroundImage: 'var(--brand-gradient)' } : undefined}
                 >
-                  {item.href === '/admin/you' && <AttentionBadge count={attention} className="left-1.5 top-1" />}
+                  {item.href === '/admin' && <AttentionBadge count={attention} className="left-0.5 top-1" />}
                   <Icon className="h-[22px] w-[22px]" strokeWidth={active ? 2.4 : 2} aria-hidden="true" />
                   {item.label}
                 </Link>
