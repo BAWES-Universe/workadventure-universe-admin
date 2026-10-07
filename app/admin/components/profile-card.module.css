@@ -20,6 +20,7 @@
 /* Small avatars (rows): a rounder, tighter frame. */
 .avatar[data-size='sm'] { border-width: 0; border-radius: 12px; }
 .avatar[data-size='sm'] .initial { font-size: 15px; }
+.avatar[data-round='true'] { border-radius: 50%; }
 .initial { font-family: var(--font-display); font-size: 30px; font-weight: 700; color: #fff; }
 .who { min-width: 0; flex: 1 1 13rem; }
 .who h1 { font-size: clamp(24px, 6vw, 32px); line-height: 1.15; letter-spacing: -.02em; font-weight: 700; overflow-wrap: anywhere; }

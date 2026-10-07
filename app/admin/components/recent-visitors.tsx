@@ -129,7 +129,7 @@ export default function RecentVisitors({ scope, id, onOpenVisitors }: { scope: S
             <button
               type="button"
               className={cn(styles.face, styles.guests)}
-              aria-label={`${guests} ${guests === 1 ? 'guest' : 'guests'} this week. See the Visitors tab`}
+              aria-label={`${guests} ${guests === 1 ? 'guest' : 'guests'} this week. See all visitors`}
               onClick={onOpenVisitors}
             >
               <span className={styles.guestCount} aria-hidden="true">

@@ -16,6 +16,9 @@ const updateMemberSchema = z.object({
   tags: z.array(z.string()).min(1),
 });
 
+/** Highest role first, as the members list sorts them. */
+const MEMBER_ORDER = ['owner', 'admin', 'editor', 'member'];
+
 // Helper function to check if user can manage world members
 async function canManageWorldMembers(worldId: string, userId: string): Promise<boolean> {
   const world = await prisma.world.findUnique({
@@ -75,8 +78,28 @@ export async function GET(
     const canSeeEmails = canManage || sessionUser.isSuperAdmin;
 
     // The System account is nobody, so it never shows as a member
-    const members = await prisma.worldMember.findMany({
+    const everyone = await prisma.worldMember.findMany({
       where: { worldId: id, user: NOT_SYSTEM_USER },
+      select: { id: true, userId: true, tags: true },
+    });
+    const total = everyone.length;
+    const yourTags = everyone.find((member) => member.userId === sessionUser.id)?.tags ?? [];
+
+    // `?limit=8` is the world page's row of faces: the first few by rank, with the total and your own roles, without
+    // reading every visit of every member.
+    const limitParam = Number.parseInt(request.nextUrl.searchParams.get('limit') ?? '', 10);
+    const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(limitParam, 50) : null;
+    let onlyIds: string[] | undefined;
+    if (limit !== null) {
+      const rankOf = (member: { userId: string; tags: string[] }) =>
+        world.universe.ownerId === member.userId
+          ? 0
+          : Math.min(9, ...member.tags.map((tag) => MEMBER_ORDER.indexOf(tag.toLowerCase()) + 1 || 9));
+      onlyIds = [...everyone].sort((a, b) => rankOf(a) - rankOf(b)).slice(0, limit).map((member) => member.id);
+    }
+
+    const members = await prisma.worldMember.findMany({
+      where: { worldId: id, user: NOT_SYSTEM_USER, ...(onlyIds ? { id: { in: onlyIds } } : {}) },
       include: {
         user: {
           select: {
@@ -88,10 +111,14 @@ export async function GET(
       },
       orderBy: { joinedAt: 'desc' },
     });
+    if (onlyIds) {
+      const position = new Map(onlyIds.map((memberId, index) => [memberId, index]));
+      members.sort((a, b) => (position.get(a.id) ?? 0) - (position.get(b.id) ?? 0));
+    }
 
     // Get last visited dates from RoomAccess
     const userIds = members.map(m => m.userId);
-    const lastVisits = await prisma.roomAccess.findMany({
+    const lastVisits = onlyIds ? [] : await prisma.roomAccess.findMany({
       where: {
         worldId: id,
         userId: { in: userIds },
@@ -124,6 +151,8 @@ export async function GET(
     return NextResponse.json({ 
       members: await withWokas(membersWithLastVisit),
       canManage,
+      total,
+      yourTags,
     });
   } catch (error) {
     console.error('Error fetching world members:', error);

@@ -90,4 +90,19 @@ describe('GET /api/admin/worlds/[id]/members', () => {
     expect(status).toBe(200);
     expect(emails(body)).toEqual(['m@example.test', 'a@example.test']);
   });
+
+  it('gives the total and your own roles, and with ?limit the first members by rank only', async () => {
+    setUp(true);
+    (getSessionUser as jest.Mock).mockResolvedValue(SESSIONS.admin);
+    const response = await getMembers(new NextRequest('http://localhost/api/admin/worlds/w/members?limit=1'), {
+      params: Promise.resolve({ id: 'w' }),
+    });
+    const body = await response.json();
+    expect(body.total).toBe(2);
+    expect(body.yourTags).toEqual(['admin']);
+    // The preview asked for the admin (first by rank) only, and skipped the visit history.
+    const preview = db.worldMember.findMany.mock.calls.at(-1)?.[0];
+    expect(preview.where.id).toEqual({ in: ['m-2'] });
+    expect(db.roomAccess.findMany).not.toHaveBeenCalled();
+  });
 });

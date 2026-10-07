@@ -74,6 +74,8 @@ export async function GET(request: NextRequest) {
       ? await prisma.favorite.groupBy({
           by: ['worldId'],
           where: {
+            // Stars on the place itself are counted apart; this is its rooms' stars.
+            roomId: { not: null },
             worldId: { in: worldIds },
           },
           _count: {
