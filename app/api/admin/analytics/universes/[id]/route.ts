@@ -183,6 +183,7 @@ export async function GET(
         userUuid: access.userUuid,
         ipAddress: access.ipAddress,
         isGuest: access.isGuest,
+        textureIds: access.textureIds,
         isAuthenticated: access.isAuthenticated,
         hasMembership: access.hasMembership,
         membershipTags: access.membershipTags,

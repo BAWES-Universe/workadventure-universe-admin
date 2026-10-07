@@ -18,8 +18,8 @@ jest.mock('@/lib/client-auth', () => ({ authenticatedFetch: (...args: unknown[])
 
 const ago = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
 const visitors = [
-  { userId: 'omar', name: 'Omar', woka: [], at: ago(1), room: { id: 'r1', name: 'HQ Lobby' } },
-  { userId: 'sara', name: 'Sara', woka: [], at: ago(4), room: { id: 'r1', name: 'HQ Lobby' } },
+  { key: 'omar', userId: 'omar', guest: false, name: 'Omar', woka: [], at: ago(1), room: { id: 'r1', name: 'HQ Lobby' } },
+  { key: 'sara', userId: 'sara', guest: false, name: 'Sara', woka: [], at: ago(4), room: { id: 'r1', name: 'HQ Lobby' } },
 ];
 
 function serve(routes: Record<string, unknown>) {
@@ -66,6 +66,22 @@ describe('Recent visitors', () => {
     fireEvent.click(tile);
     fireEvent.click(within(section).getByTestId('recent-visitors-see-all'));
     expect(open).toHaveBeenCalledTimes(2);
+  });
+
+  it('shows a guest by the name they typed, marked Guest, and opens a card with no profile to go to', async () => {
+    const guest = { key: 'g-nova', userId: null, guest: true, name: 'Nova', woka: [], at: ago(4), room: { id: 'r1', name: 'HQ Lobby' } };
+    serve({ '/api/admin/recent-visitors': { visitors: [visitors[0], guest], guests: 0 } });
+    render(<RecentVisitors scope="universe" id="u1" />);
+    const section = await screen.findByTestId('recent-visitors');
+    const face = within(section).getByRole('button', { name: 'Nova, guest, 4 minutes ago' });
+    expect(face.textContent).toContain('Nova');
+    expect(face.textContent).toContain('Guest · 4 min');
+    fireEvent.click(face);
+    const sheet = await screen.findByTestId('visitor-sheet');
+    expect(sheet.textContent).toContain('Guest · Here 4 minutes ago · HQ Lobby');
+    expect(within(sheet).queryByText('Full profile')).toBeNull();
+    // No profile to fetch for a guest.
+    expect(fetchMock.mock.calls.some(([path]) => String(path).startsWith('/api/admin/users/'))).toBe(false);
   });
 
   it('has no See all when there is nowhere to go from it', async () => {

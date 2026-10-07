@@ -168,6 +168,8 @@ model RoomAccess {
 
   playUri         String   @map("play_uri") // Full play URI
 
+  textureIds      String[] @default([]) @map("texture_ids") // The Woka a guest picked (their account has its own saved outfit)
+
   accessedAt      DateTime @default(now()) @map("accessed_at")
 
   // Relations

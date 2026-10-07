@@ -28,21 +28,37 @@ const visit = (userId: string | null, minutesAgo: number, extra: Record<string, 
   ...extra,
 });
 
+/** The people-with-an-account query and the guest query hit the same table; tell them apart by what they ask for. */
+function serve(members: unknown[], guests: unknown[] = []) {
+  findMany.mockImplementation(async (args: { where: { userUuid?: unknown } }) => (args.where.userUuid ? guests : members));
+}
+
+const guestVisit = (uuid: string, name: string | null, minutesAgo: number, extra: Record<string, unknown> = {}) => ({
+  userUuid: uuid,
+  userName: name,
+  textureIds: ['male1'],
+  accessedAt: new Date(Date.UTC(2026, 9, 7, 12, 0) - minutesAgo * 60_000),
+  room: { id: `room-${uuid}`, name: 'HQ Lobby' },
+  ...extra,
+});
+
 beforeEach(() => {
   jest.resetAllMocks();
   detail.mockResolvedValue('manager');
-  findMany.mockResolvedValue([]);
+  serve([]);
   const { withWokas } = jest.requireMock('@/lib/woka-avatar');
   withWokas.mockImplementation(async (records: { userId: string }[]) => records.map((record) => ({ ...record, woka: [`/woka/${record.userId}.png`] })));
 });
 
 describe('loadRecentVisitors', () => {
   it('lists each person once, newest first, with their name, face, room and time', async () => {
-    findMany.mockResolvedValue([visit('omar', 1), visit('sara', 4), visit('omar', 30), visit('noor', 60)]);
+    serve([visit('omar', 1), visit('sara', 4), visit('omar', 30), visit('noor', 60)]);
     const visitors = await loadRecentVisitors(viewer, { universeId: 'u1' });
     expect(visitors.map((visitor) => visitor.userId)).toEqual(['omar', 'sara', 'noor']);
     expect(visitors[0]).toEqual({
+      key: 'omar',
       userId: 'omar',
+      guest: false,
       name: 'User omar',
       woka: ['/woka/omar.png'],
       at: '2026-10-07T11:59:00.000Z',
@@ -58,13 +74,15 @@ describe('loadRecentVisitors', () => {
 
   it('asks only for the place, people with an account, and not the viewer', async () => {
     await loadRecentVisitors(viewer, { roomId: 'r1' });
-    expect(findMany.mock.calls[0][0].where).toEqual({ roomId: 'r1', userId: { not: 'me' } });
+    const asked = (calls: unknown[][]) => calls.map((call) => (call[0] as { where: Record<string, unknown> }).where);
+    expect(asked(findMany.mock.calls)).toContainEqual({ roomId: 'r1', userId: { not: 'me' } });
+    findMany.mockClear();
     await loadRecentVisitors({ kind: 'admin-token' }, { roomId: 'r1' });
-    expect(findMany.mock.calls[1][0].where).toEqual({ roomId: 'r1', userId: { not: null } });
+    expect(asked(findMany.mock.calls)).toContainEqual({ roomId: 'r1', userId: { not: null } });
   });
 
-  it('leaves out guests and visits with no account, and falls back to the name kept with the visit', async () => {
-    findMany.mockResolvedValue([
+  it('leaves out guest accounts and visits with no account, and falls back to the name kept with the visit', async () => {
+    serve([
       visit(null, 1),
       visit('guest', 2, { user: { name: 'Guest', isGuest: true } }),
       visit('kept', 3, { user: { name: '  ', isGuest: false } }),
@@ -78,8 +96,62 @@ describe('loadRecentVisitors', () => {
   });
 
   it('stops at eight faces', async () => {
-    findMany.mockResolvedValue(Array.from({ length: 20 }, (_, index) => visit(`p${index}`, index)));
+    serve(Array.from({ length: 20 }, (_, index) => visit(`p${index}`, index)));
     expect(await loadRecentVisitors(viewer, { universeId: 'u1' })).toHaveLength(RECENT_VISITORS);
+  });
+});
+
+describe('loadRecentVisitors, guests', () => {
+  it('shows a guest who typed a name as a face with their own Woka, once, among the others by time', async () => {
+    const { withWokas } = jest.requireMock('@/lib/woka-avatar');
+    serve(
+      [visit('omar', 1), visit('sara', 30)],
+      [guestVisit('g-nova', 'Nova', 5), guestVisit('g-nova', 'Nova', 50, { textureIds: ['old'] }), guestVisit('g-zed', 'Zed', 90)],
+    );
+    const visitors = await loadRecentVisitors(viewer, { universeId: 'u1' });
+    expect(visitors.map((visitor) => [visitor.key, visitor.guest, visitor.name])).toEqual([
+      ['omar', false, 'User omar'],
+      ['g-nova', true, 'Nova'],
+      ['sara', false, 'User sara'],
+      ['g-zed', true, 'Zed'],
+    ]);
+    expect(visitors[1].userId).toBeNull();
+    // The guest's saved outfit goes to the Woka lookup as it is, marked as a guest.
+    const asked = withWokas.mock.calls[0][0] as Record<string, unknown>[];
+    expect(asked[1]).toEqual({ userId: null, userUuid: 'g-nova', isGuest: true, textureIds: ['male1'] });
+  });
+
+  it('asks only for guests with a typed name, never for an id as a name, and takes the outfit from the visit that has one', async () => {
+    serve(
+      [],
+      [
+        guestVisit('g-id', 'g-id', 1),
+        guestVisit('g-blank', '   ', 2),
+        guestVisit('g-late', 'Late', 3, { textureIds: [] }),
+        guestVisit('g-late', 'Late', 9, { textureIds: ['female2'] }),
+      ],
+    );
+    const visitors = await loadRecentVisitors(viewer, { worldId: 'w1' });
+    expect(visitors.map((visitor) => visitor.name)).toEqual(['Late']);
+    const guestQuery = findMany.mock.calls.map((call) => call[0].where).find((where) => where.userUuid);
+    expect(guestQuery).toEqual({
+      worldId: 'w1',
+      userUuid: { not: null },
+      userName: { not: null },
+      OR: [{ userId: null }, { user: { isGuest: true } }],
+    });
+    const { withWokas } = jest.requireMock('@/lib/woka-avatar');
+    expect(withWokas.mock.calls[0][0][0].textureIds).toEqual(['female2']);
+  });
+
+  it('keeps eight faces in all, guests included', async () => {
+    serve(
+      Array.from({ length: 8 }, (_, index) => visit(`p${index}`, 100 + index)),
+      Array.from({ length: 8 }, (_, index) => guestVisit(`g${index}`, `Guest ${index}`, index)),
+    );
+    const visitors = await loadRecentVisitors(viewer, { universeId: 'u1' });
+    expect(visitors).toHaveLength(RECENT_VISITORS);
+    expect(visitors.every((visitor) => visitor.guest)).toBe(true);
   });
 });
 
