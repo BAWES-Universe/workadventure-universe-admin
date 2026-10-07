@@ -91,12 +91,12 @@ describe('Recent visitors', () => {
     expect(within(section).queryByText('See all')).toBeNull();
   });
 
-  it('puts a Guests chip first, with how many different guests this week, and opens the Visitors tab', async () => {
+  it('puts a Guests chip first, with how many different guests this week, and opens the Visitors page', async () => {
     const open = jest.fn();
     serve({ '/api/admin/recent-visitors': { visitors, guests: 12 } });
     render(<RecentVisitors scope="universe" id="u1" onOpenVisitors={open} />);
     const section = await screen.findByTestId('recent-visitors');
-    const chip = within(section).getByRole('button', { name: '12 guests this week. See the Visitors tab' });
+    const chip = within(section).getByRole('button', { name: '12 guests this week. See all visitors' });
     expect(chip.textContent).toContain('12');
     expect(chip.textContent).toContain('Guests');
     expect(chip.textContent).toContain('this week');
@@ -110,7 +110,7 @@ describe('Recent visitors', () => {
   it('says "Guest" for one, and still shows the chip when only guests came by', async () => {
     serve({ '/api/admin/recent-visitors': { visitors: [], guests: 1 } });
     render(<RecentVisitors scope="room" id="r1" />);
-    const chip = await screen.findByRole('button', { name: '1 guest this week. See the Visitors tab' });
+    const chip = await screen.findByRole('button', { name: '1 guest this week. See all visitors' });
     expect(chip.textContent).toContain('Guest');
     expect(chip.textContent).not.toContain('Guests');
   });
