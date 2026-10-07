@@ -90,6 +90,39 @@ export async function wokaLayersForTextureLists(lists: Map<string, string[]>): P
   return result;
 }
 
+/**
+ * Each person's Woka as the game takes it ({ id, url } per layer, bottom first), so game pickers can draw it: the outfit
+ * saved for this world, else the one they last picked anywhere (as Orbit's cards show). Someone without one, or with a
+ * layer we can't find, is left out and the game draws its default Woka.
+ */
+export async function wokaTexturesForMany(
+  userIds: string[],
+  worldId?: string,
+): Promise<Map<string, { id: string; url: string }[]>> {
+  const result = new Map<string, { id: string; url: string }[]>();
+  const ids = [...new Set(userIds)];
+  if (ids.length === 0) return result;
+  const avatars = await prisma.userAvatar.findMany({
+    where: { userId: { in: ids } },
+    orderBy: { updatedAt: 'desc' },
+    select: { userId: true, worldId: true, textureIds: true },
+  });
+  const chosen = new Map<string, string[]>();
+  for (const avatar of avatars) {
+    if (!avatar.textureIds.length) continue;
+    if (worldId && avatar.worldId === worldId) chosen.set(avatar.userId, avatar.textureIds);
+    else if (!chosen.has(avatar.userId)) chosen.set(avatar.userId, avatar.textureIds);
+  }
+  const keys = [...chosen.keys()];
+  const layers = await layersFromTextureLists(keys.map((key) => chosen.get(key) as string[]));
+  keys.forEach((key, index) => {
+    const urls = layers[index];
+    const textureIds = chosen.get(key) as string[];
+    if (urls) result.set(key, textureIds.map((id, layer) => ({ id, url: urls[layer] })));
+  });
+  return result;
+}
+
 export async function wokaLayersFor(userId: string): Promise<string[]> {
   return (await wokaLayersForMany([userId])).get(userId) ?? [];
 }

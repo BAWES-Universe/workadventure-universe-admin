@@ -1,7 +1,24 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
+import { parsePlayUri } from '@/lib/utils';
+import { wokaTexturesForMany } from '@/lib/woka-avatar';
 import type { MemberData } from '@/types/workadventure';
+
+async function wokaFor(userId: string, playUri: string | null): Promise<{ id: string; url: string }[]> {
+  try {
+    let worldId: string | undefined;
+    if (playUri) {
+      const { universe, world } = parsePlayUri(playUri);
+      const found = await prisma.world.findFirst({ where: { slug: world, universe: { slug: universe } }, select: { id: true } });
+      worldId = found?.id;
+    }
+    return (await wokaTexturesForMany([userId], worldId)).get(userId) ?? [];
+  } catch {
+    // Never fails the member: without a Woka the game draws its default one.
+    return [];
+  }
+}
 
 export async function GET(
   request: NextRequest,
@@ -31,14 +48,18 @@ export async function GET(
       );
     }
     
+    // With the room asked about (playUri), the member's Woka in that world comes too, so the game can show it.
+    const characterTextures = await wokaFor(user.id, new URL(request.url).searchParams.get('playUri'));
+
     // Return format expected by WorkAdventure: id (not uuid), and chatID
     // Tags are only in /api/room/access, not in /api/members/{uuid}
-    const memberData = {
+    const memberData: Omit<MemberData, 'name' | 'email'> & { name?: string; email?: string } = {
       id: user.uuid, // WorkAdventure expects 'id' not 'uuid'
       name: user.name || undefined,
       email: user.email || undefined,
       visitCardUrl: null,
       chatID: user.matrixChatId || null, // Matrix chat ID (capital ID)
+      characterTextures,
     };
     
     return NextResponse.json(memberData);
