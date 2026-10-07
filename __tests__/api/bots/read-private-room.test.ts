@@ -109,6 +109,15 @@ describe('reading the bots of a members-only room', () => {
     });
   });
 
+  it('asks Prisma for the bot with a query it accepts (include and select cannot share a level)', async () => {
+    asUser('owner-1');
+    await one();
+    const args = (prisma.bot.findUnique as jest.Mock).mock.calls[0][0];
+    const room = args.include.room;
+    expect(room.include).toBeDefined();
+    expect(room.select).toBeUndefined();
+  });
+
   it('keeps showing the bots of a public room to everyone, signed in or not', async () => {
     const publicRoom = { ...privateRoom, world: { ...world, isPublic: true } };
     (prisma.room.findUnique as jest.Mock).mockResolvedValue(publicRoom);

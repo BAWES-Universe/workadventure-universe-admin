@@ -196,18 +196,6 @@ export async function GET(
               },
             },
           },
-          select: {
-            id: true,
-            worldId: true,
-            slug: true,
-            name: true,
-            description: true,
-            mapUrl: true,
-            wamUrl: true,
-            isPublic: true,
-            createdAt: true,
-            updatedAt: true,
-          },
         },
         createdBy: {
           select: {
