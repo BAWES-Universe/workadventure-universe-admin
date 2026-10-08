@@ -3,12 +3,13 @@
 import { useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { authenticatedFetch } from '@/lib/client-auth';
+import { announceAttentionChanged } from '../components/shell/attention-badge';
 
 /**
  * What an invitation's role lets you do, in plain words. Kept in one place so it can later read from the world's
  * own roles and capabilities (custom roles, issue #530) instead of this fixed list.
  */
-const BUILT_IN_ROLES: { tag: string; label: string; can: string }[] = [
+export const BUILT_IN_ROLES: { tag: string; label: string; can: string }[] = [
   { tag: 'admin', label: 'an admin', can: 'enter the world’s members-only rooms, edit its maps, rooms and bots, and invite and manage members' },
   { tag: 'editor', label: 'an editor', can: 'enter the world’s members-only rooms and edit its maps, rooms and bots' },
   { tag: 'member', label: 'a member', can: 'enter the world’s members-only rooms' },
@@ -40,6 +41,7 @@ export function roleLabel(tags: string[] | null | undefined): string {
 export async function declineInvitation(id: string, worldName: string): Promise<void> {
   const response = await authenticatedFetch(`/api/memberships/invitations/${id}/reject`, { method: 'POST' });
   if (!response.ok) throw new Error(`Couldn’t decline the invitation to ${worldName}. Try again.`);
+  announceAttentionChanged();
 }
 
 /**

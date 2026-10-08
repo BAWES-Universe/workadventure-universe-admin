@@ -33,6 +33,7 @@ import {
 } from '../../components/ds';
 import { Pager } from '../../discover/discover-ui';
 import { DateFilter, Detail, FilterRow, Panel, Pill } from '../bots-ui';
+import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
 interface Bot {
   id: string;
@@ -65,12 +66,10 @@ interface Bot {
   createdBy: {
     id: string;
     name: string | null;
-    email: string | null;
   } | null;
   updatedBy: {
     id: string;
     name: string | null;
-    email: string | null;
   } | null;
 }
 
@@ -182,6 +181,7 @@ interface EmotionData {
 
 export default function BotDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const router = useRouter();
+  const replacePage = useReplacePage();
   const [botId, setBotId] = useState<string>('');
   
   const [bot, setBot] = useState<Bot | null>(null);
@@ -235,7 +235,7 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
         }
         const userData = await response.json();
         if (!userData.user?.isSuperAdmin) {
-          router.push('/admin');
+          replacePage('/admin');
           return;
         }
         setAuthChecked(true);
@@ -245,7 +245,7 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
       }
     }
     init();
-  }, [params, router]);
+  }, [params, router, replacePage]);
 
   const fetchBot = useCallback(async () => {
     if (!botId) return;
@@ -267,7 +267,7 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
           return;
         }
         if (response.status === 401 || response.status === 403) {
-          router.push('/admin');
+          replacePage('/admin');
           return;
         }
         throw new Error('Failed to fetch bot details');
@@ -296,7 +296,7 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
     } finally {
       setLoading(false);
     }
-  }, [botId, filters, router]);
+  }, [botId, filters, replacePage]);
 
   useEffect(() => {
     if (botId && authChecked) {
@@ -657,7 +657,7 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
                         {bot.room.world.universe.name}
                       </Link>
                     </Detail>
-                    {bot.createdBy && <Detail label="Created by">{bot.createdBy.name || bot.createdBy.email}</Detail>}
+                    {bot.createdBy?.name && <Detail label="Created by">{bot.createdBy.name}</Detail>}
                     <Detail label="Created">{formatDate(bot.createdAt)}</Detail>
                   </dl>
                   <details className="mt-4 border-t pt-4">

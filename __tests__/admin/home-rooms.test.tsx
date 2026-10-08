@@ -5,6 +5,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import HerePanel from '@/app/admin/components/here-panel';
 import RecentlyVisited from '@/app/admin/components/recently-visited';
 import { WorkAdventureContext } from '@/app/admin/workadventure-context';
+import { AdminBootstrapProvider, type AdminBootstrap } from '@/app/admin/admin-bootstrap-context';
 import { localHourFromUtc, localPeakHour } from '@/lib/analytics-peak';
 import { isSummariesUrl, summariesBody } from '../helpers/summaries';
 
@@ -125,6 +126,23 @@ describe('Home rooms keep their numbers', () => {
     expect(cards[0].textContent).toContain('Creative Hub');
   });
 
+  it('hides Recently visited when every room in it is already shown above', async () => {
+    const { container } = render(inGame(<RecentlyVisited excludeRoomIds={['r-hq', 'r-hub']} />));
+    await waitFor(() => expect(container.querySelector('[data-testid="recently-visited"]')).toBeNull());
+    expect(screen.queryByText('Rooms you visit will show up here.')).toBeNull();
+  });
+
+  it('still invites someone with no visits at all to discover rooms', async () => {
+    const saved = responses['/api/admin/rooms/recent'];
+    responses['/api/admin/rooms/recent'] = { rooms: [] };
+    try {
+      render(inGame(<RecentlyVisited excludeRoomIds={[]} />));
+      expect(await screen.findByText('Rooms you visit will show up here.')).toBeTruthy();
+    } finally {
+      responses['/api/admin/rooms/recent'] = saved;
+    }
+  });
+
   it("takes Peak from all visits (the server's hour buckets), on the viewer's clock", () => {
     // 16:00 UTC is the busiest bucket; the card shows that hour in local time, whatever one page of visits says.
     const expected = localHourFromUtc(16);
@@ -145,5 +163,52 @@ describe('Where you are, when it fails', () => {
     fireEvent.click(retry);
     expect(screen.queryByText('No room information available')).toBeNull();
     expect(await screen.findByText('Headquarters')).toBeTruthy();
+  });
+});
+
+describe('Where you are: the start map and unlisted rooms', () => {
+  const resolved = responses['/api/admin/rooms/from-play-uri'];
+  afterEach(() => {
+    responses['/api/admin/rooms/from-play-uri'] = resolved;
+  });
+  const withStartRoom = (startRoom: string | null, children: React.ReactNode) => (
+    <AdminBootstrapProvider
+      value={{ version: 1, user: { id: 'u', uuid: 'u', name: 'Me', email: null, tags: [], isSuperAdmin: false }, stats: { universes: 0, worlds: 0, rooms: 0, users: 0 }, startRoom } as AdminBootstrap}
+    >
+      {children}
+    </AdminBootstrapProvider>
+  );
+
+  it('calls the configured START_ROOM_URL the start map', async () => {
+    render(withStartRoom('@/bawes/office/headquarters', inGame(<HerePanel />)));
+    expect(await screen.findByText('The start map')).toBeTruthy();
+    expect(screen.queryByTestId('room-card-here')).toBeNull();
+  });
+
+  it('shows the room itself when the start room is elsewhere', async () => {
+    render(withStartRoom('@/default/default/default', inGame(<HerePanel />)));
+    expect(await screen.findByTestId('room-card-here')).toBeTruthy();
+    expect(screen.queryByText('The start map')).toBeNull();
+  });
+
+  it('still shows the room before this on a start map Orbit doesn’t know, and keeps it out of Recently visited', async () => {
+    responses['/api/admin/rooms/from-play-uri'] = undefined;
+    const onShown = jest.fn();
+    render(withStartRoom('@/bawes/office/headquarters', inGame(<HerePanel onShown={onShown} />)));
+    expect(await screen.findByText('The start map')).toBeTruthy();
+    const before = await screen.findByTestId('room-card-previous');
+    expect(before.textContent).toContain('Creative Hub');
+    await waitFor(() => expect(onShown).toHaveBeenLastCalledWith(['r-hub']));
+  });
+
+  it('says a room isn’t listed, without naming its owner', async () => {
+    responses['/api/admin/rooms/from-play-uri'] = { ...hq, unlisted: true };
+    render(withStartRoom('@/mine/office/lobby', inGame(<HerePanel />)));
+    const notice = (await screen.findByText("A room that isn't listed")).closest('[role="status"]') as HTMLElement;
+    expect(notice.textContent).toContain("This room isn't listed anywhere in Orbit.");
+    expect(notice.textContent).toContain('You are here');
+    expect(notice.querySelector('a')?.getAttribute('href')).toBe('/admin/space');
+    expect(notice.textContent).not.toMatch(/System/);
+    expect(screen.queryByTestId('room-card-here')).toBeNull();
   });
 });

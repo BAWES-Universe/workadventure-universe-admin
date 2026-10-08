@@ -3,6 +3,7 @@ import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
 import { Prisma } from '@prisma/client';
 import { z } from 'zod';
+import { andNotSystemOwnedSql, hiddenSystemOwnerId, notSystemRoom } from '@/lib/system-user';
 
 const createRoomSchema = z.object({
   worldId: z.string().uuid(),
@@ -50,6 +51,9 @@ export async function GET(request: NextRequest) {
     const worldId = searchParams.get('worldId');
     const scope = searchParams.get('scope') || 'my';
     
+    // System's rooms, when they are hidden from lists (the start room is elsewhere); null otherwise
+    const hidden = await hiddenSystemOwnerId();
+
     const where: any = {};
     
     if (search) {
@@ -126,6 +130,9 @@ export async function GET(request: NextRequest) {
     } else if (worldId) {
       // Admin token - can filter by any world
       where.worldId = worldId;
+    } else if (hidden) {
+      // Admin token, all rooms: all but System's
+      Object.assign(where, notSystemRoom(hidden));
     }
     
     // For discover scope, sort by total accesses (descending)
@@ -135,13 +142,15 @@ export async function GET(request: NextRequest) {
     
     if (scope === 'discover' && userId && !isAdminToken) {
       // Discoverable: the room, its world and its universe all public (as canSeeRoom), never the built-in
-      // default/default/default room. Filtered here, before paging, so pages and totals agree.
+      // default/default/default room, nor System's rooms once they are hidden. Filtered here, before paging, so
+      // pages and totals agree.
       const discoverable = Prisma.sql`
         FROM rooms r
         JOIN worlds w ON w.id = r.world_id
         JOIN universes u ON u.id = w.universe_id
         WHERE r.is_public = true AND w.is_public = true AND u.is_public = true
         AND NOT (u.slug = 'default' AND w.slug = 'default' AND r.slug = 'default')
+        ${andNotSystemOwnedSql(hidden)}
         ${search ? Prisma.sql`AND (r.name ILIKE ${`%${search}%`} OR r.slug ILIKE ${`%${search}%`} OR r.description ILIKE ${`%${search}%`})` : Prisma.empty}`;
 
       // Sorted by accesses before paging (counted per room, not by joining every access row).

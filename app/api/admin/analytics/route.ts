@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getViewer, isPrivileged, viewerUserId, unauthorizedResponse, forbiddenResponse } from '@/lib/access-scope';
 import { prisma } from '@/lib/db';
+import { hiddenSystemOwnerId, notSystemUniverse } from '@/lib/system-user';
 
 export async function GET(request: NextRequest) {
   try {
@@ -31,6 +32,12 @@ export async function GET(request: NextRequest) {
     if (worldId) where.worldId = worldId;
     if (roomId) where.roomId = roomId;
     if (userId) where.userId = userId;
+    // Totals across Universe leave System's spaces out once they are hidden; a universe, world or room asked for
+    // by id is counted as asked.
+    if (!universeId && !worldId && !roomId) {
+      const hidden = await hiddenSystemOwnerId();
+      if (hidden) where.universe = notSystemUniverse(hidden);
+    }
     
     if (startDate || endDate) {
       where.accessedAt = {};

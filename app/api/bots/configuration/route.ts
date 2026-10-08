@@ -7,6 +7,8 @@ import { isSuperAdmin } from '@/lib/super-admin';
 import { parsePlayUri } from '@/lib/utils';
 import { validateAccessToken } from '@/lib/oidc';
 import { resolveRoomIdFromPlayUri, transformBotToServerFormat } from '@/lib/bot-config-helpers';
+import { checkAiProviderRef } from '@/lib/ai-provider-ref';
+import { toolTimeoutSecondsSchema } from '@/lib/bot-tool-timeout';
 import { z } from 'zod';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Prisma
@@ -45,6 +47,8 @@ const botConfigSchema = z.object({
   chatInstructions: z.string().optional().nullable(),
   movementInstructions: z.string().optional().nullable(),
   aiProviderRef: z.string().max(100, 'aiProviderRef must be at most 100 characters').optional().nullable(),
+  toolTimeoutSeconds: toolTimeoutSecondsSchema,
+  companionTextureId: z.string().max(100, 'companionTextureId must be at most 100 characters').optional().nullable(),
 });
 
 // Helper function to get user ID from various auth methods
@@ -120,6 +124,19 @@ export async function GET(request: NextRequest) {
   try {
     // Get user ID from various auth methods
     const { userId, isAdminToken, userEmail } = await getUserIdFromRequest(request);
+
+    // The list carries every bot's room URL and chat instructions, so only the bot server (admin token)
+    // and super admins may read it.
+    if (!isAdminToken && !(userId && isSuperAdmin(userEmail))) {
+      const response = NextResponse.json(
+        { error: userId ? 'Forbidden' : 'Unauthorized' },
+        { status: userId ? 403 : 401 }
+      );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
+    }
 
     if (isAdminToken) {
       // Admin token - require it
@@ -374,6 +391,30 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    // The provider ref must name an existing provider (unchanged refs on an update are let through)
+    if ('aiProviderRef' in body && validatedData.aiProviderRef) {
+      const currentProvider = validatedData.botId
+        ? await prisma.bot.findUnique({
+            where: { id: validatedData.botId },
+            select: { aiProviderRef: true },
+          })
+        : null;
+      const providerError = await checkAiProviderRef(
+        validatedData.aiProviderRef,
+        currentProvider?.aiProviderRef
+      );
+      if (providerError) {
+      const response = NextResponse.json(
+        { error: providerError },
+        { status: 400 }
+      );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
+      }
+    }
+
     // Prepare behaviorConfig with assignedSpace
     const behaviorConfig = {
       ...(validatedData.behaviorConfig || {}),
@@ -396,6 +437,8 @@ export async function POST(request: NextRequest) {
       chatInstructions: validatedData.chatInstructions ?? null,
       movementInstructions: validatedData.movementInstructions ?? null,
       aiProviderRef: validatedData.aiProviderRef ?? null,
+      toolTimeoutSeconds: validatedData.toolTimeoutSeconds ?? null,
+      companionTextureId: validatedData.companionTextureId ?? null,
       updatedById: userId ?? null,
     };
 
@@ -421,6 +464,10 @@ export async function POST(request: NextRequest) {
         movementInstructions:
           'movementInstructions' in body ? data.movementInstructions : undefined,
         aiProviderRef: 'aiProviderRef' in body ? data.aiProviderRef : undefined,
+        toolTimeoutSeconds:
+          'toolTimeoutSeconds' in body ? data.toolTimeoutSeconds : undefined,
+        companionTextureId:
+          'companionTextureId' in body ? data.companionTextureId : undefined,
       };
       // behaviorConfig merge (always, not only when provided): the JSON
       // embeds behaviorType (required by the schema, always present in the

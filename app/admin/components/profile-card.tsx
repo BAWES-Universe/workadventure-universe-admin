@@ -10,6 +10,7 @@ import { DraftNotice } from './draft-notice';
 import { useDraft } from '../hooks/use-draft';
 import { announceProfileName, gameMaxNameLength } from './orbit-bridge';
 import { KindIcon } from './ds';
+import { nameColour } from '@/lib/name-colour';
 import styles from './profile-card.module.css';
 
 export interface ProfileLink {
@@ -326,7 +327,21 @@ export function ProfileCard({
 }
 
 /** Someone's Woka, standing and facing you: each layer's front frame drawn over the last, pixel-sharp. */
-export function WokaAvatar({ layers, name, size = 76 }: { layers: string[]; name: string; size?: number }) {
+export function WokaAvatar({
+  layers,
+  name,
+  size = 76,
+  tinted = false,
+  round = false,
+}: {
+  layers: string[];
+  name: string;
+  size?: number;
+  /** Behind the Woka, the colour the game gives this name, instead of the usual dark blue. */
+  tinted?: boolean;
+  /** A circle, as faces are everywhere people are listed. */
+  round?: boolean;
+}) {
   const initial = name.trim().charAt(0).toUpperCase() || '?';
   // A layer that can't load would leave a partial Woka: then the whole avatar falls back instead.
   const failed = useWokaLoadFailure(layers);
@@ -334,8 +349,10 @@ export function WokaAvatar({ layers, name, size = 76 }: { layers: string[]; name
   return (
     <span
       className={styles.avatar}
-      style={{ '--avatar-size': `${size}px` } as CSSProperties}
+      style={{ '--avatar-size': `${size}px`, ...(tinted && nameColour(name) ? { background: nameColour(name) as string } : {}) } as CSSProperties}
       data-size={size < 48 ? 'sm' : undefined}
+      data-tinted={tinted && nameColour(name) ? 'true' : undefined}
+      data-round={round ? 'true' : undefined}
       data-testid="woka-avatar"
     >
       {show ? (
@@ -435,8 +452,11 @@ export function ProfileFrame({
   );
 }
 
-/** A person in a list: their Woka when we have it, otherwise the people chip. */
-export function PersonIcon({ woka, name, size = 40 }: { woka?: string[] | null; name?: string | null; size?: number }) {
-  if (woka && woka.length > 0) return <WokaAvatar layers={woka} name={name ?? ''} size={size} />;
+/**
+ * A person in a list: their Woka when we have it, otherwise the people chip. `face` makes it a circle on the colour
+ * the game gives their name, as in Recent visitors.
+ */
+export function PersonIcon({ woka, name, size = 40, face = false }: { woka?: string[] | null; name?: string | null; size?: number; face?: boolean }) {
+  if (woka && woka.length > 0) return <WokaAvatar layers={woka} name={name ?? ''} size={size} tinted={face} round={face} />;
   return <KindIcon kind="people" />;
 }

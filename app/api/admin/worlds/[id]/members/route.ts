@@ -3,6 +3,8 @@ import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { getSessionUser } from '@/lib/auth-session';
 import { withWokas } from '@/lib/woka-avatar';
+import { NOT_SYSTEM_USER } from '@/lib/system-user';
+import { canSeeWorld } from '@/lib/room-visibility';
 
 const inviteMemberSchema = z.object({
   userId: z.string().uuid(),
@@ -13,6 +15,9 @@ const inviteMemberSchema = z.object({
 const updateMemberSchema = z.object({
   tags: z.array(z.string()).min(1),
 });
+
+/** Highest role first, as the members list sorts them. */
+const MEMBER_ORDER = ['owner', 'admin', 'editor', 'member'];
 
 // Helper function to check if user can manage world members
 async function canManageWorldMembers(worldId: string, userId: string): Promise<boolean> {
@@ -55,11 +60,46 @@ export async function GET(
 
     const { id } = await params;
 
-    // Check permissions for management (but allow viewing for anyone)
+    const world = await prisma.world.findUnique({
+      where: { id },
+      select: { id: true, isPublic: true, universe: { select: { isPublic: true, ownerId: true } } },
+    });
+    const isMember = !!world && !!(await prisma.worldMember.findUnique({
+      where: { userId_worldId: { userId: sessionUser.id, worldId: id } },
+      select: { id: true },
+    }));
+    // A world you can't see has no members you can see
+    if (!world || !canSeeWorld(world, sessionUser, new Set(isMember ? [id] : []))) {
+      return NextResponse.json({ error: 'World not found' }, { status: 404 });
+    }
+
+    // Anyone who can see the world sees its members; only the people who manage it see their emails
     const canManage = await canManageWorldMembers(id, sessionUser.id);
+    const canSeeEmails = canManage || sessionUser.isSuperAdmin;
+
+    // The System account is nobody, so it never shows as a member
+    const everyone = await prisma.worldMember.findMany({
+      where: { worldId: id, user: NOT_SYSTEM_USER },
+      select: { id: true, userId: true, tags: true },
+    });
+    const total = everyone.length;
+    const yourTags = everyone.find((member) => member.userId === sessionUser.id)?.tags ?? [];
+
+    // `?limit=8` is the world page's row of faces: the first few by rank, with the total and your own roles, without
+    // reading every visit of every member.
+    const limitParam = Number.parseInt(request.nextUrl.searchParams.get('limit') ?? '', 10);
+    const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(limitParam, 50) : null;
+    let onlyIds: string[] | undefined;
+    if (limit !== null) {
+      const rankOf = (member: { userId: string; tags: string[] }) =>
+        world.universe.ownerId === member.userId
+          ? 0
+          : Math.min(9, ...member.tags.map((tag) => MEMBER_ORDER.indexOf(tag.toLowerCase()) + 1 || 9));
+      onlyIds = [...everyone].sort((a, b) => rankOf(a) - rankOf(b)).slice(0, limit).map((member) => member.id);
+    }
 
     const members = await prisma.worldMember.findMany({
-      where: { worldId: id },
+      where: { worldId: id, user: NOT_SYSTEM_USER, ...(onlyIds ? { id: { in: onlyIds } } : {}) },
       include: {
         user: {
           select: {
@@ -71,10 +111,14 @@ export async function GET(
       },
       orderBy: { joinedAt: 'desc' },
     });
+    if (onlyIds) {
+      const position = new Map(onlyIds.map((memberId, index) => [memberId, index]));
+      members.sort((a, b) => (position.get(a.id) ?? 0) - (position.get(b.id) ?? 0));
+    }
 
     // Get last visited dates from RoomAccess
     const userIds = members.map(m => m.userId);
-    const lastVisits = await prisma.roomAccess.findMany({
+    const lastVisits = onlyIds ? [] : await prisma.roomAccess.findMany({
       where: {
         worldId: id,
         userId: { in: userIds },
@@ -97,25 +141,18 @@ export async function GET(
       }
     }
 
-    // Get universe owner info
-    const world = await prisma.world.findUnique({
-      where: { id },
-      include: {
-        universe: {
-          select: { ownerId: true },
-        },
-      },
-    });
-
     const membersWithLastVisit = members.map(member => ({
       ...member,
+      user: { ...member.user, email: canSeeEmails ? member.user.email : null },
       lastVisited: lastVisitMap.get(member.userId) || null,
-      isUniverseOwner: world?.universe.ownerId === member.userId,
+      isUniverseOwner: world.universe.ownerId === member.userId,
     }));
 
     return NextResponse.json({ 
       members: await withWokas(membersWithLastVisit),
       canManage,
+      total,
+      yourTags,
     });
   } catch (error) {
     console.error('Error fetching world members:', error);

@@ -58,3 +58,5 @@ li[data-done] .stepText strong { text-decoration: line-through; text-decoration-
   .yours *, .yours *::before, .yours *::after { transition: none !important; }
   .universe:hover, .universe:hover .celestial, .universe:hover .cardArrow { transform: none; }
 }
+
+.universePills { display: inline-flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }

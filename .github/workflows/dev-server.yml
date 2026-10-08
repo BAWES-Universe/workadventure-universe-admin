@@ -1,0 +1,179 @@
+name: Dev server
+
+# Puts a pull request's code on the dev server (https://dev.bawes.net) for testing.
+#
+# - Add the `on-dev` label to a PR: its branch is built and dev's Orbit app switches to it.
+#   Dev has one Orbit slot, so labelling a PR takes the label off any other open PR.
+# - Push to a labelled PR: it is rebuilt and dev follows.
+# - Remove the label, merge or close the PR: dev returns to the latest develop build.
+# - Run it by hand (Actions > Dev server > Run workflow) to put any branch of this repo on dev.
+#
+# The game repo has the same workflow and switches only the dev game apps, so a game PR and an
+# Orbit PR can be on dev at the same time. Orbit PR migrations apply to the dev database. PRs from forks are ignored.
+
+on:
+  pull_request:
+    types: [labeled, unlabeled, synchronize, closed]
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Branch to put on dev (develop returns dev to the default)
+        required: true
+        default: develop
+
+# One run per PR at a time; a newer push to the same PR waits and replaces any older queued run.
+# Never cancel a running one: it may be part-way through switching dev's apps.
+concurrency:
+  group: dev-server-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  LABEL: on-dev
+  DEFAULT_BRANCH: develop
+
+jobs:
+  decide:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
+      pull-requests: write
+    outputs:
+      branch: ${{ steps.decide.outputs.branch }}
+      pr: ${{ steps.decide.outputs.pr }}
+      mode: ${{ steps.decide.outputs.mode }}
+    steps:
+      - id: decide
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          EVENT_LABEL: ${{ github.event.label.name }}
+          HAS_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'on-dev') }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          INPUT_BRANCH: ${{ inputs.branch }}
+        run: |
+          set -euo pipefail
+          branch=""; pr=""; mode=""
+          # Every GitHub read is a plain assignment, so a failed call fails this step (set -e)
+          # instead of being read as "no PR holds the label".
+          holders=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --label "$LABEL" --json number --jq ".[].number")
+
+          if [ "$EVENT" = workflow_dispatch ]; then
+            branch="$INPUT_BRANCH"; mode=manual
+          elif [ "$ACTION" = labeled ] && [ "$EVENT_LABEL" = "$LABEL" ]; then
+            branch="$HEAD_REF"; pr="$PR"; mode=pr
+            # Single slot: take the label off every other open PR.
+            for other in $holders; do
+              [ "$other" = "$PR" ] && continue
+              gh pr edit "$other" --repo "$GITHUB_REPOSITORY" --remove-label "$LABEL"
+              gh pr comment "$other" --repo "$GITHUB_REPOSITORY" --body "Dev was taken over by #$PR, so this PR is no longer on dev. Add \`$LABEL\` again to put it back."
+            done
+          elif [ "$ACTION" = synchronize ] && [ "$HAS_LABEL" = true ]; then
+            branch="$HEAD_REF"; pr="$PR"; mode=pr
+          elif { [ "$ACTION" = unlabeled ] && [ "$EVENT_LABEL" = "$LABEL" ]; } || \
+               { [ "$ACTION" = closed ] && [ "$HAS_LABEL" = true ]; }; then
+            # Another open PR still holding the label keeps dev; returning to default would throw it off.
+            others=$(printf '%s\n' $holders | grep -vx "${PR:-0}" || true)
+            if [ -n "$others" ]; then
+              echo "Another PR holds $LABEL; leaving dev on it."
+            else
+              branch="$DEFAULT_BRANCH"; mode=free
+            fi
+          fi
+
+          # A branch's images are tagged `<branch>` and `<branch>-<sha7>`, with anything outside
+          # [A-Za-z0-9._-] replaced by '-'. Refuse a branch whose tags would overwrite a production
+          # tag (main, latest, sha-<sha7>, version numbers) before its build is started.
+          ref_tag=$(printf '%s' "$branch" | sed -E 's/[^A-Za-z0-9._-]+/-/g')
+          if [[ "$ref_tag" =~ ^(main|master|latest|sha)$ ]] || [[ "$ref_tag" =~ ^sha-[0-9a-f]{7}$ ]] \
+             || [[ "$ref_tag" =~ ^[0-9]+\.[0-9]+ ]]; then
+            echo "::error::Branch '$branch' would be tagged like a production image; it never goes on dev through this workflow"
+            exit 1
+          fi
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "pr=$pr" >> "$GITHUB_OUTPUT"
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "Decision: branch='${branch:-none}' pr='${pr:-none}' mode='${mode:-none}'"
+
+  build:
+    needs: decide
+    if: needs.decide.outputs.branch != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      actions: write
+    outputs:
+      tag: ${{ steps.build.outputs.tag }}
+      sha: ${{ steps.build.outputs.sha }}
+    steps:
+      - id: build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ needs.decide.outputs.branch }}
+        run: |
+          set -euo pipefail
+          if [ "$BRANCH" = "$DEFAULT_BRANCH" ]; then
+            # develop images are built on every push to it; use the moving tag.
+            echo "tag=$DEFAULT_BRANCH" >> "$GITHUB_OUTPUT"
+            echo "sha=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Note the build runs that already exist, so the one this dispatch starts is the first
+          # run with a higher id. Run ids only grow; a plain "not seen before" test is not enough,
+          # because the run list can leave out an older run and then return it later (on
+          # 2026-10-05 that put a morning game build on dev). The start time guards an empty list.
+          runs() {
+            gh run list --repo "$GITHUB_REPOSITORY" --workflow docker-build.yml \
+              --branch "$BRANCH" --event workflow_dispatch --limit "$1" --json databaseId,createdAt
+          }
+          before=$(runs 50)
+          max_before=$(jq '[.[].databaseId] | max // 0' <<< "$before")
+          not_before=$(date -u -d '-2 minutes' +%Y-%m-%dT%H:%M:%SZ)
+          gh workflow run docker-build.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH"
+          run_id=""
+          for _ in $(seq 1 30); do
+            sleep 5
+            after=$(runs 20)
+            run_id=$(jq -r --argjson max "$max_before" --arg since "$not_before" \
+              '[.[] | select(.databaseId > $max and .createdAt >= $since)]
+               | sort_by(.databaseId) | first | .databaseId // empty' <<< "$after")
+            [ -n "$run_id" ] && break
+          done
+          if [ -z "$run_id" ]; then
+            echo "::error::Could not find the image build for $BRANCH"
+            exit 1
+          fi
+          echo "Building images: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${run_id}"
+          gh run watch "$run_id" --repo "$GITHUB_REPOSITORY" --interval 30 --exit-status > /dev/null
+
+          sha=$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json headSha --jq .headSha)
+          # Same tag docker/metadata-action writes for `type=sha,prefix={{branch}}-`: the branch
+          # with anything outside [A-Za-z0-9._-] replaced by '-', then the short sha.
+          tag=$(printf '%s-%s' "$BRANCH" "${sha::7}" | sed -E 's/[^A-Za-z0-9._-]+/-/g')
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+  # The switch checks again, once it holds the switch lock, that dev is still this run's to
+  # change: a PR may lose the label (another PR took dev) while its images are building.
+  switch:
+    needs: [decide, build]
+    if: needs.decide.outputs.branch != ''
+    permissions:
+      contents: read
+      packages: read
+      pull-requests: write
+    uses: ./.github/workflows/dev-server-switch.yml
+    with:
+      tag: ${{ needs.build.outputs.tag }}
+      pr: ${{ needs.decide.outputs.pr }}
+      sha: ${{ needs.build.outputs.sha }}
+      mode: ${{ needs.decide.outputs.mode }}
+    secrets:
+      DEV_COOLIFY_TOKEN: ${{ secrets.DEV_COOLIFY_TOKEN }}

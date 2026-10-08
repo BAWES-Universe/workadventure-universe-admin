@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
+import { hiddenSystemOwnerId, notSystemWorld } from '@/lib/system-user';
 
 // GET /api/memberships/my - Get current user's world memberships
 export async function GET(request: NextRequest) {
@@ -10,9 +11,12 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
+    // Never System's worlds once they are hidden
+    const hidden = await hiddenSystemOwnerId();
     const memberships = await prisma.worldMember.findMany({
       where: {
         userId: sessionUser.id,
+        world: notSystemWorld(hidden),
       },
       include: {
         world: {
@@ -70,6 +74,8 @@ export async function GET(request: NextRequest) {
       ? await prisma.favorite.groupBy({
           by: ['worldId'],
           where: {
+            // Stars on the place itself are counted apart; this is its rooms' stars.
+            roomId: { not: null },
             worldId: { in: worldIds },
           },
           _count: {

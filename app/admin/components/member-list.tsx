@@ -236,7 +236,7 @@ export default function MemberList({ worldId, onRefresh }: MemberListProps) {
                 key={member.id}
                 href={`/admin/users/${member.user.id}`}
                 kind="people"
-                leading={<PersonIcon woka={member.woka} name={nameOrEmail} />}
+                leading={<PersonIcon woka={member.woka} name={nameOrEmail} face />}
                 title={nameOrEmail}
                 context={
                   <StatLine
@@ -306,7 +306,7 @@ export default function MemberList({ worldId, onRefresh }: MemberListProps) {
                     key={invitation.id}
                     href={`/admin/users/${invitation.invitedUser.id}`}
                     kind="people"
-                    leading={<PersonIcon woka={invitation.woka} name={invitedUserName} />}
+                    leading={<PersonIcon woka={invitation.woka} name={invitedUserName} face />}
                     title={invitedUserName}
                     context={
                       <StatLine

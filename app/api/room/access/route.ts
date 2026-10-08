@@ -6,6 +6,9 @@ import { prisma } from '@/lib/db';
 import { resolveTextureUrls, resolveCompanionTexture } from '@/lib/avatar-catalog-validator';
 import { notifyRoomAccess } from '@/lib/discord';
 import { isBotIdentifier } from '@/lib/bot-visitor';
+import { canSeeRoom } from '@/lib/room-visibility';
+import { isSuperAdmin } from '@/lib/super-admin';
+import { bansCoveringWorld } from '@/lib/moderation';
 import type { FetchMemberDataByUuidSuccessResponse, ErrorApiData } from '@/types/workadventure';
 
 export async function GET(request: NextRequest) {
@@ -17,6 +20,9 @@ export async function GET(request: NextRequest) {
     const playUri = searchParams.get('playUri');
     const ipAddress = searchParams.get('ipAddress') || getClientIp(request);
     const accessToken = searchParams.get('accessToken');
+    // The game only sends a chat ID it checked itself (today: a bot's own account). It is passed back for this
+    // visit but never saved here: a person's chat ID is saved only through /api/members/:id/chatId, once the game
+    // has confirmed it with the Matrix server.
     const chatID = searchParams.get('chatID');
     // WorkAdventure may send name/username for guest users
     const name = searchParams.get('name') || searchParams.get('username');
@@ -110,7 +116,6 @@ export async function GET(request: NextRequest) {
               uuid: authenticatedUser.identifier,
               email: userEmail,
               name: userName,
-              matrixChatId: chatID || null,
               lastIpAddress: ipAddress || null,
               isGuest: false,
             } as any,
@@ -125,7 +130,6 @@ export async function GET(request: NextRequest) {
           const updateData: {
             email?: string | null;
             name?: string | null;
-            matrixChatId?: string | null;
             lastIpAddress?: string | null;
             isGuest?: boolean;
             uuid?: string;
@@ -141,10 +145,6 @@ export async function GET(request: NextRequest) {
           
           if (userName) {
             updateData.name = userName;
-          }
-          
-          if (chatID) {
-            updateData.matrixChatId = chatID;
           }
           
           if (ipAddress) {
@@ -182,6 +182,8 @@ export async function GET(request: NextRequest) {
             select: {
               id: true,
               slug: true,
+              isPublic: true,
+              ownerId: true,
             },
           },
         },
@@ -221,27 +223,9 @@ export async function GET(request: NextRequest) {
       // Check if user is banned (by userId if authenticated, or by IP)
       const ban = await prisma.ban.findFirst({
         where: {
-          isActive: true,
           AND: [
-            {
-              OR: [
-                ...(user ? [{ userId: user.id }] : []),
-                { ipAddress: ipAddress },
-              ],
-            },
-            {
-              OR: [
-                { worldId: worldData.id },
-                { universeId: worldData.universeId },
-                { worldId: null, universeId: null }, // Global ban
-              ],
-            },
-            {
-              OR: [
-                { expiresAt: null },
-                { expiresAt: { gt: new Date() } },
-              ],
-            },
+            bansCoveringWorld(worldData),
+            { OR: [...(user ? [{ userId: user.id }] : []), { ipAddress: ipAddress }] },
           ],
         },
       });
@@ -268,6 +252,35 @@ export async function GET(request: NextRequest) {
             },
           },
         });
+      }
+
+      // Members-only rooms: a room is open to everyone only when it, its world and its universe are all public.
+      // Otherwise only the universe owner, the world's members, super admins and the room's own bots get in.
+      const canEnter =
+        canSeeRoom(
+          { isPublic: roomData.isPublic, world: worldData },
+          user ? { id: user.id, isSuperAdmin: isSuperAdmin(user.email) } : null,
+          new Set(membership ? [worldData.id] : []),
+        ) ||
+        (isBotIdentifier(finalUuid) &&
+          !!(await prisma.bot.findFirst({
+            where: { id: finalUuid.slice('bot-'.length), roomId: roomData.id },
+            select: { id: true },
+          })));
+      if (!canEnter) {
+        // Answered with 200 so the game shows this screen (it only reads error bodies on success)
+        const error: ErrorApiData = {
+          status: "error",
+          type: "error",
+          title: "Members only",
+          subtitle: "This place is only open to its members",
+          code: "MEMBERS_ONLY",
+          details: "Ask one of its admins to invite you, then come back.",
+        };
+        return NextResponse.json(error);
+      }
+
+      if (user) {
         
         // Get user avatar
         avatar = await prisma.userAvatar.findUnique({
@@ -393,6 +406,8 @@ export async function GET(request: NextRequest) {
             worldSlug: world,
             roomSlug: room,
             playUri: playUri,
+            // A guest has no saved outfit, so the one they picked is kept with the visit; a person's account has theirs.
+            textureIds: actualIsGuestForAnalytics && isTexturesValid ? characterTextureIds : [],
           },
         }).catch((error: unknown) => {
           // Log but don't fail the request if analytics logging fails

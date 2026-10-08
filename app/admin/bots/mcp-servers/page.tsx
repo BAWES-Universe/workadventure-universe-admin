@@ -1,13 +1,13 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
-import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Search } from 'lucide-react';
 import { EmptyCard, EntityRow, LoadError, LoadingRows, PageHeader, StatLine } from '../../components/ds';
 import { FilterField, FilterRow, ListPager, Pill, type PageInfo } from '../bots-ui';
+import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
 interface McpServerEntry {
   id: string;
@@ -22,7 +22,7 @@ interface McpServerEntry {
 }
 
 export default function McpServersPage() {
-  const router = useRouter();
+  const replacePage = useReplacePage();
   const [servers, setServers] = useState<McpServerEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -48,7 +48,7 @@ export default function McpServersPage() {
 
       if (!response.ok) {
         if (response.status === 403) {
-          router.push('/admin');
+          replacePage('/admin');
           return;
         }
         throw new Error('Failed to fetch MCP servers');
@@ -63,7 +63,7 @@ export default function McpServersPage() {
     } finally {
       setLoading(false);
     }
-  }, [filters, router]);
+  }, [filters, replacePage]);
 
   useEffect(() => {
     const abortController = new AbortController();

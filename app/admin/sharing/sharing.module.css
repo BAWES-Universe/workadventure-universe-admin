@@ -1,0 +1,30 @@
+.page { display: grid; gap: 18px; max-width: 620px; min-width: 0; }
+.title { margin: 0; font-family: var(--font-display); font-size: 26px; font-weight: 700; letter-spacing: -.02em; }
+.lede { margin: 4px 0 0; font-size: 14px; color: hsl(var(--muted-foreground)); }
+.roomNote { display: flex; align-items: flex-start; gap: 12px; padding: 14px 16px; border-radius: 20px; border: 1px solid rgb(45 212 191 / .45); background: rgb(45 212 191 / .07); }
+.roomNote svg { flex: none; margin-top: 2px; color: #5eead4; }
+.roomNote p { margin: 0; font-size: 14px; }
+.card { display: grid; padding: 6px 16px; border-radius: 20px; border: 1px solid hsl(var(--border)); background: hsl(var(--card)); min-width: 0; }
+.line { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; }
+.line + .line { border-top: 1px solid hsl(var(--border)); }
+.line > div:first-child { flex: 1 1 0; min-width: 0; }
+.q { margin: 0; font-size: 16px; font-weight: 700; }
+.hint { margin: 0; font-size: 13px; color: hsl(var(--muted-foreground)); }
+/* The dropdown, copied from the game's device list (USelect): a rounded field with a chevron, and a list that opens
+   under it with the chosen row outlined in violet and a check. Dark is the game's own values; light borrows the tints. */
+.pickWrap { position: relative; flex: none; min-width: 134px; }
+.pick { display: flex; align-items: center; gap: 10px; width: 100%; min-width: 0; height: 48px; padding: 0 14px; border: 0; border-radius: 14px; background: hsl(var(--foreground) / .06); box-shadow: inset 0 0 0 1px hsl(var(--foreground) / .1); color: inherit; font: inherit; font-size: 15px; text-align: start; cursor: pointer; }
+.pick:focus-visible { outline: none; box-shadow: inset 0 0 0 2px rgb(196 181 253 / .85); }
+.pick:disabled { opacity: .6; cursor: default; }
+.value { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.chevron { flex: none; color: hsl(var(--foreground) / .7); transition: transform 150ms ease; }
+.chevron[data-open='true'] { transform: rotate(180deg); }
+.menu { position: absolute; z-index: 60; left: 0; right: 0; top: calc(100% + 6px); display: flex; flex-direction: column; max-height: 252px; margin: 0; padding: 6px; overflow-y: auto; list-style: none; border-radius: 14px; background: hsl(var(--popover)); box-shadow: 0 0 0 1px rgb(167 139 250 / .3), 0 18px 48px -12px rgb(0 0 0 / .35), 0 12px 32px rgb(0 0 0 / .2); }
+:global(.dark) .menu { background: linear-gradient(160deg, rgb(31 28 47), rgb(20 18 30)); box-shadow: 0 1px 0 rgb(255 255 255 / .08) inset, 0 0 0 1px rgb(167 139 250 / .18), 0 18px 48px -12px rgb(0 0 0 / .55), 0 0 32px -12px rgb(134 41 252 / .55), 0 12px 32px rgb(0 0 0 / .45); backdrop-filter: blur(18px) saturate(140%); }
+.menu[data-upward='true'] { top: auto; bottom: calc(100% + 6px); }
+.option { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 44px; margin: 0 0 2px; padding: 0 12px; border: 1px solid transparent; border-radius: 12px; background: transparent; color: hsl(var(--foreground) / .88); font: inherit; font-size: 15px; font-weight: 400; line-height: 1.25rem; text-align: start; cursor: pointer; transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease; }
+.option:hover { background: hsl(var(--foreground) / .06); color: hsl(var(--foreground)); }
+.option:focus-visible { outline: 2px solid rgb(196 181 253 / .9); outline-offset: -2px; }
+.option[aria-selected='true'] { background: rgb(134 41 252 / .16); border-color: rgb(167 139 250 / .45); color: hsl(var(--foreground)); font-weight: 700; }
+.optionLabel { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.option svg { flex: none; margin-inline-start: auto; }

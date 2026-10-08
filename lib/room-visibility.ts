@@ -1,5 +1,8 @@
 import type { SessionUser } from '@/lib/auth-session';
 
+/** Who is looking: only their id and whether they are a super admin matter. */
+type Viewer = Pick<SessionUser, 'id' | 'isSuperAdmin'> | null;
+
 export interface VisibleRoomRecord {
   isPublic: boolean;
   world: {
@@ -13,7 +16,7 @@ export interface VisibleRoomRecord {
  * Whether this person may see a room: it and its world and universe are public, or they own the universe, or they
  * are a member of the world. Super admins see everything.
  */
-export function canSeeRoom(room: VisibleRoomRecord, viewer: SessionUser | null, memberWorldIds: Set<string>): boolean {
+export function canSeeRoom(room: VisibleRoomRecord, viewer: Viewer, memberWorldIds: Set<string>): boolean {
   if (viewer?.isSuperAdmin) return true;
   if (viewer && room.world.universe.ownerId === viewer.id) return true;
   if (memberWorldIds.has(room.world.id)) return true;
@@ -30,7 +33,7 @@ export interface VisibleWorldRecord {
  * Whether this person may see a world: it and its universe are public, or they own the universe, or they are a member
  * of the world. Super admins see everything. The same rule as a room, one level up.
  */
-export function canSeeWorld(world: VisibleWorldRecord, viewer: SessionUser | null, memberWorldIds: Set<string>): boolean {
+export function canSeeWorld(world: VisibleWorldRecord, viewer: Viewer, memberWorldIds: Set<string>): boolean {
   if (viewer?.isSuperAdmin) return true;
   if (viewer && world.universe.ownerId === viewer.id) return true;
   if (memberWorldIds.has(world.id)) return true;
@@ -43,7 +46,7 @@ export function canSeeWorld(world: VisibleWorldRecord, viewer: SessionUser | nul
  */
 export function canSeeUniverse(
   universe: { isPublic: boolean; ownerId: string },
-  viewer: SessionUser | null,
+  viewer: Viewer,
   memberOfAWorldInIt: boolean,
 ): boolean {
   if (viewer?.isSuperAdmin) return true;

@@ -3,7 +3,7 @@ import { prisma } from '@/lib/db';
 import { isReconnectRequired, parseOAuthConfig, refreshBlockedReason } from '@/lib/mcp/oauth-token';
 import { ensureFreshOAuthConfig } from '@/lib/mcp/oauth-refresh';
 import { getSessionUser } from '@/lib/auth-session';
-import { isSuperAdmin } from '@/lib/super-admin';
+import { canManageBotMcpServers } from '@/lib/bot-permissions';
 import { encryptApiKey, decryptApiKey } from '@/lib/encryption';
 import { z } from 'zod';
 
@@ -183,7 +183,7 @@ const createMcpServerSchema = z.object({
 
 /**
  * GET /api/bots/[id]/mcp-servers
- * List all MCP servers for a bot. Gated by: requester matches bot's createdById OR is super admin.
+ * List all MCP servers for a bot. Gated by canManageBotMcpServers: the bot's creator, anyone who can manage bots in its room, or a super admin.
  */
 export async function GET(
   request: NextRequest,
@@ -217,7 +217,7 @@ export async function GET(
     // Fetch the bot to check ownership
     const bot = await prisma.bot.findUnique({
       where: { id: botId },
-      select: { id: true, createdById: true },
+      select: { id: true, createdById: true, roomId: true },
     });
 
     if (!bot) {
@@ -230,10 +230,8 @@ export async function GET(
         where: { id: userId! },
         select: { email: true },
       });
-      const isOwner = bot.createdById === userId;
-      const isSuper = actorUser ? isSuperAdmin(actorUser.email) : false;
 
-      if (!isOwner && !isSuper) {
+      if (!(await canManageBotMcpServers(userId!, actorUser?.email ?? null, bot))) {
         return NextResponse.json({ error: 'Forbidden' }, { status: 403, headers: corsHeaders(request) });
       }
     }
@@ -364,7 +362,7 @@ export async function POST(
     // Fetch the bot to check ownership
     const bot = await prisma.bot.findUnique({
       where: { id: botId },
-      select: { id: true, createdById: true },
+      select: { id: true, createdById: true, roomId: true },
     });
 
     if (!bot) {
@@ -377,10 +375,8 @@ export async function POST(
         where: { id: userId! },
         select: { email: true },
       });
-      const isOwner = bot.createdById === userId;
-      const isSuper = actorUser ? isSuperAdmin(actorUser.email) : false;
 
-      if (!isOwner && !isSuper) {
+      if (!(await canManageBotMcpServers(userId!, actorUser?.email ?? null, bot))) {
         return NextResponse.json({ error: 'Forbidden' }, { status: 403, headers: corsHeaders(request) });
       }
     }

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
+import { hiddenSystemOwnerId, notSystemWorld } from '@/lib/system-user';
 
 // GET /api/admin/users/[id]/worlds - Get list of worlds current user can invite this user to
 export async function GET(
@@ -15,9 +16,11 @@ export async function GET(
 
     const { id: userId } = await params;
 
-    // Get all worlds where user is universe owner or world admin
+    // Get all worlds where user is universe owner or world admin, never System's once they are hidden
+    const hidden = await hiddenSystemOwnerId();
     const worlds = await prisma.world.findMany({
       where: {
+        ...notSystemWorld(hidden),
         OR: [
           {
             universe: {

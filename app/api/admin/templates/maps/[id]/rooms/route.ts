@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
+import { andNotSystemOwnedSql, hiddenSystemOwnerId, notSystemRoom } from '@/lib/system-user';
 
 // GET /api/admin/templates/maps/[id]/rooms
 // Get all rooms using this template map (public endpoint)
@@ -29,11 +31,18 @@ export async function GET(
       );
     }
 
+    // Never System's rooms once they are hidden (the start room is elsewhere)
+    const hidden = await hiddenSystemOwnerId();
+    const notSystem = hidden
+      ? Prisma.sql`AND EXISTS (SELECT 1 FROM worlds w JOIN universes u ON u.id = w.universe_id WHERE w.id = r.world_id ${andNotSystemOwnedSql(hidden)})`
+      : Prisma.empty;
+
     // Get total count
     const total = await prisma.room.count({
       where: {
         templateMapId: id,
         isPublic: true,
+        ...notSystemRoom(hidden),
       },
     });
 
@@ -50,6 +59,7 @@ export async function GET(
         LEFT JOIN room_accesses ra ON r.id = ra.room_id
         WHERE r.template_map_id = ${id}
         AND r.is_public = true
+        ${notSystem}
         GROUP BY r.id
         ORDER BY access_count DESC, r.created_at DESC
         LIMIT ${limit} OFFSET ${skip}
@@ -64,6 +74,7 @@ export async function GET(
         LEFT JOIN favorites f ON r.id = f.room_id
         WHERE r.template_map_id = ${id}
         AND r.is_public = true
+        ${notSystem}
         GROUP BY r.id
         ORDER BY favorite_count DESC, r.created_at DESC
         LIMIT ${limit} OFFSET ${skip}
@@ -80,6 +91,7 @@ export async function GET(
             id: { in: roomIds },
             templateMapId: id,
             isPublic: true,
+            ...notSystemRoom(hidden),
           },
           include: {
             world: {
@@ -113,6 +125,7 @@ export async function GET(
         where: {
           templateMapId: id,
           isPublic: true,
+          ...notSystemRoom(hidden),
         },
         include: {
           world: {

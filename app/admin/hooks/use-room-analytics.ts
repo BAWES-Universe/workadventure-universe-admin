@@ -15,6 +15,8 @@ export interface RoomVisit {
 /** A universe's, world's or room's activity, as every card shows it. */
 export interface RoomAnalytics {
   totalAccesses: number | null;
+  /** Visits in the last 7 days (null when the server doesn't say). */
+  visitsThisWeek: number | null;
   /** The busiest hour of the day on the viewer's own clock, from the API's all-time UTC hour buckets. */
   peakHour: number | null;
   /** Always the viewer's clock now; kept for callers that read it. */
@@ -30,6 +32,7 @@ export type SummaryKind = 'rooms' | 'worlds' | 'universes';
 
 interface AnalyticsResponse {
   totalAccesses?: number;
+  visitsThisWeek?: number;
   peakTimes?: Array<{ hour: number; count: number }>;
   recentActivity?: Array<{ accessedAt: string }>;
   lastVisitedByUser?: RoomVisit | null;
@@ -57,6 +60,10 @@ export function fromAnalytics(data: AnalyticsResponse): RoomAnalytics {
     totalAccesses:
       typeof data.totalAccesses === 'number' && Number.isFinite(data.totalAccesses) && data.totalAccesses >= 0
         ? data.totalAccesses
+        : null,
+    visitsThisWeek:
+      typeof data.visitsThisWeek === 'number' && Number.isFinite(data.visitsThisWeek) && data.visitsThisWeek >= 0
+        ? data.visitsThisWeek
         : null,
     peakHour: localPeakHour(data.peakTimes),
     peakZone: 'local',

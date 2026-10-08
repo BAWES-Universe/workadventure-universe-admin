@@ -17,6 +17,7 @@ import { AlertTriangle } from 'lucide-react';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { EmptyCard, Figure, Figures, LoadError, LoadingRows, PageHeader } from '../../components/ds';
 import { ApplyFilter, DateFilter, FilterField, FilterRow, ListPager, Panel, Pill, type PageInfo } from '../bots-ui';
+import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
 interface GroupedResponse {
   responseId: string | null;
@@ -51,6 +52,7 @@ interface Summary {
 
 export default function MetricsBrowsePage() {
   const router = useRouter();
+  const replacePage = useReplacePage();
   const [responses, setResponses] = useState<GroupedResponse[]>([]);
   const [summary, setSummary] = useState<Summary | null>(null);
   const [loading, setLoading] = useState(true);
@@ -119,7 +121,7 @@ export default function MetricsBrowsePage() {
       }
       const userData = await response.json();
       if (!userData.user?.isSuperAdmin) {
-        router.push('/admin');
+        replacePage('/admin');
         return;
       }
       fetchMetrics();
@@ -144,7 +146,7 @@ export default function MetricsBrowsePage() {
 
       if (!response.ok) {
         if (response.status === 401 || response.status === 403) {
-          router.push('/admin');
+          replacePage('/admin');
           return;
         }
         throw new Error('Failed to fetch metrics');
@@ -160,7 +162,7 @@ export default function MetricsBrowsePage() {
     } finally {
       setLoading(false);
     }
-  }, [filters, router]);
+  }, [filters, replacePage]);
 
   const handlePageChange = (newPage: number) => {
     setFilters({ ...filters, page: newPage });

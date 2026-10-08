@@ -25,6 +25,12 @@ jobs:
     permissions:
       contents: read
       packages: write
+    env:
+      # Production builds: main and release tags. They bake the production play origin and are
+      # the only builds tagged sha-* and latest. Every other build (develop, feature branches,
+      # PRs) is for the dev server: it bakes the dev play origin and is tagged <branch> and
+      # <branch>-<sha>, so it can never be mistaken for a production image.
+      PROD_BUILD: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
 
     steps:
       - name: Checkout repository
@@ -71,10 +77,12 @@ jobs:
             type=ref,event=pr
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=sha,format=short
+            type=sha,format=short,enable=${{ env.PROD_BUILD == 'true' }}
+            type=sha,prefix={{branch}}-,enable=${{ env.PROD_BUILD != 'true' && startsWith(github.ref, 'refs/heads/') }}
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Validate play origin
+        if: env.PROD_BUILD == 'true'
         env:
           NEXT_PUBLIC_PLAY_URL: ${{ vars.NEXT_PUBLIC_PLAY_URL || secrets.NEXT_PUBLIC_PLAY_URL }}
         run: |
@@ -94,11 +102,61 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           platforms: linux/amd64
+          # A production build can only reach this step with the production origin set (the
+          # validate step above fails otherwise), so it never falls through to the dev origin.
+          # The Sentry values are empty on production builds, which leaves the bundle as before.
           build-args: |
-            NEXT_PUBLIC_PLAY_URL=${{ vars.NEXT_PUBLIC_PLAY_URL || secrets.NEXT_PUBLIC_PLAY_URL }}
+            NEXT_PUBLIC_PLAY_URL=${{ env.PROD_BUILD == 'true' && (vars.NEXT_PUBLIC_PLAY_URL || secrets.NEXT_PUBLIC_PLAY_URL) || vars.DEV_NEXT_PUBLIC_PLAY_URL || 'https://dev.bawes.net' }}
+            NEXT_PUBLIC_SENTRY_DSN_ADMIN=${{ env.PROD_BUILD != 'true' && vars.DEV_NEXT_PUBLIC_SENTRY_DSN_ADMIN || '' }}
+            NEXT_PUBLIC_SENTRY_ENVIRONMENT=${{ env.PROD_BUILD != 'true' && 'dev' || '' }}
 
       - name: Image digest
         run: echo "Image pushed with digest ${{ steps.meta.outputs.digest }}"
+
+  # ─────────────────────────────────────────────────
+  # Dev server: a fresh develop build goes on
+  # orbit.dev.bawes.net, unless a PR holds dev
+  # (`on-dev` label). See dev-server.yml.
+  # ─────────────────────────────────────────────────
+  dev-server-check:
+    if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      free: ${{ steps.check.outputs.free }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEV_TOKEN_SET: ${{ secrets.DEV_COOLIFY_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          if [ "$DEV_TOKEN_SET" != true ]; then
+            echo "DEV_COOLIFY_TOKEN is not set yet; skipping the dev server."
+            echo "free=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          held=$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --label on-dev --json number --jq 'length')
+          if [ "$held" = 0 ]; then free=true; else free=false; echo "A PR holds on-dev; dev stays on it."; fi
+          echo "free=$free" >> "$GITHUB_OUTPUT"
+
+  dev-server:
+    needs: dev-server-check
+    if: needs.dev-server-check.outputs.free == 'true'
+    permissions:
+      contents: read
+      packages: read
+      pull-requests: write
+    uses: ./.github/workflows/dev-server-switch.yml
+    with:
+      tag: develop
+      # Checked again inside the switch lock: a PR may take on-dev while this run waits.
+      mode: free
+    secrets:
+      DEV_COOLIFY_TOKEN: ${{ secrets.DEV_COOLIFY_TOKEN }}
 
   # ─────────────────────────────────────────────────
   # Release: auto-version, tag, and GitHub Release
