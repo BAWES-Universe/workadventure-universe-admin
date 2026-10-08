@@ -3,7 +3,6 @@ import { requireAuth } from '@/lib/auth';
 import { getSessionUser } from '@/lib/auth-session';
 import { prisma } from '@/lib/db';
 import { canManageBots } from '@/lib/bot-permissions';
-import { mayReadRoomBots } from '@/lib/bot-room-access';
 import { validateAccessToken } from '@/lib/oidc';
 import { parsePlayUri } from '@/lib/utils';
 import { z } from 'zod';
@@ -190,11 +189,22 @@ export async function GET(
                   select: {
                     id: true,
                     isPublic: true,
-                    ownerId: true,
                   },
                 },
               },
             },
+          },
+          select: {
+            id: true,
+            worldId: true,
+            slug: true,
+            name: true,
+            description: true,
+            mapUrl: true,
+            wamUrl: true,
+            isPublic: true,
+            createdAt: true,
+            updatedAt: true,
           },
         },
         createdBy: {
@@ -231,19 +241,6 @@ export async function GET(
       const response = NextResponse.json(
         { error: 'Unauthorized' },
         { status: 401 }
-      );
-      Object.entries(corsHeaders()).forEach(([key, value]) => {
-        response.headers.set(key, value);
-      });
-      return response;
-    }
-
-    // A members-only room's bots are for the people who may see the room. The bot server's admin token keeps full access.
-    if (!isPublic && !isAdminToken && userId && !(await mayReadRoomBots(bot.room, userId))) {
-      // The same answer as for a bot that does not exist, so a stranger learns nothing about it
-      const response = NextResponse.json(
-        { error: 'Bot not found' },
-        { status: 404 }
       );
       Object.entries(corsHeaders()).forEach(([key, value]) => {
         response.headers.set(key, value);

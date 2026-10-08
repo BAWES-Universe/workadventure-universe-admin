@@ -6,7 +6,6 @@ import {
   SHARE_ROOM_KEY,
   SHARING_KEYS,
   shareRoomFromRows,
-  sharePassportFromRows,
   peopleSettingsFromRows,
   type PeopleSettings,
 } from './people-settings';
@@ -423,9 +422,7 @@ export interface SearchResult {
 
 /**
  * Players who haven't turned off being findable by name. Blocks in either direction hide the pair from each other.
- * Universes are where the player is a member, at most two, to tell people with the same name apart. They follow the
- * passport rule (see visibleStamps): only public worlds in public universes, and only to the people the player shows
- * their passport to (everyone, or friends and the searcher is one).
+ * Universes are where the player is a member, at most two, to tell people with the same name apart.
  */
 export async function searchPeople(me: Account, rawQuery: string): Promise<SearchResult[]> {
   const query = rawQuery.trim();
@@ -444,12 +441,7 @@ export async function searchPeople(me: Account, rawQuery: string): Promise<Searc
       id: true,
       uuid: true,
       name: true,
-      worldMemberships: {
-        where: { world: { isPublic: true, universe: { isPublic: true } } },
-        select: { world: { select: { universe: { select: { name: true } } } } },
-        take: 10,
-      },
-      preferences: { where: { key: { in: [...SHARING_KEYS] } }, select: { key: true, value: true } },
+      worldMemberships: { select: { world: { select: { universe: { select: { name: true } } } } }, take: 10 },
     },
     orderBy: { name: 'asc' },
     take: SEARCH_LIMIT * 2,
@@ -468,11 +460,7 @@ export async function searchPeople(me: Account, rawQuery: string): Promise<Searc
   for (const user of users) {
     const relationship = relationshipFor(me.id, rowFor.get(user.id));
     if (relationship === 'blocked_by_me' || relationship === 'blocked_by_them') continue;
-    const audience = sharePassportFromRows(user.preferences);
-    const mayShowPlaces = audience === 'everyone' || (audience === 'friends' && relationship === 'friends');
-    const universes = mayShowPlaces
-      ? [...new Set(user.worldMemberships.map((m) => m.world.universe.name))].slice(0, 2)
-      : [];
+    const universes = [...new Set(user.worldMemberships.map((m) => m.world.universe.name))].slice(0, 2);
     results.push({ uuid: user.uuid, name: user.name, universes, relationship });
     if (results.length === SEARCH_LIMIT) break;
   }

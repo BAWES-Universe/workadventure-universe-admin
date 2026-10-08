@@ -244,45 +244,6 @@ describe('/api/friends', () => {
       });
     });
 
-    describe('the universes shown next to a name', () => {
-      const universesOf = async (as: string, q = 'bil') => {
-        const res = await get(search, '/search', { userUuid: `uuid-${as}`, q });
-        return (await res.json()).results.map((r: { universes: string[] }) => r.universes);
-      };
-      const befriend = async (from: string, to: string) => {
-        await action(from, to, 'request');
-        await action(to, from, 'accept');
-      };
-
-      it('leaves out private worlds and private universes', async () => {
-        db.members.length = 0;
-        db.members.push({ userId: 'b', worldId: 'w1', worldName: 'Main Hall', universeName: 'Bawes' });
-        db.members.push({ userId: 'b', worldId: 'w2', worldName: 'Lab', universeName: 'Secret universe', universePublic: false });
-        db.members.push({ userId: 'b', worldId: 'w3', worldName: 'Back room', universeName: 'Quiet', worldPublic: false });
-        expect(await universesOf('a')).toEqual([['Bawes']]);
-      });
-
-      it('shows none to a stranger when the person shows their passport to friends, but shows them to a friend', async () => {
-        db.preferences.push({ userId: 'b', key: 'people.sharePassport', value: 'friends' });
-        expect(await universesOf('a')).toEqual([[]]);
-        await befriend('a', 'b');
-        expect(await universesOf('a')).toEqual([['Bawes', 'Other']]);
-      });
-
-      it('shows none to anyone, friends included, when the person shows their passport to no one', async () => {
-        db.preferences.push({ userId: 'b', key: 'people.sharePassport', value: 'nobody' });
-        expect(await universesOf('a')).toEqual([[]]);
-        await befriend('a', 'b');
-        expect(await universesOf('a')).toEqual([[]]);
-      });
-
-      it('still finds the person by name when no universe may be shown', async () => {
-        db.preferences.push({ userId: 'b', key: 'people.sharePassport', value: 'nobody' });
-        const res = await get(search, '/search', { userUuid: 'uuid-a', q: 'bil' });
-        expect((await res.json()).results.map((r: { uuid: string }) => r.uuid)).toEqual(['uuid-b']);
-      });
-    });
-
     it('finds someone who never touched the setting', async () => {
       const res = await get(search, '/search', { userUuid: 'uuid-a', q: 'bil' });
       expect((await res.json()).results.map((r: { uuid: string }) => r.uuid)).toEqual(['uuid-b']);
