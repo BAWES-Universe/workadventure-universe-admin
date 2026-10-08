@@ -1,14 +1,13 @@
 'use client';
 
 import Link from 'next/link';
-import { useState, type CSSProperties, type ReactNode } from 'react';
+import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
 import { ArrowUpRight, Check, Plus, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { authenticatedFetch } from '@/lib/client-auth';
 import { universeColour } from '@/lib/universe-colour';
 import { useAdminBootstrap } from '../admin-bootstrap-context';
 import { isNamed, isRecord, useCollection, type Collection } from '../hooks/use-collection';
-import { useGuidanceDismissed } from '../hooks/use-guidance-dismissed';
 import {
   EmptyCard,
   EntityRow,
@@ -71,7 +70,14 @@ function List<T>({ collection, label, empty, children }: { collection: { result:
  * What's yours, on You: a first-steps guide for someone new, your universes, the worlds you're a member of (with any
  * invitation to answer right here), and the rooms you starred. Finding new places is Space's job, not this page's.
  */
-export default function Yours({ profileComplete }: { profileComplete: boolean | null }) {
+export default function Yours({
+  profileComplete,
+  getStarted,
+}: {
+  profileComplete: boolean | null;
+  /** Whether Get started was hidden, and how to hide it. You keeps this, so its settings can show it again. */
+  getStarted: { hidden: boolean | null; hide: () => void; onAllDone?: (allDone: boolean) => void };
+}) {
   const { mine } = useAdminBootstrap();
   const universes = useCollection(`/api/admin/universes?scope=my&limit=${SHOWN}`, 'universes', isUniverse);
   const memberships = useCollection('/api/memberships/my', 'memberships', isMembership);
@@ -95,8 +101,11 @@ export default function Yours({ profileComplete }: { profileComplete: boolean | 
       ? universes.result.items[0]
       : null;
   const newWorldHref = onlyUniverse ? `/admin/worlds/new?universeId=${encodeURIComponent(onlyUniverse.id)}` : '/admin/worlds/new';
-  const [hidden, hide] = useGuidanceDismissed('getStarted');
   const allDone = profileComplete === true && ownsUniverse && ownsWorld && sentInvitation && hasStar;
+  const { hidden, hide, onAllDone } = getStarted;
+  useEffect(() => {
+    onAllDone?.(allDone);
+  }, [allDone, onAllDone]);
 
   return (
     <div className={styles.yours} data-testid="yours">
@@ -378,7 +387,7 @@ function Invitations({
 /**
  * For someone new: five steps, each one tap, each ticked by the real thing (your profile, a universe you own, a world
  * in it, an invitation you sent, a star), never by just being a member of someone else's world. It stays until every
- * step is done or you hide it.
+ * step is done or you hide it; once hidden, You's settings can show it again.
  */
 function GetStarted({
   profileComplete,

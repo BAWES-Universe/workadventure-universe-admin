@@ -47,6 +47,9 @@ function route(routes: Record<string, unknown>) {
   });
 }
 
+// Get started as You hands it down: not hidden.
+const shown = { hidden: false, hide: () => undefined };
+
 beforeEach(() => fetchMock.mockReset());
 
 describe('You, for someone new', () => {
@@ -59,7 +62,7 @@ describe('You, for someone new', () => {
     });
     render(
       <AdminBootstrapProvider value={bootstrap({ universes: 0, worlds: 0, stars: 0, invitations: 0 })}>
-        <Yours profileComplete={false} />
+        <Yours profileComplete={false} getStarted={shown} />
       </AdminBootstrapProvider>,
     );
     const steps = await screen.findByTestId('get-started');
@@ -86,7 +89,7 @@ describe('You, with one universe and no world', () => {
     });
     render(
       <AdminBootstrapProvider value={bootstrap({ universes: 1, worlds: 0, stars: 0, invitations: 0 })}>
-        <Yours profileComplete />
+        <Yours profileComplete getStarted={shown} />
       </AdminBootstrapProvider>,
     );
     const steps = await screen.findByTestId('get-started');
@@ -112,7 +115,7 @@ describe('You, with a featured universe', () => {
     });
     render(
       <AdminBootstrapProvider value={bootstrap({ universes: 2, worlds: 3, stars: 0, invitations: 0 })}>
-        <Yours profileComplete />
+        <Yours profileComplete getStarted={shown} />
       </AdminBootstrapProvider>,
     );
     await screen.findByText('BAWES');
@@ -135,7 +138,7 @@ describe('You, with memberships', () => {
     });
     render(
       <AdminBootstrapProvider value={bootstrap({ universes: 1, worlds: 1, stars: 0, invitations: 1 })}>
-        <Yours profileComplete />
+        <Yours profileComplete getStarted={shown} />
       </AdminBootstrapProvider>,
     );
     const invitations = await screen.findByTestId('invitations');
@@ -177,7 +180,7 @@ describe('You, declining', () => {
     });
     render(
       <AdminBootstrapProvider value={bootstrap({ universes: 0, worlds: 0, stars: 0, invitations: 2 })}>
-        <Yours profileComplete={false} />
+        <Yours profileComplete={false} getStarted={shown} />
       </AdminBootstrapProvider>,
     );
     const invitations = await screen.findByTestId('invitations');

@@ -1,6 +1,6 @@
 'use client';
 
-import { Suspense, useEffect, useState } from 'react';
+import { Suspense, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { ChevronRight } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
@@ -9,6 +9,7 @@ import { StatLine, count } from '../components/ds';
 import { ActivitySection, PassportSection } from '../components/passport';
 import { ProfileCard } from '../components/profile-card';
 import { ThemeChoice } from '../components/shell/theme-choice';
+import { useGuidanceDismissed } from '../hooks/use-guidance-dismissed';
 import Yours from '../components/yours';
 import LogoutButton from '../logout-button';
 import styles from './you.module.css';
@@ -37,6 +38,15 @@ function You() {
   useEffect(() => {
     if (editProfile) router.replace('/admin/you', { scroll: false });
   }, [editProfile, router]);
+  // Get started, once hidden, comes back from Settings (while any step is left), and the page scrolls up to it.
+  const [getStartedHidden, hideGetStarted, showGetStarted] = useGuidanceDismissed('getStarted');
+  const [stepsAllDone, setStepsAllDone] = useState(false);
+  const scrollToSteps = useRef(false);
+  useEffect(() => {
+    if (!scrollToSteps.current || getStartedHidden !== false) return;
+    scrollToSteps.current = false;
+    document.getElementById('get-started-heading')?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }, [getStartedHidden]);
   return (
     <div className={styles.page}>
       <ProfileCard
@@ -57,7 +67,10 @@ function You() {
       />
       <PassportSection />
       <ActivitySection />
-      <Yours profileComplete={profileComplete} />
+      <Yours
+        profileComplete={profileComplete}
+        getStarted={{ hidden: getStartedHidden, hide: hideGetStarted, onAllDone: setStepsAllDone }}
+      />
       <section className={styles.settings} aria-labelledby="settings-heading">
         <h2 id="settings-heading" className="orbit-display">
           Settings
@@ -69,6 +82,24 @@ function You() {
           </span>
           <ThemeChoice className={styles.themeControl} />
         </div>
+        {getStartedHidden === true && !stepsAllDone && (
+          <div className={styles.settingRow}>
+            <span>
+              <strong>Get started</strong>
+              <span>Your first steps, hidden for now.</span>
+            </span>
+            <button
+              type="button"
+              className={`orbit-press ${styles.settingButton}`}
+              onClick={() => {
+                scrollToSteps.current = true;
+                showGetStarted();
+              }}
+            >
+              Show
+            </button>
+          </div>
+        )}
         <Link href="/admin/sharing" className={`orbit-press ${styles.settingRow}`}>
           <span>
             <strong>Sharing</strong>
