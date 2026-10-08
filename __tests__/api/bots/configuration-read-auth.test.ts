@@ -113,10 +113,10 @@ describe('GET /api/bots/configuration[/:id] authentication', () => {
       expect(prisma.bot.findUnique).not.toHaveBeenCalled();
     });
 
-    it('rejects a signed-in user who cannot manage the bot room', async () => {
+    it('rejects a signed-in user who cannot manage the bot room, as if the bot did not exist', async () => {
       (getSessionUser as jest.Mock).mockResolvedValue(sessionUser);
       const res = await getConfiguration(request('/api/bots/configuration/bot-1'), params('bot-1'));
-      expect(res.status).toBe(403);
+      expect(res.status).toBe(404);
       expect(canManageBots).toHaveBeenCalledWith('user-1', 'room-123');
     });
 
