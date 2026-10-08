@@ -3,7 +3,7 @@ import { GET as getVisitors } from '@/app/api/admin/recent-visitors/route';
 import { GET as getPassport } from '@/app/api/admin/users/[id]/passport/route';
 import { getViewer } from '@/lib/access-scope';
 import { loadGuestsThisWeek, loadRecentVisitors } from '@/lib/recent-visitors';
-import { visibleStamps } from '@/lib/passport';
+import { visiblePassport, visibleStamps } from '@/lib/passport';
 
 jest.mock('@/lib/access-scope', () => ({
   getViewer: jest.fn(),
@@ -11,7 +11,7 @@ jest.mock('@/lib/access-scope', () => ({
   unauthorizedResponse: () => new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 }),
 }));
 jest.mock('@/lib/recent-visitors', () => ({ loadRecentVisitors: jest.fn(), loadGuestsThisWeek: jest.fn() }));
-jest.mock('@/lib/passport', () => ({ CARD_STAMPS: 3, visibleStamps: jest.fn() }));
+jest.mock('@/lib/passport', () => ({ CARD_STAMPS: 3, visibleStamps: jest.fn(), visiblePassport: jest.fn() }));
 
 const viewer = { kind: 'user', user: { id: 'me' } };
 const get = (query: string) => new NextRequest(`http://localhost:3333/api/admin/recent-visitors${query}`);
@@ -59,11 +59,22 @@ describe('/api/admin/recent-visitors', () => {
 describe('/api/admin/users/[id]/passport', () => {
   const call = () => getPassport(new NextRequest('http://localhost:3333/api/admin/users/sara/passport'), { params: Promise.resolve({ id: 'sara' }) });
 
-  it('gives the stamps this viewer may see', async () => {
+  it('gives the stamps this viewer may see, and the whole passport for the profile', async () => {
     (visibleStamps as jest.Mock).mockResolvedValue([{ worldId: 'hq' }]);
+    (visiblePassport as jest.Mock).mockResolvedValue({ stamps: [{ worldId: 'hq' }], worlds: 1, universes: 1, since: null, days: 1 });
     const response = await call();
-    expect(await response.json()).toEqual({ stamps: [{ worldId: 'hq' }] });
+    expect(await response.json()).toEqual({
+      stamps: [{ worldId: 'hq' }],
+      passport: { stamps: [{ worldId: 'hq' }], worlds: 1, universes: 1, since: null, days: 1 },
+    });
     expect(visibleStamps).toHaveBeenCalledWith('me', 'sara', 3);
+    expect(visiblePassport).toHaveBeenCalledWith('me', 'sara');
+  });
+
+  it('gives no passport when they hide it from this viewer', async () => {
+    (visibleStamps as jest.Mock).mockResolvedValue([]);
+    (visiblePassport as jest.Mock).mockResolvedValue(null);
+    expect(await (await call()).json()).toEqual({ stamps: [], passport: null });
   });
 
   it('wants someone signed in', async () => {
