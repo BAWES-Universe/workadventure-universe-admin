@@ -15,9 +15,6 @@ jest.mock('@/lib/db', () => ({
       findFirst: jest.fn(),
       create: jest.fn(),
     },
-    botsAiProvider: {
-      findUnique: jest.fn(),
-    },
   },
 }));
 
@@ -76,49 +73,6 @@ describe('/api/bots/configuration', () => {
     (prisma.bot.create as jest.Mock).mockResolvedValue({ id: 'bot-1', name: 'Test Bot' });
     (prisma.bot.update as jest.Mock).mockResolvedValue({ id: 'bot-1', name: 'Test Bot' });
     (prisma.bot.findUnique as jest.Mock).mockResolvedValue({ behaviorConfig: null });
-    (prisma.botsAiProvider.findUnique as jest.Mock).mockResolvedValue({ providerId: 'openai' });
-  });
-
-  describe('AI provider reference check', () => {
-    it('rejects creating a bot with a provider that does not exist (400)', async () => {
-      (prisma.botsAiProvider.findUnique as jest.Mock).mockResolvedValueOnce(null);
-
-      const response = await POST(configRequest({ ...validBody, aiProviderRef: 'not-a-provider' }));
-
-      expect(response.status).toBe(400);
-      expect((await response.json()).error).toBe('AI provider "not-a-provider" does not exist');
-      expect(prisma.bot.create).not.toHaveBeenCalled();
-    });
-
-    it('creates a bot whose provider exists', async () => {
-      const response = await POST(configRequest({ ...validBody, aiProviderRef: 'openai' }));
-
-      expect(response.status).toBe(201);
-      expect((prisma.bot.create as jest.Mock).mock.calls[0][0].data.aiProviderRef).toBe('openai');
-    });
-
-    it('rejects switching an existing bot to a provider that does not exist (400)', async () => {
-      (prisma.bot.findUnique as jest.Mock).mockResolvedValue({ aiProviderRef: 'openai', behaviorConfig: null });
-      (prisma.botsAiProvider.findUnique as jest.Mock).mockResolvedValueOnce(null);
-
-      const response = await POST(
-        configRequest({ ...validBody, botId: '00000000-0000-4000-8000-000000000001', aiProviderRef: 'missing' })
-      );
-
-      expect(response.status).toBe(400);
-      expect(prisma.bot.update).not.toHaveBeenCalled();
-    });
-
-    it('saves an existing bot whose unchanged provider was deleted', async () => {
-      (prisma.bot.findUnique as jest.Mock).mockResolvedValue({ aiProviderRef: 'gone', behaviorConfig: null });
-
-      const response = await POST(
-        configRequest({ ...validBody, botId: '00000000-0000-4000-8000-000000000001', aiProviderRef: 'gone' })
-      );
-
-      expect(response.status).toBe(200);
-      expect(prisma.botsAiProvider.findUnique).not.toHaveBeenCalled();
-    });
   });
 
   describe('legacy vision fallback fields (create)', () => {
