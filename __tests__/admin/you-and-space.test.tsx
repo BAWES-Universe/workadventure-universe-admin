@@ -70,7 +70,7 @@ describe('You, for someone new', () => {
     expect(within(steps).getByRole('link', { name: /Create your universe/ }).getAttribute('href')).toBe('/admin/universes/new?next=world');
     // A world needs a universe first, and inviting needs a world: those steps aren't links yet.
     expect(within(steps).queryByRole('link', { name: /Create a world/ })).toBeNull();
-    expect(within(steps).queryByRole('link', { name: /Invite someone/ })).toBeNull();
+    expect(within(steps).queryByRole('link', { name: /Invite a member/ })).toBeNull();
     expect((await screen.findByTestId('empty-universes')).getAttribute('href')).toBe('/admin/universes/new');
     expect((await screen.findByTestId('empty-memberships')).textContent).toMatch(/invites you|world of your own/);
     expect((await screen.findByTestId('empty-stars')).getAttribute('href')).toBe('/admin/discover/rooms');
@@ -152,9 +152,9 @@ describe('You, with memberships', () => {
     // The roles sit on the same line as the name, not off to the side.
     const nameLine = (await screen.findByText('Office')).closest('strong')?.parentElement?.parentElement;
     expect(nameLine?.textContent).toMatch(/Office.*Owner.*Admin/);
-    // Being a member (even an owner) doesn't tick "Invite someone" or "Star a room": the steps stay.
+    // Being a member (even an owner) doesn't tick "Invite a member" or "Star a room": the steps stay.
     const steps = await screen.findByTestId('get-started');
-    expect(within(steps).getByRole('link', { name: /Invite someone/ }).getAttribute('href')).toBe('/admin/worlds/w1?tab=members');
+    expect(within(steps).getByRole('link', { name: /Invite a member/ }).getAttribute('href')).toBe('/admin/worlds/w1?tab=members');
   });
 });
 

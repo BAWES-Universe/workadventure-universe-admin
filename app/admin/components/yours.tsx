@@ -21,6 +21,7 @@ import {
   count,
   hueStyle,
 } from './ds';
+import { deriveProgress, getStartedSteps, type GetStartedProgress } from './get-started-steps';
 import styles from './yours.module.css';
 
 interface MyUniverse {
@@ -84,24 +85,12 @@ export default function Yours({
   const invitations = useCollection('/api/memberships/invitations', 'invitations', isInvitation);
   const stars = useCollection('/api/admin/stars/rooms', 'rooms', isStar);
 
-  const ownsUniverse = universes.result.status === 'ready' ? universes.result.items.length > 0 : (mine?.universes ?? 0) > 0;
+  const progress = deriveProgress({ mine, profileComplete, universes: universes.result, memberships: memberships.result, stars: stars.result });
+  const { ownsUniverse, hasStar } = progress;
   const hasWorld = memberships.result.status === 'ready' ? memberships.result.items.length > 0 : (mine?.worlds ?? 0) > 0;
-  const hasStar = stars.result.status === 'ready' ? stars.result.items.length > 0 : (mine?.stars ?? 0) > 0;
   const universeTotal = mine?.universes ?? (universes.result.status === 'ready' ? universes.result.items.length : 0);
-  // A world you run (you own its universe, or you're its admin): where "Invite someone" leads.
-  const runWorld =
-    memberships.result.status === 'ready'
-      ? memberships.result.items.find((membership) => membership.isUniverseOwner || membership.tags.includes('admin'))
-      : undefined;
-  const ownsWorld = (mine?.ownedWorlds ?? 0) > 0 || Boolean(runWorld?.isUniverseOwner);
-  const sentInvitation = (mine?.invitationsSent ?? 0) > 0;
-  // With one universe, "Create a world" goes straight to it; with several, the form asks which.
-  const onlyUniverse =
-    universes.result.status === 'ready' && universes.result.items.length === 1 && (mine?.universes ?? 1) === 1
-      ? universes.result.items[0]
-      : null;
-  const newWorldHref = onlyUniverse ? `/admin/worlds/new?universeId=${encodeURIComponent(onlyUniverse.id)}` : '/admin/worlds/new';
-  const allDone = profileComplete === true && ownsUniverse && ownsWorld && sentInvitation && hasStar;
+  const { newWorldHref } = progress;
+  const allDone = getStartedSteps(progress).every((step) => step.done);
   const { hidden, hide, onAllDone } = getStarted;
   useEffect(() => {
     onAllDone?.(allDone);
@@ -110,16 +99,7 @@ export default function Yours({
   return (
     <div className={styles.yours} data-testid="yours">
       {!allDone && hidden === false && (
-        <GetStarted
-          profileComplete={profileComplete}
-          ownsUniverse={ownsUniverse}
-          ownsWorld={ownsWorld}
-          sentInvitation={sentInvitation}
-          hasStar={hasStar}
-          inviteHref={runWorld ? `/admin/worlds/${runWorld.world.id}?tab=members` : null}
-          newWorldHref={newWorldHref}
-          onHide={hide}
-        />
+        <GetStarted progress={progress} onHide={hide} />
       )}
 
       <section aria-labelledby="universes-heading">
@@ -385,48 +365,11 @@ function Invitations({
 }
 
 /**
- * For someone new: five steps, each one tap, each ticked by the real thing (your profile, a universe you own, a world
- * in it, an invitation you sent, a star), never by just being a member of someone else's world. It stays until every
- * step is done or you hide it; once hidden, You's settings can show it again.
+ * For someone new: five steps, each one tap, each ticked by the real thing. It stays until every step is done or you
+ * hide it; once hidden, You's settings can show it again. Orbit's top line is the short form of the same steps.
  */
-function GetStarted({
-  profileComplete,
-  ownsUniverse,
-  ownsWorld,
-  sentInvitation,
-  hasStar,
-  inviteHref,
-  newWorldHref,
-  onHide,
-}: {
-  profileComplete: boolean | null;
-  ownsUniverse: boolean;
-  ownsWorld: boolean;
-  sentInvitation: boolean;
-  hasStar: boolean;
-  /** Where to invite people: the members of a world you run, when there is one. */
-  inviteHref: string | null;
-  /** Where "Create a world" leads: straight to your universe when you have one. */
-  newWorldHref: string;
-  onHide: () => void;
-}) {
-  const steps = [
-    { done: profileComplete === true, title: 'Set up your profile', text: 'A few words and your links, so people know who they’re meeting.', href: '/admin/you?edit=profile' },
-    { done: ownsUniverse, title: 'Create your universe', text: 'Your own corner of the Universe, to hold your worlds.', href: '/admin/universes/new?next=world' },
-    {
-      done: ownsWorld,
-      title: 'Create a world',
-      text: ownsUniverse ? 'A world in your universe. You’re its admin.' : 'After your universe.',
-      href: ownsUniverse ? newWorldHref : undefined,
-    },
-    {
-      done: sentInvitation,
-      title: 'Invite someone',
-      text: inviteHref ? 'As a member, editor or admin of your world.' : 'After your world.',
-      href: inviteHref ?? undefined,
-    },
-    { done: hasStar, title: 'Star a room you like', text: 'Keep a way back to it, one tap from a visit.', href: '/admin/discover/rooms' },
-  ];
+export function GetStarted({ progress, onHide }: { progress: GetStartedProgress; onHide: () => void }) {
+  const steps = getStartedSteps(progress);
   const doneCount = steps.filter((step) => step.done).length;
   return (
     <section className={styles.getStarted} aria-labelledby="get-started-heading" data-testid="get-started">
