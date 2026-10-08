@@ -4,7 +4,6 @@ import { z } from 'zod';
 import { getSessionUser } from '@/lib/auth-session';
 import { withWokas } from '@/lib/woka-avatar';
 import { NOT_SYSTEM_USER } from '@/lib/system-user';
-import { canSeeWorld } from '@/lib/room-visibility';
 
 const inviteMemberSchema = z.object({
   userId: z.string().uuid(),
@@ -60,22 +59,8 @@ export async function GET(
 
     const { id } = await params;
 
-    const world = await prisma.world.findUnique({
-      where: { id },
-      select: { id: true, isPublic: true, universe: { select: { isPublic: true, ownerId: true } } },
-    });
-    const isMember = !!world && !!(await prisma.worldMember.findUnique({
-      where: { userId_worldId: { userId: sessionUser.id, worldId: id } },
-      select: { id: true },
-    }));
-    // A world you can't see has no members you can see
-    if (!world || !canSeeWorld(world, sessionUser, new Set(isMember ? [id] : []))) {
-      return NextResponse.json({ error: 'World not found' }, { status: 404 });
-    }
-
-    // Anyone who can see the world sees its members; only the people who manage it see their emails
+    // Check permissions for management (but allow viewing for anyone)
     const canManage = await canManageWorldMembers(id, sessionUser.id);
-    const canSeeEmails = canManage || sessionUser.isSuperAdmin;
 
     // The System account is nobody, so it never shows as a member
     const everyone = await prisma.worldMember.findMany({
@@ -141,11 +126,20 @@ export async function GET(
       }
     }
 
+    // Get universe owner info
+    const world = await prisma.world.findUnique({
+      where: { id },
+      include: {
+        universe: {
+          select: { ownerId: true },
+        },
+      },
+    });
+
     const membersWithLastVisit = members.map(member => ({
       ...member,
-      user: { ...member.user, email: canSeeEmails ? member.user.email : null },
       lastVisited: lastVisitMap.get(member.userId) || null,
-      isUniverseOwner: world.universe.ownerId === member.userId,
+      isUniverseOwner: world?.universe.ownerId === member.userId,
     }));
 
     return NextResponse.json({ 

@@ -36,6 +36,7 @@ interface Bot {
   createdBy: {
     id: string;
     name: string | null;
+    email: string | null;
   } | null;
 }
 
@@ -223,7 +224,7 @@ export default function BotsPage() {
               meta={
                 <StatLine
                   items={[
-                    bot.createdBy?.name && `by ${bot.createdBy.name}`,
+                    bot.createdBy && `by ${bot.createdBy.name || bot.createdBy.email}`,
                     `created ${new Date(bot.createdAt).toLocaleDateString()}`,
                   ]}
                 />

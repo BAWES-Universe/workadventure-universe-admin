@@ -30,11 +30,11 @@ export async function GET(request: NextRequest) {
             },
           },
         },
-        // Who invited you is shown by name; their email stays private
         invitedBy: {
           select: {
             id: true,
             name: true,
+            email: true,
           },
         },
       },

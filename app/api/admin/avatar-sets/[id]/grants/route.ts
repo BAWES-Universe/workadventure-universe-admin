@@ -1,18 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
-import { isSuperAdminUser, requireAdminSession, requireSuperAdminSession } from '@/lib/auth'
+import { requireAdminSession, requireSuperAdminSession } from '@/lib/auth'
 
 type Params = { params: Promise<{ id: string }> }
 
 export async function GET(_req: NextRequest, { params }: Params) {
-  const { userId } = await requireAdminSession()
-  // Grant holders' emails are only for super admins
-  const showEmails = await isSuperAdminUser(userId)
+  await requireAdminSession()
   const { id } = await params
   return NextResponse.json(
     await prisma.userAvatarGrant.findMany({
       where: { avatarSetId: id },
-      include: { user: { select: { id: true, name: true, email: showEmails, uuid: true } } },
+      include: { user: { select: { id: true, name: true, email: true, uuid: true } } },
       orderBy: { grantedAt: 'desc' },
     })
   )
