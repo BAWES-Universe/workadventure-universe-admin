@@ -34,6 +34,57 @@ function getBaseStartMap(authToken?: string | null): MapDetailsData {
   };
 }
 
+/** Where the assets (logos, icons, background) are served from: this admin API project. */
+function getAssetsBaseUrl(request: NextRequest): string {
+  // First try NEXT_PUBLIC_API_URL if set
+  if (process.env.NEXT_PUBLIC_API_URL) {
+    return process.env.NEXT_PUBLIC_API_URL.replace(/\/$/, ''); // Remove trailing slash
+  }
+  // Otherwise, construct from the request URL (this API endpoint's origin)
+  try {
+    const requestUrl = new URL(request.url);
+    return `${requestUrl.protocol}//${requestUrl.host}`;
+  } catch {
+    // Final fallback for local development
+    return "http://admin.bawes.localhost:8321";
+  }
+}
+
+/**
+ * What somebody who has not signed in gets for a members-only room: only that they must sign in, with the same
+ * look as the sign-in screen of any room. No room, world or universe name, no owner, no map or WAM address: the
+ * full details come once they have signed in, and then Orbit decides whether they may enter.
+ */
+function getSignInBootstrap(request: NextRequest): MapDetailsData {
+  const startRoomUrl = process.env.BASE_START_MAP_URL || process.env.START_ROOM_URL || 'https://rveiio.github.io/BAWES-virtual/office.tmj';
+  const baseUrl = getAssetsBaseUrl(request);
+  return {
+    mapUrl: startRoomUrl,
+    group: null,
+    editable: false,
+    authenticationMandatory: true,
+    policy: "private",
+    metatags: {
+      title: "Universe",
+      description: "Sign in to join this room in the Universe.",
+      author: "Universe",
+      provider: "Universe",
+      cardImage: `${baseUrl}/assets/cardimage-1500x500.png`,
+      appName: "Universe",
+      shortAppName: "Universe",
+      themeColor: "#14121E"
+    },
+    showPoweredBy: false,
+    backgroundColor: "#14121E",
+    primaryColor: "#4056F6",
+    backgroundSceneImage: `${baseUrl}/assets/background-1920x1080.png`,
+    errorSceneLogo: `${baseUrl}/assets/logo-300x250.svg`,
+    loadingLogo: `${baseUrl}/assets/loading-logo.png`,
+    loginSceneLogo: `${baseUrl}/assets/logo-300x150.svg`,
+    modules: ["teleport", "bots"],
+  };
+}
+
 export async function GET(request: NextRequest) {
   try {
     requireAuth(request);
@@ -109,7 +160,6 @@ export async function GET(request: NextRequest) {
                     select: {
                       id: true,
                       name: true,
-                      email: true,
                     },
                   },
                 },
@@ -124,6 +174,13 @@ export async function GET(request: NextRequest) {
         return NextResponse.json(getBaseStartMap(authToken));
       }
       
+      // A members-only room tells somebody who has not signed in nothing but "sign in": nothing is looked up, created
+      // or written for them either.
+      const isPublicRoom = roomData.isPublic && roomData.world.isPublic && roomData.world.universe.isPublic;
+      if (!isPublicRoom && !authToken) {
+        return NextResponse.json(getSignInBootstrap(request));
+      }
+
       // Step 4-6: Prepare map-storage paths and check/create WAM file
       const publicMapStorageUrl = process.env.PUBLIC_MAP_STORAGE_URL;
       const mapStorageApiToken = process.env.MAP_STORAGE_API_TOKEN;
@@ -190,25 +247,12 @@ export async function GET(request: NextRequest) {
       // Check if user is authenticated (if authToken/accessToken is provided)
       const isAuthenticated = !!authToken;
       
-      // Get universe owner name for author field
+      // Get universe owner name for author field. Never the owner's email: it is not theirs to publish.
       const universeOwner = roomData.world.universe.owner;
-      const authorName = universeOwner?.name || universeOwner?.email || "Universe";
+      const authorName = universeOwner?.name || "Universe";
       
       // Construct base URL for assets (assets are served from this admin API project)
-      let baseUrl: string;
-      // First try NEXT_PUBLIC_API_URL if set
-      if (process.env.NEXT_PUBLIC_API_URL) {
-        baseUrl = process.env.NEXT_PUBLIC_API_URL.replace(/\/$/, ''); // Remove trailing slash
-      } else {
-        // Otherwise, construct from the request URL (this API endpoint's origin)
-        try {
-          const requestUrl = new URL(request.url);
-          baseUrl = `${requestUrl.protocol}//${requestUrl.host}`;
-        } catch {
-          // Final fallback for local development
-          baseUrl = "http://admin.bawes.localhost:8321";
-        }
-      }
+      const baseUrl = getAssetsBaseUrl(request);
       
       // Prioritize wamUrl: if WAM exists, return it (WorkAdventure prefers wamUrl over mapUrl)
       // Only include mapUrl as fallback if wamUrl is not available
