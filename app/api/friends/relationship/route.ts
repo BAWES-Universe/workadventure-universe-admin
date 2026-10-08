@@ -1,8 +1,8 @@
 import { NextRequest } from 'next/server';
-import { FriendsError, findAccount, loadPeopleSettings, relationshipBetween, requireAccount } from '@/lib/friends';
+import { FriendsError, findAccount, loadPeopleSettings, relationshipBetween, requireAccount, sharesMemberWorld } from '@/lib/friends';
 import { friendsRoute } from '@/lib/friends-http';
 
-// GET /api/friends/relationship?userUuid=&targetUuid= - how the pair stands, and the target's ring and location settings
+// GET /api/friends/relationship?userUuid=&targetUuid= - how the pair stands, whether they are members of a world together, and the target's invite and location settings
 export const GET = friendsRoute('/api/friends/relationship', async (request: NextRequest) => {
   const params = request.nextUrl.searchParams;
   const me = await requireAccount(params.get('userUuid'));
@@ -13,6 +13,7 @@ export const GET = friendsRoute('/api/friends/relationship', async (request: Nex
   const settings = await loadPeopleSettings(target.id);
   return {
     relationship: await relationshipBetween(me, target),
+    sharedWorld: await sharesMemberWorld(me.id, target.id),
     target: { ringFrom: settings.ringFrom, friendsSeeLocation: settings.friendsSeeLocation },
   };
 });

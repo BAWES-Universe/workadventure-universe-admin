@@ -54,9 +54,9 @@ export interface PeopleSettings {
   friendsSeeLocation: boolean;
 }
 
-/** What a new user gets: only friends can ring, anyone signed in can send a request, findable by name. */
+/** What a new user gets: everyone an invite reaches can invite, anyone signed in can send a request, findable by name. */
 export const DEFAULT_PEOPLE_SETTINGS: PeopleSettings = {
-  ringFrom: 'friends',
+  ringFrom: 'friends_and_members',
   friendRequestsFrom: 'anyone',
   findableByName: true,
   friendsSeeLocation: true,
