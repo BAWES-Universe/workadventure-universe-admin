@@ -6,7 +6,9 @@ import { canManageBots } from '@/lib/bot-permissions';
 import { parsePlayUri } from '@/lib/utils';
 import { validateAccessToken } from '@/lib/oidc';
 import { z } from 'zod';
+import { checkAiProviderRef } from '@/lib/ai-provider-ref';
 import { toolTimeoutSecondsSchema } from '@/lib/bot-tool-timeout';
+import { mayReadRoomBots } from '@/lib/bot-room-access';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Prisma
 export const runtime = 'nodejs';
@@ -66,18 +68,17 @@ function transformBot(bot: any) {
     companionTextureId: bot.companionTextureId ?? null,
     createdAt: bot.createdAt,
     updatedAt: bot.updatedAt,
+    // Who made or last changed a bot is shown by name only: people's emails are private
     ...(bot.createdBy && {
       createdBy: {
         id: bot.createdBy.id,
         name: bot.createdBy.name,
-        email: bot.createdBy.email,
       },
     }),
     ...(bot.updatedBy && {
       updatedBy: {
         id: bot.updatedBy.id,
         name: bot.updatedBy.name,
-        email: bot.updatedBy.email,
       },
     }),
     ...(bot.room && {
@@ -152,10 +153,11 @@ export async function GET(request: NextRequest) {
         });
         
         if (!roomRecord) {
-          const response = NextResponse.json(
-            { error: 'Room not found' },
-            { status: 404 }
-          );
+          // Someone who is not signed in gets the same answer for a room that does not exist as for a members-only
+          // one, so the answer does not tell them which rooms exist
+          const response = isAuthenticated
+            ? NextResponse.json({ error: 'Room not found' }, { status: 404 })
+            : NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
           Object.entries(corsHeaders()).forEach(([key, value]) => {
             response.headers.set(key, value);
           });
@@ -185,6 +187,7 @@ export async function GET(request: NextRequest) {
               select: {
                 id: true,
                 isPublic: true,
+                ownerId: true,
               },
             },
           },
@@ -193,10 +196,9 @@ export async function GET(request: NextRequest) {
     });
 
     if (!room) {
-      const response = NextResponse.json(
-        { error: 'Room not found' },
-        { status: 404 }
-      );
+      const response = isAuthenticated
+        ? NextResponse.json({ error: 'Room not found' }, { status: 404 })
+        : NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
       Object.entries(corsHeaders()).forEach(([key, value]) => {
         response.headers.set(key, value);
       });
@@ -211,6 +213,20 @@ export async function GET(request: NextRequest) {
       const response = NextResponse.json(
         { error: 'Unauthorized' },
         { status: 401 }
+      );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
+    }
+
+    // A members-only room's bots (their instructions and settings) are for the people who may see the room: its
+    // world's members, the universe owner and super admins. The bot server's admin token keeps full access.
+    if (!isPublic && !isAdminToken && userId && !(await mayReadRoomBots(room, userId))) {
+      // The same answer as for a room that does not exist, so a stranger learns nothing about it
+      const response = NextResponse.json(
+        { error: 'Room not found' },
+        { status: 404 }
       );
       Object.entries(corsHeaders()).forEach(([key, value]) => {
         response.headers.set(key, value);
@@ -240,14 +256,12 @@ export async function GET(request: NextRequest) {
           select: {
             id: true,
             name: true,
-            email: true,
           },
         },
         updatedBy: {
           select: {
             id: true,
             name: true,
-            email: true,
           },
         },
       },
@@ -460,6 +474,19 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    // The provider ref must name an existing provider
+    const providerError = await checkAiProviderRef(validatedData.aiProviderRef);
+    if (providerError) {
+      const response = NextResponse.json(
+        { error: providerError },
+        { status: 400 }
+      );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
+    }
+
     // Create bot
     const bot = await prisma.bot.create({
       data: {
@@ -497,14 +524,12 @@ export async function POST(request: NextRequest) {
           select: {
             id: true,
             name: true,
-            email: true,
           },
         },
         updatedBy: {
           select: {
             id: true,
             name: true,
-            email: true,
           },
         },
       },

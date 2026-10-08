@@ -3,9 +3,11 @@ import { requireAuth } from '@/lib/auth';
 import { getSessionUser } from '@/lib/auth-session';
 import { prisma } from '@/lib/db';
 import { canManageBots } from '@/lib/bot-permissions';
+import { mayReadRoomBots } from '@/lib/bot-room-access';
 import { validateAccessToken } from '@/lib/oidc';
 import { parsePlayUri } from '@/lib/utils';
 import { z } from 'zod';
+import { checkAiProviderRef } from '@/lib/ai-provider-ref';
 import { toolTimeoutSecondsSchema } from '@/lib/bot-tool-timeout';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Prisma
@@ -128,18 +130,17 @@ function transformBot(bot: any) {
     companionTextureId: bot.companionTextureId ?? null,
     createdAt: bot.createdAt,
     updatedAt: bot.updatedAt,
+    // Who made or last changed a bot is shown by name only: people's emails are private
     ...(bot.createdBy && {
       createdBy: {
         id: bot.createdBy.id,
         name: bot.createdBy.name,
-        email: bot.createdBy.email,
       },
     }),
     ...(bot.updatedBy && {
       updatedBy: {
         id: bot.updatedBy.id,
         name: bot.updatedBy.name,
-        email: bot.updatedBy.email,
       },
     }),
     ...(bot.room && {
@@ -189,46 +190,34 @@ export async function GET(
                   select: {
                     id: true,
                     isPublic: true,
+                    ownerId: true,
                   },
                 },
               },
             },
-          },
-          select: {
-            id: true,
-            worldId: true,
-            slug: true,
-            name: true,
-            description: true,
-            mapUrl: true,
-            wamUrl: true,
-            isPublic: true,
-            createdAt: true,
-            updatedAt: true,
           },
         },
         createdBy: {
           select: {
             id: true,
             name: true,
-            email: true,
           },
         },
         updatedBy: {
           select: {
             id: true,
             name: true,
-            email: true,
           },
         },
       },
     });
 
     if (!bot) {
-      const response = NextResponse.json(
-        { error: 'Bot not found' },
-        { status: 404 }
-      );
+      // Someone who is not signed in gets the same answer for a bot that does not exist as for a members-only
+      // one, so the answer does not tell them which bots exist
+      const response = isAuthenticated
+        ? NextResponse.json({ error: 'Bot not found' }, { status: 404 })
+        : NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
       Object.entries(corsHeaders()).forEach(([key, value]) => {
         response.headers.set(key, value);
       });
@@ -243,6 +232,19 @@ export async function GET(
       const response = NextResponse.json(
         { error: 'Unauthorized' },
         { status: 401 }
+      );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
+    }
+
+    // A members-only room's bots are for the people who may see the room. The bot server's admin token keeps full access.
+    if (!isPublic && !isAdminToken && userId && !(await mayReadRoomBots(bot.room, userId))) {
+      // The same answer as for a bot that does not exist, so a stranger learns nothing about it
+      const response = NextResponse.json(
+        { error: 'Bot not found' },
+        { status: 404 }
       );
       Object.entries(corsHeaders()).forEach(([key, value]) => {
         response.headers.set(key, value);
@@ -434,6 +436,21 @@ export async function PUT(
       }
     }
 
+    // The provider ref must name an existing provider (an unchanged ref is let through)
+    if (validatedData.aiProviderRef) {
+      const providerError = await checkAiProviderRef(validatedData.aiProviderRef, existingBot.aiProviderRef);
+      if (providerError) {
+      const response = NextResponse.json(
+        { error: providerError },
+        { status: 400 }
+      );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
+      }
+    }
+
     // Prepare update data (only include fields that were provided)
     const updateData: any = {};
     if (resolvedRoomId !== undefined) updateData.roomId = resolvedRoomId;
@@ -477,14 +494,12 @@ export async function PUT(
           select: {
             id: true,
             name: true,
-            email: true,
           },
         },
         updatedBy: {
           select: {
             id: true,
             name: true,
-            email: true,
           },
         },
       },

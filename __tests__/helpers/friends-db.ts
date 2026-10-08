@@ -17,7 +17,15 @@ export const db = {
   users: [] as FakeUser[],
   friendships: [] as FakeFriendship[],
   preferences: [] as { userId: string; key: string; value: unknown }[],
-  members: [] as { userId: string; worldId: string; worldName: string; universeName: string }[],
+  members: [] as {
+    userId: string;
+    worldId: string;
+    worldName: string;
+    universeName: string;
+    /** Public unless a test says otherwise. */
+    worldPublic?: boolean;
+    universePublic?: boolean;
+  }[],
   visits: [] as { userId: string; worldId: string; worldName: string; accessedAt: Date }[],
   rooms: [] as { universe: string; universeName: string; world: string; worldName: string; slug: string; name: string }[],
   reset() {
@@ -64,7 +72,7 @@ export const fakePrisma = {
       const user = db.users.find((u) => u.uuid === where.uuid);
       return user ? pick(user, select) : null;
     }),
-    findMany: jest.fn(async ({ where, take }: { where: Where; take?: number }) => {
+    findMany: jest.fn(async ({ where, take, select }: { where: Where; take?: number; select?: Record<string, { where?: unknown }> }) => {
       const { preferences, NOT, name, ...rest } = where as Where & {
         preferences?: { some: { key: string; value: { equals: unknown } } };
         NOT?: { preferences: { some: { key: string; value: { equals: unknown } } } };
@@ -81,11 +89,16 @@ export const fakePrisma = {
         users = users.filter((u) => !db.preferences.some((p) => p.userId === u.id && p.key === key && p.value === value.equals));
       }
       users = [...users].sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
+      // Like the real query, only public worlds of public universes when the query asks for that
+      const onlyPublic = !!select?.worldMemberships?.where;
       return users.slice(0, take ?? users.length).map((u) => ({
         ...u,
         worldMemberships: db.members
-          .filter((m) => m.userId === u.id)
+          .filter((m) => m.userId === u.id && (!onlyPublic || ((m.worldPublic ?? true) && (m.universePublic ?? true))))
           .map((m) => ({ world: { universe: { name: m.universeName } } })),
+        preferences: db.preferences
+          .filter((p) => p.userId === u.id && p.key.startsWith('people.'))
+          .map((p) => ({ key: p.key, value: p.value })),
       }));
     }),
   },
