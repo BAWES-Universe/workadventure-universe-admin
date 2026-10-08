@@ -20,11 +20,13 @@ jest.mock('@/app/admin/admin-bootstrap-context', () => ({
 
 // Stands in for What's yours: the card and its Hide, as Yours draws them from what You hands down.
 let allDone = false;
+// True while the profile answer hasn't come in, so Yours can't tell yet whether every step is done.
+let progressUnknown = false;
 jest.mock('@/app/admin/components/yours', () => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { useEffect } = require('react') as typeof import('react');
-  function MockYours({ getStarted }: { getStarted: { hidden: boolean | null; hide: () => void; onAllDone?: (done: boolean) => void } }) {
-    useEffect(() => getStarted.onAllDone?.(allDone), [getStarted]);
+  function MockYours({ getStarted }: { getStarted: { hidden: boolean | null; hide: () => void; onAllDone?: (done: boolean | null) => void } }) {
+    useEffect(() => getStarted.onAllDone?.(progressUnknown ? null : allDone), [getStarted]);
     return getStarted.hidden === false && !allDone ? (
       <section data-testid="get-started">
         <h2 id="get-started-heading">Get started</h2>
@@ -54,6 +56,7 @@ function stored(hidden: boolean) {
 beforeEach(() => {
   fetchMock.mockReset();
   allDone = false;
+  progressUnknown = false;
   Element.prototype.scrollIntoView = jest.fn();
 });
 
@@ -103,6 +106,16 @@ describe('You: Get started comes back', () => {
     render(<YouPage />);
     await screen.findByTestId('get-started');
     expect(screen.queryByRole('heading', { name: 'Settings' })).toBeNull();
+  });
+
+  it('does not flash the Show row while it is still unknown whether every step is done', async () => {
+    stored(true);
+    allDone = true;
+    progressUnknown = true;
+    render(<YouPage />);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.queryByRole('button', { name: 'Show' })).toBeNull();
   });
 
   it('offers nothing once every step is done', async () => {

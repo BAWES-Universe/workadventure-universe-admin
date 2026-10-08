@@ -36,7 +36,7 @@ function You() {
   }, [editProfile, router]);
   // Get started, once hidden, comes back from Settings (while any step is left), and the page scrolls up to it.
   const [getStartedHidden, hideGetStarted, showGetStarted] = useGuidanceDismissed('getStarted');
-  const [stepsAllDone, setStepsAllDone] = useState(false);
+  const [stepsAllDone, setStepsAllDone] = useState<boolean | null>(null);
   const scrollToSteps = useRef(false);
   useEffect(() => {
     if (!scrollToSteps.current || getStartedHidden !== false) return;
@@ -67,7 +67,7 @@ function You() {
         profileComplete={profileComplete}
         getStarted={{ hidden: getStartedHidden, hide: hideGetStarted, onAllDone: setStepsAllDone }}
       />
-      {getStartedHidden === true && !stepsAllDone && (
+      {getStartedHidden === true && stepsAllDone === false && (
         <section className={styles.settings} aria-labelledby="settings-heading">
           <h2 id="settings-heading" className="orbit-display">
             Settings

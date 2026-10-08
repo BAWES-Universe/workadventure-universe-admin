@@ -77,7 +77,7 @@ export default function Yours({
 }: {
   profileComplete: boolean | null;
   /** Whether Get started was hidden, and how to hide it. You keeps this, so its settings can show it again. */
-  getStarted: { hidden: boolean | null; hide: () => void; onAllDone?: (allDone: boolean) => void };
+  getStarted: { hidden: boolean | null; hide: () => void; onAllDone?: (allDone: boolean | null) => void };
 }) {
   const { mine } = useAdminBootstrap();
   const universes = useCollection(`/api/admin/universes?scope=my&limit=${SHOWN}`, 'universes', isUniverse);
@@ -92,9 +92,11 @@ export default function Yours({
   const { newWorldHref } = progress;
   const allDone = getStartedSteps(progress).every((step) => step.done);
   const { hidden, hide, onAllDone } = getStarted;
+  // Unknown (null) until the profile answer is in, so the page doesn't show or hide its Settings row on a guess.
+  const allDoneKnown = profileComplete === null ? null : allDone;
   useEffect(() => {
-    onAllDone?.(allDone);
-  }, [allDone, onAllDone]);
+    onAllDone?.(allDoneKnown);
+  }, [allDoneKnown, onAllDone]);
 
   return (
     <div className={styles.yours} data-testid="yours">
