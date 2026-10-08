@@ -18,6 +18,9 @@ export async function GET(request: NextRequest) {
     const playUri = searchParams.get('playUri');
     const ipAddress = searchParams.get('ipAddress') || getClientIp(request);
     const accessToken = searchParams.get('accessToken');
+    // The game only sends a chat ID it checked itself (today: a bot's own account). It is passed back for this
+    // visit but never saved here: a person's chat ID is saved only through /api/members/:id/chatId, once the game
+    // has confirmed it with the Matrix server.
     const chatID = searchParams.get('chatID');
     // WorkAdventure may send name/username for guest users
     const name = searchParams.get('name') || searchParams.get('username');
@@ -111,7 +114,6 @@ export async function GET(request: NextRequest) {
               uuid: authenticatedUser.identifier,
               email: userEmail,
               name: userName,
-              matrixChatId: chatID || null,
               lastIpAddress: ipAddress || null,
               isGuest: false,
             } as any,
@@ -126,7 +128,6 @@ export async function GET(request: NextRequest) {
           const updateData: {
             email?: string | null;
             name?: string | null;
-            matrixChatId?: string | null;
             lastIpAddress?: string | null;
             isGuest?: boolean;
             uuid?: string;
@@ -142,10 +143,6 @@ export async function GET(request: NextRequest) {
           
           if (userName) {
             updateData.name = userName;
-          }
-          
-          if (chatID) {
-            updateData.matrixChatId = chatID;
           }
           
           if (ipAddress) {

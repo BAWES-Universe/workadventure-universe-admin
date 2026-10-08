@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
 
+const MATRIX_USER_ID = /^@[^\s:]+:[^\s]+$/;
+
 export async function PUT(
   request: NextRequest,
   { params }: { params: Promise<{ memberUUID: string }> }
@@ -18,6 +20,14 @@ export async function PUT(
     if (!chatId) {
       return NextResponse.json(
         { error: 'chatId is required' },
+        { status: 400 }
+      );
+    }
+
+    // A Matrix user ID: @localpart:server
+    if (typeof chatId !== 'string' || !MATRIX_USER_ID.test(chatId)) {
+      return NextResponse.json(
+        { error: 'chatId must be a Matrix user ID' },
         { status: 400 }
       );
     }
@@ -55,11 +65,18 @@ export async function PUT(
       );
     }
     
-    // Update Matrix chat ID
-    await prisma.user.update({
-      where: { id: user.id },
-      data: { matrixChatId: chatId },
-    });
+    // The game only calls this with a chat ID it confirmed with the Matrix server, so this account owns it. Any
+    // other account still holding it got it from an older, unchecked claim: take it off them.
+    await prisma.$transaction([
+      prisma.user.updateMany({
+        where: { matrixChatId: chatId, id: { not: user.id } },
+        data: { matrixChatId: null },
+      }),
+      prisma.user.update({
+        where: { id: user.id },
+        data: { matrixChatId: chatId },
+      }),
+    ]);
     
     return NextResponse.json({ success: true });
   } catch (error) {
