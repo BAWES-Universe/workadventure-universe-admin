@@ -213,11 +213,10 @@ export async function GET(
     });
 
     if (!bot) {
-      // Someone who is not signed in gets the same answer for a bot that does not exist as for a members-only
-      // one, so the answer does not tell them which bots exist
-      const response = isAuthenticated
-        ? NextResponse.json({ error: 'Bot not found' }, { status: 404 })
-        : NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      const response = NextResponse.json(
+        { error: 'Bot not found' },
+        { status: 404 }
+      );
       Object.entries(corsHeaders()).forEach(([key, value]) => {
         response.headers.set(key, value);
       });

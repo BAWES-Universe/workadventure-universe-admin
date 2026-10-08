@@ -165,10 +165,9 @@ export async function GET(
     if (userId) {
       hasPermission = await canManageBots(userId, bot.roomId) || isSuperAdmin(userEmail);
       if (!hasPermission) {
-        // The same answer as for a bot that does not exist, so a stranger learns nothing about it
         const response = NextResponse.json(
-          { error: 'Bot not found' },
-          { status: 404 }
+          { error: 'Forbidden' },
+          { status: 403 }
         );
         Object.entries(corsHeaders()).forEach(([key, value]) => {
           response.headers.set(key, value);

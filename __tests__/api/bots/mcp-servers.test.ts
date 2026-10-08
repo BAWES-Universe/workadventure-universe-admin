@@ -244,7 +244,7 @@ describe('/api/bots/[id]/mcp-servers', () => {
       expect(data[0].oauthExpiresAt).toBe('2023-11-14T22:13:20.000Z');
     });
 
-    it('should answer as if the bot did not exist when the user is not owner or super admin', async () => {
+    it('should return 403 if user is not owner or super admin', async () => {
       (prisma.bot.findUnique as jest.Mock).mockResolvedValue({
         id: MOCK_BOT_ID,
         createdById: 'some-other-user',
@@ -254,7 +254,7 @@ describe('/api/bots/[id]/mcp-servers', () => {
       const request = new NextRequest(`http://localhost:3333/api/bots/${MOCK_BOT_ID}/mcp-servers`);
       const response = await GET(request, { params: Promise.resolve({ id: MOCK_BOT_ID }) });
 
-      expect(response.status).toBe(404);
+      expect(response.status).toBe(403);
     });
 
     it('should return 404 if bot not found', async () => {

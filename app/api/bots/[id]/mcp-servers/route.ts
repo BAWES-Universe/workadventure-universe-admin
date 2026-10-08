@@ -232,8 +232,7 @@ export async function GET(
       });
 
       if (!(await canManageBotMcpServers(userId!, actorUser?.email ?? null, bot))) {
-        // The same answer as for a bot that does not exist, so a stranger learns nothing about it
-        return NextResponse.json({ error: 'Bot not found' }, { status: 404, headers: corsHeaders(request) });
+        return NextResponse.json({ error: 'Forbidden' }, { status: 403, headers: corsHeaders(request) });
       }
     }
 
