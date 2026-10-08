@@ -129,18 +129,17 @@ function transformBot(bot: any) {
     companionTextureId: bot.companionTextureId ?? null,
     createdAt: bot.createdAt,
     updatedAt: bot.updatedAt,
+    // Who made or last changed a bot is shown by name only: people's emails are private
     ...(bot.createdBy && {
       createdBy: {
         id: bot.createdBy.id,
         name: bot.createdBy.name,
-        email: bot.createdBy.email,
       },
     }),
     ...(bot.updatedBy && {
       updatedBy: {
         id: bot.updatedBy.id,
         name: bot.updatedBy.name,
-        email: bot.updatedBy.email,
       },
     }),
     ...(bot.room && {
@@ -212,14 +211,12 @@ export async function GET(
           select: {
             id: true,
             name: true,
-            email: true,
           },
         },
         updatedBy: {
           select: {
             id: true,
             name: true,
-            email: true,
           },
         },
       },
@@ -493,14 +490,12 @@ export async function PUT(
           select: {
             id: true,
             name: true,
-            email: true,
           },
         },
         updatedBy: {
           select: {
             id: true,
             name: true,
-            email: true,
           },
         },
       },
