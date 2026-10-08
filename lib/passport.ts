@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { SHARING_KEYS, sharePassportFromRows } from '@/lib/people-settings';
 
@@ -64,8 +65,10 @@ export async function loadPassport(userId: string, options: { owner: boolean }):
   if (stamps.length === 0) return EMPTY;
   stamps.sort((a, b) => b.visits - a.visits || a.since.localeCompare(b.since) || a.world.localeCompare(b.world));
 
+  // Someone else counts days only over the worlds they may see stamped, so days in private worlds stay private.
+  const onlyShown = options.owner ? Prisma.empty : Prisma.sql` AND world_id IN (${Prisma.join(stamps.map((stamp) => stamp.worldId))})`;
   const rows = await prisma.$queryRaw<Array<{ days: bigint | number }>>`
-    SELECT COUNT(DISTINCT DATE(accessed_at))::int AS days FROM room_accesses WHERE user_id = ${userId}
+    SELECT COUNT(DISTINCT DATE(accessed_at))::int AS days FROM room_accesses WHERE user_id = ${userId}${onlyShown}
   `;
   return {
     stamps: stamps.slice(0, MAX_STAMPS),
