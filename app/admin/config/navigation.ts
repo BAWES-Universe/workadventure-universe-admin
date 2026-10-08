@@ -13,7 +13,6 @@ import {
   Layers,
   Server,
   DoorOpen,
-  Eye,
 } from 'lucide-react';
 import { LucideIcon } from 'lucide-react';
 import { Planet } from '@/app/admin/components/ds/planet-icon';
@@ -50,7 +49,6 @@ export const NAV_ITEMS: NavItem[] = [
   { href: '/admin/universes', label: 'Your universes', icon: Planet, group: 'my' },
   { href: '/admin/stars', label: 'Stars', icon: Star, group: 'my' },
   { href: '/admin/memberships', label: 'Memberships', icon: Mail, requiresAuth: true, group: 'my' },
-  { href: '/admin/sharing', label: 'Sharing', icon: Eye, requiresAuth: true, group: 'my' },
   { href: '/admin/you', label: 'Profile', icon: UserCircle, requiresAuth: true, group: 'my' },
 
   // Discover section

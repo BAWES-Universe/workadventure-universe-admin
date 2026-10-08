@@ -12,7 +12,7 @@ import LogoutButton from '../../logout-button';
 
 /**
  * Everything Orbit has, from the Orbit Menu button at the top-left or Ctrl/Cmd+K: You, Orbit and Space, then every tool, searchable.
- * At its foot: who is logged in, Sign out and Appearance (Sharing is under Personalize). Dismissed by a tap outside,
+ * At its foot: who is logged in, Sharing, Sign out and Appearance. Dismissed by a tap outside,
  * Escape, or going somewhere.
  */
 export function MenuSheet({ user }: { user: NavUser }) {
@@ -116,7 +116,12 @@ export function MenuSheet({ user }: { user: NavUser }) {
                 Logged in as <strong>{user.name || user.email}</strong>
                 {user.name && user.email && <span> · {user.email}</span>}
               </p>
-              <LogoutButton className="orbit-menu-signout" />
+              <div className="orbit-menu-actions">
+                <Link href="/admin/sharing" className="orbit-menu-signout orbit-menu-sharing orbit-press">
+                  Sharing
+                </Link>
+                <LogoutButton className="orbit-menu-signout" />
+              </div>
               <div className="orbit-menu-look">
                 <span>Appearance</span>
                 <ThemeChoice />
