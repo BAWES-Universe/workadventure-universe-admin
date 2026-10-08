@@ -6,6 +6,7 @@ import { canManageBots } from '@/lib/bot-permissions';
 import { validateAccessToken } from '@/lib/oidc';
 import { parsePlayUri } from '@/lib/utils';
 import { z } from 'zod';
+import { checkAiProviderRef } from '@/lib/ai-provider-ref';
 import { toolTimeoutSecondsSchema } from '@/lib/bot-tool-timeout';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Prisma
@@ -431,6 +432,21 @@ export async function PUT(
           });
           return response;
         }
+      }
+    }
+
+    // The provider ref must name an existing provider (an unchanged ref is let through)
+    if (validatedData.aiProviderRef) {
+      const providerError = await checkAiProviderRef(validatedData.aiProviderRef, existingBot.aiProviderRef);
+      if (providerError) {
+      const response = NextResponse.json(
+        { error: providerError },
+        { status: 400 }
+      );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
       }
     }
 
