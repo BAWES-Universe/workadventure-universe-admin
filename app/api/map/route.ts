@@ -218,7 +218,10 @@ export async function GET(request: NextRequest) {
         // Only include mapUrl if wamUrl is not available (as fallback)
         ...(!wamUrl && { mapUrl: roomData.mapUrl }),
         editable: editable,
-        authenticationMandatory: roomData.authenticationMandatory || false,
+        // Members-only rooms ask guests to sign in first, so Orbit can then check whether they are members
+        authenticationMandatory:
+          roomData.authenticationMandatory ||
+          !(roomData.isPublic && roomData.world.isPublic && roomData.world.universe.isPublic),
         roomName: roomData.name,
         metatags: {
           title: "Universe | " + roomData.world.universe.name + " > " + roomData.world.name + " > " + roomData.name,
@@ -266,13 +269,15 @@ export async function GET(request: NextRequest) {
           ],
           appName: "Universe",
           shortAppName: "Universe",
-          themeColor: "#000000"
+          themeColor: "#14121E"
         },
         group: group,
         policy: roomData.isPublic ? "public" : "private",
 
         showPoweredBy: false,
-        backgroundColor: "#000000",
+        // Universe ink (#14121e, as on bawes.net). The game paints its panels, menus and first frame in this
+        // exact colour; it also tints the login, avatar and camera-setup screens behind their background image.
+        backgroundColor: "#14121E",
         primaryColor: "#4056F6",
         backgroundSceneImage: `${baseUrl}/assets/background-1920x1080.png`,
         errorSceneLogo: `${baseUrl}/assets/logo-300x250.png`,

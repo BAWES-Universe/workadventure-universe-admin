@@ -1,9 +1,12 @@
 'use client';
 
 import { Suspense, useEffect, useState } from 'react';
+import Link from 'next/link';
+import { ChevronRight } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useAdminBootstrap } from '../admin-bootstrap-context';
 import { StatLine, count } from '../components/ds';
+import { ActivitySection, PassportSection } from '../components/passport';
 import { ProfileCard } from '../components/profile-card';
 import { ThemeChoice } from '../components/shell/theme-choice';
 import Yours from '../components/yours';
@@ -52,6 +55,8 @@ function You() {
           )
         }
       />
+      <PassportSection />
+      <ActivitySection />
       <Yours profileComplete={profileComplete} />
       <section className={styles.settings} aria-labelledby="settings-heading">
         <h2 id="settings-heading" className="orbit-display">
@@ -64,6 +69,13 @@ function You() {
           </span>
           <ThemeChoice className={styles.themeControl} />
         </div>
+        <Link href="/admin/sharing" className={`orbit-press ${styles.settingRow}`}>
+          <span>
+            <strong>Sharing</strong>
+            <span>Who sees which room you’re in, and your passport.</span>
+          </span>
+          <ChevronRight size={18} aria-hidden="true" />
+        </Link>
         <div className={styles.settingRow}>
           <span>
             <strong>Account</strong>

@@ -13,6 +13,7 @@ import {
 } from '@/components/ui/table';
 import { EmptyCard, LoadError, LoadingRows, PageHeader } from '../../components/ds';
 import { ApplyFilter, DateFilter, FilterRow, JsonDetails, ListPager, Panel, Pill, type PageInfo } from '../bots-ui';
+import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
 interface Conversation {
   id: number;
@@ -37,6 +38,7 @@ interface Conversation {
 
 export default function ConversationsBrowsePage() {
   const router = useRouter();
+  const replacePage = useReplacePage();
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -77,7 +79,7 @@ export default function ConversationsBrowsePage() {
       }
       const userData = await response.json();
       if (!userData.user?.isSuperAdmin) {
-        router.push('/admin');
+        replacePage('/admin');
         return;
       }
       fetchConversations();
@@ -104,7 +106,7 @@ export default function ConversationsBrowsePage() {
 
       if (!response.ok) {
         if (response.status === 401 || response.status === 403) {
-          router.push('/admin');
+          replacePage('/admin');
           return;
         }
         const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
@@ -121,7 +123,7 @@ export default function ConversationsBrowsePage() {
     } finally {
       setLoading(false);
     }
-  }, [filters, router]);
+  }, [filters, replacePage]);
 
   const handlePageChange = (newPage: number) => {
     setFilters({ ...filters, page: newPage });

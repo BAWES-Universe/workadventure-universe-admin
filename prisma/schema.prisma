@@ -23,6 +23,11 @@ model User {
   worldMemberships  WorldMember[]
   bans              Ban[]             @relation("BannedUser")
   bannedBy          Ban[]             @relation("BannedBy")
+  bansLifted        Ban[]             @relation("BanLiftedBy")
+  banAppealsDecided Ban[]             @relation("BanAppealDecidedBy")
+  reportsAbout      Report[]          @relation("ReportedUser")
+  reportsMade       Report[]          @relation("Reporter")
+  reportsHandled    Report[]          @relation("ReportHandledBy")
   avatars           UserAvatar[]
   favorites         Favorite[]
   followers         Follow[]          @relation("Follower")
@@ -102,6 +107,7 @@ model World {
   rooms      Room[]
   members    WorldMember[]
   bans       Ban[]
+  reports    Report[]
   avatars    UserAvatar[]
   favorites  Favorite[]
   roomAccesses RoomAccess[]
@@ -133,6 +139,7 @@ model Room {
   favorites  Favorite[]
   roomAccesses RoomAccess[]
   bots       Bot[]
+  reports    Report[]
 
   @@unique([worldId, slug]) // Slug unique within world
   @@map("rooms")
@@ -160,6 +167,8 @@ model RoomAccess {
   roomSlug        String   @map("room_slug")
 
   playUri         String   @map("play_uri") // Full play URI
+
+  textureIds      String[] @default([]) @map("texture_ids") // The Woka a guest picked (their account has its own saved outfit)
 
   accessedAt      DateTime @default(now()) @map("accessed_at")
 
@@ -209,17 +218,53 @@ model Ban {
   bannedAt  DateTime  @default(now()) @map("banned_at")
   expiresAt DateTime? @map("expires_at") // NULL = permanent
   isActive  Boolean   @default(true) @map("is_active")
+  liftedAt  DateTime? @map("lifted_at")
+  liftedById String?  @map("lifted_by")
+  // One appeal per ban: the banned player's message, and the admins' answer
+  appealText       String?   @map("appeal_text")
+  appealedAt       DateTime? @map("appealed_at")
+  appealDecision   String?   @map("appeal_decision") // "kept" | "lifted"; NULL while waiting
+  appealDecidedAt  DateTime? @map("appeal_decided_at")
+  appealDecidedById String?  @map("appeal_decided_by")
 
   // Relations
   user      User?     @relation("BannedUser", fields: [userId], references: [id], onDelete: Cascade)
   universe  Universe? @relation(fields: [universeId], references: [id], onDelete: SetNull)
-  world     World?    @relation(fields: [worldId], references: [id], onDelete: SetNull)
+  world     World?    @relation(fields: [worldId], references: [id], onDelete: Cascade) // a ban is about its world
   bannedBy  User?     @relation("BannedBy", fields: [bannedById], references: [id])
+  liftedBy  User?     @relation("BanLiftedBy", fields: [liftedById], references: [id], onDelete: SetNull)
+  appealDecidedBy User? @relation("BanAppealDecidedBy", fields: [appealDecidedById], references: [id], onDelete: SetNull)
 
   @@index([userId])
   @@index([ipAddress])
   @@index([worldId])
   @@map("bans")
+}
+
+// A player's report about another player, seen by the world's admins and the universe owner
+model Report {
+  id             String    @id @default(uuid())
+  worldId        String    @map("world_id")
+  roomId         String?   @map("room_id")
+  reportedUserId String?   @map("reported_user_id")
+  reportedUuid   String    @map("reported_uuid") // As the game sent it, kept when no Orbit user matches
+  reporterUserId String?   @map("reporter_user_id")
+  reporterUuid   String    @map("reporter_uuid")
+  comment        String
+  status         String    @default("open") // "open" | "dismissed" | "banned"
+  handledById    String?   @map("handled_by")
+  handledAt      DateTime? @map("handled_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  world        World @relation(fields: [worldId], references: [id], onDelete: Cascade)
+  room         Room? @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  reportedUser User? @relation("ReportedUser", fields: [reportedUserId], references: [id], onDelete: SetNull)
+  reporterUser User? @relation("Reporter", fields: [reporterUserId], references: [id], onDelete: SetNull)
+  handledBy    User? @relation("ReportHandledBy", fields: [handledById], references: [id], onDelete: SetNull)
+
+  @@index([worldId, status])
+  @@index([reportedUserId])
+  @@map("reports")
 }
 
 // User Avatars & Companions
@@ -283,7 +328,7 @@ model Friendship {
   id         String    @id @default(uuid())
   user1Id    String    @map("user1_id")
   user2Id    String    @map("user2_id")
-  status     String    @default("pending") // pending, accepted, blocked
+  status     String    @default("pending") // pending, ignored, accepted, blocked (see lib/friends.ts)
   requestedById String? @map("requested_by")
   createdAt  DateTime  @default(now()) @map("created_at")
   acceptedAt DateTime? @map("accepted_at")
@@ -419,6 +464,10 @@ model Bot {
   chatInstructions    String?  @map("chat_instructions")
   movementInstructions String?  @map("movement_instructions")
   aiProviderRef       String?  @map("ai_provider_ref") @db.VarChar(100)
+  // How long the bot waits for a tool to answer, in seconds. Null = the bot server's default (90 s).
+  toolTimeoutSeconds  Int?     @map("tool_timeout_seconds")
+  // The companion (pet) that walks with the bot: a companion texture id from the room's companion list, or none.
+  companionTextureId  String?  @map("companion_texture_id") @db.VarChar(100)
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
   createdById         String?  @map("created_by_id")

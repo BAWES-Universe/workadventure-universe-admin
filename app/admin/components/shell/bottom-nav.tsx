@@ -1,11 +1,11 @@
 'use client';
 
+import type { CSSProperties } from 'react';
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
 import { cn } from '@/lib/utils';
 import { DESTINATIONS } from '../../config/navigation';
 import { useOrbitFrame } from '../../orbit-frame-context';
-import { rootOf } from './root-of';
+import { AttentionBadge, useAttentionCount } from './attention-badge';
 
 /**
  * You, Orbit and Space on the three root pages, within a thumb's reach on a phone and as a strip under the bar on
@@ -13,27 +13,23 @@ import { rootOf } from './root-of';
  * is at the top-left, beside the game's own buttons. Hidden on the wide layout, where the sidebar takes over.
  */
 export function BottomNav() {
-  const pathname = usePathname();
-  const { route } = useOrbitFrame();
-  const root = rootOf(pathname);
+  const { route, section: root } = useOrbitFrame();
+  const attention = useAttentionCount();
   if (route.parent !== null) return null;
   const activeIndex = DESTINATIONS.findIndex((item) => item.href === root);
   const slots = DESTINATIONS.length;
 
   return (
-    <nav
-      aria-label="Orbit"
-      className="orbit-glass orbit-dock fixed inset-x-0 bottom-0 z-40 border-t border-border/60 lg:hidden"
-      style={{ paddingBottom: 'var(--safe-bottom)' }}
-    >
-      <div className="relative mx-auto grid max-w-lg" style={{ gridTemplateColumns: `repeat(${slots}, minmax(0, 1fr))`, height: 'var(--bottombar-height)' }}>
+    <nav aria-label="Orbit" className="orbit-dock fixed z-40 lg:hidden">
+      <div
+        className="orbit-dock-track relative mx-auto grid max-w-lg rounded-full p-2"
+        style={{ gridTemplateColumns: `repeat(${slots}, minmax(0, 1fr))`, '--dock-slots': slots } as CSSProperties}
+      >
         {activeIndex >= 0 && (
           <span
             aria-hidden="true"
-            className="orbit-dock-pill pointer-events-none absolute inset-y-2 left-0 rounded-2xl transition-transform"
+            className="orbit-dock-pill pointer-events-none absolute left-2 rounded-full transition-transform"
             style={{
-              backgroundImage: 'var(--brand-gradient)',
-              width: `calc(100% / ${slots})`,
               transform: `translateX(${activeIndex * 100}%)`,
               transitionDuration: 'var(--duration-slow)',
               transitionTimingFunction: 'var(--ease-out)',
@@ -49,11 +45,12 @@ export function BottomNav() {
               href={item.href}
               aria-current={active ? 'page' : undefined}
               className={cn(
-                'orbit-press relative z-10 flex flex-col items-center justify-center gap-1 rounded-2xl text-[11px] font-medium transition-colors',
+                'orbit-press relative z-10 flex h-12 items-center justify-center gap-1.5 rounded-full text-[13px] font-semibold transition-colors',
                 active ? 'text-white' : 'text-muted-foreground hover:text-foreground',
               )}
             >
-              <Icon className={cn('h-[22px] w-[22px] transition-transform', active && 'scale-110')} strokeWidth={active ? 2.4 : 2} aria-hidden="true" />
+              {item.href === '/admin' && <AttentionBadge count={attention} className="left-[calc(50%-3rem)] top-1" />}
+              <Icon className="h-[18px] w-[18px]" strokeWidth={active ? 2.4 : 2} aria-hidden="true" />
               {item.label}
             </Link>
           );

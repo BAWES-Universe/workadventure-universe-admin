@@ -16,3 +16,18 @@ export function timeAgo(date: Date, now: Date = new Date()): string {
   if (months < 12) return `${months} ${months === 1 ? 'month' : 'months'} ago`;
   return `${years} ${years === 1 ? 'year' : 'years'} ago`;
 }
+
+/** The same, short enough for a small caption: "just now", "4 min", "3 h", "2 d", "3 w", "5 mo", "1 y". */
+export function timeAgoShort(date: Date, now: Date = new Date()): string {
+  const seconds = Math.max(0, Math.floor((now.getTime() - date.getTime()) / 1000));
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+  if (seconds < 60) return 'just now';
+  if (minutes < 60) return `${minutes} min`;
+  if (hours < 24) return `${hours} h`;
+  if (days < 7) return `${days} d`;
+  if (days < 30) return `${Math.floor(days / 7)} w`;
+  if (days < 365) return `${Math.floor(days / 30)} mo`;
+  return `${Math.floor(days / 365)} y`;
+}

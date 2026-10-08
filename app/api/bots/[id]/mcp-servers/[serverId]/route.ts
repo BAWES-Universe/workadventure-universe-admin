@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
-import { isSuperAdmin } from '@/lib/super-admin';
+import { canManageBotMcpServers } from '@/lib/bot-permissions';
 import { encryptApiKey, decryptApiKey } from '@/lib/encryption';
 import { z } from 'zod';
 
@@ -172,7 +172,7 @@ const updateMcpServerSchema = z.object({
 async function getAuthorizedBot(botId: string, actorUserId: string): Promise<{ id: string }> {
   const bot = await prisma.bot.findUnique({
     where: { id: botId },
-    select: { id: true, createdById: true },
+    select: { id: true, createdById: true, roomId: true },
   });
 
   if (!bot) {
@@ -184,10 +184,7 @@ async function getAuthorizedBot(botId: string, actorUserId: string): Promise<{ i
     select: { email: true },
   });
 
-  const isOwner = bot.createdById === actorUserId;
-  const isSuper = actorUser ? isSuperAdmin(actorUser.email) : false;
-
-  if (!isOwner && !isSuper) {
+  if (!(await canManageBotMcpServers(actorUserId, actorUser?.email ?? null, bot))) {
     throw new Error('Forbidden');
   }
 

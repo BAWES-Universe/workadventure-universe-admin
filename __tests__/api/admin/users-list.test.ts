@@ -150,16 +150,32 @@ describe('GET /api/admin/users', () => {
     await GET(request('?search=Bob', 'admin-token'));
 
     expect(db.user.count.mock.calls[0][0].where).toEqual({
-      OR: [
-        { name: { contains: 'Bob', mode: 'insensitive' } },
-        { email: { contains: 'Bob', mode: 'insensitive' } },
-        { uuid: { contains: 'Bob', mode: 'insensitive' } },
+      AND: [
+        {
+          OR: [
+            { name: { contains: 'Bob', mode: 'insensitive' } },
+            { email: { contains: 'Bob', mode: 'insensitive' } },
+            { uuid: { contains: 'Bob', mode: 'insensitive' } },
+          ],
+        },
+        { OR: [{ email: null }, { email: { not: 'system@workadventure.local' } }] },
       ],
     });
     const { sql, values } = pageQuery();
-    expect(sql).toMatch(/\(u\.name ILIKE \$1 OR u\.email ILIKE \$2 OR u\.uuid ILIKE \$3\)/);
-    expect(values.slice(0, 3)).toEqual(['%Bob%', '%Bob%', '%Bob%']);
-    expect(sql).not.toMatch(/system@workadventure\.local|<>/);
+    expect(sql).toMatch(/\(u\.name ILIKE \$1 OR u\.email ILIKE \$2 OR u\.uuid ILIKE \$3\) AND \(u\.email IS NULL OR u\.email <> \$4\)/);
+    expect(values.slice(0, 4)).toEqual(['%Bob%', '%Bob%', '%Bob%', 'system@workadventure.local']);
+  });
+
+  it('never lists the System account, not even for super admins or the admin token', async () => {
+    for (const as of ['root', 'admin-token', 'alice'] as const) {
+      db.user.count.mockClear();
+      db.$queryRaw.mockClear();
+      await GET(request('', as));
+      expect(db.user.count.mock.calls[0][0].where).toEqual({ AND: [{}, { OR: [{ email: null }, { email: { not: 'system@workadventure.local' } }] }] });
+      const { sql, values } = pageQuery();
+      expect(sql).toMatch(/WHERE \(u\.email IS NULL OR u\.email <> \$1\)/);
+      expect(values[0]).toBe('system@workadventure.local');
+    }
   });
 
   it('non-privileged viewers: no email in results, no searching by email, no system account', async () => {
@@ -195,16 +211,23 @@ describe('GET /api/admin/users', () => {
     expect(db.user.count.mock.calls[0][0].where).toEqual({
       AND: [
         {
-          OR: [
-            { name: { contains: 'Bo', mode: 'insensitive' } },
-            { email: { contains: 'Bo', mode: 'insensitive' } },
-            { uuid: { contains: 'Bo', mode: 'insensitive' } },
+          AND: [
+            {
+              OR: [
+                { name: { contains: 'Bo', mode: 'insensitive' } },
+                { email: { contains: 'Bo', mode: 'insensitive' } },
+                { uuid: { contains: 'Bo', mode: 'insensitive' } },
+              ],
+            },
+            { OR: [{ email: null }, { email: { not: 'system@workadventure.local' } }] },
           ],
         },
         { isGuest: false },
       ],
     });
-    expect(pageQuery().sql).toMatch(/WHERE \(u\.name ILIKE \$1 OR u\.email ILIKE \$2 OR u\.uuid ILIKE \$3\) AND u\.is_guest = false\s/);
+    expect(pageQuery().sql).toMatch(
+      /WHERE \(u\.name ILIKE \$1 OR u\.email ILIKE \$2 OR u\.uuid ILIKE \$3\) AND \(u\.email IS NULL OR u\.email <> \$4\) AND u\.is_guest = false\s/,
+    );
   });
 
   it('guests=exclude also applies for non-privileged viewers, with no search', async () => {
@@ -221,9 +244,9 @@ describe('GET /api/admin/users', () => {
       db.user.count.mockClear();
       db.$queryRaw.mockClear();
       await GET(request(query, 'root'));
-      expect(db.user.count.mock.calls[0][0].where).toEqual({});
+      expect(db.user.count.mock.calls[0][0].where).toEqual({ AND: [{}, { OR: [{ email: null }, { email: { not: 'system@workadventure.local' } }] }] });
       expect(pageQuery().sql).not.toMatch(/is_guest/);
-      expect(pageQuery().sql).toMatch(/FROM users u\s+\)/);
+      expect(pageQuery().sql).toMatch(/FROM users u WHERE \(u\.email IS NULL OR u\.email <> \$1\)\s+\)/);
     }
   });
 

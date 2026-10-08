@@ -12,7 +12,9 @@ export function cn(...inputs: ClassValue[]) {
  */
 export function parsePlayUri(playUri: string): { universe: string; world: string; room: string; domain: string } {
   const url = new URL(playUri);
-  const pathParts = url.pathname.split('/').filter(Boolean);
+  // The URL keeps non-ASCII slugs percent-encoded; the database has them as written. A malformed
+  // %-sequence throws, like any other address that isn't a room.
+  const pathParts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
   
   // Format: /@/universeSlug/worldSlug/roomSlug
   if (pathParts.length >= 4 && pathParts[0] === '@') {

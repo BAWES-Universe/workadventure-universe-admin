@@ -36,6 +36,17 @@ describe('Wokas for avatars', () => {
     expect(redacted).toEqual({ id: 'visit-3' });
   });
 
+  it("gives a guest the outfit saved with their visit, and the stand-in when it is missing or can't be drawn", async () => {
+    const [own, none, broken] = await withWokas([
+      { id: 'v1', userId: null, userUuid: 'g1', isGuest: true, textureIds: ['signed'] },
+      { id: 'v2', userId: null, userUuid: 'g2', isGuest: true, textureIds: [] },
+      { id: 'v3', userId: null, userUuid: 'g3', isGuest: true, textureIds: ['signed', 'no-such-layer'] },
+    ]);
+    expect(own.woka).toEqual(['https://cdn.example.com/w/a.png?sig=abc&v=2']);
+    expect(none.woka).toEqual(defaultWoka('g2'));
+    expect(broken.woka).toEqual(defaultWoka('g3'));
+  });
+
   it('keeps signed addresses whole, and uses the default Woka when a layer is missing', async () => {
     const wokas = await wokaLayersForMany(['u3', 'u4']);
     expect(wokas.get('u3')).toEqual(['https://cdn.example.com/w/a.png?sig=abc&v=2']);

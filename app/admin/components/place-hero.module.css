@@ -1,0 +1,86 @@
+/* The approved v11 top card for a universe, world or room page: one card that says what the place is, who is there
+   now and what you can do. Its edge and planet take the kind's colour. */
+.hero { --accent: var(--kind-universe-solid); position: relative; isolation: isolate; overflow: hidden; display: grid; gap: 16px; padding: 24px 20px 20px; border-radius: 24px; border: 1px solid color-mix(in srgb, var(--accent) 38%, transparent); background: radial-gradient(120% 90% at 100% 0%, color-mix(in srgb, var(--accent) 16%, transparent), transparent 60%), hsl(var(--card)); max-width: 980px; }
+.hero[data-kind='world'] { --accent: var(--kind-world-solid); }
+.hero[data-kind='room'] { --accent: var(--kind-room-solid); }
+@media (min-width: 768px) { .hero { padding: 30px 30px 24px; } }
+.planet { position: absolute; z-index: -1; top: -6px; right: -36px; width: 190px; height: 136px; color: var(--accent); opacity: .9; pointer-events: none; }
+@media (min-width: 768px) { .planet { right: 12px; top: 6px; } }
+.eyebrow { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; color: hsl(var(--muted-foreground)); }
+.eyebrow svg { color: var(--accent); }
+.title { margin: 0; font-family: var(--font-display); font-size: clamp(32px, 9vw, 44px); font-weight: 700; letter-spacing: -.03em; line-height: 1.05; overflow-wrap: anywhere; padding-right: 64px; }
+.context { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; font-size: 14px; }
+.context a { font-weight: 600; text-decoration: underline; text-decoration-color: hsl(var(--foreground) / .35); text-underline-offset: 4px; }
+.by { display: inline-flex; align-items: center; gap: 8px; color: hsl(var(--muted-foreground)); }
+.by strong { color: hsl(var(--foreground)); font-weight: 600; }
+.crumb { display: inline-flex; align-items: center; gap: 6px; }
+.crumb svg.u { color: var(--kind-universe-solid); }
+.crumb svg.w { color: var(--kind-world-solid); }
+.description { margin: 0; max-width: 60ch; font-size: 16px; line-height: 1.55; color: hsl(var(--foreground) / .9); white-space: pre-line; }
+.stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 16px; margin: 4px 0 0; max-width: 640px; }
+@media (min-width: 768px) { .stats { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+.stat { display: grid; gap: 2px; min-width: 0; }
+.stat dd { margin: 0; order: -1; font-family: var(--font-display); font-size: 30px; font-weight: 700; letter-spacing: -.02em; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.stat dt { font-size: 14px; color: hsl(var(--muted-foreground)); }
+.stat[data-live='true'] dd { color: var(--status-live); }
+.statLink { display: grid; gap: 2px; min-height: 44px; margin: -4px; padding: 4px; border-radius: 12px; }
+.statLink:hover { background: hsl(var(--foreground) / .05); }
+.rank { justify-self: start; display: inline-flex; align-items: center; gap: 8px; min-height: 36px; padding: 6px 14px; border-radius: 999px; border: 1px solid rgb(251 191 36 / .45); background: rgb(251 191 36 / .08); font-size: 13px; font-weight: 600; }
+.rank b { color: var(--brand-gold, #fbbf24); }
+.here { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; font-size: 14px; }
+.faces { display: flex; }
+.faces > * { margin-left: -6px; box-shadow: 0 0 0 2px hsl(var(--card)); border-radius: 50%; }
+.faces > *:first-child { margin-left: 0; }
+.more { font-size: 12px; color: hsl(var(--muted-foreground)); }
+.actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.actions :global(button), .actions :global(a) { min-height: 48px; }
+.manage { display: grid; gap: 10px; padding-top: 14px; border-top: 1px solid hsl(var(--border)); }
+.manage p { margin: 0; font-size: 13px; color: hsl(var(--muted-foreground)); }
+.badge { display: inline-flex; align-items: center; justify-content: center; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; background: var(--brand-gradient); color: #fff; font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums; }
+
+/* Room rows (world page, universe page) */
+.rows { display: grid; gap: 10px; }
+.row { display: flex; align-items: center; gap: 14px; min-height: 72px; padding: 12px 12px 12px 16px; border-radius: 18px; border: 1px solid hsl(var(--border)); background: hsl(var(--card)); }
+.row:hover { border-color: hsl(var(--foreground) / .22); }
+.rowIcon { flex: none; color: var(--kind-room-solid); }
+.rowMain { display: grid; gap: 4px; min-width: 0; flex: 1; }
+.rowName { font-size: 16px; font-weight: 600; overflow-wrap: anywhere; }
+.rowName::after { content: ''; position: absolute; inset: 0; }
+.rowLink { position: relative; display: contents; }
+.rowSub { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 13px; color: hsl(var(--muted-foreground)); }
+.live { display: inline-flex; align-items: center; gap: 6px; color: hsl(var(--foreground)); font-weight: 600; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--status-live); box-shadow: 0 0 0 3px rgb(34 197 94 / .18); }
+.tiny { display: inline-flex; }
+.tiny > * { margin-left: -4px; }
+.rowEnd { display: flex; align-items: center; gap: 12px; flex: none; position: relative; z-index: 1; }
+.stars { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; color: hsl(var(--muted-foreground)); font-variant-numeric: tabular-nums; }
+.stars svg { color: var(--kind-star-solid); }
+.youHere { font-size: 14px; font-weight: 700; color: #a78bfa; padding-right: 4px; }
+.visit { display: inline-flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 16px; border-radius: 999px; border: 1px solid hsl(var(--foreground) / .18); font-size: 14px; font-weight: 600; background: hsl(var(--background) / .35); }
+.visit:hover { background: hsl(var(--foreground) / .06); }
+.addRoom { justify-self: start; display: inline-flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 16px; border-radius: 999px; border: 1px solid hsl(var(--foreground) / .18); font-size: 13px; font-weight: 600; }
+
+/* Worlds on a universe page: a group per world, two columns on a wide screen. */
+.groups { display: grid; gap: 22px; }
+@media (min-width: 1024px) { .groups { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; } }
+.group { display: grid; gap: 10px; min-width: 0; }
+.groupHead { display: flex; align-items: center; gap: 10px; min-height: 44px; }
+.groupHead > a { display: inline-flex; align-items: baseline; gap: 10px; min-width: 0; flex: 1; }
+.groupHead svg.w { color: var(--kind-world-solid); flex: none; align-self: center; }
+.groupHead strong { font-family: var(--font-display); font-size: 19px; font-weight: 700; }
+.groupHead span { font-size: 13px; color: hsl(var(--muted-foreground)); }
+
+/* Also in this world, on a room page: cards that swipe on a phone and sit in a grid on a wide screen. */
+.siblings { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(260px, 78%); gap: 12px; overflow-x: auto; margin-right: -16px; padding-right: 16px; scrollbar-width: none; }
+@media (min-width: 768px) { .siblings { grid-auto-flow: row; grid-template-columns: repeat(3, minmax(0, 1fr)); overflow: visible; margin-right: 0; padding-right: 0; } }
+.sib { display: grid; gap: 8px; align-content: start; padding: 16px; border-radius: 18px; border: 1px solid hsl(var(--border)); background: hsl(var(--card)); }
+.sibTop { display: flex; justify-content: flex-end; min-height: 18px; }
+.sibName { display: flex; align-items: center; gap: 10px; font-family: var(--font-display); font-size: 19px; font-weight: 700; }
+.sibName svg { color: var(--kind-room-solid); flex: none; }
+.sibDesc { margin: 0; font-size: 14px; color: hsl(var(--muted-foreground)); min-height: 1.4em; }
+.sibFoot { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-top: 10px; border-top: 1px solid hsl(var(--border)); }
+.sibFoot p { margin: 0; font-size: 13px; color: hsl(var(--muted-foreground)); line-height: 1.5; }
+.head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 44px; margin-bottom: 12px; }
+.head h2 { margin: 0; font-family: var(--font-display); font-size: 20px; font-weight: 700; }
+.head h2 span { margin-left: 6px; font-size: 14px; font-weight: 600; color: hsl(var(--muted-foreground)); }
+

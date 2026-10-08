@@ -38,6 +38,7 @@ import { ChevronLeft, ChevronRight, Loader2, Edit, Trash2, AlertCircle, External
 import { ImageUpload } from '@/components/templates/ImageUpload';
 import { Context, EmptyCard, EntityRow, InContext, LoadError, LoadingRows, PageHeader, SectionHeader, SettingSwitch, Settings, StatLine, VisitLine, count } from '../../../components/ds';
 import { FactPill, InactivePill } from '../../components/template-bits';
+import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
 interface TemplateMap {
   id: string;
@@ -157,6 +158,7 @@ function RoomRow({ room, analytics }: { room: Room; analytics?: RoomAnalytics })
 
 export default function MapDetailPage() {
   const router = useRouter();
+  const replacePage = useReplacePage();
   const params = useParams();
   const [map, setMap] = useState<TemplateMap | null>(null);
   const [loading, setLoading] = useState(true);
@@ -212,6 +214,11 @@ export default function MapDetailPage() {
     }
   }, [roomsPage, roomsSortBy]);
 
+  // A new create-room dialog starts with no world picked
+  useEffect(() => {
+    if (isCreateRoomDialogOpen) setSelectedWorldId('');
+  }, [isCreateRoomDialogOpen]);
+
   // Reset formData when edit dialog opens
   useEffect(() => {
     if (isEditDialogOpen && map) {
@@ -259,7 +266,7 @@ export default function MapDetailPage() {
         
         if (!response.ok) {
           if (response.status === 404) {
-            router.push('/admin/templates');
+            replacePage('/admin/templates');
             return;
           }
           throw new Error('Failed to fetch map');
@@ -294,7 +301,7 @@ export default function MapDetailPage() {
         }
         
         if (!foundMap) {
-          router.push('/admin/templates');
+          replacePage('/admin/templates');
           return;
         }
         
@@ -444,7 +451,7 @@ export default function MapDetailPage() {
         throw new Error(data.error || 'Failed to delete map');
       }
 
-      router.push(map.template?.id ? `/admin/templates/templates/${map.template.id}` : '/admin/templates');
+      replacePage(map.template?.id ? `/admin/templates/templates/${map.template.id}` : '/admin/templates');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to delete map');
       setIsDeleteDialogOpen(false);

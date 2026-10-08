@@ -16,6 +16,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Card, CardContent } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { AlertCircle, Loader2 } from 'lucide-react';
+import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
 interface User {
   id: string;
@@ -39,6 +40,7 @@ const upgradeUniverseDraft = (saved: unknown) => upgradeFormDraft(saved, EMPTY_U
 
 function NewUniversePageContent() {
   const router = useRouter();
+  const replacePage = useReplacePage();
   const searchParams = useSearchParams();
   // Came from "create a world" with no universe yet: go on to the world once this universe exists.
   const nextWorld = searchParams.get('next') === 'world';
@@ -148,7 +150,7 @@ function NewUniversePageContent() {
 
       const universe = await response.json();
       discardDraft();
-      router.push(
+      replacePage(
         nextWorld ? `/admin/worlds/new?universeId=${encodeURIComponent(universe.id)}` : `/admin/universes/${universe.id}`,
       );
     } catch (err) {
@@ -273,7 +275,9 @@ function NewUniversePageContent() {
 
             <div className="flex flex-col-reverse gap-3 pt-2 sm:flex-row sm:justify-end">
               <Button type="button" variant="outline" className="h-11" asChild>
-                <Link href="/admin/universes">Cancel</Link>
+                <Link href="/admin/universes" onClick={discardDraft}>
+                  Cancel
+                </Link>
               </Button>
               <Button type="submit" className="h-11" disabled={loading}>
                 {loading ? (

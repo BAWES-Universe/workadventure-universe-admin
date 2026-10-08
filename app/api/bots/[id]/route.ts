@@ -3,9 +3,12 @@ import { requireAuth } from '@/lib/auth';
 import { getSessionUser } from '@/lib/auth-session';
 import { prisma } from '@/lib/db';
 import { canManageBots } from '@/lib/bot-permissions';
+import { mayReadRoomBots } from '@/lib/bot-room-access';
 import { validateAccessToken } from '@/lib/oidc';
 import { parsePlayUri } from '@/lib/utils';
 import { z } from 'zod';
+import { checkAiProviderRef } from '@/lib/ai-provider-ref';
+import { toolTimeoutSecondsSchema } from '@/lib/bot-tool-timeout';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Prisma
 export const runtime = 'nodejs';
@@ -105,6 +108,8 @@ const updateBotSchema = z.object({
   chatInstructions: z.string().optional().nullable(),
   movementInstructions: z.string().optional().nullable(),
   aiProviderRef: z.string().max(100, 'aiProviderRef must be at most 100 characters').optional().nullable(),
+  toolTimeoutSeconds: toolTimeoutSecondsSchema,
+  companionTextureId: z.string().max(100, 'companionTextureId must be at most 100 characters').optional().nullable(),
 });
 
 // Helper function to transform bot data from database to API response (snake_case to camelCase)
@@ -121,20 +126,21 @@ function transformBot(bot: any) {
     chatInstructions: bot.chatInstructions,
     movementInstructions: bot.movementInstructions,
     aiProviderRef: bot.aiProviderRef,
+    toolTimeoutSeconds: bot.toolTimeoutSeconds ?? null,
+    companionTextureId: bot.companionTextureId ?? null,
     createdAt: bot.createdAt,
     updatedAt: bot.updatedAt,
+    // Who made or last changed a bot is shown by name only: people's emails are private
     ...(bot.createdBy && {
       createdBy: {
         id: bot.createdBy.id,
         name: bot.createdBy.name,
-        email: bot.createdBy.email,
       },
     }),
     ...(bot.updatedBy && {
       updatedBy: {
         id: bot.updatedBy.id,
         name: bot.updatedBy.name,
-        email: bot.updatedBy.email,
       },
     }),
     ...(bot.room && {
@@ -184,36 +190,23 @@ export async function GET(
                   select: {
                     id: true,
                     isPublic: true,
+                    ownerId: true,
                   },
                 },
               },
             },
-          },
-          select: {
-            id: true,
-            worldId: true,
-            slug: true,
-            name: true,
-            description: true,
-            mapUrl: true,
-            wamUrl: true,
-            isPublic: true,
-            createdAt: true,
-            updatedAt: true,
           },
         },
         createdBy: {
           select: {
             id: true,
             name: true,
-            email: true,
           },
         },
         updatedBy: {
           select: {
             id: true,
             name: true,
-            email: true,
           },
         },
       },
@@ -238,6 +231,19 @@ export async function GET(
       const response = NextResponse.json(
         { error: 'Unauthorized' },
         { status: 401 }
+      );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
+    }
+
+    // A members-only room's bots are for the people who may see the room. The bot server's admin token keeps full access.
+    if (!isPublic && !isAdminToken && userId && !(await mayReadRoomBots(bot.room, userId))) {
+      // The same answer as for a bot that does not exist, so a stranger learns nothing about it
+      const response = NextResponse.json(
+        { error: 'Bot not found' },
+        { status: 404 }
       );
       Object.entries(corsHeaders()).forEach(([key, value]) => {
         response.headers.set(key, value);
@@ -429,6 +435,21 @@ export async function PUT(
       }
     }
 
+    // The provider ref must name an existing provider (an unchanged ref is let through)
+    if (validatedData.aiProviderRef) {
+      const providerError = await checkAiProviderRef(validatedData.aiProviderRef, existingBot.aiProviderRef);
+      if (providerError) {
+      const response = NextResponse.json(
+        { error: providerError },
+        { status: 400 }
+      );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
+      }
+    }
+
     // Prepare update data (only include fields that were provided)
     const updateData: any = {};
     if (resolvedRoomId !== undefined) updateData.roomId = resolvedRoomId;
@@ -441,6 +462,8 @@ export async function PUT(
     if (validatedData.chatInstructions !== undefined) updateData.chatInstructions = validatedData.chatInstructions;
     if (validatedData.movementInstructions !== undefined) updateData.movementInstructions = validatedData.movementInstructions;
     if (validatedData.aiProviderRef !== undefined) updateData.aiProviderRef = validatedData.aiProviderRef;
+    if (validatedData.toolTimeoutSeconds !== undefined) updateData.toolTimeoutSeconds = validatedData.toolTimeoutSeconds;
+    if (validatedData.companionTextureId !== undefined) updateData.companionTextureId = validatedData.companionTextureId;
 
     // Update bot (updatedAt is automatically updated by Prisma)
     // Always update updatedById when any field changes
@@ -470,14 +493,12 @@ export async function PUT(
           select: {
             id: true,
             name: true,
-            email: true,
           },
         },
         updatedBy: {
           select: {
             id: true,
             name: true,
-            email: true,
           },
         },
       },
@@ -590,10 +611,21 @@ export async function DELETE(
       }
     }
 
-    // Delete bot
-    await prisma.bot.delete({
+    // Delete bot. deleteMany, not delete: when two deletes of the same bot overlap (a double tap), the second finds
+    // nothing left to delete; that is "not found", not a server error.
+    const { count } = await prisma.bot.deleteMany({
       where: { id },
     });
+    if (count === 0) {
+      const response = NextResponse.json(
+        { error: 'Bot not found' },
+        { status: 404 }
+      );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
+    }
 
     // Return 204 No Content on success
     const response = new NextResponse(null, { status: 204 });

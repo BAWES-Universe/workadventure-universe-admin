@@ -15,6 +15,9 @@ jest.mock('@/lib/db', () => ({
       findFirst: jest.fn(),
       create: jest.fn(),
     },
+    botsAiProvider: {
+      findUnique: jest.fn(),
+    },
   },
 }));
 
@@ -73,6 +76,49 @@ describe('/api/bots/configuration', () => {
     (prisma.bot.create as jest.Mock).mockResolvedValue({ id: 'bot-1', name: 'Test Bot' });
     (prisma.bot.update as jest.Mock).mockResolvedValue({ id: 'bot-1', name: 'Test Bot' });
     (prisma.bot.findUnique as jest.Mock).mockResolvedValue({ behaviorConfig: null });
+    (prisma.botsAiProvider.findUnique as jest.Mock).mockResolvedValue({ providerId: 'openai' });
+  });
+
+  describe('AI provider reference check', () => {
+    it('rejects creating a bot with a provider that does not exist (400)', async () => {
+      (prisma.botsAiProvider.findUnique as jest.Mock).mockResolvedValueOnce(null);
+
+      const response = await POST(configRequest({ ...validBody, aiProviderRef: 'not-a-provider' }));
+
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toBe('AI provider "not-a-provider" does not exist');
+      expect(prisma.bot.create).not.toHaveBeenCalled();
+    });
+
+    it('creates a bot whose provider exists', async () => {
+      const response = await POST(configRequest({ ...validBody, aiProviderRef: 'openai' }));
+
+      expect(response.status).toBe(201);
+      expect((prisma.bot.create as jest.Mock).mock.calls[0][0].data.aiProviderRef).toBe('openai');
+    });
+
+    it('rejects switching an existing bot to a provider that does not exist (400)', async () => {
+      (prisma.bot.findUnique as jest.Mock).mockResolvedValue({ aiProviderRef: 'openai', behaviorConfig: null });
+      (prisma.botsAiProvider.findUnique as jest.Mock).mockResolvedValueOnce(null);
+
+      const response = await POST(
+        configRequest({ ...validBody, botId: '00000000-0000-4000-8000-000000000001', aiProviderRef: 'missing' })
+      );
+
+      expect(response.status).toBe(400);
+      expect(prisma.bot.update).not.toHaveBeenCalled();
+    });
+
+    it('saves an existing bot whose unchanged provider was deleted', async () => {
+      (prisma.bot.findUnique as jest.Mock).mockResolvedValue({ aiProviderRef: 'gone', behaviorConfig: null });
+
+      const response = await POST(
+        configRequest({ ...validBody, botId: '00000000-0000-4000-8000-000000000001', aiProviderRef: 'gone' })
+      );
+
+      expect(response.status).toBe(200);
+      expect(prisma.botsAiProvider.findUnique).not.toHaveBeenCalled();
+    });
   });
 
   describe('legacy vision fallback fields (create)', () => {
@@ -284,6 +330,88 @@ describe('/api/bots/configuration', () => {
       const data = (prisma.bot.update as jest.Mock).mock.calls[0][0].data;
       expect(data.behaviorConfig.assignedSpace.radius).toBe(2);
       expect(data.behaviorConfig.assignedSpace.center).toEqual({ x: 5, y: 5 });
+    });
+  });
+
+  describe('tool timeout (Patience)', () => {
+    const botId = '00000000-0000-4000-8000-000000000001';
+
+    it('saves the tool timeout on create', async () => {
+      const response = await POST(configRequest({ ...validBody, toolTimeoutSeconds: 180 }));
+
+      expect(response.status).toBe(201);
+      const data = (prisma.bot.create as jest.Mock).mock.calls[0][0].data;
+      expect(data.toolTimeoutSeconds).toBe(180);
+    });
+
+    it('stores null on create when no tool timeout is given, so the default applies', async () => {
+      await POST(configRequest(validBody));
+
+      const data = (prisma.bot.create as jest.Mock).mock.calls[0][0].data;
+      expect(data.toolTimeoutSeconds).toBeNull();
+    });
+
+    it('keeps the saved tool timeout when an update omits it', async () => {
+      await POST(configRequest({ ...validBody, botId }));
+
+      const data = (prisma.bot.update as jest.Mock).mock.calls[0][0].data;
+      expect(data.toolTimeoutSeconds).toBeUndefined();
+    });
+
+    it('updates and clears the tool timeout', async () => {
+      await POST(configRequest({ ...validBody, botId, toolTimeoutSeconds: 15 }));
+      expect((prisma.bot.update as jest.Mock).mock.calls[0][0].data.toolTimeoutSeconds).toBe(15);
+
+      await POST(configRequest({ ...validBody, botId, toolTimeoutSeconds: null }));
+      expect((prisma.bot.update as jest.Mock).mock.calls[1][0].data.toolTimeoutSeconds).toBeNull();
+    });
+
+    it.each([0, 4, 601, 30.5, '90'])('rejects an invalid tool timeout (%p)', async (value) => {
+      const response = await POST(configRequest({ ...validBody, toolTimeoutSeconds: value }));
+
+      expect(response.status).toBe(400);
+      expect(prisma.bot.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('companion', () => {
+    const botId = '00000000-0000-4000-8000-000000000001';
+
+    it('saves the companion on create', async () => {
+      const response = await POST(configRequest({ ...validBody, companionTextureId: 'dog1' }));
+
+      expect(response.status).toBe(201);
+      const data = (prisma.bot.create as jest.Mock).mock.calls[0][0].data;
+      expect(data.companionTextureId).toBe('dog1');
+    });
+
+    it('stores null on create when no companion is given', async () => {
+      await POST(configRequest(validBody));
+
+      const data = (prisma.bot.create as jest.Mock).mock.calls[0][0].data;
+      expect(data.companionTextureId).toBeNull();
+    });
+
+    it('keeps the saved companion when an update omits it', async () => {
+      await POST(configRequest({ ...validBody, botId }));
+
+      const data = (prisma.bot.update as jest.Mock).mock.calls[0][0].data;
+      expect(data.companionTextureId).toBeUndefined();
+    });
+
+    it('updates and clears the companion', async () => {
+      await POST(configRequest({ ...validBody, botId, companionTextureId: 'cat2' }));
+      expect((prisma.bot.update as jest.Mock).mock.calls[0][0].data.companionTextureId).toBe('cat2');
+
+      await POST(configRequest({ ...validBody, botId, companionTextureId: null }));
+      expect((prisma.bot.update as jest.Mock).mock.calls[1][0].data.companionTextureId).toBeNull();
+    });
+
+    it('rejects a companion id longer than 100 characters', async () => {
+      const response = await POST(configRequest({ ...validBody, companionTextureId: 'x'.repeat(101) }));
+
+      expect(response.status).toBe(400);
+      expect(prisma.bot.create).not.toHaveBeenCalled();
     });
   });
 

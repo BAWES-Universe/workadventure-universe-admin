@@ -83,6 +83,8 @@ export async function GET(
       ? await prisma.favorite.groupBy({
           by: ['worldId'],
           where: {
+            // Stars on the place itself are counted apart; this is its rooms' stars.
+            roomId: { not: null },
             worldId: { in: worldIds },
           },
           _count: {
@@ -95,6 +97,18 @@ export async function GET(
       favoritesByWorld.map((fb) => [fb.worldId!, fb._count.id])
     );
 
+    // Stars on the universe and on each world themselves (their rooms' stars are counted above and on the rooms).
+    const [universeStarCount, worldStarRows, yourUniverseStar] = await Promise.all([
+      prisma.favorite.count({ where: { universeId: universe.id, worldId: null, roomId: null } }),
+      worldIds.length > 0
+        ? prisma.favorite.groupBy({ by: ['worldId'], where: { worldId: { in: worldIds }, roomId: null }, _count: { id: true } })
+        : Promise.resolve([] as { worldId: string | null; _count: { id: number } }[]),
+      userId
+        ? prisma.favorite.findFirst({ where: { userId, universeId: universe.id, worldId: null, roomId: null }, select: { id: true } })
+        : Promise.resolve(null),
+    ]);
+    const worldStarCounts = new Map(worldStarRows.map((row) => [row.worldId!, row._count.id]));
+
     // Add favorites count to each world
     const worldsWithFavorites = visibleWorlds.map((world) => ({
       ...world,
@@ -102,6 +116,7 @@ export async function GET(
         ...world._count,
         favorites: favoritesCountMap.get(world.id) || 0,
       },
+      starCount: worldStarCounts.get(world.id) || 0,
     }));
 
     const canEdit = isAdminToken || (userId !== null && universe.ownerId === userId);
@@ -120,6 +135,8 @@ export async function GET(
       owner,
       worlds: worldsWithFavorites,
       canEdit,
+      starCount: universeStarCount,
+      isStarred: !!yourUniverseStar,
     };
     
     return NextResponse.json(responseData);

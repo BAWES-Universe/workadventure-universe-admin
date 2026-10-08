@@ -29,8 +29,10 @@ beforeEach(() => {
 });
 
 describe('GET /api/admin/analytics/summaries', () => {
-  it('answers a whole list in four queries: totals, hour buckets, the latest visit and yours', async () => {
-    db.roomAccess.groupBy.mockResolvedValue([{ roomId: 'r1', _count: { _all: 12 } }]);
+  it('answers a whole list in a few queries: totals, this week, hour buckets, the latest visit and yours', async () => {
+    db.roomAccess.groupBy
+      .mockResolvedValueOnce([{ roomId: 'r1', _count: { _all: 12 } }])
+      .mockResolvedValueOnce([{ roomId: 'r1', _count: { _all: 5 } }]);
     const latest = new Date('2026-09-20T10:00:00Z');
     const mine = new Date('2026-09-19T08:00:00Z');
     db.$queryRaw
@@ -45,11 +47,15 @@ describe('GET /api/admin/analytics/summaries', () => {
     expect(response.status).toBe(200);
     const { summaries } = await response.json();
 
-    expect(db.roomAccess.groupBy).toHaveBeenCalledTimes(1);
+    expect(db.roomAccess.groupBy).toHaveBeenCalledTimes(2);
     expect(db.roomAccess.groupBy.mock.calls[0][0].where).toEqual({ roomId: { in: ['r1', 'r2'] } });
+    // The second asks only for the last 7 days.
+    expect(db.roomAccess.groupBy.mock.calls[1][0].where.roomId).toEqual({ in: ['r1', 'r2'] });
+    expect(db.roomAccess.groupBy.mock.calls[1][0].where.accessedAt.gte).toBeInstanceOf(Date);
     expect(db.$queryRaw).toHaveBeenCalledTimes(3);
     expect(summaries.r1).toEqual({
       totalAccesses: 12,
+      visitsThisWeek: 5,
       peakTimes: [
         { hour: 16, count: 10 },
         { hour: 3, count: 2 },
@@ -60,7 +66,7 @@ describe('GET /api/admin/analytics/summaries', () => {
       youWereLast: false,
     });
     // A place with no visits still gets an answer, with zeros.
-    expect(summaries.r2).toEqual({ totalAccesses: 0, peakTimes: [], lastVisitedByUser: null, lastVisitedOverall: null, youWereLast: false });
+    expect(summaries.r2).toEqual({ totalAccesses: 0, visitsThisWeek: 0, peakTimes: [], lastVisitedByUser: null, lastVisitedOverall: null, youWereLast: false });
   });
 
   it('says "you were last" by identity, and uses the column for the kind asked', async () => {

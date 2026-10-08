@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
 import { parsePlayUri } from '@/lib/utils';
+import { hiddenSystemOwnerId } from '@/lib/system-user';
 
 // GET /api/admin/rooms/from-play-uri?playUri=<full_play_url>
 export async function GET(request: NextRequest) {
@@ -63,6 +64,7 @@ export async function GET(request: NextRequest) {
             id: true,
             name: true,
             slug: true,
+            ownerId: true,
           },
         },
       },
@@ -111,7 +113,9 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    return NextResponse.json(room);
+    // It still resolves by link; Home just says it isn't listed anywhere once System's spaces are hidden.
+    const hidden = await hiddenSystemOwnerId();
+    return NextResponse.json(hidden && world.universe.ownerId === hidden ? { ...room, unlisted: true } : room);
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized') {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });

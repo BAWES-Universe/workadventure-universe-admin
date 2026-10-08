@@ -29,14 +29,15 @@ export type FetchMemberDataByUuidResponse =
   | FetchMemberDataByUuidSuccessResponse 
   | ErrorApiData;
 
+/** A member as the game reads it (its MemberData): `id` is the user's uuid; name and email are null when missing. */
 export interface MemberData {
-  uuid: string;
-  name?: string;
-  email?: string;
+  id: string;
+  name: string | null;
+  email: string | null;
   tags?: string[];
-  texture?: string;
   visitCardUrl?: string | null;
   chatID?: string | null; // Matrix chat ID (capital ID for WorkAdventure compatibility)
+  characterTextures?: { id: string; url: string }[]; // the member's Woka, so game pickers can show it
 }
 
 export interface AdminApiData {

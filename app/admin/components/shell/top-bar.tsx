@@ -8,7 +8,8 @@ import { ShortcutHint } from './shortcut-hint';
 /**
  * The bar at the top of every page, at the frame's top-left beside the game's own close and maximise buttons.
  * On Orbit, Space and You it is the "Orbit Menu" button; on every other page it is Back alone, named after where it
- * goes. The page carries its own heading, so the bar doesn't repeat it. The game's maximise button changes the view; Orbit
+ * goes. The page carries its own heading, so the bar doesn't repeat it; on the wide layout, where the rail holds the menu,
+ * Orbit, Space and You are named in the bar instead. The game's maximise button changes the view; Orbit
  * has none of its own. In the full-screen view the game's buttons sit over Orbit's top-right corner, so the bar
  * leaves that corner free.
  */
@@ -24,24 +25,34 @@ export function TopBar({ isSuperAdmin = false }: { isSuperAdmin?: boolean }) {
     >
       <div className="@container/bar relative flex h-full items-center gap-2 px-2 sm:px-3">
         {isRoot ? (
-          <button
-            type="button"
-            onClick={() => setMenuOpen(!menuOpen)}
-            aria-expanded={menuOpen}
-            aria-controls="orbit-menu"
-            aria-keyshortcuts="Control+K Meta+K"
-            className="orbit-press relative inline-flex h-11 shrink-0 items-center gap-2 rounded-full border border-foreground/15 pl-3 pr-4 text-sm font-semibold transition-colors hover:border-foreground/30 hover:bg-foreground/5 lg:hidden"
-            data-testid="orbit-menu-button"
-          >
-            <Menu className="h-[18px] w-[18px]" aria-hidden="true" />
-            Orbit Menu
-            <ShortcutHint placement="beside" />
-          </button>
+          <>
+            <button
+              type="button"
+              onClick={() => setMenuOpen(!menuOpen)}
+              aria-expanded={menuOpen}
+              aria-controls="orbit-menu"
+              aria-keyshortcuts="Control+K Meta+K"
+              className="orbit-press relative inline-flex h-12 shrink-0 items-center gap-2 rounded-full border border-foreground/15 pl-3 pr-4 text-sm font-semibold transition-colors hover:border-foreground/30 hover:bg-foreground/5 lg:hidden"
+              data-testid="orbit-menu-button"
+            >
+              <Menu className="h-[18px] w-[18px]" aria-hidden="true" />
+              Orbit Menu
+              <ShortcutHint placement="beside" />
+            </button>
+            {/* The page's own heading is for screen readers; this is the same name, seen. */}
+            <span
+              className="hidden truncate pl-3 font-[family-name:var(--font-display)] text-[22px] font-bold tracking-tight lg:inline"
+              aria-hidden="true"
+              data-testid="orbit-title"
+            >
+              {route.title}
+            </span>
+          </>
         ) : (
           <button
             type="button"
             onClick={goBack}
-            className="orbit-press inline-flex h-11 min-w-0 max-w-full shrink items-center gap-0.5 rounded-full border border-foreground/15 pl-1.5 pr-4 text-foreground transition-colors hover:border-foreground/30 hover:bg-foreground/5"
+            className="orbit-press inline-flex h-12 min-w-0 max-w-full shrink items-center gap-0.5 rounded-full border border-foreground/15 pl-1.5 pr-4 text-foreground transition-colors hover:border-foreground/30 hover:bg-foreground/5"
             data-testid="orbit-back"
           >
             <ChevronLeft className="h-5 w-5 shrink-0" strokeWidth={2.75} aria-hidden="true" />

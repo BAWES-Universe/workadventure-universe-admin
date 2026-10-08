@@ -18,9 +18,9 @@ jest.mock('next/link', () => ({
 }));
 
 let search = new URLSearchParams();
-const push = jest.fn();
+const replace = jest.fn();
 jest.mock('next/navigation', () => ({
-  useRouter: () => ({ push, replace: jest.fn(), back: jest.fn(), prefetch: jest.fn() }),
+  useRouter: () => ({ push: jest.fn(), replace, back: jest.fn(), prefetch: jest.fn() }),
   useSearchParams: () => search,
 }));
 
@@ -65,7 +65,7 @@ const UNIVERSE_B = { id: 'ub', name: 'Beta', slug: 'beta' };
 
 beforeEach(() => {
   fetchMock.mockReset();
-  push.mockReset();
+  replace.mockReset();
   search = new URLSearchParams();
   window.sessionStorage.clear();
 });
@@ -97,7 +97,7 @@ describe('New world without a universe in the address', () => {
     const create = screen.getByRole('button', { name: 'Create world' });
     expect((create as HTMLButtonElement).disabled).toBe(false);
     fireEvent.click(create);
-    await waitFor(() => expect(push).toHaveBeenCalledWith('/admin/worlds/new-id'));
+    await waitFor(() => expect(replace).toHaveBeenCalledWith('/admin/worlds/new-id'));
     expect(posted('/api/admin/worlds')).toMatchObject({ universeId: 'ua', name: 'Head Office', slug: 'head-office' });
     expect(posted('/api/admin/worlds')).not.toHaveProperty('addressEdited');
   });
@@ -112,7 +112,7 @@ describe('New world without a universe in the address', () => {
     fireEvent.click(beta);
     expect((beta as HTMLInputElement).checked).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: 'Create world' }));
-    await waitFor(() => expect(push).toHaveBeenCalled());
+    await waitFor(() => expect(replace).toHaveBeenCalled());
     expect(posted('/api/admin/worlds')).toMatchObject({ universeId: 'ub', slug: 'studio' });
   });
 
@@ -163,18 +163,18 @@ describe('New universe on the way to a world', () => {
     // The owner comes from /api/auth/me; wait until it's set before submitting.
     await new Promise((resolve) => setTimeout(resolve, 0));
     fireEvent.click(screen.getByRole('button', { name: 'Create universe' }));
-    await waitFor(() => expect(push).toHaveBeenCalled());
+    await waitFor(() => expect(replace).toHaveBeenCalled());
   }
 
   it('continues to the new world in it when asked to', async () => {
     search = new URLSearchParams('next=world');
     await create();
-    expect(push).toHaveBeenCalledWith('/admin/worlds/new?universeId=new-id');
+    expect(replace).toHaveBeenCalledWith('/admin/worlds/new?universeId=new-id');
   });
 
   it('otherwise opens the universe, as before', async () => {
     await create();
-    expect(push).toHaveBeenCalledWith('/admin/universes/new-id');
+    expect(replace).toHaveBeenCalledWith('/admin/universes/new-id');
     expect(posted('/api/admin/universes')).toMatchObject({ name: 'Mine', slug: 'mine', ownerId: 'me' });
   });
 });
@@ -326,6 +326,53 @@ describe('Creation drafts', () => {
     fireEvent.change(screen.getByLabelText(/Name/), { target: { value: 'Office Two' } });
     expect((screen.getByLabelText(/Address/) as HTMLInputElement).value).toBe('hq');
     await waitFor(() => expect(readDraft<{ addressEdited: boolean; v: number }>('world.new:ua')).toMatchObject({ addressEdited: true, v: 2 }));
+  });
+});
+
+describe('Cancel on a create form', () => {
+  const WORLD = { id: 'w1', name: 'Office', slug: 'office', universe: { id: 'ua', name: 'Alpha', slug: 'alpha' } };
+
+  async function typeThenCancel(draftKey: string) {
+    fireEvent.change(await screen.findByLabelText(/Name/), { target: { value: 'Members only' } });
+    await waitFor(() => expect(readDraft<{ name: string }>(draftKey)?.name).toBe('Members only'));
+    fireEvent.click(screen.getByRole('link', { name: 'Cancel' }));
+    expect(readDraft(draftKey)).toBeNull();
+  }
+
+  it('throws away a new world’s draft, so the page opens empty next time', async () => {
+    search = new URLSearchParams('universeId=ua');
+    route({ '/api/admin/universes': { universes: [UNIVERSE_A] } });
+    const { unmount } = render(<NewWorldPage />);
+    await typeThenCancel('world.new:ua');
+    unmount();
+    render(<NewWorldPage />);
+    await screen.findByLabelText(/Name/);
+    expect((screen.getByLabelText(/Name/) as HTMLInputElement).value).toBe('');
+    expect(screen.queryByTestId('draft-notice')).toBeNull();
+  });
+
+  it('throws away a new universe’s draft', async () => {
+    route({});
+    render(<NewUniversePage />);
+    await typeThenCancel('universe.new');
+  });
+
+  it('throws away a new room’s draft', async () => {
+    search = new URLSearchParams('worldId=w1');
+    route({ '/api/admin/worlds/w1': WORLD });
+    render(<NewRoomPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Custom map (advanced)' }));
+    await typeThenCancel('room.new:w1');
+  });
+
+  it('leaving any other way still keeps the draft', async () => {
+    search = new URLSearchParams('universeId=ua');
+    route({ '/api/admin/universes': { universes: [UNIVERSE_A] } });
+    const { unmount } = render(<NewWorldPage />);
+    fireEvent.change(await screen.findByLabelText(/Name/), { target: { value: 'Members only' } });
+    await waitFor(() => expect(readDraft<{ name: string }>('world.new:ua')?.name).toBe('Members only'));
+    unmount();
+    expect(readDraft<{ name: string }>('world.new:ua')?.name).toBe('Members only');
   });
 });
 

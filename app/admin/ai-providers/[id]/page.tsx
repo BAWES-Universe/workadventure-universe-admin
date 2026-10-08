@@ -1,7 +1,6 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
 import type { ReactNode } from 'react';
 import { Button } from '@/components/ui/button';
 import { Alert, AlertDescription } from '@/components/ui/alert';
@@ -10,6 +9,7 @@ import AuthLink from '@/app/admin/auth-link';
 import { isVisionCapableModel, resolveVisionSupport } from '@/lib/vision-models';
 import { EmptyCard, EntityRow, LoadError, LoadingRows, PageHeader, SectionHeader, StatLine } from '../../components/ds';
 import { EnabledPill, providerTypeLabel } from '../components/provider-state';
+import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
 interface Bot {
   id: string;
@@ -52,7 +52,7 @@ interface AiProvider {
 }
 
 export default function ProviderDetailPage({ params }: { params: Promise<{ id: string }> }) {
-  const router = useRouter();
+  const replacePage = useReplacePage();
   const [loading, setLoading] = useState(true);
   const [testing, setTesting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -84,7 +84,7 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
 
       if (!response.ok) {
         if (response.status === 404) {
-          router.push('/admin/ai-providers');
+          replacePage('/admin/ai-providers');
           return;
         }
         throw new Error('Failed to fetch provider');
@@ -206,16 +206,16 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
             {provider.temperature !== null && <Field label="Temperature">{provider.temperature}</Field>}
             {provider.maxTokens !== null && <Field label="Max tokens">{provider.maxTokens}</Field>}
             <Field label="Streaming">{provider.supportsStreaming ? 'Yes' : 'No'}</Field>
-            <Field label="Images">
-              {seesImages ? 'Sees images' : 'Text only'}
+            <Field label="Vision">
+              {seesImages ? 'Vision-capable' : 'Text-only'}
               <span className="text-xs text-muted-foreground">
                 {provider.supportsVision === null
-                  ? ` (auto${provider.model && isVisionCapableModel(provider.model) ? ', detected from the model name' : ''})`
-                  : ' (set by hand)'}
+                  ? ` (auto${provider.model && isVisionCapableModel(provider.model) ? ' — detected from model name' : ''})`
+                  : ' (manually forced)'}
               </span>
             </Field>
-            {provider.visionModel && <Field label="Image description model">{provider.visionModel}</Field>}
-            {provider.defaultVision && <Field label="Default vision provider">Yes, used automatically to describe images</Field>}
+            {provider.visionModel && <Field label="Vision model">{provider.visionModel}</Field>}
+            {provider.defaultVision && <Field label="Default vision provider">Yes — used automatically to describe images</Field>}
             <Field label="Last tested">
               {provider.tested && provider.testedAt ? new Date(provider.testedAt).toLocaleString() : 'Not tested yet'}
             </Field>

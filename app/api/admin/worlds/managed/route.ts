@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
+import { hiddenSystemOwnerId, notSystemWorld } from '@/lib/system-user';
 
 // GET /api/admin/worlds/managed
 // Get all worlds the current user can manage (universe owner or world admin)
@@ -11,9 +12,11 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    // Get all worlds where user is universe owner or world admin
+    // Get all worlds where user is universe owner or world admin, never System's once they are hidden
+    const hidden = await hiddenSystemOwnerId();
     const worlds = await prisma.world.findMany({
       where: {
+        ...notSystemWorld(hidden),
         OR: [
           {
             universe: {

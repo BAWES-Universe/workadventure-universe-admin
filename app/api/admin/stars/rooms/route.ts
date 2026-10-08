@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireSession } from '@/lib/auth-session';
 import { prisma } from '@/lib/db';
+import { hiddenSystemOwnerId, notSystemRoom } from '@/lib/system-user';
 
 // GET /api/admin/stars/rooms
 // Fetch all starred rooms for the current user
@@ -8,13 +9,15 @@ export async function GET(request: NextRequest) {
   try {
     const user = await requireSession(request);
 
-    // Get all favorites for this user that are rooms
+    // Get all favorites for this user that are rooms, never System's once they are hidden
+    const hidden = await hiddenSystemOwnerId();
     const favorites = await prisma.favorite.findMany({
       where: {
         userId: user.id,
         roomId: {
           not: null,
         },
+        ...(hidden ? { room: notSystemRoom(hidden) } : {}),
       },
       include: {
         room: {

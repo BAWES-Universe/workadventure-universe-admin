@@ -229,6 +229,31 @@ jobs:
             esac
           done <<< "$APPS"
 
+      # Clear old images once every app runs the new tag, so back-to-back switches don't fill
+      # the dev disk between Coolify's scheduled cleanups. Volumes and networks are never touched:
+      # the map-storage volume holds user uploads. This only warns on failure, since dev is
+      # already switched by now.
+      - name: Clean up old images on the dev server
+        if: steps.slot.outputs.go == 'true'
+        continue-on-error: true
+        env:
+          SERVER_UUID: ${{ vars.DEV_COOLIFY_SERVER_UUID }}
+        run: |
+          if [ -z "$SERVER_UUID" ]; then
+            echo "::warning::DEV_COOLIFY_SERVER_UUID is not set, so no cleanup ran after this switch"
+            exit 0
+          fi
+          rm -f /tmp/cleanup.json
+          code=$(curl -sS --max-time 30 -o /tmp/cleanup.json -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer ${COOLIFY_TOKEN}" -H 'Content-Type: application/json' \
+            -d '{"delete_unused_volumes":false,"delete_unused_networks":false}' \
+            "${COOLIFY_BASE}/api/v1/servers/${SERVER_UUID}/docker-cleanup/run" || true)
+          # Coolify v4.3.23 answers 200 once the job is queued; any 2xx counts as started.
+          case "$code" in
+            2??) echo "Cleanup started: $(jq -r '.message // empty' /tmp/cleanup.json 2>/dev/null)" ;;
+            *) echo "::warning::Dev server cleanup was not started (HTTP $code): $(head -c 300 /tmp/cleanup.json 2>/dev/null)" ;;
+          esac
+
       - name: Receipt on the pull request
         if: steps.slot.outputs.go == 'true' && inputs.pr != ''
         env:

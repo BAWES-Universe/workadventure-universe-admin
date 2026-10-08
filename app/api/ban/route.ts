@@ -3,6 +3,17 @@ import { requireAuth, getClientIp } from '@/lib/auth';
 import { parsePlayUri } from '@/lib/utils';
 import { prisma } from '@/lib/db';
 import type { AdminBannedData } from '@/types/workadventure';
+import { bansCoveringWorld } from '@/lib/moderation';
+
+/** The universe and world a room address names, or null when it isn't a room address (answered with a 400). */
+function worldOf(address: string): { universe: string; world: string } | null {
+  try {
+    const { universe, world } = parsePlayUri(address);
+    return { universe, world };
+  } catch {
+    return null;
+  }
+}
 
 export async function GET(request: NextRequest) {
   try {
@@ -20,7 +31,11 @@ export async function GET(request: NextRequest) {
       );
     }
     
-    const { universe, world } = parsePlayUri(roomUrl);
+    const address = worldOf(roomUrl);
+    if (!address) {
+      return NextResponse.json({ error: 'roomUrl is not a room address' }, { status: 400 });
+    }
+    const { universe, world } = address;
     
     // Find user
     const user = await prisma.user.findFirst({
@@ -42,40 +57,17 @@ export async function GET(request: NextRequest) {
       },
     });
     
-    // Check for active bans
-    const banConditions: any[] = [];
-    
-    // User or IP condition
-    const userOrIpConditions: any[] = [];
-    if (user) {
-      userOrIpConditions.push({ userId: user.id });
-    }
-    userOrIpConditions.push({ ipAddress: ipAddress });
-    banConditions.push({ OR: userOrIpConditions });
-    
-    // World/Universe condition
-    const worldConditions: any[] = [];
-    if (worldData) {
-      worldConditions.push({ worldId: worldData.id });
-      worldConditions.push({ universeId: worldData.universeId });
-    }
-    worldConditions.push({ worldId: null, universeId: null }); // Global ban
-    banConditions.push({ OR: worldConditions });
-    
-    // Expiration condition
-    banConditions.push({
-      OR: [
-        { expiresAt: null },
-        { expiresAt: { gt: new Date() } },
-      ],
-    });
-    
-    const ban = await prisma.ban.findFirst({
-      where: {
-        isActive: true,
-        AND: banConditions,
-      },
-    });
+    // A ban from this world, its universe, or everywhere, for this player or their address
+    const ban = worldData
+      ? await prisma.ban.findFirst({
+          where: {
+            AND: [
+              bansCoveringWorld(worldData),
+              { OR: [...(user ? [{ userId: user.id }] : []), { ipAddress }] },
+            ],
+          },
+        })
+      : null;
     
     const response: AdminBannedData = {
       is_banned: !!ban,
@@ -104,7 +96,7 @@ export async function POST(request: NextRequest) {
     requireAuth(request);
     
     const body = await request.json();
-    const { uuidToBan, playUri, name, message, byUserUuid } = body;
+    const { uuidToBan, playUri, byUserUuid } = body;
     
     if (!uuidToBan || !playUri) {
       return NextResponse.json(
@@ -113,7 +105,11 @@ export async function POST(request: NextRequest) {
       );
     }
     
-    const { universe, world } = parsePlayUri(playUri);
+    const address = worldOf(playUri);
+    if (!address) {
+      return NextResponse.json({ error: 'playUri is not a room address' }, { status: 400 });
+    }
+    const { universe, world } = address;
     
     // Find user to ban
     const userToBan = await prisma.user.findFirst({
@@ -142,6 +138,14 @@ export async function POST(request: NextRequest) {
       },
     });
     
+    // Without its world a ban would cover everywhere, so there is nothing to ban from
+    if (!worldData) {
+      return NextResponse.json(
+        { error: 'World not found' },
+        { status: 404 }
+      );
+    }
+    
     // Find banning user
     let bannedBy = null;
     if (byUserUuid) {
@@ -156,12 +160,13 @@ export async function POST(request: NextRequest) {
     }
     
     // Create ban
-    const ban = await prisma.ban.create({
+    await prisma.ban.create({
       data: {
         userId: userToBan.id,
-        worldId: worldData?.id,
-        universeId: worldData?.universeId,
-        reason: message || 'Banned by administrator',
+        // This world only: its universe's other worlds stay open
+        worldId: worldData.id,
+        // The banned player sees the reason; the game's own message only names the admin's id
+        reason: null,
         bannedById: bannedBy?.id,
         isActive: true,
       },

@@ -2,13 +2,16 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
-import { X } from 'lucide-react';
+import { Earth, X } from 'lucide-react';
 import { EntityRow, KindIcon } from './ds';
 import { PersonIcon } from './profile-card';
 import { Button } from '@/components/ui/button';
 import { authenticatedFetch } from '@/lib/client-auth';
 import { timeAgo } from '@/lib/time-ago';
+import { INVITATIONS_DISMISSED_KEY } from '@/lib/user-preferences';
 import { DeclineWithConfirm, declineInvitation, roleLabel } from '../invitations/invitation-role';
+import { announceAttentionChanged } from './shell/attention-badge';
+import styles from './pending-invitations.module.css';
 
 interface Invitation {
   id: string;
@@ -19,8 +22,6 @@ interface Invitation {
   invitedAt: string;
 }
 
-/** Where the dismissal lives on the account (see lib/user-preferences.ts), so it holds on every device. */
-export const INVITATIONS_DISMISSED_KEY = 'guidance.dismissed.invitations';
 /** The most recent dismissed invitation ids kept; older ones are gone from the account anyway. */
 const DISMISSED_IDS_KEPT = 40;
 
@@ -45,6 +46,7 @@ async function writeDismissed(ids: string[]): Promise<void> {
   } catch {
     // The dismissal still holds for this visit.
   }
+  announceAttentionChanged();
 }
 
 /**
@@ -153,7 +155,7 @@ export default function PendingInvitationsAlert() {
     return (
       <div
         role="status"
-        className="orbit-rise relative space-y-3 rounded-[18px] border border-amber-500/45 bg-card bg-[linear-gradient(135deg,rgb(245_158_11/0.08),transparent_60%)] p-4 pr-12"
+        className={`orbit-rise ${styles.several}`}
         data-testid="pending-invitations"
       >
         <p className="text-[15px] font-semibold">You have {shown.length} invitations</p>
@@ -193,38 +195,36 @@ export default function PendingInvitationsAlert() {
   }
 
   return (
-    <div
-      role="status"
-      className="orbit-rise relative flex gap-3 rounded-[18px] border border-amber-500/45 bg-card bg-[linear-gradient(135deg,rgb(245_158_11/0.08),transparent_60%)] p-4 pr-12"
-      data-testid="pending-invitations"
-    >
-      {wokas[invitation.id] ? <PersonIcon woka={wokas[invitation.id]} name={inviterName} /> : <KindIcon kind="people" />}
-      <div className="min-w-0 flex-1 space-y-2">
-        <div>
-          <p className="text-[15px] font-semibold">
-            {inviterName} invited you to {invitation.world.name} in {invitation.world.universe.name}
-          </p>
-          <p className="text-sm text-muted-foreground">
-            as {roleLabel(invitation.tags)}
-            {invitation.invitedAt && <> · {timeAgo(new Date(invitation.invitedAt))}</>}
-          </p>
-          {invitation.message && (
-            <p className="truncate text-sm italic text-foreground/80" title={invitation.message} data-testid="pending-invitation-message">
-              “{invitation.message}”
-            </p>
-          )}
-        </div>
-        {declineError && (
-          <p className="text-sm text-destructive" role="alert">
-            {declineError}
-          </p>
-        )}
-        <div className="flex flex-wrap gap-2">
-          <Button asChild className="h-11 px-5">
-            <Link href={`/admin/invitations/${invitation.id}`}>View invitation</Link>
-          </Button>
-          <DeclineWithConfirm inviterName={inviterName} worldName={invitation.world.name} onConfirm={decline} />
-        </div>
+    <div role="status" className={`orbit-rise ${styles.card}`} data-testid="pending-invitations">
+      <span className={styles.face}>
+        {wokas[invitation.id] ? <PersonIcon woka={wokas[invitation.id]} name={inviterName} size={44} /> : <KindIcon kind="people" />}
+      </span>
+      <p className={styles.title}>
+        <b>{inviterName}</b> invited you to{' '}
+        <span className={styles.world}>
+          <Earth size={15} aria-hidden="true" />
+          <b>{invitation.world.name}</b>
+        </span>
+      </p>
+      <span className={styles.meta}>
+        {invitation.world.universe.name} · as {roleLabel(invitation.tags)}
+        {invitation.invitedAt && <> · {timeAgo(new Date(invitation.invitedAt))}</>}
+      </span>
+      {invitation.message && (
+        <p className={styles.message} title={invitation.message} data-testid="pending-invitation-message">
+          “{invitation.message}”
+        </p>
+      )}
+      {declineError && (
+        <p className={styles.error} role="alert">
+          {declineError}
+        </p>
+      )}
+      <div className={styles.actions}>
+        <Button asChild className="h-11 px-5">
+          <Link href={`/admin/invitations/${invitation.id}`}>View invitation</Link>
+        </Button>
+        <DeclineWithConfirm inviterName={inviterName} worldName={invitation.world.name} onConfirm={decline} />
       </div>
       {dismissButton}
     </div>

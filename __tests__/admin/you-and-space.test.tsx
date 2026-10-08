@@ -97,6 +97,30 @@ describe('You, with one universe and no world', () => {
   });
 });
 
+describe('You, with a featured universe', () => {
+  it('shows the Featured pill beside Public, and only on featured universes', async () => {
+    route({
+      '/api/admin/universes': {
+        universes: [
+          { id: 'u1', name: 'BAWES', isPublic: true, featured: true, _count: { worlds: 2, rooms: 18 } },
+          { id: 'u2', name: 'Plugn', isPublic: true, featured: false, _count: { worlds: 1, rooms: 3 } },
+        ],
+      },
+      '/api/memberships/my': { memberships: [] },
+      '/api/memberships/invitations': { invitations: [] },
+      '/api/admin/stars/rooms': { rooms: [] },
+    });
+    render(
+      <AdminBootstrapProvider value={bootstrap({ universes: 2, worlds: 3, stars: 0, invitations: 0 })}>
+        <Yours profileComplete />
+      </AdminBootstrapProvider>,
+    );
+    await screen.findByText('BAWES');
+    await waitFor(() => expect(screen.getAllByText('Featured')).toHaveLength(1));
+    expect(screen.getAllByText('Public').length).toBeGreaterThanOrEqual(2);
+  });
+});
+
 describe('You, with memberships', () => {
   it('answers an invitation in place and shows roles', async () => {
     route({
@@ -122,6 +146,9 @@ describe('You, with memberships', () => {
     await waitFor(() => expect(screen.queryByTestId('invitations')).toBeNull());
     expect(fetchMock).toHaveBeenCalledWith('/api/memberships/invitations/i1/accept', { method: 'POST' });
     expect((await screen.findByText('Office')).closest('div')?.parentElement?.textContent).toMatch(/Owner.*Admin/);
+    // The roles sit on the same line as the name, not off to the side.
+    const nameLine = (await screen.findByText('Office')).closest('strong')?.parentElement?.parentElement;
+    expect(nameLine?.textContent).toMatch(/Office.*Owner.*Admin/);
     // Being a member (even an owner) doesn't tick "Invite someone" or "Star a room": the steps stay.
     const steps = await screen.findByTestId('get-started');
     expect(within(steps).getByRole('link', { name: /Invite someone/ }).getAttribute('href')).toBe('/admin/worlds/w1?tab=members');

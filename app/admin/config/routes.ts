@@ -30,10 +30,15 @@ export const ROUTES: RouteDefinition[] = [
   { pattern: '/admin/universes', title: 'Your universes', parent: '/admin/you' },
   { pattern: '/admin/universes/new', title: 'New universe', parent: '/admin/universes' },
   { pattern: '/admin/universes/[id]', title: 'Universe', parent: '/admin/universes' },
+  { pattern: '/admin/universes/[id]/visitors', title: 'Visitors', parent: '/admin/universes/[id]' },
   { pattern: '/admin/worlds/new', title: 'New world', parent: '/admin/universes' },
   { pattern: '/admin/worlds/[id]', title: 'World', parent: '/admin/space' },
+  { pattern: '/admin/worlds/[id]/visitors', title: 'Visitors', parent: '/admin/worlds/[id]' },
+  { pattern: '/admin/worlds/[id]/members', title: 'Members', parent: '/admin/worlds/[id]' },
+  { pattern: '/admin/worlds/[id]/safety', title: 'Safety', parent: '/admin/worlds/[id]' },
   { pattern: '/admin/rooms/new', title: 'New room', parent: '/admin/space' },
   { pattern: '/admin/rooms/[id]', title: 'Room', parent: '/admin/space' },
+  { pattern: '/admin/rooms/[id]/visitors', title: 'Visitors', parent: '/admin/rooms/[id]' },
   { pattern: '/admin/stars', title: 'Stars', parent: '/admin/you' },
   { pattern: '/admin/memberships', title: 'Memberships', parent: '/admin/you' },
   { pattern: '/admin/invitations/[id]', title: 'Invitation', parent: '/admin/you' },
@@ -42,6 +47,7 @@ export const ROUTES: RouteDefinition[] = [
   { pattern: '/admin/discover/universes', title: 'Discover Universes', parent: '/admin/space' },
   { pattern: '/admin/discover/worlds', title: 'Discover Worlds', parent: '/admin/space' },
   { pattern: '/admin/discover/rooms', title: 'Discover Rooms', parent: '/admin/space' },
+  { pattern: '/admin/live', title: 'Live now', parent: '/admin/space' },
   { pattern: '/admin/users', title: 'People', parent: '/admin/space' },
   { pattern: '/admin/users/[id]', title: 'Person', parent: '/admin/users' },
   { pattern: '/admin/templates', title: 'Room templates', parent: '/admin/space' },
@@ -54,6 +60,7 @@ export const ROUTES: RouteDefinition[] = [
 
   // You
   { pattern: '/admin/profile', title: 'Profile', parent: '/admin/you' },
+  { pattern: '/admin/sharing', title: 'Sharing', parent: '/admin/you' },
 
   // Admin (super admin)
   { pattern: '/admin/style', title: 'Orbit style', parent: '/admin' },

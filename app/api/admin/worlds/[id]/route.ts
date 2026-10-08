@@ -100,10 +100,18 @@ export async function GET(
       canEdit = true;
     }
     
+    // Stars on the world itself (its rooms' stars are counted on the rooms).
+    const starCount = await prisma.favorite.count({ where: { worldId: world.id, roomId: null } });
+    const isStarred = userId
+      ? !!(await prisma.favorite.findFirst({ where: { userId, worldId: world.id, roomId: null }, select: { id: true } }))
+      : false;
+
     const responseData = {
       ...world,
       rooms,
       canEdit,
+      starCount,
+      isStarred,
     };
     
     return NextResponse.json(responseData);

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
-import { isSuperAdmin } from '@/lib/super-admin';
+import { canManageBotMcpServers } from '@/lib/bot-permissions';
 import { decryptApiKey } from '@/lib/encryption';
 import { ensureFreshOAuthConfig } from '@/lib/mcp/oauth-refresh';
 import { extractErrorCode, readBodyWithLimit, truncateDetail } from '@/lib/mcp/test-result';
@@ -56,7 +56,7 @@ export async function OPTIONS(request: NextRequest) {
 async function getAuthorizedBot(botId: string, actorUserId: string): Promise<{ id: string }> {
   const bot = await prisma.bot.findUnique({
     where: { id: botId },
-    select: { id: true, createdById: true },
+    select: { id: true, createdById: true, roomId: true },
   });
 
   if (!bot) {
@@ -68,10 +68,7 @@ async function getAuthorizedBot(botId: string, actorUserId: string): Promise<{ i
     select: { email: true },
   });
 
-  const isOwner = bot.createdById === actorUserId;
-  const isSuper = actorUser ? isSuperAdmin(actorUser.email) : false;
-
-  if (!isOwner && !isSuper) {
+  if (!(await canManageBotMcpServers(actorUserId, actorUser?.email ?? null, bot))) {
     throw new Error('Forbidden');
   }
 
@@ -498,7 +495,7 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
  * POST /api/bots/[id]/mcp-servers/[serverId]/test
  * Test connection to an MCP server. Calls tools/list on the server
  * with the stored auth credentials (decrypted server-side only).
- * Gated by bot ownership or super admin.
+ * Gated by canManageBotMcpServers (bot creator, room bot manager or super admin).
  */
 export async function POST(
   request: NextRequest,

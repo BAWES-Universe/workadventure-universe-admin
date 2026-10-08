@@ -56,7 +56,7 @@ export function VisionConfigSection({ value, onChange }: VisionConfigSectionProp
   return (
     <div className="space-y-4 rounded-xl border p-4">
       <div>
-        <h3 className="text-sm font-semibold">Images</h3>
+        <h3 className="text-sm font-semibold">Vision &amp; image support</h3>
         <p className="text-xs text-muted-foreground mt-1">
           Controls how this provider handles images — seeing them directly with its main model, or
           describing them for bots whose main model can&apos;t see.
@@ -81,7 +81,7 @@ export function VisionConfigSection({ value, onChange }: VisionConfigSectionProp
         <p className="text-xs text-muted-foreground">
           {value.supportsVision === 'auto' ? (
             isVisionCapableModel(value.model) ? (
-              'Detected: this model sees images (it matches a known vision model name).'
+              'Detected: this model sees images (matches a known vision model name)'
             ) : (
               'Auto — unknown models default to text-only (safe). Use "Yes" to force vision for proxy-renamed models.'
             )
@@ -110,17 +110,17 @@ export function VisionConfigSection({ value, onChange }: VisionConfigSectionProp
         </div>
       ) : (
         <p className="text-xs text-muted-foreground">
-          The main model already sees images, so no image description model is needed.
+          Main model already sees images — image description model not needed.
         </p>
       )}
 
       <SettingSwitch
         id="defaultVision"
-        label="Default vision provider"
+        label="Use as default vision provider"
         hint={
           isVisionEligible
-            ? 'Bots with text-only models use this provider to describe images when several can.'
-            : 'This provider can\u2019t see or describe images yet. Set an image description model or turn on image support first.'
+            ? 'Bots with text-only models automatically use this provider to describe images.'
+            : 'This provider can\u2019t see or describe images yet — set a vision model or enable vision support first.'
         }
         checked={value.defaultVision}
         disabled={!isVisionEligible}
@@ -129,7 +129,7 @@ export function VisionConfigSection({ value, onChange }: VisionConfigSectionProp
 
       {!isVisionEligible && (
         <p className="text-xs text-muted-foreground">
-          Bots using this provider get image links as text, with no descriptions.
+          Bots using this provider get image URLs as text (no image descriptions).
         </p>
       )}
       {hasDescriptionModel && (

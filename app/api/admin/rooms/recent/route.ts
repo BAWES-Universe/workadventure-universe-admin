@@ -4,6 +4,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { getSessionUser, type SessionUser } from '@/lib/auth-session';
 import { canSeeRoom } from '@/lib/room-visibility';
+import { andNotSystemOwnedSql, hiddenSystemOwnerId } from '@/lib/system-user';
 
 const ROOM_SELECT = {
   id: true,
@@ -92,8 +93,10 @@ export async function GET(request: NextRequest) {
     }[] = [];
 
     // Each room's latest visit, newest first, with everything the list leaves out filtered in the database before
-    // the limit applies: the start map, the excluded room and, for a person, rooms they may no longer see (the same
-    // rule as canSeeRoom). So the limit always counts rooms that will be shown, however many were hidden before them.
+    // the limit applies: the start map, System's rooms once they are hidden, the excluded room and, for a person,
+    // rooms they may no longer see (the same rule as canSeeRoom). So the limit always counts rooms that will be
+    // shown, however many were hidden before them.
+    const hidden = await hiddenSystemOwnerId();
     const whose = viewer
       ? Prisma.sql`AND (ra.user_id = ${viewer.id}${viewer.uuid ? Prisma.sql` OR ra.user_uuid = ${viewer.uuid}` : Prisma.empty})`
       : Prisma.empty;
@@ -112,6 +115,7 @@ export async function GET(request: NextRequest) {
       JOIN worlds w ON w.id = r.world_id
       JOIN universes u ON u.id = w.universe_id
       WHERE NOT (u.slug = 'default' AND w.slug = 'default' AND r.slug = 'default')
+        ${andNotSystemOwnedSql(hidden)}
         ${excludeRoomId ? Prisma.sql`AND r.id <> ${excludeRoomId}` : Prisma.empty}
         ${whose}
         ${visible}
@@ -128,7 +132,7 @@ export async function GET(request: NextRequest) {
       const room = byId.get(row.room_id);
       if (!room) continue;
       // The query applied these already; kept as a guard should the two ever drift apart.
-      if (isStartRoom(room)) continue;
+      if (isStartRoom(room) || (hidden && room.world.universe.ownerId === hidden)) continue;
       if (excludeRoomId && room.id === excludeRoomId) continue;
       if (!isAdminToken && !canSeeRoom(room, viewer, memberWorldIds)) continue;
       recent.push({

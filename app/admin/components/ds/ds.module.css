@@ -25,6 +25,7 @@
 .row:hover { border-color: hsl(var(--foreground) / 0.22); }
 a.row:hover, .row:has(> .rowText > .stretched):hover { transform: translateY(-1px); }
 .row[data-tone='waiting'] { border-color: rgb(245 158 11 / 0.45); background: linear-gradient(135deg, rgb(245 158 11 / 0.08), transparent 60%), hsl(var(--card)); }
+.titleLine { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; }
 .rowText { display: grid; gap: 3px; min-width: 0; flex: 1; }
 .rowText > .stretched strong, .card h3 { font-size: 14px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
 .stretched { color: inherit; outline: none; }

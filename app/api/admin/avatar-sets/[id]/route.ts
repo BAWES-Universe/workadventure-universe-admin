@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
-import { requireAdminSession, requireSuperAdminSession } from '@/lib/auth'
+import { isSuperAdminUser, requireAdminSession, requireSuperAdminSession } from '@/lib/auth'
 import { extractS3KeyFromUrl, deleteImageFromS3 } from '@/lib/s3-upload'
 
 type Params = { params: Promise<{ id: string }> }
@@ -60,7 +60,9 @@ async function cleanupS3Texture(url: string): Promise<void> {
 
 // GET /api/admin/avatar-sets/:id
 export async function GET(_req: NextRequest, { params }: Params) {
-  await requireAdminSession()
+  const { userId } = await requireAdminSession()
+  // Grant holders' and audit actors' emails are only for super admins
+  const showEmails = await isSuperAdminUser(userId)
   const id = (await params).id
   const set = await prisma.avatarSet.findUnique({
     where: { id },
@@ -71,7 +73,7 @@ export async function GET(_req: NextRequest, { params }: Params) {
       policies: true,
       userGrants: {
         where: { isActive: true },
-        include: { user: { select: { id: true, name: true, email: true, uuid: true } } },
+        include: { user: { select: { id: true, name: true, email: showEmails, uuid: true } } },
       },
     },
   })
@@ -81,7 +83,7 @@ export async function GET(_req: NextRequest, { params }: Params) {
     where: { avatarSetId: id },
     orderBy: { createdAt: 'desc' },
     take: 50,
-    include: { actor: { select: { id: true, name: true, email: true } } },
+    include: { actor: { select: { id: true, name: true, email: showEmails } } },
   })
 
   return NextResponse.json({ ...set, auditLogs })

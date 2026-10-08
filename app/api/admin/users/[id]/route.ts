@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getViewer, isPrivileged, viewerUserId, unauthorizedResponse } from '@/lib/access-scope';
+import { getViewer, isPrivileged, memberWorldIdsOf, viewerUserId, unauthorizedResponse } from '@/lib/access-scope';
+import { canSeeUniverse, canSeeWorld } from '@/lib/room-visibility';
 import { prisma } from '@/lib/db';
 import { wokaLayersFor } from '@/lib/woka-avatar';
+import { hiddenSystemOwnerId, notSystemWorld } from '@/lib/system-user';
 
 // GET /api/admin/users/[id] - Get a single user
 export async function GET(
@@ -20,6 +22,8 @@ export async function GET(
     const privileged = isPrivileged(viewer);
     const isSelf = viewerUserId(viewer) === id;
     const canSeeContact = privileged || isSelf;
+    // Their memberships leave out System's worlds once they are hidden
+    const hidden = await hiddenSystemOwnerId();
     const user = await prisma.user.findUnique({
       where: { id },
       select: {
@@ -49,6 +53,7 @@ export async function GET(
             },
             worlds: {
               select: {
+                id: true,
                 _count: {
                   select: {
                     rooms: true,
@@ -61,6 +66,7 @@ export async function GET(
           orderBy: { createdAt: 'desc' },
         },
         worldMemberships: {
+          where: { world: notSystemWorld(hidden) },
           include: {
             world: {
               select: {
@@ -69,11 +75,14 @@ export async function GET(
                 name: true,
                 description: true,
                 thumbnailUrl: true,
+                isPublic: true,
                 universe: {
                   select: {
                     id: true,
                     slug: true,
                     name: true,
+                    isPublic: true,
+                    ownerId: true,
                   },
                 },
                 _count: {
@@ -90,7 +99,7 @@ export async function GET(
         _count: {
           select: {
             ownedUniverses: true,
-            worldMemberships: true,
+            worldMemberships: { where: { world: notSystemWorld(hidden) } },
             bans: true,
             favorites: true,
             avatars: true,
@@ -106,12 +115,35 @@ export async function GET(
       );
     }
     
+    // Someone else's private universes and worlds stay off their profile, unless the viewer can see them anyway
+    if (!privileged && !isSelf) {
+      const sessionViewer = viewer.kind === 'user' ? viewer.user : null;
+      const viewerWorldIds = sessionViewer ? await memberWorldIdsOf(sessionViewer.id) : new Set<string>();
+      user.ownedUniverses = user.ownedUniverses.filter((universe) =>
+        canSeeUniverse(
+          { isPublic: universe.isPublic, ownerId: id },
+          sessionViewer,
+          universe.worlds.some((world) => viewerWorldIds.has(world.id)),
+        ),
+      );
+      user.worldMemberships = user.worldMemberships.filter((membership) =>
+        canSeeWorld(membership.world, sessionViewer, viewerWorldIds),
+      );
+      user._count = {
+        ...user._count,
+        ownedUniverses: user.ownedUniverses.length,
+        worldMemberships: user.worldMemberships.length,
+      };
+    }
+
     // Calculate total rooms, members, and favorites counts for each universe
     const universeIds = user.ownedUniverses.map((u: any) => u.id);
     const favoritesByUniverse = universeIds.length > 0
       ? await prisma.favorite.groupBy({
           by: ['universeId'],
           where: {
+            // Stars on the place itself are counted apart; this is its rooms' stars.
+            roomId: { not: null },
             universeId: { in: universeIds },
           },
           _count: {
@@ -130,6 +162,8 @@ export async function GET(
       ? await prisma.favorite.groupBy({
           by: ['worldId'],
           where: {
+            // Stars on the place itself are counted apart; this is its rooms' stars.
+            roomId: { not: null },
             worldId: { in: worldIds },
           },
           _count: {
@@ -152,6 +186,8 @@ export async function GET(
         const totalFavorites = favoritesCountMap.get(universe.id) || 0;
         return {
           ...universe,
+          // Counts only; the world ids above were just for the visibility check
+          worlds: universe.worlds?.map((world: any) => ({ _count: world._count })),
           _count: {
             ...universe._count,
             rooms: totalRooms,

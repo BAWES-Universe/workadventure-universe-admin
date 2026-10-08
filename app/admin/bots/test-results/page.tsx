@@ -14,6 +14,7 @@ import {
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { EmptyCard, LoadError, LoadingRows, PageHeader } from '../../components/ds';
 import { ApplyFilter, DateFilter, FilterField, FilterRow, JsonDetails, ListPager, Panel, Pill, type PageInfo } from '../bots-ui';
+import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
 interface TestResult {
   id: number;
@@ -27,6 +28,7 @@ interface TestResult {
 
 export default function TestResultsBrowsePage() {
   const router = useRouter();
+  const replacePage = useReplacePage();
   const [testResults, setTestResults] = useState<TestResult[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -65,7 +67,7 @@ export default function TestResultsBrowsePage() {
       }
       const userData = await response.json();
       if (!userData.user?.isSuperAdmin) {
-        router.push('/admin');
+        replacePage('/admin');
         return;
       }
       fetchTestResults();
@@ -92,7 +94,7 @@ export default function TestResultsBrowsePage() {
 
       if (!response.ok) {
         if (response.status === 401 || response.status === 403) {
-          router.push('/admin');
+          replacePage('/admin');
           return;
         }
         throw new Error('Failed to fetch test results');
@@ -107,7 +109,7 @@ export default function TestResultsBrowsePage() {
     } finally {
       setLoading(false);
     }
-  }, [filters, router]);
+  }, [filters, replacePage]);
 
   const handlePageChange = (newPage: number) => {
     setFilters({ ...filters, page: newPage });

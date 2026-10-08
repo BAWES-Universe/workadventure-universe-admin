@@ -12,6 +12,8 @@ export const MAX_SUMMARY_IDS = 100;
 /** What every card shows about a place: how busy, when, and when you and the latest visitor were there. */
 export interface ActivitySummary {
   totalAccesses: number;
+  /** Visits in the last 7 days. */
+  visitsThisWeek: number;
   peakTimes: HourBucket[];
   lastVisitedByUser: { accessedAt: Date; userId: string | null; userUuid: string | null } | null;
   /** Only when: cards never say who the latest visitor was. */
@@ -33,7 +35,7 @@ export function isSummaryKind(value: unknown): value is SummaryKind {
 type LastRow = { id: string; accessed_at: Date; user_id: string | null; user_uuid: string | null };
 
 /**
- * Activity for many places in four queries, whatever their number: totals, all-time UTC hour buckets, the latest
+ * Activity for many places in five queries, whatever their number: totals, this week's visits, all-time UTC hour buckets, the latest
  * visit, and the viewer's own latest visit. A place with no visits (or that doesn't exist) gets zeros.
  */
 export async function activitySummaries(
@@ -47,10 +49,17 @@ export async function activitySummaries(
   const idList = Prisma.join(unique);
   const user = viewer.kind === 'user' ? viewer.user : null;
 
-  const [totals, hours, latest, yours] = await Promise.all([
+  const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+  const [totals, week, hours, latest, yours] = await Promise.all([
     prisma.roomAccess.groupBy({
       by: [field],
       where: { [field]: { in: unique } },
+      _count: { _all: true },
+    }) as unknown as Promise<Array<Record<string, unknown> & { _count: { _all: number } }>>,
+    prisma.roomAccess.groupBy({
+      by: [field],
+      where: { [field]: { in: unique }, accessedAt: { gte: weekAgo } },
       _count: { _all: true },
     }) as unknown as Promise<Array<Record<string, unknown> & { _count: { _all: number } }>>,
     prisma.$queryRaw<Array<{ id: string; hour: number; count: bigint | number }>>`
@@ -75,11 +84,15 @@ export async function activitySummaries(
 
   const result: Record<string, ActivitySummary> = {};
   for (const id of unique) {
-    result[id] = { totalAccesses: 0, peakTimes: [], lastVisitedByUser: null, lastVisitedOverall: null, youWereLast: false };
+    result[id] = { totalAccesses: 0, visitsThisWeek: 0, peakTimes: [], lastVisitedByUser: null, lastVisitedOverall: null, youWereLast: false };
   }
   for (const row of totals) {
     const id = row[field];
     if (typeof id === 'string' && result[id]) result[id].totalAccesses = row._count._all;
+  }
+  for (const row of week) {
+    const id = row[field];
+    if (typeof id === 'string' && result[id]) result[id].visitsThisWeek = row._count._all;
   }
   for (const row of hours) {
     result[row.id]?.peakTimes.push({ hour: Number(row.hour), count: Number(row.count) });
