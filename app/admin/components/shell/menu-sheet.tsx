@@ -7,10 +7,13 @@ import { useEffect, useState } from 'react';
 import { ArrowUpRight, Search, X } from 'lucide-react';
 import { DESTINATIONS, getNavItems, getNavSections, isNavItemActive, type NavUser } from '../../config/navigation';
 import { useOrbitFrame } from '../../orbit-frame-context';
+import { ThemeChoice } from './theme-choice';
+import LogoutButton from '../../logout-button';
 
 /**
  * Everything Orbit has, from the Orbit Menu button at the top-left or Ctrl/Cmd+K: You, Orbit and Space, then every tool, searchable.
- * Nothing else: the account, theme and sign-out live on You. Dismissed by a tap outside, Escape, or going somewhere.
+ * At its foot: who is logged in, Sign out and Appearance (Sharing is under Personalize). Dismissed by a tap outside,
+ * Escape, or going somewhere.
  */
 export function MenuSheet({ user }: { user: NavUser }) {
   const pathname = usePathname();
@@ -107,6 +110,19 @@ export function MenuSheet({ user }: { user: NavUser }) {
               </section>
             ))}
           </div>
+          {user.email || user.name ? (
+            <footer className="orbit-menu-foot">
+              <p className="orbit-menu-who">
+                Logged in as <strong>{user.name || user.email}</strong>
+                {user.name && user.email && <span> · {user.email}</span>}
+              </p>
+              <LogoutButton className="orbit-menu-signout" />
+              <div className="orbit-menu-look">
+                <span>Appearance</span>
+                <ThemeChoice />
+              </div>
+            </footer>
+          ) : null}
         </DialogPrimitive.Content>
       </DialogPrimitive.Portal>
     </DialogPrimitive.Root>

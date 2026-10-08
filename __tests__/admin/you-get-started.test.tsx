@@ -4,7 +4,8 @@ import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 /**
- * Get started, once hidden, can be shown again from You's settings, while any of its steps is left.
+ * Get started, once hidden, can be shown again from You's settings, while any of its steps is left. That row is
+ * all Settings holds now: Appearance, Sharing and Sign out moved to the Orbit menu.
  */
 
 jest.mock('next/navigation', () => ({
@@ -13,8 +14,6 @@ jest.mock('next/navigation', () => ({
 }));
 jest.mock('@/app/admin/components/profile-card', () => ({ ProfileCard: () => null }));
 jest.mock('@/app/admin/components/passport', () => ({ PassportSection: () => null, ActivitySection: () => null }));
-jest.mock('@/app/admin/components/shell/theme-choice', () => ({ ThemeChoice: () => null }));
-jest.mock('@/app/admin/logout-button', () => ({ __esModule: true, default: () => null }));
 jest.mock('@/app/admin/admin-bootstrap-context', () => ({
   useAdminBootstrap: () => ({ user: { id: 'u', uuid: 'u', name: 'Me', email: null, tags: [], isSuperAdmin: false }, mine: null }),
 }));
@@ -87,6 +86,23 @@ describe('You: Get started comes back', () => {
     render(<YouPage />);
     expect(await screen.findByRole('button', { name: 'Show' })).toBeTruthy();
     expect(screen.getByText('Get started')).toBeTruthy();
+  });
+
+  it('no longer carries Appearance, Sharing or Sign out: they live in the Orbit menu', async () => {
+    stored(true);
+    render(<YouPage />);
+    await screen.findByRole('button', { name: 'Show' });
+    expect(screen.queryByText('Appearance')).toBeNull();
+    expect(screen.queryByText('Sharing')).toBeNull();
+    expect(screen.queryByText('Account')).toBeNull();
+    expect(screen.queryByRole('button', { name: /Sign out/ })).toBeNull();
+  });
+
+  it('has no Settings at all while Get started shows', async () => {
+    stored(false);
+    render(<YouPage />);
+    await screen.findByTestId('get-started');
+    expect(screen.queryByRole('heading', { name: 'Settings' })).toBeNull();
   });
 
   it('offers nothing once every step is done', async () => {
