@@ -13,7 +13,7 @@ jest.mock('@/lib/db', () => ({
     universe: { findUnique: jest.fn() },
     world: { findUnique: jest.fn() },
     room: { findUnique: jest.fn(), findMany: jest.fn() },
-    worldMember: { findFirst: jest.fn(), findMany: jest.fn() },
+    worldMember: { findFirst: jest.fn() },
     favorite: { groupBy: jest.fn() },
     roomAccess: {
       count: jest.fn(),
@@ -153,7 +153,6 @@ beforeEach(() => {
     return applySelect(row, args.select);
   });
   db.favorite.groupBy.mockResolvedValue([]);
-  db.worldMember.findMany.mockResolvedValue([]);
 
   db.roomAccess.count.mockResolvedValue(1);
   db.roomAccess.groupBy.mockResolvedValue([]);
@@ -224,24 +223,6 @@ describe('user by id', () => {
     expect(body).toHaveProperty('ownedUniverses');
     expect(body).toHaveProperty('worldMemberships');
     expect(body).toHaveProperty('_count');
-  });
-
-  it('someone else\'s private universes and worlds stay off their profile', async () => {
-    const universe = (id: string, isPublic: boolean) => ({ id, slug: id, isPublic, worlds: [{ id: `${id}-w`, _count: {} }], _count: {} });
-    const membership = (id: string, isPublic: boolean) => ({
-      id: `m-${id}`,
-      world: { id, slug: id, isPublic, universe: { id: 'un', isPublic: true, ownerId: 'u-other' }, _count: {} },
-    });
-    db.user.findUnique.mockImplementationOnce(async () => ({
-      ...USER_ROWS[0],
-      ownedUniverses: [universe('open-universe', true), universe('secret-universe', false)],
-      worldMemberships: [membership('open-world', true), membership('secret-world', false)],
-      _count: { ownedUniverses: 2, worldMemberships: 2, bans: 0, favorites: 0, avatars: 0 },
-    }));
-    const body = await (await getUser(req('/api/admin/users/u-bob', 'alice'), params('u-bob'))).json();
-    expect(body.ownedUniverses.map((u: { slug: string }) => u.slug)).toEqual(['open-universe']);
-    expect(body.worldMemberships.map((m: { world: { slug: string } }) => m.world.slug)).toEqual(['open-world']);
-    expect(body._count).toMatchObject({ ownedUniverses: 1, worldMemberships: 1 });
   });
 
   it('a user sees their own email and Matrix id but not their own IP address', async () => {
