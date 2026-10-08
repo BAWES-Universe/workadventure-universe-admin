@@ -77,18 +77,18 @@ export async function loadPassport(userId: string, options: { owner: boolean }):
 }
 
 /**
- * The stamps `viewerId` (null when not signed in) may see on `userId`'s card: public worlds only, and only if they show
- * their passport to everyone, or to friends and the viewer is one. Their own, a person always sees in full on You, not here.
+ * Whether `viewerId` (null when not signed in) may see `userId`'s passport: only if they show it to everyone, or to
+ * friends and the viewer is one. Their own, a person always sees in full on You, not here.
  */
-export async function visibleStamps(viewerId: string | null, userId: string, limit: number): Promise<Stamp[]> {
+async function mayViewPassport(viewerId: string | null, userId: string): Promise<boolean> {
   const rows = await prisma.userPreference.findMany({
     where: { userId, key: { in: [...SHARING_KEYS] } },
     select: { key: true, value: true },
   });
   const audience = sharePassportFromRows(rows);
-  if (audience === 'nobody') return [];
+  if (audience === 'nobody') return false;
   if (audience === 'friends') {
-    if (!viewerId) return [];
+    if (!viewerId) return false;
     if (viewerId !== userId) {
       const friendship = await prisma.friendship.findFirst({
         where: {
@@ -100,8 +100,23 @@ export async function visibleStamps(viewerId: string | null, userId: string, lim
         },
         select: { id: true },
       });
-      if (!friendship) return [];
+      if (!friendship) return false;
     }
   }
+  return true;
+}
+
+/**
+ * The stamps `viewerId` (null when not signed in) may see on `userId`'s card: public worlds only, and only if they show
+ * their passport to everyone, or to friends and the viewer is one. Their own, a person always sees in full on You, not here.
+ */
+export async function visibleStamps(viewerId: string | null, userId: string, limit: number): Promise<Stamp[]> {
+  if (!(await mayViewPassport(viewerId, userId))) return [];
   return (await loadPassport(userId, { owner: false })).stamps.slice(0, limit);
+}
+
+/** The whole passport `viewerId` may see on someone's profile (public worlds only), or null when they hide it from this viewer. */
+export async function visiblePassport(viewerId: string | null, userId: string): Promise<Passport | null> {
+  if (!(await mayViewPassport(viewerId, userId))) return null;
+  return loadPassport(userId, { owner: false });
 }
