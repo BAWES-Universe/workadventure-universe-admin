@@ -13,7 +13,15 @@
   .placesScroll[data-wide-grid] { grid-auto-flow: row; grid-template-columns: repeat(2, minmax(0, 1fr)); overflow: visible; }
 }
 .placesGrid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr)); }
-.place { position: relative; display: grid; gap: 10px; min-width: 0; padding: 14px; border: 1px solid hsl(var(--border)); border-radius: 18px; background: hsl(var(--card)); }
+.place { position: relative; display: grid; gap: 10px; min-width: 0; padding: 14px; border: 1px solid hsl(var(--border)); border-radius: 18px; background: hsl(var(--card)); transition: border-color 160ms, transform 160ms; }
+.place:hover { border-color: hsl(var(--foreground) / .22); transform: translateY(-1px); }
+.place[data-here]:hover { border-color: rgb(134 41 252 / .8); }
+/* The room's name is the card's link: its box covers the card, and the Visit button sits above it. */
+.cardLink { color: inherit; outline: none; }
+.cardLink::after { content: ''; position: absolute; inset: 0; z-index: 1; border-radius: inherit; }
+.cardLink:focus-visible::after { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
+.place .action { position: relative; z-index: 2; }
+@media (prefers-reduced-motion: reduce) { .place { transition: none; } .place:hover { transform: none; } }
 .place[data-here] { border-color: rgb(134 41 252 / .55); background: linear-gradient(135deg, rgb(134 41 252 / .14), transparent 60%), hsl(var(--card)); }
 .placeTop { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
 .placeText { min-width: 0; flex: 1; }
