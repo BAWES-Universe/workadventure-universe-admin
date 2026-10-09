@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { botReadDenied, getViewer, isPrivileged } from '@/lib/access-scope';
 import { corsHeaders } from '@/lib/cors';
+import { visibleUserUuid } from '@/lib/visible-identity';
 
 export const runtime = 'nodejs';
 
@@ -53,7 +54,7 @@ export async function GET(
 
     // Format response
     const emotions = memories.map((m) => ({
-      userUuid: m.userUuid,
+      userUuid: visibleUserUuid(m.userUuid, showEmails, m.user?.uuid),
       userId: m.userId,
       userName: m.userName || m.user?.name || null,
       isGuest: m.isGuest,

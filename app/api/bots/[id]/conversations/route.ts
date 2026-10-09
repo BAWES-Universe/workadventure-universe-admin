@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { requireServiceToken } from '@/lib/service-tokens';
 import { botReadDenied, getViewer, isPrivileged } from '@/lib/access-scope';
 import { corsHeaders } from '@/lib/cors';
+import { visibleUserUuid } from '@/lib/visible-identity';
 
 export const runtime = 'nodejs';
 
@@ -330,7 +331,10 @@ export async function GET(
     return NextResponse.json(
       {
         botId,
-        conversations,
+        conversations: conversations.map((conversation) => ({
+          ...conversation,
+          userUuid: visibleUserUuid(conversation.userUuid, showEmails, conversation.user?.uuid),
+        })),
         count: totalCount,
       },
       { headers: corsHeaders() }

@@ -54,6 +54,7 @@ export async function GET(
             worlds: {
               select: {
                 id: true,
+                isPublic: true,
                 _count: {
                   select: {
                     rooms: true,
@@ -119,13 +120,25 @@ export async function GET(
     if (!privileged && !isSelf) {
       const sessionViewer = viewer.kind === 'user' ? viewer.user : null;
       const viewerWorldIds = sessionViewer ? await memberWorldIdsOf(sessionViewer.id) : new Set<string>();
-      user.ownedUniverses = user.ownedUniverses.filter((universe) =>
-        canSeeUniverse(
-          { isPublic: universe.isPublic, ownerId: id },
-          sessionViewer,
-          universe.worlds.some((world) => viewerWorldIds.has(world.id)),
-        ),
-      );
+      user.ownedUniverses = user.ownedUniverses
+        .filter((universe) =>
+          canSeeUniverse(
+            { isPublic: universe.isPublic, ownerId: id },
+            sessionViewer,
+            universe.worlds.some((world) => viewerWorldIds.has(world.id)),
+          ),
+        )
+        .map((universe) => {
+          // A private world inside a place they can see stays out of the counts too
+          const worlds = universe.worlds.filter((world) =>
+            canSeeWorld(
+              { id: world.id, isPublic: world.isPublic, universe: { isPublic: universe.isPublic, ownerId: id } },
+              sessionViewer,
+              viewerWorldIds,
+            ),
+          );
+          return { ...universe, worlds, _count: { ...universe._count, worlds: worlds.length } };
+        });
       user.worldMemberships = user.worldMemberships.filter((membership) =>
         canSeeWorld(membership.world, sessionViewer, viewerWorldIds),
       );

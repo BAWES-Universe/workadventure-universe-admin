@@ -256,11 +256,13 @@ export async function GET(request: NextRequest) {
 
       // Members-only rooms: a room is open to everyone only when it, its world and its universe are all public.
       // Otherwise only the universe owner, the world's members, super admins and the room's own bots get in.
+      // Who somebody is counts only once they have signed in: the identifier in the address is whatever the caller
+      // sent, and a member's id is not a secret.
       const canEnter =
         canSeeRoom(
           { isPublic: roomData.isPublic, world: worldData },
-          user ? { id: user.id, isSuperAdmin: isSuperAdmin(user.email) } : null,
-          new Set(membership ? [worldData.id] : []),
+          isAuthenticated && user ? { id: user.id, isSuperAdmin: isSuperAdmin(user.email) } : null,
+          new Set(isAuthenticated && membership ? [worldData.id] : []),
         ) ||
         (isBotIdentifier(finalUuid) &&
           !!(await prisma.bot.findFirst({
