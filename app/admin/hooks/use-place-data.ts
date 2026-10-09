@@ -72,6 +72,10 @@ export interface MembersPreview {
   canManage: boolean;
   /** The viewer's own roles in the world. */
   yourTags: string[];
+  /** The viewer's user id, so their own face can be told apart. */
+  yourId: string | null;
+  /** The universe the world belongs to, for "You own …" and "Owns …" on a member card. */
+  universeName: string | null;
 }
 
 /** A world's first members by rank, how many there are in all, and your own roles; the full list is its own page. */
@@ -90,6 +94,8 @@ export function useMembersPreview(worldId: string, limit = 8): MembersPreview | 
             total: typeof body.total === 'number' ? body.total : members.length,
             canManage: !!body.canManage,
             yourTags: Array.isArray(body.yourTags) ? body.yourTags : [],
+            yourId: typeof body.yourId === 'string' ? body.yourId : null,
+            universeName: typeof body.universeName === 'string' ? body.universeName : null,
           });
         }
       })

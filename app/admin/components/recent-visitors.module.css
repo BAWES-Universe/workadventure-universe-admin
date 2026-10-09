@@ -16,8 +16,11 @@
 @media (min-width: 640px) { .sheet { left: 50%; right: auto; bottom: 24px; width: min(520px, calc(100% - 32px)); transform: translateX(-50%); border-radius: 26px; border: 1px solid hsl(var(--border)); } }
 .sheet { border-radius: 26px 26px 0 0; }
 .top { display: flex; align-items: center; gap: 14px; padding-right: 32px; }
+.nameRow { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.you { display: inline-flex; align-items: center; height: 22px; padding: 0 8px; border-radius: 999px; background: hsl(var(--foreground)); color: hsl(var(--background)); font-size: 11px; font-weight: 700; letter-spacing: 0.02em; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .name { margin: 0; font-family: var(--font-display); font-size: 22px; font-weight: 700; overflow-wrap: anywhere; }
-.when { font-size: 13px; color: hsl(var(--muted-foreground)); }
+.when { font-size: 13px; color: hsl(var(--muted-foreground)); text-wrap: pretty; }
 .bio { margin: 0; font-size: 15px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
 .full { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 44px; padding: 0 18px; border-radius: 999px; border: 1px solid hsl(var(--border)); font-size: 14px; font-weight: 600; color: hsl(var(--foreground)); text-decoration: none; justify-self: start; }
 .full:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
@@ -31,6 +34,5 @@
 .seeAllPill { display: inline-flex; align-items: center; min-height: 44px; padding: 0 14px; border: 1px solid hsl(var(--foreground) / 0.15); border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; }
 .seeAllPill:hover { border-color: hsl(var(--foreground) / 0.3); background: hsl(var(--foreground) / 0.05); }
 .seeAllPill:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
-.seeAllCircle { display: grid; place-items: center; width: 44px; height: 44px; box-sizing: border-box; border-radius: 50%; border: 1px solid hsl(var(--border)); background: hsl(var(--muted)); color: hsl(var(--foreground)); }
 /* On a wide screen nothing depends on swiping: the row wraps to fit. */
 @media (min-width: 768px) { .visitors { flex-wrap: wrap; overflow: visible; margin: 0; padding: 4px 0; } }

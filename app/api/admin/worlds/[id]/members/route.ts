@@ -62,7 +62,7 @@ export async function GET(
 
     const world = await prisma.world.findUnique({
       where: { id },
-      select: { id: true, isPublic: true, universe: { select: { isPublic: true, ownerId: true } } },
+      select: { id: true, isPublic: true, universe: { select: { name: true, isPublic: true, ownerId: true } } },
     });
     const isMember = !!world && !!(await prisma.worldMember.findUnique({
       where: { userId_worldId: { userId: sessionUser.id, worldId: id } },
@@ -153,6 +153,8 @@ export async function GET(
       canManage,
       total,
       yourTags,
+      yourId: sessionUser.id,
+      universeName: world.universe.name,
     });
   } catch (error) {
     console.error('Error fetching world members:', error);
