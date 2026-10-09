@@ -1,11 +1,13 @@
 'use client';
 
-import type { CSSProperties } from 'react';
+import { startTransition, useOptimistic, type CSSProperties } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { cn } from '@/lib/utils';
 import { DESTINATIONS } from '../../config/navigation';
 import { useOrbitFrame } from '../../orbit-frame-context';
 import { AttentionBadge, useAttentionCount } from './attention-badge';
+import { useDockSwipe } from './use-dock-swipe';
 
 /**
  * You, Orbit and Space on the three root pages, within a thumb's reach on a phone and as a strip under the bar on
@@ -15,38 +17,49 @@ import { AttentionBadge, useAttentionCount } from './attention-badge';
 export function BottomNav() {
   const { route, section: root } = useOrbitFrame();
   const attention = useAttentionCount();
-  if (route.parent !== null) return null;
+  const router = useRouter();
   const activeIndex = DESTINATIONS.findIndex((item) => item.href === root);
   const slots = DESTINATIONS.length;
+  const [selectedIndex, selectIndex] = useOptimistic(activeIndex);
+  const swipe = useDockSwipe(route.parent === null ? selectedIndex : -1, slots, (index) => {
+    // Snap immediately, keeping the pill there while Next loads the destination.
+    startTransition(() => {
+      selectIndex(index);
+      router.push(DESTINATIONS[index].href);
+    });
+  });
+  if (route.parent !== null) return null;
 
   return (
     <nav aria-label="Orbit" className="orbit-dock fixed z-40 lg:hidden">
       <div
         className="orbit-dock-track relative mx-auto grid max-w-lg rounded-full p-2"
-        style={{ gridTemplateColumns: `repeat(${slots}, minmax(0, 1fr))`, '--dock-slots': slots } as CSSProperties}
+        data-dragging={swipe.dragging || undefined}
+        style={{
+          gridTemplateColumns: `repeat(${slots}, minmax(0, 1fr))`,
+          '--dock-slots': slots,
+          '--dock-position': swipe.position,
+        } as CSSProperties}
+        {...swipe.handlers}
       >
         {activeIndex >= 0 && (
           <span
             aria-hidden="true"
-            className="orbit-dock-pill pointer-events-none absolute left-2 rounded-full transition-transform"
-            style={{
-              transform: `translateX(${activeIndex * 100}%)`,
-              transitionDuration: 'var(--duration-slow)',
-              transitionTimingFunction: 'var(--ease-out)',
-            }}
+            className="orbit-dock-pill pointer-events-none absolute rounded-full"
           />
         )}
-        {DESTINATIONS.map((item) => {
+        {DESTINATIONS.map((item, index) => {
           const Icon = item.icon;
           const active = item.href === root;
           return (
             <Link
               key={item.href}
               href={item.href}
+              draggable={false}
               aria-current={active ? 'page' : undefined}
               className={cn(
                 'orbit-press relative z-10 flex h-12 items-center justify-center gap-1.5 rounded-full text-[13px] font-semibold transition-colors',
-                active ? 'text-white' : 'text-muted-foreground hover:text-foreground',
+                index === Math.round(swipe.position) ? 'text-white' : 'text-muted-foreground hover:text-foreground',
               )}
             >
               {item.href === '/admin' && <AttentionBadge count={attention} className="left-[calc(50%-3rem)] top-1" />}
