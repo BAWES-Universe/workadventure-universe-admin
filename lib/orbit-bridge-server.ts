@@ -4,8 +4,12 @@ import { prisma } from '@/lib/db';
 import { ORBIT_HOME_PATH, isKnownIntent } from '@/lib/orbit-bridge';
 
 const worldMembersParams = z.object({ worldId: z.string().uuid() });
-// The game's id for a player (the user's uuid, which can be an email address).
-const userProfileParams = z.object({ userUuid: z.string().min(1).max(256) });
+// A person is named by the game's id for them (the user's uuid, which can be an email address) or, when the game
+// only knows them from a chat (a DM with someone who is away), by their exact Matrix id.
+const userProfileParams = z.union([
+  z.object({ userUuid: z.string().min(1).max(256) }),
+  z.object({ chatId: z.string().regex(/^@[^\s:]+:[^\s]+$/).max(256) }),
+]);
 
 /**
  * The Orbit page for a page request from the game, decided by Orbit alone: the game only names an intent, and
@@ -39,10 +43,17 @@ export async function resolveNavigateIntent(
       // every signed-in viewer only the public part. Guests and unknown players have no profile.
       const parsed = userProfileParams.safeParse(params ?? {});
       if (!parsed.success) return ORBIT_HOME_PATH;
-      const user = await prisma.user.findUnique({
-        where: { uuid: parsed.data.userUuid },
-        select: { id: true, isGuest: true },
-      });
+      // Only an exact Matrix id matches, and the game gets a page, never the account behind it.
+      const user =
+        'userUuid' in parsed.data
+          ? await prisma.user.findUnique({
+              where: { uuid: parsed.data.userUuid },
+              select: { id: true, isGuest: true },
+            })
+          : await prisma.user.findFirst({
+              where: { matrixChatId: parsed.data.chatId },
+              select: { id: true, isGuest: true },
+            });
       if (!user || user.isGuest) return ORBIT_HOME_PATH;
       return user.id === viewerUserId(viewer) ? '/admin/you' : `/admin/users/${user.id}`;
     }

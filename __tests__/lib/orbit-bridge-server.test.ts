@@ -5,7 +5,7 @@ jest.mock('@/lib/access-scope', () => ({
   viewerUserId: (viewer: { kind: string; user?: { id: string } }) => (viewer.kind === 'user' ? viewer.user!.id : null),
 }));
 
-jest.mock('@/lib/db', () => ({ prisma: { user: { findUnique: jest.fn() } } }));
+jest.mock('@/lib/db', () => ({ prisma: { user: { findUnique: jest.fn(), findFirst: jest.fn() } } }));
 
 import { canManageWorldMembers, type Viewer } from '@/lib/access-scope';
 import { prisma } from '@/lib/db';
@@ -15,11 +15,13 @@ const member = { kind: 'user', user: { id: 'user-1', isSuperAdmin: false } } as 
 const worldId = '0f6b8d4e-2a1c-4d3b-9e8f-7a6b5c4d3e2f';
 const canManage = canManageWorldMembers as jest.MockedFunction<typeof canManageWorldMembers>;
 const findUser = prisma.user.findUnique as unknown as jest.Mock;
+const findByChatId = prisma.user.findFirst as unknown as jest.Mock;
 
 describe('resolveNavigateIntent', () => {
   beforeEach(() => {
     canManage.mockReset();
     findUser.mockReset();
+    findByChatId.mockReset();
   });
 
   it('lands on New universe', async () => {
@@ -55,6 +57,31 @@ describe('resolveNavigateIntent', () => {
     findUser.mockResolvedValue({ id: 'user-2', isGuest: false });
     await expect(resolveNavigateIntent(member, 'user-profile', { userUuid: 'ada@example.com' })).resolves.toBe('/admin/users/user-2');
     expect(findUser).toHaveBeenCalledWith({ where: { uuid: 'ada@example.com' }, select: { id: true, isGuest: true } });
+  });
+
+  it("opens someone's profile page from their Matrix id, whether or not they are online", async () => {
+    findByChatId.mockResolvedValue({ id: 'user-2', isGuest: false });
+    await expect(resolveNavigateIntent(member, 'user-profile', { chatId: '@ada:chat.example.com' })).resolves.toBe(
+      '/admin/users/user-2',
+    );
+    expect(findByChatId).toHaveBeenCalledWith({ where: { matrixChatId: '@ada:chat.example.com' }, select: { id: true, isGuest: true } });
+    expect(findUser).not.toHaveBeenCalled();
+  });
+
+  it('opens You when the Matrix id is your own', async () => {
+    findByChatId.mockResolvedValue({ id: 'user-1', isGuest: false });
+    await expect(resolveNavigateIntent(member, 'user-profile', { chatId: '@me:chat.example.com' })).resolves.toBe('/admin/you');
+  });
+
+  it('sends a Matrix id nobody has stored, a guest, or a malformed one home', async () => {
+    findByChatId.mockResolvedValue(null);
+    await expect(resolveNavigateIntent(member, 'user-profile', { chatId: '@nobody:chat.example.com' })).resolves.toBe('/admin');
+    findByChatId.mockResolvedValue({ id: 'user-3', isGuest: true });
+    await expect(resolveNavigateIntent(member, 'user-profile', { chatId: '@guest:chat.example.com' })).resolves.toBe('/admin');
+    findByChatId.mockReset();
+    await expect(resolveNavigateIntent(member, 'user-profile', { chatId: 'not-a-matrix-id' })).resolves.toBe('/admin');
+    await expect(resolveNavigateIntent(member, 'user-profile', { chatId: '@a b:chat' })).resolves.toBe('/admin');
+    expect(findByChatId).not.toHaveBeenCalled();
   });
 
   it('opens You for your own profile', async () => {
