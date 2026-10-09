@@ -22,12 +22,12 @@ jest.mock('@/lib/auth', () => ({ requireAuth: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
 jest.mock('@/lib/woka-avatar', () => ({ withWokas: jest.fn(async (rows: unknown) => rows) }));
 jest.mock('@/lib/auth-token', () => ({ getSessionId: jest.fn(() => 'sid'), getSessionData: jest.fn() }));
-jest.mock('@/lib/system-user', () => ({ ...jest.requireActual('@/lib/system-user'), hiddenSystemOwnerId: jest.fn() }));
+jest.mock('@/lib/system-user', () => ({ ...jest.requireActual('@/lib/system-user'), getSystemUserId: jest.fn(), hiddenSystemOwnerId: jest.fn() }));
 
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { getSessionData } from '@/lib/auth-token';
-import { hiddenSystemOwnerId, NOT_SYSTEM_USER } from '@/lib/system-user';
+import { getSystemUserId, hiddenSystemOwnerId, NOT_SYSTEM_USER } from '@/lib/system-user';
 import { GET as listUniverses } from '@/app/api/admin/universes/route';
 import { GET as listWorlds } from '@/app/api/admin/worlds/route';
 import { GET as listRooms } from '@/app/api/admin/rooms/route';
@@ -52,6 +52,7 @@ const db = prisma as unknown as {
   roomAccess: Mocked;
 };
 const hidden = hiddenSystemOwnerId as jest.Mock;
+const systemId = getSystemUserId as jest.Mock;
 
 /** The full SQL of a $queryRaw call, nested Prisma.sql fragments included. */
 function sqlOf(call: unknown[]): Prisma.Sql {
@@ -166,6 +167,7 @@ describe('From a play URI', () => {
   beforeEach(() => {
     db.world.findFirst.mockResolvedValue({ id: 'w', universe: { id: 'u', name: 'Default', slug: 'default', ownerId: 'sys' } });
     db.room.findFirst.mockResolvedValue({ id: 'r', slug: 'default', name: 'Default' });
+    systemId.mockResolvedValue(null);
   });
   const resolve = () => fromPlayUri(session(`/api/admin/rooms/from-play-uri?playUri=${encodeURIComponent('https://play.test/@/default/default/default')}`));
 
@@ -174,6 +176,26 @@ describe('From a play URI', () => {
     const response = await resolve();
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ id: 'r', slug: 'default', name: 'Default', unlisted: true });
+  });
+
+  it('marks a System room as system, whether or not it is hidden, and leaves the flag off other rooms', async () => {
+    systemId.mockResolvedValue('sys');
+    hidden.mockResolvedValue(null);
+    expect(await (await resolve()).json()).toEqual({ id: 'r', slug: 'default', name: 'Default', system: true });
+    hidden.mockResolvedValue('sys');
+    expect(await (await resolve()).json()).toEqual({ id: 'r', slug: 'default', name: 'Default', unlisted: true, system: true });
+    systemId.mockResolvedValue('someone-else');
+    expect(await (await resolve()).json()).toEqual({ id: 'r', slug: 'default', name: 'Default', unlisted: true });
+  });
+
+  it('just omits the flag when System can’t be looked up', async () => {
+    hidden.mockResolvedValue(null);
+    systemId.mockRejectedValue(new Error('db down'));
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const response = await resolve();
+    warn.mockRestore();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ id: 'r', slug: 'default', name: 'Default' });
   });
 
   it('is not marked while the start room is still System’s', async () => {
