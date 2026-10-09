@@ -434,6 +434,9 @@ a[href] {
    game's bar, so the two line up at the bottom of a phone. The active place is the gradient pill of the game's tabs. */
 .orbit-dock { left: 4px; right: 4px; bottom: calc(4px + var(--safe-bottom)); }
 .orbit-dock-track {
+  touch-action: pan-y pinch-zoom;
+  user-select: none;
+  -webkit-user-select: none;
   background: linear-gradient(160deg, rgb(31 28 47 / .92), rgb(20 18 30 / .94));
   box-shadow: 0 1px 0 rgb(255 255 255 / .08) inset, 0 0 0 1px rgb(167 139 250 / .18);
   backdrop-filter: blur(18px) saturate(140%);
@@ -442,7 +445,22 @@ a[href] {
   --foreground: 0 0% 100%;
   --muted-foreground: 250 15% 74%;
 }
-.orbit-dock-pill { top: .5rem; bottom: .5rem; width: calc((100% - 1rem) / var(--dock-slots)); background-image: var(--brand-gradient); box-shadow: 0 6px 18px -6px rgb(134 41 252 / .9); }
+.orbit-dock-pill {
+  top: .5rem;
+  bottom: .5rem;
+  inset-inline-start: .5rem;
+  width: calc((100% - 1rem) / var(--dock-slots));
+  background-image: var(--brand-gradient);
+  box-shadow: 0 6px 18px -6px rgb(134 41 252 / .9);
+  transform: translateX(calc(var(--dock-position) * 100%));
+  transition: transform var(--duration-slow) var(--ease-out);
+}
+.orbit-dock-pill:dir(rtl) { transform: translateX(calc(var(--dock-position) * -100%)); }
+.orbit-dock-track[data-dragging] .orbit-dock-pill { transition: none; }
+.orbit-dock-track[data-dragging] a:active { transform: none; }
+@media (prefers-reduced-motion: reduce) {
+  .orbit-dock-pill { transition: none; }
+}
 
 /* Toasts: the game's raised ink (Explore, the menus) with white text, in the light theme too. A success keeps the
    violet edge and the purple glow of what pops up; an error swaps them for coral, the game's colour of danger. */
@@ -464,7 +482,7 @@ a[href] {
   .orbit-dock { position: sticky; top: var(--topbar-height); bottom: auto; padding: 8px; }
   /* The menu's own You · Orbit · Space buttons are 44px: the strip matches them. */
   .orbit-dock-track { padding: 4px; }
-  .orbit-dock-pill { top: 4px; bottom: 4px; left: 4px; width: calc((100% - 8px) / var(--dock-slots)); }
+  .orbit-dock-pill { top: 4px; bottom: 4px; inset-inline-start: 4px; width: calc((100% - 8px) / var(--dock-slots)); }
   .orbit-dock a { height: 44px; }
   .orbit-dock-space { padding-bottom: 2rem !important; }
 }
