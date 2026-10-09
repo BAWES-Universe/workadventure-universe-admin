@@ -2,7 +2,10 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
 
-const MATRIX_USER_ID = /^@[^\s:]+:[^\s]+$/;
+// A Matrix user ID: @localpart:server, at most 255 characters, where the server is a host name, an IPv4 address or a
+// bracketed IPv6 address, with an optional port.
+const MATRIX_USER_ID = /^@[^\s:@]+:(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(?::\d{1,5})?$/;
+const MATRIX_USER_ID_MAX_LENGTH = 255;
 
 export async function PUT(
   request: NextRequest,
@@ -25,7 +28,7 @@ export async function PUT(
     }
 
     // A Matrix user ID: @localpart:server
-    if (typeof chatId !== 'string' || !MATRIX_USER_ID.test(chatId)) {
+    if (typeof chatId !== 'string' || chatId.length > MATRIX_USER_ID_MAX_LENGTH || !MATRIX_USER_ID.test(chatId)) {
       return NextResponse.json(
         { error: 'chatId must be a Matrix user ID' },
         { status: 400 }

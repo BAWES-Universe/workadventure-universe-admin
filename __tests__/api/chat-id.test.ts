@@ -80,7 +80,16 @@ describe('PUT /api/members/:id/chatId', () => {
     });
   });
 
-  it.each([['alice'], ['@alice'], ['@:server'], ['@ali ce:server'], [42]])(
+  it.each([
+    ['alice'],
+    ['@alice'],
+    ['@:server'],
+    ['@ali ce:server'],
+    ['@alice:matrix.org:bogus'],
+    ['@alice:matrix.org/path'],
+    [`@alice:${'a'.repeat(260)}`],
+    [42],
+  ])(
     'refuses %p, which is not a Matrix user ID',
     async (chatId) => {
       db.user.findFirst.mockResolvedValue(ALICE);

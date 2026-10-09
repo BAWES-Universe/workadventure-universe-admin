@@ -6,7 +6,7 @@ import { NextRequest } from 'next/server';
 
 jest.mock('@/lib/db', () => ({
   prisma: {
-    user: { findFirst: jest.fn() },
+    user: { findFirst: jest.fn(), update: jest.fn() },
     world: { findFirst: jest.fn() },
     room: { findFirst: jest.fn() },
     ban: { findFirst: jest.fn().mockResolvedValue(null) },
@@ -26,6 +26,7 @@ jest.mock('@/lib/avatar-catalog-validator', () => ({
 jest.mock('@/lib/super-admin', () => ({ isSuperAdmin: (email: string | null) => email === 'root@example.test' }));
 
 import { prisma } from '@/lib/db';
+import { authenticateRequest } from '@/lib/oidc';
 import { GET as roomAccess } from '@/app/api/room/access/route';
 
 const db = prisma as unknown as Record<string, Record<string, jest.Mock>>;
@@ -48,10 +49,16 @@ function place({ room = true, world = true, universe = true }) {
   db.room.findFirst.mockResolvedValue({ id: 'r', isPublic: room });
 }
 
-async function enter(userIdentifier: string) {
+async function enter(userIdentifier: string, signedIn = true) {
+  // A signed-in person is vouched for by their token; anybody else is only a name in the address
+  (authenticateRequest as jest.Mock).mockResolvedValue(
+    signedIn && USERS[userIdentifier]
+      ? { isAuthenticated: true, identifier: userIdentifier, email: USERS[userIdentifier].email }
+      : { isAuthenticated: false },
+  );
   const url = `http://localhost/api/room/access?userIdentifier=${userIdentifier}&playUri=${encodeURIComponent(
     'http://play.test/@/uni/world/room',
-  )}`;
+  )}${signedIn && USERS[userIdentifier] ? '&accessToken=signed-in-token' : ''}`;
   const request = new NextRequest(url, { headers: { Authorization: process.env.ADMIN_API_TOKEN as string } });
   const body = await (await roomAccess(request)).json();
   return body.status === 'ok' ? 'ok' : body.code;
@@ -64,6 +71,9 @@ describe('GET /api/room/access, members-only places', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     db.user.findFirst.mockImplementation(({ where }) => Promise.resolve(USERS[where.OR[0].uuid] ?? null));
+    db.user.update.mockImplementation(({ where, data }) =>
+      Promise.resolve({ ...Object.values(USERS).find((candidate) => candidate.id === where.id), ...data }),
+    );
     db.worldMember.findUnique.mockImplementation(({ where }) =>
       Promise.resolve(where.userId_worldId.userId === 'u-member' ? { id: 'm', tags: ['member'] } : null),
     );
@@ -93,6 +103,14 @@ describe('GET /api/room/access, members-only places', () => {
     place({ world: false });
     expect(await enter(who)).toBe('ok');
   });
+
+  it.each(['uuid-member', 'uuid-owner', 'uuid-root'])(
+    "does not let somebody who has not signed in in as %s by naming them",
+    async (who) => {
+      place({ world: false });
+      expect(await enter(who, false)).toBe('MEMBERS_ONLY');
+    },
+  );
 
   it("lets only the room's own bots into a members-only room", async () => {
     place({ room: false });
