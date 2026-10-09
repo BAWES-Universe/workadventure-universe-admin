@@ -183,6 +183,16 @@ export async function sharedWorldNames(meId: string, otherIds: string[]): Promis
   return result;
 }
 
+/** Whether both accounts are members of one world. Unlike sharedWorldNames, recent visits do not count. */
+export async function sharesMemberWorld(meId: string, otherId: string): Promise<boolean> {
+  const rows = await prisma.worldMember.findMany({
+    where: { userId: { in: [meId, otherId] } },
+    select: { userId: true, worldId: true },
+  });
+  const mine = new Set(rows.filter((row) => row.userId === meId).map((row) => row.worldId));
+  return rows.some((row) => row.userId === otherId && mine.has(row.worldId));
+}
+
 function matchWorlds(
   meId: string,
   rows: ReadonlyArray<{ userId: string | null; worldId: string; world: { name: string } }>,

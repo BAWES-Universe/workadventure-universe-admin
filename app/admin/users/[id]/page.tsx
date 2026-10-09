@@ -18,6 +18,7 @@ import {
   count,
 } from '../../components/ds';
 import { ProfileFrame, ProfileLinks, WokaAvatar } from '../../components/profile-card';
+import { PassportSection } from '../../components/passport';
 import InviteToWorldDialog from '../../components/invite-to-world-dialog';
 
 interface WorldMembership {
@@ -454,15 +455,16 @@ export default function UserDetailPage() {
           ) : undefined
         }
       >
-        {bio || links.length > 0 ? (
+        {(bio || links.length > 0) && (
           <div className="grid min-w-0 gap-3">
             {bio && <p className="whitespace-pre-line text-sm leading-relaxed [overflow-wrap:anywhere]">{bio}</p>}
             <ProfileLinks links={links} />
           </div>
-        ) : (
-          <p className="text-sm text-muted-foreground">{isSelf ? 'You haven’t written a profile yet.' : `${name} hasn’t written a profile yet.`}</p>
         )}
       </ProfileFrame>
+
+      {/* The same passport block as on You: your own in full, someone else's only as far as they share it with you. */}
+      {currentUser && (isSelf ? <PassportSection /> : <PassportSection userId={user.id} name={name} />)}
 
       {error && (
         <p className="text-sm text-muted-foreground" role="alert">

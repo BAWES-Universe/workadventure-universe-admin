@@ -64,6 +64,29 @@ describe('loadPassport', () => {
     expect(passport).toMatchObject({ worlds: 2, universes: 1, since: '2026-01-12T08:00:00.000Z' });
   });
 
+  it('counts a stranger the days spent in the shown worlds only, never those spent in private ones', async () => {
+    // Private worlds (and ones in private universes) are left out of the stamps, so out of the days too.
+    db.world.findMany.mockResolvedValue([
+      world('hq', 'HQ', 'bawes'),
+      world('nebula', 'Nebula', 'bawes'),
+      world('studio', 'Studio', 'mishari', true, false),
+      world('vault', 'Vault', 'bawes', false),
+    ]);
+    await loadPassport('me', { owner: false });
+    const [, ...values] = db.$queryRaw.mock.calls[0] as [unknown, ...unknown[]];
+    const filter = values.find((value) => typeof value === 'object' && value !== null && 'sql' in value) as { sql: string; values: string[] };
+    expect(filter.sql).toContain('world_id IN');
+    expect(filter.values).toEqual(['hq', 'nebula']);
+    expect(filter.values).not.toContain('vault');
+    expect(filter.values).not.toContain('studio');
+  });
+
+  it('counts the owner every day, with no world filter', async () => {
+    await loadPassport('me', { owner: true });
+    const [, ...values] = db.$queryRaw.mock.calls[0] as [unknown, ...unknown[]];
+    expect(values.some((value) => typeof value === 'object' && value !== null && 'sql' in value && (value as { sql: string }).sql.includes('world_id'))).toBe(false);
+  });
+
   it('is empty for someone who has been nowhere, without asking for worlds', async () => {
     db.roomAccess.groupBy.mockResolvedValue([]);
     expect(await loadPassport('me', { owner: true })).toEqual({ stamps: [], worlds: 0, universes: 0, since: null, days: 0 });

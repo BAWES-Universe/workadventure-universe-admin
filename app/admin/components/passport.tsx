@@ -54,17 +54,25 @@ export function Stamps({ stamps, className }: { stamps: Passport['stamps']; clas
   );
 }
 
-/** Your passport: every world you have been to, and how long you have been around. */
-export function PassportSection() {
-  const [state, setState] = useState<{ passport: Passport; audience: Audience } | 'loading' | 'error'>('loading');
+/**
+ * Your passport: every world you have been to, and how long you have been around. Given `userId` it is someone else's:
+ * only the public worlds they chose to show you, and nothing at all when they hide it.
+ */
+export function PassportSection({ userId, name }: { userId?: string; name?: string } = {}) {
+  const [state, setState] = useState<{ passport: Passport; audience?: Audience } | 'loading' | 'error'>('loading');
   useEffect(() => {
     let cancelled = false;
-    authenticatedFetch('/api/me/passport')
+    authenticatedFetch(userId ? `/api/admin/users/${encodeURIComponent(userId)}/passport` : '/api/me/passport')
       .then(async (response) => {
         if (!response.ok) throw new Error(`Passport answered ${response.status}`);
-        const data = (await response.json()) as { passport?: Passport; audience?: Audience };
+        const data = (await response.json()) as { passport?: Passport | null; audience?: Audience };
+        // Someone who hides their passport from you answers with none; show nothing, not an error.
+        if (userId && data.passport === null) {
+          if (!cancelled) setState('error');
+          return;
+        }
         if (!data.passport) throw new Error('No passport');
-        if (!cancelled) setState({ passport: data.passport, audience: data.audience ?? 'everyone' });
+        if (!cancelled) setState({ passport: data.passport, audience: userId ? undefined : (data.audience ?? 'everyone') });
       })
       .catch(() => {
         if (!cancelled) setState('error');
@@ -72,17 +80,19 @@ export function PassportSection() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [userId]);
   // Nothing while it loads or if it can't be read: the rest of You stays as it was.
   if (state === 'loading' || state === 'error') return null;
   const { passport, audience } = state;
+  // On someone else's profile, no stamps means nothing to show.
+  if (userId && passport.stamps.length === 0) return null;
   return (
     <section className={styles.section} aria-labelledby="passport-heading" data-testid="passport">
       <div className={styles.head}>
         <h2 id="passport-heading" className="orbit-display">
-          Your passport
+          {userId ? (name ? `${name}’s passport` : 'Their passport') : 'Your passport'}
         </h2>
-        <Visible audience={audience} />
+        {audience && <Visible audience={audience} />}
       </div>
       <div className={styles.card}>
         {passport.stamps.length === 0 ? (

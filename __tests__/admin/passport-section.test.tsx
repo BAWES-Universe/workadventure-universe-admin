@@ -79,6 +79,31 @@ describe('Your passport', () => {
   });
 });
 
+describe("Someone else's passport", () => {
+  it("shows the stamps they share with you, under their name, without the 'who can see me' line", async () => {
+    answer({ stamps: passport.stamps.slice(0, 1), passport });
+    render(<PassportSection userId="sara" name="Sara" />);
+    const section = await screen.findByTestId('passport');
+    expect(fetchMock).toHaveBeenCalledWith('/api/admin/users/sara/passport');
+    expect(within(section).getByText('Sara’s passport')).toBeTruthy();
+    expect(within(section).getByText('2 worlds')).toBeTruthy();
+    expect(within(section).getAllByTestId('passport-stamp')).toHaveLength(2);
+    expect(within(section).queryByTestId('passport-visible')).toBeNull();
+  });
+
+  it('shows nothing when they hide it from you, or there is nothing to show', async () => {
+    answer({ stamps: [], passport: null });
+    const { container, unmount } = render(<PassportSection userId="sara" name="Sara" />);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(container.textContent).toBe('');
+    unmount();
+    answer({ stamps: [], passport: { stamps: [], worlds: 0, universes: 0, since: null, days: 0 } });
+    const second = render(<PassportSection userId="sara" name="Sara" />);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(second.container.textContent).toBe('');
+  });
+});
+
 describe('Your activity', () => {
   it('lists what happened with how long ago, each leading to its page, and says only you see it', async () => {
     const recent = new Date(Date.now() - 5 * 3600_000).toISOString();

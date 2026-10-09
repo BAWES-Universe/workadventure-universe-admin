@@ -195,7 +195,7 @@ describe('/api/friends', () => {
     it('start at the defaults', async () => {
       const res = await get(getSettings, '/settings', { userUuid: 'uuid-a' });
       expect(await res.json()).toEqual({
-        settings: { ringFrom: 'friends', friendRequestsFrom: 'anyone', findableByName: true, friendsSeeLocation: true },
+        settings: { ringFrom: 'friends_and_members', friendRequestsFrom: 'anyone', findableByName: true, friendsSeeLocation: true },
       });
     });
 
@@ -329,14 +329,30 @@ describe('/api/friends', () => {
     expect((await send(places, '/places', 'POST', { playUris: [known] }, {} as typeof auth)).status).toBe(401);
   });
 
-  it('relationship returns the pair and the target ring and location settings', async () => {
+  it('relationship returns the pair, whether they share a world as members, and the target invite and location settings', async () => {
     shareWorld('a', 'b');
     await action('a', 'b', 'request');
     await send(putSettings, '/settings', 'PUT', { userUuid: 'uuid-b', settings: { ringFrom: 'friends_and_members' } });
     const res = await get(relationship, '/relationship', { userUuid: 'uuid-b', targetUuid: 'uuid-a' });
-    expect(await res.json()).toEqual({ relationship: 'request_received', target: { ringFrom: 'friends', friendsSeeLocation: true } });
+    expect(await res.json()).toEqual({ relationship: 'request_received', sharedWorld: true, target: { ringFrom: 'friends_and_members', friendsSeeLocation: true } });
     const back = await get(relationship, '/relationship', { userUuid: 'uuid-a', targetUuid: 'uuid-b' });
-    expect(await back.json()).toEqual({ relationship: 'request_sent', target: { ringFrom: 'friends_and_members', friendsSeeLocation: true } });
+    expect(await back.json()).toEqual({ relationship: 'request_sent', sharedWorld: true, target: { ringFrom: 'friends_and_members', friendsSeeLocation: true } });
     expect((await get(relationship, '/relationship', { userUuid: 'uuid-a', targetUuid: 'uuid-g' })).status).toBe(404);
+  });
+
+  it('relationship says sharedWorld only when both are members of one world', async () => {
+    db.members.push({ userId: 'a', worldId: 'w1', worldName: 'Main Hall', universeName: 'Bawes' });
+    db.members.push({ userId: 'b', worldId: 'w2', worldName: 'Other', universeName: 'Bawes' });
+    const apart = await get(relationship, '/relationship', { userUuid: 'uuid-a', targetUuid: 'uuid-b' });
+    expect((await apart.json()).sharedWorld).toBe(false);
+    db.members.push({ userId: 'b', worldId: 'w1', worldName: 'Main Hall', universeName: 'Bawes' });
+    const together = await get(relationship, '/relationship', { userUuid: 'uuid-a', targetUuid: 'uuid-b' });
+    expect((await together.json()).sharedWorld).toBe(true);
+  });
+
+  it('a player who never chose gets Everyone it reaches, and a saved choice is kept', async () => {
+    expect((await (await get(getSettings, '/settings', { userUuid: 'uuid-a' })).json()).settings.ringFrom).toBe('friends_and_members');
+    await send(putSettings, '/settings', 'PUT', { userUuid: 'uuid-a', settings: { ringFrom: 'friends' } });
+    expect((await (await get(getSettings, '/settings', { userUuid: 'uuid-a' })).json()).settings.ringFrom).toBe('friends');
   });
 });
