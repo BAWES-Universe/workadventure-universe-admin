@@ -3,7 +3,24 @@ import { requireAuth } from '@/lib/auth';
 import { parsePlayUri } from '@/lib/utils';
 import { prisma } from '@/lib/db';
 import { NOT_SYSTEM_USER } from '@/lib/system-user';
+import { wokaTexturesForMany } from '@/lib/woka-avatar';
 import type { WorldChatMembersData } from '@/types/workadventure';
+
+// Wokas are looked up in slices so a world with a very long member list never sends one huge query.
+const WOKA_BATCH = 500;
+
+async function wokasFor(userIds: string[], worldId: string) {
+  const wokas = new Map<string, { id: string; url: string }[]>();
+  for (let from = 0; from < userIds.length; from += WOKA_BATCH) {
+    try {
+      const slice = await wokaTexturesForMany(userIds.slice(from, from + WOKA_BATCH), worldId);
+      slice.forEach((layers, userId) => wokas.set(userId, layers));
+    } catch {
+      // One slice failing only leaves its people without a saved Woka; the slices already read are kept.
+    }
+  }
+  return wokas;
+}
 
 export async function GET(request: NextRequest) {
   try {
@@ -59,6 +76,7 @@ export async function GET(request: NextRequest) {
       include: {
         user: {
           select: {
+            id: true,
             uuid: true,
             name: true,
             email: true,
@@ -68,6 +86,10 @@ export async function GET(request: NextRequest) {
       },
     });
     
+    // Each member's saved Woka, so the chat can draw people who are away, not only the ones on the map. Never fails
+    // the list: without one the game draws its default Woka or a letter.
+    const wokas = await wokasFor(members.map((m: typeof members[0]) => m.user.id), worldData.id);
+
     const response: WorldChatMembersData = {
       total: members.length,
       members: members.map((m: typeof members[0]) => ({
@@ -76,6 +98,7 @@ export async function GET(request: NextRequest) {
         email: m.user.email,
         chatId: m.user.matrixChatId,
         tags: m.tags,
+        characterTextures: wokas.get(m.user.id) ?? [],
       })),
     };
     

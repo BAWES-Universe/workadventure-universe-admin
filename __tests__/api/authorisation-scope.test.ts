@@ -244,6 +244,27 @@ describe('user by id', () => {
     expect(body._count).toMatchObject({ ownedUniverses: 1, worldMemberships: 1 });
   });
 
+  it('a private world inside a place they can see stays out of its counts', async () => {
+    const world = (id: string, isPublic: boolean, rooms: number) => ({ id, isPublic, _count: { rooms, members: rooms } });
+    db.user.findUnique.mockImplementationOnce(async () => ({
+      ...USER_ROWS[0],
+      ownedUniverses: [
+        {
+          id: 'open-universe',
+          slug: 'open-universe',
+          isPublic: true,
+          worlds: [world('open-world', true, 2), world('secret-world', false, 5)],
+          _count: { worlds: 2 },
+        },
+      ],
+      worldMemberships: [],
+      _count: { ownedUniverses: 1, worldMemberships: 0, bans: 0, favorites: 0, avatars: 0 },
+    }));
+    const body = await (await getUser(req('/api/admin/users/u-bob', 'alice'), params('u-bob'))).json();
+    expect(body.ownedUniverses[0]._count).toMatchObject({ worlds: 1, rooms: 2, members: 2 });
+    expect(body.ownedUniverses[0].worlds).toHaveLength(1);
+  });
+
   it('a user sees their own email and Matrix id but not their own IP address', async () => {
     const res = await getUser(req('/api/admin/users/u-bob', 'bob'), params('u-bob'));
     const body = await res.json();
@@ -427,6 +448,17 @@ describe('reading one bot\'s data', () => {
     expect(db.botsConversation.findMany).toHaveBeenCalledWith(
       expect.objectContaining({ where: expect.objectContaining({ botId: 'bot-mine' }) }),
     );
+  });
+
+  it('a bot manager does not get a player\'s email back through the player id; a super admin does', async () => {
+    db.botsConversation.findMany.mockResolvedValue([
+      { id: 'c1', userUuid: 'bob@example.test', user: { id: 'u-bob', uuid: 'uuid-bob', name: 'Bob' } },
+      { id: 'c2', userUuid: 'guest-uuid-1', user: null },
+    ]);
+    const manager = await (await readBotConversations(req('/api/bots/bot-mine/conversations', 'alice'), params('bot-mine'))).json();
+    expect(manager.conversations.map((c: { userUuid: string | null }) => c.userUuid)).toEqual(['uuid-bob', 'guest-uuid-1']);
+    const root = await (await readBotConversations(req('/api/bots/bot-mine/conversations', 'root'), params('bot-mine'))).json();
+    expect(root.conversations.map((c: { userUuid: string | null }) => c.userUuid)).toEqual(['bob@example.test', 'guest-uuid-1']);
   });
 
   it('a signed-in user cannot read memory of a bot in a room they do not manage', async () => {

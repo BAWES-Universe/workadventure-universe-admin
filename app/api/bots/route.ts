@@ -153,10 +153,11 @@ export async function GET(request: NextRequest) {
         });
         
         if (!roomRecord) {
-          const response = NextResponse.json(
-            { error: 'Room not found' },
-            { status: 404 }
-          );
+          // Someone who is not signed in gets the same answer for a room that does not exist as for a members-only
+          // one, so the answer does not tell them which rooms exist
+          const response = isAuthenticated
+            ? NextResponse.json({ error: 'Room not found' }, { status: 404 })
+            : NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
           Object.entries(corsHeaders()).forEach(([key, value]) => {
             response.headers.set(key, value);
           });
@@ -195,10 +196,9 @@ export async function GET(request: NextRequest) {
     });
 
     if (!room) {
-      const response = NextResponse.json(
-        { error: 'Room not found' },
-        { status: 404 }
-      );
+      const response = isAuthenticated
+        ? NextResponse.json({ error: 'Room not found' }, { status: 404 })
+        : NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
       Object.entries(corsHeaders()).forEach(([key, value]) => {
         response.headers.set(key, value);
       });
