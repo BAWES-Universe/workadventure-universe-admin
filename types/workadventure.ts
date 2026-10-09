@@ -195,6 +195,8 @@ export interface ChatMember {
   email: string | null;
   chatId: string | null;
   tags: string[];
+  /** The member's saved Woka (bottom layer first), so the chat can draw them while they are away. */
+  characterTextures: { id: string; url: string }[];
 }
 
 export interface IceServer {
