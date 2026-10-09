@@ -65,4 +65,22 @@ describe('GET /api/chat/members', () => {
     expect(response.status).toBe(200);
     expect((await response.json()).members[0]).toMatchObject({ uuid: 'alice-uuid', characterTextures: [] });
   });
+
+  it('keeps the Wokas already read when a later slice of a long member list fails', async () => {
+    const member = (n: number) => ({
+      tags: [],
+      user: { id: `u${n}`, uuid: `uuid-${n}`, name: `P${n}`, email: null, matrixChatId: `@p${n}:chat` },
+    });
+    db.worldMember.findMany.mockResolvedValue(Array.from({ length: 501 }, (_, n) => member(n)));
+    db.userAvatar.findMany
+      .mockResolvedValueOnce([{ userId: 'u0', worldId: 'world-1', textureIds: ['male1'] }])
+      .mockRejectedValueOnce(new Error('timeout'));
+
+    const response = await GET(request());
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.members).toHaveLength(501);
+    expect(body.members[0].characterTextures).toHaveLength(1);
+    expect(body.members[500].characterTextures).toEqual([]);
+  });
 });

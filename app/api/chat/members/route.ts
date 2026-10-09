@@ -12,8 +12,12 @@ const WOKA_BATCH = 500;
 async function wokasFor(userIds: string[], worldId: string) {
   const wokas = new Map<string, { id: string; url: string }[]>();
   for (let from = 0; from < userIds.length; from += WOKA_BATCH) {
-    const slice = await wokaTexturesForMany(userIds.slice(from, from + WOKA_BATCH), worldId);
-    slice.forEach((layers, userId) => wokas.set(userId, layers));
+    try {
+      const slice = await wokaTexturesForMany(userIds.slice(from, from + WOKA_BATCH), worldId);
+      slice.forEach((layers, userId) => wokas.set(userId, layers));
+    } catch {
+      // One slice failing only leaves its people without a saved Woka; the slices already read are kept.
+    }
   }
   return wokas;
 }
@@ -84,8 +88,7 @@ export async function GET(request: NextRequest) {
     
     // Each member's saved Woka, so the chat can draw people who are away, not only the ones on the map. Never fails
     // the list: without one the game draws its default Woka or a letter.
-    const wokas = await wokasFor(members.map((m: typeof members[0]) => m.user.id), worldData.id)
-      .catch(() => new Map<string, { id: string; url: string }[]>());
+    const wokas = await wokasFor(members.map((m: typeof members[0]) => m.user.id), worldData.id);
 
     const response: WorldChatMembersData = {
       total: members.length,
