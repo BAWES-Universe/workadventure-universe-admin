@@ -105,6 +105,15 @@ describe('Live now', () => {
     expect(navigateToRoom).toHaveBeenCalledWith('/@/x/hq/arcade');
   });
 
+  it('opens the room page from the card, including the room you are in, and keeps Visit as its own button', () => {
+    render(<LiveNowView view={view} layout="space" />);
+    const cards = screen.getAllByTestId('live-place');
+    expect(within(cards[0]).getByRole('link', { name: 'Main Hall' }).getAttribute('href')).toBe('/admin/rooms/hall');
+    expect(within(cards[1]).getByRole('link', { name: 'Arcade' }).getAttribute('href')).toBe('/admin/rooms/arcade');
+    // Visit is a separate link, not swallowed by the card.
+    expect(within(cards[1]).getByRole('link', { name: 'Visit: Arcade' })).toBeTruthy();
+  });
+
   it('says so when nobody is around, and stays out of Orbit home', () => {
     const empty: LiveView = { available: true, generatedAt: 1, places: [], people: [] };
     const { container, unmount } = render(<LiveNowView view={empty} layout="home-inline" />);

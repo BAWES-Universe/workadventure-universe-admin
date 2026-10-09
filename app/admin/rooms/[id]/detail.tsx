@@ -6,6 +6,7 @@ import { AlsoIn, Crumb, PlaceHero, SectionHead, StarButton, playPathOf, type Roo
 import { useEntitySummaries } from '../../hooks/use-entity-summaries';
 import { useHere } from '../../hooks/use-place-data';
 import RecentVisitors from '../../components/recent-visitors';
+import RoomMembers from '../../components/room-members';
 
 import { useState, useEffect, useMemo, type ReactNode } from 'react';
 import Link from 'next/link';
@@ -1024,7 +1025,12 @@ export function RoomDetailPage({ view = 'details' }: { view?: 'details' | 'visit
       ) : (
         <>
 
-          {activeTab === 'details' && <RecentVisitors scope="room" id={id} onOpenVisitors={() => router.push(`/admin/rooms/${id}/visitors`)} />}
+          {activeTab === 'details' && (
+            <>
+              <RoomMembers key={room.world.id} world={room.world} />
+              <RecentVisitors key={id} scope="room" id={id} lastVisited={lastVisit} onOpenVisitors={() => router.push(`/admin/rooms/${id}/visitors`)} />
+            </>
+          )}
 
           {activeTab === 'details' && siblingCards.length > 0 && (
             <section aria-labelledby="room-siblings">

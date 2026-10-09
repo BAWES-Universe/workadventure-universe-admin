@@ -37,7 +37,7 @@ const MEMBERS = [
 function setUp(isPublic: boolean) {
   db.world.findUnique.mockImplementation(({ where, include }) => {
     if (where.id !== 'w') return Promise.resolve(null);
-    const world = { id: 'w', isPublic, universe: { isPublic: true, ownerId: 'u-owner' } };
+    const world = { id: 'w', isPublic, universe: { name: 'Butterfly Universe', isPublic: true, ownerId: 'u-owner' } };
     // canManageWorldMembers asks for the caller's admin membership
     if (include?.members) {
       const userId = include.members.where.userId;
@@ -100,6 +100,9 @@ describe('GET /api/admin/worlds/[id]/members', () => {
     const body = await response.json();
     expect(body.total).toBe(2);
     expect(body.yourTags).toEqual(['admin']);
+    // Who is asking and which universe it is, so a member card can say "You own …" and "Owns …".
+    expect(body.yourId).toBe(SESSIONS.admin.id);
+    expect(body.universeName).toBe('Butterfly Universe');
     // The preview asked for the admin (first by rank) only, and skipped the visit history.
     const preview = db.worldMember.findMany.mock.calls.at(-1)?.[0];
     expect(preview.where.id).toEqual({ in: ['m-2'] });

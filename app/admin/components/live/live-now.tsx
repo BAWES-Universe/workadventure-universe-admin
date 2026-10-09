@@ -88,7 +88,11 @@ function PlaceCard({ place }: { place: LivePlace }) {
       <div className={styles.placeTop}>
         <KindIcon kind="room" />
         <div className={styles.placeText}>
-          <h3 className={styles.name}>{place.name}</h3>
+          <h3 className={styles.name}>
+            <Link href={`/admin/rooms/${place.roomId}`} className={styles.cardLink}>
+              {place.name}
+            </Link>
+          </h3>
           <div className={styles.ctx}>
             <Context parts={[{ label: place.universe.name }, { label: place.world.name }]} />
           </div>

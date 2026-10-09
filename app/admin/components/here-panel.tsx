@@ -20,6 +20,8 @@ interface ApiRoom {
   accessedAt?: string;
   /** One of System's rooms, kept out of every list now that the start room is elsewhere. */
   unlisted?: boolean;
+  /** One of System's built-in rooms: when it is also the start room, Home calls it the start map. */
+  system?: boolean;
 }
 
 function toCardRoom(room: ApiRoom): RoomCardRoom {
@@ -36,8 +38,8 @@ function toCardRoom(room: ApiRoom): RoomCardRoom {
 }
 
 /**
- * The start map (START_ROOM_URL, as `@/universe/world/room`) is where everyone lands; it isn't a place of anyone's,
- * so Home stays neutral there.
+ * Whether this is the start room (START_ROOM_URL, as `@/universe/world/room`), where everyone lands. It is only "the
+ * start map" when it is System's built-in map or a room Orbit doesn't know; a real room keeps its own card.
  */
 export function isStartMap(playUri: string, startRoom: string | null = '@/default/default/default'): boolean {
   if (!startRoom) return false;
@@ -71,8 +73,8 @@ function Notice({ eyebrow, title, children, action }: { eyebrow: string; title: 
 
 /**
  * Where you are and where you were just before: each room with its stars, visits, busiest hour and latest visitor,
- * one tap from its page. On the start map it says so and points at Space. Outside the game it explains why there
- * is nothing to show.
+ * one tap from its page. On the start map (System's built-in one, or a start room Orbit doesn't know) it says so and
+ * points at Space. Outside the game it explains why there is nothing to show.
  */
 export default function HerePanel({ onShown }: { onShown?: (roomIds: string[]) => void }) {
   const { wa, isReady, isLoading, error } = useWorkAdventure();
@@ -166,7 +168,7 @@ export default function HerePanel({ onShown }: { onShown?: (roomIds: string[]) =
         </button>
       </Notice>
     );
-  } else if (located.start) {
+  } else if (located.start && (located.kind === 'unknown' || located.room.system)) {
     current = (
       <Notice
         eyebrow="You are here"

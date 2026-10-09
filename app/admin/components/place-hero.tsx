@@ -7,7 +7,7 @@
 import Link from 'next/link';
 import type { ReactNode } from 'react';
 import { useContext } from 'react';
-import { DoorOpen, Earth, LogIn, Plus, Star } from 'lucide-react';
+import { ArrowDown, DoorOpen, Earth, LogIn, Plus, Star } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { timeAgo } from '@/lib/time-ago';
 import { cn } from '@/lib/utils';
@@ -95,6 +95,20 @@ export function VisitButton({
       <LogIn size={17} aria-hidden="true" />
       {label}
     </Link>
+  );
+}
+
+/** The hero's main button on a world or universe: scrolls down to the list of rooms or worlds, where each row has its own Visit. */
+export function BrowseButton({ label, targetId }: { label: string; targetId: string }) {
+  const jump = () => {
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    document.getElementById(targetId)?.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'start' });
+  };
+  return (
+    <Button className="h-12 px-6 text-base" onClick={jump}>
+      <ArrowDown aria-hidden="true" />
+      {label}
+    </Button>
   );
 }
 

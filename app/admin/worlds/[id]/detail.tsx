@@ -28,7 +28,7 @@ import { EmptyCard, EntityCard, EntityRow, Figure, Figures, InContext, LoadError
 import InviteMemberDialog from '../../components/invite-member-dialog';
 import MemberList from '../../components/member-list';
 import MembersRow from '../../components/members-row';
-import { AddButton, Crumb, PlaceHero, RoomRows, SectionHead, StarButton, VisitButton, playPathOf, type RoomRowData } from '../../components/place-hero';
+import { AddButton, BrowseButton, Crumb, PlaceHero, RoomRows, SectionHead, StarButton, playPathOf, type RoomRowData } from '../../components/place-hero';
 import WorldSafety, { useWorldSafety, waitingCount } from '../../components/world-safety';
 import { PersonIcon } from '../../components/profile-card';
 import RecentVisitors from '../../components/recent-visitors';
@@ -321,7 +321,6 @@ function WorldDetail({ view }: { view: WorldView }) {
       latest: activity?.lastVisitedOverall?.accessedAt ?? null,
     };
   });
-  const startRoom = world.rooms[0];
   // Your roles in this world: its members' tags, and owner when the universe is yours.
   const yourRoles = currentUser && world.universe.ownerId === currentUser.id ? ['owner'] : (membersPreview?.yourTags ?? []);
   const peakHour = summary?.peakHour ?? null;
@@ -372,9 +371,7 @@ function WorldDetail({ view }: { view: WorldView }) {
         here={here}
         actions={
           <>
-            {startRoom && (
-              <VisitButton hero playPath={playPathOf(universeSlug, world.slug, startRoom.slug)} roomId={startRoom.id} name={startRoom.name} />
-            )}
+            {world.rooms.length > 0 && <BrowseButton label="Browse rooms" targetId="world-rooms-section" />}
             {currentUser && <StarButton count={world.starCount ?? 0} starred={!!world.isStarred} onClick={star.toggle} disabled={star.busy} />}
           </>
         }
@@ -513,13 +510,14 @@ function WorldDetail({ view }: { view: WorldView }) {
 
           {activeTab === 'details' && (
             <>
+              <MembersRow worldId={id} preview={membersPreview} onInvite={() => setInviteDialogOpen(true)} />
               <RecentVisitors scope="world" id={id} onOpenVisitors={() => router.push(`/admin/worlds/${id}/visitors`)} />
               {world.thumbnailUrl && (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img src={world.thumbnailUrl} alt={world.name} className="h-20 w-20 rounded-xl object-cover" />
               )}
 
-              <section aria-labelledby="world-rooms">
+              <section id="world-rooms-section" aria-labelledby="world-rooms" className="scroll-mt-4">
                 <SectionHead
                   title="Rooms"
                   count={world.rooms.length}
@@ -546,7 +544,6 @@ function WorldDetail({ view }: { view: WorldView }) {
                   </div>
                 )}
               </section>
-              <MembersRow worldId={id} preview={membersPreview} onInvite={() => setInviteDialogOpen(true)} />
             </>
           )}
 

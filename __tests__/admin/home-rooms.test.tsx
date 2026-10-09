@@ -179,7 +179,15 @@ describe('Where you are: the start map and unlisted rooms', () => {
     </AdminBootstrapProvider>
   );
 
-  it('calls the configured START_ROOM_URL the start map', async () => {
+  it('shows a start room that is a real room as that room', async () => {
+    render(withStartRoom('@/bawes/office/headquarters', inGame(<HerePanel />)));
+    const here = await screen.findByTestId('room-card-here');
+    expect(here.textContent).toContain('Headquarters');
+    expect(screen.queryByText('The start map')).toBeNull();
+  });
+
+  it('calls the start room the start map when it is System’s built-in map', async () => {
+    responses['/api/admin/rooms/from-play-uri'] = { ...hq, system: true };
     render(withStartRoom('@/bawes/office/headquarters', inGame(<HerePanel />)));
     expect(await screen.findByText('The start map')).toBeTruthy();
     expect(screen.queryByTestId('room-card-here')).toBeNull();
