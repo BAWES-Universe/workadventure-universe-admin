@@ -6,14 +6,20 @@ import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { WokaAvatar } from './profile-card';
 import { RolePill } from './ds';
-import type { MembersPreview } from '../hooks/use-place-data';
+import type { MemberPreview, MembersPreview } from '../hooks/use-place-data';
 import styles from './recent-visitors.module.css';
 
 const ORDER = ['owner', 'admin', 'editor', 'member'];
 const SHOWN = 8;
 
 /** A world's members as a row of faces, owners and admins first; the full list, with role changes, is its own page. */
-export default function MembersRow({ worldId, preview, onInvite }: { worldId: string; preview: MembersPreview | null; onInvite?: () => void }) {
+export default function MembersRow({ worldId, preview, onInvite, onSelect, description }: {
+  worldId: string;
+  preview: MembersPreview | null;
+  onInvite?: () => void;
+  onSelect?: (member: MemberPreview) => void;
+  description?: string;
+}) {
   if (!preview) return null;
   const { members, total, canManage } = preview;
   const all = `/admin/worlds/${worldId}/members`;
@@ -35,17 +41,24 @@ export default function MembersRow({ worldId, preview, onInvite }: { worldId: st
           </Link>
         </div>
       </div>
+      {description && <p className={styles.note}>{description}</p>}
+      {total === 0 && <p className={styles.note}>No members yet.</p>}
       <ul className={styles.visitors}>
         {members.slice(0, SHOWN).map((member) => {
           const name = member.user.name || member.user.email || 'Someone';
           const role = member.isUniverseOwner ? 'owner' : [...member.tags].sort((a, b) => ORDER.indexOf(a) - ORDER.indexOf(b))[0] ?? 'member';
+          const face = <>
+            <WokaAvatar layers={member.woka ?? []} name={name} size={44} tinted />
+            <strong>{name}</strong>
+            <span className="-mt-0.5 scale-90"><RolePill role={role} /></span>
+          </>;
           return (
             <li key={member.id}>
-              <Link href={`/admin/users/${member.user.id}`} className={styles.face} aria-label={`${name}, ${role}`}>
-                <WokaAvatar layers={member.woka ?? []} name={name} size={44} tinted />
-                <strong>{name}</strong>
-                <span className="-mt-0.5 scale-90"><RolePill role={role} /></span>
-              </Link>
+              {onSelect ? (
+                <button type="button" className={styles.face} aria-label={`${name}, ${role}`} onClick={() => onSelect(member)}>{face}</button>
+              ) : (
+                <Link href={`/admin/users/${member.user.id}`} className={styles.face} aria-label={`${name}, ${role}`}>{face}</Link>
+              )}
             </li>
           );
         })}
