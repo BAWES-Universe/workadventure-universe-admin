@@ -4,7 +4,7 @@ import { useIsSuperAdmin } from '../../admin-bootstrap-context';
 
 import { PersonIcon } from '../../components/profile-card';
 import RecentVisitors from '../../components/recent-visitors';
-import { AddButton, By, PlaceHero, Rank, SectionHead, StarButton, VisitButton, WorldGroups, playPathOf, type WorldGroupData } from '../../components/place-hero';
+import { AddButton, BrowseButton, By, PlaceHero, Rank, SectionHead, StarButton, WorldGroups, playPathOf, type WorldGroupData } from '../../components/place-hero';
 
 import { useState, useEffect, useMemo } from 'react';
 import { useRouter, useParams } from 'next/navigation';
@@ -300,9 +300,8 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
         : null,
     };
   });
-  // Visit opens the first room of the first world.
-  const startWorld = worlds.find((world) => worldRooms[world.id]?.rooms.length);
-  const startRoom = startWorld ? worldRooms[startWorld.id].rooms[0] : undefined;
+  // Browse worlds is offered once there is somewhere to go: a world with at least one room.
+  const hasRooms = worlds.some((world) => worldRooms[world.id]?.rooms.length);
 
   return (
     <div className="space-y-8">
@@ -334,9 +333,7 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
         here={here}
         actions={
           <>
-            {startWorld && startRoom && (
-              <VisitButton hero playPath={playPathOf(universe.slug, startWorld.slug, startRoom.slug)} roomId={startRoom.id} name={startRoom.name} />
-            )}
+            {hasRooms && <BrowseButton label="Browse worlds" targetId="universe-worlds-section" />}
             {currentUser && <StarButton count={universe.starCount ?? 0} starred={!!universe.isStarred} onClick={star.toggle} disabled={star.busy} />}
           </>
         }
@@ -463,7 +460,7 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
                 <img src={universe.thumbnailUrl} alt={universe.name} className="h-12 w-12 object-cover rounded" />
               )}
               {((worlds.length === 0 && isOwner) || worlds.length > 0) && (
-                <section aria-labelledby="universe-worlds">
+                <section id="universe-worlds-section" aria-labelledby="universe-worlds" className="scroll-mt-4">
                   <SectionHead
                     title="Worlds"
                     count={worlds.length}

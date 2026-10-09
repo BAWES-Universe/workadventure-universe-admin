@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from 'react';
 import { authenticatedFetch } from '@/lib/client-auth';
-import { ArrowRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { timeAgo, timeAgoShort } from '@/lib/time-ago';
 import type { RecentVisitor } from '@/lib/recent-visitors';
@@ -83,17 +82,6 @@ export default function RecentVisitors({ scope, id, onOpenVisitors, lastVisited 
             </button>
           </li>
         ))}
-        {onOpenVisitors && (
-          <li>
-            <button type="button" className={cn(styles.face, styles.seeAll)} aria-label="See all visitors" onClick={onOpenVisitors} data-testid="recent-visitors-see-all-tile">
-              <span className={styles.seeAllCircle} aria-hidden="true">
-                <ArrowRight size={20} />
-              </span>
-              <strong>See all</strong>
-              <span>visitors</span>
-            </button>
-          </li>
-        )}
       </ul>
       <PersonSheet person={picked} onClose={() => setPicked(null)} description={picked && <>{picked.guest && 'Guest · '}Here {timeAgo(new Date(picked.at))} · {picked.room.name}</>}>
         {scope === 'room' && picked && <VisitorMembership key={`${id}-${picked.key}`} roomId={id} userId={picked.guest ? null : picked.userId} />}

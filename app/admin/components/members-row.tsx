@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { ArrowRight, UserPlus } from 'lucide-react';
+import { UserPlus } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { WokaAvatar } from './profile-card';
@@ -11,6 +11,11 @@ import styles from './recent-visitors.module.css';
 
 const ORDER = ['owner', 'admin', 'editor', 'member'];
 const SHOWN = 8;
+
+/** The one role a face carries: the universe's owner first, else the highest of their tags. */
+export function topRole(member: Pick<MemberPreview, 'isUniverseOwner' | 'tags'>): string {
+  return member.isUniverseOwner ? 'owner' : [...member.tags].sort((a, b) => ORDER.indexOf(a) - ORDER.indexOf(b))[0] ?? 'member';
+}
 
 /** A world's members as a row of faces, owners and admins first; the full list, with role changes, is its own page. */
 export default function MembersRow({ worldId, preview, onInvite, onSelect, description }: {
@@ -46,7 +51,7 @@ export default function MembersRow({ worldId, preview, onInvite, onSelect, descr
       <ul className={styles.visitors}>
         {members.slice(0, SHOWN).map((member) => {
           const name = member.user.name || member.user.email || 'Someone';
-          const role = member.isUniverseOwner ? 'owner' : [...member.tags].sort((a, b) => ORDER.indexOf(a) - ORDER.indexOf(b))[0] ?? 'member';
+          const role = topRole(member);
           const face = <>
             <WokaAvatar layers={member.woka ?? []} name={name} size={44} tinted />
             <strong>{name}</strong>
@@ -62,15 +67,6 @@ export default function MembersRow({ worldId, preview, onInvite, onSelect, descr
             </li>
           );
         })}
-        <li>
-          <Link href={all} className={styles.face} aria-label="See all members">
-            <span className={styles.seeAllCircle} aria-hidden="true">
-              <ArrowRight size={20} />
-            </span>
-            <strong>See all</strong>
-            <span>members</span>
-          </Link>
-        </li>
       </ul>
     </section>
   );

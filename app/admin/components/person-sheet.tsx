@@ -50,10 +50,16 @@ function useProfile(userId: string | null): Profile | null {
 }
 
 /** Shared profile sheet for members and visitors. Fetch private profile details only when opened. */
-export function PersonSheet({ person, description, children, onClose, testId = 'visitor-sheet' }: {
+export function PersonSheet({ person, description, children, onClose, testId = 'visitor-sheet', tag, fullProfile = true, actions }: {
   person: { userId: string | null; name: string; woka: string[] } | null;
   description: ReactNode;
   children?: ReactNode;
+  /** Sits beside the name, such as the You tag on your own card. */
+  tag?: ReactNode;
+  /** Whether the Full profile link is offered; your own card swaps it for an action of its own. */
+  fullProfile?: boolean;
+  /** More buttons for the bottom row, after Full profile. */
+  actions?: ReactNode;
   onClose: () => void;
   testId?: string;
 }) {
@@ -66,7 +72,10 @@ export function PersonSheet({ person, description, children, onClose, testId = '
             <div className={styles.top}>
               <WokaAvatar layers={person.woka} name={person.name} size={76} tinted />
               <div>
-                <SheetTitle className={styles.name}>{person.name}</SheetTitle>
+                <div className={styles.nameRow}>
+                  <SheetTitle className={styles.name}>{person.name}</SheetTitle>
+                  {tag}
+                </div>
                 <SheetDescription className={styles.when}>{description}</SheetDescription>
               </div>
             </div>
@@ -74,7 +83,12 @@ export function PersonSheet({ person, description, children, onClose, testId = '
             {profile?.bio && <p className={styles.bio}>{profile.bio}</p>}
             {profile && <ProfileLinks links={profile.links} />}
             {profile && profile.stamps.length > 0 && <Stamps stamps={profile.stamps} className={`${passportStyles.stamps} ${styles.stamps}`} />}
-            {person.userId && <Link href={`/admin/users/${encodeURIComponent(person.userId)}`} className={styles.full}>Full profile</Link>}
+            {((fullProfile && person.userId) || actions) && (
+              <div className={styles.actions}>
+                {fullProfile && person.userId && <Link href={`/admin/users/${encodeURIComponent(person.userId)}`} className={styles.full}>Full profile</Link>}
+                {actions}
+              </div>
+            )}
           </>
         )}
       </SheetContent>

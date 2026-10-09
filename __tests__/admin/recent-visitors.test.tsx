@@ -54,18 +54,16 @@ describe('Recent visitors', () => {
     expect(sara.style.background).toBe('rgb(153, 121, 77)');
   });
 
-  it('ends the row with See all, and puts See all by the title too, both opening the full paged list', async () => {
+  it('has one See all, in the header, and no second one at the end of the row', async () => {
     const open = jest.fn();
     serve({ '/api/admin/recent-visitors': { visitors, guests: 0 } });
     render(<RecentVisitors scope="universe" id="u1" onOpenVisitors={open} />);
     const section = await screen.findByTestId('recent-visitors');
-    const tile = within(section).getByTestId('recent-visitors-see-all-tile');
-    const items = section.querySelectorAll('ul > li');
-    expect(items[items.length - 1].contains(tile)).toBe(true);
-    expect(tile.textContent).toContain('See all');
-    fireEvent.click(tile);
+    expect(within(section).queryByTestId('recent-visitors-see-all-tile')).toBeNull();
+    expect(within(section).getAllByText('See all')).toHaveLength(1);
+    expect(section.querySelector('ul')?.contains(within(section).getByTestId('recent-visitors-see-all'))).toBe(false);
     fireEvent.click(within(section).getByTestId('recent-visitors-see-all'));
-    expect(open).toHaveBeenCalledTimes(2);
+    expect(open).toHaveBeenCalledTimes(1);
   });
 
   it('shows a guest by the name they typed, marked Guest, and opens a card with no profile to go to', async () => {
