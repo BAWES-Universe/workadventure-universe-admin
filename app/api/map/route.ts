@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
+import { validateAccessToken } from '@/lib/oidc';
 import { parsePlayUri } from '@/lib/utils';
 import { prisma } from '@/lib/db';
 import { safeWamExists, createWamFile, getWamUrl, getWamPath } from '@/lib/map-storage';
@@ -175,9 +176,10 @@ export async function GET(request: NextRequest) {
       }
       
       // A members-only room tells somebody who has not signed in nothing but "sign in": nothing is looked up, created
-      // or written for them either.
+      // or written for them either. Signed in means the token is a real one: the address carries whatever the caller
+      // typed, so a made-up token is the same as none.
       const isPublicRoom = roomData.isPublic && roomData.world.isPublic && roomData.world.universe.isPublic;
-      if (!isPublicRoom && !authToken) {
+      if (!isPublicRoom && !(authToken && (await validateAccessToken(authToken)))) {
         return NextResponse.json(getSignInBootstrap(request));
       }
 

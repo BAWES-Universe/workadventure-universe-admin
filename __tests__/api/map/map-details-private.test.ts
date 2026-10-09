@@ -2,11 +2,16 @@ import { NextRequest } from 'next/server';
 import { GET } from '@/app/api/map/route';
 import { prisma } from '@/lib/db';
 import { safeWamExists, createWamFile } from '@/lib/map-storage';
+import { validateAccessToken } from '@/lib/oidc';
 
 jest.mock('@/lib/db', () => ({
   prisma: { room: { findFirst: jest.fn(), update: jest.fn() } },
 }));
 jest.mock('@/lib/auth', () => ({ requireAuth: jest.fn() }));
+// Only 'oidc-token' is a real sign-in; any other token is made up
+jest.mock('@/lib/oidc', () => ({
+  validateAccessToken: jest.fn(async (token: string) => (token === 'oidc-token' ? { sub: 'user-1' } : null)),
+}));
 jest.mock('@/lib/map-storage', () => ({
   safeWamExists: jest.fn(async () => true),
   createWamFile: jest.fn(),
@@ -79,6 +84,16 @@ describe('map details of members-only rooms', () => {
       SECRETS.forEach((secret) => expect(text).not.toContain(secret));
       expect(json.wamUrl).toBeUndefined();
       expect(json.roomName).toBeUndefined();
+    });
+
+    it('treats a made-up token like no token', async () => {
+      const res = await call('made-up-token');
+      const json = await res.json();
+      expect(json.authenticationMandatory).toBe(true);
+      SECRETS.forEach((secret) => expect(JSON.stringify(json)).not.toContain(secret));
+      expect(validateAccessToken).toHaveBeenCalledWith('made-up-token');
+      expect(safeWamExists).not.toHaveBeenCalled();
+      expect(createWamFile).not.toHaveBeenCalled();
     });
 
     it('does not look up, create or write a map file for someone who has not signed in', async () => {
