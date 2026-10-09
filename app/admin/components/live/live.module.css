@@ -19,7 +19,7 @@
 /* The room's name is the card's link: its box covers the card, and the Visit button sits above it. */
 .cardLink { color: inherit; outline: none; }
 .cardLink::after { content: ''; position: absolute; inset: 0; z-index: 1; border-radius: inherit; }
-.cardLink:focus-visible::after { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
+.cardLink:focus-visible::after { outline: 2px solid hsl(var(--ring)); outline-offset: -2px; }
 .place .action { position: relative; z-index: 2; }
 @media (prefers-reduced-motion: reduce) { .place { transition: none; } .place:hover { transform: none; } }
 .place[data-here] { border-color: rgb(134 41 252 / .55); background: linear-gradient(135deg, rgb(134 41 252 / .14), transparent 60%), hsl(var(--card)); }
