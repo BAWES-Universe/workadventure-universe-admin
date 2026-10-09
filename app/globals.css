@@ -413,6 +413,15 @@ a[href] {
 .orbit-tool-icon { flex-shrink: 0; display: grid; place-items: center; width: 32px; height: 32px; border: 1px solid hsl(var(--border)); border-radius: 50%; color: hsl(var(--muted-foreground)); }
 .orbit-tool-arrow { margin-left: auto; flex-shrink: 0; opacity: .5; }
 .orbit-menu-account { max-width: 420px; border-top: 1px solid hsl(var(--border)); padding-top: 16px; }
+.orbit-menu-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; border-top: 1px solid hsl(var(--border)); padding-top: 14px; }
+.orbit-menu-who { flex: 1 1 200px; min-width: 0; font-size: 13px; line-height: 1.4; color: hsl(var(--muted-foreground)); overflow-wrap: anywhere; }
+.orbit-menu-who strong { color: hsl(var(--foreground)); font-weight: 600; }
+.orbit-menu-actions { display: flex; flex: 0 0 auto; flex-wrap: wrap; align-items: center; gap: 8px; }
+.orbit-menu-signout { min-height: 44px; border: 1px solid hsl(var(--border)); border-radius: 999px; padding: 0 16px; }
+.orbit-menu-sharing { display: inline-flex; align-items: center; font-size: 14px; font-weight: 500; color: hsl(var(--muted-foreground)); }
+.orbit-menu-sharing:hover { background: hsl(var(--muted)); color: hsl(var(--foreground)); }
+.orbit-menu-look { flex: 1 0 100%; display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13px; color: hsl(var(--muted-foreground)); }
+.orbit-menu-look > div { flex: 1 1 auto; min-width: 0; max-width: 280px; }
 .orbit-no-results { padding: 20px 0; font-size: 13px; color: hsl(var(--muted-foreground)); }
 .orbit-icon-button { display: inline-flex; width: 44px; height: 44px; align-items: center; justify-content: center; flex-shrink: 0; border-radius: 50%; color: hsl(var(--foreground)); }
 .orbit-icon-button:hover { background: hsl(var(--muted)); }

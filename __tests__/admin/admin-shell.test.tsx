@@ -585,7 +585,20 @@ describe('AdminShell', () => {
     for (const label of ['Your universes', 'Stars', 'Memberships', 'Profile', 'Room templates', 'People']) {
       expect(menu.textContent).toContain(label);
     }
-    // The account, theme and sign-out live on You, not in the menu.
-    expect(menu.textContent).not.toContain('Sign out');
+  });
+
+  it('ends the menu with who is logged in, Sharing, Sign out and Appearance', async () => {
+    await renderShell('/admin');
+    fireEvent.click(screen.getByTestId('orbit-menu-button'));
+    const menu = await screen.findByRole('dialog');
+    expect(menu.textContent).toContain('Logged in as');
+    expect(menu.textContent).toContain('Khalid');
+    expect(menu.textContent).toContain('k@example.test');
+    expect(within(menu).getByRole('button', { name: /Sign out/ })).toBeTruthy();
+    expect(within(menu).getByRole('radiogroup', { name: 'Appearance' })).toBeTruthy();
+    const sharing = within(menu).getByRole('link', { name: 'Sharing' });
+    expect(sharing.getAttribute('href')).toBe('/admin/sharing');
+    expect(sharing.closest('footer')).toBeTruthy();
+    expect(within(menu).getAllByRole('link', { name: 'Sharing' })).toHaveLength(1);
   });
 });

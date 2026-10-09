@@ -1,21 +1,18 @@
 'use client';
 
-import { Suspense, useEffect, useState } from 'react';
-import Link from 'next/link';
-import { ChevronRight } from 'lucide-react';
+import { Suspense, useEffect, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useAdminBootstrap } from '../admin-bootstrap-context';
 import { StatLine, count } from '../components/ds';
 import { ActivitySection, PassportSection } from '../components/passport';
 import { ProfileCard } from '../components/profile-card';
-import { ThemeChoice } from '../components/shell/theme-choice';
+import { useGuidanceDismissed } from '../hooks/use-guidance-dismissed';
 import Yours from '../components/yours';
-import LogoutButton from '../logout-button';
 import styles from './you.module.css';
 
 /**
  * You: your profile as others see it (edited in place), then what's yours (universes, memberships, stars), then
- * settings. Someone new gets first steps; finding new places is Space's job.
+ * a Settings row for bringing Get started back (Appearance, Sharing and Sign out live in the Orbit menu). Someone new gets first steps; finding new places is Space's job.
  */
 export default function YouPage() {
   return (
@@ -37,6 +34,15 @@ function You() {
   useEffect(() => {
     if (editProfile) router.replace('/admin/you', { scroll: false });
   }, [editProfile, router]);
+  // Get started, once hidden, comes back from Settings (while any step is left), and the page scrolls up to it.
+  const [getStartedHidden, hideGetStarted, showGetStarted] = useGuidanceDismissed('getStarted');
+  const [stepsAllDone, setStepsAllDone] = useState<boolean | null>(null);
+  const scrollToSteps = useRef(false);
+  useEffect(() => {
+    if (!scrollToSteps.current || getStartedHidden !== false) return;
+    scrollToSteps.current = false;
+    document.getElementById('get-started-heading')?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }, [getStartedHidden]);
   return (
     <div className={styles.page}>
       <ProfileCard
@@ -57,33 +63,33 @@ function You() {
       />
       <PassportSection />
       <ActivitySection />
-      <Yours profileComplete={profileComplete} />
-      <section className={styles.settings} aria-labelledby="settings-heading">
-        <h2 id="settings-heading" className="orbit-display">
-          Settings
-        </h2>
-        <div className={styles.settingRow}>
-          <span>
-            <strong>Appearance</strong>
-            <span>Light, dark, or follow your device.</span>
-          </span>
-          <ThemeChoice className={styles.themeControl} />
-        </div>
-        <Link href="/admin/sharing" className={`orbit-press ${styles.settingRow}`}>
-          <span>
-            <strong>Sharing</strong>
-            <span>Who sees which room you’re in, and your passport.</span>
-          </span>
-          <ChevronRight size={18} aria-hidden="true" />
-        </Link>
-        <div className={styles.settingRow}>
-          <span>
-            <strong>Account</strong>
-            {user.email && <span>Signed in as {user.email}</span>}
-          </span>
-          <LogoutButton className="h-10 rounded-full" />
-        </div>
-      </section>
+      <Yours
+        profileComplete={profileComplete}
+        getStarted={{ hidden: getStartedHidden, hide: hideGetStarted, onAllDone: setStepsAllDone }}
+      />
+      {getStartedHidden === true && stepsAllDone === false && (
+        <section className={styles.settings} aria-labelledby="settings-heading">
+          <h2 id="settings-heading" className="orbit-display">
+            Settings
+          </h2>
+          <div className={styles.settingRow}>
+            <span>
+              <strong>Get started</strong>
+              <span>Your first steps, hidden for now.</span>
+            </span>
+            <button
+              type="button"
+              className={`orbit-press ${styles.settingButton}`}
+              onClick={() => {
+                scrollToSteps.current = true;
+                showGetStarted();
+              }}
+            >
+              Show
+            </button>
+          </div>
+        </section>
+      )}
     </div>
   );
 }

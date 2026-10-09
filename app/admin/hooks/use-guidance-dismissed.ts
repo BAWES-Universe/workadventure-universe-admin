@@ -5,10 +5,10 @@ import { authenticatedFetch } from '@/lib/client-auth';
 
 /**
  * Whether a piece of guidance (`guidance.dismissed.<id>`) was hidden on this account, on every device. `null` while
- * reading; a failure to read shows the guidance (it can be hidden again). Hiding holds for this visit even if saving
- * fails.
+ * reading; a failure to read shows the guidance (it can be hidden again). Hiding, and showing it again, hold for this
+ * visit even if saving fails.
  */
-export function useGuidanceDismissed(id: string): [hidden: boolean | null, hide: () => void] {
+export function useGuidanceDismissed(id: string): [hidden: boolean | null, hide: () => void, show: () => void] {
   const key = `guidance.dismissed.${id}`;
   const [hidden, setHidden] = useState<boolean | null>(null);
 
@@ -30,13 +30,18 @@ export function useGuidanceDismissed(id: string): [hidden: boolean | null, hide:
     };
   }, [key]);
 
-  const hide = useCallback(() => {
-    setHidden(true);
-    void authenticatedFetch('/api/me/preferences', {
-      method: 'PUT',
-      body: JSON.stringify({ key, value: { hidden: true } }),
-    }).catch(() => undefined);
-  }, [key]);
+  const save = useCallback(
+    (value: boolean) => {
+      setHidden(value);
+      void authenticatedFetch('/api/me/preferences', {
+        method: 'PUT',
+        body: JSON.stringify({ key, value: { hidden: value } }),
+      }).catch(() => undefined);
+    },
+    [key],
+  );
+  const hide = useCallback(() => save(true), [save]);
+  const show = useCallback(() => save(false), [save]);
 
-  return [hidden, hide];
+  return [hidden, hide, show];
 }
