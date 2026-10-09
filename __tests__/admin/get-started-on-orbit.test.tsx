@@ -1,7 +1,7 @@
 /** @jest-environment jsdom */
 
 import React from 'react';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { GetStartedOnOrbit } from '@/app/admin/components/orbit/get-started-on-orbit';
 import { AdminBootstrapProvider, type AdminBootstrap } from '@/app/admin/admin-bootstrap-context';
 
@@ -28,11 +28,16 @@ function bootstrap(mine: AdminBootstrap['mine']): AdminBootstrap {
   return { version: 1, user: { id: 'u', uuid: 'u', name: 'Khalid', email: null, tags: [], isSuperAdmin: false }, stats: { universes: 0, worlds: 0, rooms: 0, users: 0 }, mine };
 }
 
-function serve(options: { hidden?: boolean; bio?: string; universes?: unknown[]; memberships?: unknown[]; stars?: unknown[] }) {
+function serve(options: { hidden?: boolean; profileFails?: number; bio?: string; universes?: unknown[]; memberships?: unknown[]; stars?: unknown[] }) {
+  let profileCalls = 0;
   fetchMock.mockImplementation((url: string, init?: RequestInit) => {
     const path = url.split('?')[0];
     if (init?.method === 'PUT') return ok({});
     if (path === '/api/me/preferences') return ok({ preferences: { 'guidance.dismissed.getStarted': { hidden: options.hidden === true } } });
+    if (path === '/api/admin/profile') {
+      profileCalls += 1;
+      if (profileCalls <= (options.profileFails ?? 0)) return Promise.resolve({ ok: false, json: () => Promise.resolve({}) });
+    }
     if (path === '/api/admin/profile') return ok({ bio: options.bio ?? '', links: [] });
     if (path === '/api/admin/universes') return ok({ universes: options.universes ?? [] });
     if (path === '/api/memberships/my') return ok({ memberships: options.memberships ?? [] });
@@ -116,5 +121,40 @@ describe('Get started on Orbit', () => {
     await waitFor(() => expect(fetchMock.mock.calls.some((call) => String(call[0]).startsWith('/api/admin/profile'))).toBe(true));
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(container.textContent).toBe('');
+  });
+
+  describe('when loading the profile fails', () => {
+    beforeEach(() => jest.useFakeTimers());
+    afterEach(() => jest.useRealTimers());
+    const profileCalls = () => fetchMock.mock.calls.filter((call) => String(call[0]).startsWith('/api/admin/profile')).length;
+
+    it('asks again, and shows the guide once the profile answers', async () => {
+      serve({ profileFails: 1, bio: 'Hello', universes: [{ id: 'u1', name: 'BAWES', isPublic: true }] });
+      show({ universes: 1, worlds: 0, stars: 0, invitations: 0 });
+      await act(async () => {});
+      expect(profileCalls()).toBe(1);
+      expect(screen.queryByTestId('get-started-strip')).toBeNull();
+      await act(async () => {
+        jest.advanceTimersByTime(1500);
+      });
+      expect(profileCalls()).toBe(2);
+      expect((await screen.findByTestId('get-started-strip')).textContent).toContain('2 of 5 done');
+    });
+
+    it('still shows the guide when every try fails, with the profile step not done', async () => {
+      serve({ profileFails: 99 });
+      show(MINE_NONE);
+      await act(async () => {});
+      await act(async () => {
+        jest.advanceTimersByTime(1500);
+      });
+      await act(async () => {});
+      await act(async () => {
+        jest.advanceTimersByTime(4000);
+      });
+      expect(profileCalls()).toBe(3);
+      const card = await screen.findByTestId('get-started');
+      expect(within(card).getByText(/0 of 5/)).toBeTruthy();
+    });
   });
 });
