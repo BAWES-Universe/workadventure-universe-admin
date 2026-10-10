@@ -20,6 +20,7 @@ import styles from './live.module.css';
 const STATUS_LABEL: Record<LiveStatus, string> = { online: 'Online', busy: 'Busy', away: 'Away' };
 const FACES = 4;
 const EVERYWHERE = 'everywhere';
+const FRIENDS = 'friends';
 
 type Layout =
   /** Space: rooms beside People online on a wide screen, above them otherwise. */
@@ -80,9 +81,10 @@ function VisitButton({
   );
 }
 
-function PlaceCard({ place }: { place: LivePlace }) {
+function PlaceCard({ place, friendsOnly = false }: { place: LivePlace; friendsOnly?: boolean }) {
   const faces = place.people.slice(0, FACES);
-  const more = place.count - faces.length;
+  // Friends view: the faces are your friends, so the rest of the room isn't counted as "more" of them.
+  const more = friendsOnly ? Math.max(0, place.people.length - faces.length) : place.count - faces.length;
   return (
     <article className={styles.place} data-here={place.here || undefined} data-testid="live-place">
       <div className={styles.placeTop}>
@@ -173,8 +175,7 @@ function Chips({
           {universe.name}
         </button>
       ))}
-      {/* Lights up when friends arrive. */}
-      <button type="button" className={styles.chip} disabled title="Coming with friends">
+      <button type="button" className={styles.chip} aria-pressed={value === FRIENDS} onClick={() => onChange(FRIENDS)}>
         Friends
       </button>
     </div>
@@ -244,11 +245,27 @@ export function LiveNowView({ view, layout }: { view: LiveView; layout: Layout }
   // On Orbit home, the universe you're in comes first; everywhere else, everywhere.
   const [picked, setPicked] = useState<string | null>(null);
   const filter = picked ?? (layout.startsWith('home') && here ? here.universe.id : EVERYWHERE);
-  const active = filter === EVERYWHERE || universes.some((universe) => universe.id === filter) ? filter : EVERYWHERE;
+  const active =
+    filter === EVERYWHERE || filter === FRIENDS || universes.some((universe) => universe.id === filter) ? filter : EVERYWHERE;
 
-  const places = active === EVERYWHERE ? view.places : view.places.filter((place) => place.universe.id === active);
-  const people = active === EVERYWHERE ? view.people : view.people.filter((person) => person.place.universe.id === active);
-  const total = places.reduce((sum, place) => sum + place.count, 0);
+  // Friends: only the rooms your friends are in, with only your friends on the cards, and only them under People online.
+  const places =
+    active === EVERYWHERE
+      ? view.places
+      : active === FRIENDS
+        ? view.places.flatMap((place) => {
+            const friends = place.people.filter((person) => person.friend);
+            return friends.length > 0 ? [{ ...place, people: friends }] : [];
+          })
+        : view.places.filter((place) => place.universe.id === active);
+  const people =
+    active === EVERYWHERE
+      ? view.people
+      : active === FRIENDS
+        ? view.people.filter((person) => person.friend)
+        : view.people.filter((person) => person.place.universe.id === active);
+  const total =
+    active === FRIENDS ? people.length : places.reduce((sum, place) => sum + place.count, 0);
   const hereRoomId = here?.roomId ?? null;
   const empty = view.places.length === 0;
 
@@ -264,13 +281,15 @@ export function LiveNowView({ view, layout }: { view: LiveView; layout: Layout }
       {!empty && <Chips universes={universes} value={active} onChange={setPicked} />}
       {empty ? (
         <p className={styles.empty}>Nobody is in a room you can enter right now. When people come in, they show up here.</p>
+      ) : active === FRIENDS && places.length === 0 ? (
+        <p className={styles.empty}>None of your friends are in a room you can enter right now. When one comes in, they show up here.</p>
       ) : (
         <div
           className={layout === 'all' ? styles.placesGrid : layout === 'home-column' ? styles.places : styles.placesScroll}
           data-wide-grid={layout === 'space' || undefined}
         >
           {places.slice(0, limit).map((place) => (
-            <PlaceCard key={place.roomId} place={place} />
+            <PlaceCard key={place.roomId} place={place} friendsOnly={active === FRIENDS} />
           ))}
         </div>
       )}
@@ -279,7 +298,8 @@ export function LiveNowView({ view, layout }: { view: LiveView; layout: Layout }
 
   if (layout === 'home-inline') return placesSection;
 
-  const peopleSection = empty ? null : (
+  // Nothing to list under Friends when none are online: the empty message above says so.
+  const peopleSection = empty || (active === FRIENDS && people.length === 0) ? null : (
     <section className={styles.section} aria-labelledby={`people-${layout}-heading`} data-testid="people-online">
       <SectionHeader
         id={`people-${layout}-heading`}
