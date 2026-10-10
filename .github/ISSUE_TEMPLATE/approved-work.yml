@@ -1,0 +1,50 @@
+name: Work item
+description: One real problem or ask. Not a bundle, a checklist, an idea or a "check".
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        One issue per problem. Short, plain words, about 20 lines. Add one state label: `approved`, `needs-mock`, `on-hold` or `needs-review`. See `.github/WORKFLOW.md`.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What goes wrong or is missing, in words a player would use. Name the screen.
+    validations:
+      required: true
+  - type: textarea
+    id: who
+    attributes:
+      label: Who it affects
+      description: Who hits it, and how often.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: file:line on the dev branch, PRs, links to the mock if there is one. Say what you checked and when.
+    validations:
+      required: true
+  - type: textarea
+    id: fix
+    attributes:
+      label: Proposed fix (small, medium or large)
+      description: What we would change, in a few lines.
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: Done when
+      description: What to check on dev to call it done.
+    validations:
+      required: true
+  - type: textarea
+    id: words
+    attributes:
+      label: His words
+      description: Khalid's own words in quotes with the date and time in Kuwait time. Write "none" if he did not ask for it.
+    validations:
+      required: true
