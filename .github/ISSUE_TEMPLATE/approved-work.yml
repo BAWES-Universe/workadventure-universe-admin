@@ -1,0 +1,51 @@
+name: Work item
+description: Something to build or change. Write it the same turn Khalid says yes, or when we say we'll do something later.
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        One issue per piece of work. Add one state label: `approved`, `needs-mock`, `on-hold` or `needs-review`. See `.github/WORKFLOW.md`.
+  - type: textarea
+    id: today
+    attributes:
+      label: Today
+      description: What a player or admin sees now. Name the screen and the steps.
+    validations:
+      required: true
+  - type: textarea
+    id: change
+    attributes:
+      label: Change
+      description: What we'll do.
+    validations:
+      required: true
+  - type: input
+    id: mock
+    attributes:
+      label: Mock
+      description: Artifact link of the approved mock, or "Needs a mock first", or "None needed".
+  - type: textarea
+    id: approval
+    attributes:
+      label: Approval
+      description: Khalid's own words in quotes, the date and time in Kuwait time, and where he said it. Write "No approval yet" if there isn't one.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: file:line on the dev branch, PRs, earlier issues.
+  - type: textarea
+    id: done
+    attributes:
+      label: Done when
+      description: What to check on dev to call it done.
+    validations:
+      required: true
+  - type: input
+    id: thread
+    attributes:
+      label: Thread
+      description: Link to the project thread that owns it.
