@@ -29,6 +29,7 @@ const person = (name: string, extra: Partial<LivePlace['people'][number]> = {}) 
   status: 'online' as const,
   woka: [],
   you: false,
+  friend: false,
   ...extra,
 });
 const place = (
@@ -80,12 +81,58 @@ describe('Live now', () => {
     expect(within(rows[1]).getByRole('link', { name: 'Go: Arcade' }).getAttribute('href')).toBe('/admin/rooms/arcade');
   });
 
-  it('filters by universe, and Friends waits for friends', () => {
+  it('filters by universe', () => {
     render(<LiveNowView view={view} layout="space" />);
     fireEvent.click(screen.getByRole('button', { name: 'Fun Zone' }));
     expect(screen.getAllByTestId('live-place').map((card) => within(card).getByRole('heading').textContent)).toEqual(['Arcade']);
     expect(screen.getAllByTestId('live-person')).toHaveLength(1);
-    expect((screen.getByRole('button', { name: 'Friends' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  describe('Friends chip', () => {
+    const dana = person('Dana', { friend: true });
+    const lounge = place('lounge', 'Lounge', FUN, [person('Stranger'), dana, person('Omar', { friend: true })], { count: 5, guests: 2 });
+    const friendsView: LiveView = {
+      available: true,
+      generatedAt: 1,
+      places: [hall, arcade, lounge],
+      people: [
+        { ...dana, place: at(lounge) },
+        { ...person('Omar', { friend: true }), place: at(lounge) },
+        { ...person('Stranger'), place: at(lounge) },
+        { ...person('Lena'), place: at(arcade) },
+      ],
+    };
+
+    it('is a real, pressable chip', () => {
+      render(<LiveNowView view={friendsView} layout="space" />);
+      const chip = screen.getByRole('button', { name: 'Friends' }) as HTMLButtonElement;
+      expect(chip.disabled).toBe(false);
+      expect(chip.getAttribute('aria-pressed')).toBe('false');
+      fireEvent.click(chip);
+      expect(chip.getAttribute('aria-pressed')).toBe('true');
+    });
+
+    it('shows only the rooms with friends in them, and only friends under People online', () => {
+      render(<LiveNowView view={friendsView} layout="space" />);
+      fireEvent.click(screen.getByRole('button', { name: 'Friends' }));
+      const cards = screen.getAllByTestId('live-place');
+      expect(cards.map((card) => within(card).getByRole('heading').textContent)).toEqual(['Lounge']);
+      // Two friends on the card, no "+3" for the stranger and the guests.
+      expect(within(cards[0]).queryByText(/^\+\d/)).toBeNull();
+      const rows = screen.getAllByTestId('live-person');
+      expect(rows.map((row) => within(row).getByText(/^(Dana|Omar|Stranger|Lena)$/).textContent).sort()).toEqual(['Dana', 'Omar']);
+    });
+
+    it('says so when none of your friends are in a room you can enter', () => {
+      render(<LiveNowView view={view} layout="space" />);
+      fireEvent.click(screen.getByRole('button', { name: 'Friends' }));
+      expect(screen.queryAllByTestId('live-place')).toHaveLength(0);
+      expect(screen.queryByTestId('people-online')).toBeNull();
+      expect(screen.getByText(/None of your friends are in a room you can enter/)).toBeTruthy();
+      // The chips stay, so you can go back.
+      fireEvent.click(screen.getByRole('button', { name: 'Everywhere' }));
+      expect(screen.getAllByTestId('live-place')).toHaveLength(2);
+    });
   });
 
   it('starts Orbit home on the universe you are in', () => {

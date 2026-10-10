@@ -37,6 +37,8 @@ export interface LivePerson {
   status: LiveStatus;
   woka: string[];
   you: boolean;
+  /** Whether they are the viewer's friend (accepted); what the Friends chip on Live now filters by. */
+  friend: boolean;
 }
 
 export interface LivePlace {
@@ -208,18 +210,18 @@ export async function buildLiveView(snapshot: PresenceSnapshot, viewer: SessionU
         select: { id: true, uuid: true, name: true, preferences: { where: { key: { in: [...SHARING_KEYS] } }, select: { key: true, value: true } } },
       })
     : [];
-  // Friends only: who among them is the viewer's friend.
-  const friendsOnly = people.filter((person) => shareRoomFromRows(person.preferences) === 'friends').map((person) => person.id);
+  // Which of them are the viewer's friends: decides who shares with friends only, and what the Friends chip shows.
+  const others = people.filter((person) => person.uuid !== viewer.uuid).map((person) => person.id);
   const friendIds = new Set(
-    friendsOnly.length === 0 || !viewer.id
+    others.length === 0 || !viewer.id
       ? []
       : (
           await prisma.friendship.findMany({
             where: {
               status: 'accepted',
               OR: [
-                { user1Id: viewer.id, user2Id: { in: friendsOnly } },
-                { user2Id: viewer.id, user1Id: { in: friendsOnly } },
+                { user1Id: viewer.id, user2Id: { in: others } },
+                { user2Id: viewer.id, user1Id: { in: others } },
               ],
             },
             select: { user1Id: true, user2Id: true },
@@ -240,6 +242,7 @@ export async function buildLiveView(snapshot: PresenceSnapshot, viewer: SessionU
       status: live.status,
       woka: wokaLayers(live.woka, base),
       you,
+      friend: !you && friendIds.has(person.id),
     });
   }
 
