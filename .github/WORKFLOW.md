@@ -23,7 +23,6 @@ Each open issue has one state label:
 | `approved` | Khalid said yes. The issue quotes his words with the time (Kuwait). |
 | `needs-mock` | It changes what people see, so a mock is approved first. |
 | `on-hold` | Khalid parked it. |
-| `on-dev` | Merged into the dev branch, waiting for the next release. |
 | `next-release` | Khalid picked it for the next release. |
 
 Area labels such as `chat`, `bots`, `security` and `map-editor` sit alongside the state label.
@@ -37,10 +36,11 @@ Area labels such as `chat`, `bots`, `security` and `map-editor` sit alongside th
 3. **One PR per issue, into the dev branch** (`universe-develop` for the game, `develop` for Orbit).
    The PR body starts with `Closes #N` (in the other repo: `Closes BAWES-Universe/<repo>#N`) and
    links the mock. The design check compares the PR with that mock.
-4. **Merged into dev.** The issue is closed as completed with a comment linking the PR, and the PR
-   gets a comment linking the issue.
-5. **Release.** The release PR from the dev branch to prod lists `Closes #N` for every issue in it.
-   Both repos' default branch is prod, so a PR into the dev branch can't close an issue on its own.
+4. **Merged into dev.** Both repos' default branch is prod, so GitHub does not close the issue by
+   itself. Close it by hand as completed, with a comment linking the PR, and comment on the PR with
+   the issue link.
+5. **Release.** The release PR from the dev branch to prod lists every PR it ships, with its issue
+   links. The issues are already closed from step 4.
 6. **Nothing "later" is lost.** Anything Khalid defers becomes an `on-hold` issue in the same turn.
 
 Work that spans both repos has one issue, in the repo that carries most of it. The other repo's PR
