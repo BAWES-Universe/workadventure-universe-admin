@@ -1,4 +1,9 @@
-import { resolveTextureUrls, resolveCompanionTexture, TextureValidationResult } from '@/lib/avatar-catalog-validator'
+import {
+  resolveTextureUrls,
+  resolveCompanionTexture,
+  isUserEntitledToSet,
+  TextureValidationResult,
+} from '@/lib/avatar-catalog-validator'
 
 // We test the pure logic paths with a mock PrismaClient
 const mockPrisma = {
@@ -237,5 +242,254 @@ describe('resolveCompanionTexture', () => {
     )
 
     expect(mockPrisma.avatarCompanion.findFirst).not.toHaveBeenCalled()
+  })
+
+  it('rejects companion when user is not entitled to restricted avatar set', async () => {
+    mockPrisma.avatarSet.count.mockResolvedValue(1)
+    mockPrisma.avatarCompanion.findFirst.mockResolvedValue({
+      textureId: 'vip_pet',
+      url: 'http://cdn.example.com/vip_pet.png',
+      avatarSet: {
+        visibility: 'restricted',
+        policies: [
+          { action: 'select', subjectType: 'membership_tag', subjectValue: 'vip', isActive: true },
+        ],
+        userGrants: [],
+      },
+    })
+
+    const result = await resolveCompanionTexture(
+      mockPrisma,
+      'vip_pet',
+      null,
+      null,
+      'http://play.local',
+      { userId: 'user-1', membershipTags: ['regular'] }
+    )
+
+    expect(result.valid).toBe(false)
+    expect(result.texture).toBeNull()
+  })
+
+  it('allows companion when user matches entitlement policy', async () => {
+    mockPrisma.avatarSet.count.mockResolvedValue(1)
+    mockPrisma.avatarCompanion.findFirst.mockResolvedValue({
+      textureId: 'vip_pet',
+      url: 'http://cdn.example.com/vip_pet.png',
+      avatarSet: {
+        visibility: 'restricted',
+        policies: [
+          { action: 'select', subjectType: 'membership_tag', subjectValue: 'vip', isActive: true },
+        ],
+        userGrants: [],
+      },
+    })
+
+    const result = await resolveCompanionTexture(
+      mockPrisma,
+      'vip_pet',
+      null,
+      null,
+      'http://play.local',
+      { userId: 'user-1', membershipTags: ['vip'] }
+    )
+
+    expect(result.valid).toBe(true)
+    expect(result.texture?.id).toBe('vip_pet')
+  })
+})
+
+describe('isUserEntitledToSet', () => {
+  const now = new Date('2026-09-01T12:00:00Z')
+
+  it('permits public sets within availability window', () => {
+    expect(
+      isUserEntitledToSet({ visibility: 'public' }, undefined, null, now)
+    ).toBe(true)
+  })
+
+  it('rejects sets outside availability window', () => {
+    const futureSet = {
+      visibility: 'public',
+      availableFrom: new Date('2026-09-02T00:00:00Z'),
+    }
+    expect(isUserEntitledToSet(futureSet, undefined, null, now)).toBe(false)
+
+    const pastSet = {
+      visibility: 'public',
+      availableUntil: new Date('2026-08-31T00:00:00Z'),
+    }
+    expect(isUserEntitledToSet(pastSet, undefined, null, now)).toBe(false)
+  })
+
+  it('requires active grant for hidden or assigned_only sets', () => {
+    const hiddenSet = { visibility: 'hidden', userGrants: [] }
+    expect(isUserEntitledToSet(hiddenSet, { userId: 'u1' }, null, now)).toBe(false)
+
+    const grantedSet = {
+      visibility: 'hidden',
+      userGrants: [{ grantType: 'select', isActive: true, expiresAt: null }],
+    }
+    expect(isUserEntitledToSet(grantedSet, { userId: 'u1' }, null, now)).toBe(true)
+
+    const expiredSet = {
+      visibility: 'assigned_only',
+      userGrants: [
+        {
+          grantType: 'select',
+          isActive: true,
+          expiresAt: new Date('2026-08-01T00:00:00Z'),
+        },
+      ],
+    }
+    expect(isUserEntitledToSet(expiredSet, { userId: 'u1' }, null, now)).toBe(false)
+  })
+
+  it('evaluates restricted set policies correctly', () => {
+    const tagPolicySet = {
+      visibility: 'restricted',
+      policies: [
+        { action: 'select', subjectType: 'membership_tag', subjectValue: 'staff', isActive: true },
+      ],
+    }
+    expect(
+      isUserEntitledToSet(tagPolicySet, { membershipTags: ['student'] }, null, now)
+    ).toBe(false)
+    expect(
+      isUserEntitledToSet(tagPolicySet, { membershipTags: ['staff'] }, null, now)
+    ).toBe(true)
+
+    const userPolicySet = {
+      visibility: 'restricted',
+      policies: [
+        { action: 'select', subjectType: 'user', subjectValue: 'u-special', isActive: true },
+      ],
+    }
+    expect(isUserEntitledToSet(userPolicySet, { userId: 'u-other' }, null, now)).toBe(false)
+    expect(isUserEntitledToSet(userPolicySet, { userId: 'u-special' }, null, now)).toBe(true)
+
+    const domainPolicySet = {
+      visibility: 'restricted',
+      policies: [
+        { action: 'select', subjectType: 'email_domain', subjectValue: 'acme.org', isActive: true },
+      ],
+    }
+    expect(
+      isUserEntitledToSet(domainPolicySet, { userEmail: 'alice@other.com' }, null, now)
+    ).toBe(false)
+    expect(
+      isUserEntitledToSet(domainPolicySet, { userEmail: 'alice@acme.org' }, null, now)
+    ).toBe(true)
+
+    const worldScopedSet = {
+      visibility: 'restricted',
+      policies: [
+        {
+          action: 'select',
+          subjectType: 'membership_tag',
+          subjectValue: 'vip',
+          worldId: 'world-1',
+          isActive: true,
+        },
+      ],
+    }
+    expect(
+      isUserEntitledToSet(worldScopedSet, { membershipTags: ['vip'] }, 'world-2', now)
+    ).toBe(false)
+    expect(
+      isUserEntitledToSet(worldScopedSet, { membershipTags: ['vip'] }, 'world-1', now)
+    ).toBe(true)
+  })
+})
+
+describe('resolveTextureUrls entitlement enforcement', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+  })
+
+  it('rejects texture when user is not entitled to restricted set', async () => {
+    mockPrisma.avatarSet.count.mockResolvedValue(1)
+    mockPrisma.avatarSet.findMany.mockResolvedValue([
+      {
+        visibility: 'restricted',
+        policies: [
+          { action: 'select', subjectType: 'membership_tag', subjectValue: 'admin', isActive: true },
+        ],
+        userGrants: [],
+        layers: [
+          { textureId: 'admin_armor', name: 'Admin Armor', url: 'http://cdn.example.com/admin.png', layer: 'clothes' },
+        ],
+        companions: [],
+      },
+    ])
+
+    const result = await resolveTextureUrls(
+      mockPrisma,
+      ['admin_armor'],
+      null,
+      null,
+      'http://play.local',
+      { userId: 'user-1', membershipTags: ['guest'] }
+    )
+
+    expect(result.valid).toBe(false)
+    expect(result.textures).toEqual([])
+  })
+
+  it('accepts texture when user has matching membership tag for restricted set', async () => {
+    mockPrisma.avatarSet.count.mockResolvedValue(1)
+    mockPrisma.avatarSet.findMany.mockResolvedValue([
+      {
+        visibility: 'restricted',
+        policies: [
+          { action: 'select', subjectType: 'membership_tag', subjectValue: 'admin', isActive: true },
+        ],
+        userGrants: [],
+        layers: [
+          { textureId: 'admin_armor', name: 'Admin Armor', url: 'http://cdn.example.com/admin.png', layer: 'clothes' },
+        ],
+        companions: [],
+      },
+    ])
+
+    const result = await resolveTextureUrls(
+      mockPrisma,
+      ['admin_armor'],
+      null,
+      null,
+      'http://play.local',
+      { userId: 'user-1', membershipTags: ['admin'] }
+    )
+
+    expect(result.valid).toBe(true)
+    expect(result.textures).toHaveLength(1)
+    expect(result.textures[0].id).toBe('admin_armor')
+  })
+
+  it('accepts texture from hidden set when user has an active direct grant', async () => {
+    mockPrisma.avatarSet.count.mockResolvedValue(1)
+    mockPrisma.avatarSet.findMany.mockResolvedValue([
+      {
+        visibility: 'hidden',
+        policies: [],
+        userGrants: [{ grantType: 'select', isActive: true, expiresAt: null }],
+        layers: [
+          { textureId: 'custom_skin', name: 'Custom Skin', url: 'http://cdn.example.com/custom.png', layer: 'body' },
+        ],
+        companions: [],
+      },
+    ])
+
+    const result = await resolveTextureUrls(
+      mockPrisma,
+      ['custom_skin'],
+      null,
+      null,
+      'http://play.local',
+      { userId: 'user-1' }
+    )
+
+    expect(result.valid).toBe(true)
+    expect(result.textures[0].id).toBe('custom_skin')
   })
 })
