@@ -1,5 +1,6 @@
-import { buildWokaListPayload, WaWokaListPayload } from '@/lib/avatar-catalog'
+import { buildWokaListPayload, checkPolicyMatch, WaWokaListPayload } from '@/lib/avatar-catalog'
 import type { AvatarSetFull } from '@/lib/avatar-catalog'
+import type { AvatarEntitlementPolicy } from '@prisma/client'
 
 function makeSet(overrides: Partial<AvatarSetFull> = {}): AvatarSetFull {
   return {
@@ -183,14 +184,156 @@ describe('buildWokaListPayload', () => {
   })
 })
 
-describe('checkPolicyMatch', () => {
-  // Note: checkPolicyMatch is not exported from avatar-catalog.ts.
-  // These tests cover what would be tested if it were exported.
-  // For now, the access-check route tests this logic via E2E.
+function makePolicy(overrides: Partial<AvatarEntitlementPolicy> = {}): AvatarEntitlementPolicy {
+  return {
+    id: 'pol-1',
+    avatarSetId: 'set-1',
+    subjectType: 'everyone',
+    subjectValue: null,
+    action: 'select',
+    worldId: null,
+    isActive: true,
+    createdAt: new Date(),
+    ...overrides,
+  }
+}
 
-  it('public visibility sets are always eligible (tested via resolvePickerSets queries)', () => {
-    // resolvePickerSets uses Prisma to filter visibility: ['public', 'restricted']
-    // and passes 'public' sets through without policy checks.
-    // This is tested by integration tests against a real DB.
+describe('checkPolicyMatch', () => {
+  it('matches everyone policy when action is select', () => {
+    const policy = makePolicy({ subjectType: 'everyone', action: 'select' })
+    const result = checkPolicyMatch([policy], {
+      userId: 'user-1',
+      membershipTags: [],
+      worldId: 'world-1',
+      action: 'select',
+    })
+    expect(result).toBe(true)
+  })
+
+  it('enforces world scoping when worldId is specified on the policy', () => {
+    const policy = makePolicy({
+      subjectType: 'everyone',
+      action: 'select',
+      worldId: 'world-specific',
+    })
+
+    // Correct world -> access granted
+    expect(
+      checkPolicyMatch([policy], {
+        userId: 'user-1',
+        membershipTags: [],
+        worldId: 'world-specific',
+        action: 'select',
+      })
+    ).toBe(true)
+
+    // Other world -> access denied
+    expect(
+      checkPolicyMatch([policy], {
+        userId: 'user-1',
+        membershipTags: [],
+        worldId: 'other-world',
+        action: 'select',
+      })
+    ).toBe(false)
+  })
+
+  it('allows access in any world when policy worldId is null', () => {
+    const policy = makePolicy({
+      subjectType: 'everyone',
+      action: 'select',
+      worldId: null,
+    })
+
+    expect(
+      checkPolicyMatch([policy], {
+        userId: 'user-1',
+        membershipTags: [],
+        worldId: 'world-any',
+        action: 'select',
+      })
+    ).toBe(true)
+  })
+
+  it('enforces membership tag matching and world scoping', () => {
+    const policy = makePolicy({
+      subjectType: 'membership_tag',
+      subjectValue: 'vip',
+      action: 'select',
+      worldId: 'world-vip',
+    })
+
+    // Tag matches and world matches -> true
+    expect(
+      checkPolicyMatch([policy], {
+        userId: 'user-1',
+        membershipTags: ['vip', 'staff'],
+        worldId: 'world-vip',
+        action: 'select',
+      })
+    ).toBe(true)
+
+    // Tag matches but world differs -> false
+    expect(
+      checkPolicyMatch([policy], {
+        userId: 'user-1',
+        membershipTags: ['vip'],
+        worldId: 'world-general',
+        action: 'select',
+      })
+    ).toBe(false)
+
+    // World matches but tag missing -> false
+    expect(
+      checkPolicyMatch([policy], {
+        userId: 'user-1',
+        membershipTags: ['guest'],
+        worldId: 'world-vip',
+        action: 'select',
+      })
+    ).toBe(false)
+  })
+
+  it('enforces user ID matching', () => {
+    const policy = makePolicy({
+      subjectType: 'user',
+      subjectValue: 'user-123',
+      action: 'select',
+    })
+
+    expect(
+      checkPolicyMatch([policy], {
+        userId: 'user-123',
+        membershipTags: [],
+        worldId: 'world-1',
+        action: 'select',
+      })
+    ).toBe(true)
+
+    expect(
+      checkPolicyMatch([policy], {
+        userId: 'user-456',
+        membershipTags: [],
+        worldId: 'world-1',
+        action: 'select',
+      })
+    ).toBe(false)
+  })
+
+  it('ignores inactive policies', () => {
+    const policy = makePolicy({
+      subjectType: 'everyone',
+      action: 'select',
+      isActive: false,
+    })
+
+    expect(
+      checkPolicyMatch([policy], {
+        userId: 'user-1',
+        membershipTags: [],
+        worldId: 'world-1',
+        action: 'select',
+      })
+    ).toBe(false)
   })
 })
