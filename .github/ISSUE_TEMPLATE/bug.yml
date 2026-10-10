@@ -26,3 +26,5 @@ body:
     attributes:
       label: Evidence
       description: Screenshots, Sentry links, file:line.
+    validations:
+      required: true
