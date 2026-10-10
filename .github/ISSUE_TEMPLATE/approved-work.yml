@@ -1,42 +1,39 @@
 name: Work item
-description: Something to build or change. Write it the same turn Khalid says yes, or when we say we'll do something later.
+description: One real problem or ask. Not a bundle, a checklist, an idea or a "check".
 labels: []
 body:
   - type: markdown
     attributes:
       value: |
-        One issue per piece of work. Add one state label: `approved`, `needs-mock`, `on-hold` or `needs-review`. See `.github/WORKFLOW.md`.
+        One issue per problem. Short, plain words, about 20 lines. Add one state label: `approved`, `needs-mock`, `on-hold` or `needs-review`. See `.github/WORKFLOW.md`.
   - type: textarea
-    id: today
+    id: problem
     attributes:
-      label: Today
-      description: What a player or admin sees now. Name the screen and the steps.
+      label: Problem
+      description: What goes wrong or is missing, in words a player would use. Name the screen.
     validations:
       required: true
   - type: textarea
-    id: change
+    id: who
     attributes:
-      label: Change
-      description: What we'll do.
-    validations:
-      required: true
-  - type: input
-    id: mock
-    attributes:
-      label: Mock
-      description: Artifact link of the approved mock, or "Needs a mock first", or "None needed".
-  - type: textarea
-    id: approval
-    attributes:
-      label: Approval
-      description: Khalid's own words in quotes, the date and time in Kuwait time, and where he said it. Write "No approval yet" if there isn't one.
+      label: Who it affects
+      description: Who hits it, and how often.
     validations:
       required: true
   - type: textarea
     id: evidence
     attributes:
       label: Evidence
-      description: file:line on the dev branch, PRs, earlier issues.
+      description: file:line on the dev branch, PRs, links to the mock if there is one. Say what you checked and when.
+    validations:
+      required: true
+  - type: textarea
+    id: fix
+    attributes:
+      label: Proposed fix (small, medium or large)
+      description: What we would change, in a few lines.
+    validations:
+      required: true
   - type: textarea
     id: done
     attributes:
@@ -44,8 +41,10 @@ body:
       description: What to check on dev to call it done.
     validations:
       required: true
-  - type: input
-    id: thread
+  - type: textarea
+    id: words
     attributes:
-      label: Thread
-      description: Link to the project thread that owns it.
+      label: His words
+      description: Khalid's own words in quotes with the date and time in Kuwait time. Write "none" if he did not ask for it.
+    validations:
+      required: true
