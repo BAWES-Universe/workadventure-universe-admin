@@ -864,7 +864,14 @@ export default function UserDetailPage() {
         </details>
       )}
 
-      <AlertDialog open={removeFriendOpen} onOpenChange={setRemoveFriendOpen}>
+      <AlertDialog
+        open={removeFriendOpen}
+        onOpenChange={(open) => {
+          setRemoveFriendOpen(open);
+          // Cancelling after a failure leaves no stale reason on the card.
+          if (!open) setFriendError(null);
+        }}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Remove {name} as a friend?</AlertDialogTitle>

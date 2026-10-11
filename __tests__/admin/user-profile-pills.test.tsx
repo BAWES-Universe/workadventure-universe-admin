@@ -160,6 +160,10 @@ describe('Someone’s profile buttons', () => {
       fireEvent.click(within(dialog).getByRole('button', { name: 'Remove friend' }));
     });
     expect(within(screen.getByRole('alertdialog')).getByRole('alert').textContent).toBe('That didn’t work. Try again.');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 
   it('hides Add friend and Message when either of you has blocked the other', async () => {
