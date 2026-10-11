@@ -1,7 +1,7 @@
 /** @jest-environment jsdom */
 
 import React from 'react';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 
 const mockFetch = jest.fn();
 let mockPeople: { uuid: string }[] = [];
@@ -125,6 +125,45 @@ describe('Someone’s profile buttons', () => {
     serve({ connect: { available: true, relationship, chatId: null } });
     await open();
     await waitFor(() => expect(names()).toEqual([label]));
+  });
+
+  it('asks before removing a friend, and only removes on Remove friend', async () => {
+    serve({ connect: { available: true, relationship: 'friends', chatId: null } });
+    await open();
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove friend' }));
+    const dialog = await screen.findByRole('alertdialog');
+    expect(dialog.textContent).toContain('Remove Ali as a friend?');
+    expect(mockFetch).not.toHaveBeenCalledWith('/api/admin/users/u-ali/connect', expect.objectContaining({ method: 'POST' }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
+    expect(mockFetch).not.toHaveBeenCalledWith('/api/admin/users/u-ali/connect', expect.objectContaining({ method: 'POST' }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove friend' }));
+    const confirm = within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Remove friend' });
+    await act(async () => {
+      fireEvent.click(confirm);
+    });
+    expect(mockFetch).toHaveBeenCalledWith('/api/admin/users/u-ali/connect', expect.objectContaining({ method: 'POST', body: JSON.stringify({ action: 'remove' }) }));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
+  });
+
+  it('keeps the confirm open and says why when removing a friend fails', async () => {
+    serve({ connect: { available: true, relationship: 'friends', chatId: null } });
+    const original = mockFetch.getMockImplementation()!;
+    mockFetch.mockImplementation((url: string, options?: RequestInit) =>
+      options?.method === 'POST' ? Promise.reject(new Error('offline')) : original(url, options));
+    await open();
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove friend' }));
+    const dialog = await screen.findByRole('alertdialog');
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Remove friend' }));
+    });
+    expect(within(screen.getByRole('alertdialog')).getByRole('alert').textContent).toBe('That didn’t work. Try again.');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 
   it('hides Add friend and Message when either of you has blocked the other', async () => {

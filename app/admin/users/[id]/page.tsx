@@ -5,6 +5,16 @@ import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { Check, ChevronLeft, ChevronRight, UserMinus, UserPlus, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { timeAgo } from '@/lib/time-ago';
 import { useLive } from '../../hooks/use-live';
 import {
@@ -220,6 +230,7 @@ export default function UserDetailPage() {
   const [connect, setConnect] = useState<Connect | null>(null);
   const [friendBusy, setFriendBusy] = useState(false);
   const [friendError, setFriendError] = useState<string | null>(null);
+  const [removeFriendOpen, setRemoveFriendOpen] = useState(false);
   // Invite and Message hand over to the game, so they show only when Orbit is open in a game that can take them.
   const gameCanInvite = useGameCapability('invite');
   const gameCanMessage = useGameCapability('message');
@@ -479,7 +490,8 @@ export default function UserDetailPage() {
     }
   }
 
-  async function changeFriendship(step: FriendStep) {
+  /** Whether it worked; if not, `friendError` says why. */
+  async function changeFriendship(step: FriendStep): Promise<boolean> {
     setFriendBusy(true);
     setFriendError(null);
     try {
@@ -491,11 +503,13 @@ export default function UserDetailPage() {
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
         setFriendError(FRIEND_ERRORS[data?.error] ?? 'That didn’t work. Try again.');
-        return;
+        return false;
       }
       setConnect((current) => (current ? { ...current, relationship: data.relationship as Relationship } : current));
+      return true;
     } catch {
       setFriendError('That didn’t work. Try again.');
+      return false;
     } finally {
       setFriendBusy(false);
     }
@@ -551,7 +565,11 @@ export default function UserDetailPage() {
   }
   if (friendButton) {
     pills.push(
-      <Button key="friend" variant={pillVariant()} className={pillClass} disabled={friendBusy} onClick={() => void changeFriendship(friendButton.step)}>
+      <Button key="friend" variant={pillVariant()} className={pillClass} disabled={friendBusy} onClick={() => {
+          if (friendButton.step !== 'remove') return void changeFriendship(friendButton.step);
+          setFriendError(null);
+          setRemoveFriendOpen(true);
+        }}>
         <friendButton.Icon aria-hidden="true" />
         {friendButton.label}
       </Button>,
@@ -845,6 +863,42 @@ export default function UserDetailPage() {
           </div>
         </details>
       )}
+
+      <AlertDialog
+        open={removeFriendOpen}
+        onOpenChange={(open) => {
+          setRemoveFriendOpen(open);
+          // Cancelling after a failure leaves no stale reason on the card.
+          if (!open) setFriendError(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Remove {name} as a friend?</AlertDialogTitle>
+            <AlertDialogDescription>You’ll stop being friends. You can send them a new request later.</AlertDialogDescription>
+          </AlertDialogHeader>
+          {friendError && (
+            <p className="text-sm text-muted-foreground" role="alert">
+              {friendError}
+            </p>
+          )}
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              className="bg-[#E96D51] text-white hover:bg-[#E96D51]/90"
+              disabled={friendBusy}
+              onClick={async (event) => {
+                event.preventDefault();
+                // On a failure the dialog stays open and says why.
+                if (await changeFriendship('remove')) setRemoveFriendOpen(false);
+              }}
+            >
+              Remove friend
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <InviteToWorldDialog
         userName={user.name || undefined}
