@@ -275,6 +275,8 @@ model UserAvatar {
   textureIds      String[] @map("texture_ids") // Array of texture IDs: ["male1", "hat1"]
   companionTextureId String? @map("companion_texture_id")
   updatedAt       DateTime @default(now()) @updatedAt @map("updated_at")
+  // When the outfit itself was last picked (a companion change leaves it alone)
+  outfitUpdatedAt DateTime? @map("outfit_updated_at")
 
   // Relations
   user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
