@@ -5,6 +5,16 @@ import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { Check, ChevronLeft, ChevronRight, UserMinus, UserPlus, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { timeAgo } from '@/lib/time-ago';
 import { useLive } from '../../hooks/use-live';
 import {
@@ -220,6 +230,7 @@ export default function UserDetailPage() {
   const [connect, setConnect] = useState<Connect | null>(null);
   const [friendBusy, setFriendBusy] = useState(false);
   const [friendError, setFriendError] = useState<string | null>(null);
+  const [removeFriendOpen, setRemoveFriendOpen] = useState(false);
   // Invite and Message hand over to the game, so they show only when Orbit is open in a game that can take them.
   const gameCanInvite = useGameCapability('invite');
   const gameCanMessage = useGameCapability('message');
@@ -551,7 +562,7 @@ export default function UserDetailPage() {
   }
   if (friendButton) {
     pills.push(
-      <Button key="friend" variant={pillVariant()} className={pillClass} disabled={friendBusy} onClick={() => void changeFriendship(friendButton.step)}>
+      <Button key="friend" variant={pillVariant()} className={pillClass} disabled={friendBusy} onClick={() => (friendButton.step === 'remove' ? setRemoveFriendOpen(true) : void changeFriendship(friendButton.step))}>
         <friendButton.Icon aria-hidden="true" />
         {friendButton.label}
       </Button>,
@@ -845,6 +856,30 @@ export default function UserDetailPage() {
           </div>
         </details>
       )}
+
+      <AlertDialog open={removeFriendOpen} onOpenChange={setRemoveFriendOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Remove {name} as a friend?</AlertDialogTitle>
+            <AlertDialogDescription>You’ll stop being friends. You can send them a new request later.</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              className="bg-[#E96D51] text-white hover:bg-[#E96D51]/90"
+              disabled={friendBusy}
+              onClick={async (event) => {
+                event.preventDefault();
+                await changeFriendship('remove');
+                setRemoveFriendOpen(false);
+              }}
+            >
+              Remove friend
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <InviteToWorldDialog
         userName={user.name || undefined}
