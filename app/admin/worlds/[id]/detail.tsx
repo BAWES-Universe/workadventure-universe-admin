@@ -343,7 +343,7 @@ function WorldDetail({ view }: { view: WorldView }) {
           }
           stats={view === 'visitors' && visits !== null ? <Figures><Figure value={visits} label={visits === 1 ? "access" : "accesses"} /></Figures> : undefined}
           actions={
-            view === 'members' && world.canEdit !== false ? (
+            view === 'members' && world.manages !== false ? (
               <Button variant="outline" onClick={() => setInviteDialogOpen(true)}>
                 <UserPlus aria-hidden="true" />
                 Invite member
