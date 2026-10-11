@@ -46,6 +46,8 @@ interface World {
   featured: boolean;
   thumbnailUrl: string | null;
   canEdit?: boolean;
+  /** Runs it (a super admin can edit and delete without running it). */
+  manages?: boolean;
   /** Stars on the world itself, and whether you gave one. */
   starCount?: number;
   isStarred?: boolean;
@@ -375,7 +377,7 @@ function WorldDetail({ view }: { view: WorldView }) {
             {currentUser && <StarButton count={world.starCount ?? 0} starred={!!world.isStarred} onClick={star.toggle} disabled={star.busy} />}
           </>
         }
-        manageLine={!isEditing && world.canEdit === true ? 'You run this world' : undefined}
+        manageLine={!isEditing && world.manages === true ? 'You run this world' : undefined}
         manage={
           !isEditing && world.canEdit === true ? (
             <>
@@ -521,10 +523,10 @@ function WorldDetail({ view }: { view: WorldView }) {
                 <SectionHead
                   title="Rooms"
                   count={world.rooms.length}
-                  action={world.canEdit === true ? <AddButton href={`/admin/rooms/new?worldId=${id}`}>Create room</AddButton> : undefined}
+                  action={world.manages === true ? <AddButton href={`/admin/rooms/new?worldId=${id}`}>Create room</AddButton> : undefined}
                 />
                 {world.rooms.length === 0 ? (
-                  world.canEdit === true ? (
+                  world.manages === true ? (
                     <EmptyCard
                       kind="room"
                       title="No rooms yet."
