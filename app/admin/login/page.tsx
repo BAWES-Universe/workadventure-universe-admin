@@ -8,7 +8,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { AlertCircle } from 'lucide-react';
 import { OrbitLoader } from '../components/shell/orbit-loader';
 import { OrbitMark } from '../components/shell/orbit-mark';
-import { adoptHandshakeSession, isOpaqueSessionId, purgeAccountState, rememberPlayUri } from '@/lib/client-auth';
+import { adoptHandshakeSession, getRememberedPlayUri, isOpaqueSessionId, purgeAccountState, rememberPlayUri } from '@/lib/client-auth';
 import { PLAY_ORIGIN, PLAY_URL, isInsideFrame } from '@/lib/play-origin';
 
 const ENABLE_MANUAL_LOGIN = process.env.NODE_ENV !== 'production' && process.env.NEXT_PUBLIC_ENABLE_MANUAL_LOGIN === 'true';
@@ -63,12 +63,14 @@ export default function LoginPage() {
     if (!response.ok || data.version !== 2 || !isOpaqueSessionId(data.sessionId) || !Number.isFinite(data.expiresAt)) {
       throw new Error(data.error || 'Invalid login response');
     }
+    // Signing in again (a session that ran out, a sign-out) comes back here without the room; it is still this frame's.
+    const keptPlayUri = getRememberedPlayUri();
     // The stored session is never reused: the game's handshake decides who is
     // signed in, and caches from a different (or unknown) account are dropped.
     adoptHandshakeSession({ sessionId: data.sessionId, expiresAt: data.expiresAt, userUuid: await fetchSessionUserUuid(data.sessionId) });
     sessionStorage.removeItem(LOGOUT_SUPPRESSION_KEY);
     // The game opens Orbit with the room the player is in; it decides which outfit people are drawn in.
-    rememberPlayUri(new URL(window.location.href).searchParams.get('playUri'), isInsideFrame());
+    rememberPlayUri(new URL(window.location.href).searchParams.get('playUri') ?? keptPlayUri, isInsideFrame());
     window.location.replace(getSafeRedirect());
   }, []);
 

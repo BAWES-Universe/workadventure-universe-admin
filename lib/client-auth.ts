@@ -73,7 +73,7 @@ export function rememberPlayUri(value: string | null, insideGame: boolean): void
   }
 }
 
-function getRememberedPlayUri(): string | null {
+export function getRememberedPlayUri(): string | null {
   if (typeof window === 'undefined') return null;
   try {
     return window.sessionStorage.getItem(PLAY_URI_KEY);

@@ -811,7 +811,7 @@ One person's current name and Woka by Matrix chat ID, so the chat can draw someo
 ```json
 {
   "wokaName": "John Doe",
-  "characterTextures": [{ "id": "male1", "url": "http://play.workadventure.localhost/resources/characters/pipoya/Male 01-1.png" }]
+  "characterTextures": [{ "id": "male1", "url": "http://play.workadventure.localhost/resources/characters/pipoya/Male%2001-1.png" }]
 }
 ```
 `characterTextures` is empty when there is no outfit to show (the game then draws its default Woka). Never an email address or an id. `400` for something that is not a Matrix ID, `404` when no account has it.
