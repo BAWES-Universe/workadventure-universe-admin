@@ -101,6 +101,8 @@ export async function wokaOutfitsFor(userIds: string[], worldId?: string | null)
   if (ids.length === 0) return result;
   const avatars = await prisma.userAvatar.findMany({
     where: { userId: { in: ids } },
+    // "Latest outfit" is by updatedAt for now, which a companion save also bumps. Once Orbit PR #324 (user_avatars.outfit_updated_at)
+    // is in develop, this should order by outfitUpdatedAt instead.
     orderBy: { updatedAt: 'desc' },
     select: { userId: true, worldId: true, textureIds: true },
   });
