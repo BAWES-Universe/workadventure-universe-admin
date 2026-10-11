@@ -68,8 +68,8 @@ function pick<T extends Record<string, unknown>>(row: T, select?: Record<string,
 
 export const fakePrisma = {
   user: {
-    findUnique: jest.fn(async ({ where, select }: { where: { uuid: string }; select?: Record<string, unknown> }) => {
-      const user = db.users.find((u) => u.uuid === where.uuid);
+    findUnique: jest.fn(async ({ where, select }: { where: { uuid?: string; id?: string }; select?: Record<string, unknown> }) => {
+      const user = db.users.find((u) => (where.uuid !== undefined ? u.uuid === where.uuid : u.id === where.id));
       return user ? pick(user, select) : null;
     }),
     findMany: jest.fn(async ({ where, take, select }: { where: Where; take?: number; select?: Record<string, { where?: unknown }> }) => {
