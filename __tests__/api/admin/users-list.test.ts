@@ -13,10 +13,12 @@ jest.mock('@/lib/db', () => ({
 }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
 jest.mock('@/lib/woka-avatar', () => ({ wokaLayersForMany: jest.fn() }));
+jest.mock('@/lib/viewer-world', () => ({ viewerWorldId: jest.fn() }));
 
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { wokaLayersForMany } from '@/lib/woka-avatar';
+import { viewerWorldId } from '@/lib/viewer-world';
 import { GET } from '@/app/api/admin/users/route';
 
 const db = prisma as unknown as {
@@ -26,6 +28,7 @@ const db = prisma as unknown as {
 };
 const session = getSessionUser as jest.Mock;
 const wokas = wokaLayersForMany as jest.Mock;
+const lookingFrom = viewerWorldId as jest.Mock;
 
 const alice = { id: 'u-alice', uuid: 'uuid-alice', email: 'alice@example.test', name: 'Alice', tags: [], isSuperAdmin: false };
 const root = { id: 'u-root', uuid: 'uuid-root', email: 'root@example.test', name: 'Root', tags: [], isSuperAdmin: true };
@@ -68,6 +71,7 @@ beforeEach(() => {
   ]);
   db.user.findMany.mockImplementation(async (args) => findManyForPage(args));
   wokas.mockResolvedValue(new Map([['u-2', ['layer-a', 'layer-b']]]));
+  lookingFrom.mockResolvedValue(undefined);
 });
 
 describe('GET /api/admin/users', () => {
@@ -92,11 +96,25 @@ describe('GET /api/admin/users', () => {
     expect(db.roomAccess.groupBy).not.toHaveBeenCalled();
     expect(db.user.findMany).toHaveBeenCalledTimes(1);
     expect(db.user.findMany.mock.calls[0][0].where).toEqual({ id: { in: ['u-2', 'u-1'] } });
-    expect(wokas).toHaveBeenCalledWith(['u-2', 'u-1']);
+    expect(wokas).toHaveBeenCalledWith(['u-2', 'u-1'], undefined);
     // Access aggregates are computed in SQL, restricted to the matching users.
     const { sql } = pageQuery();
     expect(sql).toMatch(/WHERE ra\.user_id IN \(SELECT id FROM matched\)/);
     expect(sql).toMatch(/WHERE ra\.user_uuid IN \(SELECT uuid FROM matched\)/);
+  });
+
+  it('draws people as they look from the world the viewer is in', async () => {
+    lookingFrom.mockResolvedValue('world-1');
+    await GET(request('?limit=2'));
+    expect(lookingFrom).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ kind: 'user' }));
+    expect(wokas).toHaveBeenCalledWith(['u-2', 'u-1'], 'world-1');
+  });
+
+  it('still lists people when the viewer\'s world cannot be worked out', async () => {
+    lookingFrom.mockRejectedValue(new Error('database down'));
+    const res = await GET(request('?limit=2'));
+    expect(res.status).toBe(200);
+    expect(wokas).toHaveBeenCalledWith(['u-2', 'u-1'], undefined);
   });
 
   it('keeps the database order and returns the fields the list pages read', async () => {

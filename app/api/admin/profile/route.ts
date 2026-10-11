@@ -3,6 +3,7 @@ import { requireSession } from '@/lib/auth-session';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { wokaLayersFor } from '@/lib/woka-avatar';
+import { viewerWorldId } from '@/lib/viewer-world';
 
 const visitCardSchema = z.object({
   // Your name, as everyone sees it in the game (the game reads it from here when it loads).
@@ -37,7 +38,7 @@ export async function GET(request: NextRequest) {
     }
     
     // Your Woka is decoration: a failure to read it never costs you your profile.
-    const woka = await wokaLayersFor(user.id).catch(() => []);
+    const woka = await wokaLayersFor(user.id, await viewerWorldId(request, user).catch(() => undefined)).catch(() => []);
     return NextResponse.json({
       name: user.name ?? null,
       woka,

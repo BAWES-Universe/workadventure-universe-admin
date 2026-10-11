@@ -199,6 +199,13 @@ export interface ChatMember {
   characterTextures: { id: string; url: string }[];
 }
 
+/** One person, by chat ID, for the chat of someone outside the asker's world: no email, no id. */
+export interface ChatPersonData {
+  wokaName: string | null;
+  /** Their Woka for the asker's place (bottom layer first); empty when there is none to show. */
+  characterTextures: { id: string; url: string }[];
+}
+
 export interface IceServer {
   urls: string;
   username?: string;

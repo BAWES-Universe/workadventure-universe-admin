@@ -4,6 +4,7 @@ import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { FEATURED_FORBIDDEN, refusesFeaturedChange } from '@/lib/featured';
 import { wokaLayersFor } from '@/lib/woka-avatar';
+import { viewerWorldId } from '@/lib/viewer-world';
 import { getViewer, memberWorldIdsOf } from '@/lib/access-scope';
 import { canSeeUniverse, canSeeWorld } from '@/lib/room-visibility';
 
@@ -120,7 +121,7 @@ export async function GET(
     }));
 
     const canEdit = isAdminToken || (userId !== null && universe.ownerId === userId);
-    const ownerWoka = universe.owner ? await wokaLayersFor(universe.owner.id).catch(() => []) : [];
+    const ownerWoka = universe.owner ? await wokaLayersFor(universe.owner.id, await viewerWorldId(request, viewer).catch(() => undefined)).catch(() => []) : [];
     // The owner's email is only for those who manage the universe.
     const owner = universe.owner
       ? {

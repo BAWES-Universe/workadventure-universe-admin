@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getViewer, unauthorizedResponse, type AccessScope } from '@/lib/access-scope';
 import { loadGuestsThisWeek, loadRecentVisitors } from '@/lib/recent-visitors';
+import { viewerWorldId } from '@/lib/viewer-world';
 
 export const dynamic = 'force-dynamic';
 
@@ -19,7 +20,7 @@ export async function GET(request: NextRequest) {
     if (!id || !scope || !Object.hasOwn(SCOPES, scope)) return NextResponse.json({ error: 'Pick a scope and an id' }, { status: 400 });
     const key = SCOPES[scope as keyof typeof SCOPES];
     const where = { [key]: id } as AccessScope;
-    const [visitors, guests] = await Promise.all([loadRecentVisitors(viewer, where), loadGuestsThisWeek(viewer, where)]);
+    const [visitors, guests] = await Promise.all([loadRecentVisitors(viewer, where, await viewerWorldId(request, viewer).catch(() => undefined)), loadGuestsThisWeek(viewer, where)]);
     return NextResponse.json({ visitors, guests }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (error) {
     console.error('Error fetching recent visitors:', error);

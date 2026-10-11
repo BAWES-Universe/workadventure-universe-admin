@@ -2,6 +2,8 @@ export const SESSION_STORAGE_KEY = 'orbit_session_v2';
 export const SESSION_EXPIRES_KEY = 'orbit_session_v2_expires';
 /** Universe user uuid the stored session belongs to, recorded at login. */
 export const SESSION_USER_KEY = 'orbit_session_v2_user';
+/** The room the game says the player is in (from the address the game opened Orbit with), for this visit only. */
+export const PLAY_URI_KEY = 'orbit_play_uri';
 
 /** localStorage keys Orbit may hold per account; anything else (e.g. theme) is per browser. */
 const ACCOUNT_LOCAL_STORAGE_PREFIXES = ['orbit', 'admin_'];
@@ -46,6 +48,38 @@ export function clearClientSession(): void {
   window.localStorage.removeItem('admin_session_id');
   window.localStorage.removeItem('admin_session_token');
   window.localStorage.removeItem('admin_session_expires');
+}
+
+/**
+ * Keeps the room the game opened Orbit from, so Orbit can draw people as they look from there. Only Orbit inside the
+ * game has one: anything else (no address, not a room address, a plain tab) leaves none.
+ */
+export function rememberPlayUri(value: string | null, insideGame: boolean): void {
+  if (typeof window === 'undefined') return;
+  let playUri: string | null = null;
+  if (value && insideGame) {
+    try {
+      const url = new URL(value);
+      if (url.protocol === 'http:' || url.protocol === 'https:') playUri = url.href;
+    } catch {
+      playUri = null;
+    }
+  }
+  try {
+    if (playUri) window.sessionStorage.setItem(PLAY_URI_KEY, playUri);
+    else window.sessionStorage.removeItem(PLAY_URI_KEY);
+  } catch {
+    // Storage blocked: Orbit then draws people as they look from outside any world.
+  }
+}
+
+function getRememberedPlayUri(): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    return window.sessionStorage.getItem(PLAY_URI_KEY);
+  } catch {
+    return null;
+  }
 }
 
 export function getStoredSessionUser(): string | null {
@@ -128,6 +162,9 @@ export async function authenticatedFetch(url: string, options: RequestInit = {})
   const sessionId = getClientSessionId();
   const headers = new Headers(options.headers);
   if (sessionId) headers.set('Authorization', `Bearer ${sessionId}`);
+  // Inside the game: which room the player is in, so people are drawn as they look from there.
+  const playUri = getRememberedPlayUri();
+  if (playUri && !headers.has('X-Orbit-Play-Uri')) headers.set('X-Orbit-Play-Uri', playUri);
   if (options.body && !(options.body instanceof FormData) && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
