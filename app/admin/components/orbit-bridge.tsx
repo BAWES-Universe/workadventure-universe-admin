@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useSyncExternalStore } from 'react';
 import { useRouter } from 'next/navigation';
 import { authenticatedFetch } from '@/lib/client-auth';
 import { PLAY_ORIGIN, isInsideFrame } from '@/lib/play-origin';
@@ -13,6 +13,8 @@ import {
   type OrbitBridgeAckError,
   type OrbitBridgeReady,
   type OrbitEventTopic,
+  type OrbitInvitePerson,
+  type OrbitMessagePerson,
   type OrbitProfileChanged,
   type OrbitView,
 } from '@/lib/orbit-bridge';
@@ -23,6 +25,47 @@ export type OrbitRefreshEventDetail = { topic: OrbitEventTopic };
 
 /** What the game said about this visit (in `orbit-bridge-init`), for the one thing Orbit tells the game. */
 let gameVisit: { roomRevision: string; capabilities: string[]; maxNameLength?: number } | null = null;
+
+const gameVisitListeners = new Set<() => void>();
+
+function setGameVisit(visit: typeof gameVisit) {
+  gameVisit = visit;
+  gameVisitListeners.forEach((listener) => listener());
+}
+
+/** Whether Orbit is open in a game that said it can do `capability` (for example "invite" or "message"). */
+export function useGameCapability(capability: string): boolean {
+  return useSyncExternalStore(
+    (listener) => {
+      gameVisitListeners.add(listener);
+      return () => gameVisitListeners.delete(listener);
+    },
+    () => Boolean(gameVisit?.capabilities.includes(capability)),
+    () => false,
+  );
+}
+
+function postToGame(build: (roomRevision: string) => OrbitInvitePerson | OrbitMessagePerson, capability: string): boolean {
+  if (!gameVisit?.capabilities.includes(capability) || !isInsideFrame()) return false;
+  window.parent.postMessage(build(gameVisit.roomRevision), PLAY_ORIGIN);
+  return true;
+}
+
+/** Asks the game to invite this person over. False outside the game, or in a game that can't (no message is sent). */
+export function inviteInGame(uuid: string, name: string): boolean {
+  return postToGame(
+    (roomRevision) => ({ type: 'orbit-invite-person', version: ORBIT_BRIDGE_VERSION, roomRevision, uuid, name }),
+    'invite',
+  );
+}
+
+/** Asks the game to open a chat with this person. False outside the game, or in a game that can't. */
+export function messageInGame(uuid: string, name: string, chatId: string): boolean {
+  return postToGame(
+    (roomRevision) => ({ type: 'orbit-message-person', version: ORBIT_BRIDGE_VERSION, roomRevision, uuid, name, chatId }),
+    'message',
+  );
+}
 
 /** The longest name the game accepts, when Orbit is open in a game that can take a new name. */
 export function gameMaxNameLength(): number | undefined {
@@ -99,11 +142,11 @@ export default function OrbitBridge({
 
       if (parsed.kind === 'init') {
         roomRevision.current = parsed.message.roomRevision;
-        gameVisit = {
+        setGameVisit({
           roomRevision: parsed.message.roomRevision,
           capabilities: parsed.message.capabilities,
           maxNameLength: parsed.message.maxNameLength,
-        };
+        });
         if (parsed.message.view) onViewRef.current?.(parsed.message.view);
         return;
       }
@@ -141,7 +184,7 @@ export default function OrbitBridge({
     post({ type: 'orbit-bridge-ready', version: ORBIT_BRIDGE_VERSION, capabilities: ORBIT_BRIDGE_CAPABILITIES });
     return () => {
       window.removeEventListener('message', onMessage);
-      gameVisit = null;
+      setGameVisit(null);
     };
   }, [router]);
 

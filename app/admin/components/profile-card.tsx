@@ -452,6 +452,15 @@ export function ProfileFrame({
   );
 }
 
+/** Pill buttons on a profile card (pass as the card's `action`): in a row beside the name, two by two on a phone. */
+export function ProfileActions({ count, children }: { count: number; children: ReactNode }) {
+  return (
+    <div className={styles.pills} data-count={count}>
+      {children}
+    </div>
+  );
+}
+
 /**
  * A person in a list: their Woka when we have it, otherwise the people chip. `face` makes it a circle on the colour
  * the game gives their name, as in Recent visitors.

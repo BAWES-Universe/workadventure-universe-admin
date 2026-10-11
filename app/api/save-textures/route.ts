@@ -70,9 +70,11 @@ export async function POST(request: NextRequest) {
         userId: user.id,
         worldId,
         textureIds: textures,
+        outfitUpdatedAt: new Date(),
       },
       update: {
         textureIds: textures,
+        outfitUpdatedAt: new Date(),
       },
     })
 
