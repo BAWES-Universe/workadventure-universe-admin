@@ -94,4 +94,15 @@ describe('signing in when the game’s access token has run out', () => {
     gameSends('fresh');
     await waitFor(() => expect(window.sessionStorage.getItem('orbit_session_v2')).toBe(SESSION));
   });
+
+  it('keeps the room Orbit was opened from when it has to sign in again', async () => {
+    // A session that ran out sends Orbit back here without the room in the address; it is still the same game frame.
+    window.sessionStorage.setItem('orbit_play_uri', 'http://play.test/@/uni/world/room');
+    fetchMock.mockImplementation((url) => (url === '/api/auth/login' ? answer(200, { version: 2, sessionId: SESSION, expiresAt: Date.now() + 60_000 }) : answer(404, {})));
+    render(<LoginPage />);
+    await waitFor(() => expect(postMessage).toHaveBeenCalledTimes(1));
+    gameSends('fresh');
+    await waitFor(() => expect(window.sessionStorage.getItem('orbit_session_v2')).toBe(SESSION));
+    expect(window.sessionStorage.getItem('orbit_play_uri')).toBe('http://play.test/@/uni/world/room');
+  });
 });

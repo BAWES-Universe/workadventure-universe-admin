@@ -144,7 +144,9 @@ export async function GET(request: NextRequest) {
             updateData.email = userEmail;
           }
           
-          if (userName) {
+          // The name picked in the game is the person's name everywhere: the sign-in name is only used when they
+          // have none yet (it never replaces one on a later room entry).
+          if (userName && !user.name) {
             updateData.name = userName;
           }
           

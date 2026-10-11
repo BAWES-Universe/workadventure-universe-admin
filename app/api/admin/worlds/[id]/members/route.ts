@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { getSessionUser } from '@/lib/auth-session';
 import { withWokas } from '@/lib/woka-avatar';
+import { viewerWorldId } from '@/lib/viewer-world';
 import { NOT_SYSTEM_USER } from '@/lib/system-user';
 import { canSeeWorld } from '@/lib/room-visibility';
 
@@ -149,7 +150,7 @@ export async function GET(
     }));
 
     return NextResponse.json({ 
-      members: await withWokas(membersWithLastVisit),
+      members: await withWokas(membersWithLastVisit, await viewerWorldId(request, sessionUser).catch(() => undefined)),
       canManage,
       total,
       yourTags,

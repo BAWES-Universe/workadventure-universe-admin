@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { wokaLayersForMany } from '@/lib/woka-avatar';
+import { viewerWorldId } from '@/lib/viewer-world';
 
 /** How many members the invitation shows, highest role first. */
 const MEMBERS_SHOWN = 24;
@@ -105,7 +106,10 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 
     const { world } = invitation;
     const people = await membersByRank(world.id, world.universe.ownerId);
-    const wokas = await wokaLayersForMany([invitation.invitedBy.id, ...people.map((person) => person.id)]).catch(
+    const wokas = await wokaLayersForMany(
+      [invitation.invitedBy.id, ...people.map((person) => person.id)],
+      await viewerWorldId(request, sessionUser).catch(() => undefined),
+    ).catch(
       () => new Map<string, string[]>(),
     );
 

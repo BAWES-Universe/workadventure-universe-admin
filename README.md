@@ -208,6 +208,7 @@ See [Admin Interface Guide](./docs/admin/guide.md) for complete documentation on
 ### Chat Endpoints
 
 - `GET /api/chat/members` - Get list of members for chat
+- `GET /api/chat/person` - One person's name and Woka by chat ID (for chats with people outside the world)
 
 See [docs/ENDPOINTS.md](./docs/ENDPOINTS.md) for complete API documentation.
 

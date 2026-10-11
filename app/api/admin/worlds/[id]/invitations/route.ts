@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { wokaLayersForMany } from '@/lib/woka-avatar';
+import { viewerWorldId } from '@/lib/viewer-world';
 
 // Helper function to check if user can manage world members
 async function canManageWorldMembers(worldId: string, userId: string): Promise<boolean> {
@@ -79,7 +80,10 @@ export async function GET(
     });
 
     // Each invited person's Woka, for their avatar.
-    const wokas = await wokaLayersForMany(invitations.map((invitation) => invitation.invitedUserId)).catch(
+    const wokas = await wokaLayersForMany(
+      invitations.map((invitation) => invitation.invitedUserId),
+      await viewerWorldId(request, sessionUser).catch(() => undefined),
+    ).catch(
       () => new Map<string, string[]>(),
     );
     return NextResponse.json({ 

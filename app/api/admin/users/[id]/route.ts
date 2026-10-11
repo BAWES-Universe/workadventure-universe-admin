@@ -3,6 +3,7 @@ import { getViewer, isPrivileged, memberWorldIdsOf, viewerUserId, unauthorizedRe
 import { canSeeUniverse, canSeeWorld } from '@/lib/room-visibility';
 import { prisma } from '@/lib/db';
 import { wokaLayersFor } from '@/lib/woka-avatar';
+import { viewerWorldId } from '@/lib/viewer-world';
 import { hiddenSystemOwnerId, notSystemWorld } from '@/lib/system-user';
 
 // GET /api/admin/users/[id] - Get a single user
@@ -192,7 +193,7 @@ export async function GET(
     const userWithCounts = {
       ...user,
       // Their Woka, for the profile's avatar; empty when they never picked one.
-      woka: await wokaLayersFor(user.id).catch(() => []),
+      woka: await wokaLayersFor(user.id, await viewerWorldId(request, viewer).catch(() => undefined)).catch(() => []),
       ownedUniverses: user.ownedUniverses.map((universe: any) => {
         const totalRooms = universe.worlds?.reduce((sum: number, world: any) => sum + (world._count?.rooms || 0), 0) || 0;
         const totalMembers = universe.worlds?.reduce((sum: number, world: any) => sum + (world._count?.members || 0), 0) || 0;

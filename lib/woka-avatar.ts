@@ -49,29 +49,98 @@ async function layersFromTextureLists(lists: string[][]): Promise<(string[] | nu
   });
 }
 
+type Texture = { id: string; url: string };
+
+/** Where a texture id's picture can come from: the catalog (all active layers, and the ones every world may use) and the game's own list. */
+interface LayerSources {
+  any: Map<string, string>;
+  platform: Map<string, string>;
+}
+
+async function loadLayerSources(textureIds: string[]): Promise<LayerSources> {
+  const sources: LayerSources = { any: new Map(), platform: new Map() };
+  if (textureIds.length === 0) return sources;
+  const layers = await prisma.avatarLayer.findMany({
+    where: { textureId: { in: textureIds }, isActive: true },
+    select: { textureId: true, url: true, avatarSet: { select: { lifecycle: true, scopes: { select: { scopeType: true } } } } },
+  });
+  for (const layer of layers) {
+    // Allowed in every world: part of an active set scoped to the whole platform (not to a universe or a world).
+    const everywhere = layer.avatarSet?.lifecycle === 'active' && layer.avatarSet.scopes.some((scope) => scope.scopeType === 'platform');
+    if (everywhere) sources.platform.set(layer.textureId, layer.url);
+    // A set for everyone is the better picture when a texture id is in several sets.
+    if (everywhere || !sources.any.has(layer.textureId)) sources.any.set(layer.textureId, layer.url);
+  }
+  return sources;
+}
+
+/** An outfit as { id, url } layers, or null when one of its parts can't be found (a body without a head, or the reverse). */
+function drawOutfit(textureIds: string[], catalog: Map<string, string>, config: () => Map<string, { url: string }>): Texture[] | null {
+  const layers: Texture[] = [];
+  for (const id of textureIds) {
+    const url = catalog.get(id) ?? config().get(id)?.url;
+    if (!url) return null;
+    layers.push({ id, url: resolve(url) });
+  }
+  return layers.length ? layers : null;
+}
+
 /**
- * The layers of each person's Woka (the outfit they last picked in the game), bottom first, as image URLs, in one
- * pass for a whole list. Each is a WorkAdventure 96×128 sheet; Orbit draws the standing, front-facing frame. Someone
- * who never picked one gets a default Woka, the same one every time.
+ * The one rule for which outfit of a person to draw, for everyone who draws a Woka: the outfit to show for the place
+ * you are looking from.
+ *  - Inside a world (`worldId`): the outfit they saved for that world.
+ *  - They have none saved for that world: their everywhere outfit (below).
+ *  - Outside any world: their latest outfit made only of parts allowed in every world, meaning parts of an active
+ *    outfit set scoped to the platform, or in the game's own list (config/woka.json).
+ * Someone with no such outfit is left out of the result; callers draw the default Woka. Only the picture is chosen
+ * here: who may wear what, and the check on room entry, are not touched, and nothing is saved.
  */
-export async function wokaLayersForMany(userIds: string[]): Promise<Map<string, string[]>> {
-  const result = new Map<string, string[]>();
+export async function wokaOutfitsFor(userIds: string[], worldId?: string | null): Promise<Map<string, Texture[]>> {
+  const result = new Map<string, Texture[]>();
   const ids = [...new Set(userIds)];
   if (ids.length === 0) return result;
   const avatars = await prisma.userAvatar.findMany({
     where: { userId: { in: ids } },
-    orderBy: { updatedAt: 'desc' },
-    select: { userId: true, textureIds: true },
+    // Latest picked outfit first: outfitUpdatedAt, not updatedAt, which a companion save also bumps.
+    orderBy: [{ outfitUpdatedAt: { sort: 'desc', nulls: 'last' } }, { updatedAt: 'desc' }],
+    select: { userId: true, worldId: true, textureIds: true },
   });
-  const latest = new Map<string, string[]>();
-  for (const avatar of avatars) if (!latest.has(avatar.userId) && avatar.textureIds.length) latest.set(avatar.userId, avatar.textureIds);
+  // Newest first, as asked for.
+  const byUser = new Map<string, { worldId: string; textureIds: string[] }[]>();
+  for (const avatar of avatars) {
+    if (!avatar.textureIds.length) continue;
+    byUser.set(avatar.userId, [...(byUser.get(avatar.userId) ?? []), { worldId: avatar.worldId, textureIds: avatar.textureIds }]);
+  }
+  const sources = await loadLayerSources([...new Set(avatars.flatMap((avatar) => avatar.textureIds))]);
+  let fromConfig: Map<string, { url: string }> | null = null;
+  const config = () => (fromConfig ??= getTextureMap(playServiceUrl()));
 
-  const lists = ids.map((id) => latest.get(id) ?? []);
-  const layers = await layersFromTextureLists(lists);
-  ids.forEach((id, index) => {
-    // A layer we can't find would leave a body without a head (or the reverse): show the default Woka instead.
-    result.set(id, layers[index] ?? defaultWoka(id));
-  });
+  for (const [userId, outfits] of byUser) {
+    const saved = worldId ? outfits.find((outfit) => outfit.worldId === worldId) : undefined;
+    let picked = saved ? drawOutfit(saved.textureIds, sources.any, config) : null;
+    if (!picked) {
+      for (const outfit of outfits) {
+        picked = drawOutfit(outfit.textureIds, sources.platform, config);
+        if (picked) break;
+      }
+    }
+    if (picked) result.set(userId, picked);
+  }
+  return result;
+}
+
+/**
+ * The layers of each person's Woka for the place you are looking from (see `wokaOutfitsFor`), bottom first, as image
+ * URLs, in one pass for a whole list. Each is a WorkAdventure 96×128 sheet; Orbit draws the standing, front-facing
+ * frame. Someone without an outfit to show gets a default Woka, the same one every time.
+ */
+export async function wokaLayersForMany(userIds: string[], worldId?: string | null): Promise<Map<string, string[]>> {
+  const outfits = await wokaOutfitsFor(userIds, worldId);
+  const result = new Map<string, string[]>();
+  for (const id of new Set(userIds)) {
+    const outfit = outfits.get(id);
+    result.set(id, outfit ? outfit.map((layer) => layer.url) : defaultWoka(id));
+  }
   return result;
 }
 
@@ -91,54 +160,34 @@ export async function wokaLayersForTextureLists(lists: Map<string, string[]>): P
 }
 
 /**
- * Each person's Woka as the game takes it ({ id, url } per layer, bottom first), so game pickers can draw it: the outfit
- * saved for this world, else the one they last picked anywhere (as Orbit's cards show). Someone without one, or with a
- * layer we can't find, is left out and the game draws its default Woka.
+ * Each person's Woka as the game takes it ({ id, url } per layer, bottom first), so game pickers can draw it, by the
+ * same rule as Orbit's cards (see `wokaOutfitsFor`). Someone without one is left out and the game draws its default Woka.
  */
 export async function wokaTexturesForMany(
   userIds: string[],
-  worldId?: string,
+  worldId?: string | null,
 ): Promise<Map<string, { id: string; url: string }[]>> {
-  const result = new Map<string, { id: string; url: string }[]>();
-  const ids = [...new Set(userIds)];
-  if (ids.length === 0) return result;
-  const avatars = await prisma.userAvatar.findMany({
-    where: { userId: { in: ids } },
-    orderBy: { updatedAt: 'desc' },
-    select: { userId: true, worldId: true, textureIds: true },
-  });
-  const chosen = new Map<string, string[]>();
-  for (const avatar of avatars) {
-    if (!avatar.textureIds.length) continue;
-    if (worldId && avatar.worldId === worldId) chosen.set(avatar.userId, avatar.textureIds);
-    else if (!chosen.has(avatar.userId)) chosen.set(avatar.userId, avatar.textureIds);
-  }
-  const keys = [...chosen.keys()];
-  const layers = await layersFromTextureLists(keys.map((key) => chosen.get(key) as string[]));
-  keys.forEach((key, index) => {
-    const urls = layers[index];
-    const textureIds = chosen.get(key) as string[];
-    if (urls) result.set(key, textureIds.map((id, layer) => ({ id, url: urls[layer] })));
-  });
-  return result;
+  return wokaOutfitsFor(userIds, worldId);
 }
 
-export async function wokaLayersFor(userId: string): Promise<string[]> {
-  return (await wokaLayersForMany([userId])).get(userId) ?? [];
+export async function wokaLayersFor(userId: string, worldId?: string | null): Promise<string[]> {
+  return (await wokaLayersForMany([userId], worldId)).get(userId) ?? [];
 }
 
 /**
  * Adds each person's Woka to a list of records that may name them (`userId`). A guest the viewer may see
  * (`isGuest: true`) gets a default Woka picked from `userUuid` or the record's `id`. A record redacted for this viewer
  * (no `userId`, no `isGuest`) is left exactly as it is. Never fails the list: without Wokas it comes back as it was.
+ * `worldId` is the world the viewer is looking from, when they are inside one (see `wokaOutfitsFor`).
  */
 export async function withWokas<
   T extends { userId?: string | null; userUuid?: string | null; id?: string | null; isGuest?: boolean | null; textureIds?: string[] | null },
 >(
   records: T[],
+  worldId?: string | null,
 ): Promise<(T & { woka?: string[] })[]> {
   const ids = records.map((record) => record.userId).filter((id): id is string => typeof id === 'string' && id.length > 0);
-  const wokas = ids.length ? await wokaLayersForMany(ids).catch(() => new Map<string, string[]>()) : new Map<string, string[]>();
+  const wokas = ids.length ? await wokaLayersForMany(ids, worldId).catch(() => new Map<string, string[]>()) : new Map<string, string[]>();
   // A guest with an outfit saved on the visit shows as they look; older visits keep the stand-in below.
   const own = new Map<string, string[]>();
   records.forEach((record, index) => {
