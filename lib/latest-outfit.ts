@@ -4,16 +4,18 @@ import { prisma } from '@/lib/db';
 export async function latestOutfitAnywhere(userId: string): Promise<{ worldId: string; textureIds: string[] } | null> {
   return prisma.userAvatar.findFirst({
     where: { userId, NOT: { textureIds: { isEmpty: true } } },
-    orderBy: { updatedAt: 'desc' },
+    // outfitUpdatedAt, not updatedAt: a companion change bumps updatedAt without changing the outfit
+    orderBy: [{ outfitUpdatedAt: { sort: 'desc', nulls: 'last' } }, { updatedAt: 'desc' }],
     select: { worldId: true, textureIds: true },
   });
 }
 
 /** Saves an outfit for a world without touching the companion saved there (a new entry starts with none). */
 export async function saveOutfitForWorld(userId: string, worldId: string, textureIds: string[]): Promise<void> {
+  const outfitUpdatedAt = new Date();
   await prisma.userAvatar.upsert({
     where: { userId_worldId: { userId, worldId } },
-    create: { userId, worldId, textureIds },
-    update: { textureIds },
+    create: { userId, worldId, textureIds, outfitUpdatedAt },
+    update: { textureIds, outfitUpdatedAt },
   });
 }

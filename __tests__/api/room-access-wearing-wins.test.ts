@@ -83,15 +83,15 @@ describe('GET /api/room/access, wearing wins', () => {
     expect(db.userAvatar.upsert).toHaveBeenCalledTimes(1);
     expect(db.userAvatar.upsert).toHaveBeenCalledWith({
       where: { userId_worldId: { userId: 'u1', worldId: 'world-b' } },
-      create: { userId: 'u1', worldId: 'world-b', textureIds: ['outfit-a1', 'outfit-a2'] },
-      update: { textureIds: ['outfit-a1', 'outfit-a2'] },
+      create: { userId: 'u1', worldId: 'world-b', textureIds: ['outfit-a1', 'outfit-a2'], outfitUpdatedAt: expect.any(Date) },
+      update: { textureIds: ['outfit-a1', 'outfit-a2'], outfitUpdatedAt: expect.any(Date) },
     });
   });
 
   it("looks for the latest outfit among the person's saved outfits in every world", async () => {
     await enter(PERSON.uuid);
     expect(db.userAvatar.findFirst).toHaveBeenCalledWith(
-      expect.objectContaining({ where: expect.objectContaining({ userId: 'u1' }), orderBy: { updatedAt: 'desc' } }),
+      expect.objectContaining({ where: expect.objectContaining({ userId: 'u1' }), orderBy: [{ outfitUpdatedAt: { sort: 'desc', nulls: 'last' } }, { updatedAt: 'desc' }] }),
     );
   });
 
