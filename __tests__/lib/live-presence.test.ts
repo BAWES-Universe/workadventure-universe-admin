@@ -109,6 +109,21 @@ describe('buildLiveView', () => {
     expect(lobby.count).toBe(5);
   });
 
+  it('marks the people who are your friends, whoever they share with', async () => {
+    db.friendship.findMany.mockResolvedValue([{ user1Id: 'u-sara', user2Id: 'u-me' }]);
+    const view = await buildLiveView(snapshot(), viewer);
+    expect(view.people.map((person) => [person.name, person.friend])).toEqual([['Sara', true]]);
+    const [lobby] = view.places;
+    expect(lobby.people.map((person) => [person.uuid, person.friend])).toEqual([
+      ['sara', true],
+      ['me', false],
+    ]);
+    // Asked about everyone else in view, not only those who share with friends.
+    const where = db.friendship.findMany.mock.calls[0][0].where;
+    expect(where.OR[0].user2Id.in).toEqual(expect.arrayContaining(['u-sara']));
+    expect(where.OR[0].user2Id.in).not.toContain('u-me');
+  });
+
   it('always shows you to yourself, even when you share with no one', async () => {
     db.user.findMany.mockResolvedValue([{ id: 'u-me', uuid: 'me', name: 'Me', preferences: [{ key: 'people.shareRoom', value: 'nobody' }] }]);
     const [lobby] = (await buildLiveView(snapshot(), viewer)).places;
