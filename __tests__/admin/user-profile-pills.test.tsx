@@ -148,6 +148,20 @@ describe('Someone’s profile buttons', () => {
     await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
   });
 
+  it('keeps the confirm open and says why when removing a friend fails', async () => {
+    serve({ connect: { available: true, relationship: 'friends', chatId: null } });
+    const original = mockFetch.getMockImplementation()!;
+    mockFetch.mockImplementation((url: string, options?: RequestInit) =>
+      options?.method === 'POST' ? Promise.reject(new Error('offline')) : original(url, options));
+    await open();
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove friend' }));
+    const dialog = await screen.findByRole('alertdialog');
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Remove friend' }));
+    });
+    expect(within(screen.getByRole('alertdialog')).getByRole('alert').textContent).toBe('That didn’t work. Try again.');
+  });
+
   it('hides Add friend and Message when either of you has blocked the other', async () => {
     mockCapabilities = ['message'];
     serve({ connect: { available: true, relationship: 'blocked_by_me', chatId: null } });

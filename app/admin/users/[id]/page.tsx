@@ -490,7 +490,8 @@ export default function UserDetailPage() {
     }
   }
 
-  async function changeFriendship(step: FriendStep) {
+  /** Whether it worked; if not, `friendError` says why. */
+  async function changeFriendship(step: FriendStep): Promise<boolean> {
     setFriendBusy(true);
     setFriendError(null);
     try {
@@ -502,11 +503,13 @@ export default function UserDetailPage() {
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
         setFriendError(FRIEND_ERRORS[data?.error] ?? 'That didn’t work. Try again.');
-        return;
+        return false;
       }
       setConnect((current) => (current ? { ...current, relationship: data.relationship as Relationship } : current));
+      return true;
     } catch {
       setFriendError('That didn’t work. Try again.');
+      return false;
     } finally {
       setFriendBusy(false);
     }
@@ -562,7 +565,11 @@ export default function UserDetailPage() {
   }
   if (friendButton) {
     pills.push(
-      <Button key="friend" variant={pillVariant()} className={pillClass} disabled={friendBusy} onClick={() => (friendButton.step === 'remove' ? setRemoveFriendOpen(true) : void changeFriendship(friendButton.step))}>
+      <Button key="friend" variant={pillVariant()} className={pillClass} disabled={friendBusy} onClick={() => {
+          if (friendButton.step !== 'remove') return void changeFriendship(friendButton.step);
+          setFriendError(null);
+          setRemoveFriendOpen(true);
+        }}>
         <friendButton.Icon aria-hidden="true" />
         {friendButton.label}
       </Button>,
@@ -863,6 +870,11 @@ export default function UserDetailPage() {
             <AlertDialogTitle>Remove {name} as a friend?</AlertDialogTitle>
             <AlertDialogDescription>You’ll stop being friends. You can send them a new request later.</AlertDialogDescription>
           </AlertDialogHeader>
+          {friendError && (
+            <p className="text-sm text-muted-foreground" role="alert">
+              {friendError}
+            </p>
+          )}
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
@@ -871,8 +883,8 @@ export default function UserDetailPage() {
               disabled={friendBusy}
               onClick={async (event) => {
                 event.preventDefault();
-                await changeFriendship('remove');
-                setRemoveFriendOpen(false);
+                // On a failure the dialog stays open and says why.
+                if (await changeFriendship('remove')) setRemoveFriendOpen(false);
               }}
             >
               Remove friend
