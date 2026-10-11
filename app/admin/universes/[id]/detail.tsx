@@ -44,6 +44,8 @@ interface Universe {
   thumbnailUrl: string | null;
   createdAt: string;
   canEdit?: boolean;
+  /** Owns it (a super admin can edit and delete without owning it). */
+  manages?: boolean;
   /** Stars on the universe itself, and whether you gave one. */
   starCount?: number;
   isStarred?: boolean;
@@ -464,18 +466,18 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
                   <SectionHead
                     title="Worlds"
                     count={worlds.length}
-                    action={universe.canEdit === true ? <AddButton href={`/admin/worlds/new?universeId=${id}`}>Create world</AddButton> : undefined}
+                    action={universe.manages === true ? <AddButton href={`/admin/worlds/new?universeId=${id}`}>Create world</AddButton> : undefined}
                   />
                   {worlds.length === 0 ? (
                     <EmptyCard
                       kind="world"
                       title="No worlds yet."
                       text="Worlds hold the rooms in this universe."
-                      href={universe.canEdit === true ? `/admin/worlds/new?universeId=${id}` : undefined}
-                      action={universe.canEdit === true ? 'Create a world' : undefined}
+                      href={universe.manages === true ? `/admin/worlds/new?universeId=${id}` : undefined}
+                      action={universe.manages === true ? 'Create a world' : undefined}
                     />
                   ) : (
-                    <WorldGroups worlds={worldGroups} canEdit={universe.canEdit === true} />
+                    <WorldGroups worlds={worldGroups} canEdit={universe.manages === true} />
                   )}
                 </section>
               )}

@@ -79,11 +79,12 @@ export async function GET(
       : world.rooms.filter((room) => canSeeRoom({ ...room, world }, sessionUser, memberWorldIds));
     
     // Allow viewing for anyone, but include ownership info
-    // canEdit is true only if user is universe owner OR has editor/admin tags
-    let canEdit = false;
+    // `manages` is true only if user is universe owner OR has editor/admin tags; super admins can also edit and
+    // delete (`canEdit`) without running the world.
+    let manages = false;
     if (userId && !isAdminToken) {
-      canEdit = world.universe.ownerId === userId;
-      if (!canEdit) {
+      manages = world.universe.ownerId === userId;
+      if (!manages) {
         // Check if user has editor or admin tags
         const member = await prisma.worldMember.findFirst({
           where: {
@@ -94,11 +95,12 @@ export async function GET(
             },
           },
         });
-        canEdit = !!member;
+        manages = !!member;
       }
     } else if (isAdminToken) {
-      canEdit = true;
+      manages = true;
     }
+    const canEdit = manages || sessionUser?.isSuperAdmin === true;
     
     // Stars on the world itself (its rooms' stars are counted on the rooms).
     const starCount = await prisma.favorite.count({ where: { worldId: world.id, roomId: null } });
@@ -110,6 +112,7 @@ export async function GET(
       ...world,
       rooms,
       canEdit,
+      manages,
       starCount,
       isStarred,
     };
@@ -139,6 +142,7 @@ export async function PATCH(
       authHeader.replace('Bearer ', '').trim() === process.env.ADMIN_API_TOKEN;
     
     let userId: string | null = null;
+    let isSuperAdminSession = false;
     let canFeature = Boolean(isAdminToken);
     
     if (!isAdminToken) {
@@ -149,6 +153,7 @@ export async function PATCH(
         return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
       }
       userId = sessionUser.id;
+      isSuperAdminSession = sessionUser.isSuperAdmin;
       canFeature = sessionUser.isSuperAdmin;
     } else {
       // Admin token - require it
@@ -187,7 +192,7 @@ export async function PATCH(
     }
     
     // If using session auth (not admin token), ensure user owns the universe
-    if (userId && !isAdminToken && existing.universe.ownerId !== userId) {
+    if (userId && !isAdminToken && !isSuperAdminSession && existing.universe.ownerId !== userId) {
       return NextResponse.json(
         { error: 'Forbidden' },
         { status: 403 }
@@ -279,6 +284,7 @@ export async function DELETE(
       authHeader.replace('Bearer ', '').trim() === process.env.ADMIN_API_TOKEN;
     
     let userId: string | null = null;
+    let isSuperAdminSession = false;
     
     if (!isAdminToken) {
       // Try to get user from session
@@ -288,6 +294,7 @@ export async function DELETE(
         return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
       }
       userId = sessionUser.id;
+      isSuperAdminSession = sessionUser.isSuperAdmin;
     } else {
       // Admin token - require it
       requireAuth(request);
@@ -313,7 +320,7 @@ export async function DELETE(
     }
     
     // If using session auth (not admin token), ensure user owns the universe
-    if (userId && !isAdminToken && world.universe.ownerId !== userId) {
+    if (userId && !isAdminToken && !isSuperAdminSession && world.universe.ownerId !== userId) {
       return NextResponse.json(
         { error: 'Forbidden' },
         { status: 403 }

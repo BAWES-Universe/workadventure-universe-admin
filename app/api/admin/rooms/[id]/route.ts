@@ -83,8 +83,9 @@ export async function GET(
     }
     
     // Check permissions for editing (but allow viewing for anyone)
-    // canEdit is true only if user is universe owner OR has editor/admin tags
-    let canEdit = false;
+    // `manages` is true only if user is universe owner OR has editor/admin tags; super admins can also edit and
+    // delete (`canEdit`) without running the room's world.
+    let manages = false;
     if (userId && !isAdminToken) {
       // Check if user owns the universe or has editor/admin tags in the world
       const isUniverseOwner = room.world.universe.ownerId === userId;
@@ -98,10 +99,11 @@ export async function GET(
         },
       });
       
-      canEdit = isUniverseOwner || !!hasEditPermission;
+      manages = isUniverseOwner || !!hasEditPermission;
     } else if (isAdminToken) {
-      canEdit = true;
+      manages = true;
     }
+    const canEdit = manages || sessionUser?.isSuperAdmin === true;
     
     // Sync WAM URL if map-storage is configured and room has a mapUrl
     if (room.mapUrl) {
@@ -288,6 +290,7 @@ export async function GET(
     const responseData = {
       ...room,
       canEdit,
+      manages,
       isStarred,
       starCount,
     };
@@ -317,6 +320,7 @@ export async function PATCH(
       authHeader.replace('Bearer ', '').trim() === process.env.ADMIN_API_TOKEN;
     
     let userId: string | null = null;
+    let isSuperAdminSession = false;
     
     if (!isAdminToken) {
       // Try to get user from session
@@ -326,6 +330,7 @@ export async function PATCH(
         return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
       }
       userId = sessionUser.id;
+      isSuperAdminSession = sessionUser.isSuperAdmin;
     } else {
       // Admin token - require it
       requireAuth(request);
@@ -371,7 +376,7 @@ export async function PATCH(
     }
     
     // If using session auth (not admin token), check permissions
-    if (userId && !isAdminToken) {
+    if (userId && !isAdminToken && !isSuperAdminSession) {
       // Check if user owns the universe or has editor/admin tags in the world
       const isUniverseOwner = existing.world.universe.ownerId === userId;
       const hasEditPermission = await prisma.worldMember.findFirst({
@@ -624,6 +629,7 @@ export async function DELETE(
       authHeader.replace('Bearer ', '').trim() === process.env.ADMIN_API_TOKEN;
     
     let userId: string | null = null;
+    let isSuperAdminSession = false;
     
     if (!isAdminToken) {
       // Try to get user from session
@@ -633,6 +639,7 @@ export async function DELETE(
         return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
       }
       userId = sessionUser.id;
+      isSuperAdminSession = sessionUser.isSuperAdmin;
     } else {
       // Admin token - require it
       requireAuth(request);
@@ -663,7 +670,7 @@ export async function DELETE(
     }
     
     // If using session auth (not admin token), check permissions
-    if (userId && !isAdminToken) {
+    if (userId && !isAdminToken && !isSuperAdminSession) {
       // Check if user owns the universe or has editor/admin tags in the world
       const isUniverseOwner = room.world.universe.ownerId === userId;
       const hasEditPermission = await prisma.worldMember.findFirst({
