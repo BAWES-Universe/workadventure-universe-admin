@@ -1,11 +1,12 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
-import { ChevronLeft, ChevronRight, UserPlus } from 'lucide-react';
+import { Check, ChevronLeft, ChevronRight, UserMinus, UserPlus, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { timeAgo } from '@/lib/time-ago';
+import { useLive } from '../../hooks/use-live';
 import {
   EmptyCard,
   EntityRow,
@@ -17,7 +18,8 @@ import {
   VisitLine,
   count,
 } from '../../components/ds';
-import { ProfileFrame, ProfileLinks, WokaAvatar } from '../../components/profile-card';
+import { ProfileActions, ProfileFrame, ProfileLinks, WokaAvatar } from '../../components/profile-card';
+import { inviteInGame, messageInGame, useGameCapability } from '../../components/orbit-bridge';
 import { PassportSection } from '../../components/passport';
 import InviteToWorldDialog from '../../components/invite-to-world-dialog';
 
@@ -148,6 +150,49 @@ function visits(analytics?: Analytics) {
   return { you, latest, youWereLast: analytics?.youWereLast === true };
 }
 
+/** How you stand with them, from /api/admin/users/[id]/connect. Not available for yourself or for guests. */
+type Relationship = 'none' | 'friends' | 'request_sent' | 'request_received' | 'blocked_by_me' | 'blocked_by_them';
+type Connect = { available: true; relationship: Relationship; chatId: string | null };
+type FriendStep = 'request' | 'accept' | 'cancel' | 'remove';
+
+/** The one friend button for each way you can stand: its words, what a tap does, and its glyph. */
+const FRIEND_BUTTON: Partial<Record<Relationship, { label: string; step: FriendStep; Icon: typeof UserPlus }>> = {
+  none: { label: 'Add friend', step: 'request', Icon: UserPlus },
+  request_sent: { label: 'Cancel request', step: 'cancel', Icon: X },
+  request_received: { label: 'Accept request', step: 'accept', Icon: Check },
+  friends: { label: 'Remove friend', step: 'remove', Icon: UserMinus },
+};
+
+const FRIEND_ERRORS: Record<string, string> = {
+  not_accepting_requests: 'They aren’t taking friend requests.',
+  no_shared_world: 'They only take friend requests from people who share a world with them.',
+  too_many_open_requests: 'You have too many requests waiting. Try again once some are answered.',
+  blocked: 'You can’t add them as a friend.',
+};
+
+/** Invite (two people and a plus) and Message (a speech bubble): plain white glyphs, no tile. */
+function UsersPlusIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M5 7a4 4 0 1 0 8 0a4 4 0 1 0 -8 0" />
+      <path d="M3 21v-2a4 4 0 0 1 4 -4h4c.96 0 1.84 .338 2.53 .901" />
+      <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+      <path d="M16 19h6" />
+      <path d="M19 16v6" />
+    </svg>
+  );
+}
+
+function MessageIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M8 9h8" />
+      <path d="M8 13h6" />
+      <path d="M18 4a3 3 0 0 1 3 3v8a3 3 0 0 1 -3 3h-5l-5 3v-3h-2a3 3 0 0 1 -3 -3v-8a3 3 0 0 1 3 -3h12z" />
+    </svg>
+  );
+}
+
 const linkClass = 'underline-offset-2 hover:underline [overflow-wrap:anywhere]';
 
 export default function UserDetailPage() {
@@ -172,6 +217,13 @@ export default function UserDetailPage() {
   const [worldAnalytics, setWorldAnalytics] = useState<Record<string, Analytics>>({});
   const [starredRooms, setStarredRooms] = useState<StarredRoom[]>([]);
   const [starredRoomsLoading, setStarredRoomsLoading] = useState(false);
+  const [connect, setConnect] = useState<Connect | null>(null);
+  const [friendBusy, setFriendBusy] = useState(false);
+  const [friendError, setFriendError] = useState<string | null>(null);
+  // Invite and Message hand over to the game, so they show only when Orbit is open in a game that can take them.
+  const gameCanInvite = useGameCapability('invite');
+  const gameCanMessage = useGameCapability('message');
+  const live = useLive();
 
   useEffect(() => {
     checkAuth();
@@ -199,6 +251,27 @@ export default function UserDetailPage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentUser, user]);
+
+  useEffect(() => {
+    if (!currentUser || !user || currentUser.id === user.id) {
+      setConnect(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const { authenticatedFetch } = await import('@/lib/client-auth');
+        const response = await authenticatedFetch(`/api/admin/users/${id}/connect`);
+        const data = response.ok ? await response.json() : null;
+        if (!cancelled) setConnect(data?.available ? (data as Connect) : null);
+      } catch {
+        if (!cancelled) setConnect(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser, user, id]);
 
   useEffect(() => {
     if (user) {
@@ -406,6 +479,28 @@ export default function UserDetailPage() {
     }
   }
 
+  async function changeFriendship(step: FriendStep) {
+    setFriendBusy(true);
+    setFriendError(null);
+    try {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch(`/api/admin/users/${id}/connect`, {
+        method: 'POST',
+        body: JSON.stringify({ action: step }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        setFriendError(FRIEND_ERRORS[data?.error] ?? 'That didn’t work. Try again.');
+        return;
+      }
+      setConnect((current) => (current ? { ...current, relationship: data.relationship as Relationship } : current));
+    } catch {
+      setFriendError('That didn’t work. Try again.');
+    } finally {
+      setFriendBusy(false);
+    }
+  }
+
   if (loading) {
     return <LoadingRows label="this person" rows={4} />;
   }
@@ -430,6 +525,47 @@ export default function UserDetailPage() {
   const bio = user.visitCard?.bio?.trim();
   const links = user.visitCard?.links ?? [];
 
+  // The buttons on their card, in the order drawn: Invite, Message, Add friend, then Invite as member. The first is the main one.
+  const online = !isSelf && Boolean(live?.people.some((person) => person.uuid === user.uuid));
+  const blocked = connect?.relationship === 'blocked_by_me' || connect?.relationship === 'blocked_by_them';
+  const friendButton = connect && !blocked ? FRIEND_BUTTON[connect.relationship] : undefined;
+  const pills: ReactNode[] = [];
+  const pillClass = 'h-11 min-w-0 gap-2 px-3';
+  const pillVariant = () => (pills.length === 0 ? 'default' : 'outline');
+  if (gameCanInvite && online) {
+    pills.push(
+      <Button key="invite" variant={pillVariant()} className={pillClass} onClick={() => inviteInGame(user.uuid, name)}>
+        <UsersPlusIcon />
+        Invite
+      </Button>,
+    );
+  }
+  if (gameCanMessage && connect?.chatId) {
+    const chatId = connect.chatId;
+    pills.push(
+      <Button key="message" variant={pillVariant()} className={pillClass} onClick={() => messageInGame(user.uuid, name, chatId)}>
+        <MessageIcon />
+        Message
+      </Button>,
+    );
+  }
+  if (friendButton) {
+    pills.push(
+      <Button key="friend" variant={pillVariant()} className={pillClass} disabled={friendBusy} onClick={() => void changeFriendship(friendButton.step)}>
+        <friendButton.Icon aria-hidden="true" />
+        {friendButton.label}
+      </Button>,
+    );
+  }
+  if (canInvite) {
+    pills.push(
+      <Button key="member" variant={pillVariant()} className={pillClass} onClick={() => setInviteDialogOpen(true)}>
+        <UserPlus aria-hidden="true" />
+        Invite as member
+      </Button>,
+    );
+  }
+
   return (
     <div className="grid min-w-0 gap-7">
       <ProfileFrame
@@ -446,15 +582,13 @@ export default function UserDetailPage() {
             ]}
           />
         }
-        action={
-          canInvite ? (
-            <Button onClick={() => setInviteDialogOpen(true)} className="h-10 shrink-0 gap-2 px-4">
-              <UserPlus size={15} aria-hidden="true" />
-              Invite as member
-            </Button>
-          ) : undefined
-        }
+        action={pills.length > 0 ? <ProfileActions count={pills.length}>{pills}</ProfileActions> : undefined}
       >
+        {friendError && (
+          <p className="text-sm text-muted-foreground" role="alert">
+            {friendError}
+          </p>
+        )}
         {(bio || links.length > 0) && (
           <div className="grid min-w-0 gap-3">
             {bio && <p className="whitespace-pre-line text-sm leading-relaxed [overflow-wrap:anywhere]">{bio}</p>}

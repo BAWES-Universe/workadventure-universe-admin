@@ -19,7 +19,7 @@ jest.mock('@/lib/client-auth', () => ({
   authenticatedFetch: (url: string, options?: RequestInit) => mockFetch(url, options),
 }));
 
-import OrbitBridge from '@/app/admin/components/orbit-bridge';
+import OrbitBridge, { inviteInGame, messageInGame, useGameCapability } from '@/app/admin/components/orbit-bridge';
 
 const revision = 'rev-aaaaaaaaaaaaaaaa';
 const otherRevision = 'rev-bbbbbbbbbbbbbbbb';
@@ -108,5 +108,46 @@ describe('OrbitBridge', () => {
     expect(heard).toHaveBeenCalledTimes(1);
     expect(posted).toContainEqual(expect.objectContaining({ requestId: 'r2', ok: true }));
     window.removeEventListener('orbit:refresh', heard);
+  });
+
+  describe('handing a person over to the game', () => {
+    function Probe() {
+      return <span data-testid="can-invite">{String(useGameCapability('invite'))}</span>;
+    }
+
+    it('sends nothing before the game said which visit it is', () => {
+      render(<OrbitBridge onRefresh={jest.fn()} />);
+      expect(inviteInGame('uuid-b', 'Bilal')).toBe(false);
+      expect(messageInGame('uuid-b', 'Bilal', '@b:chat')).toBe(false);
+      expect(posted.filter((message) => (message as { type: string }).type.startsWith('orbit-invite') || (message as { type: string }).type.startsWith('orbit-message'))).toHaveLength(0);
+    });
+
+    it('sends nothing for what the game did not say it can do', () => {
+      render(<OrbitBridge onRefresh={jest.fn()} />);
+      init();
+      expect(inviteInGame('uuid-b', 'Bilal')).toBe(false);
+      expect(messageInGame('uuid-b', 'Bilal', '@b:chat')).toBe(false);
+    });
+
+    it('invites and messages with the visit’s revision when the game can', () => {
+      render(<OrbitBridge onRefresh={jest.fn()} />);
+      fromGame({ type: 'orbit-bridge-init', version: 1, roomRevision: revision, capabilities: ['navigate', 'invite', 'message'] });
+      expect(inviteInGame('uuid-b', 'Bilal')).toBe(true);
+      expect(messageInGame('uuid-b', 'Bilal', '@b:chat')).toBe(true);
+      expect(posted).toContainEqual({ type: 'orbit-invite-person', version: 1, roomRevision: revision, uuid: 'uuid-b', name: 'Bilal' });
+      expect(posted).toContainEqual({ type: 'orbit-message-person', version: 1, roomRevision: revision, uuid: 'uuid-b', name: 'Bilal', chatId: '@b:chat' });
+    });
+
+    it('lets a page follow what the game can do', () => {
+      const { getByTestId } = render(
+        <>
+          <OrbitBridge onRefresh={jest.fn()} />
+          <Probe />
+        </>,
+      );
+      expect(getByTestId('can-invite').textContent).toBe('false');
+      fromGame({ type: 'orbit-bridge-init', version: 1, roomRevision: revision, capabilities: ['invite'] });
+      expect(getByTestId('can-invite').textContent).toBe('true');
+    });
   });
 });
