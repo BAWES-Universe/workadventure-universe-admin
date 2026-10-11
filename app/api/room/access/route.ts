@@ -6,6 +6,7 @@ import { prisma } from '@/lib/db';
 import { resolveTextureUrls, resolveCompanionTexture } from '@/lib/avatar-catalog-validator';
 import { notifyRoomAccess } from '@/lib/discord';
 import { isBotIdentifier } from '@/lib/bot-visitor';
+import { latestOutfitAnywhere, saveOutfitForWorld } from '@/lib/latest-outfit';
 import { canSeeRoom } from '@/lib/room-visibility';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { bansCoveringWorld } from '@/lib/moderation';
@@ -357,6 +358,32 @@ export async function GET(request: NextRequest) {
         if (dbTextures.valid) {
           finalTextures = dbTextures.textures;
           isTexturesValid = true;
+        }
+      }
+
+      // Wearing wins: a signed-in person's latest pick follows them into any world that allows it, with no prompt.
+      // It is kept for this world too, so their next visit here starts from it. Where it isn't allowed, the logic
+      // above stands. The textures the game sent are never trusted over this: they may be stale from another device.
+      // Guests and bots keep the logic above as it was.
+      if (user && isAuthenticated && !isBotIdentifier(finalUuid)) {
+        try {
+          const latest = await latestOutfitAnywhere(user.id);
+          if (latest && latest.worldId !== worldData.id) {
+            const worn = await resolveTextureUrls(
+              prisma, latest.textureIds, worldData.id, worldData.universeId, playServiceUrl
+            );
+            if (worn.valid) {
+              finalTextures = worn.textures;
+              isTexturesValid = true;
+              await saveOutfitForWorld(user.id, worldData.id, latest.textureIds).catch((error: unknown) => {
+                // Log but don't fail the request if saving the outfit for this world fails
+                console.error('Failed to save the worn outfit for this world:', error);
+              });
+            }
+          }
+        } catch (error) {
+          // Log but don't fail the request: this world's own logic above still applies
+          console.error('Failed to look up the latest outfit:', error);
         }
       }
       
