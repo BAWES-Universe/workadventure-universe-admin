@@ -174,9 +174,12 @@ export async function GET(request: NextRequest) {
         userEmail = user.email || userEmail;
       }
       
-      // An account that joins with an access token we could not check is answered as a guest (its per-world Woka, or the
-      // one the game sent), not with the Woka it wears. Say so, so it can be seen when a player gets the wrong Woka.
-      if (hasAccessToken && !isAuthenticatedFromToken && user && !user.isGuest && !isBotIdentifier(finalUuid)) {
+      // An account that joins without a token we could check (expired, Authentik unreachable, none sent) is answered as a
+      // guest: we can't tell it is them. It never gets a Woka saved for some world, which may be an old pick (that is how
+      // a default or an old Woka was worn silently); only what the game sent counts, and when that is nothing this world
+      // can show, the answer is "not valid" so the game asks. Say so, so it can be seen when a player gets this.
+      const unverifiedAccount = !!user && !user.isGuest && !isAuthenticated && !isBotIdentifier(finalUuid);
+      if (unverifiedAccount && hasAccessToken) {
         Sentry.captureMessage('Room access: an account joined with an access token Orbit could not verify, so it was answered as a guest', 'warning');
       }
 
@@ -293,7 +296,7 @@ export async function GET(request: NextRequest) {
         return NextResponse.json(error);
       }
 
-      if (user) {
+      if (user && !unverifiedAccount) {
         
         // Get user avatar
         avatar = await prisma.userAvatar.findUnique({
