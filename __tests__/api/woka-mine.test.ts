@@ -34,7 +34,7 @@ beforeEach(() => {
   for (const [slug, name] of [['world-c', 'World C'], ['world-d', 'World D']]) {
     state.worlds.push({ id: slug, slug, name, universeId: 'un', universe: { slug: 'uni' } });
   }
-  state.users.push({ id: 'u1', uuid: 'person-uuid', isGuest: false, companionTextureId: null });
+  state.users.push({ id: 'u1', uuid: 'person-uuid', email: 'pat@example.test', isGuest: false, companionTextureId: null });
   addSet({
     id: 'std',
     layers: ['teal', 'rose', 'gold', 'plum', 'mint'].map((textureId) => ({ textureId, name: `Name ${textureId}` })).concat([
@@ -47,6 +47,17 @@ beforeEach(() => {
 });
 
 describe('GET /api/woka/mine', () => {
+  it('knows a signed-in player by the email the game sends, as well as by their uuid', async () => {
+    addOutfit('u1', ['teal'], daysAgo(2));
+    addOutfit('u1', ['crown'], daysAgo(1));
+    const byEmail = await mine('world-d', 'pat@example.test');
+    expect(byEmail.status).toBe(200);
+    expect(byEmail.body.current).toMatchObject({ name: 'Gold crown', wearableHere: false });
+    expect(names(byEmail.body.recent)).toEqual(['teal']);
+    expect(byEmail.body.suggestion).toMatchObject({ lastWorn: true });
+    expect((await mine('world-d', 'person-uuid')).body).toEqual(byEmail.body);
+  });
+
   it('lists at most four Wokas, the one worn now first, newest first, never twice', async () => {
     ['mint', 'plum', 'gold', 'rose', 'teal'].forEach((id, index) => addOutfit('u1', [id], daysAgo(5 - index)));
     const { body } = await mine();
