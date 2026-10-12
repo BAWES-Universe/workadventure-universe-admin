@@ -7,7 +7,7 @@ import { NextRequest } from 'next/server';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 jest.mock('@/lib/db', () => ({ prisma: require('../helpers/fake-db').fakeDb }));
 
-import { addOutfit, addSet, resetFakeDb, state } from '../helpers/fake-db';
+import { addOutfit, addSet, fakeDb, resetFakeDb, state } from '../helpers/fake-db';
 import { POST as saveTextures } from '@/app/api/save-textures/route';
 import { POST as saveCompanion } from '@/app/api/save-companion-texture/route';
 
@@ -72,6 +72,14 @@ describe('POST /api/save-textures', () => {
   it('drops a try-on: an outfit worn once and swapped within five minutes does not stay', async () => {
     await pick('std-x');
     await pick('std-y');
+    expect(outfitsOf()).toEqual(['std-y']);
+  });
+
+  it('still saves when another device dropped the same try-on a moment earlier', async () => {
+    const stale = addOutfit('u1', ['std-x'], minutesAgo(1));
+    state.outfits = []; // gone by the time this pick deletes it
+    fakeDb.userOutfit.findFirst.mockResolvedValueOnce(stale);
+    expect((await pick('std-y')).status).toBe(204);
     expect(outfitsOf()).toEqual(['std-y']);
   });
 

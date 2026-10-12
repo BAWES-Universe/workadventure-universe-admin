@@ -210,7 +210,9 @@ export const fakeDb: Record<string, any> = {
   userOutfit: {
     findFirst: jest.fn(async (args: Row) => findMany(state.outfits, args)[0] ?? null),
     findMany: jest.fn(async (args: Row) => findMany(state.outfits, args)),
+    // Like Prisma's delete, it throws when there is no such row (P2025)
     delete: jest.fn(async ({ where }: Row) => {
+      if (!state.outfits.some((row) => row.id === where.id)) throw new Error('P2025: record to delete does not exist');
       state.outfits = state.outfits.filter((row) => row.id !== where.id);
       return {};
     }),

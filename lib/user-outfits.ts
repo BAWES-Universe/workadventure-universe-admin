@@ -35,7 +35,8 @@ export async function recordOutfitPick(userId: string, textureIds: string[], now
       previous.firstWornAt.getTime() === previous.lastWornAt.getTime() &&
       now.getTime() - previous.lastWornAt.getTime() < TRY_ON_MS
     ) {
-      await tx.userOutfit.delete({ where: { id: previous.id } });
+      // deleteMany, not delete: another device may have just dropped the same row, and that must not fail this pick
+      await tx.userOutfit.deleteMany({ where: { id: previous.id } });
     }
     const worn = await tx.userOutfit.upsert({
       where: { userId_outfitKey: { userId, outfitKey: key } },
