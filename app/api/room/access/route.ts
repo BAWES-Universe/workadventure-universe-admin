@@ -363,11 +363,13 @@ export async function GET(request: NextRequest) {
         }
       }
 
-      // Wearing wins: a signed-in person's latest pick follows them into any world that allows it, with no prompt.
+      // Wearing wins: a signed-in person's latest pick follows them into any world that allows it, with no prompt,
+      // but only into a world where they have no Woka saved yet. A Woka saved for a world is never replaced.
       // It is kept for this world too, so their next visit here starts from it. Where it isn't allowed, the logic
       // above stands. The textures the game sent are never trusted over this: they may be stale from another device.
       // Guests and bots keep the logic above as it was.
-      if (user && isAuthenticated && !isBotIdentifier(finalUuid)) {
+      const hasWokaHere = Boolean(avatar?.textureIds && avatar.textureIds.length > 0);
+      if (user && isAuthenticated && !isBotIdentifier(finalUuid) && !hasWokaHere) {
         try {
           const latest = await latestOutfitAnywhere(user.id);
           if (latest && latest.worldId !== worldData.id) {
