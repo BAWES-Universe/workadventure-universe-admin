@@ -6,11 +6,12 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 const mockFetch = jest.fn();
 let mockPeople: { uuid: string }[] = [];
 let mockCapabilities: string[] = [];
+let mockId = 'u-ali';
 const mockInvite = jest.fn();
 const mockMessage = jest.fn();
 
 jest.mock('next/navigation', () => ({
-  useParams: () => ({ id: 'u-ali' }),
+  useParams: () => ({ id: mockId }),
   useRouter: () => ({ push: jest.fn() }),
 }));
 jest.mock('next/link', () => ({ __esModule: true, default: ({ children, href }: { children: React.ReactNode; href: string }) => <a href={href}>{children}</a> }));
@@ -71,6 +72,7 @@ describe('Someone’s profile buttons', () => {
     mockMessage.mockReset();
     mockPeople = [];
     mockCapabilities = [];
+    mockId = 'u-ali';
   });
 
   it('shows Invite, Message, Add friend and Invite as member in that order, while they are online in a game that can take them', async () => {
@@ -196,5 +198,40 @@ describe('Someone’s profile buttons', () => {
     });
     expect((await screen.findByRole('alert')).textContent).toBe('They aren’t taking friend requests.');
     expect(names()).toEqual(['Add friend']);
+  });
+  it('never carries the previous person’s chat to the next profile while their lookup is still loading', async () => {
+    mockCapabilities = ['message'];
+    const bob = { ...ali, id: 'u-bob', uuid: 'uuid-bob', name: 'Bob' };
+    let answerBob: (value: unknown) => void = () => undefined;
+    const bobConnect = new Promise((resolve) => {
+      answerBob = resolve;
+    });
+    mockFetch.mockImplementation((url: string) => {
+      if (url === '/api/auth/me') return json({ user: { id: 'u-sara' } });
+      if (url === '/api/admin/users/u-ali') return json(ali);
+      if (url === '/api/admin/users/u-bob') return json(bob);
+      if (url === '/api/admin/users/u-ali/connect') return json({ available: true, relationship: 'none', chatId: '@ali:chat' });
+      if (url === '/api/admin/users/u-bob/connect') return bobConnect;
+      if (url.endsWith('/worlds')) return json({ worlds: [] });
+      if (url.startsWith('/api/admin/analytics/users/')) return json({ total: 0, page: 1, limit: 10, totalPages: 0, firstAccess: null, lastAccess: null, accesses: [] });
+      return json({ rooms: [] });
+    });
+    const view = render(<UserDetailPage />);
+    await screen.findByRole('heading', { name: 'Ali' });
+    await waitFor(() => expect(names()).toEqual(['Message', 'Add friend']));
+
+    // On to Bob, whose friend lookup has not come back yet.
+    mockId = 'u-bob';
+    view.rerender(<UserDetailPage />);
+    await screen.findByRole('heading', { name: 'Bob' });
+    expect(names()).toEqual([]);
+    expect(mockMessage).not.toHaveBeenCalled();
+
+    await act(async () => {
+      answerBob(await json({ available: true, relationship: 'none', chatId: '@bob:chat' }));
+    });
+    await waitFor(() => expect(names()).toEqual(['Message', 'Add friend']));
+    fireEvent.click(screen.getByRole('button', { name: 'Message' }));
+    expect(mockMessage).toHaveBeenCalledWith('uuid-bob', 'Bob', '@bob:chat');
   });
 });
