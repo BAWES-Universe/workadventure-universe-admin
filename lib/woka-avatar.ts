@@ -109,7 +109,10 @@ export async function wokaOutfitsFor(userIds: string[], worldId?: string | null)
   const byUser = new Map<string, { worldId: string; textureIds: string[] }[]>();
   for (const avatar of avatars) {
     if (!avatar.textureIds.length) continue;
-    byUser.set(avatar.userId, [...(byUser.get(avatar.userId) ?? []), { worldId: avatar.worldId, textureIds: avatar.textureIds }]);
+    const outfits = byUser.get(avatar.userId);
+    const outfit = { worldId: avatar.worldId, textureIds: avatar.textureIds };
+    if (outfits) outfits.push(outfit);
+    else byUser.set(avatar.userId, [outfit]);
   }
   const sources = await loadLayerSources([...new Set(avatars.flatMap((avatar) => avatar.textureIds))]);
   let fromConfig: Map<string, { url: string }> | null = null;
