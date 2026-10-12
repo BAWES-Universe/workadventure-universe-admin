@@ -91,10 +91,11 @@ describe('GET /api/companion/list, only what saving accepts', () => {
     addSet({ id: 'invite', visibility: 'assigned_only', companions: [{ textureId: 'invite-pet' }] });
     addSet({ id: 'ended', availableUntil: new Date(Date.now() - DAY), companions: [{ textureId: 'ended-pet' }] });
     const ctx = (tags: string[]) => ({ worldId: 'world-a', universeId: 'un', userId: 'u1', membershipTags: tags });
-    for (const [who, tags] of [[EMAIL, ['vip']], [null, []]] as const) {
+    const askers: [string | null, string[]][] = [[EMAIL, ['vip']], [null, []]];
+    for (const [who, tags] of askers) {
       const listed = companionIds((await call(companionList, who)).body);
       expect(listed.length).toBeGreaterThan(0);
-      for (const id of listed) expect((await companionWearableHere(id, ctx(tags as string[]))).wearable).toBe(true);
+      for (const id of listed) expect((await companionWearableHere(id, ctx(tags))).wearable).toBe(true);
     }
   });
 });
