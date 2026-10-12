@@ -6,7 +6,7 @@ import { NextRequest } from 'next/server';
 
 jest.mock('@/lib/db', () => ({
   prisma: {
-    world: { findFirst: jest.fn() },
+    world: { findFirst: jest.fn(), findUnique: jest.fn() },
     worldMember: { findMany: jest.fn() },
     userAvatar: { findMany: jest.fn() },
     avatarLayer: { findMany: jest.fn() },
@@ -36,7 +36,8 @@ beforeEach(() => {
   jest.clearAllMocks();
   process.env.PLAY_URL = 'http://play.test';
   db.world.findFirst.mockResolvedValue({ id: 'world-1' });
-  db.avatarLayer.findMany.mockResolvedValue([{ textureId: 'hat1', url: 'https://cdn.test/hat1.png', avatarSet: { lifecycle: 'active', scopes: [{ scopeType: 'world' }] } }]);
+  db.world.findUnique.mockResolvedValue({ universeId: 'uni-1' });
+  db.avatarLayer.findMany.mockResolvedValue([{ textureId: 'hat1', url: 'https://cdn.test/hat1.png', avatarSet: { lifecycle: 'active', scopes: [{ scopeType: 'world', scopeId: 'world-1' }] } }]);
 });
 
 describe('GET /api/members', () => {

@@ -51,26 +51,46 @@ async function layersFromTextureLists(lists: string[][]): Promise<(string[] | nu
 
 type Texture = { id: string; url: string };
 
-/** Where a texture id's picture can come from: the catalog (layers of active sets, and the ones every world may use) and the game's own list. */
+/** The world someone is looked at from, and the universe it belongs to: the places a costume's set must be scoped to. */
+interface Place {
+  worldId: string;
+  universeId: string | null;
+}
+
+/**
+ * Where a texture id's picture can come from: the catalog (layers of active sets, and the ones every world may use) and
+ * the game's own list. `here` holds the layers the viewed world allows today (an active set scoped to the platform, to
+ * that world, or to its universe), which is what the game checks on entry; it stays empty when there is no place.
+ */
 interface LayerSources {
-  any: Map<string, string>;
+  here: Map<string, string>;
   platform: Map<string, string>;
 }
 
-async function loadLayerSources(textureIds: string[]): Promise<LayerSources> {
-  const sources: LayerSources = { any: new Map(), platform: new Map() };
+async function loadLayerSources(textureIds: string[], place?: Place): Promise<LayerSources> {
+  const sources: LayerSources = { here: new Map(), platform: new Map() };
   if (textureIds.length === 0) return sources;
   const layers = await prisma.avatarLayer.findMany({
     where: { textureId: { in: textureIds }, isActive: true },
-    select: { textureId: true, url: true, avatarSet: { select: { lifecycle: true, scopes: { select: { scopeType: true } } } } },
+    select: { textureId: true, url: true, avatarSet: { select: { lifecycle: true, scopes: { select: { scopeType: true, scopeId: true } } } } },
   });
   for (const layer of layers) {
+    // Only a part of an active set can be worn (an archived or draft set's parts are refused on entry).
+    if (layer.avatarSet?.lifecycle !== 'active') continue;
+    const scopes = layer.avatarSet.scopes;
     // Allowed in every world: part of an active set scoped to the whole platform (not to a universe or a world).
-    const everywhere = layer.avatarSet?.lifecycle === 'active' && layer.avatarSet.scopes.some((scope) => scope.scopeType === 'platform');
+    const everywhere = scopes.some((scope) => scope.scopeType === 'platform');
     if (everywhere) sources.platform.set(layer.textureId, layer.url);
-    // Only a part of an active set can be worn (an archived or draft set's parts are refused on entry), so only those
-    // are drawn. A set for everyone is the better picture when a texture id is in several sets.
-    if (layer.avatarSet?.lifecycle === 'active' && (everywhere || !sources.any.has(layer.textureId))) sources.any.set(layer.textureId, layer.url);
+    if (!place) continue;
+    const inPlace =
+      everywhere ||
+      scopes.some(
+        (scope) =>
+          (scope.scopeType === 'world' && scope.scopeId === place.worldId) ||
+          (scope.scopeType === 'universe' && place.universeId !== null && scope.scopeId === place.universeId),
+      );
+    // A set for everyone is the better picture when a texture id is in several sets.
+    if (inPlace && (everywhere || !sources.here.has(layer.textureId))) sources.here.set(layer.textureId, layer.url);
   }
   return sources;
 }
@@ -110,8 +130,9 @@ function drawOutfit(textureIds: string[], catalog: Map<string, string>, config: 
 /**
  * The one rule for which outfit of a person to draw, for everyone who draws a Woka: the outfit to show for the place
  * you are looking from. It matches what the game puts on them when they enter.
- *  - Inside a world (`worldId`): the costume they saved for that world, when it draws. A costume is an outfit with a
- *    part only a universe's or a world's own set has.
+ *  - Inside a world (`worldId`): the costume they saved for that world, when that world (or its universe) still has
+ *    every part in an active set, as the game checks on entry. A costume is an outfit with a part only a universe's or
+ *    a world's own set has.
  *  - Otherwise, and outside any world: their everyday outfit, the latest outfit made only of standard parts, meaning
  *    parts of an active outfit set scoped to the platform, or in the game's own list (config/woka.json).
  * Someone with no such outfit is left out of the result; callers draw the default Woka. Only the picture is chosen
@@ -136,14 +157,20 @@ export async function wokaOutfitsFor(userIds: string[], worldId?: string | null)
     if (outfits) outfits.push(outfit);
     else byUser.set(avatar.userId, [outfit]);
   }
-  const sources = await loadLayerSources([...new Set(avatars.flatMap((avatar) => avatar.textureIds))]);
+  // A costume only draws where the world still allows it, so it needs the world's universe (the game checks both).
+  let place: Place | undefined;
+  if (worldId) {
+    const world = await prisma.world.findUnique({ where: { id: worldId }, select: { universeId: true } }).catch(() => null);
+    place = { worldId, universeId: world?.universeId ?? null };
+  }
+  const sources = await loadLayerSources([...new Set(avatars.flatMap((avatar) => avatar.textureIds))], place);
   let fromConfig: Map<string, { url: string }> | null = null;
   const config = () => (fromConfig ??= getTextureMap(playServiceUrl()));
 
   for (const [userId, outfits] of byUser) {
     const saved = worldId ? outfits.find((outfit) => outfit.worldId === worldId) : undefined;
     // Only a costume stays in its world; a standard outfit saved here gives way to their everyday one.
-    let picked = saved && !isStandardOutfit(saved.textureIds, sources, config) ? drawOutfit(saved.textureIds, sources.any, config) : null;
+    let picked = saved && !isStandardOutfit(saved.textureIds, sources, config) ? drawOutfit(saved.textureIds, sources.here, config) : null;
     if (!picked) {
       for (const outfit of outfits) {
         picked = drawOutfit(outfit.textureIds, sources.platform, config);

@@ -4,17 +4,23 @@ const WORLD_B = 'world-b';
 // What each person has saved, newest first (the real query sorts by update time).
 const mockAvatars: { userId: string; worldId: string; textureIds: string[] }[] = [];
 
-// The catalog: `signed` is in a set for the whole platform; `costume` only in a world's own set; `draftpart` is in a
-// platform set that is still a draft; `uni` is in a universe's set.
+const UNIVERSE = 'uni-1';
+const inWorlds = (...worldIds: string[]) => ({ lifecycle: 'active', scopes: worldIds.map((scopeId) => ({ scopeType: 'world', scopeId })) });
+
+// The catalog: `signed` is in a set for the whole platform; `costume` only in the own sets of worlds A and B; `draftpart`
+// is in a platform set that is still a draft; `uni` is in the set of the universe both worlds belong to; `otheruni` in
+// another universe's; `unlinked` in an active set that is scoped to a world that is neither A nor B.
 const platform = { lifecycle: 'active', scopes: [{ scopeType: 'platform' }] };
 const mockLayers = [
   { textureId: 'signed', url: 'https://cdn.example.com/w/a.png?sig=abc&v=2', avatarSet: platform },
-  { textureId: 'costume', url: 'https://cdn.example.com/w/costume.png', avatarSet: { lifecycle: 'active', scopes: [{ scopeType: 'world' }] } },
-  { textureId: 'uni', url: 'https://cdn.example.com/w/uni.png', avatarSet: { lifecycle: 'active', scopes: [{ scopeType: 'universe' }] } },
-  { textureId: 'archivedcostume', url: 'https://cdn.example.com/w/archived.png', avatarSet: { lifecycle: 'archived', scopes: [{ scopeType: 'world' }] } },
+  { textureId: 'costume', url: 'https://cdn.example.com/w/costume.png', avatarSet: inWorlds(WORLD_A, WORLD_B) },
+  { textureId: 'uni', url: 'https://cdn.example.com/w/uni.png', avatarSet: { lifecycle: 'active', scopes: [{ scopeType: 'universe', scopeId: UNIVERSE }] } },
+  { textureId: 'otheruni', url: 'https://cdn.example.com/w/otheruni.png', avatarSet: { lifecycle: 'active', scopes: [{ scopeType: 'universe', scopeId: 'uni-2' }] } },
+  { textureId: 'unlinked', url: 'https://cdn.example.com/w/unlinked.png', avatarSet: inWorlds('world-z') },
+  { textureId: 'archivedcostume', url: 'https://cdn.example.com/w/archived.png', avatarSet: { lifecycle: 'archived', scopes: [{ scopeType: 'world', scopeId: WORLD_B }] } },
   { textureId: 'draftpart', url: 'https://cdn.example.com/w/draft.png', avatarSet: { lifecycle: 'draft', scopes: [{ scopeType: 'platform' }] } },
   // In a world's set and a platform set under the same id: the platform picture is the one for everyone.
-  { textureId: 'both', url: 'https://cdn.example.com/w/both-world.png', avatarSet: { lifecycle: 'active', scopes: [{ scopeType: 'world' }] } },
+  { textureId: 'both', url: 'https://cdn.example.com/w/both-world.png', avatarSet: inWorlds(WORLD_A) },
   { textureId: 'both', url: 'https://cdn.example.com/w/both-platform.png', avatarSet: platform },
 ];
 
@@ -30,9 +36,11 @@ jest.mock('@/lib/db', () => ({
         mockLayers.filter((layer) => where.textureId.in.includes(layer.textureId)),
       ),
     },
+    world: { findUnique: jest.fn(async () => ({ universeId: 'uni-1' })) },
   },
 }));
 
+import { prisma } from '@/lib/db';
 import { defaultWoka, outfitAllowedEverywhere, outfitsAllowedEverywhere, withWokas, wokaLayersFor, wokaLayersForMany, wokaTexturesForMany } from '@/lib/woka-avatar';
 
 describe('Wokas for avatars', () => {
@@ -139,6 +147,36 @@ describe('Wokas for avatars', () => {
       save('p', WORLD_A, 'male1'); // newest, standard
       save('p', WORLD_B, 'archivedcostume'); // saved for the world looked from, but its set was archived
       expect((await wokaLayersForMany(['p'], WORLD_B)).get('p')?.[0]).toMatch(/Male%2001-1\.png$|Male 01-1\.png$/);
+    });
+
+    it('does not draw a costume whose active set is no longer scoped to the world looked from: the everyday outfit', async () => {
+      save('p', WORLD_A, 'male1'); // newest, standard
+      save('p', WORLD_B, 'unlinked'); // saved for the world looked from, but its set belongs to another world
+      save('q', WORLD_B, 'otheruni', 'male1'); // another universe's set
+      save('r', WORLD_B, 'male1', 'unlinked'); // a standard body with a part that is no longer there
+      save('r', WORLD_A, 'male1');
+      const wokas = await wokaLayersForMany(['p', 'q', 'r'], WORLD_B);
+      expect(wokas.get('p')?.[0]).toMatch(/Male%2001-1\.png$|Male 01-1\.png$/);
+      expect(wokas.get('p')).toHaveLength(1);
+      expect(wokas.get('q')).toEqual(defaultWoka('q'));
+      expect(wokas.get('r')).toHaveLength(1);
+      expect(wokas.get('r')).not.toContain('https://cdn.example.com/w/unlinked.png');
+    });
+
+    it("draws a costume from the world's universe, and not the same costume looked at from a world outside it", async () => {
+      save('p', WORLD_B, 'uni');
+      expect((await wokaLayersForMany(['p'], WORLD_B)).get('p')).toEqual(['https://cdn.example.com/w/uni.png']);
+      (prisma.world.findUnique as jest.Mock).mockResolvedValueOnce({ universeId: 'uni-2' });
+      expect((await wokaLayersForMany(['p'], WORLD_B)).get('p')).toEqual(defaultWoka('p'));
+    });
+
+    it('still draws a costume scoped to the world itself when the universe can\'t be looked up', async () => {
+      save('p', WORLD_A, 'costume');
+      save('q', WORLD_A, 'uni');
+      (prisma.world.findUnique as jest.Mock).mockRejectedValueOnce(new Error('db down'));
+      expect((await wokaLayersForMany(['p'], WORLD_A)).get('p')).toEqual(costume);
+      (prisma.world.findUnique as jest.Mock).mockRejectedValueOnce(new Error('db down'));
+      expect((await wokaLayersForMany(['q'], WORLD_A)).get('q')).toEqual(defaultWoka('q'));
     });
 
     it('draws the platform picture of a part that is also in a world\'s own set', async () => {

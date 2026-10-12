@@ -8,7 +8,7 @@ import { NextRequest } from 'next/server';
 jest.mock('@/lib/db', () => ({
   prisma: {
     user: { findFirst: jest.fn() },
-    world: { findFirst: jest.fn() },
+    world: { findFirst: jest.fn(), findUnique: jest.fn() },
     userAvatar: { findMany: jest.fn() },
     avatarLayer: { findMany: jest.fn() },
   },
@@ -25,7 +25,7 @@ import { GET } from '@/app/api/chat/person/route';
 const db = prisma as unknown as Record<string, Record<string, jest.Mock>>;
 
 const platform = { lifecycle: 'active', scopes: [{ scopeType: 'platform' }] };
-const worldOnly = { lifecycle: 'active', scopes: [{ scopeType: 'world' }] };
+const worldOnly = { lifecycle: 'active', scopes: [{ scopeType: 'world', scopeId: 'world-1' }] };
 
 function request(query: Record<string, string | undefined>, authorized = true) {
   const url = new URL('http://localhost:3333/api/chat/person');
@@ -38,6 +38,7 @@ beforeEach(() => {
   process.env.PLAY_URL = 'http://play.test';
   db.user.findFirst.mockResolvedValue({ id: 'u1', name: 'Alice' });
   db.world.findFirst.mockResolvedValue({ id: 'world-1' });
+  db.world.findUnique.mockResolvedValue({ universeId: 'uni-1' });
   db.avatarLayer.findMany.mockResolvedValue([
     { textureId: 'hat1', url: 'https://cdn.test/hat1.png', avatarSet: platform },
     { textureId: 'costume', url: 'https://cdn.test/costume.png', avatarSet: worldOnly },
