@@ -1,5 +1,5 @@
 import { prisma } from '@/lib/db';
-import { isScopedHere, resolvePickerSets } from '@/lib/avatar-catalog';
+import { isInsideDates, isScopedHere, resolvePickerSets } from '@/lib/avatar-catalog';
 import { getCompanionMap, getTextureMap } from '@/lib/wokas';
 
 /**
@@ -73,7 +73,11 @@ async function loadAllowed(ctx: WearableContext): Promise<Allowed> {
       },
     });
     for (const grant of grants) {
-      if (grant.avatarSet.lifecycle === 'active' && isScopedHere(grant.avatarSet.scopes, ctx.worldId, ctx.universeId)) {
+      if (
+        grant.avatarSet.lifecycle === 'active' &&
+        isInsideDates(grant.avatarSet, now) &&
+        isScopedHere(grant.avatarSet.scopes, ctx.worldId, ctx.universeId)
+      ) {
         sets.push(grant.avatarSet as (typeof sets)[number]);
       }
     }
@@ -102,11 +106,7 @@ async function reasonsFor(kind: Kind, textureIds: string[], ctx: WearableContext
       : await prisma.avatarCompanion.findMany({ where, select });
   const now = new Date();
   // Only a set that is active and inside its dates still counts; a part in none of them was removed.
-  const live = rows.filter(
-    (row) =>
-      (!row.avatarSet.availableFrom || row.avatarSet.availableFrom <= now) &&
-      (!row.avatarSet.availableUntil || row.avatarSet.availableUntil >= now),
-  );
+  const live = rows.filter((row) => isInsideDates(row.avatarSet, now));
   const places = new Map<string, Set<string>>();
   const placeIds = { world: new Set<string>(), universe: new Set<string>() };
   for (const row of live) {

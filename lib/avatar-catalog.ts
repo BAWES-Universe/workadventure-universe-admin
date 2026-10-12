@@ -118,6 +118,7 @@ export async function resolvePickerSets(
       // boundaries: the game refuses a Woka from a set that isn't scoped to the world it is worn in)
       if (
         grant.avatarSet.lifecycle === 'active' &&
+        isInsideDates(grant.avatarSet, now) &&
         isScopedHere(grant.avatarSet.scopes, worldId, universeId) &&
         !eligible.find((s) => s.id === grant.avatarSet.id)
       ) {
@@ -127,6 +128,14 @@ export async function resolvePickerSets(
   }
 
   return eligible
+}
+
+/** Whether a set is inside its availability window (no limit when a date is empty). */
+export function isInsideDates(
+  set: { availableFrom: Date | null; availableUntil: Date | null },
+  now: Date = new Date()
+): boolean {
+  return (!set.availableFrom || set.availableFrom <= now) && (!set.availableUntil || set.availableUntil >= now)
 }
 
 /** Whether a set is scoped to the whole platform, to this universe or to this world. */

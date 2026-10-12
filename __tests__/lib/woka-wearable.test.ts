@@ -99,6 +99,21 @@ describe('wearableHere', () => {
     expect((await wearableHere(['gift-1'], { ...inC, userId: 'other' })).wearable).toBe(false);
   });
 
+  it('does not allow a granted set outside its dates, whether granted to select or assigned_only', async () => {
+    const ended = new Date(Date.now() - YEAR);
+    addSet({ id: 'g1', visibility: 'hidden', layers: [part('ended-grant')], availableUntil: ended });
+    addSet({ id: 'g2', visibility: 'assigned_only', layers: [part('ended-forced')], availableUntil: ended });
+    addSet({ id: 'g3', visibility: 'assigned_only', layers: [part('live-forced')], availableUntil: new Date(Date.now() + YEAR) });
+    state.grants.push(
+      { userId: 'me', avatarSetId: 'g1', grantType: 'select', isActive: true, expiresAt: null },
+      { userId: 'me', avatarSetId: 'g2', grantType: 'assigned_only', isActive: true, expiresAt: null },
+      { userId: 'me', avatarSetId: 'g3', grantType: 'assigned_only', isActive: true, expiresAt: null },
+    );
+    expect(await wearableHere(['ended-grant'], inC)).toEqual({ wearable: false, reason: 'removed' });
+    expect(await wearableHere(['ended-forced'], inC)).toEqual({ wearable: false, reason: 'removed' });
+    expect((await wearableHere(['live-forced'], inC)).wearable).toBe(true);
+  });
+
   it('refuses an outfit when any one part fails, and reports the most telling reason: removed, then no access, then another place', async () => {
     addSet({ id: 'std', layers: [part('std-body')] });
     addSet({ id: 'cw', layers: [part('cost-w')], scopes: [{ scopeType: 'world', scopeId: 'wC' }] });
