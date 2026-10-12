@@ -11,7 +11,7 @@ import { getCompanionMap, getTextureMap } from '@/lib/wokas';
  *  - the game's own list (config/woka.json, config/companions.json).
  */
 export interface WearableContext {
-  worldId: string;
+  worldId: string | null;
   universeId: string | null;
   userId: string | null;
   membershipTags: string[];
@@ -43,9 +43,8 @@ interface Allowed {
   companion: Set<string>;
 }
 
-/** The texture ids this person may wear in this place. */
-async function loadAllowed(ctx: WearableContext): Promise<Allowed> {
-  const allowed: Allowed = { layer: new Set(), companion: new Set() };
+/** The sets this person may wear parts of in this place (the picker's sets plus their own `assigned_only` grants). */
+export async function wearableSetsHere(ctx: WearableContext) {
   const sets = await resolvePickerSets({
     prisma,
     worldId: ctx.worldId,
@@ -82,7 +81,13 @@ async function loadAllowed(ctx: WearableContext): Promise<Allowed> {
       }
     }
   }
-  for (const set of sets) {
+  return sets;
+}
+
+/** The texture ids this person may wear in this place. */
+async function loadAllowed(ctx: WearableContext): Promise<Allowed> {
+  const allowed: Allowed = { layer: new Set(), companion: new Set() };
+  for (const set of await wearableSetsHere(ctx)) {
     for (const layer of set.layers) allowed.layer.add(layer.textureId);
     for (const companion of set.companions) allowed.companion.add(companion.textureId);
   }

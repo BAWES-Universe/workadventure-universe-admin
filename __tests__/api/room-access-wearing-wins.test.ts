@@ -170,6 +170,35 @@ describe('GET /api/room/access, your Woka stays yours', () => {
     expect(state.users[0].companionTextureId).toBe('cape-pet');
   });
 
+  it('keeps the companion the game sent on first entry (a guest who just signed up), and saves it on the account', async () => {
+    const body = await enter(PERSON.uuid, { sent: ['std-body', 'std-y'], companion: 'dog1' });
+    expect(body.isCompanionTextureValid).toBe(true);
+    expect(body.companionTexture).toEqual({ id: 'dog1', url: 'https://play.test/dog1.png' });
+    expect(state.users[0].companionTextureId).toBe('dog1');
+    // Entering another world wears it from the account, whatever the game sends
+    const again = await enter(PERSON.uuid, { world: 'world-d', companion: 'cape-pet' });
+    expect(again.companionTexture).toEqual({ id: 'dog1', url: 'https://play.test/dog1.png' });
+  });
+
+  it('does not keep a first-entry companion this world does not allow, one the person already has replaced, or one after the first entry', async () => {
+    // not allowed here (only in world-c)
+    let body = await enter(PERSON.uuid, { world: 'world-d', sent: ['std-x'], companion: 'cape-pet' });
+    expect(body.companionTexture).toBeNull();
+    expect(state.users[0].companionTextureId).toBeNull();
+    // after the first entry they have a Woka on record: the game's companion never counts again
+    await enter(PERSON.uuid, { sent: ['std-x'] });
+    body = await enter(PERSON.uuid, { sent: ['std-x'], companion: 'dog1' });
+    expect(body.companionTexture).toBeNull();
+    expect(state.users[0].companionTextureId).toBeNull();
+  });
+
+  it('never overwrites a companion they already have on first entry', async () => {
+    state.users[0].companionTextureId = 'cape-pet';
+    const body = await enter(PERSON.uuid, { world: 'world-c', sent: ['std-x'], companion: 'dog1' });
+    expect(body.companionTexture).toEqual({ id: 'cape-pet', url: 'https://play.test/cape-pet.png' });
+    expect(state.users[0].companionTextureId).toBe('cape-pet');
+  });
+
   it('still lets them in when the lookup fails, with the logic guests get', async () => {
     addOutfit('u1', ['std-x'], minutesAgo(30));
     fakeDb.userOutfit.findFirst.mockRejectedValueOnce(new Error('db down'));

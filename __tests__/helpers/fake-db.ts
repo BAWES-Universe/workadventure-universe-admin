@@ -206,6 +206,11 @@ export const fakeDb: Record<string, any> = {
       Object.assign(user, data);
       return user;
     }),
+    updateMany: jest.fn(async ({ where, data }: Row) => {
+      const found = state.users.filter((candidate) => matches(candidate, where));
+      for (const user of found) Object.assign(user, data);
+      return { count: found.length };
+    }),
   },
   userOutfit: {
     findFirst: jest.fn(async (args: Row) => findMany(state.outfits, args)[0] ?? null),

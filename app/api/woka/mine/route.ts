@@ -11,6 +11,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { requireAuth } from '@/lib/auth'
 import { prisma } from '@/lib/db'
 import { parsePlayUri } from '@/lib/utils'
+import { findUserByIdentifier } from '@/lib/user-identifier'
 import { buildWokaMine } from '@/lib/woka-mine'
 
 export async function GET(request: NextRequest) {
@@ -35,7 +36,7 @@ export async function GET(request: NextRequest) {
     }
 
     const [user, world] = await Promise.all([
-      prisma.user.findUnique({ where: { uuid }, select: { id: true, isGuest: true } }),
+      findUserByIdentifier(uuid),
       prisma.world.findFirst({
         where: { slug: worldSlug, universe: { slug: universeSlug } },
         select: { id: true, universeId: true },

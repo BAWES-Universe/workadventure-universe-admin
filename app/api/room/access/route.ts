@@ -393,14 +393,26 @@ export async function GET(request: NextRequest) {
             : { valid: false, textures: [] };
           // Their companion is just as much theirs: the one they wear now (none is fine), if this world can show it.
           let companion: { texture: CompanionDetail | null; valid: boolean } = { texture: null, valid: true };
+          let firstCompanion: string | null = null;
           if (user.companionTextureId) {
             const allowed = (await companionWearableHere(user.companionTextureId, wearing)).wearable;
             const resolved = allowed
               ? await resolveCompanionTexture(prisma, user.companionTextureId, worldData.id, worldData.universeId, playServiceUrl)
               : { valid: false, texture: null };
             companion = { texture: resolved.texture, valid: resolved.valid };
+          } else if (firstPick && companionTextureId && (await companionWearableHere(companionTextureId, wearing)).wearable) {
+            // First entry (a guest who just signed up): the companion the game sent is worn and kept, like the Woka
+            const resolved = await resolveCompanionTexture(prisma, companionTextureId, worldData.id, worldData.universeId, playServiceUrl);
+            if (resolved.valid && resolved.texture) {
+              companion = { texture: resolved.texture, valid: true };
+              firstCompanion = companionTextureId;
+            }
           }
-          if (firstPick && worn.valid) await recordOutfitPick(user.id, wear as string[]);
+          if (firstPick && worn.valid) {
+            await recordOutfitPick(user.id, wear as string[]);
+            // Only while they still have none, so a companion picked in the meantime is never overwritten
+            if (firstCompanion) await prisma.user.updateMany({ where: { id: user.id, companionTextureId: null }, data: { companionTextureId: firstCompanion } });
+          }
           finalTextures = worn.valid ? worn.textures : [];
           isTexturesValid = worn.valid;
           ownCompanion = companion;
