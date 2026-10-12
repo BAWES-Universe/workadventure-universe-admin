@@ -12,6 +12,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server'
+import * as Sentry from '@sentry/nextjs'
 import { requireAuth } from '@/lib/auth'
 import { prisma } from '@/lib/db'
 import { parsePlayUri } from '@/lib/utils'
@@ -101,6 +102,8 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
     console.error('Error in /api/save-textures:', error)
+    // A pick that did not save leaves the old Woka in Recent; without this nobody can see why
+    Sentry.captureException(error, { tags: { area: 'save-textures' } })
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
 }

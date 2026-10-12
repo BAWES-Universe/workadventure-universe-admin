@@ -132,15 +132,22 @@ export async function authenticateRequest(
   request: Request
 ): Promise<AuthenticatedUser | null> {
   // 1. Validate Bearer token
+  // The play server sends the admin token as it is configured, with or without "Bearer " in front (requireAuth and
+  // validateAdminToken accept both). Insisting on the prefix here made every join from a play server that sends it
+  // bare look like a stranger, however good the player's own sign-in was.
   const authHeader = request.headers.get('authorization');
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return null;
-  }
-  
-  const token = authHeader.replace('Bearer ', '').trim();
+  const token = authHeader ? authHeader.replace('Bearer ', '').trim() : '';
   const expectedToken = process.env.ADMIN_API_TOKEN;
   
-  if (!expectedToken || token !== expectedToken) {
+  if (!expectedToken || !token || token !== expectedToken) {
+    // A player's sign-in was sent but the caller itself was not accepted here: say so, since it makes them a stranger
+    if (new URL(request.url).searchParams.get('accessToken')) {
+      Sentry.captureMessage('authenticateRequest: a sign-in came with an admin token this server did not accept', {
+        level: 'warning',
+        tags: { area: 'oidc-admin-token' },
+        extra: { headerSent: !!authHeader, configured: !!expectedToken },
+      });
+    }
     return null;
   }
   

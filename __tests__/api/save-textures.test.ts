@@ -3,9 +3,12 @@
  * Recent rules (a try-on is dropped, 30 days, ten rows). Runs the real rules over an in-memory database.
  */
 import { NextRequest } from 'next/server';
+import * as Sentry from '@sentry/nextjs';
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 jest.mock('@/lib/db', () => ({ prisma: require('../helpers/fake-db').fakeDb }));
+
+jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
 
 import { addOutfit, addSet, fakeDb, resetFakeDb, state } from '../helpers/fake-db';
 import { POST as saveTextures } from '@/app/api/save-textures/route';
@@ -105,6 +108,8 @@ describe('POST /api/save-textures', () => {
   it('passes on any other save error unchanged and does not run again', async () => {
     fakeDb.userOutfit.upsert.mockRejectedValueOnce(new Error('connection lost'));
     expect((await pick('std-x')).status).toBe(500);
+    // …and says so in Sentry, so a pick that did not stick can be seen
+    expect(Sentry.captureException).toHaveBeenCalledWith(expect.objectContaining({ message: 'connection lost' }), { tags: { area: 'save-textures' } });
     expect(fakeDb.userOutfit.upsert).toHaveBeenCalledTimes(1);
   });
 
