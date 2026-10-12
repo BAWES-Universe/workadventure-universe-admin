@@ -2,17 +2,20 @@
  * POST /api/save-companion-texture
  *
  * Called by the WA play server when a user selects their companion.
- * Persists to the user_avatars table so the selection survives reconnection.
+ * A person wears one companion everywhere: the last one they pick (null = none, always allowed). The pick is refused
+ * (422 WOKA_NOT_ALLOWED, nothing saved) when it can't be worn in the world it is picked in. Otherwise it is saved on the
+ * person (users.companion_texture_id) and kept in user_avatars as before.
  *
  * Request body: { playUri, userIdentifier, texture: string | null }
  * Auth: ADMIN_API_TOKEN in Authorization header
- * Response: 204 on success
+ * Response: 204 on success, 422 { code: "WOKA_NOT_ALLOWED" } when the companion can't be worn there
  */
 
 import { NextRequest, NextResponse } from 'next/server'
 import { requireAuth } from '@/lib/auth'
 import { prisma } from '@/lib/db'
 import { parsePlayUri } from '@/lib/utils'
+import { companionWearableHere, wearableContextFor } from '@/lib/woka-wearable'
 
 export async function POST(request: NextRequest) {
   try {
@@ -60,6 +63,13 @@ export async function POST(request: NextRequest) {
     if (!user) {
       return NextResponse.json({ error: 'User not found' }, { status: 404 })
     }
+
+    const context = await wearableContextFor(user.id, worldId)
+    if (!context || !(await companionWearableHere(texture, context)).wearable) {
+      return NextResponse.json({ code: 'WOKA_NOT_ALLOWED' }, { status: 422 })
+    }
+
+    await prisma.user.update({ where: { id: user.id }, data: { companionTextureId: texture } })
 
     // Upsert user_avatars record (unique constraint on userId + worldId)
     // texture can be null to clear the companion

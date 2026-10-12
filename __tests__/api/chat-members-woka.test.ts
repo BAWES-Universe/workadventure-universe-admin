@@ -8,7 +8,7 @@ jest.mock('@/lib/db', () => ({
   prisma: {
     world: { findFirst: jest.fn(), findUnique: jest.fn() },
     worldMember: { findMany: jest.fn() },
-    userAvatar: { findMany: jest.fn() },
+    userOutfit: { findMany: jest.fn() },
     avatarLayer: { findMany: jest.fn() },
   },
 }));
@@ -43,7 +43,7 @@ describe('GET /api/chat/members', () => {
       { tags: ['member'], user: { id: 'u1', uuid: 'alice-uuid', name: 'Alice', email: null, matrixChatId: '@alice:chat' } },
       { tags: [], user: { id: 'u2', uuid: 'bob-uuid', name: 'Bob', email: null, matrixChatId: '@bob:chat' } },
     ]);
-    db.userAvatar.findMany.mockResolvedValue([{ userId: 'u1', worldId: 'world-1', textureIds: ['male1', 'hat1'] }]);
+    db.userOutfit.findMany.mockResolvedValue([{ userId: 'u1', textureIds: ['male1', 'hat1'] }]);
 
     const response = await GET(request());
     expect(response.status).toBe(200);
@@ -60,7 +60,7 @@ describe('GET /api/chat/members', () => {
     db.worldMember.findMany.mockResolvedValue([
       { tags: [], user: { id: 'u1', uuid: 'alice-uuid', name: 'Alice', email: null, matrixChatId: '@alice:chat' } },
     ]);
-    db.userAvatar.findMany.mockRejectedValue(new Error('database down'));
+    db.userOutfit.findMany.mockRejectedValue(new Error('database down'));
 
     const response = await GET(request());
     expect(response.status).toBe(200);
@@ -73,8 +73,8 @@ describe('GET /api/chat/members', () => {
       user: { id: `u${n}`, uuid: `uuid-${n}`, name: `P${n}`, email: null, matrixChatId: `@p${n}:chat` },
     });
     db.worldMember.findMany.mockResolvedValue(Array.from({ length: 501 }, (_, n) => member(n)));
-    db.userAvatar.findMany
-      .mockResolvedValueOnce([{ userId: 'u0', worldId: 'world-1', textureIds: ['male1'] }])
+    db.userOutfit.findMany
+      .mockResolvedValueOnce([{ userId: 'u0', textureIds: ['male1'] }])
       .mockRejectedValueOnce(new Error('timeout'));
 
     const response = await GET(request());
