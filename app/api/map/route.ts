@@ -282,32 +282,35 @@ export async function GET(request: NextRequest) {
               src: `${baseUrl}/assets/favicon-trans-512x512.png`,
             },
             {
+              // iPhone and iPad paint a see-through icon on black, so this one is the mark on Universe ink
               rel: "apple-touch-icon",
               sizes: "180x180",
-              src: `${baseUrl}/assets/logo-ios-180x180.png`,
+              src: `${baseUrl}/assets/apple-touch-icon-180x180.png`,
             }
           ],
+          // Universe mark on the game's ink. The two maskable files keep the mark inside the safe circle, so
+          // Android can cut them to any shape without clipping it.
           manifestIcons: [
             {
-              src: `${baseUrl}/assets/favicon-512x512.png`,
+              src: `${baseUrl}/assets/icon-192x192.png`,
+              sizes: "192x192",
+              type: "image/png",
+              purpose: "any",
+            },
+            {
+              src: `${baseUrl}/assets/icon-512x512.png`,
               sizes: "512x512",
               type: "image/png",
               purpose: "any",
             },
             {
-              src: `${baseUrl}/assets/favicon-512x512.png`,
-              sizes: "512x512",
-              type: "image/png",
-              purpose: "any",
-            },
-            {
-              src: `${baseUrl}/assets/favicon-512x512.png`,
+              src: `${baseUrl}/assets/icon-maskable-192x192.png`,
               sizes: "192x192",
               type: "image/png",
               purpose: "maskable",
             },
             {
-              src: `${baseUrl}/assets/favicon-512x512.png`,
+              src: `${baseUrl}/assets/icon-maskable-512x512.png`,
               sizes: "512x512",
               type: "image/png",
               purpose: "maskable",
