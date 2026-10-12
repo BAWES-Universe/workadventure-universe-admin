@@ -100,6 +100,17 @@ describe('GET /api/room/access, your Woka stays yours', () => {
     expect(fakeDb.userOutfit.upsert).not.toHaveBeenCalled();
   });
 
+  it('still tells the game which Woka the account wears where it is not allowed, so the device does not keep an old one', async () => {
+    addOutfit('u1', ['std-y'], minutesAgo(900));
+    addOutfit('u1', ['cost-c1'], minutesAgo(60));
+    const refused = await enter(PERSON.uuid, { world: 'world-d', sent: ['std-y'] });
+    expect(refused.isCharacterTexturesValid).toBe(false);
+    expect(refused.characterTextures).toEqual([]);
+    expect(refused.characterTextureIds).toEqual(['cost-c1']);
+    // where it is allowed the ids are the ones worn, as before
+    expect((await enter(PERSON.uuid, { world: 'world-c', sent: ['std-y'] })).characterTextureIds).toEqual(['cost-c1']);
+  });
+
   it('says not valid, and writes nothing, when the set of their current Woka was archived', async () => {
     addSet({ id: 'gone', lifecycle: 'archived', layers: [{ textureId: 'archived-1' }] });
     addOutfit('u1', ['std-y'], minutesAgo(900));

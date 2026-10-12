@@ -371,6 +371,8 @@ export async function GET(request: NextRequest) {
       // it, and recorded as their first pick. The textures the game sent otherwise never count: they may be stale.
       // Guests and bots keep the logic above as it was.
       let ownCompanion: { texture: CompanionDetail | null; valid: boolean } | null = null;
+      // The Woka their account says they wear, even when this world can't show it (see characterTextureIds below)
+      let accountTextureIds: string[] | null = null;
       if (user && isAuthenticated && !isBotIdentifier(finalUuid)) {
         try {
           const wearing = {
@@ -415,6 +417,7 @@ export async function GET(request: NextRequest) {
           }
           finalTextures = worn.valid ? worn.textures : [];
           isTexturesValid = worn.valid;
+          accountTextureIds = current?.textureIds ?? (firstPick && worn.valid ? wear : null);
           ownCompanion = companion;
         } catch (error) {
           // Log but don't fail the request: the logic above still applies
@@ -422,8 +425,9 @@ export async function GET(request: NextRequest) {
         }
       }
 
-      // Extract texture IDs for front-end cross-device sync
-      const characterTextureIds = finalTextures.map(t => t.id);
+      // Extract texture IDs for front-end cross-device sync. A signed-in person's are the Woka their account says they
+      // wear, also when this world can't show it: the game keeps them on the device, and the picker and popup name them.
+      const characterTextureIds = accountTextureIds ?? finalTextures.map(t => t.id);
       
       // Handle companion texture - use stored one if provided one is invalid
       let finalCompanionTexture = companionValidation.texture;
