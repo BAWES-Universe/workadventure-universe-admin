@@ -2,7 +2,8 @@
 
 import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { ProfileCard, profileLinkError } from '@/app/admin/components/profile-card';
+import { ProfileCard, preloadWoka, profileLinkError } from '@/app/admin/components/profile-card';
+import { AdminBootstrapProvider } from '@/app/admin/admin-bootstrap-context';
 
 const fetchMock = jest.fn();
 const announceProfileName = jest.fn((name: string) => Boolean(name));
@@ -109,5 +110,66 @@ describe('Your profile on You', () => {
     view.rerender(<ProfileCard user={me} startEditing />);
     const name = await screen.findByPlaceholderText('What people call you');
     expect(document.activeElement).toBe(name);
+  });
+});
+
+describe('Your Woka on the profile card', () => {
+  const layers = ['https://play.example.test/woka/body.png', 'https://play.example.test/woka/hat.png'];
+  const shell = (woka: string[] | undefined) => ({
+    version: 1 as const,
+    user: { id: 'u1', uuid: 'uuid-1', name: 'Khalid Alsayed', email: null, tags: [], isSuperAdmin: false },
+    stats: { universes: 0, worlds: 0, rooms: 0, users: 0 },
+    woka,
+  });
+
+  it('draws the Woka the shell already knows on the first paint, never the letter', () => {
+    // The profile has not answered yet.
+    fetchMock.mockImplementation(() => new Promise(() => undefined));
+    render(
+      <AdminBootstrapProvider value={shell(layers)}>
+        <ProfileCard user={me} />
+      </AdminBootstrapProvider>,
+    );
+    const avatar = screen.getByTestId('woka-avatar');
+    expect(avatar.querySelectorAll('[style*="background-image"]')).toHaveLength(2);
+    expect(avatar.textContent).toBe('');
+  });
+
+  it('shows an empty frame, not the first letter, while an unknown Woka is still loading', async () => {
+    let answer: (value: unknown) => void = () => undefined;
+    fetchMock.mockImplementation(() => new Promise((resolve) => (answer = resolve)));
+    render(<ProfileCard user={me} />);
+    expect(screen.getByTestId('woka-avatar').textContent).toBe('');
+    answer({ ok: true, json: () => Promise.resolve({ bio: null, links: [], woka: layers }) });
+    await waitFor(() => expect(screen.getByTestId('woka-avatar').querySelectorAll('[style*="background-image"]')).toHaveLength(2));
+  });
+
+  it('keeps the first letter for someone who really has no Woka', async () => {
+    fetchMock.mockImplementation(() => json({ bio: null, links: [], woka: [] }));
+    render(<ProfileCard user={me} />);
+    await screen.findByTestId('profile-empty');
+    expect(screen.getByTestId('woka-avatar').textContent).toBe('K');
+  });
+
+  it('does not load a picture again once it has loaded this visit', async () => {
+    const created: string[] = [];
+    const RealImage = window.Image;
+    class FakeImage {
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      set src(url: string) {
+        created.push(url);
+        queueMicrotask(() => this.onload?.());
+      }
+    }
+    (window as unknown as { Image: unknown }).Image = FakeImage;
+    try {
+      preloadWoka(['https://play.example.test/woka/once.png']);
+      await Promise.resolve();
+      preloadWoka(['https://play.example.test/woka/once.png']);
+      expect(created).toEqual(['https://play.example.test/woka/once.png']);
+    } finally {
+      (window as unknown as { Image: unknown }).Image = RealImage;
+    }
   });
 });

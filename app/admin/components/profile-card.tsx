@@ -9,6 +9,7 @@ import { authenticatedFetch } from '@/lib/client-auth';
 import { DraftNotice } from './draft-notice';
 import { useDraft } from '../hooks/use-draft';
 import { announceProfileName, gameMaxNameLength } from './orbit-bridge';
+import { useMyWoka } from '../admin-bootstrap-context';
 import { KindIcon } from './ds';
 import { nameColour } from '@/lib/name-colour';
 import styles from './profile-card.module.css';
@@ -86,7 +87,11 @@ export function ProfileCard({
   const [error, setError] = useState<string | null>(null);
   const [justSaved, setJustSaved] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
-  const [woka, setWoka] = useState<string[]>([]);
+  // Your Woka comes with the shell (known before this card opens); the profile's own answer only fills in when the
+  // shell had none.
+  const shellWoka = useMyWoka();
+  const [fetchedWoka, setWoka] = useState<string[]>([]);
+  const woka = shellWoka.length > 0 ? shellWoka : fetchedWoka;
   const headingId = useId();
   const onLoadedRef = useRef(onLoaded);
   onLoadedRef.current = onLoaded;
@@ -194,6 +199,7 @@ export function ProfileCard({
       frameRef={sectionRef}
       headingId={headingId}
       layers={woka}
+      wokaPending={status === 'loading' && woka.length === 0}
       name={saved.name || user.name || ''}
       stats={stats}
       action={
@@ -333,6 +339,7 @@ export function WokaAvatar({
   size = 76,
   tinted = false,
   round = false,
+  pending = false,
 }: {
   layers: string[];
   name: string;
@@ -341,6 +348,8 @@ export function WokaAvatar({
   tinted?: boolean;
   /** A circle, as faces are everywhere people are listed. */
   round?: boolean;
+  /** The Woka is still on its way: an empty frame, not the first letter, which would only flash and be replaced. */
+  pending?: boolean;
 }) {
   const initial = name.trim().charAt(0).toUpperCase() || '?';
   // A layer that can't load would leave a partial Woka: then the whole avatar falls back instead.
@@ -363,7 +372,7 @@ export function WokaAvatar({
         </span>
       ) : layers.length > 0 ? (
         <KindIcon kind="people" />
-      ) : (
+      ) : pending ? null : (
         <span className={styles.initial} aria-hidden="true">
           {initial}
         </span>
@@ -372,7 +381,24 @@ export function WokaAvatar({
   );
 }
 
-/** Whether any of these images fails to load (checked once per set of layers). */
+/**
+ * Woka pictures this visit has already loaded. Pages remount on every switch; a picture that loaded once is not
+ * checked again (the browser has it and draws it at once). A failure is not remembered: it is tried again next time.
+ */
+const loadedWokaPictures = new Set<string>();
+
+/** Loads Woka pictures ahead of the page that draws them, and remembers the ones that loaded. */
+export function preloadWoka(layers: string[]): void {
+  if (typeof Image === 'undefined') return;
+  for (const url of layers) {
+    if (loadedWokaPictures.has(url)) continue;
+    const image = new Image();
+    image.onload = () => loadedWokaPictures.add(url);
+    image.src = url;
+  }
+}
+
+/** Whether any of these images fails to load (each picture is checked until it has loaded once this visit). */
 function useWokaLoadFailure(layers: string[]): boolean {
   const key = layers.join('\n');
   const [failedKey, setFailedKey] = useState<string | null>(null);
@@ -380,7 +406,9 @@ function useWokaLoadFailure(layers: string[]): boolean {
     if (!key || typeof Image === 'undefined') return;
     let cancelled = false;
     for (const url of key.split('\n')) {
+      if (loadedWokaPictures.has(url)) continue;
       const image = new Image();
+      image.onload = () => loadedWokaPictures.add(url);
       image.onerror = () => {
         if (!cancelled) setFailedKey(key);
       };
@@ -419,6 +447,7 @@ export function ProfileFrame({
   frameRef,
   headingId,
   layers,
+  wokaPending = false,
   name,
   stats,
   action,
@@ -428,6 +457,8 @@ export function ProfileFrame({
   frameRef?: Ref<HTMLElement>;
   headingId: string;
   layers: string[];
+  /** Your Woka is still loading: no first letter in its place. */
+  wokaPending?: boolean;
   name: string;
   stats?: ReactNode;
   action?: ReactNode;
@@ -438,7 +469,7 @@ export function ProfileFrame({
     <section ref={frameRef} className={styles.card} aria-labelledby={headingId} data-testid={testId}>
       <div className={styles.banner} aria-hidden="true" />
       <div className={styles.identity}>
-        <WokaAvatar layers={layers} name={name} />
+        <WokaAvatar layers={layers} name={name} pending={wokaPending} />
         <div className={styles.who}>
           <h1 id={headingId} className="orbit-display">
             {name || 'You'}

@@ -20,11 +20,12 @@ jest.mock('@/lib/db', () => ({
 }));
 jest.mock('@/lib/auth', () => ({ requireAuth: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
-jest.mock('@/lib/woka-avatar', () => ({ withWokas: jest.fn(async (rows: unknown) => rows) }));
+jest.mock('@/lib/woka-avatar', () => ({ withWokas: jest.fn(async (rows: unknown) => rows), wokaLayersFor: jest.fn(async () => ['https://play.test/woka.png']) }));
 jest.mock('@/lib/auth-token', () => ({ getSessionId: jest.fn(() => 'sid'), getSessionData: jest.fn() }));
 jest.mock('@/lib/system-user', () => ({ ...jest.requireActual('@/lib/system-user'), getSystemUserId: jest.fn(), hiddenSystemOwnerId: jest.fn() }));
 
 import { prisma } from '@/lib/db';
+import { wokaLayersFor } from '@/lib/woka-avatar';
 import { getSessionUser } from '@/lib/auth-session';
 import { getSessionData } from '@/lib/auth-token';
 import { getSystemUserId, hiddenSystemOwnerId, NOT_SYSTEM_USER } from '@/lib/system-user';
@@ -219,6 +220,15 @@ describe('Bootstrap', () => {
     db.favorite.count.mockResolvedValue(0);
     db.worldMember.count.mockResolvedValue(0);
     db.membershipInvitation.count.mockResolvedValue(0);
+  });
+
+  it('carries your Woka once for the whole shell, and still answers when it cannot be read', async () => {
+    hidden.mockResolvedValue(null);
+    expect((await (await bootstrap(session('/api/admin/bootstrap'))).json()).woka).toEqual(['https://play.test/woka.png']);
+    (wokaLayersFor as jest.Mock).mockRejectedValueOnce(new Error('texture list unreadable'));
+    const response = await bootstrap(session('/api/admin/bootstrap'));
+    expect(response.status).toBe(200);
+    expect((await response.json()).woka).toEqual([]);
   });
 
   it('never counts System as a person, and counts only others’ spaces once hidden', async () => {
