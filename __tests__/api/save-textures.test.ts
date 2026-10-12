@@ -60,6 +60,14 @@ describe('POST /api/save-textures', () => {
     expect(state.avatars[0]).toMatchObject({ userId: 'u1', worldId: 'world-a', textureIds: ['std-x'] });
   });
 
+  it('answers an error and leaves the Woka they wear unchanged when the world’s saved row cannot be written', async () => {
+    addOutfit('u1', ['std-x'], minutesAgo(600));
+    fakeDb.userAvatar.upsert.mockRejectedValueOnce(new Error('connection lost'));
+    expect((await pick('std-y')).status).toBe(500);
+    expect(outfitsOf()).toEqual(['std-x']);
+    expect(state.avatars).toEqual([]);
+  });
+
   it('moves an outfit they wore before to the front: one row, last worn updated', async () => {
     addOutfit('u1', ['std-x'], minutesAgo(600));
     addOutfit('u1', ['std-y'], minutesAgo(500));
