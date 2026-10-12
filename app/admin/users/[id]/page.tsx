@@ -227,7 +227,9 @@ export default function UserDetailPage() {
   const [worldAnalytics, setWorldAnalytics] = useState<Record<string, Analytics>>({});
   const [starredRooms, setStarredRooms] = useState<StarredRoom[]>([]);
   const [starredRoomsLoading, setStarredRoomsLoading] = useState(false);
-  const [connect, setConnect] = useState<Connect | null>(null);
+  // Kept with the profile it was fetched for, so a lookup for one person is never read as another's after the page moves on.
+  const [connectState, setConnectState] = useState<{ forId: string; connect: Connect } | null>(null);
+  const connect = connectState?.forId === id ? connectState.connect : null;
   const [friendBusy, setFriendBusy] = useState(false);
   const [friendError, setFriendError] = useState<string | null>(null);
   const [removeFriendOpen, setRemoveFriendOpen] = useState(false);
@@ -265,7 +267,7 @@ export default function UserDetailPage() {
 
   useEffect(() => {
     if (!currentUser || !user || currentUser.id === user.id) {
-      setConnect(null);
+      setConnectState(null);
       return;
     }
     let cancelled = false;
@@ -274,9 +276,9 @@ export default function UserDetailPage() {
         const { authenticatedFetch } = await import('@/lib/client-auth');
         const response = await authenticatedFetch(`/api/admin/users/${id}/connect`);
         const data = response.ok ? await response.json() : null;
-        if (!cancelled) setConnect(data?.available ? (data as Connect) : null);
+        if (!cancelled) setConnectState(data?.available ? { forId: id, connect: data as Connect } : null);
       } catch {
-        if (!cancelled) setConnect(null);
+        if (!cancelled) setConnectState(null);
       }
     })();
     return () => {
@@ -505,7 +507,9 @@ export default function UserDetailPage() {
         setFriendError(FRIEND_ERRORS[data?.error] ?? 'That didn’t work. Try again.');
         return false;
       }
-      setConnect((current) => (current ? { ...current, relationship: data.relationship as Relationship } : current));
+      setConnectState((current) =>
+        current?.forId === id ? { ...current, connect: { ...current.connect, relationship: data.relationship as Relationship } } : current,
+      );
       return true;
     } catch {
       setFriendError('That didn’t work. Try again.');
