@@ -6,12 +6,12 @@ import { prisma } from '@/lib/db';
 import { resolveTextureUrls, resolveCompanionTexture } from '@/lib/avatar-catalog-validator';
 import { notifyRoomAccess } from '@/lib/discord';
 import { isBotIdentifier } from '@/lib/bot-visitor';
-import { latestEverydayOutfit } from '@/lib/latest-outfit';
-import { outfitAllowedEverywhere } from '@/lib/woka-avatar';
+import { currentOutfit, recordOutfitPick } from '@/lib/user-outfits';
+import { companionWearableHere, wearableHere } from '@/lib/woka-wearable';
 import { canSeeRoom } from '@/lib/room-visibility';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { bansCoveringWorld } from '@/lib/moderation';
-import type { FetchMemberDataByUuidSuccessResponse, ErrorApiData } from '@/types/workadventure';
+import type { FetchMemberDataByUuidSuccessResponse, ErrorApiData, CompanionDetail } from '@/types/workadventure';
 
 export async function GET(request: NextRequest) {
   try {
@@ -91,7 +91,7 @@ export async function GET(request: NextRequest) {
       
       // Only create/find User records for authenticated users
       // But also try to find existing user by identifier even if not authenticated in this request
-      let user: { id: string; name: string | null; email: string | null; uuid: string; matrixChatId: string | null; isGuest: boolean } | null = null;
+      let user: { id: string; name: string | null; email: string | null; uuid: string; matrixChatId: string | null; isGuest: boolean; companionTextureId: string | null } | null = null;
       let membership = null;
       let avatar = null;
       
@@ -351,7 +351,6 @@ export async function GET(request: NextRequest) {
       // If textures are invalid and we have stored avatar textures, use them as fallback
       let finalTextures = textureValidation.textures;
       let isTexturesValid = textureValidation.valid;
-      let savedOutfitUsable = false;
       
       // Prefer DB textures over localStorage when user has a saved avatar —
       // DB is the source of truth across devices and sessions
@@ -362,37 +361,55 @@ export async function GET(request: NextRequest) {
         if (dbTextures.valid) {
           finalTextures = dbTextures.textures;
           isTexturesValid = true;
-          savedOutfitUsable = true;
         }
       }
 
-      // Wearing wins: a signed-in person wears their everyday Woka, the latest standard outfit they picked in any world,
-      // with no prompt. The one exception is a costume saved for this world (an outfit with a part only a universe's or a
-      // world's own set has) that this world still allows: that stays, and is worn only here. Entering a world saves
-      // nothing; only picking a Woka does. Where there is no everyday Woka, or it isn't allowed, the logic above stands.
-      // The textures the game sent are never trusted over this: they may be stale from another device.
+      // Your Woka stays yours: a signed-in person wears one Woka in every world, the last one they picked themselves.
+      // Entering a world never changes it. If this world can't show it (a costume from elsewhere, a set that was
+      // removed or ended, access lost), the answer is "not valid" and the game asks them what to wear; nothing is saved.
+      // The one write: someone who never picked has no Woka yet, so the outfit the game sent is worn if this world allows
+      // it, and recorded as their first pick. The textures the game sent otherwise never count: they may be stale.
       // Guests and bots keep the logic above as it was.
+      let ownCompanion: { texture: CompanionDetail | null; valid: boolean } | null = null;
       if (user && isAuthenticated && !isBotIdentifier(finalUuid)) {
         try {
-          const keepsCostume = savedOutfitUsable && !(await outfitAllowedEverywhere(avatar?.textureIds ?? []));
-          if (!keepsCostume) {
-            const everyday = await latestEverydayOutfit(user.id);
-            if (everyday) {
-              const worn = await resolveTextureUrls(
-                prisma, everyday.textureIds, worldData.id, worldData.universeId, playServiceUrl
-              );
-              if (worn.valid) {
-                finalTextures = worn.textures;
-                isTexturesValid = true;
-              }
-            }
+          const wearing = {
+            worldId: worldData.id,
+            universeId: worldData.universeId,
+            userId: user.id,
+            membershipTags: (membership && 'tags' in membership && Array.isArray(membership.tags)) ? membership.tags : [],
+          };
+          const current = await currentOutfit(user.id);
+          let wear: string[] | null = null;
+          let firstPick = false;
+          if (current) {
+            wear = (await wearableHere(current.textureIds, wearing)).wearable ? current.textureIds : null;
+          } else if (textureIds.length > 0 && (await wearableHere(textureIds, wearing)).wearable) {
+            wear = textureIds;
+            firstPick = true;
           }
+          const worn = wear
+            ? await resolveTextureUrls(prisma, wear, worldData.id, worldData.universeId, playServiceUrl)
+            : { valid: false, textures: [] };
+          // Their companion is just as much theirs: the one they wear now (none is fine), if this world can show it.
+          let companion: { texture: CompanionDetail | null; valid: boolean } = { texture: null, valid: true };
+          if (user.companionTextureId) {
+            const allowed = (await companionWearableHere(user.companionTextureId, wearing)).wearable;
+            const resolved = allowed
+              ? await resolveCompanionTexture(prisma, user.companionTextureId, worldData.id, worldData.universeId, playServiceUrl)
+              : { valid: false, texture: null };
+            companion = { texture: resolved.texture, valid: resolved.valid };
+          }
+          if (firstPick && worn.valid) await recordOutfitPick(user.id, wear as string[]);
+          finalTextures = worn.valid ? worn.textures : [];
+          isTexturesValid = worn.valid;
+          ownCompanion = companion;
         } catch (error) {
-          // Log but don't fail the request: this world's own logic above still applies
-          console.error('Failed to look up the everyday outfit:', error);
+          // Log but don't fail the request: the logic above still applies
+          console.error('Failed to look up the Woka they wear:', error);
         }
       }
-      
+
       // Extract texture IDs for front-end cross-device sync
       const characterTextureIds = finalTextures.map(t => t.id);
       
@@ -400,7 +417,11 @@ export async function GET(request: NextRequest) {
       let finalCompanionTexture = companionValidation.texture;
       let isCompanionValid = companionValidation.valid;
       
-      if ((!isCompanionValid || !companionTextureId) && avatar?.companionTextureId) {
+      if (ownCompanion) {
+        // Signed-in people wear the companion saved on their account, whatever the game sent
+        finalCompanionTexture = ownCompanion.texture;
+        isCompanionValid = ownCompanion.valid;
+      } else if ((!isCompanionValid || !companionTextureId) && avatar?.companionTextureId) {
         const fallbackCompanion = await resolveCompanionTexture(
           prisma, avatar.companionTextureId, worldData.id, worldData.universeId, playServiceUrl
         );

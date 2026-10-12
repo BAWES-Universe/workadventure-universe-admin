@@ -1,81 +1,41 @@
 /**
- * Wearing wins: a signed-in person's latest outfit (picked in any world) follows them into every world that allows it,
- * and is saved for that world too, replacing a standard outfit saved there. A custom Woka saved for the world they enter
- * (one only a universe's or a world's own set has) stays as saved. Where the latest isn't allowed, the outfit saved for
- * the world they enter (else the one the game sent) is used as before. Guests and bots never get this.
+ * Your Woka stays yours: a signed-in person wears one Woka in every world, the last one they picked themselves. Entering
+ * a world never changes it; a world that can't show it says "not valid" and writes nothing. These run the real rules
+ * (the wearable check and the outfit history) over an in-memory catalog.
  */
 import { NextRequest } from 'next/server';
 
-// What the person has saved, one outfit per world, newest picked first (the real query sorts them).
-const mockSaved: { userId: string; worldId: string; textureIds: string[] }[] = [];
-
-// The catalog: `std-*` and `sy`/`sx` parts are in a set for the whole platform; `cost-*`, `ucost-*` and `hat-*` only in a
-// world's or a universe's own set; `archived-*` in a set that was archived. ("male1" is in the game's own list.)
-const platform = { lifecycle: 'active', scopes: [{ scopeType: 'platform' }] };
-const own = (scopeType: string) => ({ lifecycle: 'active', scopes: [{ scopeType }] });
-const mockLayers = [
-  ...['std-y', 'std-x', 'std-s1', 'std-s2', 'std-old', 'std-body'].map((textureId) => ({ textureId, url: `https://play.test/${textureId}.png`, avatarSet: platform })),
-  { textureId: 'cost-c1', url: 'https://play.test/cost-c1.png', avatarSet: own('world') },
-  { textureId: 'ucost-c1', url: 'https://play.test/ucost-c1.png', avatarSet: own('universe') },
-  { textureId: 'hat-c1', url: 'https://play.test/hat-c1.png', avatarSet: own('world') },
-  { textureId: 'archived-c1', url: 'https://play.test/archived-c1.png', avatarSet: { lifecycle: 'archived', scopes: [{ scopeType: 'world' }] } },
-];
-
-jest.mock('@/lib/db', () => ({
-  prisma: {
-    user: { findFirst: jest.fn(), update: jest.fn() },
-    world: { findFirst: jest.fn() },
-    room: { findFirst: jest.fn() },
-    ban: { findFirst: jest.fn().mockResolvedValue(null) },
-    worldMember: { findUnique: jest.fn().mockResolvedValue(null) },
-    userAvatar: {
-      findUnique: jest.fn(async ({ where }: { where: { userId_worldId: { userId: string; worldId: string } } }) => {
-        const row = mockSaved.find((saved) => saved.userId === where.userId_worldId.userId && saved.worldId === where.userId_worldId.worldId);
-        return row ? { ...row, companionTextureId: null } : null;
-      }),
-      findMany: jest.fn(async ({ where }: { where: { userId: string } }) => mockSaved.filter((saved) => saved.userId === where.userId)),
-      upsert: jest.fn(),
-    },
-    avatarLayer: {
-      findMany: jest.fn(async ({ where }: { where: { textureId: { in: string[] } } }) =>
-        mockLayers.filter((layer) => where.textureId.in.includes(layer.textureId)),
-      ),
-    },
-    visitCard: { findUnique: jest.fn().mockResolvedValue(null) },
-    bot: { findFirst: jest.fn() },
-    roomAccess: { create: jest.fn().mockResolvedValue({}) },
-  },
-}));
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+jest.mock('@/lib/db', () => ({ prisma: require('../helpers/fake-db').fakeDb }));
 jest.mock('@/lib/oidc', () => ({ authenticateRequest: jest.fn() }));
 jest.mock('@/lib/discord', () => ({ notifyRoomAccess: jest.fn().mockResolvedValue(undefined) }));
+// What a part's picture is, not who may wear it: that is the wearable check's job and is not mocked.
 jest.mock('@/lib/avatar-catalog-validator', () => ({
-  // Ids starting with "no-" or "archived-" are not allowed anywhere; a costume ("cost-c1", "ucost-c1", "hat-c1") only in world-c
-  resolveTextureUrls: jest.fn(async (_prisma: unknown, ids: string[], worldId: string) => ({
-    valid: ids.length > 0 && ids.every((id) => !id.startsWith('no-') && !id.startsWith('archived-') && (!/^(u?cost|hat)-c1$/.test(id) || worldId === 'world-c')),
+  resolveTextureUrls: jest.fn(async (_prisma: unknown, ids: string[]) => ({
+    valid: ids.length > 0,
     textures: ids.map((id) => ({ id, url: `https://play.test/${id}.png` })),
   })),
-  resolveCompanionTexture: jest.fn().mockResolvedValue({ valid: true, texture: null }),
+  resolveCompanionTexture: jest.fn(async (_prisma: unknown, id: string | null) =>
+    id ? { valid: true, texture: { id, url: `https://play.test/${id}.png` } } : { valid: true, texture: null },
+  ),
 }));
 jest.mock('@/lib/super-admin', () => ({ isSuperAdmin: () => false }));
 
-import { prisma } from '@/lib/db';
+import { addOutfit, addSet, fakeDb, resetFakeDb, state } from '../helpers/fake-db';
 import { authenticateRequest } from '@/lib/oidc';
 import { GET as roomAccess } from '@/app/api/room/access/route';
 
-const db = prisma as unknown as Record<string, Record<string, jest.Mock>>;
-
-const PERSON = { id: 'u1', uuid: 'person-uuid', email: 'p@example.test', name: 'Pat', isGuest: false };
+const PERSON = { id: 'u1', uuid: 'person-uuid', email: 'p@example.test', name: 'Pat', isGuest: false, companionTextureId: null as string | null };
 const BOT = 'bot-11111111-2222-4333-8444-555555555555';
+const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000);
 
-const save = (worldId: string, ...textureIds: string[]) => mockSaved.push({ userId: 'u1', worldId, textureIds });
-
-async function enter(who: string, { signedIn = true, sent = ['sent1'], world = 'world-b' } = {}) {
-  db.world.findFirst.mockResolvedValue({ id: world, universeId: 'un', isPublic: true, universe: { id: 'un', slug: 'uni', isPublic: true, ownerId: 'someone' } });
+async function enter(who: string, { signedIn = true, sent = ['sent1'], world = 'world-b', companion = null as string | null } = {}) {
   (authenticateRequest as jest.Mock).mockResolvedValue(
     signedIn ? { isAuthenticated: true, identifier: who, email: PERSON.email } : { isAuthenticated: false },
   );
   const textures = sent.map((id) => `&characterTextureIds[]=${id}`).join('');
-  const url = `http://localhost/api/room/access?userIdentifier=${who}${textures}&playUri=${encodeURIComponent(
+  const pet = companion ? `&companionTextureId=${companion}` : '';
+  const url = `http://localhost/api/room/access?userIdentifier=${who}${textures}${pet}&playUri=${encodeURIComponent(
     `http://play.test/@/uni/${world}/room`,
   )}${signedIn ? '&accessToken=token' : ''}`;
   const request = new NextRequest(url, { headers: { Authorization: process.env.ADMIN_API_TOKEN as string } });
@@ -83,156 +43,165 @@ async function enter(who: string, { signedIn = true, sent = ['sent1'], world = '
 }
 
 const ids = (body: { characterTextures: { id: string }[] }) => body.characterTextures.map((texture) => texture.id);
+const outfitsOf = () => state.outfits.map((row) => row.textureIds.join('|')).sort();
 
 beforeAll(() => {
   process.env.ADMIN_API_TOKEN = 'test-token';
 });
+
 beforeEach(() => {
   jest.clearAllMocks();
-  mockSaved.length = 0;
-  db.room.findFirst.mockResolvedValue({ id: 'r', isPublic: true });
-  db.user.findFirst.mockResolvedValue(PERSON);
-  db.user.update.mockImplementation(({ data }) => Promise.resolve({ ...PERSON, ...data }));
-  db.bot.findFirst.mockResolvedValue({ id: BOT.slice(4) });
-  db.userAvatar.upsert.mockResolvedValue({});
-});
-afterEach(() => {
-  // Entering a world never saves anything: only picking a Woka does
-  expect(db.userAvatar.upsert).not.toHaveBeenCalled();
+  resetFakeDb();
+  state.universes.push({ id: 'un', slug: 'uni', name: 'Uni', isPublic: true, ownerId: 'someone' });
+  for (const slug of ['world-a', 'world-b', 'world-c', 'world-d', 'world-e']) {
+    state.worlds.push({ id: slug, slug, name: slug, universeId: 'un', isPublic: true, universe: { id: 'un', slug: 'uni', isPublic: true, ownerId: 'someone' } });
+  }
+  state.users.push({ ...PERSON });
+  // The catalog: std-* for the whole platform, cost-c1 only in world-c, ucost-c1 for the whole universe
+  addSet({ id: 'std', layers: ['std-x', 'std-y', 'std-s1', 'std-body'].map((textureId) => ({ textureId })), companions: [{ textureId: 'dog1' }] });
+  addSet({ id: 'costume-c', layers: [{ textureId: 'cost-c1' }], scopes: [{ scopeType: 'world', scopeId: 'world-c' }], companions: [{ textureId: 'cape-pet' }] });
+  addSet({ id: 'costume-uni', layers: [{ textureId: 'ucost-c1' }], scopes: [{ scopeType: 'universe', scopeId: 'un' }] });
+  fakeDb.room = { findFirst: jest.fn().mockResolvedValue({ id: 'r', isPublic: true }) };
+  fakeDb.ban = { findFirst: jest.fn().mockResolvedValue(null) };
+  fakeDb.visitCard = { findUnique: jest.fn().mockResolvedValue(null) };
+  fakeDb.bot = { findFirst: jest.fn().mockResolvedValue({ id: BOT.slice(4) }) };
+  fakeDb.roomAccess = { create: jest.fn().mockResolvedValue({}) };
 });
 
-describe('GET /api/room/access, wearing wins', () => {
-  it('wears the latest Woka picked in another world, replacing a standard one saved here', async () => {
-    save('world-b', 'std-x'); // picked later
-    save('world-a', 'std-y');
-    const body = await enter(PERSON.uuid, { world: 'world-a' });
-    expect(ids(body)).toEqual(['std-x']);
-    expect(body.isCharacterTexturesValid).toBe(true);
-    expect(body.characterTextureIds).toEqual(['std-x']);
+describe('GET /api/room/access, your Woka stays yours', () => {
+  it('wears the last Woka they picked in every world: picked Y in A then X in B, entering A, B or a new world C gives X', async () => {
+    addOutfit('u1', ['std-y'], minutesAgo(600));
+    addOutfit('u1', ['std-x'], minutesAgo(300));
+    for (const world of ['world-a', 'world-b', 'world-d']) {
+      const body = await enter(PERSON.uuid, { world });
+      expect(ids(body)).toEqual(['std-x']);
+      expect(body.isCharacterTexturesValid).toBe(true);
+      expect(body.characterTextureIds).toEqual(['std-x']);
+    }
+    expect(fakeDb.userOutfit.upsert).not.toHaveBeenCalled();
+    expect(fakeDb.userAvatar.upsert).not.toHaveBeenCalled();
   });
 
-  it('wears the everyday Woka in a world never visited, checked against that world', async () => {
-    save('world-b', 'std-x');
-    save('world-a', 'std-y');
-    const { resolveTextureUrls } = jest.requireMock('@/lib/avatar-catalog-validator');
+  it('keeps a costume they picked in World C when they enter World D where it is allowed (the same universe set)', async () => {
+    addOutfit('u1', ['std-y'], minutesAgo(900));
+    addOutfit('u1', ['ucost-c1'], minutesAgo(60));
+    expect(ids(await enter(PERSON.uuid, { world: 'world-d' }))).toEqual(['ucost-c1']);
+  });
+
+  it('says not valid, and writes nothing, where the costume is not allowed', async () => {
+    addOutfit('u1', ['std-y'], minutesAgo(900));
+    addOutfit('u1', ['cost-c1'], minutesAgo(60));
     const body = await enter(PERSON.uuid, { world: 'world-d' });
-    expect(ids(body)).toEqual(['std-x']);
-    expect(resolveTextureUrls).toHaveBeenCalledWith(expect.anything(), ['std-x'], 'world-d', 'un', expect.any(String));
-  });
-
-  it('keeps a costume saved for this world, even when a later pick was elsewhere', async () => {
-    save('world-b', 'std-x'); // picked later
-    save('world-c', 'cost-c1');
+    expect(body.isCharacterTexturesValid).toBe(false);
+    expect(body.characterTextures).toEqual([]);
+    expect(outfitsOf()).toEqual(['cost-c1', 'std-y']);
+    // …and it is worn again where it is allowed
     expect(ids(await enter(PERSON.uuid, { world: 'world-c' }))).toEqual(['cost-c1']);
+    expect(fakeDb.userOutfit.upsert).not.toHaveBeenCalled();
   });
 
-  it("keeps a universe's costume saved for this world", async () => {
-    save('world-b', 'std-x');
-    save('world-c', 'ucost-c1');
-    expect(ids(await enter(PERSON.uuid, { world: 'world-c' }))).toEqual(['ucost-c1']);
+  it('says not valid, and writes nothing, when the set of their current Woka was archived', async () => {
+    addSet({ id: 'gone', lifecycle: 'archived', layers: [{ textureId: 'archived-1' }] });
+    addOutfit('u1', ['std-y'], minutesAgo(900));
+    addOutfit('u1', ['archived-1'], minutesAgo(5));
+    const body = await enter(PERSON.uuid, { world: 'world-a' });
+    expect(body.isCharacterTexturesValid).toBe(false);
+    expect(outfitsOf()).toEqual(['archived-1', 'std-y']);
   });
 
-  it('keeps a mixed outfit, a standard body with a costume hat, saved for this world', async () => {
-    save('world-b', 'std-x');
-    save('world-c', 'std-body', 'hat-c1');
-    expect(ids(await enter(PERSON.uuid, { world: 'world-c' }))).toEqual(['std-body', 'hat-c1']);
+  it('says not valid when they lost the tag a restricted set needs, and valid while they have it', async () => {
+    addSet({
+      id: 'vip',
+      visibility: 'restricted',
+      layers: [{ textureId: 'vip-1' }],
+      policies: [{ subjectType: 'membership_tag', subjectValue: 'vip' }],
+    });
+    addOutfit('u1', ['vip-1'], minutesAgo(30));
+    state.members.push({ userId: 'u1', worldId: 'world-a', tags: ['vip'] });
+    expect((await enter(PERSON.uuid, { world: 'world-a' })).isCharacterTexturesValid).toBe(true);
+    state.members.length = 0;
+    const body = await enter(PERSON.uuid, { world: 'world-a' });
+    expect(body.isCharacterTexturesValid).toBe(false);
+    expect(outfitsOf()).toEqual(['vip-1']);
   });
 
-  it('leaves a costume world for the everyday Woka, not the older one saved in the next world and not the costume', async () => {
-    save('world-c', 'cost-c1'); // newest pick: a costume
-    save('world-a', 'std-s1');
-    save('world-d', 'std-old'); // oldest, saved for the world being entered
-    const body = await enter(PERSON.uuid, { world: 'world-d' });
-    expect(ids(body)).toEqual(['std-s1']);
+  it('never lets the textures the game sent replace the Woka they wear', async () => {
+    addOutfit('u1', ['std-x'], minutesAgo(30));
+    const body = await enter(PERSON.uuid, { world: 'world-a', sent: ['std-y'] });
+    expect(ids(body)).toEqual(['std-x']);
+    expect(outfitsOf()).toEqual(['std-x']);
+  });
+
+  it('wears the outfit the game sent for someone who never picked, and records it as their first pick', async () => {
+    const body = await enter(PERSON.uuid, { sent: ['std-body', 'std-y'] });
+    expect(ids(body)).toEqual(['std-body', 'std-y']);
     expect(body.isCharacterTexturesValid).toBe(true);
+    expect(outfitsOf()).toEqual(['std-body|std-y']);
+    // Entering again wears it from the record, and writes no more
+    fakeDb.userOutfit.upsert.mockClear();
+    expect(ids(await enter(PERSON.uuid, { sent: ['std-x'] }))).toEqual(['std-body', 'std-y']);
+    expect(fakeDb.userOutfit.upsert).not.toHaveBeenCalled();
   });
 
-  it('gives the everyday Woka, not the costume, to a world with nothing saved', async () => {
-    save('world-c', 'cost-c1');
-    save('world-a', 'std-s1');
-    const body = await enter(PERSON.uuid, { world: 'world-e' });
-    expect(ids(body)).toEqual(['std-s1']);
-    expect(body.isCharacterTexturesValid).toBe(true);
+  it('says not valid for someone who never picked when the outfit the game sent is not allowed here, and records nothing', async () => {
+    const body = await enter(PERSON.uuid, { world: 'world-d', sent: ['cost-c1'] });
+    expect(body.isCharacterTexturesValid).toBe(false);
+    expect(state.outfits).toEqual([]);
+    const none = await enter(PERSON.uuid, { sent: [] });
+    expect(none.isCharacterTexturesValid).toBe(false);
   });
 
-  it('wears the everyday Woka in a costume world whose costume can no longer be used', async () => {
-    save('world-c', 'archived-c1'); // its set was archived
-    save('world-a', 'std-s1');
-    const body = await enter(PERSON.uuid, { world: 'world-c' });
-    expect(ids(body)).toEqual(['std-s1']);
-    expect(body.isCharacterTexturesValid).toBe(true);
+  it('keeps the companion they wear: valid, none is valid, not allowed here is not valid; what the game sent does not count', async () => {
+    addOutfit('u1', ['std-x'], minutesAgo(30));
+    // none
+    let body = await enter(PERSON.uuid, { world: 'world-a', companion: 'dog1' });
+    expect(body.isCompanionTextureValid).toBe(true);
+    expect(body.companionTexture).toBeNull();
+    // one they wear, allowed here
+    state.users[0].companionTextureId = 'dog1';
+    body = await enter(PERSON.uuid, { world: 'world-d' });
+    expect(body.isCompanionTextureValid).toBe(true);
+    expect(body.companionTexture).toEqual({ id: 'dog1', url: 'https://play.test/dog1.png' });
+    // one only allowed in world-c
+    state.users[0].companionTextureId = 'cape-pet';
+    expect((await enter(PERSON.uuid, { world: 'world-c' })).isCompanionTextureValid).toBe(true);
+    body = await enter(PERSON.uuid, { world: 'world-d', companion: 'dog1' });
+    expect(body.isCompanionTextureValid).toBe(false);
+    expect(state.users[0].companionTextureId).toBe('cape-pet');
   });
 
-  it('takes a costume off by picking a standard Woka there: it is then the everyday Woka everywhere', async () => {
-    save('world-c', 'std-s2'); // newest: picked over the costume in world c
-    save('world-a', 'std-s1');
-    expect(ids(await enter(PERSON.uuid, { world: 'world-c' }))).toEqual(['std-s2']);
-    expect(ids(await enter(PERSON.uuid, { world: 'world-a' }))).toEqual(['std-s2']);
-    expect(ids(await enter(PERSON.uuid, { world: 'world-e' }))).toEqual(['std-s2']);
-  });
-
-  it('uses the logic as before for someone who only ever picked costumes', async () => {
-    save('world-c', 'cost-c1');
-    expect(ids(await enter(PERSON.uuid, { world: 'world-d' }))).toEqual(['sent1']);
-    const refused = await enter(PERSON.uuid, { world: 'world-d', sent: ['no-way'] });
-    expect(refused.isCharacterTexturesValid).toBe(false);
-  });
-
-  it("uses this world's saved outfit as before when the person has nothing but it", async () => {
-    save('world-b', 'std-y');
-    expect(ids(await enter(PERSON.uuid))).toEqual(['std-y']);
-  });
-
-  it('never lets the textures the game sent undo the everyday Woka', async () => {
-    save('world-b', 'std-x');
-    save('world-a', 'std-y');
-    expect(ids(await enter(PERSON.uuid, { world: 'world-a', sent: ['stale-device-pick'] }))).toEqual(['std-x']);
-  });
-
-  it('changes nothing for someone who never picked an outfit', async () => {
-    expect(ids(await enter(PERSON.uuid))).toEqual(['sent1']);
-  });
-
-  it('looks for the everyday Woka among the saved outfits of every world', async () => {
-    save('world-a', 'std-y');
-    await enter(PERSON.uuid, { world: 'world-e' });
-    expect(db.userAvatar.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: expect.objectContaining({ userId: 'u1' }), orderBy: [{ outfitUpdatedAt: { sort: 'desc', nulls: 'last' } }, { updatedAt: 'desc' }] }),
-    );
-  });
-
-  it("still lets them in with this world's outfit when the lookup fails", async () => {
-    save('world-a', 'std-x');
-    save('world-b', 'std-y');
-    db.userAvatar.findMany.mockRejectedValue(new Error('db down'));
+  it('still lets them in when the lookup fails, with the logic guests get', async () => {
+    addOutfit('u1', ['std-x'], minutesAgo(30));
+    fakeDb.userOutfit.findFirst.mockRejectedValueOnce(new Error('db down'));
     const error = jest.spyOn(console, 'error').mockImplementation(() => undefined);
     const body = await enter(PERSON.uuid);
     expect(body.status).toBe('ok');
-    expect(ids(body)).toEqual(['std-y']);
+    expect(ids(body)).toEqual(['sent1']);
     error.mockRestore();
   });
 
   it('leaves guests as they were', async () => {
-    db.user.findFirst.mockResolvedValue(null);
-    save('world-a', 'std-x');
+    state.users.length = 0;
+    addOutfit('u1', ['std-x'], minutesAgo(30));
     const body = await enter('guest-uuid', { signedIn: false });
     expect(ids(body)).toEqual(['sent1']);
-    expect(db.userAvatar.findMany).not.toHaveBeenCalled();
+    expect(fakeDb.userOutfit.findFirst).not.toHaveBeenCalled();
   });
 
   it('leaves a name that has not signed in as it was, even when it names a real person', async () => {
-    save('world-a', 'std-x');
+    addOutfit('u1', ['std-x'], minutesAgo(30));
     const body = await enter(PERSON.uuid, { signedIn: false });
-    expect(db.userAvatar.findMany).not.toHaveBeenCalled();
+    expect(fakeDb.userOutfit.findFirst).not.toHaveBeenCalled();
     expect(body.status).toBe('ok');
+    expect(ids(body)).toEqual(['sent1']);
   });
 
   it('leaves bots as they were', async () => {
-    db.user.findFirst.mockResolvedValue({ ...PERSON, uuid: BOT, name: 'Botty' });
-    mockSaved.push({ userId: 'u1', worldId: 'world-a', textureIds: ['std-x'] });
+    state.users[0].uuid = BOT;
+    addOutfit('u1', ['std-x'], minutesAgo(30));
     const body = await enter(BOT);
     expect(body.status).toBe('ok');
     expect(ids(body)).toEqual(['sent1']);
-    expect(db.userAvatar.findMany).not.toHaveBeenCalled();
+    expect(fakeDb.userOutfit.findFirst).not.toHaveBeenCalled();
   });
 });

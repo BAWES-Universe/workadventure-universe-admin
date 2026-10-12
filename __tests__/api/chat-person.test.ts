@@ -1,7 +1,7 @@
 /**
  * GET /api/chat/person: one person's name and Woka by chat ID, for a direct chat with someone outside the asker's
- * world. The Woka follows the same rule as everywhere (the asker's world's outfit, else the latest one made only of
- * parts allowed in every world), and the answer never carries an email address or an id.
+ * world. The Woka follows the same rule as everywhere (the Woka they wear now, wherever the asker is), and the answer
+ * never carries an email address or an id.
  */
 import { NextRequest } from 'next/server';
 
@@ -9,7 +9,7 @@ jest.mock('@/lib/db', () => ({
   prisma: {
     user: { findFirst: jest.fn() },
     world: { findFirst: jest.fn(), findUnique: jest.fn() },
-    userAvatar: { findMany: jest.fn() },
+    userOutfit: { findMany: jest.fn() },
     avatarLayer: { findMany: jest.fn() },
   },
 }));
@@ -46,11 +46,11 @@ beforeEach(() => {
 });
 
 describe('GET /api/chat/person', () => {
-  it("answers with the person's current name and Woka, outside the asker's world: the latest outfit allowed everywhere", async () => {
+  it("answers with the person's current name and the Woka they wear now, outside the asker's world", async () => {
     db.world.findFirst.mockResolvedValue(null);
-    db.userAvatar.findMany.mockResolvedValue([
-      { userId: 'u1', worldId: 'elsewhere', textureIds: ['costume'] }, // newest, but only for another world
-      { userId: 'u1', worldId: 'old', textureIds: ['male1', 'hat1'] },
+    db.userOutfit.findMany.mockResolvedValue([
+      { userId: 'u1', textureIds: ['male1', 'hat1'] }, // the Woka they wear now
+      { userId: 'u1', textureIds: ['costume'] },
     ]);
 
     const response = await GET(request({ chatId: '@alice:chat.test', playUri: 'http://play.test/@/uni/world/room' }));
@@ -67,17 +67,17 @@ describe('GET /api/chat/person', () => {
     expect(db.user.findFirst.mock.calls[0][0].where.AND).toContainEqual({ matrixChatId: '@alice:chat.test', isGuest: false });
   });
 
-  it("shows the outfit saved for the asker's own world when there is one", async () => {
-    db.userAvatar.findMany.mockResolvedValue([
-      { userId: 'u1', worldId: 'elsewhere', textureIds: ['hat1'] },
-      { userId: 'u1', worldId: 'world-1', textureIds: ['costume'] },
+  it("shows the Woka they wear now even when it is a costume from another world than the asker's", async () => {
+    db.userOutfit.findMany.mockResolvedValue([
+      { userId: 'u1', textureIds: ['costume'] },
+      { userId: 'u1', textureIds: ['hat1'] },
     ]);
     const body = await (await GET(request({ chatId: '@alice:chat.test', playUri: 'http://play.test/@/uni/world/room' }))).json();
     expect(body.characterTextures).toEqual([{ id: 'costume', url: 'https://cdn.test/costume.png' }]);
   });
 
-  it('answers with no Woka (the game draws its default) for someone without an outfit allowed there, and for an asker with no room', async () => {
-    db.userAvatar.findMany.mockResolvedValue([{ userId: 'u1', worldId: 'elsewhere', textureIds: ['costume'] }]);
+  it('answers with no Woka (the game draws its default) for someone with no Woka yet, and for an asker with no room', async () => {
+    db.userOutfit.findMany.mockResolvedValue([]);
     const body = await (await GET(request({ chatId: '@alice:chat.test' }))).json();
     expect(body).toEqual({ wokaName: 'Alice', characterTextures: [] });
     expect(db.world.findFirst).not.toHaveBeenCalled();
@@ -85,14 +85,14 @@ describe('GET /api/chat/person', () => {
 
   it('never carries an email address, an id or a sign-in name', async () => {
     db.user.findFirst.mockResolvedValue({ id: 'u1', name: 'Alice', email: 'alice@example.test', uuid: 'alice@example.test' });
-    db.userAvatar.findMany.mockResolvedValue([]);
+    db.userOutfit.findMany.mockResolvedValue([]);
     const body = await (await GET(request({ chatId: '@alice:chat.test' }))).json();
     expect(Object.keys(body).sort()).toEqual(['characterTextures', 'wokaName']);
     expect(db.user.findFirst.mock.calls[0][0].select).toEqual({ id: true, name: true });
   });
 
   it('still answers the name when the Woka cannot be read', async () => {
-    db.userAvatar.findMany.mockRejectedValue(new Error('database down'));
+    db.userOutfit.findMany.mockRejectedValue(new Error('database down'));
     const response = await GET(request({ chatId: '@alice:chat.test' }));
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ wokaName: 'Alice', characterTextures: [] });
