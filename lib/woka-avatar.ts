@@ -51,7 +51,7 @@ async function layersFromTextureLists(lists: string[][]): Promise<(string[] | nu
 
 type Texture = { id: string; url: string };
 
-/** Where a texture id's picture can come from: the catalog (all active layers, and the ones every world may use) and the game's own list. */
+/** Where a texture id's picture can come from: the catalog (layers of active sets, and the ones every world may use) and the game's own list. */
 interface LayerSources {
   any: Map<string, string>;
   platform: Map<string, string>;
@@ -68,8 +68,9 @@ async function loadLayerSources(textureIds: string[]): Promise<LayerSources> {
     // Allowed in every world: part of an active set scoped to the whole platform (not to a universe or a world).
     const everywhere = layer.avatarSet?.lifecycle === 'active' && layer.avatarSet.scopes.some((scope) => scope.scopeType === 'platform');
     if (everywhere) sources.platform.set(layer.textureId, layer.url);
-    // A set for everyone is the better picture when a texture id is in several sets.
-    if (everywhere || !sources.any.has(layer.textureId)) sources.any.set(layer.textureId, layer.url);
+    // Only a part of an active set can be worn (an archived or draft set's parts are refused on entry), so only those
+    // are drawn. A set for everyone is the better picture when a texture id is in several sets.
+    if (layer.avatarSet?.lifecycle === 'active' && (everywhere || !sources.any.has(layer.textureId))) sources.any.set(layer.textureId, layer.url);
   }
   return sources;
 }

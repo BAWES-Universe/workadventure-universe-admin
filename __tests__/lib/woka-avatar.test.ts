@@ -11,6 +11,7 @@ const mockLayers = [
   { textureId: 'signed', url: 'https://cdn.example.com/w/a.png?sig=abc&v=2', avatarSet: platform },
   { textureId: 'costume', url: 'https://cdn.example.com/w/costume.png', avatarSet: { lifecycle: 'active', scopes: [{ scopeType: 'world' }] } },
   { textureId: 'uni', url: 'https://cdn.example.com/w/uni.png', avatarSet: { lifecycle: 'active', scopes: [{ scopeType: 'universe' }] } },
+  { textureId: 'archivedcostume', url: 'https://cdn.example.com/w/archived.png', avatarSet: { lifecycle: 'archived', scopes: [{ scopeType: 'world' }] } },
   { textureId: 'draftpart', url: 'https://cdn.example.com/w/draft.png', avatarSet: { lifecycle: 'draft', scopes: [{ scopeType: 'platform' }] } },
   // In a world's set and a platform set under the same id: the platform picture is the one for everyone.
   { textureId: 'both', url: 'https://cdn.example.com/w/both-world.png', avatarSet: { lifecycle: 'active', scopes: [{ scopeType: 'world' }] } },
@@ -132,6 +133,12 @@ describe('Wokas for avatars', () => {
       save('p', WORLD_B, 'costume'); // a costume saved for the world looked from
       expect((await wokaLayersForMany(['p'], WORLD_B)).get('p')).toEqual(costume);
       expect((await wokaLayersForMany(['p'], WORLD_A)).get('p')?.[0]).toMatch(/Male%2001-1\.png$|Male 01-1\.png$/);
+    });
+
+    it('does not draw a costume whose set was archived: the everyday outfit, as the game puts on them', async () => {
+      save('p', WORLD_A, 'male1'); // newest, standard
+      save('p', WORLD_B, 'archivedcostume'); // saved for the world looked from, but its set was archived
+      expect((await wokaLayersForMany(['p'], WORLD_B)).get('p')?.[0]).toMatch(/Male%2001-1\.png$|Male 01-1\.png$/);
     });
 
     it('draws the platform picture of a part that is also in a world\'s own set', async () => {
