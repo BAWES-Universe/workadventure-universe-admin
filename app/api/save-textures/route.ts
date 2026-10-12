@@ -67,7 +67,10 @@ export async function POST(request: NextRequest) {
 
     // The same check as on room entry: a pick the door would refuse is refused here, before anything is saved.
     const context = await wearableContextFor(user.id, worldId)
-    if (!context || !(await wearableHere(textures, context)).wearable) {
+    if (!context) {
+      return NextResponse.json({ error: 'World not found' }, { status: 404 })
+    }
+    if (!(await wearableHere(textures, context)).wearable) {
       return NextResponse.json({ code: 'WOKA_NOT_ALLOWED' }, { status: 422 })
     }
 

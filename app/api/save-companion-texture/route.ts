@@ -65,7 +65,10 @@ export async function POST(request: NextRequest) {
     }
 
     const context = await wearableContextFor(user.id, worldId)
-    if (!context || !(await companionWearableHere(texture, context)).wearable) {
+    if (!context) {
+      return NextResponse.json({ error: 'World not found' }, { status: 404 })
+    }
+    if (!(await companionWearableHere(texture, context)).wearable) {
       return NextResponse.json({ code: 'WOKA_NOT_ALLOWED' }, { status: 422 })
     }
 

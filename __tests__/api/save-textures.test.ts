@@ -125,6 +125,14 @@ describe('POST /api/save-textures', () => {
     expect(outfitsOf()).toEqual(['std-x']);
   });
 
+  it('answers 404, not 422, when the world is deleted between looking it up and checking the pick', async () => {
+    fakeDb.world.findUnique.mockResolvedValueOnce(null);
+    expect(await pick('std-x')).toMatchObject({ status: 404 });
+    fakeDb.world.findUnique.mockResolvedValueOnce(null);
+    expect(await post(saveCompanion, { texture: 'dog1' })).toMatchObject({ status: 404 });
+    expect(state.outfits).toEqual([]);
+  });
+
   it('rejects a request with textures that are not ids', async () => {
     expect((await post(saveTextures, { textures: [{ id: 'std-x' }] })).status).toBe(400);
   });
