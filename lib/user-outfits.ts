@@ -26,6 +26,21 @@ export async function currentOutfit(userId: string) {
  *  - outfits not worn for 30 days go, then only the newest ten stay. The one just put on is never removed.
  */
 export async function recordOutfitPick(userId: string, textureIds: string[], now: Date = new Date()): Promise<void> {
+  try {
+    await recordOutfitPickOnce(userId, textureIds, now);
+  } catch (error) {
+    // The same new outfit saved twice at once (a double submit, two devices): both found no row and both tried to add it,
+    // so the second hit the unique key. The row exists now, so one more run (a new transaction) just moves it to the front.
+    if (!isUniqueConflict(error)) throw error;
+    await recordOutfitPickOnce(userId, textureIds, now);
+  }
+}
+
+function isUniqueConflict(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 'P2002';
+}
+
+async function recordOutfitPickOnce(userId: string, textureIds: string[], now: Date): Promise<void> {
   const key = outfitKey(textureIds);
   await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     const previous = await tx.userOutfit.findFirst({ where: { userId }, orderBy: { lastWornAt: 'desc' } });
