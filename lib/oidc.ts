@@ -1,3 +1,5 @@
+import * as Sentry from '@sentry/nextjs';
+
 // Use dynamic import for openid-client (ESM-only package)
 // This avoids build issues with Next.js/Turbopack
 // openid-client v6+ uses a new API with discovery() and fetchUserInfo()
@@ -93,6 +95,21 @@ export async function validateAccessToken(token: string): Promise<UserInfoRespon
     return userInfo;
   } catch (error) {
     console.error('Token validation failed:', error);
+    // Without this, a player Orbit cannot recognise is answered as a guest and nobody can see why (expired token,
+    // the provider unreachable, a subject that does not match). The token itself is never sent, only whether it ran out.
+    Sentry.captureException(error, { tags: { area: 'oidc-validate' }, extra: { tokenRanOut: tokenRanOut(token) } });
+    return null;
+  }
+}
+
+/** Whether the `exp` inside a JWT access token has passed; null when the token does not say. */
+function tokenRanOut(token: string): boolean | null {
+  try {
+    const payload = token.split('.')[1];
+    if (!payload) return null;
+    const { exp } = JSON.parse(Buffer.from(payload, 'base64url').toString()) as { exp?: unknown };
+    return typeof exp === 'number' ? exp * 1000 < Date.now() : null;
+  } catch {
     return null;
   }
 }

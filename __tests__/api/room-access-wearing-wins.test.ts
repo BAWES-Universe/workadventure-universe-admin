@@ -100,6 +100,17 @@ describe('GET /api/room/access, your Woka stays yours', () => {
     expect(fakeDb.userOutfit.upsert).not.toHaveBeenCalled();
   });
 
+  it('still tells the game which Woka the account wears where it is not allowed, so the device does not keep an old one', async () => {
+    addOutfit('u1', ['std-y'], minutesAgo(900));
+    addOutfit('u1', ['cost-c1'], minutesAgo(60));
+    const refused = await enter(PERSON.uuid, { world: 'world-d', sent: ['std-y'] });
+    expect(refused.isCharacterTexturesValid).toBe(false);
+    expect(refused.characterTextures).toEqual([]);
+    expect(refused.characterTextureIds).toEqual(['cost-c1']);
+    // where it is allowed the ids are the ones worn, as before
+    expect((await enter(PERSON.uuid, { world: 'world-c', sent: ['std-y'] })).characterTextureIds).toEqual(['cost-c1']);
+  });
+
   it('says not valid, and writes nothing, when the set of their current Woka was archived', async () => {
     addSet({ id: 'gone', lifecycle: 'archived', layers: [{ textureId: 'archived-1' }] });
     addOutfit('u1', ['std-y'], minutesAgo(900));
@@ -223,6 +234,18 @@ describe('GET /api/room/access, your Woka stays yours', () => {
     expect(fakeDb.userOutfit.findFirst).not.toHaveBeenCalled();
     expect(body.status).toBe('ok');
     expect(ids(body)).toEqual(['sent1']);
+  });
+
+  it('never wears a Woka saved for a world when the account could not be verified: it asks instead of silently giving an old or default one', async () => {
+    addOutfit('u1', ['std-x'], minutesAgo(30));
+    // an old pick saved for this world (the per-world row older versions kept), here the default look
+    state.avatars.push({ id: 'a1', userId: 'u1', worldId: 'world-b', textureIds: ['std-body'], companionTextureId: null });
+    // the game sent nothing (a signed-in player's device holds no Woka), and the access token could not be checked
+    (authenticateRequest as jest.Mock).mockResolvedValue(null);
+    const url = `http://localhost/api/room/access?userIdentifier=${PERSON.uuid}&playUri=${encodeURIComponent('http://play.test/@/uni/world-b/room')}&accessToken=expired`;
+    const body = await (await roomAccess(new NextRequest(url, { headers: { Authorization: process.env.ADMIN_API_TOKEN as string } }))).json();
+    expect(body.isCharacterTexturesValid).toBe(false);
+    expect(body.characterTextures).toEqual([]);
   });
 
   it('leaves bots as they were', async () => {

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import * as Sentry from '@sentry/nextjs';
 import { requireAuth, getClientIp } from '@/lib/auth';
 import { parsePlayUri } from '@/lib/utils';
 import { authenticateRequest } from '@/lib/oidc';
@@ -173,6 +174,15 @@ export async function GET(request: NextRequest) {
         userEmail = user.email || userEmail;
       }
       
+      // An account that joins without a token we could check (expired, Authentik unreachable, none sent) is answered as a
+      // guest: we can't tell it is them. It never gets a Woka saved for some world, which may be an old pick (that is how
+      // a default or an old Woka was worn silently); only what the game sent counts, and when that is nothing this world
+      // can show, the answer is "not valid" so the game asks. Say so, so it can be seen when a player gets this.
+      const unverifiedAccount = !!user && !user.isGuest && !isAuthenticated && !isBotIdentifier(finalUuid);
+      if (unverifiedAccount && hasAccessToken) {
+        Sentry.captureMessage('Room access: an account joined with an access token Orbit could not verify, so it was answered as a guest', 'warning');
+      }
+
       // Find world and room
       const worldData = await prisma.world.findFirst({
         where: {
@@ -286,7 +296,7 @@ export async function GET(request: NextRequest) {
         return NextResponse.json(error);
       }
 
-      if (user) {
+      if (user && !unverifiedAccount) {
         
         // Get user avatar
         avatar = await prisma.userAvatar.findUnique({
@@ -371,6 +381,8 @@ export async function GET(request: NextRequest) {
       // it, and recorded as their first pick. The textures the game sent otherwise never count: they may be stale.
       // Guests and bots keep the logic above as it was.
       let ownCompanion: { texture: CompanionDetail | null; valid: boolean } | null = null;
+      // The Woka their account says they wear, even when this world can't show it (see characterTextureIds below)
+      let accountTextureIds: string[] | null = null;
       if (user && isAuthenticated && !isBotIdentifier(finalUuid)) {
         try {
           const wearing = {
@@ -415,15 +427,18 @@ export async function GET(request: NextRequest) {
           }
           finalTextures = worn.valid ? worn.textures : [];
           isTexturesValid = worn.valid;
+          accountTextureIds = current?.textureIds ?? (firstPick && worn.valid ? wear : null);
           ownCompanion = companion;
         } catch (error) {
           // Log but don't fail the request: the logic above still applies
           console.error('Failed to look up the Woka they wear:', error);
+          Sentry.captureException(error);
         }
       }
 
-      // Extract texture IDs for front-end cross-device sync
-      const characterTextureIds = finalTextures.map(t => t.id);
+      // Extract texture IDs for front-end cross-device sync. A signed-in person's are the Woka their account says they
+      // wear, also when this world can't show it: the game keeps them on the device, and the picker and popup name them.
+      const characterTextureIds = accountTextureIds ?? finalTextures.map(t => t.id);
       
       // Handle companion texture - use stored one if provided one is invalid
       let finalCompanionTexture = companionValidation.texture;
