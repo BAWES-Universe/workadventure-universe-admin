@@ -74,8 +74,8 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ code: 'WOKA_NOT_ALLOWED' }, { status: 422 })
     }
 
-    await recordOutfitPick(user.id, textures)
-
+    // The older per-world record first, then the pick: if this write fails, nothing has changed and the Woka they wear
+    // stays the same (the upsert can safely be repeated; the pick is what changes what they wear).
     // Upsert user_avatars record (unique constraint on userId + worldId)
     await prisma.userAvatar.upsert({
       where: {
@@ -92,6 +92,8 @@ export async function POST(request: NextRequest) {
         outfitUpdatedAt: new Date(),
       },
     })
+
+    await recordOutfitPick(user.id, textures)
 
     return new NextResponse(null, { status: 204 })
   } catch (error) {
