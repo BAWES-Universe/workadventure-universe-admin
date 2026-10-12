@@ -32,7 +32,7 @@ jest.mock('@/lib/db', () => ({
   },
 }));
 
-import { defaultWoka, withWokas, wokaLayersFor, wokaLayersForMany, wokaTexturesForMany } from '@/lib/woka-avatar';
+import { defaultWoka, outfitAllowedEverywhere, withWokas, wokaLayersFor, wokaLayersForMany, wokaTexturesForMany } from '@/lib/woka-avatar';
 
 describe('Wokas for avatars', () => {
   beforeEach(() => {
@@ -160,6 +160,24 @@ describe('Wokas for avatars', () => {
       const wokas = await wokaLayersForMany(['a', 'b'], WORLD_A);
       expect(wokas.get('a')).toEqual(costume);
       expect(wokas.get('b')).toEqual(signed);
+    });
+  });
+
+  describe('outfitAllowedEverywhere', () => {
+    it('is true for parts of a platform set and of the game\'s own list, mixed or alone', async () => {
+      expect(await outfitAllowedEverywhere(['signed'])).toBe(true);
+      expect(await outfitAllowedEverywhere(['male1'])).toBe(true);
+      expect(await outfitAllowedEverywhere(['signed', 'male1'])).toBe(true);
+      expect(await outfitAllowedEverywhere(['both'])).toBe(true);
+      expect(await outfitAllowedEverywhere([])).toBe(true);
+    });
+
+    it('is false when any part is only in a world\'s or a universe\'s own set, a draft set, or unknown', async () => {
+      expect(await outfitAllowedEverywhere(['costume'])).toBe(false);
+      expect(await outfitAllowedEverywhere(['uni'])).toBe(false);
+      expect(await outfitAllowedEverywhere(['signed', 'costume'])).toBe(false);
+      expect(await outfitAllowedEverywhere(['draftpart'])).toBe(false);
+      expect(await outfitAllowedEverywhere(['no-such-layer'])).toBe(false);
     });
   });
 });

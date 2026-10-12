@@ -7,6 +7,7 @@ import { resolveTextureUrls, resolveCompanionTexture } from '@/lib/avatar-catalo
 import { notifyRoomAccess } from '@/lib/discord';
 import { isBotIdentifier } from '@/lib/bot-visitor';
 import { latestOutfitAnywhere, saveOutfitForWorld } from '@/lib/latest-outfit';
+import { outfitAllowedEverywhere } from '@/lib/woka-avatar';
 import { canSeeRoom } from '@/lib/room-visibility';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { bansCoveringWorld } from '@/lib/moderation';
@@ -350,6 +351,7 @@ export async function GET(request: NextRequest) {
       // If textures are invalid and we have stored avatar textures, use them as fallback
       let finalTextures = textureValidation.textures;
       let isTexturesValid = textureValidation.valid;
+      let savedOutfitUsable = false;
       
       // Prefer DB textures over localStorage when user has a saved avatar —
       // DB is the source of truth across devices and sessions
@@ -360,23 +362,25 @@ export async function GET(request: NextRequest) {
         if (dbTextures.valid) {
           finalTextures = dbTextures.textures;
           isTexturesValid = true;
+          savedOutfitUsable = true;
         }
       }
 
-      // Wearing wins: a signed-in person's latest pick follows them into any world that allows it, with no prompt,
-      // but only into a world where they have no Woka saved yet. A Woka saved for a world is never replaced.
-      // It is kept for this world too, so their next visit here starts from it. Where it isn't allowed, the logic
-      // above stands. The textures the game sent are never trusted over this: they may be stale from another device.
+      // Wearing wins: a signed-in person's latest pick follows them into any world that allows it, with no prompt.
+      // The one exception is a custom Woka saved for this world (made of parts only a universe's or a world's own set
+      // has): that stays as saved. It is kept for this world too, so their next visit here starts from it. Where it
+      // isn't allowed, the logic above stands. The textures the game sent are never trusted over this: they may be
+      // stale from another device.
       // Guests and bots keep the logic above as it was.
-      const hasWokaHere = Boolean(avatar?.textureIds && avatar.textureIds.length > 0);
-      if (user && isAuthenticated && !isBotIdentifier(finalUuid) && !hasWokaHere) {
+      if (user && isAuthenticated && !isBotIdentifier(finalUuid)) {
         try {
           const latest = await latestOutfitAnywhere(user.id);
           if (latest && latest.worldId !== worldData.id) {
             const worn = await resolveTextureUrls(
               prisma, latest.textureIds, worldData.id, worldData.universeId, playServiceUrl
             );
-            if (worn.valid) {
+            const keepsCustom = worn.valid && savedOutfitUsable && !(await outfitAllowedEverywhere(avatar?.textureIds ?? []));
+            if (worn.valid && !keepsCustom) {
               finalTextures = worn.textures;
               isTexturesValid = true;
               await saveOutfitForWorld(user.id, worldData.id, latest.textureIds).catch((error: unknown) => {

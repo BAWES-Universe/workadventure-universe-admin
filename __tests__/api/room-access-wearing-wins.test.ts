@@ -1,8 +1,8 @@
 /**
- * Wearing wins: a signed-in person's latest outfit (picked in any world) follows them into every world that allows it
- * and where they have no outfit saved yet, and is saved for that world too. An outfit saved for a world is never
- * replaced. Where it isn't allowed, the outfit saved for the world they enter (else the one the game sent) is used as
- * before. Guests and bots never get this.
+ * Wearing wins: a signed-in person's latest outfit (picked in any world) follows them into every world that allows it,
+ * and is saved for that world too, replacing a standard outfit saved there. A custom Woka saved for the world they enter
+ * (one only a universe's or a world's own set has) stays as saved. Where the latest isn't allowed, the outfit saved for
+ * the world they enter (else the one the game sent) is used as before. Guests and bots never get this.
  */
 import { NextRequest } from 'next/server';
 
@@ -30,6 +30,10 @@ jest.mock('@/lib/avatar-catalog-validator', () => ({
   resolveCompanionTexture: jest.fn().mockResolvedValue({ valid: true, texture: null }),
 }));
 jest.mock('@/lib/super-admin', () => ({ isSuperAdmin: () => false }));
+jest.mock('@/lib/woka-avatar', () => ({
+  // Outfits with a part whose id starts with "custom-" belong to a world's own set; every other outfit is allowed everywhere
+  outfitAllowedEverywhere: jest.fn(async (ids: string[]) => ids.every((id) => !id.startsWith('custom-'))),
+}));
 
 import { prisma } from '@/lib/db';
 import { authenticateRequest } from '@/lib/oidc';
@@ -65,15 +69,14 @@ beforeEach(() => {
   db.user.findFirst.mockResolvedValue(PERSON);
   db.user.update.mockImplementation(({ data }) => Promise.resolve({ ...PERSON, ...data }));
   db.bot.findFirst.mockResolvedValue({ id: BOT.slice(4) });
-  // Saved for world B (tests of a world with nothing saved override this)
+  // Saved for world B
   db.userAvatar.findUnique.mockResolvedValue({ userId: 'u1', worldId: 'world-b', textureIds: ['saved-b'], companionTextureId: null });
   db.userAvatar.findFirst.mockResolvedValue(null);
   db.userAvatar.upsert.mockResolvedValue({});
 });
 
 describe('GET /api/room/access, wearing wins', () => {
-  it("brings the latest outfit from another world into a world with none saved, and saves it for this one", async () => {
-    db.userAvatar.findUnique.mockResolvedValue(null);
+  it("brings the latest outfit from another world and saves it for this one", async () => {
     db.userAvatar.findFirst.mockResolvedValue({ worldId: 'world-a', textureIds: ['outfit-a1', 'outfit-a2'] });
     const body = await enter(PERSON.uuid);
     expect(ids(body)).toEqual(['outfit-a1', 'outfit-a2']);
@@ -90,24 +93,31 @@ describe('GET /api/room/access, wearing wins', () => {
     });
   });
 
-  it("keeps the outfit saved for this world, and saves nothing, when the latest pick was in another world", async () => {
-    // A has Y, B has X (picked later): entering A keeps Y
+  it("replaces a standard outfit saved for this world with the latest pick from another world", async () => {
+    // A has Y (standard), the latest pick X is from another world: entering A wears X
+    db.userAvatar.findFirst.mockResolvedValue({ worldId: 'world-a', textureIds: ['outfit-x'] });
+    const body = await enter(PERSON.uuid);
+    expect(ids(body)).toEqual(['outfit-x']);
+    expect(db.userAvatar.upsert).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a custom Woka saved for this world, and saves nothing, when the latest pick was in another world", async () => {
+    db.userAvatar.findUnique.mockResolvedValue({ userId: 'u1', worldId: 'world-b', textureIds: ['custom-b'], companionTextureId: null });
     db.userAvatar.findFirst.mockResolvedValue({ worldId: 'world-a', textureIds: ['outfit-a1'] });
     const body = await enter(PERSON.uuid);
-    expect(ids(body)).toEqual(['saved-b']);
-    expect(body.characterTextureIds).toEqual(['saved-b']);
+    expect(ids(body)).toEqual(['custom-b']);
+    expect(body.characterTextureIds).toEqual(['custom-b']);
     expect(db.userAvatar.upsert).not.toHaveBeenCalled();
   });
 
-  it("treats a world whose saved outfit is empty as having none saved", async () => {
-    db.userAvatar.findUnique.mockResolvedValue({ userId: 'u1', worldId: 'world-b', textureIds: [], companionTextureId: null });
+  it("replaces a saved outfit that can no longer be used here, even a custom one", async () => {
+    db.userAvatar.findUnique.mockResolvedValue({ userId: 'u1', worldId: 'world-b', textureIds: ['no-custom-b'], companionTextureId: null });
     db.userAvatar.findFirst.mockResolvedValue({ worldId: 'world-a', textureIds: ['outfit-a1'] });
     expect(ids(await enter(PERSON.uuid))).toEqual(['outfit-a1']);
     expect(db.userAvatar.upsert).toHaveBeenCalledTimes(1);
   });
 
   it("looks for the latest outfit among the person's saved outfits in every world", async () => {
-    db.userAvatar.findUnique.mockResolvedValue(null);
     await enter(PERSON.uuid);
     expect(db.userAvatar.findFirst).toHaveBeenCalledWith(
       expect.objectContaining({ where: expect.objectContaining({ userId: 'u1' }), orderBy: [{ outfitUpdatedAt: { sort: 'desc', nulls: 'last' } }, { updatedAt: 'desc' }] }),
@@ -115,7 +125,6 @@ describe('GET /api/room/access, wearing wins', () => {
   });
 
   it("never lets the textures the game sent undo the latest pick", async () => {
-    db.userAvatar.findUnique.mockResolvedValue(null);
     db.userAvatar.findFirst.mockResolvedValue({ worldId: 'world-a', textureIds: ['outfit-a1'] });
     expect(ids(await enter(PERSON.uuid, { sent: ['stale-device-pick'] }))).toEqual(['outfit-a1']);
   });
@@ -148,7 +157,6 @@ describe('GET /api/room/access, wearing wins', () => {
   });
 
   it("still lets them in, wearing it, when saving it for this world fails", async () => {
-    db.userAvatar.findUnique.mockResolvedValue(null);
     db.userAvatar.findFirst.mockResolvedValue({ worldId: 'world-a', textureIds: ['outfit-a1'] });
     db.userAvatar.upsert.mockRejectedValue(new Error('db down'));
     const error = jest.spyOn(console, 'error').mockImplementation(() => undefined);

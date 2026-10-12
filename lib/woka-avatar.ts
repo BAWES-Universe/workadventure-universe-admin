@@ -74,6 +74,17 @@ async function loadLayerSources(textureIds: string[]): Promise<LayerSources> {
   return sources;
 }
 
+/**
+ * Whether every part of an outfit is allowed in every world: part of an active set scoped to the whole platform, or in
+ * the game's own list. An outfit with a part that only a universe's or a world's own set has is a custom Woka.
+ */
+export async function outfitAllowedEverywhere(textureIds: string[]): Promise<boolean> {
+  if (textureIds.length === 0) return true;
+  const sources = await loadLayerSources(textureIds);
+  const config = getTextureMap(playServiceUrl());
+  return textureIds.every((id) => sources.platform.has(id) || config.has(id));
+}
+
 /** An outfit as { id, url } layers, or null when one of its parts can't be found (a body without a head, or the reverse). */
 function drawOutfit(textureIds: string[], catalog: Map<string, string>, config: () => Map<string, { url: string }>): Texture[] | null {
   const layers: Texture[] = [];
