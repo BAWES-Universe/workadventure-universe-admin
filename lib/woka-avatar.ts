@@ -74,15 +74,25 @@ async function loadLayerSources(textureIds: string[]): Promise<LayerSources> {
   return sources;
 }
 
+/** Whether every part of an outfit is standard: in an active set scoped to the whole platform, or in the game's own list. */
+function isStandardOutfit(textureIds: string[], sources: LayerSources, config: () => Map<string, { url: string }>): boolean {
+  return textureIds.every((id) => sources.platform.has(id) || config().has(id));
+}
+
 /**
- * Whether every part of an outfit is allowed in every world: part of an active set scoped to the whole platform, or in
- * the game's own list. An outfit with a part that only a universe's or a world's own set has is a custom Woka.
+ * For each outfit, whether every part is allowed in every world: part of an active set scoped to the whole platform, or
+ * in the game's own list. An outfit with a part that only a universe's or a world's own set has is a costume.
  */
+export async function outfitsAllowedEverywhere(outfits: string[][]): Promise<boolean[]> {
+  const sources = await loadLayerSources([...new Set(outfits.flat())]);
+  let fromConfig: Map<string, { url: string }> | null = null;
+  const config = () => (fromConfig ??= getTextureMap(playServiceUrl()));
+  return outfits.map((textureIds) => isStandardOutfit(textureIds, sources, config));
+}
+
+/** Whether every part of one outfit is allowed in every world (see `outfitsAllowedEverywhere`). */
 export async function outfitAllowedEverywhere(textureIds: string[]): Promise<boolean> {
-  if (textureIds.length === 0) return true;
-  const sources = await loadLayerSources(textureIds);
-  const config = getTextureMap(playServiceUrl());
-  return textureIds.every((id) => sources.platform.has(id) || config.has(id));
+  return (await outfitsAllowedEverywhere([textureIds]))[0];
 }
 
 /** An outfit as { id, url } layers, or null when one of its parts can't be found (a body without a head, or the reverse). */
@@ -98,11 +108,11 @@ function drawOutfit(textureIds: string[], catalog: Map<string, string>, config: 
 
 /**
  * The one rule for which outfit of a person to draw, for everyone who draws a Woka: the outfit to show for the place
- * you are looking from.
- *  - Inside a world (`worldId`): the outfit they saved for that world.
- *  - They have none saved for that world: their everywhere outfit (below).
- *  - Outside any world: their latest outfit made only of parts allowed in every world, meaning parts of an active
- *    outfit set scoped to the platform, or in the game's own list (config/woka.json).
+ * you are looking from. It matches what the game puts on them when they enter.
+ *  - Inside a world (`worldId`): the costume they saved for that world, when it draws. A costume is an outfit with a
+ *    part only a universe's or a world's own set has.
+ *  - Otherwise, and outside any world: their everyday outfit, the latest outfit made only of standard parts, meaning
+ *    parts of an active outfit set scoped to the platform, or in the game's own list (config/woka.json).
  * Someone with no such outfit is left out of the result; callers draw the default Woka. Only the picture is chosen
  * here: who may wear what, and the check on room entry, are not touched, and nothing is saved.
  */
@@ -131,7 +141,8 @@ export async function wokaOutfitsFor(userIds: string[], worldId?: string | null)
 
   for (const [userId, outfits] of byUser) {
     const saved = worldId ? outfits.find((outfit) => outfit.worldId === worldId) : undefined;
-    let picked = saved ? drawOutfit(saved.textureIds, sources.any, config) : null;
+    // Only a costume stays in its world; a standard outfit saved here gives way to their everyday one.
+    let picked = saved && !isStandardOutfit(saved.textureIds, sources, config) ? drawOutfit(saved.textureIds, sources.any, config) : null;
     if (!picked) {
       for (const outfit of outfits) {
         picked = drawOutfit(outfit.textureIds, sources.platform, config);

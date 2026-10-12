@@ -32,7 +32,7 @@ jest.mock('@/lib/db', () => ({
   },
 }));
 
-import { defaultWoka, outfitAllowedEverywhere, withWokas, wokaLayersFor, wokaLayersForMany, wokaTexturesForMany } from '@/lib/woka-avatar';
+import { defaultWoka, outfitAllowedEverywhere, outfitsAllowedEverywhere, withWokas, wokaLayersFor, wokaLayersForMany, wokaTexturesForMany } from '@/lib/woka-avatar';
 
 describe('Wokas for avatars', () => {
   beforeEach(() => {
@@ -122,6 +122,18 @@ describe('Wokas for avatars', () => {
       for (const id of ['p', 'q', 'r']) expect(wokas.get(id)).toEqual(defaultWoka(id));
     });
 
+    it('inside a world, draws their everyday outfit, not an older standard one saved there; a costume saved there stays', async () => {
+      save('p', WORLD_A, 'male1'); // newest, standard
+      save('p', WORLD_B, 'signed'); // older, standard, saved for the world looked from
+      expect((await wokaLayersForMany(['p'], WORLD_B)).get('p')?.[0]).toMatch(/Male%2001-1\.png$|Male 01-1\.png$/);
+      expect((await wokaLayersForMany(['p'])).get('p')?.[0]).toMatch(/Male%2001-1\.png$|Male 01-1\.png$/);
+      mockAvatars.length = 0;
+      save('p', WORLD_A, 'male1'); // newest, standard
+      save('p', WORLD_B, 'costume'); // a costume saved for the world looked from
+      expect((await wokaLayersForMany(['p'], WORLD_B)).get('p')).toEqual(costume);
+      expect((await wokaLayersForMany(['p'], WORLD_A)).get('p')?.[0]).toMatch(/Male%2001-1\.png$|Male 01-1\.png$/);
+    });
+
     it('draws the platform picture of a part that is also in a world\'s own set', async () => {
       save('p', WORLD_A, 'both');
       expect((await wokaLayersForMany(['p'])).get('p')).toEqual(['https://cdn.example.com/w/both-platform.png']);
@@ -164,6 +176,10 @@ describe('Wokas for avatars', () => {
   });
 
   describe('outfitAllowedEverywhere', () => {
+    it('answers for several outfits in one pass', async () => {
+      expect(await outfitsAllowedEverywhere([['signed'], ['costume'], ['signed', 'costume'], ['male1']])).toEqual([true, false, false, true]);
+    });
+
     it('is true for parts of a platform set and of the game\'s own list, mixed or alone', async () => {
       expect(await outfitAllowedEverywhere(['signed'])).toBe(true);
       expect(await outfitAllowedEverywhere(['male1'])).toBe(true);
