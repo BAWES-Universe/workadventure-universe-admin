@@ -33,7 +33,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   process.env.PLAY_URL = 'http://play.test';
   db.world.findFirst.mockResolvedValue({ id: 'world-1' });
-  db.avatarLayer.findMany.mockResolvedValue([{ textureId: 'hat1', url: 'https://cdn.test/hat1.png' }]);
+  db.avatarLayer.findMany.mockResolvedValue([{ textureId: 'hat1', url: 'https://cdn.test/hat1.png', avatarSet: { lifecycle: 'active', scopes: [{ scopeType: 'world' }] } }]);
 });
 
 describe('GET /api/chat/members', () => {

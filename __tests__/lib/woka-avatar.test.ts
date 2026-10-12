@@ -11,6 +11,7 @@ const mockLayers = [
   { textureId: 'signed', url: 'https://cdn.example.com/w/a.png?sig=abc&v=2', avatarSet: platform },
   { textureId: 'costume', url: 'https://cdn.example.com/w/costume.png', avatarSet: { lifecycle: 'active', scopes: [{ scopeType: 'world' }] } },
   { textureId: 'uni', url: 'https://cdn.example.com/w/uni.png', avatarSet: { lifecycle: 'active', scopes: [{ scopeType: 'universe' }] } },
+  { textureId: 'archivedcostume', url: 'https://cdn.example.com/w/archived.png', avatarSet: { lifecycle: 'archived', scopes: [{ scopeType: 'world' }] } },
   { textureId: 'draftpart', url: 'https://cdn.example.com/w/draft.png', avatarSet: { lifecycle: 'draft', scopes: [{ scopeType: 'platform' }] } },
   // In a world's set and a platform set under the same id: the platform picture is the one for everyone.
   { textureId: 'both', url: 'https://cdn.example.com/w/both-world.png', avatarSet: { lifecycle: 'active', scopes: [{ scopeType: 'world' }] } },
@@ -32,7 +33,7 @@ jest.mock('@/lib/db', () => ({
   },
 }));
 
-import { defaultWoka, withWokas, wokaLayersFor, wokaLayersForMany, wokaTexturesForMany } from '@/lib/woka-avatar';
+import { defaultWoka, outfitAllowedEverywhere, outfitsAllowedEverywhere, withWokas, wokaLayersFor, wokaLayersForMany, wokaTexturesForMany } from '@/lib/woka-avatar';
 
 describe('Wokas for avatars', () => {
   beforeEach(() => {
@@ -122,6 +123,24 @@ describe('Wokas for avatars', () => {
       for (const id of ['p', 'q', 'r']) expect(wokas.get(id)).toEqual(defaultWoka(id));
     });
 
+    it('inside a world, draws their everyday outfit, not an older standard one saved there; a costume saved there stays', async () => {
+      save('p', WORLD_A, 'male1'); // newest, standard
+      save('p', WORLD_B, 'signed'); // older, standard, saved for the world looked from
+      expect((await wokaLayersForMany(['p'], WORLD_B)).get('p')?.[0]).toMatch(/Male%2001-1\.png$|Male 01-1\.png$/);
+      expect((await wokaLayersForMany(['p'])).get('p')?.[0]).toMatch(/Male%2001-1\.png$|Male 01-1\.png$/);
+      mockAvatars.length = 0;
+      save('p', WORLD_A, 'male1'); // newest, standard
+      save('p', WORLD_B, 'costume'); // a costume saved for the world looked from
+      expect((await wokaLayersForMany(['p'], WORLD_B)).get('p')).toEqual(costume);
+      expect((await wokaLayersForMany(['p'], WORLD_A)).get('p')?.[0]).toMatch(/Male%2001-1\.png$|Male 01-1\.png$/);
+    });
+
+    it('does not draw a costume whose set was archived: the everyday outfit, as the game puts on them', async () => {
+      save('p', WORLD_A, 'male1'); // newest, standard
+      save('p', WORLD_B, 'archivedcostume'); // saved for the world looked from, but its set was archived
+      expect((await wokaLayersForMany(['p'], WORLD_B)).get('p')?.[0]).toMatch(/Male%2001-1\.png$|Male 01-1\.png$/);
+    });
+
     it('draws the platform picture of a part that is also in a world\'s own set', async () => {
       save('p', WORLD_A, 'both');
       expect((await wokaLayersForMany(['p'])).get('p')).toEqual(['https://cdn.example.com/w/both-platform.png']);
@@ -160,6 +179,28 @@ describe('Wokas for avatars', () => {
       const wokas = await wokaLayersForMany(['a', 'b'], WORLD_A);
       expect(wokas.get('a')).toEqual(costume);
       expect(wokas.get('b')).toEqual(signed);
+    });
+  });
+
+  describe('outfitAllowedEverywhere', () => {
+    it('answers for several outfits in one pass', async () => {
+      expect(await outfitsAllowedEverywhere([['signed'], ['costume'], ['signed', 'costume'], ['male1']])).toEqual([true, false, false, true]);
+    });
+
+    it('is true for parts of a platform set and of the game\'s own list, mixed or alone', async () => {
+      expect(await outfitAllowedEverywhere(['signed'])).toBe(true);
+      expect(await outfitAllowedEverywhere(['male1'])).toBe(true);
+      expect(await outfitAllowedEverywhere(['signed', 'male1'])).toBe(true);
+      expect(await outfitAllowedEverywhere(['both'])).toBe(true);
+      expect(await outfitAllowedEverywhere([])).toBe(true);
+    });
+
+    it('is false when any part is only in a world\'s or a universe\'s own set, a draft set, or unknown', async () => {
+      expect(await outfitAllowedEverywhere(['costume'])).toBe(false);
+      expect(await outfitAllowedEverywhere(['uni'])).toBe(false);
+      expect(await outfitAllowedEverywhere(['signed', 'costume'])).toBe(false);
+      expect(await outfitAllowedEverywhere(['draftpart'])).toBe(false);
+      expect(await outfitAllowedEverywhere(['no-such-layer'])).toBe(false);
     });
   });
 });
