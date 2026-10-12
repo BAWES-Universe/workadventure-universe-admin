@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import * as Sentry from '@sentry/nextjs';
 import { requireAuth, getClientIp } from '@/lib/auth';
 import { parsePlayUri } from '@/lib/utils';
 import { authenticateRequest } from '@/lib/oidc';
@@ -173,6 +174,12 @@ export async function GET(request: NextRequest) {
         userEmail = user.email || userEmail;
       }
       
+      // An account that joins with an access token we could not check is answered as a guest (its per-world Woka, or the
+      // one the game sent), not with the Woka it wears. Say so, so it can be seen when a player gets the wrong Woka.
+      if (hasAccessToken && !isAuthenticatedFromToken && user && !user.isGuest && !isBotIdentifier(finalUuid)) {
+        Sentry.captureMessage('Room access: an account joined with an access token Orbit could not verify, so it was answered as a guest', 'warning');
+      }
+
       // Find world and room
       const worldData = await prisma.world.findFirst({
         where: {
@@ -422,6 +429,7 @@ export async function GET(request: NextRequest) {
         } catch (error) {
           // Log but don't fail the request: the logic above still applies
           console.error('Failed to look up the Woka they wear:', error);
+          Sentry.captureException(error);
         }
       }
 
