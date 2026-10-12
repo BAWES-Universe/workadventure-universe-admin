@@ -83,6 +83,30 @@ describe('POST /api/save-textures', () => {
     expect(outfitsOf()).toEqual(['std-y']);
   });
 
+  it('saves a new Woka picked on two devices at once: the second save hits the unique key, runs again, and leaves one row', async () => {
+    // the other device's save lands between this save's look-up and its insert
+    fakeDb.userOutfit.upsert.mockImplementationOnce(async () => {
+      addOutfit('u1', ['std-x'], minutesAgo(0));
+      throw Object.assign(new Error('Unique constraint failed on the fields: (`userId`,`outfitKey`)'), { code: 'P2002' });
+    });
+    expect((await pick('std-x')).status).toBe(204);
+    expect(outfitsOf()).toEqual(['std-x']);
+    expect(fakeDb.userOutfit.upsert).toHaveBeenCalledTimes(2);
+  });
+
+  it('passes on any other save error unchanged and does not run again', async () => {
+    fakeDb.userOutfit.upsert.mockRejectedValueOnce(new Error('connection lost'));
+    expect((await pick('std-x')).status).toBe(500);
+    expect(fakeDb.userOutfit.upsert).toHaveBeenCalledTimes(1);
+  });
+
+  it('runs again only once when the conflict repeats', async () => {
+    const conflict = () => Object.assign(new Error('Unique constraint failed'), { code: 'P2002' });
+    fakeDb.userOutfit.upsert.mockRejectedValueOnce(conflict()).mockRejectedValueOnce(conflict());
+    expect((await pick('std-x')).status).toBe(500);
+    expect(fakeDb.userOutfit.upsert).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps an outfit swapped after five minutes', async () => {
     addOutfit('u1', ['std-x'], minutesAgo(6));
     await pick('std-y');
