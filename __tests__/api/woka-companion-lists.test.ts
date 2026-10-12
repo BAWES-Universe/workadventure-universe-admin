@@ -16,7 +16,7 @@ import { companionWearableHere } from '@/lib/woka-wearable';
 const EMAIL = 'pat@example.test';
 const DAY = 24 * 3600 * 1000;
 
-async function call(handler: typeof wokaList, who: string | null, world = 'world-a') {
+async function call(handler: (request: NextRequest) => Promise<Response>, who: string | null, world = 'world-a') {
   const roomUrl = `http://play.test/@/uni/${world}/room`;
   const person = who ? `&uuid=${encodeURIComponent(who)}` : '';
   const request = new NextRequest(`http://localhost/api/x?roomUrl=${encodeURIComponent(roomUrl)}${person}`, {
