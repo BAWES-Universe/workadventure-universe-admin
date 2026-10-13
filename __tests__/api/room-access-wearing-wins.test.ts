@@ -4,6 +4,7 @@
  * (the wearable check and the outfit history) over an in-memory catalog.
  */
 import { NextRequest } from 'next/server';
+import * as Sentry from '@sentry/nextjs';
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 jest.mock('@/lib/db', () => ({ prisma: require('../helpers/fake-db').fakeDb }));
@@ -19,6 +20,7 @@ jest.mock('@/lib/avatar-catalog-validator', () => ({
     id ? { valid: true, texture: { id, url: `https://play.test/${id}.png` } } : { valid: true, texture: null },
   ),
 }));
+jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn(), captureMessage: jest.fn() }));
 jest.mock('@/lib/super-admin', () => ({ isSuperAdmin: () => false }));
 
 import { addOutfit, addSet, fakeDb, resetFakeDb, state } from '../helpers/fake-db';
@@ -210,14 +212,87 @@ describe('GET /api/room/access, your Woka stays yours', () => {
     expect(state.users[0].companionTextureId).toBe('cape-pet');
   });
 
-  it('still lets them in when the lookup fails, with the logic guests get', async () => {
-    addOutfit('u1', ['std-x'], minutesAgo(30));
-    fakeDb.userOutfit.findFirst.mockRejectedValueOnce(new Error('db down'));
-    const error = jest.spyOn(console, 'error').mockImplementation(() => undefined);
-    const body = await enter(PERSON.uuid);
-    expect(body.status).toBe('ok');
-    expect(ids(body)).toEqual(['sent1']);
-    error.mockRestore();
+  // Account Woka X, the Woka saved for this world Y, and the one the game sent Z: none of Y or Z may be handed out
+  // when the account's own Woka cannot be looked up or checked, because they never passed the members-only and grant checks.
+  describe('when the account Woka cannot be looked up or checked', () => {
+    let consoleError: jest.SpyInstance;
+    beforeEach(() => {
+      addOutfit('u1', ['std-x'], minutesAgo(30));
+      state.avatars.push({ id: 'a1', userId: 'u1', worldId: 'world-b', textureIds: ['std-y'], companionTextureId: null });
+      consoleError = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    });
+    afterEach(() => consoleError.mockRestore());
+
+    const expectRetryScreen = (body: Record<string, unknown>) => {
+      expect(body).toEqual({
+        status: 'error',
+        type: 'retry',
+        code: 'WOKA_LOOKUP_FAILED',
+        title: expect.any(String),
+        subtitle: "We couldn't load your Woka. Trying again.",
+        details: expect.any(String),
+        buttonTitle: 'Retry',
+        timeToRetry: expect.any(Number),
+        canRetryManual: true,
+      });
+      expect(body.timeToRetry as number).toBeGreaterThan(0);
+      // no Woka, no companion, no account ids
+      expect(JSON.stringify(body)).not.toMatch(/std-|characterTexture|companion|person-uuid|u1/i);
+    };
+    const nothingWritten = () => {
+      expect(outfitsOf()).toEqual(['std-x']);
+      expect(state.avatars).toHaveLength(1);
+      expect(state.avatars[0]).toMatchObject({ textureIds: ['std-y'] });
+      expect(state.users[0].companionTextureId).toBeNull();
+      expect(fakeDb.user.updateMany).not.toHaveBeenCalled();
+    };
+
+    it('answers the retry screen, not Y or Z, when the outfit lookup fails', async () => {
+      fakeDb.userOutfit.findFirst.mockRejectedValueOnce(new Error('db down'));
+      const body = await enter(PERSON.uuid, { sent: ['std-z'] });
+      expectRetryScreen(body);
+      nothingWritten();
+    });
+
+    it('answers the retry screen when the wearable check fails', async () => {
+      fakeDb.userAvatarGrant.findMany.mockRejectedValueOnce(new Error('db down'));
+      const body = await enter(PERSON.uuid, { sent: ['std-z'] });
+      expectRetryScreen(body);
+      nothingWritten();
+    });
+
+    it('answers the retry screen when the companion check fails', async () => {
+      state.users[0].companionTextureId = 'dog1';
+      // the first check (the Woka) passes, the second (the companion) fails
+      fakeDb.userAvatarGrant.findMany.mockResolvedValueOnce([]).mockRejectedValueOnce(new Error('db down'));
+      const body = await enter(PERSON.uuid, { sent: ['std-z'] });
+      expectRetryScreen(body);
+      expect(outfitsOf()).toEqual(['std-x']);
+      expect(state.users[0].companionTextureId).toBe('dog1');
+    });
+
+    it('answers the retry screen on a first entry whose pick cannot be saved, and nothing is worn', async () => {
+      state.outfits.length = 0;
+      fakeDb.userOutfit.upsert.mockRejectedValueOnce(new Error('user_outfits does not exist'));
+      const body = await enter(PERSON.uuid, { sent: ['std-x'] });
+      expectRetryScreen(body);
+      expect(state.outfits).toEqual([]);
+      expect(state.users[0].companionTextureId).toBeNull();
+    });
+
+    it('tells Sentry', async () => {
+      fakeDb.userOutfit.findFirst.mockRejectedValueOnce(new Error('db down'));
+      await enter(PERSON.uuid);
+      expect(Sentry.captureException).toHaveBeenCalledTimes(1);
+    });
+
+    it('works again on the next entry once the lookup recovers', async () => {
+      fakeDb.userOutfit.findFirst.mockRejectedValueOnce(new Error('db down'));
+      expectRetryScreen(await enter(PERSON.uuid));
+      const body = await enter(PERSON.uuid);
+      expect(body.status).toBe('ok');
+      expect(ids(body)).toEqual(['std-x']);
+    });
   });
 
   it('leaves guests as they were', async () => {

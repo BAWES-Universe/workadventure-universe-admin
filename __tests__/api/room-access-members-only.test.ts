@@ -18,6 +18,8 @@ jest.mock('@/lib/db', () => ({
   },
 }));
 jest.mock('@/lib/oidc', () => ({ authenticateRequest: jest.fn().mockResolvedValue({ isAuthenticated: false }) }));
+// The person's current Woka is not what these tests are about: none on record, so entry goes ahead with what the game sent
+jest.mock('@/lib/user-outfits', () => ({ currentOutfit: jest.fn().mockResolvedValue(null), recordOutfitPick: jest.fn().mockResolvedValue(undefined) }));
 jest.mock('@/lib/discord', () => ({ notifyRoomAccess: jest.fn().mockResolvedValue(undefined) }));
 jest.mock('@/lib/avatar-catalog-validator', () => ({
   resolveTextureUrls: jest.fn().mockResolvedValue({ valid: true, textures: [] }),
