@@ -72,23 +72,27 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ code: 'WOKA_NOT_ALLOWED' }, { status: 422 })
     }
 
-    await prisma.user.update({ where: { id: user.id }, data: { companionTextureId: texture } })
+    // One transaction: if the per-world row can't be written, the account's companion is not changed either, so the
+    // game's "your old companion was kept" is true after a refresh and on another device.
+    await prisma.$transaction(async (tx) => {
+      await tx.user.update({ where: { id: user.id }, data: { companionTextureId: texture } })
 
-    // Upsert user_avatars record (unique constraint on userId + worldId)
-    // texture can be null to clear the companion
-    await prisma.userAvatar.upsert({
-      where: {
-        userId_worldId: { userId: user.id, worldId },
-      },
-      create: {
-        userId: user.id,
-        worldId,
-        companionTextureId: texture,
-        textureIds: [], // required field, use empty array if no textures saved yet
-      },
-      update: {
-        companionTextureId: texture,
-      },
+      // Upsert user_avatars record (unique constraint on userId + worldId)
+      // texture can be null to clear the companion
+      await tx.userAvatar.upsert({
+        where: {
+          userId_worldId: { userId: user.id, worldId },
+        },
+        create: {
+          userId: user.id,
+          worldId,
+          companionTextureId: texture,
+          textureIds: [], // required field, use empty array if no textures saved yet
+        },
+        update: {
+          companionTextureId: texture,
+        },
+      })
     })
 
     return new NextResponse(null, { status: 204 })

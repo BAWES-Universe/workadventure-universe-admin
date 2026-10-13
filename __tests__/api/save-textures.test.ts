@@ -191,4 +191,54 @@ describe('POST /api/save-companion-texture', () => {
     expect((await post(saveCompanion, { texture: null })).status).toBe(204);
     expect(state.users[0].companionTextureId).toBeNull();
   });
+
+  // Prisma rolls a transaction back when it throws; the in-memory database does not, so this stand-in does it for the
+  // two tables a companion save writes. A route that does not use $transaction is not rolled back, and fails below.
+  async function rollsBackOnError<T>(run: () => Promise<T>) {
+    const original = fakeDb.$transaction.getMockImplementation();
+    fakeDb.$transaction.mockImplementation(async (work: (tx: unknown) => unknown) => {
+      const before = { users: state.users.map((row) => ({ ...row })), avatars: state.avatars.map((row) => ({ ...row })) };
+      try {
+        return await work(fakeDb);
+      } catch (error) {
+        state.users = before.users;
+        state.avatars = before.avatars;
+        throw error;
+      }
+    });
+    try {
+      return await run();
+    } finally {
+      fakeDb.$transaction.mockImplementation(original);
+    }
+  }
+
+  describe.each([
+    ['a pick', 'cape-pet', 'world-c'],
+    ['"Go without one"', null, 'world-a'],
+  ])('when a write fails during %s', (_label, texture, world) => {
+    beforeEach(async () => {
+      // They already wear a dog, saved in world-a
+      expect((await post(saveCompanion, { texture: 'dog1' })).status).toBe(204);
+    });
+    const unchanged = () => {
+      expect(state.users[0].companionTextureId).toBe('dog1');
+      expect(state.avatars).toHaveLength(1);
+      expect(state.avatars[0]).toMatchObject({ worldId: 'world-a', companionTextureId: 'dog1' });
+    };
+
+    it('the per-world write failing: answers 500 and the account companion is not changed', async () => {
+      fakeDb.userAvatar.upsert.mockRejectedValueOnce(new Error('database went away'));
+      const result = await rollsBackOnError(() => post(saveCompanion, { texture }, world));
+      expect(result.status).toBe(500);
+      unchanged();
+    });
+
+    it('the account write failing: answers 500 and no per-world row is written', async () => {
+      fakeDb.user.update.mockRejectedValueOnce(new Error('database went away'));
+      const result = await rollsBackOnError(() => post(saveCompanion, { texture }, world));
+      expect(result.status).toBe(500);
+      unchanged();
+    });
+  });
 });
