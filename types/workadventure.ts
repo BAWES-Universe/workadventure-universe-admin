@@ -174,6 +174,14 @@ export interface ErrorApiData {
   image?: string;
 }
 
+/** The game's waiting screen: it tries again by itself after timeToRetry (ms) and, if canRetryManual, shows a button. */
+export interface ErrorApiRetryData extends ErrorApiData {
+  type: "retry";
+  buttonTitle?: string | null;
+  timeToRetry: number;
+  canRetryManual: boolean;
+}
+
 export interface ErrorApiRedirectData extends ErrorApiData {
   type: "redirect";
   redirectUrl: string;

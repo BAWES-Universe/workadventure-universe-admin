@@ -12,7 +12,7 @@ import { companionWearableHere, wearableHere } from '@/lib/woka-wearable';
 import { canSeeRoom } from '@/lib/room-visibility';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { bansCoveringWorld } from '@/lib/moderation';
-import type { FetchMemberDataByUuidSuccessResponse, ErrorApiData, CompanionDetail } from '@/types/workadventure';
+import type { FetchMemberDataByUuidSuccessResponse, ErrorApiData, ErrorApiRetryData, CompanionDetail } from '@/types/workadventure';
 
 export async function GET(request: NextRequest) {
   try {
@@ -430,9 +430,25 @@ export async function GET(request: NextRequest) {
           accountTextureIds = current?.textureIds ?? (firstPick && worn.valid ? wear : null);
           ownCompanion = companion;
         } catch (error) {
-          // Log but don't fail the request: the logic above still applies
+          // A signed-in person is never handed a Woka or companion that did not pass the checks above: the Woka saved
+          // for this world, or the one the game sent, was only checked against the catalog, not who may wear it, and
+          // the game keeps whatever comes back as their Woka on the device. So the game shows its retry screen
+          // instead, and nothing is saved or sent. Answered with 200 so the game shows it (it only reads error bodies
+          // on success). Guests and bots do not come through here.
           console.error('Failed to look up the Woka they wear:', error);
           Sentry.captureException(error);
+          const retry: ErrorApiRetryData = {
+            status: "error",
+            type: "retry",
+            title: "Couldn't load your Woka",
+            subtitle: "We couldn't load your Woka. Trying again.",
+            code: "WOKA_LOOKUP_FAILED",
+            details: "This usually clears up in a few seconds.",
+            buttonTitle: "Retry",
+            timeToRetry: 5000,
+            canRetryManual: true,
+          };
+          return NextResponse.json(retry);
         }
       }
 
