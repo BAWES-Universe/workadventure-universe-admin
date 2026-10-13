@@ -336,8 +336,8 @@ function WorldDetail({ view }: { view: WorldView }) {
           context={
             <InContext
               parts={[
-                { label: world.universe.name, href: `/admin/universes/${world.universe.id}` },
-                { label: world.name, href: `/admin/worlds/${id}` },
+                { label: world.universe.name, href: `/admin/universes/${world.universe.id}`, kind: 'universe' },
+                { label: world.name, href: `/admin/worlds/${id}`, kind: 'world' },
               ]}
             />
           }

@@ -5,6 +5,7 @@ import { Pencil, Plus } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { UNIVERSE_COLOURS } from '@/lib/universe-colour';
 import {
+  Context,
   EmptyCard,
   EntityCard,
   EntityRow,
@@ -14,6 +15,7 @@ import {
   KIND_LABEL,
   KindIcon,
   PageHeader,
+  Place,
   RolePills,
   SectionHeader,
   SettingSwitch,
@@ -22,6 +24,7 @@ import {
   StatusPill,
   VisitLine,
   count,
+  countPlace,
   type Kind,
 } from '../components/ds';
 import styles from './style.module.css';
@@ -136,21 +139,21 @@ export default function StylePage() {
           kind="universe"
           universeId="u-1"
           title="BAWES"
-          context={<StatLine items={[count(2, 'world'), count(18, 'room')]} />}
+          context={<StatLine items={[countPlace('world', 2, 'world'), countPlace('room', 18, 'room')]} />}
           aside={<RolePills roles={['owner']} />}
         />
         <EntityRow
           href="#"
           kind="world"
           title="Office"
-          context={<StatLine items={['BAWES', count(3, 'room'), count(18, 'member')]} />}
+          context={<StatLine items={[<Place key="u" kind="universe" label="BAWES" />, countPlace('room', 3, 'room'), countPlace('people', 18, 'member')]} />}
           aside={<RolePills roles={['admin']} />}
         />
         <EntityRow
           href="#"
           kind="room"
           title="Headquarters"
-          context={<StatLine items={['BAWES › Office']} />}
+          context={<Context parts={[{ label: 'BAWES', kind: 'universe' }, { label: 'Office', kind: 'world' }]} />}
           meta={<VisitLine you={minutesAgo(1440)} latest={minutesAgo(7)} />}
         />
       </section>
@@ -165,13 +168,13 @@ export default function StylePage() {
             title="Plugn"
             pills={<StatusPill status="private" />}
             description="A private universe for the Plugn product team."
-            meta={<StatLine items={[count(1, 'world'), count(7, 'room'), count(1284, 'access', 'accesses')]} />}
+            meta={<StatLine items={[countPlace('world', 1, 'world'), countPlace('room', 7, 'room'), count(1284, 'access', 'accesses')]} />}
           />
           <EntityCard
             href="#"
             kind="room"
             title="Creative Hub"
-            context={<StatLine items={['BAWES › Campus East']} />}
+            context={<Context parts={[{ label: 'BAWES', kind: 'universe' }, { label: 'Campus East', kind: 'world' }]} />}
             description="Whiteboards and quiet corners for design reviews."
             meta={
               <>

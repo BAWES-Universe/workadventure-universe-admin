@@ -575,9 +575,9 @@ export function RoomDetailPage({ view = 'details' }: { view?: 'details' | 'visit
           context={
             <InContext
               parts={[
-                { label: room.world.universe.name, href: `/admin/universes/${room.world.universe.id}` },
-                { label: room.world.name, href: `/admin/worlds/${room.world.id}` },
-                { label: room.name, href: `/admin/rooms/${id}` },
+                { label: room.world.universe.name, href: `/admin/universes/${room.world.universe.id}`, kind: 'universe' },
+                { label: room.world.name, href: `/admin/worlds/${room.world.id}`, kind: 'world' },
+                { label: room.name, href: `/admin/rooms/${id}`, kind: 'room' },
               ]}
             />
           }

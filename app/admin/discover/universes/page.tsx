@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { EmptyCard, EntityCard, LoadError, LoadingRows, PageHeader, StatLine, StatusPill, VisitLine, count } from '../../components/ds';
+import { EmptyCard, EntityCard, LoadError, LoadingRows, PageHeader, StatLine, StatusPill, VisitLine, countPlace } from '../../components/ds';
 import { Pager, SearchBox } from '../discover-ui';
 import { activityStats } from '@/lib/analytics-peak';
 import { useEntitySummaries } from '../../hooks/use-entity-summaries';
@@ -124,7 +124,7 @@ export default function DiscoverUniversesPage() {
                     <>
                       <StatLine
                         items={[
-                          count(universe._count?.worlds, 'world'),
+                          countPlace('world', universe._count?.worlds, 'world'),
                           ...activityStats(analytics),
                           universe.owner?.name && `by ${universe.owner.name}`,
                         ]}

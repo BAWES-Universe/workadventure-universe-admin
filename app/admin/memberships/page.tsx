@@ -20,12 +20,13 @@ import {
   LoadError,
   LoadingRows,
   PageHeader,
+  Place,
   RolePills,
   SectionHeader,
   StatLine,
   StatusPill,
   VisitLine,
-  count,
+  countPlace,
 } from '../components/ds';
 import { activityStats } from '@/lib/analytics-peak';
 import { useEntitySummaries } from '../hooks/use-entity-summaries';
@@ -256,11 +257,11 @@ export default function MyMembershipsPage() {
                       kind="world"
                       tone="waiting"
                       title={invitation.world.name}
+                      titleAside={<StatusPill status="waiting" />}
                       context={
-                        <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
-                          <StatusPill status="waiting" />
+                        <span className="text-xs text-muted-foreground">
                           {from ? `${from} invited you` : 'You’re invited'}
-                          {invitation.tags.length ? ` as ${invitation.tags.join(', ')}` : ''} · {invitation.world.universe.name}
+                          {invitation.tags.length ? ` as ${invitation.tags.join(', ')}` : ''} · <Place kind="universe" label={invitation.world.universe.name} />
                         </span>
                       }
                       meta={
@@ -341,9 +342,9 @@ export default function MyMembershipsPage() {
                       context={
                         <StatLine
                           items={[
-                            membership.world.universe.name,
-                            count(membership.world._count?.rooms ?? 0, 'room'),
-                            count(membership.world._count?.members ?? 0, 'member'),
+                            <Place key="u" kind="universe" label={membership.world.universe.name} />,
+                            countPlace('room', membership.world._count?.rooms ?? 0, 'room'),
+                            countPlace('people', membership.world._count?.members ?? 0, 'member'),
                             ...activityStats(analytics),
                           ]}
                         />

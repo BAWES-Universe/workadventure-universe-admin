@@ -211,7 +211,7 @@ function NewWorldPageContent() {
         title="New world"
         context={
           selectedUniverse ? (
-            <InContext parts={[{ label: selectedUniverse.name, href: `/admin/universes/${selectedUniverse.id}` }]} />
+            <InContext parts={[{ label: selectedUniverse.name, href: `/admin/universes/${selectedUniverse.id}`, kind: 'universe' }]} />
           ) : (
             <span>A world belongs to a universe and holds its rooms.</span>
           )

@@ -5,7 +5,10 @@ import { Search, X } from 'lucide-react';
 import { useInitialSearch, useSearchInUrl } from '../hooks/use-search-in-url';
 import { useAdminBootstrap } from '../admin-bootstrap-context';
 import {
+  Context,
   EmptyCard,
+  Place,
+  countPlace,
   EntityCard,
   EntityRow,
   LoadError,
@@ -140,7 +143,7 @@ export default function SpacePage() {
                 description={universe.description}
                 meta={
                   <StatLine
-                    items={[count(universe._count?.worlds, 'world'), count(universe._count?.rooms, 'room'), universe.owner?.name && `by ${universe.owner.name}`]}
+                    items={[countPlace('world', universe._count?.worlds, 'world'), countPlace('room', universe._count?.rooms, 'room'), universe.owner?.name && `by ${universe.owner.name}`]}
                   />
                 }
               />
@@ -158,7 +161,7 @@ export default function SpacePage() {
                 href={`/admin/worlds/${world.id}`}
                 kind="world"
                 title={world.name}
-                context={<StatLine items={[world.universe.name, count(world._count?.rooms, 'room'), count(world._count?.members, 'member')]} />}
+                context={<StatLine items={[<Place key="u" kind="universe" label={world.universe.name} />, countPlace('room', world._count?.rooms, 'room'), countPlace('people', world._count?.members, 'member')]} />}
               />
             ))}
           </div>
@@ -174,7 +177,7 @@ export default function SpacePage() {
                 href={`/admin/rooms/${room.id}`}
                 kind="room"
                 title={room.name}
-                context={<StatLine items={[`${room.world.universe.name} › ${room.world.name}`]} />}
+                context={<Context parts={[{ label: room.world.universe.name, kind: 'universe' }, { label: room.world.name, kind: 'world' }]} />}
                 aside={typeof room._count?.favorites === 'number' && room._count.favorites > 0 ? `★ ${room._count.favorites}` : undefined}
               />
             ))}
@@ -195,8 +198,8 @@ export default function SpacePage() {
                 context={
                   <StatLine
                     items={[
-                      person._count?.ownedUniverses ? `Owns ${count(person._count.ownedUniverses, 'universe')}` : null,
-                      person._count?.worldMemberships ? `Member of ${count(person._count.worldMemberships, 'world')}` : null,
+                      person._count?.ownedUniverses ? <Place key="u" kind="universe" label={`Owns ${count(person._count.ownedUniverses, 'universe')}`} /> : null,
+                      person._count?.worldMemberships ? <Place key="w" kind="world" label={`Member of ${count(person._count.worldMemberships, 'world')}`} /> : null,
                     ]}
                   />
                 }

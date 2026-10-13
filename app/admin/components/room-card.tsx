@@ -2,10 +2,11 @@
 
 import Link from 'next/link';
 import { useId } from 'react';
-import { DoorOpen, Star } from 'lucide-react';
+import { Star } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { timeAgo } from '@/lib/time-ago';
 import { formatHour, useRoomAnalytics, wasLastVisitorYou } from '../hooks/use-room-analytics';
+import { NameGlyph, Place } from './ds';
 import styles from './room-card.module.css';
 
 export interface RoomCardRoom {
@@ -94,15 +95,13 @@ export function RoomCard({ room, kind }: { room: RoomCardRoom; kind: Kind }) {
       <div className={cn(styles.place, kind === 'trail' && styles.placeTop)}>
         <div className={styles.placeWords}>
           <p className={styles.coordinates}>
-            <span>{room.universe.name}</span>
+            <Place kind="universe" label={room.universe.name} />
             <span aria-hidden="true">/</span>
-            <span>{room.world.name}</span>
+            <Place kind="world" label={room.world.name} />
             {kind === 'trail' && stars}
           </p>
           <div className={styles.nameRow}>
-            <span className="orbit-kind" data-kind="room" aria-hidden="true">
-              <DoorOpen size={18} />
-            </span>
+            <NameGlyph kind="room" size={22} />
             <h3 id={titleId} className={styles.roomName}>
               {/* The whole card opens the room's page. */}
               <Link href={`/admin/rooms/${room.id}`} className={styles.cardLink}>

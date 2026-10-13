@@ -9,16 +9,18 @@ import { universeColour } from '@/lib/universe-colour';
 import { useAdminBootstrap } from '../admin-bootstrap-context';
 import { isNamed, isRecord, useCollection, type Collection } from '../hooks/use-collection';
 import {
+  Context,
   EmptyCard,
   EntityRow,
-  KindIcon,
   LoadError,
   LoadingRows,
+  NameGlyph,
+  Place,
   RolePills,
   SectionHeader,
   StatLine,
   StatusPill,
-  count,
+  countPlace,
   hueStyle,
 } from './ds';
 import { deriveProgress, getStartedSteps, type GetStartedProgress } from './get-started-steps';
@@ -180,9 +182,9 @@ export default function Yours({
                   context={
                     <StatLine
                       items={[
-                        membership.world.universe.name,
-                        count(membership.world._count?.rooms, 'room'),
-                        count(membership.world._count?.members, 'member'),
+                        <Place key="u" kind="universe" label={membership.world.universe.name} />,
+                        countPlace('room', membership.world._count?.rooms, 'room'),
+                        countPlace('people', membership.world._count?.members, 'member'),
                       ]}
                     />
                   }
@@ -223,7 +225,7 @@ export default function Yours({
                   href={`/admin/rooms/${room.id}`}
                   kind="star"
                   title={room.name}
-                  context={<StatLine items={[`${room.world.universe.name} › ${room.world.name}`]} />}
+                  context={<Context parts={[{ label: room.world.universe.name, kind: 'universe' }, { label: room.world.name, kind: 'world' }]} />}
                 />
               ))}
             </div>
@@ -249,7 +251,6 @@ function UniverseCard({ universe }: { universe: MyUniverse }) {
         <span className={styles.moon} />
       </div>
       <div className={styles.universeTop}>
-        <KindIcon kind="universe" universeId={universe.id} />
         <span className={styles.universePills}>
           <StatusPill status={universe.isPublic ? 'public' : 'private'} />
           {universe.featured && <StatusPill status="featured" />}
@@ -257,9 +258,12 @@ function UniverseCard({ universe }: { universe: MyUniverse }) {
       </div>
       <div className={styles.universeBottom}>
         <div>
-          <h3 className="orbit-display">{universe.name}</h3>
+          <h3 className={`orbit-display ${styles.universeName}`}>
+            <NameGlyph kind="universe" size={22} />
+            {universe.name}
+          </h3>
           {universe.description && <p>{universe.description}</p>}
-          <StatLine items={[count(universe._count?.worlds, 'world'), count(universe._count?.rooms, 'room')]} />
+          <StatLine items={[countPlace('world', universe._count?.worlds, 'world'), countPlace('room', universe._count?.rooms, 'room')]} />
         </div>
         <ArrowUpRight className={styles.cardArrow} size={22} aria-hidden="true" />
       </div>
@@ -319,11 +323,13 @@ function Invitations({
             kind="world"
             tone="waiting"
             title={invitation.world.name}
+            titleAside={<StatusPill status="waiting" />}
             context={
               <span className={styles.invitationLine}>
-                <StatusPill status="waiting" />
-                {from ? `${from} invited you` : 'You’re invited'}
-                {invitation.tags?.length ? ` as ${invitation.tags.join(', ')}` : ''} · {invitation.world.universe.name}
+                <span>
+                  {from ? `${from} invited you` : 'You’re invited'}
+                  {invitation.tags?.length ? ` as ${invitation.tags.join(', ')}` : ''} · <Place kind="universe" label={invitation.world.universe.name} />
+                </span>
               </span>
             }
             trailing={
