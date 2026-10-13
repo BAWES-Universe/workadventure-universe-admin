@@ -212,6 +212,21 @@ describe('GET /api/room/access, your Woka stays yours', () => {
     expect(state.users[0].companionTextureId).toBe('cape-pet');
   });
 
+  it('saves both the Woka and the companion on a normal first entry', async () => {
+    const body = await enter(PERSON.uuid, { sent: ['std-body', 'std-y'], companion: 'dog1' });
+    expect(body.status).toBe('ok');
+    expect(outfitsOf()).toEqual(['std-body|std-y']);
+    expect(state.users[0].companionTextureId).toBe('dog1');
+  });
+
+  it('records the Woka but does not overwrite a companion they already have on first entry', async () => {
+    state.users[0].companionTextureId = 'cape-pet';
+    await enter(PERSON.uuid, { world: 'world-c', sent: ['std-x'], companion: 'dog1' });
+    expect(outfitsOf()).toEqual(['std-x']);
+    expect(state.users[0].companionTextureId).toBe('cape-pet');
+    expect(fakeDb.user.updateMany).not.toHaveBeenCalled();
+  });
+
   // Account Woka X, the Woka saved for this world Y, and the one the game sent Z: none of Y or Z may be handed out
   // when the account's own Woka cannot be looked up or checked, because they never passed the members-only and grant checks.
   describe('when the account Woka cannot be looked up or checked', () => {
@@ -278,6 +293,21 @@ describe('GET /api/room/access, your Woka stays yours', () => {
       expectRetryScreen(body);
       expect(state.outfits).toEqual([]);
       expect(state.users[0].companionTextureId).toBeNull();
+    });
+
+    it('on a first entry whose companion cannot be saved, answers the retry screen, saves neither, and the next entry saves both', async () => {
+      state.outfits.length = 0;
+      fakeDb.user.updateMany.mockRejectedValueOnce(new Error('db down'));
+      expectRetryScreen(await enter(PERSON.uuid, { sent: ['std-body', 'std-y'], companion: 'dog1' }));
+      // the Woka is not left saved without the companion, so the retry is still a first entry
+      expect(state.outfits).toEqual([]);
+      expect(state.users[0].companionTextureId).toBeNull();
+      const body = await enter(PERSON.uuid, { sent: ['std-body', 'std-y'], companion: 'dog1' });
+      expect(body.status).toBe('ok');
+      expect(ids(body)).toEqual(['std-body', 'std-y']);
+      expect(body.companionTexture).toEqual({ id: 'dog1', url: 'https://play.test/dog1.png' });
+      expect(outfitsOf()).toEqual(['std-body|std-y']);
+      expect(state.users[0].companionTextureId).toBe('dog1');
     });
 
     it('tells Sentry', async () => {

@@ -421,9 +421,11 @@ export async function GET(request: NextRequest) {
             }
           }
           if (firstPick && worn.valid) {
-            await recordOutfitPick(user.id, wear as string[]);
+            // The companion goes first: once the Woka is recorded this is no longer a first entry, so a failure between
+            // the two writes must leave the next entry a first entry that finishes the job.
             // Only while they still have none, so a companion picked in the meantime is never overwritten
             if (firstCompanion) await prisma.user.updateMany({ where: { id: user.id, companionTextureId: null }, data: { companionTextureId: firstCompanion } });
+            await recordOutfitPick(user.id, wear as string[]);
           }
           finalTextures = worn.valid ? worn.textures : [];
           isTexturesValid = worn.valid;
