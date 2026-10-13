@@ -103,3 +103,25 @@ a.empty:hover::before { opacity: 1 !important; }
 .settingText { display: grid; gap: 2px; min-width: 0; flex: 1; }
 .settingText strong { font-size: 14px; font-weight: 600; }
 .settingText span { font-size: 12px; line-height: 1.4; color: hsl(var(--muted-foreground)); }
+
+/* A universe, world or room named in a line: small icon in its colour before the name. */
+.place { white-space: nowrap; }
+.place svg { display: inline; vertical-align: middle; position: relative; top: -0.1em; margin-right: 4px; }
+.place[data-kind='people'] svg { color: var(--kind-people-solid); }
+.place[data-kind='universe'] svg { color: var(--kind-universe-solid); }
+.place[data-kind='world'] svg { color: var(--kind-world-solid); }
+.place[data-kind='room'] svg { color: var(--kind-room-solid); }
+
+/* Inline layout: the kind's icon sits on the name's line; the lines under it start at the card's edge. */
+.nameGlyph { flex: none; }
+.nameGlyph[data-kind='universe'] { color: var(--kind-universe-solid); }
+.nameGlyph[data-kind='world'] { color: var(--kind-world-solid); }
+.nameGlyph[data-kind='room'] { color: var(--kind-room-solid); }
+.nameGlyph[data-kind='star'] { color: var(--kind-star-solid); }
+.inlineTitle { display: flex; align-items: center; gap: 8px; }
+/* An invitation on a phone: name and Waiting on one line, who invited you under it, Decline and Accept on their own line. */
+@media (max-width: 640px) {
+  .row[data-tone='waiting'] { flex-wrap: wrap; row-gap: 12px; }
+  .row[data-tone='waiting'] > .rowText { flex: 1 1 0; }
+  .row[data-tone='waiting'] > .trailing { flex: 1 0 100%; justify-content: flex-end; }
+}

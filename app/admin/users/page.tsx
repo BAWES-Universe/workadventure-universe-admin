@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { timeAgo } from '@/lib/time-ago';
-import { EmptyCard, EntityRow, LoadError, LoadingRows, PageHeader, StatLine, count } from '../components/ds';
+import { EmptyCard, EntityRow, LoadError, LoadingRows, PageHeader, Place, StatLine, count } from '../components/ds';
 import { Pager, SearchBox } from '../discover/discover-ui';
 import { WokaAvatar } from '../components/profile-card';
 import { usePagedSearch } from '../hooks/use-paged-search';
@@ -110,8 +110,8 @@ export default function UsersPage() {
               context={
                 <StatLine
                   items={[
-                    user._count.ownedUniverses ? `Owns ${count(user._count.ownedUniverses, 'universe')}` : null,
-                    user._count.worldMemberships ? `Member of ${count(user._count.worldMemberships, 'world')}` : null,
+                    user._count.ownedUniverses ? <Place key="u" kind="universe" label={`Owns ${count(user._count.ownedUniverses, 'universe')}`} /> : null,
+                    user._count.worldMemberships ? <Place key="w" kind="world" label={`Member of ${count(user._count.worldMemberships, 'world')}`} /> : null,
                     count(user.totalAccesses, 'access', 'accesses'),
                   ]}
                 />

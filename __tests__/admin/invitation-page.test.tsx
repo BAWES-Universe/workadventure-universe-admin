@@ -81,7 +81,7 @@ describe('The invitation page', () => {
     routeDetail({ invitation: invitation() });
     renderPage();
     expect(await screen.findByRole('heading', { level: 1, name: 'Studio' })).toBeTruthy();
-    expect(screen.getByText('In Plugn')).toBeTruthy();
+    expect(screen.getByText('Plugn')).toBeTruthy();
     expect(screen.getByText('Waiting')).toBeTruthy();
     expect(screen.getByTestId('invitation-inviter').querySelector('a')?.getAttribute('href')).toBe('/admin/users/u-sara');
     expect(screen.getByText(/invited you 2 days ago/)).toBeTruthy();

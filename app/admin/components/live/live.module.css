@@ -25,7 +25,8 @@
 .place[data-here] { border-color: rgb(134 41 252 / .55); background: linear-gradient(135deg, rgb(134 41 252 / .14), transparent 60%), hsl(var(--card)); }
 .placeTop { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
 .placeText { min-width: 0; flex: 1; }
-.name { font-family: var(--font-display); font-weight: 700; font-size: 16px; letter-spacing: -.01em; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.name { display: flex; align-items: center; gap: 8px; font-family: var(--font-display); font-weight: 700; font-size: 16px; letter-spacing: -.01em; line-height: 1.2; }
+.name > a { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ctx { font-size: 12px; color: hsl(var(--muted-foreground)); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .count { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; white-space: nowrap; }
 .dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 0 3px rgb(34 197 94 / .2); }

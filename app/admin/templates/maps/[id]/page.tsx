@@ -126,7 +126,7 @@ function RoomRow({ room, analytics }: { room: Room; analytics?: RoomAnalytics })
       href={`/admin/rooms/${room.id}`}
       kind="room"
       title={room.name}
-      context={<Context parts={[{ label: room.world.universe.name }, { label: room.world.name }]} />}
+      context={<Context parts={[{ label: room.world.universe.name, kind: 'universe' }, { label: room.world.name, kind: 'world' }]} />}
       meta={
         analytics ? (
           <>

@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { EmptyCard, EntityCard, LoadError, LoadingRows, PageHeader, StatLine, StatusPill, VisitLine, count } from '../../components/ds';
+import { EmptyCard, EntityCard, LoadError, LoadingRows, PageHeader, Place, StatLine, StatusPill, VisitLine, countPlace } from '../../components/ds';
 import { Pager, SearchBox } from '../discover-ui';
 import { activityStats } from '@/lib/analytics-peak';
 import { useEntitySummaries } from '../../hooks/use-entity-summaries';
@@ -45,7 +45,7 @@ function WorldCard({ world, analytics }: { world: World; analytics?: EntitySumma
       href={`/admin/worlds/${world.id}`}
       kind="world"
       title={world.name}
-      context={<StatLine items={[world.universe.name]} />}
+      context={<StatLine items={[<Place key="u" kind="universe" label={world.universe.name} />]} />}
       pills={world.featured ? <StatusPill status="featured" /> : undefined}
       description={world.description}
       aside={stars > 0 ? `★ ${stars}` : undefined}
@@ -53,8 +53,8 @@ function WorldCard({ world, analytics }: { world: World; analytics?: EntitySumma
         <>
           <StatLine
             items={[
-              count(world._count?.rooms ?? 0, 'room'),
-              count(world._count?.members ?? 0, 'member'),
+              countPlace('room', world._count?.rooms ?? 0, 'room'),
+              countPlace('people', world._count?.members ?? 0, 'member'),
               ...activityStats(analytics),
             ]}
           />

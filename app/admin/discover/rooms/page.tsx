@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { EmptyCard, EntityCard, LoadError, LoadingRows, PageHeader, StatLine, VisitLine } from '../../components/ds';
+import { Context, EmptyCard, EntityCard, LoadError, LoadingRows, PageHeader, StatLine, VisitLine } from '../../components/ds';
 import { Pager, SearchBox } from '../discover-ui';
 import { activityStats } from '@/lib/analytics-peak';
 import { useEntitySummaries } from '../../hooks/use-entity-summaries';
@@ -47,7 +47,7 @@ function RoomCard({ room, analytics }: { room: Room; analytics?: EntitySummary }
       href={`/admin/rooms/${room.id}`}
       kind="room"
       title={room.name}
-      context={<StatLine items={[`${room.world.universe.name} › ${room.world.name}`]} />}
+      context={<Context parts={[{ label: room.world.universe.name, kind: 'universe' }, { label: room.world.name, kind: 'world' }]} />}
       description={room.description}
       aside={favorites > 0 ? `★ ${favorites}` : undefined}
       meta={

@@ -30,7 +30,7 @@ import { timeAgo } from '@/lib/time-ago';
 import { activityStats } from '@/lib/analytics-peak';
 import { useEntitySummaries } from '../../hooks/use-entity-summaries';
 import { useHere, useStarToggle, useUniverseRank, useWorldRooms } from '../../hooks/use-place-data';
-import { EmptyCard, EntityCard, EntityRow, Figure, Figures, InContext, KindIcon, LoadError, LoadingRows, PageHeader, RolePills, SectionHeader, SettingSwitch, Settings, StatLine, StatusPill, VisitLine, count } from '../../components/ds';
+import { EmptyCard, EntityCard, EntityRow, Figure, Figures, InContext, KindIcon, LoadError, LoadingRows, PageHeader, Place, RolePills, SectionHeader, SettingSwitch, Settings, StatLine, StatusPill, VisitLine, count } from '../../components/ds';
 import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
 interface Universe {
@@ -311,7 +311,7 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
         <PageHeader
           kind="people"
           title="Visitors"
-          context={<InContext parts={[{ label: universe.name, href: `/admin/universes/${id}` }]} />}
+          context={<InContext parts={[{ label: universe.name, href: `/admin/universes/${id}`, kind: 'universe' }]} />}
           stats={analytics ? <Figures><Figure value={analytics.totalAccesses || 0} label="accesses" /></Figures> : undefined}
         />
       ) : (
@@ -523,19 +523,29 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
                               )}
                             </div>
                             <p className="text-xs text-muted-foreground break-words">
-                              <Link
-                                href={`/admin/worlds/${access.world.id}`}
-                                className="font-medium text-foreground underline decoration-foreground/30 underline-offset-2 hover:decoration-foreground"
-                              >
-                                {access.world.name}
-                              </Link>
+                              <Place
+                                kind="world"
+                                label={
+                                  <Link
+                                    href={`/admin/worlds/${access.world.id}`}
+                                    className="font-medium text-foreground underline decoration-foreground/30 underline-offset-2 hover:decoration-foreground"
+                                  >
+                                    {access.world.name}
+                                  </Link>
+                                }
+                              />
                               <span aria-hidden="true"> › </span>
-                              <Link
-                                href={`/admin/rooms/${access.room.id}`}
-                                className="font-medium text-foreground underline decoration-foreground/30 underline-offset-2 hover:decoration-foreground"
-                              >
-                                {access.room.name}
-                              </Link>
+                              <Place
+                                kind="room"
+                                label={
+                                  <Link
+                                    href={`/admin/rooms/${access.room.id}`}
+                                    className="font-medium text-foreground underline decoration-foreground/30 underline-offset-2 hover:decoration-foreground"
+                                  >
+                                    {access.room.name}
+                                  </Link>
+                                }
+                              />
                               {' · '}
                               {timeAgo(accessDate)}
                             </p>

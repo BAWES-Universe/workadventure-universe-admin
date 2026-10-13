@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { Check, Loader2 } from 'lucide-react';
-import { KindIcon } from '../../components/ds';
+import { KindIcon, Place } from '../../components/ds';
 import { SearchBox } from '../../discover/discover-ui';
 
 export type PlaceType = 'universe' | 'world';
@@ -113,7 +113,13 @@ export function PlaceSearch({
                   <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">
                     <span className="block font-medium">{place.name}</span>
                     <span className="block text-xs text-muted-foreground">
-                      {place.universe?.name ? `In ${place.universe.name} · ` : ''}
+                      {place.universe?.name ? (
+                        <>
+                          In <Place kind="universe" label={place.universe.name} /> ·{' '}
+                        </>
+                      ) : (
+                        ''
+                      )}
                       {place.slug}
                     </span>
                   </span>

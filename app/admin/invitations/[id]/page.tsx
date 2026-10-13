@@ -12,6 +12,7 @@ import {
   LoadError,
   LoadingRows,
   PageHeader,
+  Place,
   RolePill,
   SectionHeader,
   StatLine,
@@ -156,7 +157,11 @@ export default function InvitationPage() {
       <PageHeader
         kind="world"
         title={world.name}
-        context={<span className="text-sm text-muted-foreground">In {world.universe.name}</span>}
+        context={
+          <span className="text-sm text-muted-foreground">
+            In <Place kind="universe" label={world.universe.name} />
+          </span>
+        }
         status={waiting ? <StatusPill status="waiting" /> : undefined}
       />
 

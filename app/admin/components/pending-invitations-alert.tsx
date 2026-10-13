@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { Earth, X } from 'lucide-react';
-import { EntityRow, KindIcon } from './ds';
+import { EntityRow, KindIcon, Place } from './ds';
 import { PersonIcon } from './profile-card';
 import { Button } from '@/components/ui/button';
 import { authenticatedFetch } from '@/lib/client-auth';
@@ -169,7 +169,7 @@ export default function PendingInvitationsAlert() {
               title={invitation.world.name}
               context={
                 <span className="text-sm text-muted-foreground">
-                  From {inviterOf(invitation)} · {invitation.world.universe.name}
+                  From {inviterOf(invitation)} · <Place kind="universe" label={invitation.world.universe.name} />
                 </span>
               }
               testId="pending-invitation-row"
@@ -207,7 +207,7 @@ export default function PendingInvitationsAlert() {
         </span>
       </p>
       <span className={styles.meta}>
-        {invitation.world.universe.name} · as {roleLabel(invitation.tags)}
+        <Place kind="universe" label={invitation.world.universe.name} /> · as {roleLabel(invitation.tags)}
         {invitation.invitedAt && <> · {timeAgo(new Date(invitation.invitedAt))}</>}
       </span>
       {invitation.message && (

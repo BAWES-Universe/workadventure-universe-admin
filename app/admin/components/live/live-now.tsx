@@ -7,7 +7,7 @@ import type { LiveStatus, LivePlace, LiveView } from '@/lib/live-presence';
 import { cn } from '@/lib/utils';
 import { WorkAdventureContext } from '../../workadventure-context';
 import { useLive } from '../../hooks/use-live';
-import { Context, KindIcon, SectionHeader } from '../ds';
+import { Context, NameGlyph, Place, SectionHeader } from '../ds';
 import { WokaAvatar } from '../profile-card';
 import { DoorEnterIcon } from './door-enter-icon';
 import styles from './live.module.css';
@@ -88,15 +88,15 @@ function PlaceCard({ place, friendsOnly = false }: { place: LivePlace; friendsOn
   return (
     <article className={styles.place} data-here={place.here || undefined} data-testid="live-place">
       <div className={styles.placeTop}>
-        <KindIcon kind="room" />
         <div className={styles.placeText}>
           <h3 className={styles.name}>
+            <NameGlyph kind="room" />
             <Link href={`/admin/rooms/${place.roomId}`} className={styles.cardLink}>
               {place.name}
             </Link>
           </h3>
           <div className={styles.ctx}>
-            <Context parts={[{ label: place.universe.name }, { label: place.world.name }]} />
+            <Context parts={[{ label: place.universe.name, kind: 'universe' }, { label: place.world.name, kind: 'world' }]} />
           </div>
         </div>
         <span className={styles.count}>
@@ -138,7 +138,7 @@ function PersonRow({ person, hereRoomId }: { person: Person; hereRoomId: string 
           <span className="sr-only">{STATUS_LABEL[person.status]}</span>
         </strong>
         <div className={styles.where}>
-          {place.name} · {place.universe.name} › {place.world.name}
+          <Place kind="room" label={place.name} /> · <Place kind="universe" label={place.universe.name} /> › <Place kind="world" label={place.world.name} />
         </div>
       </div>
       {place.roomId === hereRoomId ? (

@@ -1,7 +1,7 @@
 'use client';
 
 import { activityStats } from '@/lib/analytics-peak';
-import { EntityCard, StatLine, StatusPill, VisitLine, count } from '../components/ds';
+import { EntityCard, StatLine, StatusPill, VisitLine, countPlace } from '../components/ds';
 import type { EntitySummary } from '../hooks/use-room-analytics';
 
 /** A universe's activity (accesses, peak, last visits), from the shared analytics loader. */
@@ -71,9 +71,9 @@ export function UniverseCard({
         <>
           <StatLine
             items={[
-              count(universe._count?.worlds ?? 0, 'world'),
-              count(universe._count?.rooms ?? 0, 'room'),
-              count(universe._count?.members ?? 0, 'member'),
+              countPlace('world', universe._count?.worlds ?? 0, 'world'),
+              countPlace('room', universe._count?.rooms ?? 0, 'room'),
+              countPlace('people', universe._count?.members ?? 0, 'member'),
               ...activityStats(analytics),
               showOwner && ownerLabel,
             ]}

@@ -582,9 +582,9 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
           bot ? (
             <InContext
               parts={[
-                { label: bot.room.world.universe.name, href: `/admin/universes/${bot.room.world.universe.id}` },
-                { label: bot.room.world.name, href: `/admin/worlds/${bot.room.world.id}` },
-                { label: bot.room.name, href: `/admin/rooms/${bot.room.id}` },
+                { label: bot.room.world.universe.name, href: `/admin/universes/${bot.room.world.universe.id}`, kind: 'universe' },
+                { label: bot.room.world.name, href: `/admin/worlds/${bot.room.world.id}`, kind: 'world' },
+                { label: bot.room.name, href: `/admin/rooms/${bot.room.id}`, kind: 'room' },
               ]}
             />
           ) : (

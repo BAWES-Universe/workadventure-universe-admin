@@ -18,15 +18,18 @@ import {
 import { timeAgo } from '@/lib/time-ago';
 import { useLive } from '../../hooks/use-live';
 import {
+  Context,
   EmptyCard,
   EntityRow,
   LoadingRows,
+  Place,
   RolePills,
   SectionHeader,
   StatLine,
   StatusPill,
   VisitLine,
   count,
+  countPlace,
 } from '../../components/ds';
 import { ProfileActions, ProfileFrame, ProfileLinks, WokaAvatar } from '../../components/profile-card';
 import { inviteInGame, messageInGame, useGameCapability } from '../../components/orbit-bridge';
@@ -647,9 +650,9 @@ export default function UserDetailPage() {
                   context={
                     <StatLine
                       items={[
-                        count(universe._count?.worlds ?? 0, 'world'),
-                        count(universe._count?.rooms ?? 0, 'room'),
-                        count(universe._count?.members ?? 0, 'member'),
+                        countPlace('world', universe._count?.worlds ?? 0, 'world'),
+                        countPlace('room', universe._count?.rooms ?? 0, 'room'),
+                        countPlace('people', universe._count?.members ?? 0, 'member'),
                         analytics && count(analytics.totalAccesses, 'access', 'accesses'),
                       ]}
                     />
@@ -686,9 +689,9 @@ export default function UserDetailPage() {
                   context={
                     <StatLine
                       items={[
-                        membership.world.universe.name,
-                        count(membership.world._count?.rooms ?? 0, 'room'),
-                        count(membership.world._count?.members ?? 0, 'member'),
+                        <Place key="u" kind="universe" label={membership.world.universe.name} />,
+                        countPlace('room', membership.world._count?.rooms ?? 0, 'room'),
+                        countPlace('people', membership.world._count?.members ?? 0, 'member'),
                         analytics && count(analytics.totalAccesses, 'access', 'accesses'),
                       ]}
                     />
@@ -726,9 +729,10 @@ export default function UserDetailPage() {
                 kind="star"
                 title={room.name}
                 context={
-                  <StatLine
-                    items={[`${room.world.universe.name} › ${room.world.name}`, room.favoritedAt && !Number.isNaN(Date.parse(room.favoritedAt)) && `starred ${timeAgo(new Date(room.favoritedAt))}`]}
-                  />
+                  <>
+                    <Context parts={[{ label: room.world.universe.name, kind: 'universe' }, { label: room.world.name, kind: 'world' }]} />
+                    <StatLine items={[room.favoritedAt && !Number.isNaN(Date.parse(room.favoritedAt)) && `starred ${timeAgo(new Date(room.favoritedAt))}`]} />
+                  </>
                 }
                 aside={room.starCount > 0 ? `★ ${room.starCount}` : undefined}
               />
@@ -801,21 +805,36 @@ export default function UserDetailPage() {
                         <li key={access.id} className="grid min-w-0 gap-1 rounded-xl px-3 py-2.5 text-xs hover:bg-foreground/[0.04]">
                           <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-1">
                             <span className="min-w-0 text-sm">
-                              <Link href={`/admin/universes/${access.universe.id}`} className={linkClass}>
-                                {access.universe.name}
-                              </Link>
+                              <Place
+                                kind="universe"
+                                label={
+                                  <Link href={`/admin/universes/${access.universe.id}`} className={linkClass}>
+                                    {access.universe.name}
+                                  </Link>
+                                }
+                              />
                               <span className="text-muted-foreground" aria-hidden="true">
                                 {' › '}
                               </span>
-                              <Link href={`/admin/worlds/${access.world.id}`} className={linkClass}>
-                                {access.world.name}
-                              </Link>
+                              <Place
+                                kind="world"
+                                label={
+                                  <Link href={`/admin/worlds/${access.world.id}`} className={linkClass}>
+                                    {access.world.name}
+                                  </Link>
+                                }
+                              />
                               <span className="text-muted-foreground" aria-hidden="true">
                                 {' › '}
                               </span>
-                              <Link href={`/admin/rooms/${access.room.id}`} className={linkClass}>
-                                {access.room.name}
-                              </Link>
+                              <Place
+                                kind="room"
+                                label={
+                                  <Link href={`/admin/rooms/${access.room.id}`} className={linkClass}>
+                                    {access.room.name}
+                                  </Link>
+                                }
+                              />
                             </span>
                             <span className="shrink-0 text-muted-foreground">{timeAgo(new Date(access.accessedAt))}</span>
                           </div>
