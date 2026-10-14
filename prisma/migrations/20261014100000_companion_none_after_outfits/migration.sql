@@ -6,6 +6,26 @@
 -- newer than every row with a pet, "no companion" was their last choice. A row with no companion but a Woka can also mean
 -- they never chose a companion there, so it is left alone, and so is everyone who picked a companion since: every pick
 -- since 20261012100000 also rewrites that world's row, which makes it the newest.
+--
+-- The people it would change are locked first: a companion save already running finishes before the update, and one that
+-- starts now waits for it. The update is its own statement, so it sees every save finished by then, and never clears a
+-- pet picked a moment ago. Both run in the migration's one transaction.
+SELECT "id" FROM "users"
+WHERE "companion_texture_id" IS NOT NULL
+  AND EXISTS (
+    SELECT 1 FROM "user_avatars" AS "none"
+    WHERE "none"."user_id" = "users"."id"
+      AND "none"."companion_texture_id" IS NULL
+      AND cardinality("none"."texture_ids") = 0
+      AND NOT EXISTS (
+        SELECT 1 FROM "user_avatars" AS "pet"
+        WHERE "pet"."user_id" = "users"."id"
+          AND "pet"."companion_texture_id" IS NOT NULL
+          AND "pet"."updated_at" >= "none"."updated_at"
+      )
+  )
+FOR UPDATE;
+
 UPDATE "users" SET "companion_texture_id" = NULL
 WHERE "companion_texture_id" IS NOT NULL
   AND EXISTS (

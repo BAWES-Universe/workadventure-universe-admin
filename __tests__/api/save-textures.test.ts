@@ -168,6 +168,16 @@ describe('POST /api/save-textures', () => {
       expect(newest()).toBe('std-y');
     });
 
+    it('leaves the world’s row as a newer save for that world wrote it', async () => {
+      const newer = new Date(Date.now() + 60_000); // a save made after this one, already written
+      addOutfit('u1', ['std-z'], newer);
+      state.avatars.push({ id: 'a-newer', userId: 'u1', worldId: 'world-a', textureIds: ['std-z'], outfitUpdatedAt: newer });
+      expect((await pick('std-y')).status).toBe(204);
+      expect(state.avatars).toHaveLength(1);
+      expect(state.avatars[0]).toMatchObject({ textureIds: ['std-z'], outfitUpdatedAt: newer });
+      expect(newest()).toBe('std-z');
+    });
+
     it('locks the person first, so picks for one person run one at a time', async () => {
       await pick('std-x');
       const [strings, userId] = fakeDb.$queryRaw.mock.calls[0];

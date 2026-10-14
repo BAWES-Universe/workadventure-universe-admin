@@ -76,9 +76,13 @@ export async function POST(request: NextRequest) {
     }
 
     // The pick and the older per-world record (user_avatars, kept as before) in one transaction: when either write fails,
-    // neither is saved, so the error the game shows is true for both.
-    await recordOutfitPick(user.id, textures, new Date(), (tx) =>
-      tx.userAvatar.upsert({
+    // neither is saved, so the error the game shows is true for both. A slow save that finishes after a newer one for
+    // the same world leaves that world's row as the newer one wrote it.
+    const now = new Date()
+    await recordOutfitPick(user.id, textures, now, async (tx) => {
+      const saved = await tx.userAvatar.findUnique({ where: { userId_worldId: { userId: user.id, worldId } } })
+      if (saved?.outfitUpdatedAt && saved.outfitUpdatedAt.getTime() > now.getTime()) return
+      await tx.userAvatar.upsert({
         where: {
           userId_worldId: { userId: user.id, worldId },
         },
@@ -86,14 +90,14 @@ export async function POST(request: NextRequest) {
           userId: user.id,
           worldId,
           textureIds: textures,
-          outfitUpdatedAt: new Date(),
+          outfitUpdatedAt: now,
         },
         update: {
           textureIds: textures,
-          outfitUpdatedAt: new Date(),
+          outfitUpdatedAt: now,
         },
       })
-    )
+    })
 
     return new NextResponse(null, { status: 204 })
   } catch (error) {
