@@ -9,9 +9,16 @@ import {
 
 export const runtime = 'nodejs';
 
-function response(body: unknown, status = 200) {
-  const result = NextResponse.json(body, { status });
+function response(request: NextRequest, body: unknown, status = 200) {
+  const result = status === 204 ? new NextResponse(null, { status }) : NextResponse.json(body, { status });
   result.headers.set('Cache-Control', 'no-store');
+  const origin = request.headers.get('origin')?.trim();
+  if (origin && isMobileOrigin(origin)) {
+    result.headers.set('Access-Control-Allow-Origin', origin);
+    result.headers.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    result.headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    result.headers.set('Vary', 'Origin');
+  }
   return result;
 }
 
@@ -33,6 +40,14 @@ function loginExpectedOrigin(request: NextRequest): string {
   return request.nextUrl.origin;
 }
 
+export async function OPTIONS(request: NextRequest) {
+  const origin = request.headers.get('origin')?.trim();
+  if (origin && isMobileOrigin(origin)) {
+    return response(request, {}, 204);
+  }
+  return response(request, { error: 'Cross-origin preflight is not allowed' }, 403);
+}
+
 export async function GET(request: NextRequest) {
   const requestedRedirectUri =
     request.nextUrl.searchParams.get('redirect_uri') ??
@@ -47,10 +62,10 @@ export async function GET(request: NextRequest) {
   });
 
   if (!resolved.valid) {
-    return response({ error: 'Invalid redirect_uri' }, 400);
+    return response(request, { error: 'Invalid redirect_uri' }, 400);
   }
 
-  return response({
+  return response(request, {
     redirectUri: resolved.redirectUri,
     isMobile: resolved.isMobile,
   });
@@ -63,9 +78,9 @@ export async function POST(request: NextRequest) {
     // 500 with a clear message instead of a silent 403.
     const expected = loginExpectedOrigin(request);
     try {
-      if (new URL(origin).origin !== expected) return response({ error: 'Cross-origin login is not allowed' }, 403);
+      if (new URL(origin).origin !== expected) return response(request, { error: 'Cross-origin login is not allowed' }, 403);
     } catch {
-      return response({ error: 'Invalid origin' }, 403);
+      return response(request, { error: 'Invalid origin' }, 403);
     }
   }
 
@@ -85,24 +100,24 @@ export async function POST(request: NextRequest) {
     if (requestedRedirectUri !== null) {
       const fallbackOrigin = process.env.NODE_ENV === 'production' ? '' : request.nextUrl.origin;
       if (!isValidRedirectUri(requestedRedirectUri, fallbackOrigin)) {
-        return response({ error: 'Invalid redirect_uri' }, 400);
+        return response(request, { error: 'Invalid redirect_uri' }, 400);
       }
     }
 
     const accessToken = record && 'accessToken' in record ? record.accessToken : null;
     if (typeof accessToken !== 'string' || !accessToken.trim()) {
-      return response({ error: 'Access token required' }, 400);
+      return response(request, { error: 'Access token required' }, 400);
     }
 
     const session = await exchangeOidcAccessToken(accessToken);
     if (requestedRedirectUri !== null) {
-      return response({ ...session, redirectUri: requestedRedirectUri.trim() });
+      return response(request, { ...session, redirectUri: requestedRedirectUri.trim() });
     }
-    return response(session);
+    return response(request, session);
   } catch (error) {
-    if (error instanceof SyntaxError) return response({ error: 'Invalid JSON body' }, 400);
-    if (error instanceof SessionExchangeError) return response({ error: error.message }, error.status);
+    if (error instanceof SyntaxError) return response(request, { error: 'Invalid JSON body' }, 400);
+    if (error instanceof SessionExchangeError) return response(request, { error: error.message }, error.status);
     console.error('[Login] Session exchange failed:', error);
-    return response({ error: 'Internal server error' }, 500);
+    return response(request, { error: 'Internal server error' }, 500);
   }
 }

@@ -10,11 +10,23 @@ export function middleware(request: NextRequest) {
   response.headers.set('Referrer-Policy', 'no-referrer');
   response.headers.set('X-Content-Type-Options', 'nosniff');
 
-  // Allow mobile app deep-link origin (`bawes://`) to pass through without origin blocking
+  // Allow mobile app deep-link / WebView origins to pass through with CORS headers and preflight support
   const origin = request.headers.get('origin')?.trim();
   if (origin && isMobileOrigin(origin) && request.nextUrl.pathname.startsWith('/api/auth')) {
-    response.headers.set('Access-Control-Allow-Origin', origin);
-    response.headers.set('Vary', 'Origin');
+    const corsHeaders: Record<string, string> = {
+      'Access-Control-Allow-Origin': origin,
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      'Vary': 'Origin',
+      'Referrer-Policy': 'no-referrer',
+      'X-Content-Type-Options': 'nosniff',
+    };
+    if (request.method === 'OPTIONS') {
+      return new NextResponse(null, { status: 204, headers: corsHeaders });
+    }
+    for (const [key, value] of Object.entries(corsHeaders)) {
+      response.headers.set(key, value);
+    }
   }
 
   // Never let old credential-bearing URLs become valid again.

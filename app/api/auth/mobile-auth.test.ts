@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server';
-import { GET as loginGet, POST as loginPost } from '@/app/api/auth/login/route';
+import { GET as loginGet, OPTIONS as loginOptions, POST as loginPost } from '@/app/api/auth/login/route';
 import { OPTIONS as sessionOptions, POST as sessionPost } from '@/app/api/auth/session/route';
 import {
   DEFAULT_MOBILE_REDIRECT_URI,
@@ -188,7 +188,28 @@ describe('Mobile OIDC deep-link support (bawes://callback)', () => {
       expect(postRes.headers.get('access-control-allow-origin')).toBe('bawes://callback');
     });
 
-    it('does not block bawes:// origin in middleware', () => {
+    it('handles CORS preflight OPTIONS and sets Access-Control-Allow-Headers/Methods for mobile origins in middleware and /api/auth/login', async () => {
+      const preflightRes = middleware(
+        new NextRequest('https://orbit.bawes.net/api/auth/login', {
+          method: 'OPTIONS',
+          headers: { Origin: 'bawes://callback' },
+        }),
+      );
+      expect(preflightRes.status).toBe(204);
+      expect(preflightRes.headers.get('access-control-allow-origin')).toBe('bawes://callback');
+      expect(preflightRes.headers.get('access-control-allow-methods')).toBe('GET, POST, OPTIONS');
+      expect(preflightRes.headers.get('access-control-allow-headers')).toBe('Content-Type, Authorization');
+
+      const loginOptRes = await loginOptions(
+        new NextRequest('https://orbit.bawes.net/api/auth/login', {
+          method: 'OPTIONS',
+          headers: { Origin: 'bawes://callback' },
+        }),
+      );
+      expect(loginOptRes.status).toBe(204);
+      expect(loginOptRes.headers.get('access-control-allow-origin')).toBe('bawes://callback');
+      expect(loginOptRes.headers.get('access-control-allow-headers')).toBe('Content-Type, Authorization');
+
       const res = middleware(
         new NextRequest('https://orbit.bawes.net/api/auth/login', {
           method: 'POST',
@@ -197,6 +218,8 @@ describe('Mobile OIDC deep-link support (bawes://callback)', () => {
       );
       expect(res.status).toBe(200);
       expect(res.headers.get('access-control-allow-origin')).toBe('bawes://callback');
+      expect(res.headers.get('access-control-allow-methods')).toBe('GET, POST, OPTIONS');
+      expect(res.headers.get('access-control-allow-headers')).toBe('Content-Type, Authorization');
     });
   });
 });
