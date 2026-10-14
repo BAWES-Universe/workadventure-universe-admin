@@ -9,7 +9,9 @@
 --
 -- The people it would change are locked first: a companion save already running finishes before the update, and one that
 -- starts now waits for it. The update is its own statement, so it sees every save finished by then, and never clears a
--- pet picked a moment ago. Both run in the migration's one transaction.
+-- pet picked a moment ago. Both run in one transaction, so the lock holds until the update is done.
+BEGIN;
+
 SELECT "id" FROM "users"
 WHERE "companion_texture_id" IS NOT NULL
   AND EXISTS (
@@ -40,3 +42,5 @@ WHERE "companion_texture_id" IS NOT NULL
           AND "pet"."updated_at" >= "none"."updated_at"
       )
   );
+
+COMMIT;
