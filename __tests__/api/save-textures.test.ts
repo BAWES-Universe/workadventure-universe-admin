@@ -13,6 +13,7 @@ jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
 import { addOutfit, addSet, fakeDb, resetFakeDb, state } from '../helpers/fake-db';
 import { POST as saveTextures } from '@/app/api/save-textures/route';
 import { POST as saveCompanion } from '@/app/api/save-companion-texture/route';
+import { recordOutfitPick } from '@/lib/user-outfits';
 
 const DAY = 24 * 3600 * 1000;
 const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000);
@@ -137,6 +138,66 @@ describe('POST /api/save-textures', () => {
     await pick('std-x');
     await pick('std-x');
     expect(outfitsOf()).toEqual(['std-x']);
+  });
+
+  describe('a slow pick that finishes after a newer one (two devices, a slow request)', () => {
+    const newest = () => [...state.outfits].sort((a, b) => b.lastWornAt - a.lastWornAt)[0].textureIds.join('|');
+
+    it('does not drop the newer pick as a try-on, and does not go in front of it', async () => {
+      await pick('std-y'); // the later pick, saved first
+      await recordOutfitPick('u1', ['std-x'], minutesAgo(1)); // the earlier pick, finishing now
+      expect(outfitsOf()).toEqual(['std-x', 'std-y']);
+      expect(newest()).toBe('std-y');
+    });
+
+    it('never moves an outfit back in time: X, Y, then X again stays X when the first X finishes last', async () => {
+      addOutfit('u1', ['std-y'], minutesAgo(2));
+      const wornAgainAt = minutesAgo(1);
+      const again = addOutfit('u1', ['std-x'], wornAgainAt, minutesAgo(900)); // X worn again a minute ago
+      await recordOutfitPick('u1', ['std-x'], minutesAgo(3)); // the first X, finishing now
+      expect(again.lastWornAt).toEqual(wornAgainAt);
+      expect(newest()).toBe('std-x');
+    });
+
+    it('moves an older outfit forward to when the slow pick was made, still behind the newest', async () => {
+      const old = addOutfit('u1', ['std-x'], minutesAgo(600));
+      addOutfit('u1', ['std-y'], minutesAgo(1));
+      const madeAt = minutesAgo(3);
+      await recordOutfitPick('u1', ['std-x'], madeAt);
+      expect(old.lastWornAt).toEqual(madeAt);
+      expect(newest()).toBe('std-y');
+    });
+
+    it('locks the person first, so picks for one person run one at a time', async () => {
+      await pick('std-x');
+      const [strings, userId] = fakeDb.$queryRaw.mock.calls[0];
+      expect(strings.join('?')).toContain('FOR UPDATE');
+      expect(userId).toBe('u1');
+      const lockedAt = fakeDb.$queryRaw.mock.invocationCallOrder[0];
+      expect(lockedAt).toBeLessThan(fakeDb.userAvatar.upsert.mock.invocationCallOrder[0]);
+      expect(lockedAt).toBeLessThan(fakeDb.userOutfit.findFirst.mock.invocationCallOrder[0]);
+    });
+  });
+
+  it('saves the world’s row and the pick together: when the pick fails, the world’s row is not changed either', async () => {
+    addOutfit('u1', ['std-x'], minutesAgo(600));
+    await pick('std-x');
+    // Prisma rolls the transaction back when it throws; the in-memory database does not, so this does it here
+    fakeDb.$transaction.mockImplementationOnce(async (work: (tx: unknown) => unknown) => {
+      const before = { avatars: state.avatars.map((row) => ({ ...row })), outfits: state.outfits.map((row) => ({ ...row })) };
+      try {
+        return await work(fakeDb);
+      } catch (error) {
+        state.avatars = before.avatars;
+        state.outfits = before.outfits;
+        throw error;
+      }
+    });
+    fakeDb.userOutfit.upsert.mockRejectedValueOnce(new Error('connection lost'));
+    expect((await pick('std-y')).status).toBe(500);
+    expect(outfitsOf()).toEqual(['std-x']);
+    expect(state.avatars).toHaveLength(1);
+    expect(state.avatars[0]).toMatchObject({ worldId: 'world-a', textureIds: ['std-x'] });
   });
 
   it('removes outfits not worn for 30 days, except the newest', async () => {

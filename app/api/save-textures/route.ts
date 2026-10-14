@@ -4,7 +4,7 @@
  * Called by the WA play server when a user selects their avatar textures.
  * A person wears one Woka everywhere: the last one they pick. The pick is refused (422 WOKA_NOT_ALLOWED, nothing saved)
  * when it can't be worn in the world it is picked in. Otherwise it is recorded in the person's outfits (user_outfits,
- * which holds the Woka they wear now and their Recent list) and kept in user_avatars as before.
+ * which holds the Woka they wear now and their Recent list) and kept in user_avatars as before, in one transaction.
  *
  * Request body: { playUri, userIdentifier, textures: string[] }
  * Auth: ADMIN_API_TOKEN in Authorization header
@@ -75,26 +75,25 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ code: 'WOKA_NOT_ALLOWED' }, { status: 422 })
     }
 
-    // The older per-world record first, then the pick: if this write fails, nothing has changed and the Woka they wear
-    // stays the same (the upsert can safely be repeated; the pick is what changes what they wear).
-    // Upsert user_avatars record (unique constraint on userId + worldId)
-    await prisma.userAvatar.upsert({
-      where: {
-        userId_worldId: { userId: user.id, worldId },
-      },
-      create: {
-        userId: user.id,
-        worldId,
-        textureIds: textures,
-        outfitUpdatedAt: new Date(),
-      },
-      update: {
-        textureIds: textures,
-        outfitUpdatedAt: new Date(),
-      },
-    })
-
-    await recordOutfitPick(user.id, textures)
+    // The pick and the older per-world record (user_avatars, kept as before) in one transaction: when either write fails,
+    // neither is saved, so the error the game shows is true for both.
+    await recordOutfitPick(user.id, textures, new Date(), (tx) =>
+      tx.userAvatar.upsert({
+        where: {
+          userId_worldId: { userId: user.id, worldId },
+        },
+        create: {
+          userId: user.id,
+          worldId,
+          textureIds: textures,
+          outfitUpdatedAt: new Date(),
+        },
+        update: {
+          textureIds: textures,
+          outfitUpdatedAt: new Date(),
+        },
+      })
+    )
 
     return new NextResponse(null, { status: 204 })
   } catch (error) {
