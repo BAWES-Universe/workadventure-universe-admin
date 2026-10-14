@@ -18,7 +18,7 @@ import {
 import { useToast } from '@/components/ui/toast';
 import { timeAgo } from '@/lib/time-ago';
 import { cn } from '@/lib/utils';
-import { EmptyCard, EntityRow, LoadError, LoadingRows, RolePill, SectionHeader, StatLine } from './ds';
+import { EmptyCard, EntityRow, LoadError, LoadingRows, Place, RolePill, SectionHeader, StatLine } from './ds';
 import { PersonIcon } from './profile-card';
 import { RoleChoice } from './role-choice';
 
@@ -526,7 +526,7 @@ export function ReportsAlert() {
               <span className="text-sm text-muted-foreground">
                 <StatLine
                   items={[
-                    world.universeName,
+                    <Place key="u" kind="universe" label={world.universeName} />,
                     !appealsOnly && world.appeals > 0 && (world.appeals === 1 ? '1 appeal' : `${world.appeals} appeals`),
                   ]}
                 />

@@ -7,7 +7,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { AlertCircle, Loader2, TestTube, Pencil } from 'lucide-react';
 import AuthLink from '@/app/admin/auth-link';
 import { isVisionCapableModel, resolveVisionSupport } from '@/lib/vision-models';
-import { EmptyCard, EntityRow, LoadError, LoadingRows, PageHeader, SectionHeader, StatLine } from '../../components/ds';
+import { Context, EmptyCard, EntityRow, LoadError, LoadingRows, PageHeader, SectionHeader, StatLine } from '../../components/ds';
 import { EnabledPill, providerTypeLabel } from '../components/provider-state';
 import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
@@ -249,7 +249,14 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
                 kind="bot"
                 title={bot.name}
                 context={
-                  <StatLine items={[`In ${bot.room.world.universe.name} › ${bot.room.world.name} › ${bot.room.name}`]} />
+                  <Context
+                    prefix="In "
+                    parts={[
+                      { label: bot.room.world.universe.name, kind: 'universe' },
+                      { label: bot.room.world.name, kind: 'world' },
+                      { label: bot.room.name, kind: 'room' },
+                    ]}
+                  />
                 }
                 meta={<span className="font-mono text-[11px] text-muted-foreground [overflow-wrap:anywhere]">{bot.id}</span>}
                 aside={<EnabledPill enabled={bot.enabled} />}

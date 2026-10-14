@@ -114,14 +114,42 @@ export async function resolvePickerSets(
       },
     })
     for (const grant of grants) {
-      // Only include sets with active lifecycle
-      if (grant.avatarSet.lifecycle === 'active' && !eligible.find((s) => s.id === grant.avatarSet.id)) {
+      // Only include sets with active lifecycle, and only where the set is scoped (a grant doesn't override world
+      // boundaries: the game refuses a Woka from a set that isn't scoped to the world it is worn in)
+      if (
+        grant.avatarSet.lifecycle === 'active' &&
+        isInsideDates(grant.avatarSet, now) &&
+        isScopedHere(grant.avatarSet.scopes, worldId, universeId) &&
+        !eligible.find((s) => s.id === grant.avatarSet.id)
+      ) {
         eligible.push(grant.avatarSet)
       }
     }
   }
 
   return eligible
+}
+
+/** Whether a set is inside its availability window (no limit when a date is empty). */
+export function isInsideDates(
+  set: { availableFrom: Date | null; availableUntil: Date | null },
+  now: Date = new Date()
+): boolean {
+  return (!set.availableFrom || set.availableFrom <= now) && (!set.availableUntil || set.availableUntil >= now)
+}
+
+/** Whether a set is scoped to the whole platform, to this universe or to this world. */
+export function isScopedHere(
+  scopes: { scopeType: string; scopeId: string }[],
+  worldId: string | null,
+  universeId: string | null
+): boolean {
+  return scopes.some(
+    (s) =>
+      s.scopeType === 'platform' ||
+      (s.scopeType === 'universe' && !!universeId && s.scopeId === universeId) ||
+      (s.scopeType === 'world' && !!worldId && s.scopeId === worldId)
+  )
 }
 
 /**

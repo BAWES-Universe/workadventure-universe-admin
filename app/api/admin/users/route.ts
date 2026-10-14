@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client';
 import { getViewer, isPrivileged, unauthorizedResponse } from '@/lib/access-scope';
 import { prisma } from '@/lib/db';
 import { wokaLayersForMany } from '@/lib/woka-avatar';
+import { viewerWorldId } from '@/lib/viewer-world';
 import { NOT_SYSTEM_USER, NOT_SYSTEM_USER_SQL } from '@/lib/system-user';
 
 const DEFAULT_LIMIT = 50;
@@ -111,6 +112,8 @@ export async function GET(request: NextRequest) {
     }
 
     const pageIds = pageRows.map((row) => row.id);
+    // People are drawn as they look from the world the viewer is in, when they are inside the game.
+    const worldId = await viewerWorldId(request, viewer).catch(() => undefined);
     const [rows, wokas] = await Promise.all([
       prisma.user.findMany({
         where: { id: { in: pageIds } },
@@ -130,7 +133,7 @@ export async function GET(request: NextRequest) {
         },
       }),
       // Each person's Woka, for their avatar (decoration: never costs the list).
-      wokaLayersForMany(pageIds).catch(() => new Map<string, string[]>()),
+      wokaLayersForMany(pageIds, worldId).catch(() => new Map<string, string[]>()),
     ]);
 
     const byId = new Map(rows.map((user) => [user.id, user]));

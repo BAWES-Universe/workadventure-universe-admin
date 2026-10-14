@@ -60,6 +60,8 @@ interface Room {
   } | null;
   isPublic: boolean;
   canEdit?: boolean;
+  /** Runs the room's world (a super admin can edit and delete without running it). */
+  manages?: boolean;
   isStarred?: boolean;
   starCount?: number;
   world: {
@@ -573,9 +575,9 @@ export function RoomDetailPage({ view = 'details' }: { view?: 'details' | 'visit
           context={
             <InContext
               parts={[
-                { label: room.world.universe.name, href: `/admin/universes/${room.world.universe.id}` },
-                { label: room.world.name, href: `/admin/worlds/${room.world.id}` },
-                { label: room.name, href: `/admin/rooms/${id}` },
+                { label: room.world.universe.name, href: `/admin/universes/${room.world.universe.id}`, kind: 'universe' },
+                { label: room.world.name, href: `/admin/worlds/${room.world.id}`, kind: 'world' },
+                { label: room.name, href: `/admin/rooms/${id}`, kind: 'room' },
               ]}
             />
           }
@@ -670,7 +672,7 @@ export function RoomDetailPage({ view = 'details' }: { view?: 'details' | 'visit
             {currentUser && <StarButton count={room.starCount ?? 0} starred={!!room.isStarred} onClick={handleToggleStar} disabled={togglingStar} />}
           </>
         }
-        manageLine={canEdit ? 'You run this room’s world' : undefined}
+        manageLine={canEdit && room.manages !== false ? 'You run this room’s world' : undefined}
         manage={
           canEdit ? (
             <Button variant="outline" onClick={() => setIsEditing(true)}>

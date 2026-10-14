@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import * as Sentry from '@sentry/nextjs';
 import { requireAuth, getClientIp } from '@/lib/auth';
 import { parsePlayUri } from '@/lib/utils';
 import { authenticateRequest } from '@/lib/oidc';
@@ -6,10 +7,12 @@ import { prisma } from '@/lib/db';
 import { resolveTextureUrls, resolveCompanionTexture } from '@/lib/avatar-catalog-validator';
 import { notifyRoomAccess } from '@/lib/discord';
 import { isBotIdentifier } from '@/lib/bot-visitor';
+import { currentOutfit, recordOutfitPick } from '@/lib/user-outfits';
+import { companionWearableHere, wearableHere } from '@/lib/woka-wearable';
 import { canSeeRoom } from '@/lib/room-visibility';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { bansCoveringWorld } from '@/lib/moderation';
-import type { FetchMemberDataByUuidSuccessResponse, ErrorApiData } from '@/types/workadventure';
+import type { FetchMemberDataByUuidSuccessResponse, ErrorApiData, ErrorApiRetryData, CompanionDetail } from '@/types/workadventure';
 
 export async function GET(request: NextRequest) {
   try {
@@ -89,7 +92,7 @@ export async function GET(request: NextRequest) {
       
       // Only create/find User records for authenticated users
       // But also try to find existing user by identifier even if not authenticated in this request
-      let user: { id: string; name: string | null; email: string | null; uuid: string; matrixChatId: string | null; isGuest: boolean } | null = null;
+      let user: { id: string; name: string | null; email: string | null; uuid: string; matrixChatId: string | null; isGuest: boolean; companionTextureId: string | null } | null = null;
       let membership = null;
       let avatar = null;
       
@@ -143,7 +146,9 @@ export async function GET(request: NextRequest) {
             updateData.email = userEmail;
           }
           
-          if (userName) {
+          // The name picked in the game is the person's name everywhere: the sign-in name is only used when they
+          // have none yet (it never replaces one on a later room entry).
+          if (userName && !user.name) {
             updateData.name = userName;
           }
           
@@ -169,6 +174,15 @@ export async function GET(request: NextRequest) {
         userEmail = user.email || userEmail;
       }
       
+      // An account that joins without a token we could check (expired, Authentik unreachable, none sent) is answered as a
+      // guest: we can't tell it is them. It never gets a Woka saved for some world, which may be an old pick (that is how
+      // a default or an old Woka was worn silently); only what the game sent counts, and when that is nothing this world
+      // can show, the answer is "not valid" so the game asks. Say so, so it can be seen when a player gets this.
+      const unverifiedAccount = !!user && !user.isGuest && !isAuthenticated && !isBotIdentifier(finalUuid);
+      if (unverifiedAccount && hasAccessToken) {
+        Sentry.captureMessage('Room access: an account joined with an access token Orbit could not verify, so it was answered as a guest', 'warning');
+      }
+
       // Find world and room
       const worldData = await prisma.world.findFirst({
         where: {
@@ -282,7 +296,7 @@ export async function GET(request: NextRequest) {
         return NextResponse.json(error);
       }
 
-      if (user) {
+      if (user && !unverifiedAccount) {
         
         // Get user avatar
         avatar = await prisma.userAvatar.findUnique({
@@ -359,15 +373,100 @@ export async function GET(request: NextRequest) {
           isTexturesValid = true;
         }
       }
-      
-      // Extract texture IDs for front-end cross-device sync
-      const characterTextureIds = finalTextures.map(t => t.id);
+
+      // Your Woka stays yours: a signed-in person wears one Woka in every world, the last one they picked themselves.
+      // Entering a world never changes it. If this world can't show it (a costume from elsewhere, a set that was
+      // removed or ended, access lost), the answer is "not valid" and the game asks them what to wear; nothing is saved.
+      // The one write: someone who never picked has no Woka yet, so the outfit the game sent is worn if this world allows
+      // it, and recorded as their first pick. The textures the game sent otherwise never count: they may be stale.
+      // Guests and bots keep the logic above as it was.
+      let ownCompanion: { texture: CompanionDetail | null; valid: boolean } | null = null;
+      // The Woka their account says they wear, even when this world can't show it (see characterTextureIds below)
+      let accountTextureIds: string[] | null = null;
+      if (user && isAuthenticated && !isBotIdentifier(finalUuid)) {
+        try {
+          const wearing = {
+            worldId: worldData.id,
+            universeId: worldData.universeId,
+            userId: user.id,
+            membershipTags: (membership && 'tags' in membership && Array.isArray(membership.tags)) ? membership.tags : [],
+          };
+          const current = await currentOutfit(user.id);
+          let wear: string[] | null = null;
+          let firstPick = false;
+          if (current) {
+            wear = (await wearableHere(current.textureIds, wearing)).wearable ? current.textureIds : null;
+          } else if (textureIds.length > 0 && (await wearableHere(textureIds, wearing)).wearable) {
+            wear = textureIds;
+            firstPick = true;
+          }
+          const worn = wear
+            ? await resolveTextureUrls(prisma, wear, worldData.id, worldData.universeId, playServiceUrl)
+            : { valid: false, textures: [] };
+          // Their companion is just as much theirs: the one they wear now (none is fine), if this world can show it.
+          let companion: { texture: CompanionDetail | null; valid: boolean } = { texture: null, valid: true };
+          let firstCompanion: string | null = null;
+          if (user.companionTextureId) {
+            const allowed = (await companionWearableHere(user.companionTextureId, wearing)).wearable;
+            const resolved = allowed
+              ? await resolveCompanionTexture(prisma, user.companionTextureId, worldData.id, worldData.universeId, playServiceUrl)
+              : { valid: false, texture: null };
+            companion = { texture: resolved.texture, valid: resolved.valid };
+          } else if (firstPick && companionTextureId && (await companionWearableHere(companionTextureId, wearing)).wearable) {
+            // First entry (a guest who just signed up): the companion the game sent is worn and kept, like the Woka
+            const resolved = await resolveCompanionTexture(prisma, companionTextureId, worldData.id, worldData.universeId, playServiceUrl);
+            if (resolved.valid && resolved.texture) {
+              companion = { texture: resolved.texture, valid: true };
+              firstCompanion = companionTextureId;
+            }
+          }
+          if (firstPick && worn.valid) {
+            // The companion goes first: once the Woka is recorded this is no longer a first entry, so a failure between
+            // the two writes must leave the next entry a first entry that finishes the job.
+            // Only while they still have none, so a companion picked in the meantime is never overwritten
+            if (firstCompanion) await prisma.user.updateMany({ where: { id: user.id, companionTextureId: null }, data: { companionTextureId: firstCompanion } });
+            await recordOutfitPick(user.id, wear as string[]);
+          }
+          finalTextures = worn.valid ? worn.textures : [];
+          isTexturesValid = worn.valid;
+          accountTextureIds = current?.textureIds ?? (firstPick && worn.valid ? wear : null);
+          ownCompanion = companion;
+        } catch (error) {
+          // A signed-in person is never handed a Woka or companion that did not pass the checks above: the Woka saved
+          // for this world, or the one the game sent, was only checked against the catalog, not who may wear it, and
+          // the game keeps whatever comes back as their Woka on the device. So the game shows its retry screen
+          // instead, and nothing is saved or sent. Answered with 200 so the game shows it (it only reads error bodies
+          // on success). Guests and bots do not come through here.
+          console.error('Failed to look up the Woka they wear:', error);
+          Sentry.captureException(error);
+          const retry: ErrorApiRetryData = {
+            status: "error",
+            type: "retry",
+            title: "Couldn't load your Woka",
+            subtitle: "We couldn't load your Woka. Trying again.",
+            code: "WOKA_LOOKUP_FAILED",
+            details: "This usually clears up in a few seconds.",
+            buttonTitle: "Retry",
+            timeToRetry: 5000,
+            canRetryManual: true,
+          };
+          return NextResponse.json(retry);
+        }
+      }
+
+      // Extract texture IDs for front-end cross-device sync. A signed-in person's are the Woka their account says they
+      // wear, also when this world can't show it: the game keeps them on the device, and the picker and popup name them.
+      const characterTextureIds = accountTextureIds ?? finalTextures.map(t => t.id);
       
       // Handle companion texture - use stored one if provided one is invalid
       let finalCompanionTexture = companionValidation.texture;
       let isCompanionValid = companionValidation.valid;
       
-      if ((!isCompanionValid || !companionTextureId) && avatar?.companionTextureId) {
+      if (ownCompanion) {
+        // Signed-in people wear the companion saved on their account, whatever the game sent
+        finalCompanionTexture = ownCompanion.texture;
+        isCompanionValid = ownCompanion.valid;
+      } else if ((!isCompanionValid || !companionTextureId) && avatar?.companionTextureId) {
         const fallbackCompanion = await resolveCompanionTexture(
           prisma, avatar.companionTextureId, worldData.id, worldData.universeId, playServiceUrl
         );

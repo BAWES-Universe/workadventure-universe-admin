@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { withWokas } from '@/lib/woka-avatar';
+import { viewerWorldId } from '@/lib/viewer-world';
 import { BAN_DURATIONS, banEndsAt, canModerateWorld, playerNames, sendOutOfWorld, type BanDuration } from '@/lib/moderation';
 
 /** The longest reason an admin can give a banned player. */
@@ -81,6 +82,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       doneGroups.set(key, group);
     }
 
+    const lookingFrom = await viewerWorldId(request, sessionUser).catch(() => undefined);
     const openPeople = await withWokas(
       [...openGroups.values()].map((group) => ({
         key: group.key,
@@ -95,6 +97,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
           roomName: report.room?.name ?? null,
         })),
       })),
+      lookingFrom,
     );
     const donePeople = await withWokas(
       [...doneGroups.values()].map((group) => ({
@@ -108,6 +111,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         handledByName: by(group.reports[0].handledBy),
         handledAt: group.reports[0].handledAt?.toISOString() ?? null,
       })),
+      lookingFrom,
     );
     const banned = await withWokas(
       bans.map((ban) => ({
@@ -122,6 +126,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         // Only an appeal still waiting for an answer asks anything of the admins
         appeal: ban.appealedAt && !ban.appealDecision ? { text: ban.appealText ?? '', sentAt: ban.appealedAt.toISOString() } : null,
       })),
+      lookingFrom,
     );
 
     return NextResponse.json({

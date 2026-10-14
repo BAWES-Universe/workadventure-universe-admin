@@ -174,6 +174,14 @@ export interface ErrorApiData {
   image?: string;
 }
 
+/** The game's waiting screen: it tries again by itself after timeToRetry (ms) and, if canRetryManual, shows a button. */
+export interface ErrorApiRetryData extends ErrorApiData {
+  type: "retry";
+  buttonTitle?: string | null;
+  timeToRetry: number;
+  canRetryManual: boolean;
+}
+
 export interface ErrorApiRedirectData extends ErrorApiData {
   type: "redirect";
   redirectUrl: string;
@@ -196,6 +204,13 @@ export interface ChatMember {
   chatId: string | null;
   tags: string[];
   /** The member's saved Woka (bottom layer first), so the chat can draw them while they are away. */
+  characterTextures: { id: string; url: string }[];
+}
+
+/** One person, by chat ID, for the chat of someone outside the asker's world: no email, no id. */
+export interface ChatPersonData {
+  wokaName: string | null;
+  /** Their Woka for the asker's place (bottom layer first); empty when there is none to show. */
   characterTextures: { id: string; url: string }[];
 }
 

@@ -6,9 +6,9 @@ import { NextRequest } from 'next/server';
 
 jest.mock('@/lib/db', () => ({
   prisma: {
-    world: { findFirst: jest.fn() },
+    world: { findFirst: jest.fn(), findUnique: jest.fn() },
     worldMember: { findMany: jest.fn() },
-    userAvatar: { findMany: jest.fn() },
+    userOutfit: { findMany: jest.fn() },
     avatarLayer: { findMany: jest.fn() },
     user: { findFirst: jest.fn() },
   },
@@ -36,7 +36,8 @@ beforeEach(() => {
   jest.clearAllMocks();
   process.env.PLAY_URL = 'http://play.test';
   db.world.findFirst.mockResolvedValue({ id: 'world-1' });
-  db.avatarLayer.findMany.mockResolvedValue([{ textureId: 'hat1', url: 'https://cdn.test/hat1.png' }]);
+  db.world.findUnique.mockResolvedValue({ universeId: 'uni-1' });
+  db.avatarLayer.findMany.mockResolvedValue([{ textureId: 'hat1', url: 'https://cdn.test/hat1.png', avatarSet: { lifecycle: 'active', scopes: [{ scopeType: 'world', scopeId: 'world-1' }] } }]);
 });
 
 describe('GET /api/members', () => {
@@ -45,10 +46,10 @@ describe('GET /api/members', () => {
       { tags: ['member'], user: { id: 'u1', uuid: 'alice-uuid', name: 'Alice', email: 'alice@test' } },
       { tags: [], user: { id: 'u2', uuid: 'bob-uuid', name: null, email: null } },
     ]);
-    db.userAvatar.findMany.mockResolvedValue([
-      // Alice's outfit in another world is newer, but this world's outfit wins.
-      { userId: 'u1', worldId: 'world-2', textureIds: ['male1'] },
-      { userId: 'u1', worldId: 'world-1', textureIds: ['male1', 'hat1'] },
+    db.userOutfit.findMany.mockResolvedValue([
+      // The Woka she wears now (the newest) is the one shown; an older one she wore is not.
+      { userId: 'u1', textureIds: ['male1', 'hat1'] },
+      { userId: 'u1', textureIds: ['male1'] },
     ]);
 
     const response = await search(request('/api/members', { playUri: PLAY_URI, searchText: 'a' }));
@@ -77,7 +78,7 @@ describe('GET /api/members', () => {
     db.worldMember.findMany.mockResolvedValue([
       { tags: [], user: { id: 'u1', uuid: 'alice-uuid', name: 'Alice', email: null } },
     ]);
-    db.userAvatar.findMany.mockRejectedValue(new Error('db down'));
+    db.userOutfit.findMany.mockRejectedValue(new Error('db down'));
 
     const body = await (await search(request('/api/members', { playUri: PLAY_URI, searchText: '' }))).json();
     expect(body).toEqual([
@@ -87,9 +88,9 @@ describe('GET /api/members', () => {
 });
 
 describe('GET /api/members/:uuid', () => {
-  it("adds the member's Woka in the world of the room asked about", async () => {
+  it("adds the Woka the member wears now", async () => {
     db.user.findFirst.mockResolvedValue({ id: 'u1', uuid: 'alice-uuid', name: 'Alice', email: 'alice@test', matrixChatId: null });
-    db.userAvatar.findMany.mockResolvedValue([{ userId: 'u1', worldId: 'world-1', textureIds: ['hat1'] }]);
+    db.userOutfit.findMany.mockResolvedValue([{ userId: 'u1', textureIds: ['hat1'] }]);
 
     const response = await getMember(request('/api/members/alice-uuid', { playUri: PLAY_URI }), {
       params: Promise.resolve({ memberUUID: 'alice-uuid' }),

@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, Suspense, useMemo, useCallback } from 'react';
 import { DraftNotice } from '../../components/draft-notice';
 import { useDraft } from '../../hooks/use-draft';
-import { EmptyCard, InContext, KindIcon, LoadError, LoadingRows, PageHeader, SectionHeader, SettingSwitch, Settings } from '../../components/ds';
+import { EmptyCard, InContext, KindIcon, LoadError, LoadingRows, PageHeader, Place, SectionHeader, SettingSwitch, Settings } from '../../components/ds';
 import { FORM_DRAFT_VERSION, addressFromName, scopedDraftKey, upgradeFormDraft } from '@/lib/drafts';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
@@ -405,8 +405,8 @@ function NewRoomPageContent() {
           displayWorld ? (
             <InContext
               parts={[
-                { label: displayWorld.universe.name, href: `/admin/universes/${displayWorld.universe.id}` },
-                { label: displayWorld.name, href: `/admin/worlds/${displayWorld.id}` },
+                { label: displayWorld.universe.name, href: `/admin/universes/${displayWorld.universe.id}`, kind: 'universe' },
+                { label: displayWorld.name, href: `/admin/worlds/${displayWorld.id}`, kind: 'world' },
               ]}
             />
           ) : (
@@ -730,7 +730,9 @@ function WorldChoice({
             <KindIcon kind="world" size="sm" />
             <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">
               <span className="block text-sm font-medium">{world.name}</span>
-              <span className="block text-xs text-muted-foreground">In {world.universe.name}</span>
+              <span className="block text-xs text-muted-foreground">
+                In <Place kind="universe" label={world.universe.name} />
+              </span>
             </span>
           </label>
         ))}

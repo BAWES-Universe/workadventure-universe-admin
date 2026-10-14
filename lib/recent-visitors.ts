@@ -90,7 +90,7 @@ async function guestVisits(scope: AccessScope) {
   return [...byGuest.entries()].map(([uuid, guest]) => ({ uuid, ...guest }));
 }
 
-export async function loadRecentVisitors(viewer: Viewer, scope: AccessScope): Promise<RecentVisitor[]> {
+export async function loadRecentVisitors(viewer: Viewer, scope: AccessScope, lookingFromWorldId?: string): Promise<RecentVisitor[]> {
   if ((await accessDetailFor(viewer, scope)) === 'minimal') return [];
   const [members, guests] = await Promise.all([memberVisits(viewer, scope), guestVisits(scope)]);
   const people = [
@@ -115,7 +115,7 @@ export async function loadRecentVisitors(viewer: Viewer, scope: AccessScope): Pr
   ]
     .sort((a, b) => b.at.getTime() - a.at.getTime())
     .slice(0, RECENT_VISITORS);
-  const withFaces = await withWokas(people.map((person) => person.face));
+  const withFaces = await withWokas(people.map((person) => person.face), lookingFromWorldId);
   return people.map((person, index) => ({
     key: person.key,
     userId: person.userId,

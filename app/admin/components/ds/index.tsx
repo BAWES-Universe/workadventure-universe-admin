@@ -41,6 +41,16 @@ export const KIND_ICON: Record<Kind, LucideIcon> = {
   avatar: Shirt,
 };
 
+/** Universe, world, room and star: a clean icon in their colour, no box, on the name's own line (as the room page). */
+const CLEAN = new Set<Kind>(['universe', 'world', 'room', 'star']);
+export const isCleanKind = (kind: Kind) => CLEAN.has(kind);
+
+/** The kind's icon on the name's own line (inline layout). */
+export function NameGlyph({ kind, size = 18 }: { kind: Kind; size?: number }) {
+  const Icon = KIND_ICON[kind];
+  return <Icon size={size} className={styles.nameGlyph} data-kind={kind} aria-hidden="true" />;
+}
+
 export const KIND_LABEL: Record<Kind, string> = {
   universe: 'Universe',
   world: 'World',
@@ -73,27 +83,47 @@ export function KindIcon({
   className?: string;
 }) {
   const Icon = KIND_ICON[kind];
+  // Universe, world, room and star: the glyph alone in its kind's colour, as on a place's page (no box).
+  const glyph = CLEAN.has(kind) ? (size === 'sm' ? 18 : size === 'lg' ? 28 : 22) : size === 'sm' ? 14 : size === 'lg' ? 22 : 18;
   return (
     <span
       className={cn('orbit-kind', styles[`kind-${size}`], className)}
       data-kind={kind}
       aria-hidden="true"
     >
-      <Icon size={size === 'sm' ? 14 : size === 'lg' ? 22 : 18} />
+      <Icon size={glyph} />
     </span>
   );
 }
 
+/** A universe, world or room named in a line: its small icon in its colour, then the name (as the room page's crumbs). */
+export function Place({ kind, label }: { kind: 'universe' | 'world' | 'room' | 'people'; label: ReactNode }) {
+  const Icon = KIND_ICON[kind];
+  return (
+    <span className={styles.place} data-kind={kind}>
+      <Icon size={14} aria-hidden="true" />
+      {label}
+    </span>
+  );
+}
+
+/** "7 rooms" with the room's icon; nothing when the number is unknown. */
+export function countPlace(kind: 'universe' | 'world' | 'room' | 'people', value: number | null | undefined, one: string, many?: string) {
+  const label = count(value, one, many);
+  return label ? <Place key={`${kind}-${one}`} kind={kind} label={label} /> : null;
+}
+
 /** Where something is: "Universe › World", each part its own link when given one. */
-export function Context({ parts }: { parts: { label: string; href?: string }[] }) {
+export function Context({ parts, prefix }: { parts: { label: string; href?: string; kind?: 'universe' | 'world' | 'room' | 'people' }[]; prefix?: string }) {
   const shown = parts.filter((part) => part.label);
   if (shown.length === 0) return null;
   return (
     <span className={styles.context}>
+      {prefix}
       {shown.map((part, index) => (
         <span key={`${part.label}-${index}`}>
           {index > 0 && <span aria-hidden="true"> › </span>}
-          {part.label}
+          {part.kind ? <Place kind={part.kind} label={part.label} /> : part.label}
         </span>
       ))}
     </span>
@@ -101,10 +131,21 @@ export function Context({ parts }: { parts: { label: string; href?: string }[] }
 }
 
 /** Numbers about something, in one format everywhere: "1,284 accesses · 3 rooms · 18 members". */
-export function StatLine({ items }: { items: (string | false | null | undefined)[] }) {
-  const shown = items.filter(Boolean) as string[];
+export function StatLine({ items }: { items: (ReactNode | false | null | undefined)[] }) {
+  const shown = items.filter(Boolean) as ReactNode[];
   if (shown.length === 0) return null;
-  return <span className={styles.stats}>{shown.join(' · ')}</span>;
+  // Plain text stays one text node; icons (a place's name or a count) make each item its own span.
+  if (shown.every((item) => typeof item === 'string')) return <span className={styles.stats}>{shown.join(' · ')}</span>;
+  return (
+    <span className={styles.stats}>
+      {shown.map((item, index) => (
+        <span key={index}>
+          {index > 0 && ' · '}
+          {item}
+        </span>
+      ))}
+    </span>
+  );
 }
 
 export function count(value: number | null | undefined, one: string, many = `${one}s`): string | null {
@@ -219,9 +260,17 @@ export function EntityRow({
       style={kind === 'universe' ? hueStyle(universeId) : undefined}
       data-testid={testId}
     >
-      {leading ?? <KindIcon kind={kind} universeId={universeId} />}
+      {leading ?? (CLEAN.has(kind) ? null : <KindIcon kind={kind} universeId={universeId} />)}
       <div className={styles.rowText}>
-        {titleAside ? (
+        {!leading && CLEAN.has(kind) ? (
+          <div className={styles.titleLine}>
+            <NameGlyph kind={kind} />
+            <Link href={href} className={styles.stretched}>
+              <strong>{title}</strong>
+            </Link>
+            {titleAside}
+          </div>
+        ) : titleAside ? (
           <div className={styles.titleLine}>
             <Link href={href} className={styles.stretched}>
               <strong>{title}</strong>
@@ -274,9 +323,10 @@ export function EntityCard({
       data-testid={testId}
     >
       <div className={styles.cardTop}>
-        <KindIcon kind={kind} universeId={universeId} />
+        {!CLEAN.has(kind) && <KindIcon kind={kind} universeId={universeId} />}
         <div className={styles.rowText}>
-          <h3>
+          <h3 className={CLEAN.has(kind) ? styles.inlineTitle : undefined}>
+            {CLEAN.has(kind) && <NameGlyph kind={kind} />}
             <Link href={href} className={styles.stretched}>
               {title}
             </Link>
@@ -335,16 +385,19 @@ export function PageHeader({
 }
 
 /** "In BAWES › Office": where a page's thing lives, each part a link. */
-export function InContext({ parts }: { parts: { label: string; href: string }[] }) {
+export function InContext({ parts }: { parts: { label: string; href: string; kind?: 'universe' | 'world' | 'room' }[] }) {
   return (
     <span className={styles.inContext}>
       In{' '}
-      {parts.map((part, index) => (
-        <span key={part.href}>
-          {index > 0 && <span aria-hidden="true"> › </span>}
-          <Link href={part.href}>{part.label}</Link>
-        </span>
-      ))}
+      {parts.map((part, index) => {
+        const link = <Link href={part.href}>{part.label}</Link>;
+        return (
+          <span key={part.href}>
+            {index > 0 && <span aria-hidden="true"> › </span>}
+            {part.kind ? <Place kind={part.kind} label={link} /> : link}
+          </span>
+        );
+      })}
     </span>
   );
 }

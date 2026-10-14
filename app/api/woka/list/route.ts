@@ -18,6 +18,7 @@ import {
   buildWokaListPayload,
 } from '@/lib/avatar-catalog'
 import { getWokaList } from '@/lib/wokas'
+import { findUserByIdentifier } from '@/lib/user-identifier'
 
 export async function GET(request: NextRequest) {
   try {
@@ -57,10 +58,8 @@ export async function GET(request: NextRequest) {
           universeId = world.universeId
 
           if (uuid) {
-            const user = await prisma.user.findUnique({
-              where: { uuid },
-              select: { id: true },
-            })
+            // The game names a signed-in player by their email, anyone else by their uuid
+            const user = await findUserByIdentifier(uuid)
             if (user) {
               userId = user.id
               const member = await prisma.worldMember.findUnique({

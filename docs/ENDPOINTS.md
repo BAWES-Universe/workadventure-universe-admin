@@ -796,6 +796,26 @@ Get list of members for chat display (member directory/search feature).
 - Only return members who have a `chatId` (Matrix ID) set
 - See [DATABASE.md](./DATABASE.md) for the Prisma schema and implementation examples
 
+### GET /api/chat/person
+
+One person's current name and Woka by Matrix chat ID, so the chat can draw someone who is not in the asker's world (a direct chat with a person outside it).
+
+**Request:**
+- Method: `GET`
+- Headers: `Authorization: Bearer {ADMIN_API_TOKEN}` (called by the game's server)
+- Query Parameters:
+  - `chatId` (required): the person's Matrix user ID (`User.matrixChatId`), e.g. `@john:matrix.org`
+  - `playUri` (optional): the room the asker is in. Its world decides the Woka: the outfit saved for that world, else the latest outfit made only of parts allowed in every world (parts of an active outfit set scoped to the platform, or in `config/woka.json`). Without it, only the latter.
+
+**Response:** `200 OK`
+```json
+{
+  "wokaName": "John Doe",
+  "characterTextures": [{ "id": "male1", "url": "http://play.workadventure.localhost/resources/characters/pipoya/Male%2001-1.png" }]
+}
+```
+`characterTextures` is empty when there is no outfit to show (the game then draws its default Woka). Never an email address or an id. `400` for something that is not a Matrix ID, `404` when no account has it.
+
 ---
 
 ## Bot Management Endpoints

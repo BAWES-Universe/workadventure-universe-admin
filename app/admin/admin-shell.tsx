@@ -20,6 +20,7 @@ import { BottomNav } from './components/shell/bottom-nav';
 import { Sidebar } from './components/shell/sidebar';
 import { MenuSheet } from './components/shell/menu-sheet';
 import { PageTransition } from './components/shell/page-transition';
+import { preloadWoka } from './components/profile-card';
 
 function loginRedirect() {
   const redirect = `${window.location.pathname}${window.location.search}`;
@@ -86,11 +87,16 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
         setFailure(null);
         setBootstrap((current) =>
           endpoint === '/api/admin/bootstrap'
-            ? (data as AdminBootstrap)
+            ? {
+                ...(data as AdminBootstrap),
+                // A refresh that could not read your Woka keeps the one already known, never a blank.
+                woka: (data as AdminBootstrap).woka?.length ? (data as AdminBootstrap).woka : current?.woka ?? (data as AdminBootstrap).woka,
+              }
             : {
                 version: 1,
                 user: data.user,
                 stats: current?.stats ?? { universes: 0, worlds: 0, rooms: 0, users: 0 },
+                woka: current?.woka,
                 mine: current?.mine,
                 startRoom: current?.startRoom,
               },
@@ -106,6 +112,12 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
     // `hasBootstrap` only decides the endpoint; a change of it must not start another request.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [attempt, pathname]);
+
+  // Your Woka's pictures load as soon as the shell knows them, before any page asks to draw them.
+  const wokaKey = bootstrap?.woka?.join('\n') ?? '';
+  useEffect(() => {
+    if (wokaKey) preloadWoka(wokaKey.split('\n'));
+  }, [wokaKey]);
 
   if (pathname === '/admin/login') return <main>{children}</main>;
 

@@ -2,6 +2,7 @@ import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { buildPlayUri } from '@/lib/utils';
 import { canManageWorldMembers } from '@/lib/access-scope';
+import { findUserByIdentifier } from '@/lib/user-identifier';
 
 /**
  * Self-moderation: each world's admins and its universe's owner handle reports and bans for that world.
@@ -52,10 +53,7 @@ export function parseWorldAddress(playUri: string): { universe: string; world: s
   }
 }
 
-/** A user as the game names them: their WorkAdventure uuid, or their email for signed-in players. */
-export function findUserByIdentifier(identifier: string) {
-  return prisma.user.findFirst({ where: { OR: [{ uuid: identifier }, { email: identifier }] } });
-}
+export { findUserByIdentifier };
 
 /**
  * Sends a player who was just banned out of every room of the world they're in, through the game's admin

@@ -4,6 +4,7 @@ import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { FEATURED_FORBIDDEN, refusesFeaturedChange } from '@/lib/featured';
 import { wokaLayersFor } from '@/lib/woka-avatar';
+import { viewerWorldId } from '@/lib/viewer-world';
 import { getViewer, memberWorldIdsOf } from '@/lib/access-scope';
 import { canSeeUniverse, canSeeWorld } from '@/lib/room-visibility';
 
@@ -119,14 +120,16 @@ export async function GET(
       starCount: worldStarCounts.get(world.id) || 0,
     }));
 
-    const canEdit = isAdminToken || (userId !== null && universe.ownerId === userId);
-    const ownerWoka = universe.owner ? await wokaLayersFor(universe.owner.id).catch(() => []) : [];
+    // Whoever runs the universe (its owner), and who may edit or delete it (also super admins).
+    const manages = isAdminToken || (userId !== null && universe.ownerId === userId);
+    const canEdit = manages || sessionUser?.isSuperAdmin === true;
+    const ownerWoka = universe.owner ? await wokaLayersFor(universe.owner.id, await viewerWorldId(request, viewer).catch(() => undefined)).catch(() => []) : [];
     // The owner's email is only for those who manage the universe.
     const owner = universe.owner
       ? {
           id: universe.owner.id,
           name: universe.owner.name,
-          ...(canEdit || sessionUser?.isSuperAdmin ? { email: universe.owner.email } : {}),
+          ...(manages || sessionUser?.isSuperAdmin ? { email: universe.owner.email } : {}),
           woka: ownerWoka,
         }
       : universe.owner;
@@ -135,6 +138,7 @@ export async function GET(
       owner,
       worlds: worldsWithFavorites,
       canEdit,
+      manages,
       starCount: universeStarCount,
       isStarred: !!yourUniverseStar,
     };
@@ -164,6 +168,7 @@ export async function PATCH(
       authHeader.replace('Bearer ', '').trim() === process.env.ADMIN_API_TOKEN;
     
     let userId: string | null = null;
+    let isSuperAdminSession = false;
     let canFeature = Boolean(isAdminToken);
     
     if (!isAdminToken) {
@@ -174,6 +179,7 @@ export async function PATCH(
         return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
       }
       userId = sessionUser.id;
+      isSuperAdminSession = sessionUser.isSuperAdmin;
       canFeature = sessionUser.isSuperAdmin;
     } else {
       // Admin token - require it
@@ -206,7 +212,7 @@ export async function PATCH(
     }
     
     // If using session auth (not admin token), ensure user owns the universe
-    if (userId && !isAdminToken && existing.ownerId !== userId) {
+    if (userId && !isAdminToken && !isSuperAdminSession && existing.ownerId !== userId) {
       return NextResponse.json(
         { error: 'Forbidden' },
         { status: 403 }
@@ -218,7 +224,7 @@ export async function PATCH(
     }
     
     // If using session auth, ensure user can only change owner to themselves
-    if (userId && !isAdminToken && data.ownerId && data.ownerId !== userId) {
+    if (userId && !isAdminToken && data.ownerId && data.ownerId !== (isSuperAdminSession ? existing.ownerId : userId)) {
       return NextResponse.json(
         { error: 'You can only transfer ownership to yourself' },
         { status: 403 }
@@ -316,6 +322,7 @@ export async function DELETE(
       authHeader.replace('Bearer ', '').trim() === process.env.ADMIN_API_TOKEN;
     
     let userId: string | null = null;
+    let isSuperAdminSession = false;
     
     if (!isAdminToken) {
       // Try to get user from session
@@ -325,6 +332,7 @@ export async function DELETE(
         return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
       }
       userId = sessionUser.id;
+      isSuperAdminSession = sessionUser.isSuperAdmin;
     } else {
       // Admin token - require it
       requireAuth(request);
@@ -343,7 +351,7 @@ export async function DELETE(
     }
     
     // If using session auth (not admin token), ensure user owns the universe
-    if (userId && !isAdminToken && universe.ownerId !== userId) {
+    if (userId && !isAdminToken && !isSuperAdminSession && universe.ownerId !== userId) {
       return NextResponse.json(
         { error: 'Forbidden' },
         { status: 403 }

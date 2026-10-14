@@ -93,6 +93,28 @@ export interface OrbitProfileChanged {
   name: string;
 }
 
+/**
+ * Ask the game to invite this person over (needs "invite" in the game's capabilities). The game decides whether
+ * and how: it checks reach, Busy and blocks itself, so this is a request, never an instruction.
+ */
+export interface OrbitInvitePerson {
+  type: 'orbit-invite-person';
+  version: typeof ORBIT_BRIDGE_VERSION;
+  roomRevision: string;
+  uuid: string;
+  name: string;
+}
+
+/** Ask the game to open a chat with this person (needs "message" in the game's capabilities). */
+export interface OrbitMessagePerson {
+  type: 'orbit-message-person';
+  version: typeof ORBIT_BRIDGE_VERSION;
+  roomRevision: string;
+  uuid: string;
+  name: string;
+  chatId: string;
+}
+
 export interface OrbitBridgeAck {
   type: 'orbit-bridge-ack';
   version: typeof ORBIT_BRIDGE_VERSION;

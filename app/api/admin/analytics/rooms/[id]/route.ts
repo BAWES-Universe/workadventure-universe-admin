@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getViewer, accessDetailFor, detailForRecord, redactAccess, unauthorizedResponse } from '@/lib/access-scope';
 import { prisma } from '@/lib/db';
 import { withWokas } from '@/lib/woka-avatar';
+import { viewerWorldId } from '@/lib/viewer-world';
 import { utcHourBucketsFor } from '@/lib/analytics-hours';
 import { viewerWasLast } from '@/lib/analytics-viewer';
 
@@ -144,7 +145,7 @@ export async function GET(
         hasMembership: access.hasMembership,
         membershipTags: access.membershipTags,
         playUri: access.playUri,
-      }, detailForRecord(viewer, access, detail)))),
+      }, detailForRecord(viewer, access, detail))), await viewerWorldId(request, viewer).catch(() => undefined)),
       pagination: {
         page,
         limit,

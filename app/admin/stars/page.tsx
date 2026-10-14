@@ -1,12 +1,12 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
 import { Loader2, Star } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { activityStats } from '@/lib/analytics-peak';
-import { EmptyCard, EntityRow, LoadError, LoadingRows, PageHeader, StatLine, VisitLine } from '../components/ds';
+import { Context, EmptyCard, EntityRow, LoadError, LoadingRows, PageHeader, Place, StatLine, VisitLine } from '../components/ds';
 import { useEntitySummaries } from '../hooks/use-entity-summaries';
 import type { EntitySummary } from '../hooks/use-room-analytics';
 
@@ -40,8 +40,8 @@ interface StarredPlace {
   kind: 'universe' | 'world';
   id: string;
   name: string;
-  /** "by Faisal" for a universe, the universe's name for a world. */
-  context: string;
+  /** "by Faisal" for a universe, "World · in" and the universe's name for a world. */
+  context: ReactNode;
   isStarred: boolean;
   starCount: number;
   favoritedAt: string;
@@ -112,7 +112,7 @@ function StarredRoomRow({
       href={`/admin/rooms/${room.id}`}
       kind="star"
       title={room.name}
-      context={<StatLine items={[`${room.world.universe.name} › ${room.world.name}`]} />}
+      context={<Context parts={[{ label: room.world.universe.name, kind: 'universe' }, { label: room.world.name, kind: 'world' }]} />}
       meta={
         analytics && (
           <>
@@ -203,7 +203,11 @@ export default function MyStarsPage() {
               kind: 'universe' as const, id: u.id, name: u.name, context: u.ownerName ? `Universe · by ${u.ownerName}` : 'Universe', isStarred: u.isStarred, starCount: u.starCount, favoritedAt: u.favoritedAt,
             })),
             ...(places.worlds ?? []).map((w: { id: string; name: string; universe: { name: string }; isStarred: boolean; starCount: number; favoritedAt: string }) => ({
-              kind: 'world' as const, id: w.id, name: w.name, context: `World · in ${w.universe.name}`, isStarred: w.isStarred, starCount: w.starCount, favoritedAt: w.favoritedAt,
+              kind: 'world' as const, id: w.id, name: w.name, context: (
+                <>
+                  World · in <Place kind="universe" label={w.universe.name} />
+                </>
+              ), isStarred: w.isStarred, starCount: w.starCount, favoritedAt: w.favoritedAt,
             })),
           ]);
         }

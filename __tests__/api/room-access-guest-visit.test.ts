@@ -12,7 +12,7 @@ jest.mock('@/lib/db', () => ({
     room: { findFirst: jest.fn() },
     ban: { findFirst: jest.fn().mockResolvedValue(null) },
     worldMember: { findUnique: jest.fn().mockResolvedValue(null) },
-    userAvatar: { findUnique: jest.fn().mockResolvedValue(null) },
+    userAvatar: { findUnique: jest.fn().mockResolvedValue(null), findFirst: jest.fn().mockResolvedValue(null), upsert: jest.fn().mockResolvedValue({}) },
     visitCard: { findUnique: jest.fn().mockResolvedValue(null) },
     bot: { findFirst: jest.fn() },
     roomAccess: { create: jest.fn().mockResolvedValue({}) },

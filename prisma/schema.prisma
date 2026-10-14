@@ -13,6 +13,8 @@ model User {
   email        String?  @unique
   name         String?
   matrixChatId String?  @map("matrix_chat_id") // Matrix ID: "@user:matrix.org"
+  // The companion they wear now, in every world (null = none). Changed only by their own pick.
+  companionTextureId String? @map("companion_texture_id")
   lastIpAddress String? @map("last_ip_address") // Last known IP address
   isGuest      Boolean  @default(false) @map("is_guest") // True for unauthenticated guest users
   createdAt    DateTime @default(now()) @map("created_at")
@@ -29,6 +31,7 @@ model User {
   reportsMade       Report[]          @relation("Reporter")
   reportsHandled    Report[]          @relation("ReportHandledBy")
   avatars           UserAvatar[]
+  outfits           UserOutfit[]
   favorites         Favorite[]
   followers         Follow[]          @relation("Follower")
   following         Follow[]          @relation("Following")
@@ -275,6 +278,8 @@ model UserAvatar {
   textureIds      String[] @map("texture_ids") // Array of texture IDs: ["male1", "hat1"]
   companionTextureId String? @map("companion_texture_id")
   updatedAt       DateTime @default(now()) @updatedAt @map("updated_at")
+  // When the outfit itself was last picked (a companion change leaves it alone)
+  outfitUpdatedAt DateTime? @map("outfit_updated_at")
 
   // Relations
   user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -282,6 +287,23 @@ model UserAvatar {
 
   @@unique([userId, worldId])
   @@map("user_avatars")
+}
+
+// The Wokas a person has worn, newest first. The newest (lastWornAt) is the one they wear now, in every world; the rest
+// are their Recent list (lib/user-outfits.ts keeps it short: 30 days, 10 rows, try-ons dropped).
+model UserOutfit {
+  id          String   @id @default(uuid())
+  userId      String   @map("user_id")
+  textureIds  String[] @map("texture_ids")
+  outfitKey   String   @map("outfit_key") // textureIds joined with "|", in order
+  firstWornAt DateTime @default(now()) @map("first_worn_at")
+  lastWornAt  DateTime @default(now()) @map("last_worn_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, outfitKey])
+  @@index([userId, lastWornAt])
+  @@map("user_outfits")
 }
 
 // Favorites (for future social features)

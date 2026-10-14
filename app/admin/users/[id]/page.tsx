@@ -1,23 +1,38 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
-import { ChevronLeft, ChevronRight, UserPlus } from 'lucide-react';
+import { Check, ChevronLeft, ChevronRight, UserMinus, UserPlus, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { timeAgo } from '@/lib/time-ago';
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
+import { timeAgo } from '@/lib/time-ago';
+import { useLive } from '../../hooks/use-live';
+import {
+  Context,
   EmptyCard,
   EntityRow,
   LoadingRows,
+  Place,
   RolePills,
   SectionHeader,
   StatLine,
   StatusPill,
   VisitLine,
   count,
+  countPlace,
 } from '../../components/ds';
-import { ProfileFrame, ProfileLinks, WokaAvatar } from '../../components/profile-card';
+import { ProfileActions, ProfileFrame, ProfileLinks, WokaAvatar } from '../../components/profile-card';
+import { inviteInGame, messageInGame, useGameCapability } from '../../components/orbit-bridge';
 import { PassportSection } from '../../components/passport';
 import InviteToWorldDialog from '../../components/invite-to-world-dialog';
 
@@ -148,6 +163,49 @@ function visits(analytics?: Analytics) {
   return { you, latest, youWereLast: analytics?.youWereLast === true };
 }
 
+/** How you stand with them, from /api/admin/users/[id]/connect. Not available for yourself or for guests. */
+type Relationship = 'none' | 'friends' | 'request_sent' | 'request_received' | 'blocked_by_me' | 'blocked_by_them';
+type Connect = { available: true; relationship: Relationship; chatId: string | null };
+type FriendStep = 'request' | 'accept' | 'cancel' | 'remove';
+
+/** The one friend button for each way you can stand: its words, what a tap does, and its glyph. */
+const FRIEND_BUTTON: Partial<Record<Relationship, { label: string; step: FriendStep; Icon: typeof UserPlus }>> = {
+  none: { label: 'Add friend', step: 'request', Icon: UserPlus },
+  request_sent: { label: 'Cancel request', step: 'cancel', Icon: X },
+  request_received: { label: 'Accept request', step: 'accept', Icon: Check },
+  friends: { label: 'Remove friend', step: 'remove', Icon: UserMinus },
+};
+
+const FRIEND_ERRORS: Record<string, string> = {
+  not_accepting_requests: 'They aren’t taking friend requests.',
+  no_shared_world: 'They only take friend requests from people who share a world with them.',
+  too_many_open_requests: 'You have too many requests waiting. Try again once some are answered.',
+  blocked: 'You can’t add them as a friend.',
+};
+
+/** Invite (two people and a plus) and Message (a speech bubble): plain white glyphs, no tile. */
+function UsersPlusIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M5 7a4 4 0 1 0 8 0a4 4 0 1 0 -8 0" />
+      <path d="M3 21v-2a4 4 0 0 1 4 -4h4c.96 0 1.84 .338 2.53 .901" />
+      <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+      <path d="M16 19h6" />
+      <path d="M19 16v6" />
+    </svg>
+  );
+}
+
+function MessageIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M8 9h8" />
+      <path d="M8 13h6" />
+      <path d="M18 4a3 3 0 0 1 3 3v8a3 3 0 0 1 -3 3h-5l-5 3v-3h-2a3 3 0 0 1 -3 -3v-8a3 3 0 0 1 3 -3h12z" />
+    </svg>
+  );
+}
+
 const linkClass = 'underline-offset-2 hover:underline [overflow-wrap:anywhere]';
 
 export default function UserDetailPage() {
@@ -172,6 +230,16 @@ export default function UserDetailPage() {
   const [worldAnalytics, setWorldAnalytics] = useState<Record<string, Analytics>>({});
   const [starredRooms, setStarredRooms] = useState<StarredRoom[]>([]);
   const [starredRoomsLoading, setStarredRoomsLoading] = useState(false);
+  // Kept with the profile it was fetched for, so a lookup for one person is never read as another's after the page moves on.
+  const [connectState, setConnectState] = useState<{ forId: string; connect: Connect } | null>(null);
+  const connect = connectState?.forId === id ? connectState.connect : null;
+  const [friendBusy, setFriendBusy] = useState(false);
+  const [friendError, setFriendError] = useState<string | null>(null);
+  const [removeFriendOpen, setRemoveFriendOpen] = useState(false);
+  // Invite and Message hand over to the game, so they show only when Orbit is open in a game that can take them.
+  const gameCanInvite = useGameCapability('invite');
+  const gameCanMessage = useGameCapability('message');
+  const live = useLive();
 
   useEffect(() => {
     checkAuth();
@@ -199,6 +267,27 @@ export default function UserDetailPage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentUser, user]);
+
+  useEffect(() => {
+    if (!currentUser || !user || currentUser.id === user.id) {
+      setConnectState(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const { authenticatedFetch } = await import('@/lib/client-auth');
+        const response = await authenticatedFetch(`/api/admin/users/${id}/connect`);
+        const data = response.ok ? await response.json() : null;
+        if (!cancelled) setConnectState(data?.available ? { forId: id, connect: data as Connect } : null);
+      } catch {
+        if (!cancelled) setConnectState(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser, user, id]);
 
   useEffect(() => {
     if (user) {
@@ -406,6 +495,33 @@ export default function UserDetailPage() {
     }
   }
 
+  /** Whether it worked; if not, `friendError` says why. */
+  async function changeFriendship(step: FriendStep): Promise<boolean> {
+    setFriendBusy(true);
+    setFriendError(null);
+    try {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch(`/api/admin/users/${id}/connect`, {
+        method: 'POST',
+        body: JSON.stringify({ action: step }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        setFriendError(FRIEND_ERRORS[data?.error] ?? 'That didn’t work. Try again.');
+        return false;
+      }
+      setConnectState((current) =>
+        current?.forId === id ? { ...current, connect: { ...current.connect, relationship: data.relationship as Relationship } } : current,
+      );
+      return true;
+    } catch {
+      setFriendError('That didn’t work. Try again.');
+      return false;
+    } finally {
+      setFriendBusy(false);
+    }
+  }
+
   if (loading) {
     return <LoadingRows label="this person" rows={4} />;
   }
@@ -430,6 +546,51 @@ export default function UserDetailPage() {
   const bio = user.visitCard?.bio?.trim();
   const links = user.visitCard?.links ?? [];
 
+  // The buttons on their card, in the order drawn: Invite, Message, Add friend, then Invite as member. The first is the main one.
+  const online = !isSelf && Boolean(live?.people.some((person) => person.uuid === user.uuid));
+  const blocked = connect?.relationship === 'blocked_by_me' || connect?.relationship === 'blocked_by_them';
+  const friendButton = connect && !blocked ? FRIEND_BUTTON[connect.relationship] : undefined;
+  const pills: ReactNode[] = [];
+  const pillClass = 'h-11 min-w-0 gap-2 px-3';
+  const pillVariant = () => (pills.length === 0 ? 'default' : 'outline');
+  if (gameCanInvite && online) {
+    pills.push(
+      <Button key="invite" variant={pillVariant()} className={pillClass} onClick={() => inviteInGame(user.uuid, name)}>
+        <UsersPlusIcon />
+        Invite
+      </Button>,
+    );
+  }
+  if (gameCanMessage && connect?.chatId) {
+    const chatId = connect.chatId;
+    pills.push(
+      <Button key="message" variant={pillVariant()} className={pillClass} onClick={() => messageInGame(user.uuid, name, chatId)}>
+        <MessageIcon />
+        Message
+      </Button>,
+    );
+  }
+  if (friendButton) {
+    pills.push(
+      <Button key="friend" variant={pillVariant()} className={pillClass} disabled={friendBusy} onClick={() => {
+          if (friendButton.step !== 'remove') return void changeFriendship(friendButton.step);
+          setFriendError(null);
+          setRemoveFriendOpen(true);
+        }}>
+        <friendButton.Icon aria-hidden="true" />
+        {friendButton.label}
+      </Button>,
+    );
+  }
+  if (canInvite) {
+    pills.push(
+      <Button key="member" variant={pillVariant()} className={pillClass} onClick={() => setInviteDialogOpen(true)}>
+        <UserPlus aria-hidden="true" />
+        Invite as member
+      </Button>,
+    );
+  }
+
   return (
     <div className="grid min-w-0 gap-7">
       <ProfileFrame
@@ -446,15 +607,13 @@ export default function UserDetailPage() {
             ]}
           />
         }
-        action={
-          canInvite ? (
-            <Button onClick={() => setInviteDialogOpen(true)} className="h-10 shrink-0 gap-2 px-4">
-              <UserPlus size={15} aria-hidden="true" />
-              Invite as member
-            </Button>
-          ) : undefined
-        }
+        action={pills.length > 0 ? <ProfileActions count={pills.length}>{pills}</ProfileActions> : undefined}
       >
+        {friendError && (
+          <p className="text-sm text-muted-foreground" role="alert">
+            {friendError}
+          </p>
+        )}
         {(bio || links.length > 0) && (
           <div className="grid min-w-0 gap-3">
             {bio && <p className="whitespace-pre-line text-sm leading-relaxed [overflow-wrap:anywhere]">{bio}</p>}
@@ -491,9 +650,9 @@ export default function UserDetailPage() {
                   context={
                     <StatLine
                       items={[
-                        count(universe._count?.worlds ?? 0, 'world'),
-                        count(universe._count?.rooms ?? 0, 'room'),
-                        count(universe._count?.members ?? 0, 'member'),
+                        countPlace('world', universe._count?.worlds ?? 0, 'world'),
+                        countPlace('room', universe._count?.rooms ?? 0, 'room'),
+                        countPlace('people', universe._count?.members ?? 0, 'member'),
                         analytics && count(analytics.totalAccesses, 'access', 'accesses'),
                       ]}
                     />
@@ -530,9 +689,9 @@ export default function UserDetailPage() {
                   context={
                     <StatLine
                       items={[
-                        membership.world.universe.name,
-                        count(membership.world._count?.rooms ?? 0, 'room'),
-                        count(membership.world._count?.members ?? 0, 'member'),
+                        <Place key="u" kind="universe" label={membership.world.universe.name} />,
+                        countPlace('room', membership.world._count?.rooms ?? 0, 'room'),
+                        countPlace('people', membership.world._count?.members ?? 0, 'member'),
                         analytics && count(analytics.totalAccesses, 'access', 'accesses'),
                       ]}
                     />
@@ -570,9 +729,10 @@ export default function UserDetailPage() {
                 kind="star"
                 title={room.name}
                 context={
-                  <StatLine
-                    items={[`${room.world.universe.name} › ${room.world.name}`, room.favoritedAt && !Number.isNaN(Date.parse(room.favoritedAt)) && `starred ${timeAgo(new Date(room.favoritedAt))}`]}
-                  />
+                  <>
+                    <Context parts={[{ label: room.world.universe.name, kind: 'universe' }, { label: room.world.name, kind: 'world' }]} />
+                    <StatLine items={[room.favoritedAt && !Number.isNaN(Date.parse(room.favoritedAt)) && `starred ${timeAgo(new Date(room.favoritedAt))}`]} />
+                  </>
                 }
                 aside={room.starCount > 0 ? `★ ${room.starCount}` : undefined}
               />
@@ -645,21 +805,36 @@ export default function UserDetailPage() {
                         <li key={access.id} className="grid min-w-0 gap-1 rounded-xl px-3 py-2.5 text-xs hover:bg-foreground/[0.04]">
                           <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-1">
                             <span className="min-w-0 text-sm">
-                              <Link href={`/admin/universes/${access.universe.id}`} className={linkClass}>
-                                {access.universe.name}
-                              </Link>
+                              <Place
+                                kind="universe"
+                                label={
+                                  <Link href={`/admin/universes/${access.universe.id}`} className={linkClass}>
+                                    {access.universe.name}
+                                  </Link>
+                                }
+                              />
                               <span className="text-muted-foreground" aria-hidden="true">
                                 {' › '}
                               </span>
-                              <Link href={`/admin/worlds/${access.world.id}`} className={linkClass}>
-                                {access.world.name}
-                              </Link>
+                              <Place
+                                kind="world"
+                                label={
+                                  <Link href={`/admin/worlds/${access.world.id}`} className={linkClass}>
+                                    {access.world.name}
+                                  </Link>
+                                }
+                              />
                               <span className="text-muted-foreground" aria-hidden="true">
                                 {' › '}
                               </span>
-                              <Link href={`/admin/rooms/${access.room.id}`} className={linkClass}>
-                                {access.room.name}
-                              </Link>
+                              <Place
+                                kind="room"
+                                label={
+                                  <Link href={`/admin/rooms/${access.room.id}`} className={linkClass}>
+                                    {access.room.name}
+                                  </Link>
+                                }
+                              />
                             </span>
                             <span className="shrink-0 text-muted-foreground">{timeAgo(new Date(access.accessedAt))}</span>
                           </div>
@@ -711,6 +886,42 @@ export default function UserDetailPage() {
           </div>
         </details>
       )}
+
+      <AlertDialog
+        open={removeFriendOpen}
+        onOpenChange={(open) => {
+          setRemoveFriendOpen(open);
+          // Cancelling after a failure leaves no stale reason on the card.
+          if (!open) setFriendError(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Remove {name} as a friend?</AlertDialogTitle>
+            <AlertDialogDescription>You’ll stop being friends. You can send them a new request later.</AlertDialogDescription>
+          </AlertDialogHeader>
+          {friendError && (
+            <p className="text-sm text-muted-foreground" role="alert">
+              {friendError}
+            </p>
+          )}
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              className="bg-[#E96D51] text-white hover:bg-[#E96D51]/90"
+              disabled={friendBusy}
+              onClick={async (event) => {
+                event.preventDefault();
+                // On a failure the dialog stays open and says why.
+                if (await changeFriendship('remove')) setRemoveFriendOpen(false);
+              }}
+            >
+              Remove friend
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <InviteToWorldDialog
         userName={user.name || undefined}

@@ -1,8 +1,8 @@
 /**
  * GET /api/companion/list?roomUrl=...&uuid=...
  *
- * Returns all companion textures the player can access, based on
- * the avatar catalog's scope + entitlement resolution.
+ * Returns the companion textures the player can wear here: the same check saving a companion uses
+ * (scope, entitlement, dates). `uuid` is the player's uuid, or their email when signed in.
  *
  * Called by the WA play server's AdminCompanionService when the
  * "api/companion/list" capability is set to "v1".
@@ -17,6 +17,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
 import { getCompanions } from '@/lib/wokas';
+import { findUserByIdentifier } from '@/lib/user-identifier';
+import { wearableSetsHere } from '@/lib/woka-wearable';
 
 export async function GET(request: NextRequest) {
   try {
@@ -35,7 +37,9 @@ export async function GET(request: NextRequest) {
     let universeId: string | null = null;
 
     try {
-      const parts = roomUrl.replace(/^\/@\//, '').split('/');
+      // Either the room's address (http://play.../@/universe/world/room) or just its path (/@/universe/world/room)
+      const path = /^https?:\/\//.test(roomUrl) ? new URL(roomUrl).pathname : roomUrl;
+      const parts = path.replace(/^\/@\//, '').split('/').map(decodeURIComponent);
       if (parts.length >= 2) {
         const world = await prisma.world.findFirst({
           where: {
@@ -63,27 +67,19 @@ export async function GET(request: NextRequest) {
       return NextResponse.json(companions);
     }
 
-    // Query catalog for companion textures
-    const scopeFilter: Record<string, unknown>[] = [{ scopeType: 'platform' }];
-    if (universeId) scopeFilter.push({ scopeType: 'universe', scopeId: universeId });
-    if (worldId) scopeFilter.push({ scopeType: 'world', scopeId: worldId });
-
-    const sets = await prisma.avatarSet.findMany({
-      where: {
-        lifecycle: 'active',
-        visibility: { in: ['public', 'restricted', 'hidden', 'assigned_only'] },
-        companions: { some: { isActive: true } },
-        scopes: { some: { OR: scopeFilter } },
-      },
-      select: {
-        name: true,
-        companions: {
-          where: { isActive: true },
-          select: { textureId: true, name: true, url: true, behavior: true },
-          orderBy: { position: 'asc' },
-        },
-      },
-      orderBy: { position: 'asc' },
+    // The same sets saving allows for this person here, so every companion listed can be saved: members-only ones only
+    // for members, nothing hidden, invite-only (unless granted to them) or outside its dates.
+    const person = uuid ? await findUserByIdentifier(uuid) : null;
+    const member =
+      person && worldId
+        ? await prisma.worldMember.findUnique({ where: { userId_worldId: { userId: person.id, worldId } }, select: { tags: true } })
+        : null;
+    const allowed = await wearableSetsHere({ worldId, universeId, userId: person?.id ?? null, membershipTags: member?.tags ?? [] });
+    const seen = new Set<string>();
+    const sets = allowed.filter((set) => {
+      if (set.companions.length === 0 || seen.has(set.id)) return false;
+      seen.add(set.id);
+      return true;
     });
 
     if (sets.length === 0) {

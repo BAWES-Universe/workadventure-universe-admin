@@ -11,13 +11,15 @@ jest.mock('@/lib/db', () => ({
     room: { findFirst: jest.fn() },
     ban: { findFirst: jest.fn().mockResolvedValue(null) },
     worldMember: { findUnique: jest.fn() },
-    userAvatar: { findUnique: jest.fn().mockResolvedValue(null) },
+    userAvatar: { findUnique: jest.fn().mockResolvedValue(null), findFirst: jest.fn().mockResolvedValue(null), upsert: jest.fn().mockResolvedValue({}) },
     visitCard: { findUnique: jest.fn().mockResolvedValue(null) },
     bot: { findFirst: jest.fn() },
     roomAccess: { create: jest.fn().mockResolvedValue({}) },
   },
 }));
 jest.mock('@/lib/oidc', () => ({ authenticateRequest: jest.fn().mockResolvedValue({ isAuthenticated: false }) }));
+// The person's current Woka is not what these tests are about: none on record, so entry goes ahead with what the game sent
+jest.mock('@/lib/user-outfits', () => ({ currentOutfit: jest.fn().mockResolvedValue(null), recordOutfitPick: jest.fn().mockResolvedValue(undefined) }));
 jest.mock('@/lib/discord', () => ({ notifyRoomAccess: jest.fn().mockResolvedValue(undefined) }));
 jest.mock('@/lib/avatar-catalog-validator', () => ({
   resolveTextureUrls: jest.fn().mockResolvedValue({ valid: true, textures: [] }),

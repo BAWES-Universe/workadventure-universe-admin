@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { getSessionData, getSessionId } from '@/lib/auth-token';
 import { isSuperAdmin } from '@/lib/super-admin';
+import { wokaLayersFor } from '@/lib/woka-avatar';
 import { NOT_SYSTEM_USER, hiddenSystemOwnerId, notSystemRoom, notSystemUniverse, notSystemWorld, startRoomPath } from '@/lib/system-user';
 
 export const runtime = 'nodejs';
@@ -60,10 +61,14 @@ export async function GET(request: NextRequest) {
     prisma.membershipInvitation.count({ where: { invitedByUserId: session.userId } }),
   ]);
   if (!user) return NextResponse.json({ error: 'User not found' }, { status: 404 });
+  // Your Woka, once for the whole shell: pages draw it from here instead of each asking again. It is decoration, so a
+  // failure to read it costs nothing else.
+  const woka = await wokaLayersFor(user.id).catch(() => []);
 
   const response = NextResponse.json({
     version: 1,
     user: { ...user, tags: session.tags, isSuperAdmin: isSuperAdmin(user.email) },
+    woka,
     stats: {
       universes: Math.max(0, universes - (defaultUniverse ? 1 : 0)),
       worlds: Math.max(0, worlds - (defaultWorld ? 1 : 0)),

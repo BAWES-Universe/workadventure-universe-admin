@@ -207,9 +207,9 @@ export default function BotsPage() {
               context={
                 <Context
                   parts={[
-                    { label: bot.room.world.universe.name },
-                    { label: bot.room.world.name },
-                    { label: bot.room.name },
+                    { label: bot.room.world.universe.name, kind: 'universe' },
+                    { label: bot.room.world.name, kind: 'world' },
+                    { label: bot.room.name, kind: 'room' },
                   ]}
                 />
               }

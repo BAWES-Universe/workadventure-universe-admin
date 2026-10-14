@@ -27,6 +27,8 @@ export type AdminBootstrap = {
   version: 1;
   user: AdminUser;
   stats: AdminStats;
+  /** The layers of your Woka as image URLs, bottom first; absent from an older server, empty when it could not be read. */
+  woka?: string[];
   mine?: AdminMine;
   /** START_ROOM_URL as `@/universe/world/room`; null when it is a map URL; absent from an older server. */
   startRoom?: string | null;
@@ -54,3 +56,13 @@ export function useStartRoom(): string | null {
 export function useIsSuperAdmin(): boolean {
   return useContext(AdminBootstrapContext)?.user.isSuperAdmin === true;
 }
+
+/**
+ * Your Woka as the shell knows it (image URLs, bottom first): loaded once with the shell and kept across pages, so a page
+ * draws it at once instead of asking again. Empty outside the shell or when the server could not say.
+ */
+export function useMyWoka(): string[] {
+  return useContext(AdminBootstrapContext)?.woka ?? NO_WOKA;
+}
+
+const NO_WOKA: string[] = [];
