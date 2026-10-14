@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { exchangeOidcAccessToken, SessionExchangeError } from '@/lib/oidc-session-exchange';
 import { resolveExpectedLoginOrigin } from '@/lib/auth';
+import {
+  isMobileOrigin,
+  isValidRedirectUri,
+  resolveRedirectUri,
+} from '@/app/api/auth/redirect-uri';
 
 export const runtime = 'nodejs';
 
@@ -28,9 +33,32 @@ function loginExpectedOrigin(request: NextRequest): string {
   return request.nextUrl.origin;
 }
 
+export async function GET(request: NextRequest) {
+  const requestedRedirectUri =
+    request.nextUrl.searchParams.get('redirect_uri') ??
+    request.nextUrl.searchParams.get('redirectUri');
+  const userAgent = request.headers.get('user-agent');
+  const fallbackOrigin = process.env.NODE_ENV === 'production' ? '' : request.nextUrl.origin;
+
+  const resolved = resolveRedirectUri({
+    requestedRedirectUri,
+    userAgent,
+    fallbackOrigin,
+  });
+
+  if (!resolved.valid) {
+    return response({ error: 'Invalid redirect_uri' }, 400);
+  }
+
+  return response({
+    redirectUri: resolved.redirectUri,
+    isMobile: resolved.isMobile,
+  });
+}
+
 export async function POST(request: NextRequest) {
   const origin = request.headers.get('origin');
-  if (origin) {
+  if (origin && !isMobileOrigin(origin)) {
     // Computed before the try so a missing production config surfaces as a loud
     // 500 with a clear message instead of a silent 403.
     const expected = loginExpectedOrigin(request);
@@ -43,13 +71,34 @@ export async function POST(request: NextRequest) {
 
   try {
     const body: unknown = await request.json();
-    const accessToken = typeof body === 'object' && body !== null && 'accessToken' in body
-      ? (body as { accessToken?: unknown }).accessToken
+    const record = typeof body === 'object' && body !== null
+      ? (body as Record<string, unknown>)
       : null;
+
+    const requestedRedirectUri =
+      typeof record?.redirect_uri === 'string'
+        ? record.redirect_uri
+        : typeof record?.redirectUri === 'string'
+          ? record.redirectUri
+          : null;
+
+    if (requestedRedirectUri !== null) {
+      const fallbackOrigin = process.env.NODE_ENV === 'production' ? '' : request.nextUrl.origin;
+      if (!isValidRedirectUri(requestedRedirectUri, fallbackOrigin)) {
+        return response({ error: 'Invalid redirect_uri' }, 400);
+      }
+    }
+
+    const accessToken = record && 'accessToken' in record ? record.accessToken : null;
     if (typeof accessToken !== 'string' || !accessToken.trim()) {
       return response({ error: 'Access token required' }, 400);
     }
-    return response(await exchangeOidcAccessToken(accessToken));
+
+    const session = await exchangeOidcAccessToken(accessToken);
+    if (requestedRedirectUri !== null) {
+      return response({ ...session, redirectUri: requestedRedirectUri.trim() });
+    }
+    return response(session);
   } catch (error) {
     if (error instanceof SyntaxError) return response({ error: 'Invalid JSON body' }, 400);
     if (error instanceof SessionExchangeError) return response({ error: error.message }, error.status);

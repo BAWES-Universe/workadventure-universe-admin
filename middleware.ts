@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
+import { isMobileOrigin } from '@/app/api/auth/redirect-uri';
 
 /** Admin pages are a non-sensitive client shell. Authentication is enforced by
  * every data API with an opaque Authorization credential. This is intentional:
@@ -8,6 +9,13 @@ export function middleware(request: NextRequest) {
   const response = NextResponse.next();
   response.headers.set('Referrer-Policy', 'no-referrer');
   response.headers.set('X-Content-Type-Options', 'nosniff');
+
+  // Allow mobile app deep-link origin (`bawes://`) to pass through without origin blocking
+  const origin = request.headers.get('origin')?.trim();
+  if (origin && isMobileOrigin(origin) && request.nextUrl.pathname.startsWith('/api/auth')) {
+    response.headers.set('Access-Control-Allow-Origin', origin);
+    response.headers.set('Vary', 'Origin');
+  }
 
   // Never let old credential-bearing URLs become valid again.
   if (request.nextUrl.pathname.startsWith('/admin') &&
