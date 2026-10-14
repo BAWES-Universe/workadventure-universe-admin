@@ -138,32 +138,32 @@ async function testProviderConnection(
           return { success: false, error: 'API key required for Anthropic' };
         }
 
-        const anthropicResponse = await fetch('https://api.anthropic.com/v1/messages', {
-          method: 'POST',
+        const anthropicResponse = await fetch('https://api.anthropic.com/v1/models?limit=1', {
+          method: 'GET',
           headers: {
             'x-api-key': apiKey,
             'anthropic-version': '2023-06-01',
-            'Content-Type': 'application/json',
           },
-          body: JSON.stringify({
-            model: 'claude-3-haiku-20240307',
-            max_tokens: 10,
-            messages: [{ role: 'user', content: 'test' }],
-          }),
           signal: AbortSignal.timeout(10000),
         });
 
-        // 2xx responses or 400 (bad request but auth worked) indicate success; 401 = bad key
-        if (anthropicResponse.ok || anthropicResponse.status === 400) {
+        // Check credentials without a model call or token usage.
+        if (anthropicResponse.status === 200) {
           return { success: true };
         }
         if (anthropicResponse.status === 401) {
           return { success: false, error: 'Authentication failed' };
         }
 
+        const errorData = await anthropicResponse.json().catch(() => null);
+        const reason = errorData?.error?.message;
         return {
           success: false,
           error: `Unexpected response: ${anthropicResponse.status}`,
+          details: (typeof reason === 'string' && reason.trim()
+            ? reason.trim()
+            : anthropicResponse.statusText || 'Request failed'
+          ).slice(0, 200),
         };
       }
 

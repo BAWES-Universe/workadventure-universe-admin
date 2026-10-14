@@ -178,7 +178,7 @@ export default function NewProviderPage() {
                 className="h-11"
                 value={formData.model}
                 onChange={(e) => setFormData({ ...formData, model: e.target.value })}
-                placeholder="e.g., gpt-4, claude-3-haiku"
+                placeholder="e.g., gpt-4, claude-haiku-4-5"
               />
             </div>
 
