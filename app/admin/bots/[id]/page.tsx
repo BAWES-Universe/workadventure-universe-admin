@@ -670,9 +670,13 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
                     </dl>
                   </details>
                   <BotToolCallSwitch
-                    key={`${bot.id}:${bot.behaviorConfig?.showToolCalls === true}`}
+                    key={bot.id}
                     botId={bot.id}
-                    initialValue={bot.behaviorConfig?.showToolCalls === true}
+                    value={bot.behaviorConfig?.showToolCalls === true}
+                    onSaved={(showToolCalls) => setBot((current) => current ? {
+                      ...current,
+                      behaviorConfig: { ...current.behaviorConfig, showToolCalls },
+                    } : current)}
                   />
                 </div>
               </section>

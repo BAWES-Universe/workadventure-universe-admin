@@ -7,12 +7,13 @@ import { authenticatedFetch } from '@/lib/client-auth';
 
 export function BotToolCallSwitch({
   botId,
-  initialValue,
+  value,
+  onSaved,
 }: {
   botId: string;
-  initialValue: boolean;
+  value: boolean;
+  onSaved: (value: boolean) => void;
 }) {
-  const [checked, setChecked] = useState(initialValue);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -26,7 +27,7 @@ export function BotToolCallSwitch({
         body: JSON.stringify({ showToolCalls: value }),
       });
       if (!response.ok) throw new Error('Could not save Show tool calls. Please try again.');
-      setChecked(value);
+      onSaved(value);
     } catch {
       setError('Could not save Show tool calls. Please try again.');
     } finally {
@@ -40,7 +41,7 @@ export function BotToolCallSwitch({
         id={`show-tool-calls-${botId}`}
         label="Show tool calls"
         hint="On: show tool names while this bot uses them. Off: keep tool calls hidden."
-        checked={checked}
+        checked={value}
         onChange={save}
         disabled={saving}
       />
