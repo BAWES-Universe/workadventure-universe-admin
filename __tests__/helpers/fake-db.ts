@@ -250,5 +250,7 @@ export const fakeDb: Record<string, any> = {
       return row;
     }),
   },
+  // Row locks (SELECT ... FOR UPDATE): one request at a time here, so nothing to wait for
+  $queryRaw: jest.fn(async () => []),
   $transaction: jest.fn(async (run: (tx: unknown) => unknown) => run(fakeDb)),
 };
