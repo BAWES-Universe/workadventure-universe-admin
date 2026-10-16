@@ -173,3 +173,18 @@ export async function transformBotToServerFormat(
   return result;
 }
 
+
+/**
+ * A save that replaces a bot's whole behavior config must not silently turn "Show tool calls"
+ * back off just because the caller did not know about that key. An explicit true or false
+ * from the caller still wins.
+ */
+export function keepToolCallSetting(
+  stored: unknown,
+  incoming: Record<string, unknown>
+): Record<string, unknown> {
+  if ('showToolCalls' in incoming) return incoming;
+  const storedValue =
+    stored && typeof stored === 'object' ? (stored as Record<string, unknown>).showToolCalls : undefined;
+  return typeof storedValue === 'boolean' ? { ...incoming, showToolCalls: storedValue } : incoming;
+}
