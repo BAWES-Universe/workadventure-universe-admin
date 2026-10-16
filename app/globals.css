@@ -96,9 +96,11 @@
 
   /* On a phone the game raises its own bottom buttons only 13px for the home bar (the 34px an iPhone reports, less
      21px), so they sit 17px from the edge. The dock and the page below it use the same amount, which keeps them level
-     with those buttons in the installed app. This is the game's own phone query (ResponsiveActionBar.svelte). */
-  @media (max-height: 960px) and (max-width: 480px) and (pointer: coarse),
-    (max-height: 480px) and (max-width: 960px) and (pointer: coarse) {
+     with those buttons in the installed app. This is the game's own phone query (ResponsiveActionBar.svelte), plus the
+     size of the screen itself: Orbit's narrow panel on an iPad matches the window size but not a phone's screen, and
+     the iPad keeps its whole home-bar inset because the game's bar is at its top. */
+  @media (max-height: 960px) and (max-width: 480px) and (max-device-width: 480px) and (max-device-height: 960px) and (pointer: coarse),
+    (max-height: 480px) and (max-width: 960px) and (max-device-height: 480px) and (max-device-width: 960px) and (pointer: coarse) {
     :root { --safe-bottom: max(0px, env(safe-area-inset-bottom, 0px) - 21px); }
   }
 
