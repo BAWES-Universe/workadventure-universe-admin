@@ -9,6 +9,7 @@ import { parsePlayUri } from '@/lib/utils';
 import { z } from 'zod';
 import { checkAiProviderRef } from '@/lib/ai-provider-ref';
 import { toolTimeoutSecondsSchema } from '@/lib/bot-tool-timeout';
+import { keepToolCallSetting } from '@/lib/bot-config-helpers';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Prisma
 export const runtime = 'nodejs';
@@ -459,7 +460,9 @@ export async function PUT(
     if (validatedData.characterTextureId !== undefined) updateData.characterTextureId = validatedData.characterTextureId;
     if (validatedData.enabled !== undefined) updateData.enabled = validatedData.enabled;
     if (validatedData.behaviorType !== undefined) updateData.behaviorType = validatedData.behaviorType;
-    if (validatedData.behaviorConfig !== undefined) updateData.behaviorConfig = validatedData.behaviorConfig;
+    if (validatedData.behaviorConfig !== undefined) {
+      updateData.behaviorConfig = keepToolCallSetting(existingBot.behaviorConfig, validatedData.behaviorConfig);
+    }
     if (validatedData.chatInstructions !== undefined) updateData.chatInstructions = validatedData.chatInstructions;
     if (validatedData.movementInstructions !== undefined) updateData.movementInstructions = validatedData.movementInstructions;
     if (validatedData.aiProviderRef !== undefined) updateData.aiProviderRef = validatedData.aiProviderRef;
