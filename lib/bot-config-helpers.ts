@@ -147,6 +147,7 @@ export async function transformBotToServerFormat(
     behaviorType: bot.behaviorType as 'idle' | 'patrol' | 'social',
     behaviorConfig: {
       ...behaviorConfig,
+      showToolCalls: behaviorConfig.showToolCalls === true,
       behaviorType: bot.behaviorType,
       assignedSpace: behaviorConfig.assignedSpace,
     },

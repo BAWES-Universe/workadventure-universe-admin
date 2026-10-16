@@ -3,6 +3,39 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
+import { z } from 'zod';
+
+const toolCallSettingSchema = z.object({ showToolCalls: z.boolean() }).strict();
+
+/** Save just this switch atomically, preserving every other behavior setting. */
+export async function PATCH(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  try {
+    const user = await getSessionUser(request);
+    if (!user || !isSuperAdmin(user.email)) {
+      return NextResponse.json({ error: 'Unauthorized: Super admin access required' }, { status: 403 });
+    }
+    const { showToolCalls } = toolCallSettingSchema.parse(await request.json());
+    const { id } = await params;
+    const updated = await prisma.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+      UPDATE bots
+      SET behavior_config = jsonb_set(behavior_config, '{showToolCalls}', ${JSON.stringify(showToolCalls)}::jsonb, true),
+          updated_at = NOW(), updated_by_id = ${user.id}
+      WHERE id = ${id}
+      RETURNING id
+    `);
+    if (updated.length === 0) return NextResponse.json({ error: 'Bot not found' }, { status: 404 });
+    return NextResponse.json({ showToolCalls });
+  } catch (error) {
+    if (error instanceof z.ZodError || error instanceof SyntaxError) {
+      return NextResponse.json({ error: 'Show tool calls must be a boolean' }, { status: 400 });
+    }
+    console.error('Error saving bot tool-call setting:', error);
+    return NextResponse.json({ error: 'Could not save Show tool calls' }, { status: 500 });
+  }
+}
 
 /** Result row from BotsAiUsage.groupBy({ by: ['providerId'], _sum: {...} }) */
 type ProviderStatRow = {
