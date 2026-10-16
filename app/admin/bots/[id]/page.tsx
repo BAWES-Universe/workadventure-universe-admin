@@ -15,6 +15,7 @@ import {
 } from '@/components/ui/table';
 import { AlertCircle, ChevronDown, Server } from 'lucide-react';
 import BotTexturePicker from '@/components/bot-texture-picker';
+import { BotToolCallSwitch } from '@/components/bot-tool-call-switch';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
@@ -668,6 +669,15 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
                       </Detail>
                     </dl>
                   </details>
+                  <BotToolCallSwitch
+                    key={bot.id}
+                    botId={bot.id}
+                    value={bot.behaviorConfig?.showToolCalls === true}
+                    onSaved={(showToolCalls) => setBot((current) => current ? {
+                      ...current,
+                      behaviorConfig: { ...current.behaviorConfig, showToolCalls },
+                    } : current)}
+                  />
                 </div>
               </section>
 
