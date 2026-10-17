@@ -3,7 +3,8 @@
 import Link from 'next/link';
 import { useState } from 'react';
 import { useMembersPreview, type MemberPreview } from '../hooks/use-place-data';
-import InviteMemberDialog from './invite-member-dialog';
+import InviteSheet from './invite-sheet';
+import { useCanInvite } from './universe-people';
 import MembersRow, { topRole } from './members-row';
 import { PersonSheet } from './person-sheet';
 import { RolePills } from './ds';
@@ -14,6 +15,7 @@ export default function RoomMembers({ world }: { world: { id: string; name: stri
   const preview = useMembersPreview(world.id);
   const [picked, setPicked] = useState<MemberPreview | null>(null);
   const [inviteOpen, setInviteOpen] = useState(false);
+  const canInvite = useCanInvite(preview?.universeId ?? null, world.id);
   // Your own card and the owner's card say less than a card for anyone else: neither offers membership changes.
   const isYou = !!picked && picked.user.id === preview?.yourId;
   const universe = preview?.universeName ?? 'the universe';
@@ -30,6 +32,7 @@ export default function RoomMembers({ world }: { world: { id: string; name: stri
         worldId={world.id}
         preview={preview}
         onSelect={setPicked}
+        canInvite={canInvite}
         onInvite={() => setInviteOpen(true)}
         description={`Members of ${world.name} belong to all its rooms.`}
       />
@@ -50,7 +53,7 @@ export default function RoomMembers({ world }: { world: { id: string; name: stri
       >
         {picked && <RolePills roles={isYou || picked.isUniverseOwner ? [topRole(picked)] : picked.tags} />}
       </PersonSheet>
-      {preview?.canManage && <InviteMemberDialog open={inviteOpen} onOpenChange={setInviteOpen} worldId={world.id} onInviteSent={() => {}} />}
+      {canInvite && preview?.universeId && <InviteSheet open={inviteOpen} onOpenChange={setInviteOpen} universeId={preview.universeId} worldId={world.id} />}
     </>
   );
 }

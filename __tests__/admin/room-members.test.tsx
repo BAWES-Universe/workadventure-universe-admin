@@ -6,10 +6,10 @@ import RoomMembers from '@/app/admin/components/room-members';
 
 const fetchMock = jest.fn();
 jest.mock('@/lib/client-auth', () => ({ authenticatedFetch: (...args: unknown[]) => fetchMock(...args) }));
-// The invite dialog has its own tests; here it only has to open for the world it is given.
-jest.mock('@/app/admin/components/invite-member-dialog', () => ({
+// The invite sheet has its own tests; here it only has to open for the universe and world it is given.
+jest.mock('@/app/admin/components/invite-sheet', () => ({
   __esModule: true,
-  default: ({ open, worldId }: { open: boolean; worldId: string }) => (open ? <div data-testid="invite-dialog">Invite to {worldId}</div> : null),
+  default: ({ open, universeId, worldId }: { open: boolean; universeId: string; worldId: string }) => (open ? <div data-testid="invite-dialog">Invite to {universeId}/{worldId}</div> : null),
 }));
 
 type Member = { id: string; tags: string[]; isUniverseOwner: boolean; woka: string[]; user: { id: string; name: string; email: null } };
@@ -20,9 +20,11 @@ const omar = person('omar', 'Omar', ['editor']);
 
 beforeEach(() => fetchMock.mockReset());
 
-function serve({ canManage = true, members = [sara], yourId = 'someone-else' }: { canManage?: boolean; members?: Member[]; yourId?: string } = {}) {
+function serve({ canManage = true, members = [sara], yourId = 'someone-else', roles = [] }: { canManage?: boolean; members?: Member[]; yourId?: string; roles?: unknown[] } = {}) {
   fetchMock.mockImplementation(async (path: string) => ({ ok: true, json: async () =>
-    path.includes('/members?') ? { members, total: members.length, canManage, yourTags: [], yourId, universeName: 'Butterfly Universe' }
+    path.includes('/members?') ? { members, total: members.length, canManage, yourTags: [], yourId, universeName: 'Butterfly Universe', universeId: 'u1' }
+      : path === '/api/admin/universes/u1/me' ? { inviteWorlds: canManage ? 'all' : [] }
+      : path === '/api/admin/universes/u1/roles' ? { roles }
       : path.endsWith('/passport') ? { stamps: [] }
         : { visitCard: { bio: 'Ops at HQ', links: [] } },
   }));
@@ -60,7 +62,7 @@ it('has a single See all, in the header, and no arrow tile at the end of the row
   await screen.findByRole('button', { name: 'Sara, admin' });
   const links = screen.getAllByRole('link', { name: /see all/i });
   expect(links).toHaveLength(1);
-  expect(links[0].getAttribute('href')).toBe('/admin/worlds/w1/members');
+  expect(links[0].getAttribute('href')).toBe('/admin/universes/u1/members?world=w1');
   expect(screen.queryByRole('link', { name: 'See all members' })).toBeNull();
 });
 
@@ -127,7 +129,7 @@ it('offers Invite member in the Members header to managers, opening the invite f
   render(<RoomMembers world={{ id: 'w1', name: 'HQ' }} />);
   expect(screen.queryByTestId('invite-dialog')).toBeNull();
   fireEvent.click(await screen.findByRole('button', { name: /invite member/i }));
-  expect((await screen.findByTestId('invite-dialog')).textContent).toBe('Invite to w1');
+  expect((await screen.findByTestId('invite-dialog')).textContent).toBe('Invite to u1/w1');
 });
 
 it('shows an empty state and does not expose a list when the endpoint denies access', async () => {
@@ -139,4 +141,19 @@ it('shows an empty state and does not expose a list when the endpoint denies acc
   const second = render(<RoomMembers world={{ id: 'private', name: 'Private' }} />);
   await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/admin/worlds/private/members?limit=8'));
   expect(second.container.textContent).toBe('');
+});
+
+it('shows a custom role as itself on the face, the highest the universe ranks them at', async () => {
+  const lina = person('lina', 'Lina', ['member', 'accountant']);
+  serve({
+    members: [lina],
+    roles: [
+      { id: 'r1', key: 'member', name: 'Member', color: '#A78BFA', builtIn: true, position: 1, permissions: '0', people: 5 },
+      { id: 'r2', key: 'accountant', name: 'Accountant', color: '#34D399', builtIn: false, position: 12, permissions: '0', people: 2 },
+    ],
+  });
+  render(<RoomMembers world={{ id: 'w1', name: 'HQ' }} />);
+  const face = await screen.findByRole('button', { name: 'Lina, Accountant' });
+  expect(within(face).getByText('Accountant')).toBeTruthy();
+  expect(within(face).queryByText('Member')).toBeNull();
 });
