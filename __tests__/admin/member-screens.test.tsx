@@ -182,6 +182,27 @@ describe('a member’s page', () => {
     expect(calls.find((call) => call.method === 'PUT')!.body).toEqual({ allWorlds: false, worldIds: ['hq'] });
   });
 
+  it('keeps the worlds picked when the segment already chosen is tapped again', async () => {
+    const base = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
+      if (url.endsWith('/members/sara') && !init?.method) {
+        return ok({
+          member: { userId: 'sara', name: 'Sara Ali', email: 'sara@example.com', joinedAt: '2026-08-01T00:00:00Z', lastVisitedAt: null, isOwner: false, worlds: everywhere, roles: [{ roleId: 'r-editor', allWorlds: false, worldIds: ['hq', 'campus'] }] },
+          can,
+        });
+      }
+      return base(url, init);
+    });
+    wrap(<MemberPage />);
+    await screen.findByRole('checkbox', { name: 'Editor' });
+    fireEvent.click(screen.getByRole('radio', { name: 'Some worlds' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'Some worlds' }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(calls.some((call) => call.method === 'PUT')).toBe(false);
+    expect(screen.getByRole('button', { name: 'HQ' }).getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByRole('button', { name: 'Campus' }).getAttribute('aria-pressed')).toBe('true');
+  });
+
   it('undoes the tick and says why when the save is refused', async () => {
     failNextRole = true;
     wrap(<MemberPage />);
