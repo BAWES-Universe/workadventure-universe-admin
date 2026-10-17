@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import { DoorOpen } from 'lucide-react';
 import { PERMISSIONS, withUniverse } from '@/lib/permissions';
-import type { MapAreasStatus, UsedIn, UsedInRoom } from '@/lib/role-used-in';
+import type { UsedIn, UsedInRoom } from '@/lib/role-used-in';
 import type { RoleRow } from '@/lib/role-ui';
 import { RolePill } from '@/components/ui/choice';
 import { LoadError, LoadingRows } from '../ds';
@@ -25,11 +25,14 @@ function Line({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-const AREA_STATUS_NOTE: Record<Exclude<MapAreasStatus, 'read'>, (unread: number) => string> = {
-  partial: (unread) =>
-    `${unread === 1 ? '1 room’s map' : `${unread} rooms’ maps`} could not be read just now, so this may be incomplete.`,
-  not_configured: () => 'Orbit cannot read map areas here: this server has no map-storage address, so none can be listed.',
-};
+/** What was not checked, said apart: maps past the cap were never tried, the others were tried and could not be read. */
+function mapAreaNotes(areas: UsedIn['reach']['mapAreas']): string[] {
+  if (areas.status === 'not_configured') return ['Orbit cannot read map areas here: this server has no map-storage address, so none can be listed.'];
+  const notes: string[] = [];
+  if (areas.skipped > 0) notes.push(`Read the first ${(areas.read + areas.unread).toLocaleString()} maps; ${areas.skipped.toLocaleString()} more not checked.`);
+  if (areas.unread > 0) notes.push(`${areas.unread === 1 ? '1 map' : `${areas.unread.toLocaleString()} maps`} could not be read.`);
+  return notes;
+}
 
 /** Where the role opens doors, and what it reaches. Only what Orbit can read is listed; what it cannot read is said. */
 export function UsedInTab({ role, universeId, universeName }: { role: RoleRow; universeId: string; universeName: string }) {
@@ -101,12 +104,14 @@ export function UsedInTab({ role, universeId, universeName }: { role: RoleRow; u
         <dl className="grid gap-4">
           <Line label="Worlds">
             {reach.worlds.length === 0
-              ? 'None yet: no one has it'
+              ? reach.held
+                ? 'Not in any world you can see'
+                : 'None yet: no one has it'
               : reach.allWorlds
                 ? `Every world: ${reach.worlds.map((world) => world.name).join(', ')}`
                 : reach.worlds.map((world) => world.name).join(', ')}
           </Line>
-          <Line label="Rooms">{reach.rooms.length === 0 ? 'None yet' : names(reach.rooms, reach.roomsTotal)}</Line>
+          <Line label="Rooms">{reach.rooms.length === 0 ? (reach.held ? 'None you can see' : 'None yet') : names(reach.rooms, reach.roomsTotal)}</Line>
           <Line label="Map areas">
             {areas.areas.length > 0 ? (
               <ul className="grid gap-1" aria-label="Map areas locked to this role">
@@ -121,11 +126,11 @@ export function UsedInTab({ role, universeId, universeName }: { role: RoleRow; u
             ) : (
               'None locked to this role'
             )}
-            {areas.status !== 'read' && (
-              <span className="mt-1 block text-sm text-muted-foreground" data-testid="map-areas-note">
-                {AREA_STATUS_NOTE[areas.status](areas.unread)}
+            {mapAreaNotes(areas).map((note) => (
+              <span key={note} className="mt-1 block text-sm text-muted-foreground" data-testid="map-areas-note">
+                {note}
               </span>
-            )}
+            ))}
           </Line>
           <Line label="Permissions">{permissionLabels.length === 0 ? 'None' : permissionLabels.join(', ')}</Line>
         </dl>

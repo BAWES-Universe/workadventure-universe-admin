@@ -89,7 +89,7 @@ function serve(extra?: (url: string, init?: RequestInit) => Promise<Response> | 
     if (url.endsWith('/used-in')) {
       return json({
         doors: { basis: 'none', rooms: [], roomsTotal: 0 },
-        reach: { allWorlds: false, worlds: [], rooms: [], roomsTotal: 0, mapAreas: { status: 'not_configured', areas: [], unread: 0, read: 0 }, permissions: [] },
+        reach: { held: false, allWorlds: false, worlds: [], rooms: [], roomsTotal: 0, mapAreas: { status: 'not_configured', areas: [], unread: 0, skipped: 0, read: 0 }, permissions: [] },
       });
     }
     if (url.includes('/members')) return json({ members: [], total: 0, nextCursor: null });
@@ -392,5 +392,36 @@ describe('a role page', () => {
     expect(screen.getByText('What Accountant can reach')).toBeTruthy();
     expect(screen.getByText(/no map-storage address/)).toBeTruthy();
     expect(screen.getByText('Not known')).toBeTruthy();
+    expect(screen.getByText('None yet: no one has it')).toBeTruthy();
+  });
+
+  async function openUsedIn(reach: object) {
+    serve((url) =>
+      url.endsWith('/used-in')
+        ? json({ doors: { basis: 'none', rooms: [], roomsTotal: 0 }, reach: { held: false, allWorlds: false, worlds: [], rooms: [], roomsTotal: 0, permissions: [], ...reach } })
+        : undefined,
+    );
+    open('acc');
+    fireEvent.mouseDown(await screen.findByRole('tab', { name: 'Used in' }), { button: 0 });
+    fireEvent.click(screen.getByRole('tab', { name: 'Used in' }));
+    await screen.findByText('What Accountant can reach');
+  }
+
+  it('says "Not in any world you can see" when the role is held only where you cannot look', async () => {
+    await openUsedIn({ held: true, mapAreas: { status: 'read', areas: [], unread: 0, skipped: 0, read: 3 } });
+    expect(screen.getByText('Not in any world you can see')).toBeTruthy();
+    expect(screen.queryByText('None yet: no one has it')).toBeNull();
+  });
+
+  it('says apart which maps were not checked and which could not be read', async () => {
+    await openUsedIn({ mapAreas: { status: 'partial', areas: [], unread: 2, skipped: 5, read: 58 } });
+    const notes = screen.getAllByTestId('map-areas-note').map((note) => note.textContent);
+    expect(notes).toEqual(['Read the first 60 maps; 5 more not checked.', '2 maps could not be read.']);
+    expect(screen.queryByText(/just now/)).toBeNull();
+  });
+
+  it('says only that maps could not be read when nothing was skipped', async () => {
+    await openUsedIn({ mapAreas: { status: 'partial', areas: [], unread: 1, skipped: 0, read: 4 } });
+    expect(screen.getAllByTestId('map-areas-note').map((note) => note.textContent)).toEqual(['1 map could not be read.']);
   });
 });

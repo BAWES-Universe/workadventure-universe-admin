@@ -14,7 +14,7 @@ jest.mock('@/lib/db', () => ({
   },
 }));
 
-import { areasLockedTo, computeUsedIn } from '@/lib/role-used-in';
+import { areasLockedTo, computeUsedIn, MAX_MAPS_READ } from '@/lib/role-used-in';
 import { fromKeys } from '@/lib/permissions';
 
 const wam = (properties: unknown[], name: string | null = 'Finance desk') => ({ areas: [{ name, properties }] });
@@ -116,7 +116,7 @@ describe('computeUsedIn', () => {
     delete process.env.PUBLIC_MAP_STORAGE_URL;
     const fetcher = jest.fn();
     const used = await computeUsedIn({ universeId: 'u', role: ROLE, viewer: VIEWER, fetcher });
-    expect(used.reach.mapAreas).toEqual({ status: 'not_configured', areas: [], unread: 0, read: 0 });
+    expect(used.reach.mapAreas).toEqual({ status: 'not_configured', areas: [], unread: 0, skipped: 0, read: 0 });
     expect(fetcher).not.toHaveBeenCalled();
   });
 
@@ -177,6 +177,47 @@ describe('computeUsedIn', () => {
     worldMemberFindMany.mockResolvedValue([]);
     const asAdmin = await computeUsedIn({ universeId: 'u', role: ROLE, viewer: { id: 'root', isSuperAdmin: true }, fetcher: answers({}) });
     expect(asAdmin.reach.worlds.map((world) => world.name)).toEqual(['HQ', 'Secret plans']);
+  });
+
+  it('says whether anyone holds the role at all, without naming or counting worlds the viewer cannot see', async () => {
+    worldFindMany.mockResolvedValue([
+      { id: 'hq', name: 'HQ', isPublic: true, universe },
+      { id: 'secret', name: 'Secret plans', isPublic: false, universe },
+    ]);
+    roomFindMany.mockResolvedValue([]);
+    worldMemberFindMany.mockResolvedValue([]);
+    // Held, but only in the private world
+    memberRoleFindMany.mockResolvedValue([{ allWorlds: false, worldIds: ['secret'] }]);
+    const held = await computeUsedIn({ universeId: 'u', role: ROLE, viewer: VIEWER, fetcher: answers({}) });
+    expect(held.reach.held).toBe(true);
+    expect(held.reach.worlds).toEqual([]);
+    expect(held.reach.roomsTotal).toBe(0);
+    expect(JSON.stringify(held)).not.toContain('Secret plans');
+    // Held by no one
+    memberRoleFindMany.mockResolvedValue([]);
+    const nobody = await computeUsedIn({ universeId: 'u', role: ROLE, viewer: VIEWER, fetcher: answers({}) });
+    expect(nobody.reach.held).toBe(false);
+  });
+
+  it('counts maps past the cap apart from maps that could not be read', async () => {
+    const many = Array.from({ length: MAX_MAPS_READ + 3 }, (_, index) => room(`r${index}`, `Room ${index}`, 'hq', true, `https://maps.example.test/d/u/hq/r${index}/map.wam`));
+    // One of the first maps is somewhere else, so it is tried and cannot be read
+    many[0] = room('r0', 'Room 0', 'hq', true, 'https://elsewhere.example.test/map.wam');
+    roomFindMany.mockResolvedValue(many);
+    const fetcher = jest.fn(async () => ({ ok: true, json: async () => wam([]) }));
+    const used = await computeUsedIn({ universeId: 'u', role: ROLE, viewer: VIEWER, fetcher });
+    const areas = used.reach.mapAreas;
+    expect(areas.status).toBe('partial');
+    expect(areas.skipped).toBe(3);
+    expect(areas.unread).toBe(1);
+    expect(areas.read).toBe(MAX_MAPS_READ - 1);
+    expect(fetcher).toHaveBeenCalledTimes(MAX_MAPS_READ - 1);
+  });
+
+  it('reports only the cap when every map it tried was read', async () => {
+    roomFindMany.mockResolvedValue(Array.from({ length: MAX_MAPS_READ + 2 }, (_, index) => room(`r${index}`, `Room ${index}`, 'hq', true, `https://maps.example.test/d/u/hq/r${index}/map.wam`)));
+    const used = await computeUsedIn({ universeId: 'u', role: ROLE, viewer: VIEWER, fetcher: jest.fn(async () => ({ ok: true, json: async () => wam([]) })) });
+    expect(used.reach.mapAreas).toMatchObject({ status: 'partial', skipped: 2, unread: 0, read: MAX_MAPS_READ });
   });
 
   it('lists every permission for a role with Administrator', async () => {

@@ -40,7 +40,7 @@ export interface LockedArea {
 export type MapAreasStatus =
   /** Every map that has a file was read. */
   | 'read'
-  /** Some were not read: map-storage did not answer, or there were more than we read at once. See `unread`. */
+  /** Some were not read: see `unread` (could not be read) and `skipped` (past the cap). */
   | 'partial'
   /** Orbit has no map-storage address here, so no map can be read. */
   | 'not_configured';
@@ -52,6 +52,8 @@ export interface UsedIn {
     roomsTotal: number;
   };
   reach: {
+    /** Whether anyone holds the role at all. Only a yes or no: the worlds a viewer cannot see are never named or counted. */
+    held: boolean;
     allWorlds: boolean;
     worlds: { id: string; name: string }[];
     rooms: UsedInRoom[];
@@ -59,8 +61,10 @@ export interface UsedIn {
     mapAreas: {
       status: MapAreasStatus;
       areas: LockedArea[];
-      /** Rooms that have a map file Orbit could not read just now, or did not get to. */
+      /** Rooms whose map file could not be read: not on map-storage, or the download failed. */
       unread: number;
+      /** Rooms with a map file that were not tried, because only the first MAX_MAPS_READ are read at once. */
+      skipped: number;
       /** Rooms whose map file was read. */
       read: number;
     };
@@ -176,6 +180,7 @@ export async function computeUsedIn(input: UsedInInput): Promise<UsedIn> {
   const reached = new Set<string>();
   for (const scope of scopes) for (const id of worldsOf(scope, universeWorldIds)) reached.add(id);
   // A private world the viewer can't see is not named: not its id, not its name
+  const held = scopes.length > 0;
   const reachedWorlds = worlds
     .filter((world) => reached.has(world.id) && canSeeWorld(world, viewer, memberWorldIds))
     .map((world) => ({ id: world.id, name: world.name }));
@@ -199,13 +204,14 @@ export async function computeUsedIn(input: UsedInInput): Promise<UsedIn> {
   const areas: LockedArea[] = [];
   let status: MapAreasStatus = 'read';
   let unread = 0;
+  let skipped = 0;
   let read = 0;
   if (!origin) {
     status = 'not_configured';
   } else {
     const withMap = visible.filter((room) => room.wamUrl);
     const batch = withMap.slice(0, MAX_MAPS_READ);
-    unread = withMap.length - batch.length;
+    skipped = withMap.length - batch.length;
     let next = 0;
     const worker = async () => {
       while (next < batch.length) {
@@ -228,17 +234,18 @@ export async function computeUsedIn(input: UsedInInput): Promise<UsedIn> {
       }
     };
     await Promise.all(Array.from({ length: Math.min(READ_AT_ONCE, batch.length) }, worker));
-    if (unread > 0) status = 'partial';
+    if (unread > 0 || skipped > 0) status = 'partial';
   }
 
   return {
     doors: { basis, rooms: doorRooms.slice(0, LIST_LIMIT).map(roomRef), roomsTotal: doorRooms.length },
     reach: {
+      held,
       allWorlds,
       worlds: reachedWorlds,
       rooms: reachRooms.slice(0, LIST_LIMIT).map(roomRef),
       roomsTotal: reachRooms.length,
-      mapAreas: { status, areas, unread, read },
+      mapAreas: { status, areas, unread, skipped, read },
       // Administrator expands to every permission
       permissions: keysOf(role.permissions),
     },
