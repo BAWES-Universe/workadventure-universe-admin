@@ -3,7 +3,7 @@ import { prisma } from '@/lib/db';
 import { withWokas } from '@/lib/woka-avatar';
 import { allows, ranksAbove, worldsAllowing, type Reach } from '@/lib/role-access';
 import { leaveUniverse } from '@/lib/universe-members';
-import { failed, managesPeople, memberForJson, memberInclude, needs, universeContext } from '@/lib/universe-route';
+import { failed, managesPeople, memberForJson, memberInclude, needs, seesHiddenRoles, universeContext } from '@/lib/universe-route';
 
 type Params = { params: Promise<{ id: string; userId: string }> };
 
@@ -42,7 +42,7 @@ export async function GET(request: NextRequest, { params }: Params) {
     const canGiveAnywhere = (givable === 'all' || givable.length > 0) && (access.full || userId === user.id || theirHighest < access.highest);
     const isOwner = userId === universe.ownerId;
 
-    const [withWoka] = await withWokas([memberForJson(member, universe.ownerId, managesPeople(access) || userId === user.id)]);
+    const [withWoka] = await withWokas([memberForJson(member, universe.ownerId, managesPeople(access) || userId === user.id, seesHiddenRoles(access) || userId === user.id)]);
     return NextResponse.json({
       member: withWoka,
       can: {

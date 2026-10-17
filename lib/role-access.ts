@@ -174,7 +174,7 @@ export function roleForJson(role: {
   key: string;
   name: string;
   color: string;
-  badge: string | null;
+  showBadge: boolean;
   permissions: bigint;
   position: number;
   builtIn: boolean;
@@ -184,7 +184,7 @@ export function roleForJson(role: {
     key: role.key,
     name: role.name,
     color: role.color,
-    badge: role.badge,
+    showBadge: role.showBadge,
     permissions: role.permissions.toString(),
     position: role.position,
     builtIn: role.builtIn,

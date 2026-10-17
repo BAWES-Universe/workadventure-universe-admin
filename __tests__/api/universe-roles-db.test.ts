@@ -208,6 +208,17 @@ run('universe roles and people routes (real database)', () => {
     const asMod = await as('mod', membersRoute.GET, {});
     expect(asMod.body.members.some((m: { email: string | null }) => m.email !== null)).toBe(true);
 
+    // With its badge hidden, only people who handle roles see who has Moderator
+    await prisma.role.update({ where: { id: role.moderator }, data: { showBadge: false } });
+    const rolesOf = (body: { members: { userId: string; roles: { roleId: string }[] }[] }, userId: string) =>
+      body.members.find((m) => m.userId === userId)!.roles.map((given) => given.roleId);
+    expect(rolesOf((await as('helper', membersRoute.GET, {})).body, people.mod)).toEqual([]);
+    expect((await as('helper', membersRoute.GET, {}, undefined, `roleId=${role.moderator}`)).body.total).toBe(0);
+    expect(rolesOf((await as('admin', membersRoute.GET, {})).body, people.mod)).toEqual([role.moderator]);
+    expect((await as('helper', memberRoute.GET, { userId: people.mod })).body.member.roles).toEqual([]);
+    expect((await as('mod', memberRoute.GET, { userId: people.mod })).body.member.roles).toHaveLength(1);
+    await prisma.role.update({ where: { id: role.moderator }, data: { showBadge: true } });
+
     const detail = await as('mod', memberRoute.GET, { userId: people.helper });
     expect(detail.body.can.giveWorlds).toEqual([worldA]);
     expect(detail.body.can.giveRoleIds).toContain(role.helper);
