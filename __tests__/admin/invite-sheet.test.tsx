@@ -138,6 +138,7 @@ it('says under a name whether they are your friend and when they last came, and 
 it('shows the line handed in for the chosen universe under the person’s name', async () => {
   open({ person: { userId: 'hanan', name: 'Hanan Aziz', notes: { u1: 'Your friend · in HQ Lobby yesterday' } } });
   expect(await screen.findByText('Your friend · in HQ Lobby yesterday')).toBeTruthy();
+});
 
 it('sends Administrator to every world only: picking it takes the choice back to All worlds and locks Some worlds', async () => {
   open({ person: { userId: 'hanan', name: 'Hanan Aziz' } });
