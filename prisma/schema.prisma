@@ -49,6 +49,7 @@ model User {
   avatarGrants     UserAvatarGrant[]
   avatarSetAuditLogs AvatarSetAuditLog[]
   preferences      UserPreference[]
+  universeMemberships UniverseMember[]
 
   @@map("users")
 }
@@ -88,6 +89,9 @@ model Universe {
   bans       Ban[]
   favorites  Favorite[]
   roomAccesses RoomAccess[]
+  roles      Role[]
+  members    UniverseMember[]
+  membershipInvitations MembershipInvitation[]
 
   @@map("universes")
 }
@@ -207,6 +211,65 @@ model WorldMember {
   @@index([worldId])
   @@index([userId])
   @@map("world_members")
+}
+
+// Roles (#314). One list per universe, Discord style. Each role's permissions are one number, its bits fixed in
+// lib/permissions.ts. The built-in roles (everyone, member, editor, admin) use the keys the game and saved maps already
+// know as tags; a custom role's key is fixed when it is created, so renaming it never breaks a map.
+model Role {
+  id          String   @id @default(uuid())
+  universeId  String   @map("universe_id")
+  key         String   // Sent to the game as a tag
+  name        String
+  color       String   @default("#99AAB5")
+  badge       String?  // An emoji shown next to the name
+  permissions BigInt   @default(0)
+  position    Int      @default(0) // Higher ranks above; lib/roles.ts says where the built-ins sit
+  builtIn     Boolean  @default(false) @map("built_in")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  universe    Universe             @relation(fields: [universeId], references: [id], onDelete: Cascade)
+  assignments UniverseMemberRole[]
+
+  @@unique([universeId, key])
+  @@map("roles")
+}
+
+// Joining a universe, once. Everyone who joined is a Member in the worlds below (all of them, or some), and in every
+// world one of their roles works in. lib/roles.ts keeps world_members (and its tags) filled from these rows.
+model UniverseMember {
+  id         String   @id @default(uuid())
+  universeId String   @map("universe_id")
+  userId     String   @map("user_id")
+  allWorlds  Boolean  @default(false) @map("all_worlds")
+  worldIds   String[] @default([]) @map("world_ids")
+  joinedAt   DateTime @default(now()) @map("joined_at")
+
+  universe Universe             @relation(fields: [universeId], references: [id], onDelete: Cascade)
+  user     User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  roles    UniverseMemberRole[]
+
+  @@unique([universeId, userId])
+  @@index([userId])
+  @@map("universe_members")
+}
+
+// One role given to one member, working in every world or only the ones listed.
+model UniverseMemberRole {
+  id        String   @id @default(uuid())
+  memberId  String   @map("member_id")
+  roleId    String   @map("role_id")
+  allWorlds Boolean  @default(false) @map("all_worlds")
+  worldIds  String[] @default([]) @map("world_ids")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  member UniverseMember @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  role   Role           @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@unique([memberId, roleId])
+  @@index([roleId])
+  @@map("universe_member_roles")
 }
 
 // Bans
@@ -387,13 +450,20 @@ model MembershipInvitation {
   invitedUserId String   @map("invited_user_id")
   invitedByUserId String  @map("invited_by_user_id")
   status        String   @default("pending") // pending, accepted, rejected, cancelled
-  tags          String[] // Tags that will be assigned when accepted
+  tags          String[] // Tags that will be assigned when accepted (invitations sent before roles)
+  // Roles (#314): the universe they join, the roles they get and the worlds they work in. world_id stays the world it
+  // was sent from (or the first world picked), for the screens that show one.
+  universeId    String?  @map("universe_id")
+  roleIds       String[] @default([]) @map("role_ids")
+  allWorlds     Boolean  @default(false) @map("all_worlds")
+  worldIds      String[] @default([]) @map("world_ids")
   message       String?
   invitedAt     DateTime @default(now()) @map("invited_at")
   respondedAt   DateTime? @map("responded_at")
 
   // Relations
   world       World @relation(fields: [worldId], references: [id], onDelete: Cascade)
+  universe    Universe? @relation(fields: [universeId], references: [id], onDelete: Cascade)
   invitedUser User  @relation("InvitedUser", fields: [invitedUserId], references: [id], onDelete: Cascade)
   invitedBy   User  @relation("InvitedBy", fields: [invitedByUserId], references: [id], onDelete: Cascade)
 

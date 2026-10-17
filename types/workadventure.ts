@@ -21,6 +21,8 @@ export interface FetchMemberDataByUuidSuccessResponse {
   activatedInviteUser?: boolean | null;
   applications?: ApplicationDefinitionInterface[] | null;
   canEdit?: boolean | null;
+  // Their role permissions in this world (#314), a decimal string of the bits in lib/permissions.ts
+  permissions?: string;
   world: string;
   chatID?: string;
 }

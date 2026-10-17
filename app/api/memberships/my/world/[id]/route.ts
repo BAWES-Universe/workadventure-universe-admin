@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
+import { leaveWorld } from '@/lib/universe-members';
 
 // DELETE /api/memberships/my/world/[id] - Leave world
 export async function DELETE(
@@ -67,10 +68,8 @@ export async function DELETE(
       },
     });
 
-    // Remove membership
-    await prisma.worldMember.delete({
-      where: { id: membership.id },
-    });
+    // Remove membership: their membership and roles stop working in this world
+    await prisma.$transaction((tx) => leaveWorld(tx, worldId, sessionUser.id));
 
     return NextResponse.json({ success: true });
   } catch (error) {
