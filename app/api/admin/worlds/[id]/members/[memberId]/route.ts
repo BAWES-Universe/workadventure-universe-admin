@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { getSessionUser } from '@/lib/auth-session';
-import { leaveWorld, setTagsInWorld } from '@/lib/universe-members';
+import { AdministratorScopeError, leaveWorld, setTagsInWorld } from '@/lib/universe-members';
 
 const updateMemberSchema = z.object({
   tags: z.array(z.string()).min(1),
@@ -112,6 +112,7 @@ export async function PATCH(
         { status: 400 }
       );
     }
+    if (error instanceof AdministratorScopeError) return NextResponse.json({ error: error.message }, { status: 400 });
     console.error('Error updating member:', error);
     return NextResponse.json(
       { error: 'Failed to update member' },
@@ -170,24 +171,25 @@ export async function DELETE(
       );
     }
 
-    // Cancel any pending invitations for this user to this world
-    await prisma.membershipInvitation.updateMany({
-      where: {
-        worldId: worldId,
-        invitedUserId: member.userId,
-        status: 'pending',
-      },
-      data: {
-        status: 'cancelled',
-        respondedAt: new Date(),
-      },
+    // Cancel their pending invitations to this world and take them out of it, together: nothing changes if leaving is refused
+    await prisma.$transaction(async (tx) => {
+      await tx.membershipInvitation.updateMany({
+        where: {
+          worldId: worldId,
+          invitedUserId: member.userId,
+          status: 'pending',
+        },
+        data: {
+          status: 'cancelled',
+          respondedAt: new Date(),
+        },
+      });
+      await leaveWorld(tx, worldId, member.userId);
     });
-
-    // Remove member: their membership and roles stop working in this world
-    await prisma.$transaction((tx) => leaveWorld(tx, worldId, member.userId));
 
     return NextResponse.json({ success: true });
   } catch (error) {
+    if (error instanceof AdministratorScopeError) return NextResponse.json({ error: error.message }, { status: 400 });
     console.error('Error removing member:', error);
     return NextResponse.json(
       { error: 'Failed to remove member' },

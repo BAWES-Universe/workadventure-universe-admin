@@ -24,6 +24,9 @@ import * as givenRoute from '@/app/api/admin/universes/[id]/members/[userId]/rol
 import * as inviteRoute from '@/app/api/admin/universes/[id]/invitations/route';
 import * as meRoute from '@/app/api/admin/universes/[id]/me/route';
 import { POST as accept } from '@/app/api/memberships/invitations/[id]/accept/route';
+import * as worldMembersRoute from '@/app/api/admin/worlds/[id]/members/route';
+import * as worldMemberRoute from '@/app/api/admin/worlds/[id]/members/[memberId]/route';
+import * as leaveWorldRoute from '@/app/api/memberships/my/world/[id]/route';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 const session = getSessionUser as jest.Mock;
@@ -55,7 +58,7 @@ async function tagsOf(who: string, worldId: string) {
 
 run('universe roles and people routes (real database)', () => {
   beforeAll(async () => {
-    for (const who of ['owner', 'admin', 'mod', 'helper', 'plain', 'outsider']) {
+    for (const who of ['owner', 'admin', 'mod', 'helper', 'plain', 'outsider', 'returning', 'late']) {
       const user = await prisma.user.create({ data: { uuid: `${who}-${tag}`, email: `${who}-${tag}@example.test`, name: who } });
       people[who] = user.id;
     }
@@ -186,6 +189,70 @@ run('universe roles and people routes (real database)', () => {
     expect(accepted.status).toBe(200);
     expect(await tagsOf('outsider', worldA)).toEqual(['helper', 'member']);
     expect(await tagsOf('outsider', worldB)).toBeNull();
+  });
+
+  it('re-sends an old invitation the old way with its new tags, not the roles it once carried', async () => {
+    // What the migration leaves on an invitation once sent as Admin and then cancelled
+    const old = await prisma.membershipInvitation.create({
+      data: {
+        worldId: worldB,
+        invitedUserId: people.returning,
+        invitedByUserId: people.owner,
+        status: 'cancelled',
+        tags: ['admin'],
+        universeId,
+        roleIds: [role.admin],
+        allWorlds: false,
+        worldIds: [worldB],
+      },
+    });
+    const resent = await as('owner', worldMembersRoute.POST, { id: worldB }, { userId: people.returning, tags: ['member'] });
+    expect(resent.status).toBeLessThan(300);
+    expect((await prisma.membershipInvitation.findUniqueOrThrow({ where: { id: old.id } })).roleIds).toEqual([]);
+
+    session.mockResolvedValue({ id: people.returning, uuid: 'returning', email: null, name: 'returning', tags: [], isSuperAdmin: false });
+    const accepted = await accept(new NextRequest('http://localhost/api', { method: 'POST' }), { params: Promise.resolve({ id: old.id }) });
+    expect(accepted.status).toBe(200);
+    expect(await tagsOf('returning', worldB)).toEqual(['member']);
+  });
+
+  it('never lets a pending invitation give Administrator in some worlds', async () => {
+    const chief = await prisma.role.create({ data: { universeId, key: `chief-${tag}`, name: 'Chief', position: 15 } });
+    const invited = await as('owner', inviteRoute.POST, {}, {
+      userId: people.late,
+      roleIds: [chief.id],
+      worlds: { allWorlds: false, worldIds: [worldA] },
+    });
+    expect(invited.status).toBe(201);
+    const administrator = { permissions: flag('ADMINISTRATOR').toString() };
+    expect((await as('owner', roleRoute.PATCH, { roleId: chief.id }, administrator)).status).toBe(400);
+
+    // Had it gained Administrator anyway, accepting still gives the worlds but not the role
+    await prisma.role.update({ where: { id: chief.id }, data: { permissions: flag('ADMINISTRATOR') } });
+    session.mockResolvedValue({ id: people.late, uuid: 'late', email: null, name: 'late', tags: [], isSuperAdmin: false });
+    const accepted = await accept(new NextRequest('http://localhost/api', { method: 'POST' }), {
+      params: Promise.resolve({ id: invited.body.invitation.id }),
+    });
+    expect(accepted.status).toBe(200);
+    expect(await tagsOf('late', worldA)).toEqual(['member']);
+    await prisma.role.delete({ where: { id: chief.id } });
+  });
+
+  it('never leaves an Administrator role working in only some worlds when someone leaves one', async () => {
+    const boss = await prisma.role.create({
+      data: { universeId, key: `boss-${tag}`, name: 'Boss', position: 16, permissions: flag('ADMINISTRATOR') },
+    });
+    const all = { allWorlds: true, worldIds: [] };
+    await joinUniverse(prisma, { universeId, userId: people.late, worlds: all, roles: [{ roleId: boss.id, scope: all }] });
+    const row = await prisma.worldMember.findUniqueOrThrow({ where: { userId_worldId: { userId: people.late, worldId: worldA } } });
+
+    expect((await as('owner', worldMemberRoute.PATCH, { id: worldA, memberId: row.id }, { tags: ['member'] })).status).toBe(400);
+    expect((await as('owner', worldMemberRoute.DELETE, { id: worldA, memberId: row.id })).status).toBe(400);
+    expect((await as('late', leaveWorldRoute.DELETE, { id: worldA })).status).toBe(400);
+    const given = await prisma.universeMemberRole.findFirstOrThrow({ where: { roleId: boss.id } });
+    expect(given.allWorlds).toBe(true);
+    expect(await tagsOf('late', worldA)).toContain(boss.key);
+    await prisma.role.delete({ where: { id: boss.id } });
   });
 
   it('removes someone only from below, and only with the permission everywhere they are', async () => {
