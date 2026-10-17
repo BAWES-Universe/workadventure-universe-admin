@@ -25,7 +25,8 @@ import { AlertCircle, ChevronLeft, ChevronRight, Loader2, Pencil, Plus, ShieldCh
 import { timeAgo } from '@/lib/time-ago';
 import { activityStats } from '@/lib/analytics-peak';
 import { EmptyCard, EntityCard, EntityRow, Figure, Figures, InContext, LoadError, LoadingRows, PageHeader, RolePills, SectionHeader, SettingSwitch, Settings, StatLine, StatusPill, VisitLine } from '../../components/ds';
-import InviteMemberDialog from '../../components/invite-member-dialog';
+import InviteSheet from '../../components/invite-sheet';
+import { useCanInvite } from '../../components/universe-people';
 import MemberList from '../../components/member-list';
 import MembersRow from '../../components/members-row';
 import { AddButton, BrowseButton, Crumb, PlaceHero, RoomRows, SectionHead, StarButton, playPathOf, type RoomRowData } from '../../components/place-hero';
@@ -139,6 +140,7 @@ function WorldDetail({ view }: { view: WorldView }) {
   const worldSummaries = useEntitySummaries('worlds', useMemo(() => [id], [id]));
   const { here, known: hereKnown, byRoom } = useHere('world', id);
   const membersPreview = useMembersPreview(id);
+  const canInvite = useCanInvite(membersPreview?.universeId ?? null, id);
   const star = useStarToggle(
     `/api/admin/worlds/${id}/favorite`,
     world ? { isStarred: !!world.isStarred, starCount: world.starCount ?? 0 } : null,
@@ -512,7 +514,7 @@ function WorldDetail({ view }: { view: WorldView }) {
 
           {activeTab === 'details' && (
             <>
-              <MembersRow worldId={id} preview={membersPreview} onInvite={() => setInviteDialogOpen(true)} />
+              <MembersRow worldId={id} preview={membersPreview} canInvite={canInvite} onInvite={() => setInviteDialogOpen(true)} />
               <RecentVisitors scope="world" id={id} onOpenVisitors={() => router.push(`/admin/worlds/${id}/visitors`)} />
               {world.thumbnailUrl && (
                 // eslint-disable-next-line @next/next/no-img-element
@@ -635,14 +637,17 @@ function WorldDetail({ view }: { view: WorldView }) {
             </section>
           )}
 
-          <InviteMemberDialog
-            open={inviteDialogOpen}
-            onOpenChange={setInviteDialogOpen}
-            worldId={id}
-            onInviteSent={() => {
-              fetchWorld();
-            }}
-          />
+          {canInvite && (
+            <InviteSheet
+              open={inviteDialogOpen}
+              onOpenChange={setInviteDialogOpen}
+              universeId={world.universe.id}
+              worldId={id}
+              onSent={() => {
+                fetchWorld();
+              }}
+            />
+          )}
         </>
       )}
 

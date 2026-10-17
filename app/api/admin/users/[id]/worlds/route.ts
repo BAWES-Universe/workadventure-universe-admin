@@ -2,8 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { hiddenSystemOwnerId, notSystemWorld } from '@/lib/system-user';
+import { accessFor, worldsAllowing } from '@/lib/role-access';
 
-// GET /api/admin/users/[id]/worlds - Get list of worlds current user can invite this user to
+// GET /api/admin/users/[id]/worlds - Get list of worlds current user can invite this user to, and the universes they can
+// invite this user to (the invite sheet's): Invite and remove people somewhere in it, and the person is not in it yet
+// and has no invitation waiting.
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -63,7 +66,9 @@ export async function GET(
         universe: world.universe,
       }));
 
-    return NextResponse.json({ worlds: availableWorlds });
+    const universes = await invitableUniverses(sessionUser, userId, hidden);
+
+    return NextResponse.json({ worlds: availableWorlds, universes });
   } catch (error) {
     console.error('Error fetching worlds:', error);
     return NextResponse.json(
@@ -73,3 +78,24 @@ export async function GET(
   }
 }
 
+
+async function invitableUniverses(viewer: { id: string; isSuperAdmin: boolean }, personId: string, hidden: string | null) {
+  if (viewer.id === personId) return [];
+  const candidates = await prisma.universe.findMany({
+    where: {
+      ...(hidden ? { ownerId: { not: hidden } } : {}),
+      ...(viewer.isSuperAdmin ? {} : { OR: [{ ownerId: viewer.id }, { members: { some: { userId: viewer.id } } }] }),
+      NOT: [{ ownerId: personId }, { members: { some: { userId: personId } } }, { membershipInvitations: { some: { invitedUserId: personId, status: 'pending' } } }],
+    },
+    select: { id: true, name: true },
+    orderBy: { name: 'asc' },
+  });
+  const universes: { id: string; name: string }[] = [];
+  for (const universe of candidates) {
+    const access = await accessFor(prisma, universe.id, viewer);
+    if (!access) continue;
+    const worlds = worldsAllowing(access, 'INVITE_AND_REMOVE');
+    if (worlds === 'all' || worlds.length > 0) universes.push(universe);
+  }
+  return universes;
+}

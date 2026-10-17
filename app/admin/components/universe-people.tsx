@@ -89,3 +89,9 @@ export function RoleSummaryPills({ summary, showWhere = true }: { summary: RoleS
     </span>
   );
 }
+
+/** Whether you may invite people to a world: Invite and remove people there, from a role or as the owner. */
+export function useCanInvite(universeId: string | null, worldId: string): boolean {
+  const [me] = useJson<'all' | string[]>(universeId ? `/api/admin/universes/${encodeURIComponent(universeId)}/me` : null, (body) => body.inviteWorlds ?? []);
+  return me.status === 'ready' && (me.value === 'all' || me.value.includes(worldId));
+}

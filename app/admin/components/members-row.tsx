@@ -6,6 +6,7 @@ import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { WokaAvatar } from './profile-card';
 import { RolePill } from './ds';
+import { RoleChip, useUniverseRoles, type UniverseRole } from './universe-people';
 import type { MemberPreview, MembersPreview } from '../hooks/use-place-data';
 import styles from './recent-visitors.module.css';
 
@@ -18,16 +19,30 @@ export function topRole(member: Pick<MemberPreview, 'isUniverseOwner' | 'tags'>)
 }
 
 /** A world's members as a row of faces, owners and admins first; the full list, with role changes, is its own page. */
-export default function MembersRow({ worldId, preview, onInvite, onSelect, description }: {
+/**
+ * The role a face carries when the universe's roles are known: its highest, wherever the universe ranks it, so a custom
+ * role such as Accountant shows as itself. Null when none of their tags is a role the universe has.
+ */
+export function topUniverseRole(member: Pick<MemberPreview, 'tags'>, byKey: ReadonlyMap<string, UniverseRole>): UniverseRole | null {
+  const held = member.tags.map((tag) => byKey.get(tag.toLowerCase())).filter((role): role is UniverseRole => !!role);
+  return held.sort((a, b) => b.position - a.position)[0] ?? null;
+}
+
+export default function MembersRow({ worldId, preview, onInvite, canInvite, onSelect, description }: {
   worldId: string;
   preview: MembersPreview | null;
   onInvite?: () => void;
+  /** Whether Invite member shows; when left out, whoever manages the world. */
+  canInvite?: boolean;
   onSelect?: (member: MemberPreview) => void;
   description?: string;
 }) {
+  const roles = useUniverseRoles(preview?.universeId ?? null);
   if (!preview) return null;
-  const { members, total, canManage } = preview;
-  const all = `/admin/worlds/${worldId}/members`;
+  const { members, total, canManage, universeId } = preview;
+  // The approved screens replace the world's own list: See all goes to the universe's Members page, on this world
+  const all = universeId ? `/admin/universes/${universeId}/members?world=${worldId}` : `/admin/worlds/${worldId}/members`;
+  const byKey = roles.status === 'ready' ? new Map(roles.value.list.map((role) => [role.key, role])) : null;
   return (
     <section className={styles.section} aria-labelledby="world-members">
       <div className={styles.head}>
@@ -35,7 +50,7 @@ export default function MembersRow({ worldId, preview, onInvite, onSelect, descr
           Members <span className="ml-1 text-sm font-semibold text-muted-foreground">{total}</span>
         </h2>
         <div className="flex items-center gap-2">
-          {canManage && onInvite && (
+          {(canInvite ?? canManage) && onInvite && (
             <Button variant="outline" className="h-11 rounded-full px-4 text-xs" onClick={onInvite}>
               <UserPlus aria-hidden="true" />
               Invite member
@@ -51,11 +66,13 @@ export default function MembersRow({ worldId, preview, onInvite, onSelect, descr
       <ul className={styles.visitors}>
         {members.slice(0, SHOWN).map((member) => {
           const name = member.user.name || member.user.email || 'Someone';
-          const role = topRole(member);
+          const owner = member.isUniverseOwner;
+          const custom = !owner && byKey ? topUniverseRole(member, byKey) : null;
+          const role = owner ? 'owner' : custom ? custom.name : topRole(member);
           const face = <>
             <WokaAvatar layers={member.woka ?? []} name={name} size={44} tinted />
             <strong>{name}</strong>
-            <span className="-mt-0.5 scale-90"><RolePill role={role} /></span>
+            <span className="-mt-0.5 scale-90">{custom ? <RoleChip name={custom.name} color={custom.color} /> : <RolePill role={owner ? 'owner' : topRole(member)} />}</span>
           </>;
           return (
             <li key={member.id}>

@@ -1,8 +1,16 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
-import { accessDetailFor, canManageWorldMembers, forbiddenResponse, getViewer, unauthorizedResponse, viewerUserId } from '@/lib/access-scope';
+import { accessDetailFor, forbiddenResponse, getViewer, unauthorizedResponse, viewerUserId } from '@/lib/access-scope';
+import { accessFor, worldsAllowing } from '@/lib/role-access';
 
 export const dynamic = 'force-dynamic';
+
+async function mayInvite(userId: string, universeId: string, worldId: string): Promise<boolean> {
+  const access = await accessFor(prisma, universeId, { id: userId });
+  if (!access) return false;
+  const worlds = worldsAllowing(access, 'INVITE_AND_REMOVE');
+  return worlds === 'all' || worlds.includes(worldId);
+}
 
 /** Current world membership, for a room's visitor card. Visit-time tags can be out of date. */
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string; userId: string }> }) {
@@ -14,22 +22,24 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     if ((await accessDetailFor(viewer, { roomId: id })) === 'minimal') return forbiddenResponse();
     const room = await prisma.room.findUnique({
       where: { id },
-      select: { world: { select: { id: true, name: true, universe: { select: { ownerId: true } } } } },
+      select: { world: { select: { id: true, name: true, universeId: true, universe: { select: { ownerId: true } } } } },
     });
     if (!room) return NextResponse.json({ error: 'Room not found' }, { status: 404 });
     const user = await prisma.user.findUnique({ where: { id: userId }, select: { isGuest: true } });
     if (!user) return NextResponse.json({ error: 'User not found' }, { status: 404 });
     const worldId = room.world.id;
     const me = viewerUserId(viewer);
+    const universeId = room.world.universeId;
     const [member, invitation, canInvite] = await Promise.all([
       prisma.worldMember.findUnique({ where: { userId_worldId: { userId, worldId } }, select: { tags: true } }),
-      prisma.membershipInvitation.findFirst({ where: { worldId, invitedUserId: userId, status: 'pending' }, select: { id: true } }),
-      // Match the existing invitation POST: a session and owner/admin membership are required, even for super admins.
-      me ? canManageWorldMembers(me, worldId) : false,
+      prisma.membershipInvitation.findFirst({ where: { OR: [{ worldId }, { universeId }], invitedUserId: userId, status: 'pending' }, select: { id: true } }),
+      // Match the invitation POST: a session, and Invite and remove people in this world (from a role or as the owner).
+      me ? mayInvite(me, universeId, worldId) : false,
     ]);
     const owner = room.world.universe.ownerId === userId;
     return NextResponse.json({
       world: { id: worldId, name: room.world.name },
+      universeId,
       status: user.isGuest ? 'guest' : owner ? 'owner' : member ? 'member' : invitation ? 'invited' : 'none',
       tags: member?.tags ?? [],
       canInvite: canInvite && !user.isGuest && !owner && !member && !invitation,
