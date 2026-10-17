@@ -126,7 +126,8 @@ export function Segmented<T extends string>({ value, onChange, options, classNam
   const buttons = React.useRef<(HTMLButtonElement | null)[]>([])
   const enabled = options.map((option, index) => (option.disabled ? -1 : index)).filter((index) => index >= 0)
   const selected = options.findIndex((option) => option.value === value)
-  const tabbable = selected >= 0 ? selected : enabled[0]
+  // The tab stop is the picked option, unless that one is disabled (it can't take focus): then the first enabled one
+  const tabbable = selected >= 0 && enabled.includes(selected) ? selected : enabled[0]
 
   function onKeyDown(event: React.KeyboardEvent, index: number) {
     const at = enabled.indexOf(index)

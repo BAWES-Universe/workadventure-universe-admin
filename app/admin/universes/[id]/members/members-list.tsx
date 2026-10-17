@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import { useParams, useSearchParams } from 'next/navigation';
 import { Shield, UserPlus, Users } from 'lucide-react';
@@ -107,6 +107,10 @@ export function UniverseMembersPage() {
     [id, query, worldId, roleId],
   );
 
+  // The list the screen shows now, so an answer for an earlier search or filter is dropped
+  const currentPath = useRef(listPath);
+  currentPath.current = listPath;
+
   useEffect(() => {
     let cancelled = false;
     setFailed(false);
@@ -141,10 +145,13 @@ export function UniverseMembersPage() {
     setVisible(Number.MAX_SAFE_INTEGER);
     if (!page.nextCursor) return;
     setMore('busy');
+    const askedFor = listPath();
     try {
       const response = await authenticatedFetch(listPath(page.nextCursor));
       if (!response.ok) throw new Error('more');
       const next = (await response.json()) as Page;
+      // The search or a filter changed while this was on its way: its rows belong to a list that is gone
+      if (currentPath.current() !== askedFor) return;
       setPage({ ...next, members: [...page.members, ...next.members] });
     } catch {
       addToast({ description: 'Couldn’t load more people. Try again.', variant: 'error' });
@@ -254,6 +261,14 @@ export function UniverseMembersPage() {
 
       {failed ? (
         <LoadError label="members" retry={() => setAttempt((value) => value + 1)} />
+      ) : basics.status === 'error' || roles.status === 'error' ? (
+        <LoadError
+          label="this universe"
+          retry={() => {
+            if (basics.status === 'error') basics.retry();
+            if (roles.status === 'error') roles.retry();
+          }}
+        />
       ) : !page || !ready ? (
         <LoadingRows label="members" rows={4} />
       ) : rows.length === 0 ? (
