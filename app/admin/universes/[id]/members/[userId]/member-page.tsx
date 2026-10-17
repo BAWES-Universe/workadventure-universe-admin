@@ -197,7 +197,8 @@ export function MemberPage() {
         throw new Error(typeof body.error === 'string' ? body.error : 'Couldn’t remove them. Try again.');
       }
       addToast({ description: `${answer?.member.name || 'They'} left ${universe?.name ?? 'the universe'}.`, variant: 'success' });
-      router.replace(`/admin/universes/${id}/members`);
+      // Someone who left no longer sees a private universe, so their way on is their own universes, not its Members page
+      router.replace(viewerId !== null && viewerId === answer?.member.userId ? '/admin/universes' : `/admin/universes/${id}/members`);
     } catch (cause) {
       setConfirming(false);
       setError(cause instanceof Error ? cause.message : 'Couldn’t remove them. Try again.');
@@ -243,8 +244,10 @@ export function MemberPage() {
     const adminRole = isAdministrator(role.permissions);
     // Administrator can only be given in every world, so without that reach the row can't be turned on
     const everyWorldOnly = adminRole && !on && !allowed.all;
+    // Where you may give roles is only worlds they aren't in: nothing to put the role in
+    const nowhere = !on && !allowed.all && allowed.ids.length === 0;
     const allowedRole = can.giveRoleIds.includes(role.id);
-    const rowOff = !allowedRole || everyWorldOnly;
+    const rowOff = !allowedRole || everyWorldOnly || nowhere;
     const inputId = `role-${role.id}`;
     return (
       <div key={role.id} aria-busy={pending.has(role.id)} className={cn('rounded-2xl border px-3.5 py-1 transition-[background-color,border-color,box-shadow]', on ? PICKED : 'border-foreground/[.08] bg-foreground/[.04]', rowOff && 'opacity-60', pending.has(role.id) && 'opacity-70')}>
@@ -255,7 +258,9 @@ export function MemberPage() {
             {role.name}
           </label>
         </div>
-        {everyWorldOnly && allowedRole && <p className="pb-2.5 pl-8 text-[13px] text-muted-foreground">Administrator works in every world</p>}
+        {allowedRole && (everyWorldOnly || nowhere) && (
+          <p className="pb-2.5 pl-8 text-[13px] text-muted-foreground">{everyWorldOnly ? 'Administrator works in every world' : 'You can give roles only in worlds they’re not in'}</p>
+        )}
         {on && scope && (
           <div className="grid gap-2.5 pb-3 pl-8">
             <span id={`${inputId}-works`} className="text-[13px] font-semibold text-muted-foreground">Works in</span>
