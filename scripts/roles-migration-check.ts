@@ -3,6 +3,9 @@
  *
  *   DATABASE_URL=postgres://...copy... ROLES_CHECK_ON_A_COPY=yes npx tsx scripts/roles-migration-check.ts
  *
+ * It refuses any database that is not on this machine (localhost, 127.0.0.1, ::1 or a local socket), whatever the flag says:
+ * production's data is never copied here, it is rebuilt from counts (see the roles check page).
+ *
  * It records every world member before, applies prisma/migrations/20261017180000_roles to the copy, and compares:
  * - who is in which world (so who can enter which room: room entry only reads world membership),
  * - tags, where the only change allowed is `member` added (everyone who joined is a Member, decided 17 Oct),
@@ -28,11 +31,35 @@ interface Row {
   tags: string[];
 }
 
+/** Whether a database URL is on this machine: localhost, 127.0.0.1, ::1 or a local socket. */
+function isLocalDatabase(url: string | undefined): boolean {
+  if (!url) return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== 'postgres:' && parsed.protocol !== 'postgresql:') return false;
+  // A socket path in ?host= is local only when it is a path; a host name there could be anywhere
+  const socket = parsed.searchParams.get('host');
+  if (socket !== null && !socket.startsWith('/')) return false;
+  const host = parsed.hostname.replace(/^\[|\]$/g, '');
+  const local = (name: string) => name === 'localhost' || name === '127.0.0.1' || name === '::1' || name.startsWith('/');
+  // No host in the URL means the driver falls back to PGHOST
+  if (host === '') return socket !== null || !process.env.PGHOST || local(process.env.PGHOST);
+  return local(host);
+}
+
 const keyOf = (row: { user_id: string; world_id: string }) => `${row.user_id} ${row.world_id}`;
 
 async function main() {
   if (process.env.ROLES_CHECK_ON_A_COPY !== 'yes') {
     console.error('This changes the database it runs on. Run it on a copy of production with ROLES_CHECK_ON_A_COPY=yes.');
+    process.exit(2);
+  }
+  if (!isLocalDatabase(process.env.DATABASE_URL)) {
+    console.error('Refusing: DATABASE_URL is not a database on this machine. This check only runs on a local throwaway copy.');
     process.exit(2);
   }
   const pool = new Pool({ connectionString: process.env.DATABASE_URL });
