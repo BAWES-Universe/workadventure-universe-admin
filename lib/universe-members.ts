@@ -3,6 +3,7 @@
  * world_members rows (and their tags) that the rest of Orbit and the game read always match.
  */
 import type { Prisma, PrismaClient } from '@prisma/client';
+import { isAdministratorRole } from '@/lib/role-access';
 import { CUSTOM_MIN_POSITION, EVERYONE_KEY, MEMBER_KEY, ensureBuiltInRoles, syncWorldMembers, type WorldScope } from '@/lib/roles';
 
 type Db = PrismaClient | Prisma.TransactionClient;
@@ -76,13 +77,15 @@ export async function joinUniverse(db: Db, request: JoinRequest): Promise<void> 
 
   const roles = await db.role.findMany({
     where: { universeId, id: { in: request.roles.map((given) => given.roleId) } },
-    select: { id: true, key: true },
+    select: { id: true, key: true, permissions: true },
   });
   for (const given of request.roles) {
     const role = roles.find((candidate) => candidate.id === given.roleId);
     if (!role || role.key === MEMBER_KEY || role.key === EVERYONE_KEY || isEmptyScope(given.scope)) continue;
     const had = existing?.roles.find((row) => row.roleId === role.id);
     const scope = had ? unionScope(had, given.scope) : given.scope;
+    // Administrator is never limited to some worlds: a role that gained it after being offered that way is not given
+    if (!scope.allWorlds && isAdministratorRole(role)) continue;
     await db.universeMemberRole.upsert({
       where: { memberId_roleId: { memberId: member.id, roleId: role.id } },
       create: { memberId: member.id, roleId: role.id, ...scope },
@@ -114,9 +117,16 @@ export async function setTagsInWorld(db: Db, worldId: string, userId: string, ta
     if (isEmptyScope(scope)) await db.universeMemberRole.delete({ where: { id: row.id } });
     else await db.universeMemberRole.update({ where: { id: row.id }, data: scope });
   }
+  const administrators = new Set(
+    (await db.role.findMany({ where: { id: { in: [...wanted] } }, select: { id: true, permissions: true } }))
+      .filter(isAdministratorRole)
+      .map((role) => role.id),
+  );
   for (const roleId of wanted) {
     const row = member.roles.find((candidate) => candidate.roleId === roleId);
     const scope = row ? unionScope(row, { allWorlds: false, worldIds: [worldId] }) : { allWorlds: false, worldIds: [worldId] };
+    // A tag gives its role in one world, and Administrator is never limited to some worlds
+    if (!scope.allWorlds && administrators.has(roleId)) continue;
     await db.universeMemberRole.upsert({
       where: { memberId_roleId: { memberId: member.id, roleId } },
       create: { memberId: member.id, roleId, ...scope },

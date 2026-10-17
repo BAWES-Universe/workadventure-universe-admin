@@ -56,7 +56,7 @@ async function tagsOf(who: string, worldId: string) {
 
 run('universe roles and people routes (real database)', () => {
   beforeAll(async () => {
-    for (const who of ['owner', 'admin', 'mod', 'helper', 'plain', 'outsider', 'returning']) {
+    for (const who of ['owner', 'admin', 'mod', 'helper', 'plain', 'outsider', 'returning', 'late']) {
       const user = await prisma.user.create({ data: { uuid: `${who}-${tag}`, email: `${who}-${tag}@example.test`, name: who } });
       people[who] = user.id;
     }
@@ -212,6 +212,28 @@ run('universe roles and people routes (real database)', () => {
     const accepted = await accept(new NextRequest('http://localhost/api', { method: 'POST' }), { params: Promise.resolve({ id: old.id }) });
     expect(accepted.status).toBe(200);
     expect(await tagsOf('returning', worldB)).toEqual(['member']);
+  });
+
+  it('never lets a pending invitation give Administrator in some worlds', async () => {
+    const chief = await prisma.role.create({ data: { universeId, key: `chief-${tag}`, name: 'Chief', position: 15 } });
+    const invited = await as('owner', inviteRoute.POST, {}, {
+      userId: people.late,
+      roleIds: [chief.id],
+      worlds: { allWorlds: false, worldIds: [worldA] },
+    });
+    expect(invited.status).toBe(201);
+    const administrator = { permissions: flag('ADMINISTRATOR').toString() };
+    expect((await as('owner', roleRoute.PATCH, { roleId: chief.id }, administrator)).status).toBe(400);
+
+    // Had it gained Administrator anyway, accepting still gives the worlds but not the role
+    await prisma.role.update({ where: { id: chief.id }, data: { permissions: flag('ADMINISTRATOR') } });
+    session.mockResolvedValue({ id: people.late, uuid: 'late', email: null, name: 'late', tags: [], isSuperAdmin: false });
+    const accepted = await accept(new NextRequest('http://localhost/api', { method: 'POST' }), {
+      params: Promise.resolve({ id: invited.body.invitation.id }),
+    });
+    expect(accepted.status).toBe(200);
+    expect(await tagsOf('late', worldA)).toEqual(['member']);
+    await prisma.role.delete({ where: { id: chief.id } });
   });
 
   it('removes someone only from below, and only with the permission everywhere they are', async () => {
