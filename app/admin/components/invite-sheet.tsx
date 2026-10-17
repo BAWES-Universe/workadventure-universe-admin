@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { ChevronRight, Search } from 'lucide-react';
 import { authenticatedFetch } from '@/lib/client-auth';
 import { timeAgo } from '@/lib/time-ago';
-import { dayWord, pickableWorlds, type AllowedWorlds } from '@/lib/member-roles';
+import { dayWord, isAdministrator, pickableWorlds, type AllowedWorlds } from '@/lib/member-roles';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { PickChip, Segmented } from '@/components/ui/choice';
@@ -157,8 +157,14 @@ export default function InviteSheet({ open, onOpenChange, universeId, universes,
     return pickableWorlds(universeWorlds.map((world) => world.id), ...limits);
   }, [me, roleIds, universeWorlds]);
 
+  // Administrator works in every world and can't be limited: picking it picks "All worlds", and it can't be picked
+  // by someone who may not invite and give roles in every world.
+  const adminIds = useMemo(() => (roles.status === 'ready' ? roles.value.list.filter((role) => isAdministrator(role.permissions)).map((role) => role.id) : []), [roles]);
+  const adminPicked = roleIds.some((id) => adminIds.includes(id));
+  const adminReach = me.status === 'ready' && pickableWorlds(universeWorlds.map((world) => world.id), me.value.invite, me.value.give).all;
+
   // What is picked, kept inside what is allowed: with nothing chosen yet, every world when that is allowed.
-  const everyWorld = all ?? allowed.all;
+  const everyWorld = adminPicked || (all ?? allowed.all);
   const shownAll = everyWorld && allowed.all;
   const chosenWorlds = worldIds.filter((id) => allowed.ids.includes(id));
   const note = picked ? (picked.notes ? (picked.notes[chosenUniverse] ?? null) : (picked.note ?? null)) : null;
@@ -199,7 +205,11 @@ export default function InviteSheet({ open, onOpenChange, universeId, universes,
 
   const first = picked?.name.trim().split(/\s+/)[0] ?? '';
   const title = picked ? `Invite ${first} to ${universeName}` : `Invite to ${universeName}`;
-  const toggleRole = (id: string) => setRoleIds((current) => (current.includes(id) ? current.filter((value) => value !== id) : [...current, id]));
+  const toggleRole = (id: string) => {
+    setRoleIds((current) => (current.includes(id) ? current.filter((value) => value !== id) : [...current, id]));
+    if (adminIds.includes(id)) setAll(null);
+  };
+  const everyWorldOnly = (id: string) => adminIds.includes(id) && !adminReach && !roleIds.includes(id);
   const toggleWorld = (id: string) => setWorldIds((current) => (current.includes(id) ? current.filter((value) => value !== id) : [...current, id]));
   const hasRoles = givable.builtIn.length + givable.custom.length > 0;
 
@@ -308,7 +318,7 @@ export default function InviteSheet({ open, onOpenChange, universeId, universes,
                 <span className="text-[13px] font-semibold text-muted-foreground">Built in</span>
                 <div className="flex flex-wrap gap-2">
                   {givable.builtIn.map((role) => (
-                    <PickChip key={role.id} picked={roleIds.includes(role.id)} color={role.color} onClick={() => toggleRole(role.id)}>
+                    <PickChip key={role.id} picked={roleIds.includes(role.id)} color={role.color} disabled={everyWorldOnly(role.id)} onClick={() => toggleRole(role.id)}>
                       {role.name}
                     </PickChip>
                   ))}
@@ -320,12 +330,15 @@ export default function InviteSheet({ open, onOpenChange, universeId, universes,
                 <span className="text-[13px] font-semibold text-muted-foreground">Your roles</span>
                 <div className="flex flex-wrap gap-2">
                   {givable.custom.map((role) => (
-                    <PickChip key={role.id} picked={roleIds.includes(role.id)} color={role.color} onClick={() => toggleRole(role.id)}>
+                    <PickChip key={role.id} picked={roleIds.includes(role.id)} color={role.color} disabled={everyWorldOnly(role.id)} onClick={() => toggleRole(role.id)}>
                       {role.name}
                     </PickChip>
                   ))}
                 </div>
               </div>
+            )}
+            {(adminPicked || [...givable.builtIn, ...givable.custom].some((role) => everyWorldOnly(role.id))) && (
+              <p className="text-[13px] text-muted-foreground">Administrator works in every world</p>
             )}
           </section>
 
@@ -337,7 +350,7 @@ export default function InviteSheet({ open, onOpenChange, universeId, universes,
               onChange={(value) => setAll(value === 'all')}
               options={[
                 { value: 'all', label: 'All worlds', disabled: !allowed.all },
-                { value: 'some', label: 'Some worlds' },
+                { value: 'some', label: 'Some worlds', disabled: adminPicked },
               ]}
               className="justify-self-start"
             />

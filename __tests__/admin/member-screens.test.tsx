@@ -190,6 +190,30 @@ describe('a member’s page', () => {
     expect(screen.getByRole('checkbox', { name: 'Accountant' }).getAttribute('aria-checked')).toBe('false');
   });
 
+  it('gives Administrator in every world, the only way the server takes it', async () => {
+    can = { ...can, giveWorlds: 'all' };
+    wrap(<MemberPage />);
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Admin' }));
+    await waitFor(() => expect(calls.find((call) => call.method === 'PUT')).toBeTruthy());
+    expect(calls.find((call) => call.method === 'PUT')!.url).toBe('/api/admin/universes/u1/members/sara/roles/r-admin');
+    expect(calls.find((call) => call.method === 'PUT')!.body).toEqual({ allWorlds: true, worldIds: [] });
+  });
+
+  it('turns the Administrator row off, with the reason, when you cannot give roles in every world', async () => {
+    can = { ...can, giveWorlds: ['hq'] };
+    wrap(<MemberPage />);
+    const admin = await screen.findByRole('checkbox', { name: 'Admin' });
+    expect(admin.hasAttribute('disabled')).toBe(true);
+    expect(screen.getByText('Administrator works in every world')).toBeTruthy();
+    fireEvent.click(admin);
+    expect(calls.some((call) => call.method === 'PUT')).toBe(false);
+    // Other roles still work, in the worlds you may give them in
+    expect(screen.getByRole('checkbox', { name: 'Accountant' }).hasAttribute('disabled')).toBe(false);
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Accountant' }));
+    await waitFor(() => expect(calls.find((call) => call.method === 'PUT')).toBeTruthy());
+    expect(calls.find((call) => call.method === 'PUT')!.body).toEqual({ allWorlds: false, worldIds: ['hq'] });
+  });
+
   it('cannot tick a role above yours', async () => {
     can = { ...can, giveRoleIds: ['r-acct'] };
     wrap(<MemberPage />);
