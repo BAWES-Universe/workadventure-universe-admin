@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import Link from 'next/link';
 import { useParams, useSearchParams } from 'next/navigation';
-import { Shield, UserPlus } from 'lucide-react';
+import { Shield, UserPlus, Users } from 'lucide-react';
 import { authenticatedFetch } from '@/lib/client-auth';
 import { dayWord, summariseRoles, type MemberRoles, type Worlds } from '@/lib/member-roles';
 import { Button } from '@/components/ui/button';
@@ -181,14 +181,13 @@ export function UniverseMembersPage() {
     !!owner && roleId === ANY && (!query || [owner.name, owner.email].some((text) => text?.toLowerCase().includes(query.toLowerCase())));
   const rows: Member[] = useMemo(() => {
     if (!page) return [];
-    // The highest roles first; people with the same rank stay as the list gave them (newest first)
-    const rank = (member: Member) => Math.max(0, ...member.roles.map((given) => rolesById.get(given.roleId)?.position ?? 0));
-    const others = page.members.filter((member) => !member.isOwner).sort((a, b) => rank(b) - rank(a));
+    // The server lists the highest roles first, newest within a rank; the owner is pinned above them
+    const others = page.members.filter((member) => !member.isOwner);
     if (!ownerShown || !owner) return others;
     const joinedRow = page.members.find((member) => member.isOwner);
     const row: Member = joinedRow ?? { userId: owner.userId, name: owner.name, email: owner.email, joinedAt: owner.joinedAt ?? '', isOwner: true, woka: owner.woka, worlds: { allWorlds: true, worldIds: [] }, roles: [] };
     return [{ ...row, woka: row.woka ?? owner.woka }, ...others];
-  }, [page, owner, ownerShown, rolesById]);
+  }, [page, owner, ownerShown]);
   const total = page ? page.total + (owner && !owner.joined && ownerShown ? 1 : 0) : null;
   const remaining = page ? Math.max(0, (total ?? 0) - Math.min(rows.length, visible)) : 0;
 
@@ -197,7 +196,7 @@ export function UniverseMembersPage() {
   return (
     <div className="grid min-w-0 gap-6">
       <PageHeader
-        kind="people"
+        icon={<Users aria-hidden="true" className="h-7 w-7 shrink-0" />}
         title="Members"
         context={
           <>
@@ -206,20 +205,21 @@ export function UniverseMembersPage() {
           </>
         }
         actions={
-          <>
+          // One row, side by side, on a phone too
+          <div className="flex gap-2">
             {canInvite && (
-              <Button className="h-11 px-5" onClick={() => setInviting(true)}>
+              <Button className="h-11 px-4" onClick={() => setInviting(true)}>
                 <UserPlus aria-hidden="true" />
                 Invite member
               </Button>
             )}
-            <Button asChild variant="outline" className="h-11 px-5">
+            <Button asChild variant="outline" className="h-11 px-4">
               <Link href={`/admin/universes/${id}/roles`}>
                 <Shield aria-hidden="true" />
                 Roles & permissions
               </Link>
             </Button>
-          </>
+          </div>
         }
       />
 
@@ -271,6 +271,7 @@ export function UniverseMembersPage() {
               <EntityRow
                 key={member.userId}
                 href={`/admin/universes/${id}/members/${member.userId}`}
+                chevron
                 kind="people"
                 leading={<WokaAvatar layers={member.woka ?? []} name={name} size={44} tinted round />}
                 title={name}
@@ -304,6 +305,7 @@ export function UniverseMembersPage() {
                 <EntityRow
                   key={invitation.id}
                   href={`/admin/users/${invitation.userId}`}
+                  chevron
                   kind="people"
                   leading={<WokaAvatar layers={invitation.woka ?? []} name={name} size={44} tinted round />}
                   title={name}

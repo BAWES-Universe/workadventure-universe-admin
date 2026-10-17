@@ -26,9 +26,10 @@ const ROLES = [
   { id: 'r-acct', key: 'accountant', name: 'Accountant', color: '#34D399', builtIn: false, position: 12, permissions: '0', people: 2 },
 ];
 const everywhere = { allWorlds: true, worldIds: [] as string[] };
+// As the server lists them: the highest role first
 const MEMBERS = [
-  { userId: 'newest', name: 'Noor Khan', email: 'noor@example.com', joinedAt: '2026-10-10T00:00:00Z', isOwner: false, worlds: everywhere, roles: [] },
   { userId: 'sara', name: 'Sara Ali', email: 'sara@example.com', joinedAt: '2026-08-01T00:00:00Z', isOwner: false, worlds: everywhere, roles: [{ roleId: 'r-acct', ...everywhere }, { roleId: 'r-editor', ...everywhere }] },
+  { userId: 'newest', name: 'Noor Khan', email: 'noor@example.com', joinedAt: '2026-10-10T00:00:00Z', isOwner: false, worlds: everywhere, roles: [] },
 ];
 const OWNER = { userId: 'owner', name: 'Khalid', email: null, woka: [], joinedAt: '2026-01-01T00:00:00Z', joined: false };
 
@@ -73,7 +74,7 @@ beforeEach(() => {
 const wrap = (node: React.ReactNode) => render(<ToastProvider>{node}</ToastProvider>);
 
 describe('universe Members page', () => {
-  it('puts the owner first, then the highest roles, each row opening the person', async () => {
+  it('puts the owner first, then people in the order the server ranks them, each row opening the person', async () => {
     wrap(<UniverseMembersPage />);
     const list = await screen.findByTestId('members');
     const rows = within(list).getAllByRole('link');
