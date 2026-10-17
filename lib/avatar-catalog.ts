@@ -395,7 +395,7 @@ export function buildWokaListPayload(
 // Helpers
 // ---------------------------------------------------------------------------
 
-function checkPolicyMatch(
+export function checkPolicyMatch(
   policies: AvatarEntitlementPolicy[],
   ctx: {
     userId: string | null
@@ -406,6 +406,7 @@ function checkPolicyMatch(
 ): boolean {
   return policies.some((p) => {
     if (!p.isActive) return false
+    if (p.worldId && p.worldId !== ctx.worldId) return false
     if (p.action !== ctx.action && p.action !== 'manage') return false
     switch (p.subjectType) {
       case 'everyone':
