@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { hiddenSystemOwnerId } from '@/lib/system-user';
+import { memberWorldIdsOf } from '@/lib/access-scope';
+import { canSeeWorld } from '@/lib/room-visibility';
 
 export const dynamic = 'force-dynamic';
 
@@ -19,8 +21,9 @@ export async function GET(request: NextRequest) {
       id: true,
       name: true,
       ownerId: true,
+      isPublic: true,
       createdAt: true,
-      worlds: { select: { id: true, name: true }, orderBy: { createdAt: 'asc' as const } },
+      worlds: { select: { id: true, name: true, isPublic: true }, orderBy: { createdAt: 'asc' as const } },
     };
 
     const [joined, owned] = await Promise.all([
@@ -35,9 +38,21 @@ export async function GET(request: NextRequest) {
       prisma.universe.findMany({ where: { ownerId: sessionUser.id, ...notHidden }, select: universeSelect, orderBy: { createdAt: 'desc' } }),
     ]);
 
+    // Only the worlds this person may see, as the universe page lists them: a private world is named only to its owner,
+    // its members and super admins, even inside a universe they belong to
+    const memberWorldIds = await memberWorldIdsOf(
+      sessionUser.id,
+      [...joined.map((member) => member.universe), ...owned].flatMap((universe) => universe.worlds.map((world) => world.id)),
+    );
+    type Listed = { ownerId: string; isPublic: boolean; worlds: { id: string; name: string; isPublic: boolean }[] };
+    const seen = (universe: Listed) =>
+      universe.worlds
+        .filter((world) => canSeeWorld({ ...world, universe: { isPublic: universe.isPublic, ownerId: universe.ownerId } }, sessionUser, memberWorldIds))
+        .map((world) => ({ id: world.id, name: world.name }));
+
     const everywhere = { allWorlds: true, worldIds: [] as string[] };
     const memberships = joined.map((member) => ({
-      universe: { id: member.universe.id, name: member.universe.name, worlds: member.universe.worlds },
+      universe: { id: member.universe.id, name: member.universe.name, worlds: seen(member.universe) },
       isOwner: member.universe.ownerId === sessionUser.id,
       joinedAt: member.joinedAt,
       worlds: { allWorlds: member.allWorlds, worldIds: member.worldIds },
@@ -55,7 +70,7 @@ export async function GET(request: NextRequest) {
     for (const universe of owned) {
       if (joinedIds.has(universe.id)) continue;
       memberships.push({
-        universe: { id: universe.id, name: universe.name, worlds: universe.worlds },
+        universe: { id: universe.id, name: universe.name, worlds: seen(universe) },
         isOwner: true,
         joinedAt: universe.createdAt,
         worlds: everywhere,
