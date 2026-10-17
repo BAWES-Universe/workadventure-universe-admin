@@ -29,6 +29,12 @@ export function RolesListPage() {
   const startOrder = useRef<string[]>([]);
   const pending = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latest = useRef<string[] | null>(null);
+  // The order as of the last move, whatever the screen has drawn yet, so a move always builds on the one before it
+  const orderRef = useRef<string[] | null>(null);
+  // Counts the moves, so a save that was started before a later move cannot throw that move away
+  const revision = useRef(0);
+  // Saves go one after another, so an older order never lands after a newer one
+  const queue = useRef<Promise<void>>(Promise.resolve());
 
   const data = state.status === 'ready' ? state.data : null;
   const movable = data ? movableRoles(data.roles.roles, { ...data.me, canManageRoles: data.roles.canManageRoles }) : [];
@@ -38,8 +44,14 @@ export function RolesListPage() {
     if (pending.current) clearTimeout(pending.current);
   }, []);
 
-  const save = useCallback(
-    async (ids: string[]) => {
+  const changeOrder = useCallback((next: string[]) => {
+    orderRef.current = next;
+    revision.current += 1;
+    setOrder(next);
+  }, []);
+
+  const run = useCallback(
+    async (ids: string[], movesAtStart: number) => {
       try {
         const { authenticatedFetch } = await import('@/lib/client-auth');
         const response = await authenticatedFetch(`/api/admin/universes/${universeId}/roles/order`, {
@@ -55,10 +67,23 @@ export function RolesListPage() {
         addToast({ description: failure instanceof Error ? failure.message : 'That didn’t work. Try again.', variant: 'error' });
       }
       await reload();
-      // Show what the server has, which is the old order when the save failed
-      setOrder(null);
+      // Show what the server has (the old order when the save failed), unless the roles were moved again meanwhile:
+      // then the newer order stays on screen and its own save settles it
+      if (revision.current === movesAtStart) {
+        orderRef.current = null;
+        setOrder(null);
+      }
     },
     [addToast, reload, universeId],
+  );
+
+  const save = useCallback(
+    (ids: string[]) => {
+      const movesAtStart = revision.current;
+      queue.current = queue.current.then(() => run(ids, movesAtStart));
+      return queue.current;
+    },
+    [run],
   );
 
   if (state.status === 'loading') {
@@ -104,8 +129,8 @@ export function RolesListPage() {
   function onHandleDown(event: React.PointerEvent<HTMLButtonElement>, id: string) {
     if (event.button !== 0 && event.pointerType === 'mouse') return;
     event.currentTarget.setPointerCapture(event.pointerId);
-    startOrder.current = order ?? movable.map((role) => role.id);
-    setOrder(startOrder.current);
+    startOrder.current = orderRef.current ?? movable.map((role) => role.id);
+    changeOrder(startOrder.current);
     setDragging(id);
   }
 
@@ -119,7 +144,7 @@ export function RolesListPage() {
       if (box && box.top + box.height / 2 < event.clientY) index += 1;
     }
     const next = place(order, dragging, index);
-    if (next.join(',') !== order.join(',')) setOrder(next);
+    if (next.join(',') !== order.join(',')) changeOrder(next);
   }
 
   function onHandleUp() {
@@ -132,11 +157,11 @@ export function RolesListPage() {
   function onHandleKey(event: React.KeyboardEvent<HTMLButtonElement>, id: string) {
     if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
     event.preventDefault();
-    const current = order ?? movable.map((role) => role.id);
+    const current = orderRef.current ?? movable.map((role) => role.id);
     const at = current.indexOf(id);
     const next = place(current, id, event.key === 'ArrowUp' ? at - 1 : at + 1);
     if (next.join(',') === current.join(',')) return;
-    setOrder(next);
+    changeOrder(next);
     latest.current = next;
     if (pending.current) clearTimeout(pending.current);
     pending.current = setTimeout(() => {

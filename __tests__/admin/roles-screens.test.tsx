@@ -173,6 +173,39 @@ describe('Roles & permissions list', () => {
     );
   });
 
+  it('keeps a move made while an earlier order is still being saved, and saves both moves', async () => {
+    let finishFirstSave: () => void = () => {};
+    const puts: string[][] = [];
+    serve((url, init) => {
+      if (!url.endsWith('/roles/order') || init?.method !== 'PUT') return undefined;
+      puts.push(JSON.parse(init.body as string).roleIds);
+      if (puts.length > 1) return json({ success: true });
+      return new Promise<Response>((resolve) => {
+        finishFirstSave = () => resolve({ ok: true, status: 200, json: () => Promise.resolve({ success: true }) } as Response);
+      });
+    });
+    render(<RolesListPage />);
+    await screen.findByText('Your roles');
+    const names = () => screen.getAllByTestId('role-row').slice(0, 3).map((row) => row.textContent?.slice(0, 5));
+
+    // First move: Accountant above Moderator. Its save starts and stays open.
+    fireEvent.keyDown(screen.getByRole('button', { name: /Move Accountant/ }), { key: 'ArrowUp' });
+    await waitFor(() => expect(puts).toEqual([['lead', 'acc', 'mod']]), { timeout: 3000 });
+
+    // Second move while that save is still open: Accountant above Lead
+    fireEvent.keyDown(screen.getByRole('button', { name: /Move Accountant/ }), { key: 'ArrowUp' });
+    expect(names()).toEqual(['Accou', 'Lead1', 'Moder']);
+
+    // The first save and its reload finish: the newer order stays, it does not snap back to the server's
+    finishFirstSave();
+    await waitFor(() => expect(addToast).toHaveBeenCalledWith(expect.objectContaining({ description: 'Order saved' })));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(names()).toEqual(['Accou', 'Lead1', 'Moder']);
+
+    // And the second save carries both moves
+    await waitFor(() => expect(puts).toEqual([['lead', 'acc', 'mod'], ['acc', 'lead', 'mod']]), { timeout: 3000 });
+  });
+
   it('creates a role from a template and opens it', async () => {
     serve((url, init) => (url.endsWith('/roles') && init?.method === 'POST' ? json({ role: { id: 'new-1' } }, 201) : undefined));
     render(<RolesListPage />);
