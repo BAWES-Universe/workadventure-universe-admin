@@ -129,28 +129,30 @@ export function RolesListPage() {
   function onHandleDown(event: React.PointerEvent<HTMLButtonElement>, id: string) {
     if (event.button !== 0 && event.pointerType === 'mouse') return;
     event.currentTarget.setPointerCapture(event.pointerId);
+    // The order is pinned only once the row moves: a press without a move leaves the list following the server
     startOrder.current = orderRef.current ?? movable.map((role) => role.id);
-    changeOrder(startOrder.current);
     setDragging(id);
   }
 
   function onHandleMove(event: React.PointerEvent<HTMLButtonElement>) {
-    if (!dragging || !order) return;
+    if (!dragging) return;
+    const current = orderRef.current ?? startOrder.current;
     // Its place is the number of other rows whose middle is above the finger
     let index = 0;
-    for (const other of order) {
+    for (const other of current) {
       if (other === dragging) continue;
       const box = rows.current.get(other)?.getBoundingClientRect();
       if (box && box.top + box.height / 2 < event.clientY) index += 1;
     }
-    const next = place(order, dragging, index);
-    if (next.join(',') !== order.join(',')) changeOrder(next);
+    const next = place(current, dragging, index);
+    if (next.join(',') !== current.join(',')) changeOrder(next);
   }
 
   function onHandleUp() {
     if (!dragging) return;
     setDragging(null);
-    if (order && order.join(',') !== startOrder.current.join(',')) void save(order);
+    const current = orderRef.current;
+    if (current && current.join(',') !== startOrder.current.join(',')) void save(current);
   }
 
   // Arrow keys on the handle move one place; the order is saved once they stop

@@ -20,6 +20,8 @@ import { EVERYONE_KEY, MEMBER_KEY, worldsOf, type WorldScope } from '@/lib/roles
 export const MAX_MAPS_READ = 60;
 const READ_AT_ONCE = 6;
 const READ_TIMEOUT_MS = 4000;
+/** All the map reading for one role stops starting new reads after this, so a slow map-storage can't hold the page. */
+const READ_BUDGET_MS = 10000;
 /** How many names each list carries; the rest are counted. */
 export const LIST_LIMIT = 30;
 
@@ -109,9 +111,9 @@ function playDomain(): string {
   }
 }
 
-async function readWam(url: string, fetcher: Fetcher): Promise<unknown | undefined> {
+async function readWam(url: string, fetcher: Fetcher, timeoutMs: number): Promise<unknown | undefined> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), READ_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetcher(url, { signal: controller.signal });
     if (!response.ok) return undefined;
@@ -226,11 +228,18 @@ export async function computeUsedIn(input: UsedInInput): Promise<UsedIn> {
     const batch = withMap.slice(0, MAX_MAPS_READ);
     skipped = withMap.length - batch.length;
     let next = 0;
+    const deadline = Date.now() + READ_BUDGET_MS;
     const worker = async () => {
       while (next < batch.length) {
+        // Out of time: the maps not tried yet count as not read
+        if (Date.now() >= deadline) {
+          unread += batch.length - next;
+          next = batch.length;
+          return;
+        }
         const room = batch[next++];
         const url = getWamUrl(domain, room.world.universe.slug, room.world.slug, room.slug, storage);
-        const wam = await readWam(url, fetcher);
+        const wam = await readWam(url, fetcher, Math.min(READ_TIMEOUT_MS, deadline - Date.now()));
         if (wam === undefined) {
           unread += 1;
           continue;

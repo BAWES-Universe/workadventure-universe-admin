@@ -153,6 +153,27 @@ describe('computeUsedIn', () => {
     expect(used.reach.mapAreas.unread).toBe(2);
   });
 
+  it('stops starting new map reads once its time is up, and counts the rest as not read', async () => {
+    roomFindMany.mockResolvedValue(
+      Array.from({ length: 20 }, (_, index) => room(`r${index}`, `Room ${index}`, 'hq', true, `https://maps.example.test/d/u/hq/r${index}/map.wam`)),
+    );
+    // Each read takes 4 seconds, so the 10 second budget runs out after the third has started
+    let now = 0;
+    const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    const fetcher = jest.fn(async () => {
+      now += 4000;
+      return { ok: false, json: async () => ({}) };
+    });
+    try {
+      const used = await computeUsedIn({ universeId: 'u', role: ROLE, viewer: VIEWER, fetcher });
+      expect(fetcher).toHaveBeenCalledTimes(3);
+      expect(used.reach.mapAreas.status).toBe('partial');
+      expect(used.reach.mapAreas.unread).toBe(20);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it('shows Member the rooms only a world’s people can enter, and the worlds everyone who joined is in', async () => {
     const used = await computeUsedIn({ universeId: 'u', role: { id: 'm', key: 'member', permissions: BigInt(0) }, viewer: VIEWER, fetcher: answers({}) });
     expect(used.doors.basis).toBe('members');
