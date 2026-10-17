@@ -49,18 +49,18 @@ export default function MembersRow({ worldId, preview, onInvite, canInvite, onSe
         <h2 id="world-members" className="orbit-display text-lg font-bold">
           Members <span className="ml-1 text-sm font-semibold text-muted-foreground">{total}</span>
         </h2>
-        <div className="flex items-center gap-2">
-          {(canInvite ?? canManage) && onInvite && (
-            <Button variant="outline" className="h-11 rounded-full px-4 text-xs" onClick={onInvite}>
-              <UserPlus aria-hidden="true" />
-              Invite member
-            </Button>
-          )}
-          <Link href={all} className={cn('orbit-press', styles.seeAllPill)}>
-            See all
-          </Link>
-        </div>
+        <Link href={all} className={cn('orbit-press', styles.seeAllPill)}>
+          See all
+        </Link>
       </div>
+      {(canInvite ?? canManage) && onInvite && (
+        <div className="mt-1">
+          <Button variant="outline" className="h-11 rounded-full px-4 text-sm" onClick={onInvite}>
+            <UserPlus aria-hidden="true" />
+            Invite member
+          </Button>
+        </div>
+      )}
       {description && <p className={styles.note}>{description}</p>}
       {total === 0 && <p className={styles.note}>No members yet.</p>}
       <ul className={styles.visitors}>

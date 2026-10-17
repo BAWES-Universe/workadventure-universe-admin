@@ -17,6 +17,7 @@ import { Check, Loader2, X } from 'lucide-react';
 import {
   EmptyCard,
   EntityRow,
+  KIND_ICON,
   LoadError,
   LoadingRows,
   PageHeader,
@@ -27,6 +28,8 @@ import {
 } from '../components/ds';
 import { OWNER_PILL, worldsLabel } from '@/lib/member-roles';
 import { RoleChip } from '../components/universe-people';
+
+const UniverseGlyph = KIND_ICON.universe;
 
 interface Invitation {
   id: string;
@@ -305,6 +308,7 @@ export default function MyMembershipsPage() {
                       key={membership.universe.id}
                       href={`/admin/universes/${membership.universe.id}`}
                       kind="universe"
+                      leading={<UniverseGlyph size={32} className="mx-1 shrink-0" aria-hidden="true" />}
                       title={membership.universe.name}
                       context={
                         <StatLine

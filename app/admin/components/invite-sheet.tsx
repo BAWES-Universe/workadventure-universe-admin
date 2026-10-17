@@ -20,6 +20,8 @@ export interface InvitePerson {
   woka?: string[];
   /** A line under their name, such as "Your friend · in HQ Lobby yesterday". */
   note?: string | null;
+  /** The line for each universe, when it differs by universe (a visit is in one universe). */
+  notes?: Record<string, string | null>;
 }
 
 interface Candidate extends InvitePerson {
@@ -37,6 +39,12 @@ function visitorNote(visit: Candidate): string {
   const spoken = when === 'today' || when === 'yesterday' ? when : when ? `on ${when}` : '';
   const line = [visit.friend ? 'Your friend' : null, [place, spoken].filter(Boolean).join(' ')].filter(Boolean).join(' · ') || 'Visited this week';
   return line.charAt(0).toUpperCase() + line.slice(1);
+}
+
+/** The line under someone's name from what is known: your friend, and their last visit. Nothing when there is nothing to say. */
+export function personNote(known: { friend?: boolean; visit?: { at: string; room?: { name: string } | null; world?: { name: string } | null } | null }): string | null {
+  if (!known.friend && !known.visit) return null;
+  return visitorNote({ userId: '', name: '', friend: known.friend, at: known.visit?.at, room: known.visit?.room as Candidate['room'], world: known.visit?.world as Candidate['world'] });
 }
 
 function PersonRow({ person, note, onPick }: { person: Candidate; note: string; onPick: () => void }) {
@@ -153,6 +161,7 @@ export default function InviteSheet({ open, onOpenChange, universeId, universes,
   const everyWorld = all ?? allowed.all;
   const shownAll = everyWorld && allowed.all;
   const chosenWorlds = worldIds.filter((id) => allowed.ids.includes(id));
+  const note = picked ? (picked.notes ? (picked.notes[chosenUniverse] ?? null) : (picked.note ?? null)) : null;
   const ready = !!picked && !sending && me.status === 'ready' && (shownAll || chosenWorlds.length > 0);
 
   function pick(candidate: Candidate, note: string) {
@@ -270,7 +279,7 @@ export default function InviteSheet({ open, onOpenChange, universeId, universes,
             <WokaAvatar layers={picked.woka ?? []} name={picked.name} size={40} tinted round />
             <span className="min-w-0 flex-1">
               <strong className="block truncate text-[15px] font-bold">{picked.name}</strong>
-              {picked.note && <span className="block text-[13px] text-muted-foreground">{picked.note}</span>}
+              {note && <span className="block text-[13px] text-muted-foreground">{note}</span>}
             </span>
             {!given && (
               <Button variant="outline" className="h-11 px-4" onClick={() => setPicked(null)}>
