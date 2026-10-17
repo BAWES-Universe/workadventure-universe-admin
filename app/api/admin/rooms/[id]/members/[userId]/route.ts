@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
-import { accessDetailFor, forbiddenResponse, getViewer, unauthorizedResponse, viewerUserId } from '@/lib/access-scope';
+import { accessDetailFor, forbiddenResponse, getViewer, unauthorizedResponse } from '@/lib/access-scope';
 import { accessFor, worldsAllowing } from '@/lib/role-access';
 
 export const dynamic = 'force-dynamic';
 
-async function mayInvite(userId: string, universeId: string, worldId: string): Promise<boolean> {
-  const access = await accessFor(prisma, universeId, { id: userId });
+async function mayInvite(user: { id: string; isSuperAdmin?: boolean }, universeId: string, worldId: string): Promise<boolean> {
+  // A super admin has everything, as in the invitation route, so who they are goes along with their id
+  const access = await accessFor(prisma, universeId, { id: user.id, isSuperAdmin: user.isSuperAdmin });
   if (!access) return false;
   const worlds = worldsAllowing(access, 'INVITE_AND_REMOVE');
   return worlds === 'all' || worlds.includes(worldId);
@@ -28,13 +29,12 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const user = await prisma.user.findUnique({ where: { id: userId }, select: { isGuest: true } });
     if (!user) return NextResponse.json({ error: 'User not found' }, { status: 404 });
     const worldId = room.world.id;
-    const me = viewerUserId(viewer);
     const universeId = room.world.universeId;
     const [member, invitation, canInvite] = await Promise.all([
       prisma.worldMember.findUnique({ where: { userId_worldId: { userId, worldId } }, select: { tags: true } }),
       prisma.membershipInvitation.findFirst({ where: { OR: [{ worldId }, { universeId }], invitedUserId: userId, status: 'pending' }, select: { id: true } }),
       // Match the invitation POST: a session, and Invite and remove people in this world (from a role or as the owner).
-      me ? mayInvite(me, universeId, worldId) : false,
+      viewer.kind === 'user' ? mayInvite(viewer.user, universeId, worldId) : false,
     ]);
     const owner = room.world.universe.ownerId === userId;
     return NextResponse.json({

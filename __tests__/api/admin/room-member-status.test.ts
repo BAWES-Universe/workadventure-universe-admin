@@ -64,7 +64,7 @@ it('looks up current membership and pending invites in the room’s world, witho
   expect(accessDetailFor).toHaveBeenCalledWith(expect.anything(), { roomId: 'r1' });
   expect(db.worldMember.findUnique).toHaveBeenCalledWith({ where: { userId_worldId: { userId: 'person', worldId: 'w1' } }, select: { tags: true } });
   expect(db.membershipInvitation.findFirst).toHaveBeenCalledWith({ where: { OR: [{ worldId: 'w1' }, { universeId: 'u1' }], invitedUserId: 'person', status: 'pending' }, select: { id: true } });
-  expect(accessFor).toHaveBeenCalledWith(expect.anything(), 'u1', { id: 'manager' });
+  expect(accessFor).toHaveBeenCalledWith(expect.anything(), 'u1', { id: 'manager', isSuperAdmin: undefined });
 });
 
 it('shows current roles, giving membership precedence over an old pending invite', async () => {
@@ -90,6 +90,12 @@ it('offers the invite only where the viewer’s role has Invite and remove peopl
   expect(await (await call()).json()).toMatchObject({ status: 'none', canInvite: false });
   (accessFor as jest.Mock).mockResolvedValue(holding('none'));
   expect(await (await call()).json()).toMatchObject({ status: 'none', canInvite: false });
+});
+
+it('asks for a super admin’s access as a super admin, so they are offered the invite in a universe they are not in', async () => {
+  (getViewer as jest.Mock).mockResolvedValue({ kind: 'user', user: { id: 'root', isSuperAdmin: true } });
+  expect(await (await call()).json()).toMatchObject({ status: 'none', canInvite: true });
+  expect(accessFor).toHaveBeenCalledWith(expect.anything(), 'u1', { id: 'root', isSuperAdmin: true });
 });
 
 it('lets privileged readers see status without a session user to invite as', async () => {

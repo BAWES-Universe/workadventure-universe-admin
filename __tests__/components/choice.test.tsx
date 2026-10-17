@@ -98,6 +98,16 @@ describe('Segmented', () => {
     expect(onChange).toHaveBeenLastCalledWith('some');
   });
 
+  it('does not call back when the segment already picked is chosen again', () => {
+    const onChange = jest.fn();
+    render(<Segmented aria-label="Kind" value="a" onChange={onChange} options={[{ value: 'a', label: 'A' }, { value: 'b', label: 'B' }]} />);
+    fireEvent.click(screen.getByRole('radio', { name: 'A' }));
+    fireEvent.keyDown(screen.getByRole('radio', { name: 'A' }), { key: 'Home' });
+    expect(onChange).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('radio', { name: 'B' }));
+    expect(onChange).toHaveBeenCalledWith('b');
+  });
+
   it('skips a disabled segment', () => {
     const onChange = jest.fn();
     render(

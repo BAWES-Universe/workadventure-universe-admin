@@ -172,6 +172,9 @@ export function MemberPage() {
   }
 
   function setWhere(role: UniverseRole, where: 'all' | 'some') {
+    // Already there: nothing to save, and the worlds picked so far stay
+    const current = held.get(role.id);
+    if (current && current.allWorlds === (where === 'all')) return;
     if (where === 'all') return void save(role, { allWorlds: true, worldIds: [] });
     void save(role, { allWorlds: false, worldIds: allowed.ids.slice(0, 1) });
   }
