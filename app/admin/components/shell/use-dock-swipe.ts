@@ -14,7 +14,18 @@ type Drag = {
   samples: SwipeSample[];
 };
 
-export function useDockSwipe(activeIndex: number, slots: number, onSelect: (index: number) => void) {
+type SwipeOptions = {
+  /** Leave mouse presses alone: a desktop keeps plain click and keyboard behaviour. */
+  touchOnly?: boolean;
+  /** The width the slots share. Default: the element's content box. A scrolling strip passes its scrollable width. */
+  measure?: (element: HTMLDivElement, style: CSSStyleDeclaration) => number;
+};
+
+/**
+ * Drag or flick a row of equal slots to move the selection, as in the bottom dock. Shared by the dock and by the
+ * tab bars (components/ui/tabs.tsx). `activeIndex` is -1 when nothing is selected, which turns swiping off.
+ */
+export function useDockSwipe(activeIndex: number, slots: number, onSelect: (index: number) => void, options: SwipeOptions = {}) {
   const drag = useRef<Drag | null>(null);
   const ignoreClicksUntil = useRef(0);
   const [preview, setPreview] = useState<{ base: number; position: number } | null>(null);
@@ -38,11 +49,15 @@ export function useDockSwipe(activeIndex: number, slots: number, onSelect: (inde
     if (!event.isPrimary || event.button !== 0 || drag.current) return;
     // A fresh press is always allowed, even immediately after a swipe.
     ignoreClicksUntil.current = 0;
+    if (options.touchOnly && event.pointerType === 'mouse') return;
     if (activeIndex < 0 || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
     // Leave both viewport edges to browser back/forward gestures, including in RTL.
     if (event.pointerType !== 'mouse' && (event.clientX < 24 || event.clientX > window.innerWidth - 24)) return;
     const style = getComputedStyle(event.currentTarget);
-    const width = (event.currentTarget.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight)) / slots;
+    const total = options.measure
+      ? options.measure(event.currentTarget, style)
+      : event.currentTarget.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+    const width = total / slots;
     if (width <= 0) return;
     drag.current = {
       pointerId: event.pointerId,
@@ -105,6 +120,14 @@ export function useDockSwipe(activeIndex: number, slots: number, onSelect: (inde
     }
   }
 
+  /** A press that follows a swipe can also arrive as a mouse press (Radix tabs select on that): drop it too. */
+  function onMouseDownCapture(event: MouseEvent<HTMLDivElement>) {
+    if (event.detail > 0 && event.timeStamp <= ignoreClicksUntil.current) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  }
+
   return {
     position: dragging ? preview.position : activeIndex,
     dragging,
@@ -121,6 +144,7 @@ export function useDockSwipe(activeIndex: number, slots: number, onSelect: (inde
         if (!drag.current?.moved) cancelDrag(event);
       },
       onClickCapture,
+      onMouseDownCapture,
     },
   };
 }
