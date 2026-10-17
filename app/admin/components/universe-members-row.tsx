@@ -9,7 +9,7 @@ import { Button } from '@/components/ui/button';
 import { RolePill } from '@/components/ui/choice';
 import { WokaAvatar } from './profile-card';
 import InviteSheet from './invite-sheet';
-import { RoleChip, useJson, useUniverseBasics, useUniverseRoles, useWorldNames, type UniverseRole } from './universe-people';
+import { RoleChip, useJson, useUniverseBasics, useUniverseRoles, useWorldNames } from './universe-people';
 import styles from './recent-visitors.module.css';
 
 const SHOWN = 8;
@@ -28,12 +28,6 @@ interface Answer {
   members: Face[];
   total: number;
   owner: { userId: string; name: string | null; email: string | null; woka: string[]; joined: boolean } | null;
-}
-
-/** How high someone ranks: the owner, then the highest role they hold. */
-function rankOf(face: Face, roles: ReadonlyMap<string, UniverseRole>): number {
-  if (face.isOwner) return Infinity;
-  return Math.max(0, ...face.roles.map((given) => roles.get(given.roleId)?.position ?? 0));
 }
 
 /**
@@ -59,8 +53,8 @@ export default function UniverseMembersRow({ universeId, className }: { universe
     const ownerFace: Face[] = owner
       ? [members.find((member) => member.isOwner) ?? { userId: owner.userId, name: owner.name, email: owner.email, isOwner: true, woka: owner.woka, worlds: { allWorlds: true, worldIds: [] }, roles: [] }]
       : [];
-    const byRole = roles.value.byId;
-    return [...ownerFace, ...others.sort((a, b) => rankOf(b, byRole) - rankOf(a, byRole))].slice(0, SHOWN);
+    // The server lists the highest roles first; the owner leads
+    return [...ownerFace, ...others].slice(0, SHOWN);
   }, [answer, roles]);
 
   if (answer.status !== 'ready' || roles.status !== 'ready') return null;

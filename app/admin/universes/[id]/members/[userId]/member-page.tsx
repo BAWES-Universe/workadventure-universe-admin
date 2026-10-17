@@ -14,7 +14,7 @@ import { useToast } from '@/components/ui/toast';
 import { EmptyCard, InContext, LoadError, LoadingRows } from '../../../../components/ds';
 import { WokaAvatar } from '../../../../components/profile-card';
 import { FormSheet } from '../../../../components/form-sheet';
-import { RoleChip, useUniverseBasics, useUniverseRoles, useWorldNames, type UniverseRole } from '../../../../components/universe-people';
+import { useUniverseBasics, useUniverseRoles, useWorldNames, type UniverseRole } from '../../../../components/universe-people';
 
 interface MemberAnswer {
   member: {
@@ -270,7 +270,8 @@ export function MemberPage() {
             <span className="text-[13px] font-semibold text-muted-foreground">Built in</span>
             <div className="flex min-h-12 items-center gap-3 rounded-2xl border border-foreground/[.08] bg-foreground/[.04] px-3.5 py-2 text-muted-foreground" data-testid="member-base">
               <Lock aria-hidden="true" className="h-4 w-4 shrink-0" />
-              <RoleChip name="Member" color={roles.value.list.find((role) => role.key === 'member')?.color ?? '#A78BFA'} />
+              <i aria-hidden="true" className="h-2 w-2 shrink-0 rounded-full" style={{ background: roles.value.list.find((role) => role.key === 'member')?.color ?? '#A78BFA' }} />
+              <span className="text-[15px] font-medium">Member</span>
               <span className="ml-auto text-right text-[13px]">{memberLine}</span>
             </div>
             {builtIn.map(renderRole)}
