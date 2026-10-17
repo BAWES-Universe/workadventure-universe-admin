@@ -31,6 +31,8 @@ export const ROUTES: RouteDefinition[] = [
   { pattern: '/admin/universes/new', title: 'New universe', parent: '/admin/universes' },
   { pattern: '/admin/universes/[id]', title: 'Universe', parent: '/admin/universes' },
   { pattern: '/admin/universes/[id]/visitors', title: 'Visitors', parent: '/admin/universes/[id]' },
+  { pattern: '/admin/universes/[id]/roles', title: 'Roles & permissions', parent: '/admin/universes/[id]' },
+  { pattern: '/admin/universes/[id]/roles/[roleId]', title: 'Role', parent: '/admin/universes/[id]/roles' },
   { pattern: '/admin/worlds/new', title: 'New world', parent: '/admin/universes' },
   { pattern: '/admin/worlds/[id]', title: 'World', parent: '/admin/space' },
   { pattern: '/admin/worlds/[id]/visitors', title: 'Visitors', parent: '/admin/worlds/[id]' },

@@ -13,7 +13,7 @@
 
 import Link from 'next/link';
 import type { CSSProperties, ReactNode } from 'react';
-import { ArrowUpRight, Bot, Cpu, DoorOpen, Earth, Globe2, LayoutTemplate, Lock, Map as MapIcon, Shirt, Star, Tags, Users, type LucideIcon } from 'lucide-react';
+import { ArrowUpRight, Bot, Cpu, DoorOpen, Earth, Globe2, LayoutTemplate, Lock, Map as MapIcon, Shield, Shirt, Star, Tags, Users, type LucideIcon } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { timeAgo } from '@/lib/time-ago';
 import { universeColour } from '@/lib/universe-colour';
@@ -24,7 +24,7 @@ import { Planet } from './planet-icon';
 /** What players meet: each has its own colour. */
 export type EntityKind = 'universe' | 'world' | 'room' | 'star' | 'people';
 /** Super-admin tools: neutral chips, so they never read as a universe, world or room. */
-export type ToolKind = 'template' | 'category' | 'map' | 'bot' | 'provider' | 'avatar';
+export type ToolKind = 'template' | 'category' | 'map' | 'bot' | 'provider' | 'avatar' | 'role';
 export type Kind = EntityKind | ToolKind;
 
 export const KIND_ICON: Record<Kind, LucideIcon> = {
@@ -39,10 +39,11 @@ export const KIND_ICON: Record<Kind, LucideIcon> = {
   bot: Bot,
   provider: Cpu,
   avatar: Shirt,
+  role: Shield,
 };
 
 /** Universe, world, room and star: a clean icon in their colour, no box, on the name's own line (as the room page). */
-const CLEAN = new Set<Kind>(['universe', 'world', 'room', 'star']);
+const CLEAN = new Set<Kind>(['universe', 'world', 'room', 'star', 'role']);
 export const isCleanKind = (kind: Kind) => CLEAN.has(kind);
 
 /** The kind's icon on the name's own line (inline layout). */
@@ -63,6 +64,7 @@ export const KIND_LABEL: Record<Kind, string> = {
   bot: 'Bot',
   provider: 'AI provider',
   avatar: 'Avatar set',
+  role: 'Role',
 };
 
 /** A universe's own colour as a style, for its chip, wash and planet. */
