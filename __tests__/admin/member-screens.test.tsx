@@ -214,6 +214,44 @@ describe('a member’s page', () => {
     expect(calls.find((call) => call.method === 'PUT')!.body).toEqual({ allWorlds: false, worldIds: ['hq'] });
   });
 
+  it('keeps the newest change when an earlier save of the same role fails late', async () => {
+    // The first save waits; it is answered with a refusal only after the role was tapped again
+    let refuseFirst: ((value: unknown) => void) | null = null;
+    const base = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
+      if (url.endsWith('/roles/r-acct') && init?.method === 'PUT') {
+        calls.push({ url, method: 'PUT', body: JSON.parse(init.body ?? '{}') });
+        return new Promise((resolve) => { refuseFirst = resolve; });
+      }
+      return base(url, init);
+    });
+    wrap(<MemberPage />);
+    const box = await screen.findByRole('checkbox', { name: 'Accountant' });
+    fireEvent.click(box); // on
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Accountant' })); // and off again before the first save answers
+    expect(screen.getByRole('checkbox', { name: 'Accountant' }).getAttribute('aria-checked')).toBe('false');
+    // One request per role at a time: the second waits for the first
+    expect(calls.filter((call) => call.url.endsWith('/roles/r-acct') && call.method === 'DELETE')).toHaveLength(0);
+    await waitFor(() => expect(refuseFirst).not.toBeNull());
+    refuseFirst!({ ok: false, status: 403, json: () => Promise.resolve({ error: 'Needs Give roles' }) });
+    await waitFor(() => expect(calls.some((call) => call.url.endsWith('/roles/r-acct') && call.method === 'DELETE')).toBe(true));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // The late failure does not put the tick back, or show its error over the newer change
+    expect(screen.getByRole('checkbox', { name: 'Accountant' }).getAttribute('aria-checked')).toBe('false');
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('goes back to what was saved when the newest change fails', async () => {
+    wrap(<MemberPage />);
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Accountant' }));
+    await waitFor(() => expect(calls.some((call) => call.method === 'PUT')).toBe(true));
+    failNextRole = true;
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Accountant' }));
+    expect((await screen.findByRole('alert')).textContent).toBe('Needs Give roles');
+    // Back on: the first tick was saved, the second (taking it away) was refused
+    expect(screen.getByRole('checkbox', { name: 'Accountant' }).getAttribute('aria-checked')).toBe('true');
+  });
+
   it('cannot tick a role above yours', async () => {
     can = { ...can, giveRoleIds: ['r-acct'] };
     wrap(<MemberPage />);

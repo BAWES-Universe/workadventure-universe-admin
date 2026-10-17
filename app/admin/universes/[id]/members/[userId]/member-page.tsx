@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { Lock, Trash2 } from 'lucide-react';
 import { authenticatedFetch } from '@/lib/client-auth';
@@ -60,6 +60,13 @@ export function MemberPage() {
   const [held, setHeld] = useState<Map<string, Worlds>>(new Map());
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(0);
+  // Roles with a save on its way: shown as pending
+  const [pending, setPending] = useState<Set<string>>(new Set());
+  // What the server last accepted for each role, which a failed save goes back to
+  const confirmed = useRef<Map<string, Worlds>>(new Map());
+  // The newest change made to each role, and the save running for it; one request per role at a time, in order
+  const revisions = useRef<Map<string, number>>(new Map());
+  const queues = useRef<Map<string, Promise<void>>>(new Map());
   const [confirming, setConfirming] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [viewerId, setViewerId] = useState<string | null>(null);
@@ -71,7 +78,9 @@ export function MemberPage() {
       if (!response.ok) throw new Error(String(response.status));
       const body = (await response.json()) as MemberAnswer;
       setAnswer(body);
-      setHeld(new Map(body.member.roles.map((given) => [given.roleId, { allWorlds: given.allWorlds, worldIds: given.worldIds }])));
+      const given = new Map<string, Worlds>(body.member.roles.map((role) => [role.roleId, { allWorlds: role.allWorlds, worldIds: role.worldIds }]));
+      confirmed.current = given;
+      setHeld(new Map(given));
     } catch {
       setFailed(true);
     }
@@ -97,9 +106,15 @@ export function MemberPage() {
   );
   const reach = memberWorlds === 'all' ? universeWorldIds : universeWorldIds.filter((worldId) => memberWorlds.includes(worldId));
 
-  /** Save one role as it is now (null takes it away); the page shows the change at once and undoes it if it fails. */
-  async function save(role: UniverseRole, next: Worlds | null) {
-    const before = held.get(role.id);
+  /**
+   * Save one role as it is now (null takes it away). The page shows the change at once. Saves of the same role go one
+   * at a time, in order, and each change gets a revision: an answer or a rollback only applies if no newer change was
+   * made to that role since, so a late failure never undoes what was tapped after it.
+   */
+  function save(role: UniverseRole, next: Worlds | null) {
+    const revision = (revisions.current.get(role.id) ?? 0) + 1;
+    revisions.current.set(role.id, revision);
+    const latest = () => revisions.current.get(role.id) === revision;
     setError(null);
     setHeld((current) => {
       const copy = new Map(current);
@@ -107,27 +122,46 @@ export function MemberPage() {
       else copy.delete(role.id);
       return copy;
     });
+    setPending((current) => new Set(current).add(role.id));
     setBusy((count) => count + 1);
-    try {
-      const url = `/api/admin/universes/${id}/members/${userId}/roles/${role.id}`;
-      const response = next
-        ? await authenticatedFetch(url, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(next) })
-        : await authenticatedFetch(url, { method: 'DELETE' });
-      if (!response.ok) {
-        const body = await response.json().catch(() => ({}));
-        throw new Error(typeof body.error === 'string' ? body.error : 'Couldn’t save that. Try again.');
+
+    const run = async () => {
+      try {
+        const url = `/api/admin/universes/${id}/members/${userId}/roles/${role.id}`;
+        const response = next
+          ? await authenticatedFetch(url, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(next) })
+          : await authenticatedFetch(url, { method: 'DELETE' });
+        if (!response.ok) {
+          const body = await response.json().catch(() => ({}));
+          throw new Error(typeof body.error === 'string' ? body.error : 'Couldn’t save that. Try again.');
+        }
+        if (next) confirmed.current.set(role.id, next);
+        else confirmed.current.delete(role.id);
+      } catch (cause) {
+        // Only the newest change goes back (to what the server last accepted); an older one is overtaken by it
+        if (latest()) {
+          const before = confirmed.current.get(role.id);
+          setHeld((current) => {
+            const copy = new Map(current);
+            if (before) copy.set(role.id, before);
+            else copy.delete(role.id);
+            return copy;
+          });
+          setError(cause instanceof Error ? cause.message : 'Couldn’t save that. Try again.');
+        }
+      } finally {
+        setBusy((count) => count - 1);
+        if (latest()) {
+          setPending((current) => {
+            const copy = new Set(current);
+            copy.delete(role.id);
+            return copy;
+          });
+        }
       }
-    } catch (cause) {
-      setHeld((current) => {
-        const copy = new Map(current);
-        if (before) copy.set(role.id, before);
-        else copy.delete(role.id);
-        return copy;
-      });
-      setError(cause instanceof Error ? cause.message : 'Couldn’t save that. Try again.');
-    } finally {
-      setBusy((count) => count - 1);
-    }
+    };
+    const after = queues.current.get(role.id) ?? Promise.resolve();
+    queues.current.set(role.id, after.then(run));
   }
 
   function toggle(role: UniverseRole, on: boolean) {
@@ -213,7 +247,7 @@ export function MemberPage() {
     const rowOff = !allowedRole || everyWorldOnly;
     const inputId = `role-${role.id}`;
     return (
-      <div key={role.id} className={cn('rounded-2xl border px-3.5 py-1 transition-[background-color,border-color,box-shadow]', on ? PICKED : 'border-foreground/[.08] bg-foreground/[.04]', rowOff && 'opacity-60')}>
+      <div key={role.id} aria-busy={pending.has(role.id)} className={cn('rounded-2xl border px-3.5 py-1 transition-[background-color,border-color,box-shadow]', on ? PICKED : 'border-foreground/[.08] bg-foreground/[.04]', rowOff && 'opacity-60', pending.has(role.id) && 'opacity-70')}>
         <div className="flex min-h-11 items-center gap-3">
           <Checkbox id={inputId} checked={on} disabled={rowOff} onCheckedChange={(value) => toggle(role, value === true)} />
           <label htmlFor={inputId} className={cn('flex min-h-11 flex-1 items-center gap-2 text-[15px]', on ? 'font-bold' : 'font-medium', !rowOff ? 'cursor-pointer' : 'cursor-not-allowed')}>
