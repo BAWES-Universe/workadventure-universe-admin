@@ -312,7 +312,7 @@ export default function InviteSheet({ open, onOpenChange, universeId, universes,
                 <div className="flex flex-wrap gap-2">
                   {givable.custom.map((role) => (
                     <PickChip key={role.id} picked={roleIds.includes(role.id)} color={role.color} onClick={() => toggleRole(role.id)}>
-                      {role.badge ? `${role.badge} ` : ''}{role.name}
+                      {role.name}
                     </PickChip>
                   ))}
                 </div>

@@ -3,7 +3,7 @@ import { prisma } from '@/lib/db';
 import { withWokas } from '@/lib/woka-avatar';
 import { allows, ranksAbove, worldsAllowing, type Reach } from '@/lib/role-access';
 import { leaveUniverse } from '@/lib/universe-members';
-import { failed, managesPeople, memberForJson, memberInclude, needs, universeContext } from '@/lib/universe-route';
+import { failed, managesPeople, memberForJson, memberInclude, needs, seesHiddenRoles, universeContext } from '@/lib/universe-route';
 
 type Params = { params: Promise<{ id: string; userId: string }> };
 
@@ -35,7 +35,7 @@ async function ownerWithoutMembership(universeId: string, userId: string) {
     worldIds: [] as string[],
     joinedAt: universe?.createdAt ?? new Date(),
     user,
-    roles: [] as { roleId: string; allWorlds: boolean; worldIds: string[]; role: { position: number } }[],
+    roles: [] as { roleId: string; allWorlds: boolean; worldIds: string[]; role: { position: number; showBadge: boolean } }[],
   };
 }
 
@@ -72,7 +72,7 @@ export async function GET(request: NextRequest, { params }: Params) {
     const canGiveAnywhere = !isOwner && (givable === 'all' || givable.length > 0) && (access.full || userId === user.id || theirHighest < access.highest);
 
     const [[withWoka], lastVisitedAt] = await Promise.all([
-      withWokas([memberForJson(joined, universe.ownerId, managesPeople(access) || userId === user.id)]),
+      withWokas([memberForJson(joined, universe.ownerId, managesPeople(access) || userId === user.id, seesHiddenRoles(access) || userId === user.id)]),
       lastVisitIn(id, userId),
     ]);
     return NextResponse.json({

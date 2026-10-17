@@ -74,16 +74,16 @@ export function useWorldNames(basics: Loaded<UniverseBasics>): Map<string, strin
   );
 }
 
-/** A role as a neutral pill with its colour dot; a role's badge (an emoji) comes before its name. */
-export function RoleChip({ name, color, badge }: { name: string; color: string; badge?: string | null }) {
-  return <RolePill name={badge ? `${badge} ${name}` : name} color={color} />;
+/** A role as a neutral pill with its colour dot. */
+export function RoleChip({ name, color }: { name: string; color: string }) {
+  return <RolePill name={name} color={color} />;
 }
 
 /** The highest role, where it works, and "+N" for the rest: what a row or a face shows of someone's roles. */
 export function RoleSummaryPills({ summary, showWhere = true }: { summary: RoleSummary; showWhere?: boolean }) {
   return (
     <span className="inline-flex flex-wrap items-center gap-1.5">
-      <RoleChip name={summary.name} color={summary.color} badge={summary.badge} />
+      <RoleChip name={summary.name} color={summary.color} />
       {showWhere && summary.where && <span className="text-xs text-muted-foreground">{summary.where}</span>}
       {summary.more > 0 && <RolePill name={`+${summary.more}`} />}
     </span>

@@ -69,7 +69,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       }
       if (position >= ADMIN_POSITION) throw new Error('No room for another custom role');
       return tx.role.create({
-        data: { universeId: id, key, name: data.name, color: data.color, badge: data.badge || null, permissions, position },
+        data: { universeId: id, key, name: data.name, color: data.color, showBadge: data.showBadge ?? true, permissions, position },
       });
     });
     return NextResponse.json({ role: roleForJson(role) }, { status: 201 });

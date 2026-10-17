@@ -103,7 +103,7 @@ export default function UniverseMembersRow({ universeId, className }: { universe
                 <WokaAvatar layers={face.woka ?? []} name={name} size={44} tinted round />
                 <strong>{name}</strong>
                 <span className="-mt-0.5 inline-flex items-center gap-1">
-                  <span className="scale-90"><RoleChip name={summary.name} color={summary.color} badge={summary.badge} /></span>
+                  <span className="scale-90"><RoleChip name={summary.name} color={summary.color} /></span>
                   {summary.more > 0 && <span className="scale-90"><RolePill name={`+${summary.more}`} /></span>}
                 </span>
               </Link>

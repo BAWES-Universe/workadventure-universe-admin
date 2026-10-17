@@ -8,7 +8,6 @@ export interface RoleInfo {
   key: string;
   name: string;
   color: string;
-  badge?: string | null;
   builtIn?: boolean;
   /** The permission number as a decimal string. */
   permissions?: string;
@@ -42,7 +41,6 @@ export function worldsLabel(scope: Worlds, worldNames: ReadonlyMap<string, strin
 export interface RoleSummary {
   name: string;
   color: string;
-  badge: string | null;
   /** Where it works, when not everywhere. */
   where: string | null;
   /** How many more roles they hold, shown as "+N". */
@@ -60,21 +58,20 @@ export function summariseRoles(
 ): RoleSummary {
   const held = member.roles.filter((given) => roles.has(given.roleId));
   if (member.isOwner) {
-    return { ...OWNER_PILL, badge: null, where: null, more: held.length };
+    return { ...OWNER_PILL, where: null, more: held.length };
   }
   if (held.length === 0) {
     const base = [...roles.values()].find((role) => role.key === 'member');
     return {
       name: base?.name ?? 'Member',
       color: base?.color ?? '#A78BFA',
-      badge: null,
       where: worldsLabel(member.worlds, worldNames),
       more: 0,
     };
   }
   const top = held[0];
   const role = roles.get(top.roleId) as RoleInfo;
-  return { name: role.name, color: role.color, badge: role.badge ?? null, where: worldsLabel(top, worldNames), more: held.length - 1 };
+  return { name: role.name, color: role.color, where: worldsLabel(top, worldNames), more: held.length - 1 };
 }
 
 /** What a list of allowed worlds says: every world, or only these. */

@@ -46,7 +46,7 @@ export async function GET(request: NextRequest) {
     const roles = roleIds.length
       ? await prisma.role.findMany({
           where: { id: { in: roleIds } },
-          select: { id: true, name: true, color: true, badge: true, position: true },
+          select: { id: true, name: true, color: true, position: true },
           orderBy: { position: 'desc' },
         })
       : [];
@@ -55,7 +55,7 @@ export async function GET(request: NextRequest) {
         ...invitation,
         roles: roles
           .filter((role) => invitation.roleIds.includes(role.id))
-          .map((role) => ({ id: role.id, name: role.name, color: role.color, badge: role.badge })),
+          .map((role) => ({ id: role.id, name: role.name, color: role.color })),
       })),
     });
   } catch (error) {

@@ -49,7 +49,7 @@ export async function PATCH(request: NextRequest, { params }: Params) {
       data: {
         ...(data.name !== undefined ? { name: data.name } : {}),
         ...(data.color !== undefined ? { color: data.color } : {}),
-        ...(data.badge !== undefined ? { badge: data.badge || null } : {}),
+        ...(data.showBadge !== undefined ? { showBadge: data.showBadge } : {}),
         permissions,
       },
     });

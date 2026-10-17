@@ -25,7 +25,7 @@ CREATE TABLE "roles" (
     "key" TEXT NOT NULL,
     "name" TEXT NOT NULL,
     "color" TEXT NOT NULL DEFAULT '#99AAB5',
-    "badge" TEXT,
+    "show_badge" BOOLEAN NOT NULL DEFAULT true,
     "permissions" BIGINT NOT NULL DEFAULT 0,
     "position" INTEGER NOT NULL DEFAULT 0,
     "built_in" BOOLEAN NOT NULL DEFAULT false,

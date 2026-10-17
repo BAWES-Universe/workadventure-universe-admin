@@ -8,7 +8,7 @@ import { z } from 'zod';
 import { prisma } from '@/lib/db';
 import { getSessionUser, type SessionUser } from '@/lib/auth-session';
 import { canSeeUniverse } from '@/lib/room-visibility';
-import { accessFor, worldsAllowing, type Access } from '@/lib/role-access';
+import { accessFor, allows, worldsAllowing, type Access } from '@/lib/role-access';
 import { isBuiltInKey } from '@/lib/roles';
 
 export type UniverseContext =
@@ -68,7 +68,8 @@ export function checkScope(scope: { allWorlds: boolean; worldIds: string[] }, un
 export const roleFieldsSchema = z.object({
   name: z.string().trim().min(1).max(40),
   color: z.string().regex(/^#[0-9a-fA-F]{6}$/),
-  badge: z.string().trim().max(16).nullable().optional(),
+  /** Off: only people who handle roles see it on others. */
+  showBadge: z.boolean().optional(),
   permissions: z.string().regex(/^\d{1,20}$/),
 });
 
@@ -92,6 +93,12 @@ export function keyForName(name: string, taken: ReadonlySet<string>): string {
   return key;
 }
 
+/** They change the Roles list or give roles somewhere, so they see the roles whose badge is hidden. */
+export function seesHiddenRoles(access: Access): boolean {
+  const worlds = worldsAllowing(access, 'GIVE_ROLES');
+  return access.full || allows(access, 'MANAGE_ROLES', { allWorlds: true }) || worlds === 'all' || worlds.length > 0;
+}
+
 /** They invite, remove or give roles somewhere in the universe, so they see people's emails. */
 export function managesPeople(access: Access): boolean {
   const some = (worlds: 'all' | string[]) => worlds === 'all' || worlds.length > 0;
@@ -100,13 +107,16 @@ export function managesPeople(access: Access): boolean {
 
 export const memberInclude = {
   user: { select: { id: true, name: true, email: true } },
-  roles: { select: { roleId: true, allWorlds: true, worldIds: true, role: { select: { position: true } } } },
+  roles: { select: { roleId: true, allWorlds: true, worldIds: true, role: { select: { position: true, showBadge: true } } } },
 } satisfies Prisma.UniverseMemberInclude;
 
 type MemberRow = Prisma.UniverseMemberGetPayload<{ include: typeof memberInclude }>;
 
-/** One member for the screens: their roles highest first, and their email only for people who manage members. */
-export function memberForJson(member: MemberRow, ownerId: string, showEmail: boolean) {
+/**
+ * One member for the screens: their roles highest first (without the ones whose badge is hidden, unless `showHidden`),
+ * and their email only for people who manage members.
+ */
+export function memberForJson(member: MemberRow, ownerId: string, showEmail: boolean, showHidden: boolean) {
   return {
     userId: member.userId,
     name: member.user.name,
@@ -115,6 +125,7 @@ export function memberForJson(member: MemberRow, ownerId: string, showEmail: boo
     isOwner: member.userId === ownerId,
     worlds: { allWorlds: member.allWorlds, worldIds: member.worldIds },
     roles: [...member.roles]
+      .filter((given) => showHidden || given.role.showBadge)
       .sort((a, b) => b.role.position - a.role.position)
       .map((given) => ({ roleId: given.roleId, allWorlds: given.allWorlds, worldIds: given.worldIds })),
   };

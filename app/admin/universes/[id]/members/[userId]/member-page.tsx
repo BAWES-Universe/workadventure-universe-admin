@@ -205,7 +205,7 @@ export function MemberPage() {
           <Checkbox id={inputId} checked={on} disabled={!allowedRole} onCheckedChange={(value) => toggle(role, value === true)} />
           <label htmlFor={inputId} className={cn('flex min-h-11 flex-1 items-center gap-2 text-[15px]', on ? 'font-bold' : 'font-medium', allowedRole ? 'cursor-pointer' : 'cursor-not-allowed')}>
             <i aria-hidden="true" className="h-2 w-2 shrink-0 rounded-full" style={{ background: role.color }} />
-            {role.badge ? `${role.badge} ` : ''}{role.name}
+            {role.name}
           </label>
         </div>
         {on && scope && (
