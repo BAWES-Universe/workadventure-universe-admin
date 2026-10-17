@@ -373,7 +373,7 @@ function WorldDetail({ view }: { view: WorldView }) {
         here={here}
         actions={
           <>
-            {world.rooms.length > 0 && <BrowseButton label="Browse rooms" targetId="world-rooms-section" />}
+            {!isEditing && world.rooms.length > 0 && <BrowseButton label="Browse rooms" targetId="world-rooms-section" />}
             {currentUser && <StarButton count={world.starCount ?? 0} starred={!!world.isStarred} onClick={star.toggle} disabled={star.busy} />}
           </>
         }

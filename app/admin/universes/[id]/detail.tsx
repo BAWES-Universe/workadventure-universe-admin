@@ -335,7 +335,7 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
         here={here}
         actions={
           <>
-            {hasRooms && <BrowseButton label="Browse worlds" targetId="universe-worlds-section" />}
+            {!isEditing && hasRooms && <BrowseButton label="Browse worlds" targetId="universe-worlds-section" />}
             {currentUser && <StarButton count={universe.starCount ?? 0} starred={!!universe.isStarred} onClick={star.toggle} disabled={star.busy} />}
           </>
         }
