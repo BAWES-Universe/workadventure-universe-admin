@@ -15,7 +15,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const { id } = await params;
     const context = await universeContext(request, id);
     if (!context.ok) return context.response;
-    const { access, universe } = context;
+    const { access, universe, user } = context;
 
     // Emails are for the people who invite, remove or give roles; everyone who can see the universe sees its members
     const showEmail = managesPeople(access);
@@ -80,7 +80,11 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       prisma.universe.findUnique({ where: { id }, select: { createdAt: true } }),
     ]);
     const page = rows.slice(0, PAGE);
-    const members = page.map((member) => memberForJson(member, universe.ownerId, showEmail, showHidden));
+    const members = page.map((member) => {
+      // Everyone sees their own email and roles
+      const self = member.userId === user.id;
+      return memberForJson(member, universe.ownerId, showEmail || self, showHidden || self);
+    });
     const [ownerWithWoka] = owner ? await withWokas([{ userId: owner.id }]) : [];
 
     return NextResponse.json({
@@ -92,7 +96,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         ? {
             userId: owner.id,
             name: owner.name,
-            email: showEmail ? owner.email : null,
+            email: showEmail || owner.id === user.id ? owner.email : null,
             woka: ownerWithWoka?.woka ?? [],
             joinedAt: ownerMember?.joinedAt ?? created?.createdAt ?? null,
             joined: !!ownerMember,

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { flag, parsePermissions } from '@/lib/permissions';
-import { ADMIN_KEY, syncWorldMembers } from '@/lib/roles';
+import { ADMIN_KEY, EVERYONE_KEY, MEMBER_KEY, syncWorldMembers } from '@/lib/roles';
 import { allows, mayChangePermissions, ranksAbove, roleForJson } from '@/lib/role-access';
 import { badRequest, failed, needs, roleFieldsSchema, universeContext } from '@/lib/universe-route';
 
@@ -40,6 +40,8 @@ export async function PATCH(request: NextRequest, { params }: Params) {
     // Administrator can't be limited to some worlds, so it can't be added while the role is given that way
     const administrator = flag('ADMINISTRATOR');
     if ((permissions & administrator) !== BigInt(0) && (role.permissions & administrator) === BigInt(0)) {
+      // Member follows each person's worlds and Everyone reaches every visitor, so neither may carry it
+      if (role.key === MEMBER_KEY || role.key === EVERYONE_KEY) return badRequest('Administrator goes on a role given in every world');
       const limited = await prisma.universeMemberRole.count({ where: { roleId, allWorlds: false } });
       if (limited > 0) return badRequest('Administrator works in every world: give this role in every world first');
     }

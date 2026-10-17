@@ -121,6 +121,10 @@ run('universe roles and people routes (real database)', () => {
     expect((await as('admin', roleRoute.PATCH, { roleId: role.admin }, { color: '#000000' })).status).toBe(403);
     expect((await as('owner', roleRoute.PATCH, { roleId: role.admin }, { color: '#000000' })).status).toBe(200);
     expect((await as('admin', roleRoute.PATCH, { roleId: role.helper }, { name: 'Helpers' })).status).toBe(200);
+    // Member follows each person's worlds and Everyone reaches every visitor: neither carries Administrator
+    const administrator = { permissions: flag('ADMINISTRATOR').toString() };
+    expect((await as('owner', roleRoute.PATCH, { roleId: role.member }, administrator)).status).toBe(400);
+    expect((await as('owner', roleRoute.PATCH, { roleId: role.everyone }, administrator)).status).toBe(400);
   });
 
   it('gives a role only in the worlds where the giver may, and only where the person is a member', async () => {
@@ -196,7 +200,9 @@ run('universe roles and people routes (real database)', () => {
   it('lists members with emails only for those who manage people, and says what you may do', async () => {
     const asHelper = await as('helper', membersRoute.GET, {});
     expect(asHelper.status).toBe(200);
-    expect(asHelper.body.members.every((m: { email: string | null }) => m.email === null)).toBe(true);
+    // Only their own email
+    const emails = asHelper.body.members.filter((m: { email: string | null }) => m.email !== null);
+    expect(emails.map((m: { userId: string }) => m.userId)).toEqual([people.helper]);
     expect(asHelper.body.owner.userId).toBe(people.owner);
 
     // Filtering by Member lists everyone who joined; by a given role, only who holds it
@@ -213,6 +219,8 @@ run('universe roles and people routes (real database)', () => {
     const rolesOf = (body: { members: { userId: string; roles: { roleId: string }[] }[] }, userId: string) =>
       body.members.find((m) => m.userId === userId)!.roles.map((given) => given.roleId);
     expect(rolesOf((await as('helper', membersRoute.GET, {})).body, people.mod)).toEqual([]);
+    const ownRow = (await as('mod', membersRoute.GET, {})).body;
+    expect(rolesOf(ownRow, people.mod)).toEqual([role.moderator]);
     expect((await as('helper', membersRoute.GET, {}, undefined, `roleId=${role.moderator}`)).body.total).toBe(0);
     expect(rolesOf((await as('admin', membersRoute.GET, {})).body, people.mod)).toEqual([role.moderator]);
     expect((await as('helper', memberRoute.GET, { userId: people.mod })).body.member.roles).toEqual([]);
