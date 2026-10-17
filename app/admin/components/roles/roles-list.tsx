@@ -129,6 +129,12 @@ export function RolesListPage() {
   function onHandleDown(event: React.PointerEvent<HTMLButtonElement>, id: string) {
     if (event.button !== 0 && event.pointerType === 'mouse') return;
     event.currentTarget.setPointerCapture(event.pointerId);
+    // A move made with the arrow keys and not saved yet is saved now, so its late save can't undo this drag
+    if (pending.current) {
+      clearTimeout(pending.current);
+      pending.current = null;
+      if (latest.current) void save(latest.current);
+    }
     // The order is pinned only once the row moves: a press without a move leaves the list following the server
     startOrder.current = orderRef.current ?? movable.map((role) => role.id);
     setDragging(id);
@@ -167,6 +173,7 @@ export function RolesListPage() {
     latest.current = next;
     if (pending.current) clearTimeout(pending.current);
     pending.current = setTimeout(() => {
+      pending.current = null;
       if (latest.current) void save(latest.current);
     }, 600);
     requestAnimationFrame(() => (document.querySelector(`[data-handle="${id}"]`) as HTMLElement | null)?.focus());

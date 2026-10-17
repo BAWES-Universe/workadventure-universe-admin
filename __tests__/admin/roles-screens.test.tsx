@@ -173,6 +173,35 @@ describe('Roles & permissions list', () => {
     );
   });
 
+  it('saves an arrow-key move at once when a drag starts, so its late save cannot undo the drag', async () => {
+    const puts: string[][] = [];
+    serve((url, init) => {
+      if (!url.endsWith('/roles/order') || init?.method !== 'PUT') return undefined;
+      puts.push(JSON.parse(init.body as string).roleIds);
+      return json({ success: true });
+    });
+    render(<RolesListPage />);
+    await screen.findByText('Your roles');
+    fireEvent.keyDown(screen.getByRole('button', { name: /Move Accountant/ }), { key: 'ArrowUp' });
+    const handle = screen.getByRole('button', { name: /Move Moderator/ });
+    Object.assign(handle, { setPointerCapture: () => {} });
+    // Each row 80px tall, in the order shown
+    screen.getAllByTestId('role-row').forEach((row, index) => {
+      row.getBoundingClientRect = () => ({ top: index * 80, height: 72 }) as DOMRect;
+    });
+    // Drag Moderator to the top before the arrow-key wait is over
+    fireEvent.pointerDown(handle, { pointerId: 1 });
+    fireEvent.pointerMove(handle, { pointerId: 1, clientY: 0 });
+    fireEvent.pointerUp(handle, { pointerId: 1 });
+    await waitFor(() => expect(puts.length).toBeGreaterThanOrEqual(2));
+    // The arrow-key wait has passed: the drag is still the last order saved
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(puts).toEqual([
+      ['lead', 'acc', 'mod'],
+      ['mod', 'lead', 'acc'],
+    ]);
+  });
+
   it('keeps a move made while an earlier order is still being saved, and saves both moves', async () => {
     let finishFirstSave: () => void = () => {};
     const puts: string[][] = [];
