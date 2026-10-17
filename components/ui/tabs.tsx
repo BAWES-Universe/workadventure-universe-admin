@@ -7,9 +7,11 @@ import { cn } from "@/lib/utils"
 import { useDockSwipe } from "@/app/admin/components/shell/use-dock-swipe"
 
 /*
- * Tabs and filters in the Universe look: a pill-shaped bar of equal columns, the current one on the gradient. On a
- * touch screen the bar can be dragged or flicked to the next or previous tab (the bottom dock's swipe). Mouse and
- * keyboard behave as plain Radix tabs. Every tab bar and filter strip in Orbit uses these.
+ * Tabs and filters in the Universe look: a pill-shaped bar of equal columns, the current one on the gradient. A bar that
+ * fits its space can be dragged or flicked on a touch screen to the next or previous tab (the bottom dock's swipe). A bar
+ * with more tabs than fit scrolls sideways instead, like any strip: a finger drag scrolls it, the edges fade where more
+ * tabs are hidden, and the current tab is kept in view. Either way the bar never makes the page wider than the screen.
+ * Mouse and keyboard behave as plain Radix tabs. Every tab bar and filter strip in Orbit uses these.
  */
 
 type TabsContextValue = {
@@ -38,7 +40,7 @@ const Tabs = React.forwardRef<
   const context = React.useMemo(() => ({ value: current, select }), [current, select])
   return (
     <TabsContext.Provider value={context}>
-      <TabsPrimitive.Root ref={ref} value={current} onValueChange={select} {...props} />
+      <TabsPrimitive.Root ref={ref} value={current} onValueChange={select} {...props} className={cn("min-w-0", props.className)} />
     </TabsContext.Provider>
   )
 })
@@ -56,6 +58,30 @@ const TabsList = React.forwardRef<
   const list = React.useRef<HTMLDivElement | null>(null)
   const [values, setValues] = React.useState<string[]>([])
   const value = context?.value
+  // Whether the tabs are wider than the bar, and which ends have tabs hidden past them
+  const [overflow, setOverflow] = React.useState({ scrolls: false, before: false, after: false })
+
+  const measure = React.useCallback(() => {
+    const element = list.current
+    if (!element) return
+    const scrolls = element.scrollWidth > element.clientWidth + 1
+    const left = Math.abs(element.scrollLeft)
+    const next = { scrolls, before: scrolls && left > 1, after: scrolls && left < element.scrollWidth - element.clientWidth - 1 }
+    setOverflow((previous) =>
+      previous.scrolls === next.scrolls && previous.before === next.before && previous.after === next.after ? previous : next
+    )
+  }, [])
+
+  React.useEffect(() => {
+    const element = list.current
+    if (!element) return
+    measure()
+    if (typeof ResizeObserver === "undefined") return
+    const observer = new ResizeObserver(measure)
+    observer.observe(element)
+    for (const tab of Array.from(element.children)) observer.observe(tab)
+    return () => observer.disconnect()
+  }, [measure, values])
 
   // The tabs in order, read from the page so wrapped or conditional triggers are counted. Runs after every render and
   // only sets state when the list changed, so it settles at once.
@@ -79,10 +105,11 @@ const TabsList = React.forwardRef<
     if (by === 0) return
     if (typeof element.scrollBy === "function") element.scrollBy({ left: by, behavior: "smooth" })
     else element.scrollLeft += by
-  }, [value])
+  }, [value, overflow.scrolls])
 
+  // A bar that scrolls is dragged like any strip, so swiping between tabs is only for a bar that fits
   const swipe = useDockSwipe(
-    value === undefined ? -1 : values.indexOf(value),
+    value === undefined || overflow.scrolls ? -1 : values.indexOf(value),
     values.length,
     (index) => context?.select(values[index]),
     { touchOnly: true, measure: (element, style) => element.scrollWidth - sumPadding(style) }
@@ -98,12 +125,27 @@ const TabsList = React.forwardRef<
           else if (forwardedRef) forwardedRef.current = node
         }}
         className={cn(
-          "grid touch-pan-y auto-cols-[minmax(max-content,1fr)] grid-flow-col gap-1 overflow-x-auto rounded-full border border-foreground/[.08] bg-foreground/[.04] p-1 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
+          // contain:inline-size keeps the tabs' own width out of the page's sums: the bar takes the width it is given and
+          // scrolls inside it, so a long bar can never push the page past the screen
+          "grid w-full min-w-0 auto-cols-[minmax(max-content,1fr)] grid-flow-col gap-1 overflow-x-auto overscroll-x-contain rounded-full border border-foreground/[.08] bg-foreground/[.04] p-1 [contain:inline-size] [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
+          overflow.scrolls ? "touch-manipulation" : "touch-pan-y",
+          overflow.before && overflow.after
+            ? "[mask-image:linear-gradient(to_right,transparent,#000_2rem,#000_calc(100%-2rem),transparent)]"
+            : overflow.before
+              ? "[mask-image:linear-gradient(to_right,transparent,#000_2rem)]"
+              : overflow.after
+                ? "[mask-image:linear-gradient(to_left,transparent,#000_2rem)]"
+                : undefined,
           className
         )}
         data-dragging={swipe.dragging || undefined}
+        data-scrolls={overflow.scrolls || undefined}
         {...swipe.handlers}
         {...props}
+        onScroll={(event) => {
+          measure()
+          props.onScroll?.(event)
+        }}
       />
     </PreviewContext.Provider>
   )

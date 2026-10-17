@@ -1,6 +1,11 @@
 /* Live now: rooms with people in them right now, and who is where. */
 .section { display: grid; gap: 0; min-width: 0; }
-.action:focus-visible, .go:focus-visible { outline: none; box-shadow: 0 0 0 2px hsl(var(--background)), 0 0 0 4px hsl(var(--ring)); }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; margin: -2px 0 12px; }
+.chip { height: 32px; padding: 0 12px; border-radius: 999px; border: 1px solid hsl(var(--foreground) / 0.15); font-size: 12px; font-weight: 600; color: hsl(var(--muted-foreground)); display: inline-flex; align-items: center; gap: 6px; transition: color 120ms ease, border-color 120ms ease; }
+.chip:hover:not(:disabled) { color: hsl(var(--foreground)); border-color: hsl(var(--foreground) / 0.3); }
+.chip[aria-pressed='true'] { background-image: var(--brand-gradient); color: #fff; border-color: transparent; }
+.chip:disabled { opacity: .55; border-style: dashed; cursor: default; }
+.chip:focus-visible, .action:focus-visible, .go:focus-visible { outline: none; box-shadow: 0 0 0 2px hsl(var(--background)), 0 0 0 4px hsl(var(--ring)); }
 .places { display: grid; gap: 10px; min-width: 0; }
 .placesScroll { display: grid; grid-auto-flow: column; grid-auto-columns: min(84%, 320px); gap: 10px; overflow-x: auto; padding-bottom: 4px; scrollbar-width: none; min-width: 0; }
 .placesScroll::-webkit-scrollbar { display: none; }
