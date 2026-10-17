@@ -15,6 +15,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useToast } from '@/components/ui/toast';
 import { timeAgo } from '@/lib/time-ago';
 import { cn } from '@/lib/utils';
@@ -166,23 +167,17 @@ export default function WorldSafety({
         <p className="-mt-1 text-sm text-muted-foreground">
           What players reported in {worldName}. Only you and the other admins see this.
         </p>
-        <div className="flex gap-2" role="tablist" aria-label="Which reports">
-          {(['open', 'done'] as const).map((key) => (
-            <button
-              key={key}
-              type="button"
-              role="tab"
-              aria-selected={show === key}
-              onClick={() => setShow(key)}
-              className={cn(
-                'orbit-press h-9 rounded-full px-4 text-sm font-semibold transition-colors',
-                show === key ? 'bg-[image:var(--brand-gradient)] text-white' : 'border border-border/70 text-muted-foreground hover:text-foreground',
-              )}
-            >
-              {key === 'open' ? `To review · ${data.counts.reports}` : 'Done'}
-            </button>
-          ))}
-        </div>
+        {/* A filter on the list below, not separate panels, so the tabs point at nothing (aria-controls). */}
+        <Tabs value={show} onValueChange={(key) => setShow(key as 'open' | 'done')}>
+          <TabsList aria-label="Which reports">
+            <TabsTrigger value="open" aria-controls={undefined}>
+              To review · {data.counts.reports}
+            </TabsTrigger>
+            <TabsTrigger value="done" aria-controls={undefined}>
+              Done
+            </TabsTrigger>
+          </TabsList>
+        </Tabs>
 
         {show === 'open' ? (
           data.open.length === 0 ? (

@@ -83,7 +83,7 @@ describe('Live now', () => {
 
   it('filters by universe', () => {
     render(<LiveNowView view={view} layout="space" />);
-    fireEvent.click(screen.getByRole('button', { name: 'Fun Zone' }));
+    fireEvent.mouseDown(screen.getByRole('tab', { name: 'Fun Zone' }));
     expect(screen.getAllByTestId('live-place').map((card) => within(card).getByRole('heading').textContent)).toEqual(['Arcade']);
     expect(screen.getAllByTestId('live-person')).toHaveLength(1);
   });
@@ -105,16 +105,16 @@ describe('Live now', () => {
 
     it('is a real, pressable chip', () => {
       render(<LiveNowView view={friendsView} layout="space" />);
-      const chip = screen.getByRole('button', { name: 'Friends' }) as HTMLButtonElement;
+      const chip = screen.getByRole('tab', { name: 'Friends' }) as HTMLButtonElement;
       expect(chip.disabled).toBe(false);
-      expect(chip.getAttribute('aria-pressed')).toBe('false');
-      fireEvent.click(chip);
-      expect(chip.getAttribute('aria-pressed')).toBe('true');
+      expect(chip.getAttribute('aria-selected')).toBe('false');
+      fireEvent.mouseDown(chip);
+      expect(chip.getAttribute('aria-selected')).toBe('true');
     });
 
     it('shows only the rooms with friends in them, and only friends under People online', () => {
       render(<LiveNowView view={friendsView} layout="space" />);
-      fireEvent.click(screen.getByRole('button', { name: 'Friends' }));
+      fireEvent.mouseDown(screen.getByRole('tab', { name: 'Friends' }));
       const cards = screen.getAllByTestId('live-place');
       expect(cards.map((card) => within(card).getByRole('heading').textContent)).toEqual(['Lounge']);
       // Two friends on the card, no "+3" for the stranger and the guests.
@@ -125,19 +125,19 @@ describe('Live now', () => {
 
     it('says so when none of your friends are in a room you can enter', () => {
       render(<LiveNowView view={view} layout="space" />);
-      fireEvent.click(screen.getByRole('button', { name: 'Friends' }));
+      fireEvent.mouseDown(screen.getByRole('tab', { name: 'Friends' }));
       expect(screen.queryAllByTestId('live-place')).toHaveLength(0);
       expect(screen.queryByTestId('people-online')).toBeNull();
       expect(screen.getByText(/None of your friends are in a room you can enter/)).toBeTruthy();
       // The chips stay, so you can go back.
-      fireEvent.click(screen.getByRole('button', { name: 'Everywhere' }));
+      fireEvent.mouseDown(screen.getByRole('tab', { name: 'Everywhere' }));
       expect(screen.getAllByTestId('live-place')).toHaveLength(2);
     });
   });
 
   it('starts Orbit home on the universe you are in', () => {
     render(<LiveNowView view={view} layout="home-column" />);
-    expect(screen.getByRole('button', { name: 'BAWES' }).getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByRole('tab', { name: 'BAWES' }).getAttribute('aria-selected')).toBe('true');
     expect(screen.getAllByTestId('live-place')).toHaveLength(1);
   });
 
