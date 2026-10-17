@@ -11,7 +11,7 @@ jest.mock('@/lib/db', () => ({
     universeMember: { count: jest.fn(), findMany: jest.fn(), findUnique: jest.fn() },
     user: { findUnique: jest.fn(), findMany: jest.fn() },
     universe: { findUnique: jest.fn() },
-    role: { findMany: jest.fn() },
+    role: { findMany: jest.fn(), findFirst: jest.fn() },
     roomAccess: { aggregate: jest.fn(), findMany: jest.fn(), groupBy: jest.fn() },
     membershipInvitation: { findMany: jest.fn(), findFirst: jest.fn(), update: jest.fn() },
   },
@@ -94,6 +94,25 @@ describe('GET members?worldId=', () => {
       { worldIds: { has: 'hq' } },
       { roles: { some: { OR: [{ allWorlds: true }, { worldIds: { has: 'hq' } }] } } },
     ]);
+  });
+
+  it('leaves out who already has a role, for the Give sheet', async () => {
+    asViewer('owner');
+    db.role.findFirst.mockResolvedValue({ id: 'r-mod', key: 'moderator', showBadge: true });
+    await listMembers(request('/api/admin/universes/u1/members?withoutRoleId=r-mod'), params());
+    expect(db.role.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'r-mod', universeId: 'u1' } }));
+    expect(db.universeMember.findMany.mock.calls[0][0].where.AND).toEqual([{ roles: { none: { roleId: 'r-mod' } } }]);
+  });
+
+  it('ignores withoutRoleId for a hidden role the viewer may not see the holders of, and for Member', async () => {
+    asViewer('plain');
+    db.role.findFirst.mockResolvedValue({ id: 'r-secret', key: 'secret', showBadge: false });
+    await listMembers(request('/api/admin/universes/u1/members?withoutRoleId=r-secret'), params());
+    expect(db.universeMember.findMany.mock.calls[0][0].where.AND).toBeUndefined();
+    asViewer('owner');
+    db.role.findFirst.mockResolvedValue({ id: 'r-member', key: 'member', showBadge: true });
+    await listMembers(request('/api/admin/universes/u1/members?withoutRoleId=r-member'), params());
+    expect(db.universeMember.findMany.mock.calls[1][0].where.AND).toBeUndefined();
   });
 
   it('sends the owner with their face and whether they joined, so the screens can list them first', async () => {

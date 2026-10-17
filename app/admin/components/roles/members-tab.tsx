@@ -227,7 +227,8 @@ function GiveSheet({
     let current = true;
     const timer = setTimeout(async () => {
       try {
-        const page = await loadMembers(universeId, new URLSearchParams(query.trim() ? { q: query.trim() } : {}));
+        // The server leaves out who already has the role, so a first page full of holders still lists the others
+        const page = await loadMembers(universeId, new URLSearchParams({ withoutRoleId: role.id, ...(query.trim() ? { q: query.trim() } : {}) }));
         if (current) setResults(page.members.filter((member) => !member.roles.some((given) => given.roleId === role.id)));
       } catch {
         if (current) setResults([]);
