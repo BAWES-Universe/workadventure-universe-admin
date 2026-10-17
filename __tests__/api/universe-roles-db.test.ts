@@ -24,6 +24,7 @@ import * as givenRoute from '@/app/api/admin/universes/[id]/members/[userId]/rol
 import * as inviteRoute from '@/app/api/admin/universes/[id]/invitations/route';
 import * as meRoute from '@/app/api/admin/universes/[id]/me/route';
 import { POST as accept } from '@/app/api/memberships/invitations/[id]/accept/route';
+import * as worldMembersRoute from '@/app/api/admin/worlds/[id]/members/route';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 const session = getSessionUser as jest.Mock;
@@ -55,7 +56,7 @@ async function tagsOf(who: string, worldId: string) {
 
 run('universe roles and people routes (real database)', () => {
   beforeAll(async () => {
-    for (const who of ['owner', 'admin', 'mod', 'helper', 'plain', 'outsider']) {
+    for (const who of ['owner', 'admin', 'mod', 'helper', 'plain', 'outsider', 'returning']) {
       const user = await prisma.user.create({ data: { uuid: `${who}-${tag}`, email: `${who}-${tag}@example.test`, name: who } });
       people[who] = user.id;
     }
@@ -186,6 +187,31 @@ run('universe roles and people routes (real database)', () => {
     expect(accepted.status).toBe(200);
     expect(await tagsOf('outsider', worldA)).toEqual(['helper', 'member']);
     expect(await tagsOf('outsider', worldB)).toBeNull();
+  });
+
+  it('re-sends an old invitation the old way with its new tags, not the roles it once carried', async () => {
+    // What the migration leaves on an invitation once sent as Admin and then cancelled
+    const old = await prisma.membershipInvitation.create({
+      data: {
+        worldId: worldB,
+        invitedUserId: people.returning,
+        invitedByUserId: people.owner,
+        status: 'cancelled',
+        tags: ['admin'],
+        universeId,
+        roleIds: [role.admin],
+        allWorlds: false,
+        worldIds: [worldB],
+      },
+    });
+    const resent = await as('owner', worldMembersRoute.POST, { id: worldB }, { userId: people.returning, tags: ['member'] });
+    expect(resent.status).toBeLessThan(300);
+    expect((await prisma.membershipInvitation.findUniqueOrThrow({ where: { id: old.id } })).roleIds).toEqual([]);
+
+    session.mockResolvedValue({ id: people.returning, uuid: 'returning', email: null, name: 'returning', tags: [], isSuperAdmin: false });
+    const accepted = await accept(new NextRequest('http://localhost/api', { method: 'POST' }), { params: Promise.resolve({ id: old.id }) });
+    expect(accepted.status).toBe(200);
+    expect(await tagsOf('returning', worldB)).toEqual(['member']);
   });
 
   it('removes someone only from below, and only with the permission everywhere they are', async () => {

@@ -260,6 +260,11 @@ export async function POST(
           status: 'pending',
           invitedByUserId: sessionUser.id,
           tags: data.tags,
+          // Sent this way it gives what its tags say, never the roles an earlier universe invitation carried
+          universeId: null,
+          roleIds: [],
+          allWorlds: false,
+          worldIds: [],
           message: data.message || null,
           invitedAt: new Date(),
           respondedAt: null,
