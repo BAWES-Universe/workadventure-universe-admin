@@ -10,7 +10,7 @@ jest.mock('@/lib/client-auth', () => ({ authenticatedFetch: (...args: unknown[])
 
 const ok = (body: unknown) => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
 const ROLES = [
-  { id: 'r-admin', key: 'admin', name: 'Admin', color: '#F87171', builtIn: true, position: 1_000_000, permissions: '16383', people: 1 },
+  { id: 'r-admin', key: 'admin', name: 'Admin', color: '#F87171', builtIn: true, position: 1_000_000, permissions: String(BigInt(1) << BigInt(30)), people: 1 },
   { id: 'r-editor', key: 'editor', name: 'Editor', color: '#60A5FA', builtIn: true, position: 2, permissions: '8416', people: 1 },
   { id: 'r-member', key: 'member', name: 'Member', color: '#A78BFA', builtIn: true, position: 1, permissions: '0', people: 5 },
   { id: 'r-acct', key: 'accountant', name: 'Accountant', color: '#34D399', builtIn: false, position: 12, permissions: '0', people: 2 },
@@ -122,4 +122,28 @@ it('says what went wrong and stays open when the invite is refused', async () =>
   fetchMock.mockImplementationOnce(() => Promise.resolve({ ok: false, status: 400, json: () => Promise.resolve({ error: 'They already have an invitation to this universe' }) }));
   fireEvent.click(send);
   expect((await screen.findByRole('alert')).textContent).toBe('They already have an invitation to this universe');
+});
+
+it('sends Administrator to every world only: picking it takes the choice back to All worlds and locks Some worlds', async () => {
+  open({ person: { userId: 'hanan', name: 'Hanan Aziz' } });
+  await screen.findByRole('button', { name: 'Admin' });
+  // Start on some worlds, then pick Administrator
+  fireEvent.click(screen.getByRole('radio', { name: 'Some worlds' }));
+  fireEvent.click(screen.getByRole('button', { name: 'HQ' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Admin' }));
+  expect(screen.getByText('Administrator works in every world')).toBeTruthy();
+  expect(screen.getByRole('radio', { name: 'All worlds' }).getAttribute('aria-checked')).toBe('true');
+  expect(screen.getByRole('radio', { name: 'Some worlds' }).hasAttribute('disabled')).toBe(true);
+  fireEvent.click(screen.getByRole('button', { name: 'Send invite' }));
+  await waitFor(() => expect(posts).toHaveLength(1));
+  expect(posts[0].body).toMatchObject({ roleIds: ['r-admin'], worlds: { allWorlds: true, worldIds: [] } });
+});
+
+it('cannot pick Administrator without inviting and giving roles in every world, and says why', async () => {
+  me = { highestPosition: null, full: true, giveWorlds: ['hq'], inviteWorlds: 'all' };
+  open({ person: { userId: 'hanan', name: 'Hanan Aziz' } });
+  const admin = await screen.findByRole('button', { name: 'Admin' });
+  expect(admin.hasAttribute('disabled')).toBe(true);
+  expect(screen.getByText('Administrator works in every world')).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Accountant' }).hasAttribute('disabled')).toBe(false);
 });

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { prisma } from '@/lib/db';
 import { EVERYONE_KEY, MEMBER_KEY, coversWorld } from '@/lib/roles';
-import { allows, isAdministratorRole, ranksAbove, reachOf, worldsAllowing } from '@/lib/role-access';
+import { allows, invitationReach, isAdministratorRole, ranksAbove, reachOf, worldsAllowing } from '@/lib/role-access';
 import { SYSTEM_USER_EMAIL } from '@/lib/system-user';
 import { withWokas } from '@/lib/woka-avatar';
 import { badRequest, checkScope, failed, needs, scopeSchema, universeContext } from '@/lib/universe-route';
@@ -102,8 +102,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   }
 }
 
-// GET /api/admin/universes/[id]/invitations - Invitations still waiting for an answer, newest first. Only for people who
-// may invite and remove people somewhere in the universe; for everyone else the list is empty.
+// GET /api/admin/universes/[id]/invitations - Invitations still waiting for an answer, newest first. Each person sees the
+// invitations they could send or take back: ones that name only worlds where they may invite and remove people (an
+// every-world invitation needs that permission everywhere). For everyone else the list is empty.
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
@@ -123,7 +124,9 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       orderBy: { invitedAt: 'desc' },
       take: 200,
     });
-    const invitations = rows.map((row) => ({
+    // The rule that cancelling uses, so everything listed can be taken back
+    const mine = rows.filter((row) => allows(access, 'INVITE_AND_REMOVE', invitationReach(row)));
+    const invitations = mine.map((row) => ({
       id: row.id,
       userId: row.invitedUser.id,
       name: row.invitedUser.name,
@@ -135,7 +138,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       worlds: row.universeId ? { allWorlds: row.allWorlds, worldIds: row.worldIds } : { allWorlds: false, worldIds: [row.worldId] },
       tags: row.tags,
     }));
-    return NextResponse.json({ invitations: await withWokas(invitations), canCancel: true });
+    return NextResponse.json({ invitations: await withWokas(invitations), canCancel: invitations.length > 0 });
   } catch (error) {
     return failed(error, 'list invitations');
   }

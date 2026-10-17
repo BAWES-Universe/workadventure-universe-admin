@@ -99,11 +99,15 @@ export function isAdministrator(permissions: string | undefined): boolean {
 
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
-/** "today", "yesterday", or the weekday ("Monday"); the sheet's list only reaches back a week. */
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/** "today", "yesterday", the weekday for the last six days ("Monday"), and past that a short date ("3 Oct", with the year if it is not this one). */
 export function dayWord(date: Date, now: Date = new Date()): string {
   const start = (value: Date) => new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime();
   const days = Math.round((start(now) - start(date)) / 86_400_000);
   if (days <= 0) return 'today';
   if (days === 1) return 'yesterday';
-  return WEEKDAYS[date.getDay()];
+  if (days <= 6) return WEEKDAYS[date.getDay()];
+  const short = `${date.getDate()} ${MONTHS[date.getMonth()]}`;
+  return date.getFullYear() === now.getFullYear() ? short : `${short} ${date.getFullYear()}`;
 }

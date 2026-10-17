@@ -321,4 +321,29 @@ run('universe roles and people routes (real database)', () => {
     expect(created.body.role.position).toBe(500);
     expect((await prisma.role.findUnique({ where: { id: lead.id } }))?.position).toBe(501);
   });
+
+  it('lists pending invitations only for worlds the viewer may invite to, and an every-world one only to someone who may everywhere', async () => {
+    const mine: Record<string, string> = {};
+    for (const who of ['wanted-a', 'wanted-b', 'wanted-all']) {
+      const user = await prisma.user.create({ data: { uuid: `${who}-${tag}`, email: `${who}-${tag}@example.test`, name: who } });
+      people[who] = user.id;
+      mine[user.id] = who;
+    }
+    const sent = (who: string, fields: { worldId: string; allWorlds: boolean; worldIds: string[] }) =>
+      prisma.membershipInvitation.create({
+        data: { ...fields, universeId, invitedUserId: people[who], invitedByUserId: people.admin, status: 'pending', tags: [], roleIds: [] },
+      });
+    await sent('wanted-a', { worldId: worldA, allWorlds: false, worldIds: [worldA] });
+    await sent('wanted-b', { worldId: worldB, allWorlds: false, worldIds: [worldB] });
+    await sent('wanted-all', { worldId: worldA, allWorlds: true, worldIds: [] });
+
+    const names = (body: { invitations: { userId: string }[] }) => body.invitations.map((invitation) => mine[invitation.userId]).filter(Boolean).sort();
+    // The Moderator invites and removes in world A only
+    const moderator = await as('mod', inviteRoute.GET, {});
+    expect(moderator.status).toBe(200);
+    expect(names(moderator.body)).toEqual(['wanted-a']);
+    expect(moderator.body.canCancel).toBe(true);
+    // The Admin has it everywhere
+    expect(names((await as('admin', inviteRoute.GET, {})).body)).toEqual(['wanted-a', 'wanted-all', 'wanted-b']);
+  });
 });

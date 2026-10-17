@@ -69,5 +69,11 @@ describe('dayWord', () => {
     expect(dayWord(new Date(2026, 9, 17, 1, 0), now)).toBe('today');
     expect(dayWord(new Date(2026, 9, 16, 23, 0), now)).toBe('yesterday');
     expect(dayWord(new Date(2026, 9, 12, 12, 0), now)).toBe('Monday');
+    expect(dayWord(new Date(2026, 9, 11, 12, 0), now)).toBe('Sunday');
+  });
+  it('gives a short date once it is past the last six days, so an old day is never mistaken for this week', () => {
+    expect(dayWord(new Date(2026, 9, 10, 12, 0), now)).toBe('10 Oct');
+    expect(dayWord(new Date(2026, 9, 3, 12, 0), now)).toBe('3 Oct');
+    expect(dayWord(new Date(2025, 11, 25, 12, 0), now)).toBe('25 Dec 2025');
   });
 });

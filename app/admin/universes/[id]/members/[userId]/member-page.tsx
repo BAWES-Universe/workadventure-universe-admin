@@ -132,8 +132,9 @@ export function MemberPage() {
 
   function toggle(role: UniverseRole, on: boolean) {
     if (!on) return void save(role, null);
-    // A new role starts in every world when that is allowed, else in the worlds you may give it in
-    void save(role, allowed.all && !isAdministrator(role.permissions) ? { allWorlds: true, worldIds: [] } : { allWorlds: false, worldIds: isAdministrator(role.permissions) ? [] : allowed.ids });
+    // Administrator always works in every world, so it is only sent that way (the row is off when you can't give it there).
+    // Any other role starts in every world when that is allowed, else in the worlds you may give it in.
+    void save(role, isAdministrator(role.permissions) || allowed.all ? { allWorlds: true, worldIds: [] } : { allWorlds: false, worldIds: allowed.ids });
   }
 
   function setWhere(role: UniverseRole, where: 'all' | 'some') {
@@ -205,18 +206,22 @@ export function MemberPage() {
   function renderRole(role: UniverseRole) {
     const scope = held.get(role.id);
     const on = !!scope;
-    const allowedRole = can.giveRoleIds.includes(role.id);
-    const inputId = `role-${role.id}`;
     const adminRole = isAdministrator(role.permissions);
+    // Administrator can only be given in every world, so without that reach the row can't be turned on
+    const everyWorldOnly = adminRole && !on && !allowed.all;
+    const allowedRole = can.giveRoleIds.includes(role.id);
+    const rowOff = !allowedRole || everyWorldOnly;
+    const inputId = `role-${role.id}`;
     return (
-      <div key={role.id} className={cn('rounded-2xl border px-3.5 py-1 transition-[background-color,border-color,box-shadow]', on ? PICKED : 'border-foreground/[.08] bg-foreground/[.04]', !allowedRole && 'opacity-60')}>
+      <div key={role.id} className={cn('rounded-2xl border px-3.5 py-1 transition-[background-color,border-color,box-shadow]', on ? PICKED : 'border-foreground/[.08] bg-foreground/[.04]', rowOff && 'opacity-60')}>
         <div className="flex min-h-11 items-center gap-3">
-          <Checkbox id={inputId} checked={on} disabled={!allowedRole} onCheckedChange={(value) => toggle(role, value === true)} />
-          <label htmlFor={inputId} className={cn('flex min-h-11 flex-1 items-center gap-2 text-[15px]', on ? 'font-bold' : 'font-medium', allowedRole ? 'cursor-pointer' : 'cursor-not-allowed')}>
+          <Checkbox id={inputId} checked={on} disabled={rowOff} onCheckedChange={(value) => toggle(role, value === true)} />
+          <label htmlFor={inputId} className={cn('flex min-h-11 flex-1 items-center gap-2 text-[15px]', on ? 'font-bold' : 'font-medium', !rowOff ? 'cursor-pointer' : 'cursor-not-allowed')}>
             <i aria-hidden="true" className="h-2 w-2 shrink-0 rounded-full" style={{ background: role.color }} />
             {role.name}
           </label>
         </div>
+        {everyWorldOnly && allowedRole && <p className="pb-2.5 pl-8 text-[13px] text-muted-foreground">Administrator works in every world</p>}
         {on && scope && (
           <div className="grid gap-2.5 pb-3 pl-8">
             <span id={`${inputId}-works`} className="text-[13px] font-semibold text-muted-foreground">Works in</span>
