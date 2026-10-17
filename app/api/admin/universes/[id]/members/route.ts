@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
+import { EVERYONE_KEY, MEMBER_KEY } from '@/lib/roles';
 import { NOT_SYSTEM_USER } from '@/lib/system-user';
 import { withWokas } from '@/lib/woka-avatar';
 import { failed, managesPeople, memberForJson, memberInclude, universeContext } from '@/lib/universe-route';
@@ -19,7 +20,12 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const showEmail = managesPeople(access);
 
     const search = request.nextUrl.searchParams.get('q')?.trim().slice(0, 100) ?? '';
-    const roleId = request.nextUrl.searchParams.get('roleId');
+    // Member and Everyone come with joining and are never given, so filtering by them means everyone who joined
+    const roleParam = request.nextUrl.searchParams.get('roleId');
+    const filterRole = roleParam
+      ? await prisma.role.findFirst({ where: { id: roleParam, universeId: id }, select: { id: true, key: true } })
+      : null;
+    const roleId = filterRole && (filterRole.key === MEMBER_KEY || filterRole.key === EVERYONE_KEY) ? null : roleParam;
     const cursor = request.nextUrl.searchParams.get('cursor');
     const where: Prisma.UniverseMemberWhereInput = {
       universeId: id,

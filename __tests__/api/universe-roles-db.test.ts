@@ -37,9 +37,9 @@ let worldA = '';
 let worldB = '';
 const role: Record<string, string> = {};
 
-async function as(who: string, route: unknown, params: Record<string, string>, body?: unknown) {
+async function as(who: string, route: unknown, params: Record<string, string>, body?: unknown, query = '') {
   session.mockResolvedValue({ id: people[who], uuid: who, email: `${who}-${tag}@example.test`, name: who, tags: [], isSuperAdmin: false });
-  const request = new NextRequest('http://localhost/api', {
+  const request = new NextRequest(`http://localhost/api?${query}`, {
     method: body === undefined ? 'GET' : 'POST',
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
@@ -198,6 +198,12 @@ run('universe roles and people routes (real database)', () => {
     expect(asHelper.status).toBe(200);
     expect(asHelper.body.members.every((m: { email: string | null }) => m.email === null)).toBe(true);
     expect(asHelper.body.owner.userId).toBe(people.owner);
+
+    // Filtering by Member lists everyone who joined; by a given role, only who holds it
+    const byMember = await as('helper', membersRoute.GET, {}, undefined, `roleId=${role.member}`);
+    expect(byMember.body.total).toBe(asHelper.body.total);
+    const byModerator = await as('helper', membersRoute.GET, {}, undefined, `roleId=${role.moderator}`);
+    expect(byModerator.body.members.map((m: { userId: string }) => m.userId)).toEqual([people.mod]);
 
     const asMod = await as('mod', membersRoute.GET, {});
     expect(asMod.body.members.some((m: { email: string | null }) => m.email !== null)).toBe(true);
