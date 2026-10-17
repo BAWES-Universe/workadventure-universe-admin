@@ -44,6 +44,15 @@ export async function PATCH(request: NextRequest, { params }: Params) {
       if (role.key === MEMBER_KEY || role.key === EVERYONE_KEY) return badRequest('Administrator goes on a role given in every world');
       const limited = await prisma.universeMemberRole.count({ where: { roleId, allWorlds: false } });
       if (limited > 0) return badRequest('Administrator works in every world: give this role in every world first');
+      // Nor while an invitation waits to give it in some worlds (one sent before roles gives its tags in one world)
+      const invited = await prisma.membershipInvitation.count({
+        where: {
+          status: 'pending',
+          world: { universeId: id },
+          OR: [{ roleIds: { has: roleId }, allWorlds: false }, { universeId: null, tags: { has: role.key } }],
+        },
+      });
+      if (invited > 0) return badRequest('Administrator works in every world: an invitation gives this role in some worlds, cancel it first');
     }
 
     const updated = await prisma.role.update({

@@ -171,9 +171,18 @@ export function MemberPage() {
   }
 
   if (failed) return <LoadError label="this person" retry={() => void load()} />;
-  if (!answer || !universe || roles.status !== 'ready') {
-    return roles.status === 'error' ? <LoadError label="roles" retry={() => router.refresh()} /> : <LoadingRows label="this person" rows={4} />;
+  if (basics.status === 'error' || roles.status === 'error') {
+    return (
+      <LoadError
+        label={basics.status === 'error' ? 'this universe' : 'roles'}
+        retry={() => {
+          if (basics.status === 'error') basics.retry();
+          if (roles.status === 'error') roles.retry();
+        }}
+      />
+    );
   }
+  if (!answer || !universe || roles.status !== 'ready') return <LoadingRows label="this person" rows={4} />;
   const { member, can } = answer;
   const name = member.name || member.email || 'Someone';
   const first = name.trim().split(/\s+/)[0];

@@ -37,12 +37,16 @@ let calls: { url: string; method: string; body?: Record<string, unknown> }[] = [
 let memberRoles: { roleId: string; allWorlds: boolean; worldIds: string[] }[] = [];
 let can = { giveRoleIds: ['r-admin', 'r-editor', 'r-acct'], giveWorlds: 'all' as 'all' | string[], remove: true };
 let failNextRole = false;
+let failBasics = false;
+let staleList: ((value: unknown) => void) | null = null;
 
 beforeEach(() => {
   fetchMock.mockReset();
   replace.mockReset();
   calls = [];
   failNextRole = false;
+  failBasics = false;
+  staleList = null;
   params = { id: 'u1', userId: 'sara' };
   search = new URLSearchParams();
   memberRoles = [{ roleId: 'r-editor', ...everywhere }];
@@ -51,10 +55,12 @@ beforeEach(() => {
     const method = init?.method ?? 'GET';
     calls.push({ url, method, body: init?.body ? JSON.parse(init.body) : undefined });
     if (url === '/api/auth/me') return ok({ user: { id: 'owner' } });
+    if (url === '/api/admin/universes/u1' && failBasics) return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}) });
     if (url === '/api/admin/universes/u1') return ok({ id: 'u1', name: 'BAWES', ownerId: 'owner', worlds: [{ id: 'hq', name: 'HQ' }, { id: 'campus', name: 'Campus' }] });
     if (url.endsWith('/u1/roles')) return ok({ roles: ROLES });
     if (url.endsWith('/u1/me')) return ok({ inviteWorlds: 'all' });
     if (url.endsWith('/u1/invitations') && method === 'GET') return ok({ invitations: [], canCancel: false });
+    if (url.includes('/u1/members?') && url.includes('cursor=c2')) return new Promise((resolve) => { staleList = resolve; });
     if (url.includes('/u1/members?')) return ok({ members: MEMBERS, total: 2, owner: OWNER, nextCursor: null });
     if (url.includes('/roles/')) {
       if (failNextRole) return Promise.resolve({ ok: false, status: 403, json: () => Promise.resolve({ error: 'Needs Give roles' }) });
@@ -100,6 +106,45 @@ describe('universe Members page', () => {
     wrap(<UniverseMembersPage />);
     await screen.findByTestId('members');
     expect(calls.some((call) => call.url.includes('/members?') && call.url.includes('worldId=hq'))).toBe(true);
+  });
+});
+
+describe('when the universe or its roles can’t be loaded', () => {
+  it.each([
+    ['the Members page', () => <UniverseMembersPage />],
+    ['a member’s page', () => <MemberPage />],
+  ])('%s shows the error with a retry, never a skeleton forever, and the retry asks again', async (_name, view) => {
+    failBasics = true;
+    wrap(view());
+    await screen.findByText(/couldn’t load this universe/);
+    failBasics = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(screen.queryByText(/couldn’t load this universe/)).toBeNull());
+    await waitFor(() => expect(calls.filter((call) => call.url === '/api/admin/universes/u1').length).toBeGreaterThan(1));
+  });
+});
+
+describe('Show more', () => {
+  it('drops the rows of an answer for a search that is no longer the one on screen', async () => {
+    // Nine people and more to come, so "Show more" asks for the next page
+    const nine = Array.from({ length: 9 }, (_, n) => ({ ...MEMBERS[1], userId: `p${n}`, name: `Person ${n}`, email: null, roles: [] }));
+    const base = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
+      if (url.includes('/u1/members?') && url.includes('q=zed')) return ok({ members: [{ ...MEMBERS[1], userId: 'zed', name: 'Zed Only', email: null, roles: [] }], total: 1, owner: null, nextCursor: null });
+      if (url.includes('/u1/members?') && !url.includes('cursor=')) return ok({ members: nine, total: 12, owner: null, nextCursor: 'c2' });
+      return base(url, init);
+    });
+    wrap(<UniverseMembersPage />);
+    await screen.findByText('Person 7');
+    fireEvent.click(screen.getByRole('button', { name: /Show \d+ more/ }));
+    await waitFor(() => expect(staleList).not.toBeNull());
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'zed' } });
+    fireEvent.submit(screen.getByRole('search'));
+    await screen.findByText('Zed Only');
+    staleList!({ ok: true, status: 200, json: () => Promise.resolve({ members: [{ ...MEMBERS[1], userId: 'late', name: 'Late Arrival', email: null, roles: [] }], total: 12, owner: null, nextCursor: null }) });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.queryByText('Late Arrival')).toBeNull();
+    expect(screen.getByText('Zed Only')).toBeTruthy();
   });
 });
 

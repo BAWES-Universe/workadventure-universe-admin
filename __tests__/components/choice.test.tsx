@@ -146,3 +146,22 @@ it('Swatch is a named radio, ringed when picked', () => {
   expect(screen.getByRole('radio', { name: 'Violet' }).getAttribute('aria-checked')).toBe('true');
   expect(screen.getByRole('radio', { name: 'Violet' }).className).toContain('0_0_0_4px');
 });
+
+describe('Segmented tab stop', () => {
+  it('falls back to the first enabled option when the picked one is disabled, so the group can be tabbed into', () => {
+    render(
+      <Segmented
+        aria-label="Works in"
+        value="all"
+        onChange={() => {}}
+        options={[
+          { value: 'all', label: 'All worlds', disabled: true },
+          { value: 'some', label: 'Some worlds' },
+        ]}
+      />,
+    );
+    expect(screen.getByRole('radio', { name: 'All worlds' }).getAttribute('tabindex')).toBe('-1');
+    expect(screen.getByRole('radio', { name: 'Some worlds' }).getAttribute('tabindex')).toBe('0');
+  });
+});
+

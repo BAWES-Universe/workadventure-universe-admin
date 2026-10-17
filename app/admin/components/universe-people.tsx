@@ -13,12 +13,13 @@ export interface UniverseBasics {
   worlds: { id: string; name: string }[];
 }
 
-export type Loaded<T> = { status: 'loading' } | { status: 'error' } | { status: 'ready'; value: T };
+/** A failed load carries its own way to ask again. */
+export type Loaded<T> = { status: 'loading' } | { status: 'error'; retry: () => void } | { status: 'ready'; value: T };
 
 /** One GET, with a way to ask again. A failure says so (it never leaves the page loading). */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- each caller reads its own answer shape
 export function useJson<T>(path: string | null, read: (body: any) => T): [Loaded<T>, () => void] {
-  const [state, setState] = useState<Loaded<T>>({ status: 'loading' });
+  const [state, setState] = useState<{ status: 'loading' } | { status: 'error' } | { status: 'ready'; value: T }>({ status: 'loading' });
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     if (!path) return;
@@ -40,7 +41,7 @@ export function useJson<T>(path: string | null, read: (body: any) => T): [Loaded
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [path, attempt]);
   const retry = useCallback(() => setAttempt((value) => value + 1), []);
-  return [state, retry];
+  return [state.status === 'error' ? { status: 'error', retry } : state, retry];
 }
 
 export function useUniverseBasics(universeId: string | null): Loaded<UniverseBasics> {

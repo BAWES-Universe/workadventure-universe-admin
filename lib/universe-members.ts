@@ -3,6 +3,7 @@
  * world_members rows (and their tags) that the rest of Orbit and the game read always match.
  */
 import type { Prisma, PrismaClient } from '@prisma/client';
+import { isAdministratorRole } from '@/lib/role-access';
 import { CUSTOM_MIN_POSITION, EVERYONE_KEY, MEMBER_KEY, ensureBuiltInRoles, syncWorldMembers, type WorldScope } from '@/lib/roles';
 
 type Db = PrismaClient | Prisma.TransactionClient;
@@ -21,6 +22,28 @@ export function withoutWorld(scope: WorldScope, worldId: string, universeWorldId
 
 export function isEmptyScope(scope: WorldScope): boolean {
   return !scope.allWorlds && scope.worldIds.length === 0;
+}
+
+/** Asked to limit an Administrator role to some worlds, which it never is. */
+export class AdministratorScopeError extends Error {
+  constructor() {
+    super("Administrator works in every world, so its holder can't leave just one: take the role away first");
+    this.name = 'AdministratorScopeError';
+  }
+}
+
+type GivenRow = { id: string; allWorlds: boolean; worldIds: string[]; role: { permissions: bigint } };
+
+/** Stop someone's roles working in one world. An Administrator role is never left working in only some worlds. */
+async function takeRolesOutOfWorld(db: Db, rows: GivenRow[], worldId: string, worldIds: readonly string[]): Promise<void> {
+  const changes = rows
+    .filter((row) => row.allWorlds || row.worldIds.includes(worldId))
+    .map((row) => ({ row, scope: withoutWorld(row, worldId, worldIds) }));
+  if (changes.some(({ row, scope }) => !isEmptyScope(scope) && isAdministratorRole(row.role))) throw new AdministratorScopeError();
+  for (const { row, scope } of changes) {
+    if (isEmptyScope(scope)) await db.universeMemberRole.delete({ where: { id: row.id } });
+    else await db.universeMemberRole.update({ where: { id: row.id }, data: scope });
+  }
 }
 
 async function universeWorldIds(db: Db, universeId: string): Promise<string[]> {
@@ -76,13 +99,15 @@ export async function joinUniverse(db: Db, request: JoinRequest): Promise<void> 
 
   const roles = await db.role.findMany({
     where: { universeId, id: { in: request.roles.map((given) => given.roleId) } },
-    select: { id: true, key: true },
+    select: { id: true, key: true, permissions: true },
   });
   for (const given of request.roles) {
     const role = roles.find((candidate) => candidate.id === given.roleId);
     if (!role || role.key === MEMBER_KEY || role.key === EVERYONE_KEY || isEmptyScope(given.scope)) continue;
     const had = existing?.roles.find((row) => row.roleId === role.id);
     const scope = had ? unionScope(had, given.scope) : given.scope;
+    // Administrator is never limited to some worlds: a role that gained it after being offered that way is not given
+    if (!scope.allWorlds && isAdministratorRole(role)) continue;
     await db.universeMemberRole.upsert({
       where: { memberId_roleId: { memberId: member.id, roleId: role.id } },
       create: { memberId: member.id, roleId: role.id, ...scope },
@@ -104,19 +129,20 @@ export async function setTagsInWorld(db: Db, worldId: string, userId: string, ta
 
   const member = await db.universeMember.findUniqueOrThrow({
     where: { universeId_userId: { universeId, userId } },
-    include: { roles: true },
+    include: { roles: { include: { role: { select: { permissions: true } } } } },
   });
   const worldIds = await universeWorldIds(db, universeId);
-  for (const row of member.roles) {
-    if (wanted.has(row.roleId)) continue;
-    if (!row.allWorlds && !row.worldIds.includes(worldId)) continue;
-    const scope = withoutWorld(row, worldId, worldIds);
-    if (isEmptyScope(scope)) await db.universeMemberRole.delete({ where: { id: row.id } });
-    else await db.universeMemberRole.update({ where: { id: row.id }, data: scope });
-  }
+  await takeRolesOutOfWorld(db, member.roles.filter((row) => !wanted.has(row.roleId)), worldId, worldIds);
+  const administrators = new Set(
+    (await db.role.findMany({ where: { id: { in: [...wanted] } }, select: { id: true, permissions: true } }))
+      .filter(isAdministratorRole)
+      .map((role) => role.id),
+  );
   for (const roleId of wanted) {
     const row = member.roles.find((candidate) => candidate.roleId === roleId);
     const scope = row ? unionScope(row, { allWorlds: false, worldIds: [worldId] }) : { allWorlds: false, worldIds: [worldId] };
+    // A tag gives its role in one world, and Administrator is never limited to some worlds
+    if (!scope.allWorlds && administrators.has(roleId)) continue;
     await db.universeMemberRole.upsert({
       where: { memberId_roleId: { memberId: member.id, roleId } },
       create: { memberId: member.id, roleId, ...scope },
@@ -128,23 +154,18 @@ export async function setTagsInWorld(db: Db, worldId: string, userId: string, ta
 
 /**
  * Take someone out of one world: their membership and every role of theirs stop working there. When no world is left,
- * they are no longer in the universe.
+ * they are no longer in the universe. Someone with an Administrator role keeps every world until the role is taken.
  */
 export async function leaveWorld(db: Db, worldId: string, userId: string): Promise<void> {
   const world = await db.world.findUniqueOrThrow({ where: { id: worldId }, select: { universeId: true } });
   const { universeId } = world;
   const member = await db.universeMember.findUnique({
     where: { universeId_userId: { universeId, userId } },
-    include: { roles: true },
+    include: { roles: { include: { role: { select: { permissions: true } } } } },
   });
   if (member) {
     const worldIds = await universeWorldIds(db, universeId);
-    for (const row of member.roles) {
-      if (!row.allWorlds && !row.worldIds.includes(worldId)) continue;
-      const scope = withoutWorld(row, worldId, worldIds);
-      if (isEmptyScope(scope)) await db.universeMemberRole.delete({ where: { id: row.id } });
-      else await db.universeMemberRole.update({ where: { id: row.id }, data: scope });
-    }
+    await takeRolesOutOfWorld(db, member.roles, worldId, worldIds);
     const scope = withoutWorld(member, worldId, worldIds);
     const remaining = await db.universeMemberRole.count({ where: { memberId: member.id } });
     if (isEmptyScope(scope) && remaining === 0) await db.universeMember.delete({ where: { id: member.id } });
