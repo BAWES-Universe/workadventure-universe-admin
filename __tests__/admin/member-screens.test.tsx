@@ -278,6 +278,38 @@ describe('a member’s page', () => {
     expect(calls.find((call) => call.method === 'DELETE')!.url).toBe('/api/admin/universes/u1/members/sara');
   });
 
+  it('after you leave a universe yourself, goes to your universes, not the Members page you can no longer open', async () => {
+    params = { id: 'u1', userId: 'sara' };
+    const base = fetchMock.getMockImplementation()!;
+    // Sara is the one looking
+    fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => (url === '/api/auth/me' ? ok({ user: { id: 'sara' } }) : base(url, init)));
+    wrap(<MemberPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Leave' }));
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Leave' }));
+    await waitFor(() => expect(replace).toHaveBeenCalledWith('/admin/universes'));
+    expect(replace).not.toHaveBeenCalledWith('/admin/universes/u1/members');
+  });
+
+  it('turns a role off, with the reason, when the only worlds you may give it in are ones they are not in', async () => {
+    // Sara is a member of HQ only, and you may give roles in Campus only
+    const base = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
+      if (url.endsWith('/members/sara') && !init?.method) {
+        return ok({
+          member: { userId: 'sara', name: 'Sara Ali', email: 'sara@example.com', joinedAt: '2026-08-01T00:00:00Z', lastVisitedAt: null, isOwner: false, worlds: { allWorlds: false, worldIds: ['hq'] }, roles: [] },
+          can: { giveRoleIds: ['r-admin', 'r-editor', 'r-acct'], giveWorlds: ['campus'], remove: true },
+        });
+      }
+      return base(url, init);
+    });
+    wrap(<MemberPage />);
+    const box = await screen.findByRole('checkbox', { name: 'Accountant' });
+    expect(box.hasAttribute('disabled')).toBe(true);
+    expect(screen.getAllByText('You can give roles only in worlds they’re not in').length).toBeGreaterThan(0);
+    fireEvent.click(box);
+    expect(calls.some((call) => call.method === 'PUT')).toBe(false);
+  });
+
   it('hides the Danger zone from someone who cannot remove people', async () => {
     can = { ...can, remove: false };
     wrap(<MemberPage />);
