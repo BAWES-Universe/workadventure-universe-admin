@@ -202,6 +202,28 @@ describe('Roles & permissions list', () => {
     ]);
   });
 
+  it('saves a drag let go away from the handle, after the handle lost the pointer', async () => {
+    const puts: string[][] = [];
+    serve((url, init) => {
+      if (!url.endsWith('/roles/order') || init?.method !== 'PUT') return undefined;
+      puts.push(JSON.parse(init.body as string).roleIds);
+      return json({ success: true });
+    });
+    render(<RolesListPage />);
+    await screen.findByText('Your roles');
+    screen.getAllByTestId('role-row').forEach((row, index) => {
+      row.getBoundingClientRect = () => ({ top: index * 80, height: 72 }) as DOMRect;
+    });
+    const handle = screen.getByRole('button', { name: /Move Accountant/ });
+    Object.assign(handle, { setPointerCapture: () => {} });
+    fireEvent.pointerDown(handle, { pointerId: 1 });
+    // The rest of the drag reaches only the page, not the handle
+    fireEvent.pointerMove(document.body, { pointerId: 1, clientY: 0 });
+    fireEvent.pointerUp(document.body, { pointerId: 1 });
+    await waitFor(() => expect(puts).toEqual([['acc', 'lead', 'mod']]));
+    expect(document.querySelector('[data-dragging]')).toBeNull();
+  });
+
   it('keeps a move made while an earlier order is still being saved, and saves both moves', async () => {
     let finishFirstSave: () => void = () => {};
     const puts: string[][] = [];

@@ -13,6 +13,12 @@ import { Group, RoleDot } from './role-bits';
 import { useRolesData } from './use-roles-data';
 import { builtInRoles, customRoles, movableRoles, roleLine, viewerFrom, type RoleRow } from '@/lib/role-ui';
 
+function place(ids: string[], id: string, to: number) {
+  const rest = ids.filter((other) => other !== id);
+  rest.splice(Math.max(0, Math.min(to, rest.length)), 0, id);
+  return rest;
+}
+
 /** Roles & permissions: custom roles first, highest first, dragged to change rank; the built-in ones sit apart. */
 export function RolesListPage() {
   const params = useParams();
@@ -86,6 +92,10 @@ export function RolesListPage() {
     [run],
   );
 
+  // The window listeners of a drag under way, taken off when it ends or the page goes
+  const stopFollowing = useRef<(() => void) | null>(null);
+  useEffect(() => () => stopFollowing.current?.(), []);
+
   if (state.status === 'loading') {
     return (
       <div className="grid gap-6">
@@ -120,12 +130,6 @@ export function RolesListPage() {
   const movableOrdered = (order ?? movable.map((role) => role.id)).map((id) => byId.get(id)).filter((role): role is RoleRow => !!role);
   const shown = [...fixed, ...movableOrdered];
 
-  function place(ids: string[], id: string, to: number) {
-    const rest = ids.filter((other) => other !== id);
-    rest.splice(Math.max(0, Math.min(to, rest.length)), 0, id);
-    return rest;
-  }
-
   function onHandleDown(event: React.PointerEvent<HTMLButtonElement>, id: string) {
     if (event.button !== 0 && event.pointerType === 'mouse') return;
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -138,27 +142,36 @@ export function RolesListPage() {
     // The order is pinned only once the row moves: a press without a move leaves the list following the server
     startOrder.current = orderRef.current ?? movable.map((role) => role.id);
     setDragging(id);
-  }
-
-  function onHandleMove(event: React.PointerEvent<HTMLButtonElement>) {
-    if (!dragging) return;
-    const current = orderRef.current ?? startOrder.current;
-    // Its place is the number of other rows whose middle is above the finger
-    let index = 0;
-    for (const other of current) {
-      if (other === dragging) continue;
-      const box = rows.current.get(other)?.getBoundingClientRect();
-      if (box && box.top + box.height / 2 < event.clientY) index += 1;
-    }
-    const next = place(current, dragging, index);
-    if (next.join(',') !== current.join(',')) changeOrder(next);
-  }
-
-  function onHandleUp() {
-    if (!dragging) return;
-    setDragging(null);
-    const current = orderRef.current;
-    if (current && current.join(',') !== startOrder.current.join(',')) void save(current);
+    // The window follows the pointer, not the handle: moving rows can take the pointer capture off the handle, and
+    // the drop must still land wherever the pointer is let go
+    stopFollowing.current?.();
+    const onMove = (moved: PointerEvent) => {
+      const current = orderRef.current ?? startOrder.current;
+      // Its place is the number of other rows whose middle is above the finger
+      let index = 0;
+      for (const other of current) {
+        if (other === id) continue;
+        const box = rows.current.get(other)?.getBoundingClientRect();
+        if (box && box.top + box.height / 2 < moved.clientY) index += 1;
+      }
+      const next = place(current, id, index);
+      if (next.join(',') !== current.join(',')) changeOrder(next);
+    };
+    const onUp = () => {
+      stopFollowing.current?.();
+      setDragging(null);
+      const current = orderRef.current;
+      if (current && current.join(',') !== startOrder.current.join(',')) void save(current);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+    stopFollowing.current = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+      stopFollowing.current = null;
+    };
   }
 
   // Arrow keys on the handle move one place; the order is saved once they stop
@@ -257,9 +270,6 @@ export function RolesListPage() {
                         aria-label={`Move ${role.name}. Drag, or use the up and down arrow keys.`}
                         className="orbit-touch-exempt grid h-11 w-11 shrink-0 cursor-grab touch-none place-items-center rounded-full text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring active:cursor-grabbing"
                         onPointerDown={(event) => onHandleDown(event, role.id)}
-                        onPointerMove={onHandleMove}
-                        onPointerUp={onHandleUp}
-                        onPointerCancel={onHandleUp}
                         onKeyDown={(event) => onHandleKey(event, role.id)}
                       >
                         <GripVertical className="h-5 w-5" aria-hidden="true" />
