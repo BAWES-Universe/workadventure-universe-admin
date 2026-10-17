@@ -222,7 +222,7 @@ model Role {
   key         String   // Sent to the game as a tag
   name        String
   color       String   @default("#99AAB5")
-  badge       String?  // An emoji shown next to the name
+  showBadge   Boolean  @default(true) @map("show_badge") // Off: only people who manage roles see it on others
   permissions BigInt   @default(0)
   position    Int      @default(0) // Higher ranks above; lib/roles.ts says where the built-ins sit
   builtIn     Boolean  @default(false) @map("built_in")

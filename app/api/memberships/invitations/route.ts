@@ -41,7 +41,23 @@ export async function GET(request: NextRequest) {
       orderBy: { invitedAt: 'desc' },
     });
 
-    return NextResponse.json({ invitations });
+    // A universe invitation (#314) names its roles by id: send their names and colours, highest first
+    const roleIds = [...new Set(invitations.flatMap((invitation) => invitation.roleIds))];
+    const roles = roleIds.length
+      ? await prisma.role.findMany({
+          where: { id: { in: roleIds } },
+          select: { id: true, name: true, color: true, position: true },
+          orderBy: { position: 'desc' },
+        })
+      : [];
+    return NextResponse.json({
+      invitations: invitations.map((invitation) => ({
+        ...invitation,
+        roles: roles
+          .filter((role) => invitation.roleIds.includes(role.id))
+          .map((role) => ({ id: role.id, name: role.name, color: role.color })),
+      })),
+    });
   } catch (error) {
     console.error('Error fetching invitations:', error);
     return NextResponse.json(

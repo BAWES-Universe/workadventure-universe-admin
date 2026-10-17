@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
+import { EVERYONE_KEY, MEMBER_KEY } from '@/lib/roles';
 import { NOT_SYSTEM_USER } from '@/lib/system-user';
 import { withWokas } from '@/lib/woka-avatar';
-import { failed, managesPeople, memberForJson, memberInclude, universeContext } from '@/lib/universe-route';
+import { failed, managesPeople, memberForJson, memberInclude, seesHiddenRoles, universeContext } from '@/lib/universe-route';
 
 const PAGE = 50;
 
@@ -17,9 +18,17 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 
     // Emails are for the people who invite, remove or give roles; everyone who can see the universe sees its members
     const showEmail = managesPeople(access);
+    const showHidden = seesHiddenRoles(access);
 
     const search = request.nextUrl.searchParams.get('q')?.trim().slice(0, 100) ?? '';
-    const roleId = request.nextUrl.searchParams.get('roleId');
+    // Member and Everyone come with joining and are never given, so filtering by them means everyone who joined
+    const roleParam = request.nextUrl.searchParams.get('roleId');
+    const filterRole = roleParam
+      ? await prisma.role.findFirst({ where: { id: roleParam, universeId: id }, select: { id: true, key: true, showBadge: true } })
+      : null;
+    const roleId = filterRole && (filterRole.key === MEMBER_KEY || filterRole.key === EVERYONE_KEY) ? null : roleParam;
+    // A role whose badge is hidden doesn't say who has it, not even through the filter
+    const hiddenFilter = !!filterRole && !filterRole.showBadge && !showHidden;
     const cursor = request.nextUrl.searchParams.get('cursor');
     const where: Prisma.UniverseMemberWhereInput = {
       universeId: id,
@@ -39,6 +48,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         ],
       },
       ...(roleId ? { roles: { some: { roleId } } } : {}),
+      ...(hiddenFilter ? { id: { in: [] } } : {}),
     };
 
     const [total, rows, owner] = await Promise.all([
@@ -53,7 +63,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       prisma.user.findUnique({ where: { id: universe.ownerId }, select: { id: true, name: true } }),
     ]);
     const page = rows.slice(0, PAGE);
-    const members = page.map((member) => memberForJson(member, universe.ownerId, showEmail));
+    const members = page.map((member) => memberForJson(member, universe.ownerId, showEmail, showHidden));
 
     return NextResponse.json({
       members: await withWokas(members),
