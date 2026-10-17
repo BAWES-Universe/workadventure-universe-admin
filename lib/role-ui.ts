@@ -20,7 +20,7 @@ export interface RoleRow {
   key: string;
   name: string;
   color: string;
-  badge: string | null;
+  showBadge: boolean;
   /** Decimal string. */
   permissions: string;
   position: number;
@@ -247,8 +247,12 @@ export function customRoles(roles: readonly RoleRow[]): RoleRow[] {
   return roles.filter((role) => !role.builtIn).sort((a, b) => b.position - a.position);
 }
 
-/** The custom roles this viewer ranks above, the only ones that move. */
-export function movableRoles(roles: readonly RoleRow[], me: Pick<MeResponse, 'full' | 'highestPosition'>): RoleRow[] {
+/**
+ * The custom roles this viewer may move: they need Manage roles in every world (the order is saved for the whole
+ * universe) and rank above the role. Without Manage roles nothing moves.
+ */
+export function movableRoles(roles: readonly RoleRow[], me: Pick<MeResponse, 'full' | 'highestPosition' | 'canManageRoles'>): RoleRow[] {
+  if (!me.canManageRoles) return [];
   return customRoles(roles).filter((role) => me.full || (me.highestPosition !== null && role.position < me.highestPosition));
 }
 

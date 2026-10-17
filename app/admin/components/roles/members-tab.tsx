@@ -113,7 +113,7 @@ export function MembersTab({
                   href={`/admin/universes/${universeId}/members/${member.userId}`}
                   className="flex min-h-14 items-center gap-3 rounded-2xl px-1 py-1.5 hover:bg-foreground/5"
                 >
-                  <PersonIcon woka={member.woka} name={member.name} />
+                  <PersonIcon woka={member.woka} name={member.name} face />
                   <span className="min-w-0 flex-1 truncate text-[15px] font-medium">{member.name ?? 'Someone'}</span>
                   {given && <RolePill name={scopeLabel(given, worlds)} />}
                 </Link>
@@ -297,7 +297,7 @@ function GiveSheet({
                     picked={personId === member.userId}
                     onClick={() => choose(member)}
                     title={member.name ?? 'Someone'}
-                    indicator={<PersonIcon woka={member.woka} name={member.name} size={32} />}
+                    indicator={<PersonIcon woka={member.woka} name={member.name} size={32} face />}
                   />
                 ))}
               </div>

@@ -39,15 +39,15 @@ export function RoleEditPage() {
   // What is held while editing: starts as what the server has, and starts over whenever the server's copy changes
   const roleName = role?.name;
   const roleColour = role?.color;
-  const roleBadge = role?.badge ?? '';
+  const roleShowBadge = role?.showBadge ?? true;
   const rolePermissions = role?.permissions;
   // Keyed by value, so a reload that changes nothing here (a new people count) keeps what is being typed
   const saved = useMemo<{ display: DisplayDraft; permissions: bigint } | null>(
     () =>
       roleName !== undefined && roleColour !== undefined && rolePermissions !== undefined
-        ? { display: { name: roleName, color: roleColour, badge: roleBadge }, permissions: permissionsOf({ permissions: rolePermissions }) }
+        ? { display: { name: roleName, color: roleColour, showBadge: roleShowBadge }, permissions: permissionsOf({ permissions: rolePermissions }) }
         : null,
-    [roleName, roleColour, roleBadge, rolePermissions],
+    [roleName, roleColour, roleShowBadge, rolePermissions],
   );
   const [display, setDisplay] = useState<DisplayDraft | null>(null);
   const [permissions, setPermissions] = useState<bigint | null>(null);
@@ -100,7 +100,7 @@ export function RoleEditPage() {
 
   const nameChanged = display.name.trim() !== saved.display.name;
   const colourChanged = display.color.toLowerCase() !== saved.display.color.toLowerCase();
-  const badgeChanged = display.badge.trim() !== saved.display.badge;
+  const badgeChanged = display.showBadge !== saved.display.showBadge;
   const permissionsChanged = changedCount(permissions, saved.permissions);
   const changes = (nameChanged ? 1 : 0) + (colourChanged ? 1 : 0) + (badgeChanged ? 1 : 0) + permissionsChanged;
   const blankName = display.name.trim().length === 0;
@@ -115,7 +115,7 @@ export function RoleEditPage() {
         body: JSON.stringify({
           ...(nameChanged ? { name: draft.name.trim() } : {}),
           ...(colourChanged ? { color: draft.color } : {}),
-          ...(badgeChanged ? { badge: draft.badge.trim() || null } : {}),
+          ...(badgeChanged ? { showBadge: draft.showBadge } : {}),
           ...(permissionsChanged > 0 ? { permissions: toWire(draftPermissions) } : {}),
         }),
       });
@@ -140,7 +140,7 @@ export function RoleEditPage() {
         body: JSON.stringify({
           name: `${role.name} copy`.slice(0, 40),
           color: role.color,
-          ...(role.badge ? { badge: role.badge } : {}),
+          showBadge: role.showBadge,
           permissions: role.permissions,
         }),
       });
@@ -189,7 +189,7 @@ export function RoleEditPage() {
   return (
     <div className="grid min-w-0 grid-cols-1 gap-6">
       <PageHeader
-        kind="role"
+        kind={isEveryone ? 'everyone' : 'role'}
         title={display.name.trim() || role.name}
         context={
           <InContext

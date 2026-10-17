@@ -31,7 +31,7 @@ export function RolesListPage() {
   const latest = useRef<string[] | null>(null);
 
   const data = state.status === 'ready' ? state.data : null;
-  const movable = data ? movableRoles(data.roles.roles, data.me) : [];
+  const movable = data ? movableRoles(data.roles.roles, { ...data.me, canManageRoles: data.roles.canManageRoles }) : [];
 
   // Leaving the page mid-wait must not send a late save
   useEffect(() => () => {
@@ -169,7 +169,6 @@ export function RolesListPage() {
           <span className="min-w-0 flex-1">
             <span className="flex items-center gap-1.5 text-base font-bold">
               <span className="truncate">{role.name}</span>
-              {role.badge && <span aria-hidden="true">{role.badge}</span>}
             </span>
             <span className="block truncate text-[13px] text-muted-foreground">{roleLine(role)}</span>
           </span>

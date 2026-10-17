@@ -24,7 +24,7 @@ import { Planet } from './planet-icon';
 /** What players meet: each has its own colour. */
 export type EntityKind = 'universe' | 'world' | 'room' | 'star' | 'people';
 /** Super-admin tools: neutral chips, so they never read as a universe, world or room. */
-export type ToolKind = 'template' | 'category' | 'map' | 'bot' | 'provider' | 'avatar' | 'role';
+export type ToolKind = 'template' | 'category' | 'map' | 'bot' | 'provider' | 'avatar' | 'role' | 'everyone';
 export type Kind = EntityKind | ToolKind;
 
 export const KIND_ICON: Record<Kind, LucideIcon> = {
@@ -40,10 +40,11 @@ export const KIND_ICON: Record<Kind, LucideIcon> = {
   provider: Cpu,
   avatar: Shirt,
   role: Shield,
+  everyone: Users,
 };
 
 /** Universe, world, room and star: a clean icon in their colour, no box, on the name's own line (as the room page). */
-const CLEAN = new Set<Kind>(['universe', 'world', 'room', 'star', 'role']);
+const CLEAN = new Set<Kind>(['universe', 'world', 'room', 'star', 'role', 'everyone']);
 export const isCleanKind = (kind: Kind) => CLEAN.has(kind);
 
 /** The kind's icon on the name's own line (inline layout). */
@@ -65,6 +66,7 @@ export const KIND_LABEL: Record<Kind, string> = {
   provider: 'AI provider',
   avatar: 'Avatar set',
   role: 'Role',
+  everyone: 'Everyone',
 };
 
 /** A universe's own colour as a style, for its chip, wash and planet. */

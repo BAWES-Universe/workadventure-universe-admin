@@ -71,22 +71,24 @@ export function PermissionsTab({
 
   return (
     <div className="grid gap-5">
-      <div className="relative">
-        <label htmlFor={searchId} className="sr-only">
-          Search permissions
-        </label>
-        <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
-        <Input
-          id={searchId}
-          type="search"
-          value={query}
-          placeholder="Search permissions"
-          autoComplete="off"
-          className="h-12 rounded-2xl pl-11 text-base"
-          onChange={(event) => setQuery(event.target.value)}
-        />
-      </div>
-      <p className="-mt-2 max-w-2xl text-sm text-muted-foreground">
+      {!isAdmin && (
+        <div className="relative">
+          <label htmlFor={searchId} className="sr-only">
+            Search permissions
+          </label>
+          <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
+          <Input
+            id={searchId}
+            type="search"
+            value={query}
+            placeholder="Search permissions"
+            autoComplete="off"
+            className="h-12 rounded-2xl pl-11 text-base"
+            onChange={(event) => setQuery(event.target.value)}
+          />
+        </div>
+      )}
+      <p className={isAdmin ? 'max-w-2xl text-sm text-muted-foreground' : '-mt-2 max-w-2xl text-sm text-muted-foreground'}>
         {intro}
         {wholeReason && <> {wholeReason} to change these.</>}
       </p>

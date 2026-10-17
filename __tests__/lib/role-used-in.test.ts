@@ -56,7 +56,10 @@ const VIEWER = { id: 'viewer', isSuperAdmin: false };
 beforeEach(() => {
   jest.resetAllMocks();
   process.env.PUBLIC_MAP_STORAGE_URL = 'https://maps.example.test';
-  worldFindMany.mockResolvedValue([{ id: 'hq', name: 'HQ' }, { id: 'campus', name: 'Campus' }]);
+  worldFindMany.mockResolvedValue([
+    { id: 'hq', name: 'HQ', isPublic: true, universe },
+    { id: 'campus', name: 'Campus', isPublic: true, universe },
+  ]);
   worldMemberFindMany.mockResolvedValue([{ worldId: 'hq' }, { worldId: 'campus' }]);
   roomFindMany.mockResolvedValue([
     room('lobby', 'Lobby', 'hq', true, 'https://maps.example.test/d/u/hq/lobby/map.wam'),
@@ -152,6 +155,28 @@ describe('computeUsedIn', () => {
     const used = await computeUsedIn({ universeId: 'u', role: { id: 'm', key: 'member', permissions: BigInt(0) }, viewer: VIEWER, fetcher: answers({}) });
     expect(used.doors.rooms).toEqual([]);
     expect(used.reach.rooms.map((r) => r.name)).toEqual(['Lobby', 'Library']);
+  });
+
+  it('never names a private world the viewer cannot see, and still counts that it is reached', async () => {
+    worldFindMany.mockResolvedValue([
+      { id: 'hq', name: 'HQ', isPublic: true, universe },
+      { id: 'secret', name: 'Secret plans', isPublic: false, universe },
+    ]);
+    roomFindMany.mockResolvedValue([room('lobby', 'Lobby', 'hq', true, null)]);
+    worldMemberFindMany.mockResolvedValue([]);
+    memberRoleFindMany.mockResolvedValue([{ allWorlds: true, worldIds: [] }]);
+    const used = await computeUsedIn({ universeId: 'u', role: ROLE, viewer: VIEWER, fetcher: answers({}) });
+    expect(used.reach.worlds).toEqual([{ id: 'hq', name: 'HQ' }]);
+    expect(JSON.stringify(used)).not.toContain('Secret plans');
+    expect(used.reach.allWorlds).toBe(true);
+
+    // Their own world, the owner and a super admin do see it
+    worldMemberFindMany.mockResolvedValue([{ worldId: 'secret' }]);
+    const asMember = await computeUsedIn({ universeId: 'u', role: ROLE, viewer: VIEWER, fetcher: answers({}) });
+    expect(asMember.reach.worlds.map((world) => world.name)).toEqual(['HQ', 'Secret plans']);
+    worldMemberFindMany.mockResolvedValue([]);
+    const asAdmin = await computeUsedIn({ universeId: 'u', role: ROLE, viewer: { id: 'root', isSuperAdmin: true }, fetcher: answers({}) });
+    expect(asAdmin.reach.worlds.map((world) => world.name)).toEqual(['HQ', 'Secret plans']);
   });
 
   it('lists every permission for a role with Administrator', async () => {

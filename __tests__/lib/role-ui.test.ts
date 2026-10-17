@@ -24,7 +24,7 @@ function role(over: Partial<RoleRow>): RoleRow {
     key: 'x',
     name: 'X',
     color: '#34D399',
-    badge: null,
+    showBadge: true,
     permissions: '0',
     position: 12,
     builtIn: false,
@@ -115,12 +115,17 @@ describe('the list', () => {
     role({ id: 'm', key: 'member', builtIn: true, position: 1 }),
     role({ id: 'ev', key: 'everyone', builtIn: true, position: 0 }),
   ];
-  const me = (highest: number | null, full = false) => ({ full, highestPosition: highest });
+  const me = (highest: number | null, full = false, canManageRoles = true) => ({ full, highestPosition: highest, canManageRoles });
 
   it('moves only the custom roles below the viewer', () => {
     expect(movableRoles(roles, me(40)).map((r) => r.id)).toEqual(['mod', 'acc']);
     expect(movableRoles(roles, me(null, true)).map((r) => r.id)).toEqual(['lead', 'mod', 'acc']);
     expect(movableRoles(roles, me(1))).toEqual([]);
+  });
+
+  it('moves nothing without Manage roles in every world, however high the viewer ranks', () => {
+    expect(movableRoles(roles, me(40, false, false))).toEqual([]);
+    expect(movableRoles(roles, me(null, true, false))).toEqual([]);
   });
 
   it('lists the built-in roles Everyone, Admin, Editor, Member', () => {

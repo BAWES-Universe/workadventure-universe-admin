@@ -67,7 +67,7 @@ export function UsedInTab({ role, universeId, universeName }: { role: RoleRow; u
         <h2 className="orbit-display text-lg font-bold">Where it opens doors</h2>
         {doors.rooms.length === 0 ? (
           <p className="text-sm text-muted-foreground">
-            No room is set to {role.name}. A room is open to everyone or to the members of its world; a map area inside it can be locked to a role, as listed below.
+            No room is set to {role.name} yet. Rooms open to a role come in a later release. Map areas locked to it are listed below.
           </p>
         ) : (
           <>

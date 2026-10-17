@@ -506,7 +506,8 @@ a[href] {
 .orbit-kind[data-kind='world'] { color: var(--kind-world-solid); }
 .orbit-kind[data-kind='room'] { color: var(--kind-room-solid); }
 .orbit-kind[data-kind='star'] { color: var(--kind-star-solid); }
-.orbit-kind[data-kind='role'] { color: hsl(var(--foreground)); }
+.orbit-kind[data-kind='role'],
+.orbit-kind[data-kind='everyone'] { color: hsl(var(--foreground)); }
 .orbit-kind[data-kind='people'] { background-image: var(--kind-people); }
 /* Admin tools: neutral, so a template or a bot never looks like a room or a person. */
 .orbit-kind:is([data-kind='template'], [data-kind='category'], [data-kind='map'], [data-kind='bot'], [data-kind='provider'], [data-kind='avatar']) { background: hsl(var(--foreground) / 0.1); color: hsl(var(--foreground)); box-shadow: inset 0 0 0 1px hsl(var(--foreground) / 0.12); }

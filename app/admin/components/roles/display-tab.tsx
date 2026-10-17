@@ -4,6 +4,7 @@ import { useId, useState } from 'react';
 import { Loader2, Lock, Trash2 } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
+import { Switch } from '@/components/ui/switch';
 import { Swatch } from '@/components/ui/choice';
 import {
   AlertDialog,
@@ -20,10 +21,10 @@ import { Panel } from './role-bits';
 export interface DisplayDraft {
   name: string;
   color: string;
-  badge: string;
+  showBadge: boolean;
 }
 
-/** Name, colour and badge, and at the very end the Danger zone with Delete alone in it. */
+/** Name, colour and whether the badge shows, and at the very end the Danger zone with Delete alone in it. */
 export function DisplayTab({
   role,
   draft,
@@ -96,22 +97,25 @@ export function DisplayTab({
             </div>
           </div>
 
-          <div className="grid gap-2">
-            <label htmlFor={badgeId} className="text-sm font-semibold">
-              Badge <span className="font-normal text-muted-foreground">· optional</span>
-            </label>
-            <Input
+          <label htmlFor={badgeId} className="flex items-center gap-4 rounded-2xl border border-foreground/[.12] p-4">
+            <span className="min-w-0 flex-1">
+              <strong id={`${badgeId}-label`} className="block text-base font-bold">
+                Show the badge to everyone
+              </strong>
+              <span id={`${badgeId}-hint`} className="mt-1 block text-sm leading-relaxed text-muted-foreground">
+                The role name and colour next to their name in Orbit’s member lists. Off: only people who manage roles see it.
+              </span>
+            </span>
+            {readOnly && <Lock className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />}
+            <Switch
               id={badgeId}
-              value={draft.badge}
-              maxLength={16}
-              disabled={readOnly}
-              autoComplete="off"
-              placeholder="An emoji, like 🛡️"
-              className="h-12 rounded-2xl text-base"
-              onChange={(event) => onChange({ ...draft, badge: event.target.value })}
+              checked={draft.showBadge}
+              locked={readOnly}
+              aria-labelledby={`${badgeId}-label`}
+              aria-describedby={`${badgeId}-hint`}
+              onCheckedChange={(next) => onChange({ ...draft, showBadge: next })}
             />
-            <p className="text-xs text-muted-foreground">Shown next to the role’s name in Orbit’s lists. Leave it empty for none.</p>
-          </div>
+          </label>
         </Panel>
       </section>
 

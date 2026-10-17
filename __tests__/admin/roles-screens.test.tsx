@@ -36,7 +36,7 @@ const json = (body: unknown, status = 200) =>
 
 const role = (over: Partial<RoleRow> & Pick<RoleRow, 'id' | 'key' | 'name'>): RoleRow => ({
   color: '#34D399',
-  badge: null,
+  showBadge: true,
   permissions: '0',
   position: 12,
   builtIn: false,
@@ -143,6 +143,16 @@ describe('Roles & permissions list', () => {
     expect(screen.queryByRole('button', { name: /Move Lead/ })).toBeNull();
     expect(screen.getByRole('button', { name: /Move Moderator/ })).toBeTruthy();
     expect(screen.getByRole('button', { name: /Move Accountant/ })).toBeTruthy();
+  });
+
+  it('shows no drag handles without Manage roles in every world, even for a role ranked below yours', async () => {
+    me = LEAD_ME;
+    canManageRoles = false;
+    serve();
+    render(<RolesListPage />);
+    await screen.findByText('Your roles');
+    expect(screen.getByText('Moderator')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Move / })).toBeNull();
   });
 
   it('moves a role with the arrow keys and saves the new order', async () => {
@@ -326,6 +336,33 @@ describe('a role page', () => {
     expect(switches.every((toggle) => toggle.disabled && toggle.getAttribute('aria-checked') === 'true')).toBe(true);
     expect(screen.getByText(/Admin always has every permission/)).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Duplicate' })).toBeNull();
+    // Every permission is locked there, so there is nothing to search
+    expect(screen.queryByRole('searchbox', { name: 'Search permissions' })).toBeNull();
+  });
+
+  it('offers the search on a role whose permissions can change', async () => {
+    serve();
+    open('acc');
+    await screen.findByRole('heading', { name: 'People' });
+    expect(screen.getByRole('searchbox', { name: 'Search permissions' })).toBeTruthy();
+  });
+
+  it('turns the badge off from Display as a change, and saves it as showBadge', async () => {
+    serve((url, init) => (url.endsWith('/roles/acc') && init?.method === 'PATCH' ? json({ role: {} }) : undefined));
+    open('acc');
+    fireEvent.mouseDown(await screen.findByRole('tab', { name: 'Display' }), { button: 0 });
+    fireEvent.click(screen.getByRole('tab', { name: 'Display' }));
+    expect(screen.queryByLabelText(/Badge/)).toBeNull();
+    const toggle = await screen.findByRole('switch', { name: 'Show the badge to everyone' });
+    expect(toggle.getAttribute('aria-checked')).toBe('true');
+    expect(screen.getByText(/Off: only people who manage roles see it/)).toBeTruthy();
+    fireEvent.click(toggle);
+    expect(screen.getByText('1 unsaved change')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => {
+      const patch = fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH');
+      expect(JSON.parse(patch![1].body)).toEqual({ showBadge: false });
+    });
   });
 
   it('gives Everyone only Permissions and Used in', async () => {

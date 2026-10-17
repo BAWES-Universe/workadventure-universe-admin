@@ -10,7 +10,7 @@
  *   time. A room whose file cannot be read is counted, never guessed.
  */
 import { prisma } from '@/lib/db';
-import { canSeeRoom } from '@/lib/room-visibility';
+import { canSeeRoom, canSeeWorld } from '@/lib/room-visibility';
 import { keysOf, type PermissionKey } from '@/lib/permissions';
 import { EVERYONE_KEY, MEMBER_KEY, worldsOf, type WorldScope } from '@/lib/roles';
 
@@ -141,7 +141,11 @@ export async function computeUsedIn(input: UsedInInput): Promise<UsedIn> {
   const fetcher = input.fetcher ?? (fetch as unknown as Fetcher);
 
   const [worlds, rooms, viewerWorlds] = await Promise.all([
-    prisma.world.findMany({ where: { universeId }, select: { id: true, name: true }, orderBy: { createdAt: 'asc' } }),
+    prisma.world.findMany({
+      where: { universeId },
+      select: { id: true, name: true, isPublic: true, universe: { select: { isPublic: true, ownerId: true } } },
+      orderBy: { createdAt: 'asc' },
+    }),
     prisma.room.findMany({
       where: { world: { universeId } },
       select: {
@@ -171,8 +175,11 @@ export async function computeUsedIn(input: UsedInInput): Promise<UsedIn> {
   }
   const reached = new Set<string>();
   for (const scope of scopes) for (const id of worldsOf(scope, universeWorldIds)) reached.add(id);
-  const reachedWorlds = worlds.filter((world) => reached.has(world.id));
-  const allWorlds = universeWorldIds.length > 0 && reachedWorlds.length === universeWorldIds.length;
+  // A private world the viewer can't see is not named: not its id, not its name
+  const reachedWorlds = worlds
+    .filter((world) => reached.has(world.id) && canSeeWorld(world, viewer, memberWorldIds))
+    .map((world) => ({ id: world.id, name: world.name }));
+  const allWorlds = universeWorldIds.length > 0 && universeWorldIds.every((id) => reached.has(id));
 
   // Rooms the role reaches: Everyone, the open ones; anyone else, every room in the worlds it works in
   const reachRooms = visible.filter((room) => reached.has(room.world.id) && (role.key !== EVERYONE_KEY || openToEveryone(room)));
