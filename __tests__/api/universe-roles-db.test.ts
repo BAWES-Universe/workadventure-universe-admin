@@ -25,6 +25,8 @@ import * as inviteRoute from '@/app/api/admin/universes/[id]/invitations/route';
 import * as meRoute from '@/app/api/admin/universes/[id]/me/route';
 import { POST as accept } from '@/app/api/memberships/invitations/[id]/accept/route';
 import * as worldMembersRoute from '@/app/api/admin/worlds/[id]/members/route';
+import * as worldMemberRoute from '@/app/api/admin/worlds/[id]/members/[memberId]/route';
+import * as leaveWorldRoute from '@/app/api/memberships/my/world/[id]/route';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 const session = getSessionUser as jest.Mock;
@@ -234,6 +236,23 @@ run('universe roles and people routes (real database)', () => {
     expect(accepted.status).toBe(200);
     expect(await tagsOf('late', worldA)).toEqual(['member']);
     await prisma.role.delete({ where: { id: chief.id } });
+  });
+
+  it('never leaves an Administrator role working in only some worlds when someone leaves one', async () => {
+    const boss = await prisma.role.create({
+      data: { universeId, key: `boss-${tag}`, name: 'Boss', position: 16, permissions: flag('ADMINISTRATOR') },
+    });
+    const all = { allWorlds: true, worldIds: [] };
+    await joinUniverse(prisma, { universeId, userId: people.late, worlds: all, roles: [{ roleId: boss.id, scope: all }] });
+    const row = await prisma.worldMember.findUniqueOrThrow({ where: { userId_worldId: { userId: people.late, worldId: worldA } } });
+
+    expect((await as('owner', worldMemberRoute.PATCH, { id: worldA, memberId: row.id }, { tags: ['member'] })).status).toBe(400);
+    expect((await as('owner', worldMemberRoute.DELETE, { id: worldA, memberId: row.id })).status).toBe(400);
+    expect((await as('late', leaveWorldRoute.DELETE, { id: worldA })).status).toBe(400);
+    const given = await prisma.universeMemberRole.findFirstOrThrow({ where: { roleId: boss.id } });
+    expect(given.allWorlds).toBe(true);
+    expect(await tagsOf('late', worldA)).toContain(boss.key);
+    await prisma.role.delete({ where: { id: boss.id } });
   });
 
   it('removes someone only from below, and only with the permission everywhere they are', async () => {
