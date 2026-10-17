@@ -174,6 +174,57 @@ export async function accessFor(
   });
 }
 
+/**
+ * The access of one person to several universes at once: one query for the universes and their worlds, one for the
+ * Everyone and Member roles, one for their memberships and roles, however many universes there are. Universes that
+ * don't exist are left out of the map.
+ */
+export async function accessForMany(
+  db: Db,
+  universeIds: string[],
+  user: { id: string; isSuperAdmin?: boolean },
+): Promise<Map<string, Access>> {
+  const result = new Map<string, Access>();
+  if (universeIds.length === 0) return result;
+  const [universes, base, memberships] = await Promise.all([
+    db.universe.findMany({
+      where: { id: { in: universeIds } },
+      select: { id: true, ownerId: true, worlds: { select: { id: true }, orderBy: { createdAt: 'asc' } } },
+    }),
+    db.role.findMany({ where: { universeId: { in: universeIds }, key: { in: [EVERYONE_KEY, MEMBER_KEY] } }, select: { universeId: true, key: true, permissions: true } }),
+    db.universeMember.findMany({
+      where: { universeId: { in: universeIds }, userId: user.id },
+      include: { roles: { include: { role: { select: { key: true, position: true, permissions: true } } } } },
+    }),
+  ]);
+  for (const universe of universes) {
+    const permissionsOf = (key: string) =>
+      parsePermissions(base.find((role) => role.universeId === universe.id && role.key === key)?.permissions ?? 0) ?? ZERO;
+    const membership = memberships.find((row) => row.universeId === universe.id);
+    const isOwner = universe.ownerId === user.id;
+    result.set(
+      universe.id,
+      computeAccess({
+        universeId: universe.id,
+        worldIds: universe.worlds.map((world) => world.id),
+        full: isOwner || !!user.isSuperAdmin,
+        isOwner,
+        everyone: permissionsOf(EVERYONE_KEY),
+        member: permissionsOf(MEMBER_KEY),
+        membership: membership ? { allWorlds: membership.allWorlds, worldIds: membership.worldIds } : null,
+        roles: (membership?.roles ?? []).map((given) => ({
+          key: given.role.key,
+          position: given.role.position,
+          permissions: parsePermissions(given.role.permissions) ?? ZERO,
+          allWorlds: given.allWorlds,
+          worldIds: given.worldIds,
+        })),
+      }),
+    );
+  }
+  return result;
+}
+
 /** A universe's roles, highest first, ready for JSON (the permission number as a decimal string). */
 export function roleForJson(role: {
   id: string;

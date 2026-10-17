@@ -5,16 +5,16 @@ jest.mock('@/lib/db', () => ({
     world: { findMany: jest.fn() },
     universe: { findMany: jest.fn() },
     friendship: { findUnique: jest.fn() },
-    roomAccess: { findFirst: jest.fn() },
+    roomAccess: { findMany: jest.fn() },
   },
 }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
 jest.mock('@/lib/system-user', () => ({ hiddenSystemOwnerId: jest.fn().mockResolvedValue(null), notSystemWorld: () => ({}) }));
-jest.mock('@/lib/role-access', () => ({ ...jest.requireActual('@/lib/role-access'), accessFor: jest.fn() }));
+jest.mock('@/lib/role-access', () => ({ ...jest.requireActual('@/lib/role-access'), accessForMany: jest.fn() }));
 
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
-import { accessFor } from '@/lib/role-access';
+import { accessForMany } from '@/lib/role-access';
 import { GET } from '@/app/api/admin/users/[id]/worlds/route';
 
 const db = prisma as unknown as Record<string, Record<string, jest.Mock>>;
@@ -37,12 +37,12 @@ beforeEach(() => {
   db.world.findMany.mockResolvedValue([]);
   db.universe.findMany.mockResolvedValue([{ id: 'u1', name: 'BAWES' }, { id: 'u2', name: 'Other' }]);
   db.friendship.findUnique.mockResolvedValue(null);
-  db.roomAccess.findFirst.mockResolvedValue(null);
-  (accessFor as jest.Mock).mockResolvedValue(holding('owner'));
+  db.roomAccess.findMany.mockResolvedValue([]);
+  (accessForMany as jest.Mock).mockImplementation(async (_db: unknown, ids: string[]) => new Map(ids.map((id) => [id, holding('owner')])));
 });
 
 it('offers the universes where you may invite people, and only to people not in them yet', async () => {
-  (accessFor as jest.Mock).mockImplementation(async (_db: unknown, universeId: string) => (universeId === 'u1' ? holding(['hq']) : holding('none')));
+  (accessForMany as jest.Mock).mockImplementation(async (_db: unknown, ids: string[]) => new Map(ids.map((id) => [id, id === 'u1' ? holding(['hq']) : holding('none')])));
   const body = await (await call()).json();
   expect(body.universes).toEqual([{ id: 'u1', name: 'BAWES', visit: null }]);
   expect(body.friend).toBe(false);
@@ -70,13 +70,29 @@ it('offers every universe to a super admin, who may invite everywhere', async ()
 
 it('says whether they are your friend and when and where they last came into each universe, for the line under their name', async () => {
   db.friendship.findUnique.mockResolvedValue({ status: 'accepted' });
-  db.roomAccess.findFirst.mockResolvedValue({ accessedAt: new Date('2026-10-16T10:00:00Z'), room: { name: 'Lobby' }, world: { name: 'HQ' } });
+  db.roomAccess.findMany.mockResolvedValue([{ universeId: 'u1', accessedAt: new Date('2026-10-16T10:00:00Z'), room: { name: 'Lobby' }, world: { name: 'HQ' } }]);
   const body = await (await call()).json();
   expect(body.friend).toBe(true);
   expect(body.universes[0].visit).toEqual({ at: '2026-10-16T10:00:00.000Z', room: { name: 'Lobby' }, world: { name: 'HQ' } });
-  expect(db.roomAccess.findFirst.mock.calls[0][0].where).toEqual({ universeId: 'u1', userId: 'person' });
+  expect(db.roomAccess.findMany.mock.calls[0][0].where).toEqual({ universeId: { in: ['u1', 'u2'] }, userId: 'person' });
   // A request that is still pending is not a friend
   db.friendship.findUnique.mockResolvedValue({ status: 'pending' });
   expect((await (await call()).json()).friend).toBe(false);
 });
 
+
+it('asks for access and for visits once, however many universes there are', async () => {
+  db.universe.findMany.mockResolvedValue(Array.from({ length: 30 }, (_, n) => ({ id: `u${n}`, name: `Universe ${n}` })));
+  const body = await (await call()).json();
+  expect(body.universes).toHaveLength(30);
+  expect(accessForMany).toHaveBeenCalledTimes(1);
+  expect(db.roomAccess.findMany).toHaveBeenCalledTimes(1);
+  // Newest first, one row for each universe
+  expect(db.roomAccess.findMany.mock.calls[0][0]).toMatchObject({ orderBy: { accessedAt: 'desc' }, distinct: ['universeId'] });
+});
+
+it('asks for no visits when no universe passes', async () => {
+  (accessForMany as jest.Mock).mockImplementation(async (_db: unknown, ids: string[]) => new Map(ids.map((id) => [id, holding('none')])));
+  expect((await (await call()).json()).universes).toEqual([]);
+  expect(db.roomAccess.findMany).not.toHaveBeenCalled();
+});
