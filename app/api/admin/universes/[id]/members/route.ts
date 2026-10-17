@@ -7,7 +7,8 @@ import { failed, managesPeople, memberForJson, memberInclude, universeContext } 
 
 const PAGE = 50;
 
-// GET /api/admin/universes/[id]/members?q=&roleId=&cursor= - Everyone who joined the universe, newest first
+// GET /api/admin/universes/[id]/members?q=&roleId=&worldId=&cursor= - Everyone who joined the universe, newest first.
+// `worldId` keeps the people whose membership or a role reaches that world.
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
@@ -20,6 +21,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 
     const search = request.nextUrl.searchParams.get('q')?.trim().slice(0, 100) ?? '';
     const roleId = request.nextUrl.searchParams.get('roleId');
+    const worldId = request.nextUrl.searchParams.get('worldId');
     const cursor = request.nextUrl.searchParams.get('cursor');
     const where: Prisma.UniverseMemberWhereInput = {
       universeId: id,
@@ -39,27 +41,53 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         ],
       },
       ...(roleId ? { roles: { some: { roleId } } } : {}),
+      ...(worldId
+        ? {
+            OR: [
+              { allWorlds: true },
+              { worldIds: { has: worldId } },
+              { roles: { some: { OR: [{ allWorlds: true }, { worldIds: { has: worldId } }] } } },
+            ],
+          }
+        : {}),
     };
 
-    const [total, rows, owner] = await Promise.all([
+    const [total, rows, owner, ownerMember, created] = await Promise.all([
       prisma.universeMember.count({ where }),
       prisma.universeMember.findMany({
         where,
         include: memberInclude,
-        orderBy: [{ joinedAt: 'desc' }, { id: 'desc' }],
+        // `order=roles` is the row of faces: people with roles come first, so the highest ranks are among them
+        orderBy: [...(request.nextUrl.searchParams.get('order') === 'roles' ? [{ roles: { _count: 'desc' as const } }] : []), { joinedAt: 'desc' }, { id: 'desc' }],
         take: PAGE + 1,
         ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
       }),
-      prisma.user.findUnique({ where: { id: universe.ownerId }, select: { id: true, name: true } }),
+      prisma.user.findUnique({ where: { id: universe.ownerId }, select: { id: true, name: true, email: true } }),
+      prisma.universeMember.findUnique({
+        where: { universeId_userId: { universeId: id, userId: universe.ownerId } },
+        select: { joinedAt: true },
+      }),
+      prisma.universe.findUnique({ where: { id }, select: { createdAt: true } }),
     ]);
     const page = rows.slice(0, PAGE);
     const members = page.map((member) => memberForJson(member, universe.ownerId, showEmail));
+    const [ownerWithWoka] = owner ? await withWokas([{ userId: owner.id }]) : [];
 
     return NextResponse.json({
       members: await withWokas(members),
       total,
-      // The owner has everything whether or not they joined, so the screens show them first
-      owner: owner ? { userId: owner.id, name: owner.name } : null,
+      // The owner has everything whether or not they joined, so the screens show them first. `joined` says whether
+      // they are also among `members` (and `total`).
+      owner: owner
+        ? {
+            userId: owner.id,
+            name: owner.name,
+            email: showEmail ? owner.email : null,
+            woka: ownerWithWoka?.woka ?? [],
+            joinedAt: ownerMember?.joinedAt ?? created?.createdAt ?? null,
+            joined: !!ownerMember,
+          }
+        : null,
       nextCursor: rows.length > PAGE ? page[page.length - 1].id : null,
     });
   } catch (error) {

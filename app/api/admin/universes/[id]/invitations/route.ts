@@ -2,8 +2,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { prisma } from '@/lib/db';
 import { EVERYONE_KEY, MEMBER_KEY, coversWorld } from '@/lib/roles';
-import { allows, isAdministratorRole, ranksAbove, reachOf } from '@/lib/role-access';
+import { allows, isAdministratorRole, ranksAbove, reachOf, worldsAllowing } from '@/lib/role-access';
 import { SYSTEM_USER_EMAIL } from '@/lib/system-user';
+import { withWokas } from '@/lib/woka-avatar';
 import { badRequest, checkScope, failed, needs, scopeSchema, universeContext } from '@/lib/universe-route';
 
 const inviteSchema = z.object({
@@ -98,5 +99,44 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       return badRequest('They already have an invitation to this universe');
     }
     return failed(error, 'invite');
+  }
+}
+
+// GET /api/admin/universes/[id]/invitations - Invitations still waiting for an answer, newest first. Only for people who
+// may invite and remove people somewhere in the universe; for everyone else the list is empty.
+export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  try {
+    const { id } = await params;
+    const context = await universeContext(request, id);
+    if (!context.ok) return context.response;
+    const { access } = context;
+
+    const where = worldsAllowing(access, 'INVITE_AND_REMOVE');
+    if (where !== 'all' && where.length === 0) return NextResponse.json({ invitations: [], canCancel: false });
+
+    const rows = await prisma.membershipInvitation.findMany({
+      where: { status: 'pending', OR: [{ universeId: id }, { world: { universeId: id } }] },
+      include: {
+        invitedUser: { select: { id: true, name: true, email: true } },
+        invitedBy: { select: { id: true, name: true } },
+      },
+      orderBy: { invitedAt: 'desc' },
+      take: 200,
+    });
+    const invitations = rows.map((row) => ({
+      id: row.id,
+      userId: row.invitedUser.id,
+      name: row.invitedUser.name,
+      email: row.invitedUser.email,
+      invitedBy: { userId: row.invitedBy.id, name: row.invitedBy.name },
+      invitedAt: row.invitedAt,
+      roleIds: row.roleIds,
+      // An invitation from before roles names one world and a tag: they join as a Member there
+      worlds: row.universeId ? { allWorlds: row.allWorlds, worldIds: row.worldIds } : { allWorlds: false, worldIds: [row.worldId] },
+      tags: row.tags,
+    }));
+    return NextResponse.json({ invitations: await withWokas(invitations), canCancel: true });
+  } catch (error) {
+    return failed(error, 'list invitations');
   }
 }
