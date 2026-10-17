@@ -185,7 +185,7 @@ export function RolesListPage() {
         title="Roles & permissions"
         context={<InContext parts={[{ label: universe.name, href: `/admin/universes/${universeId}` }]} />}
         actions={
-          roles.canManageRoles ? (
+          roles.canCreateRoles ? (
             <Button className="h-12 px-6 text-[15px]" onClick={() => setCreating(true)}>
               <Plus aria-hidden="true" />
               Create role
@@ -194,9 +194,11 @@ export function RolesListPage() {
         }
       />
       <p className="-mt-2 max-w-3xl text-sm text-muted-foreground">
-        {roles.canManageRoles
+        {roles.canCreateRoles
           ? 'Give roles on the Members page. Rooms and map areas can open to a role.'
-          : 'Needs Manage roles in every world to create or change roles. Give roles on the Members page.'}
+          : roles.canManageRoles
+            ? 'Needs a role above Editor to create roles. Give roles on the Members page.'
+            : 'Needs Manage roles in every world to create or change roles. Give roles on the Members page.'}
       </p>
 
       <div className="grid grid-cols-1 items-start gap-8 lg:grid-cols-2">
@@ -205,7 +207,7 @@ export function RolesListPage() {
             <EmptyCard
               kind="role"
               title="No roles of your own yet."
-              text={roles.canManageRoles ? 'Create one for a team, a department or a level, then give it to people.' : 'Roles made for this universe show up here.'}
+              text={roles.canCreateRoles ? 'Create one for a team, a department or a level, then give it to people.' : 'Roles made for this universe show up here.'}
             />
           ) : (
             <>

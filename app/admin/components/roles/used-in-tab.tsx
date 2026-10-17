@@ -34,6 +34,14 @@ function mapAreaNotes(areas: UsedIn['reach']['mapAreas']): string[] {
   return notes;
 }
 
+/** The Worlds line: who holds the role may be hidden from the viewer, or held only where they cannot look. */
+function worldsText(reach: UsedIn['reach']): string {
+  if (reach.hidden) return 'Only people who give or manage roles see who has this role';
+  if (reach.worlds.length === 0) return reach.held ? 'Not in any world you can see' : 'None yet: no one has it';
+  const names = reach.worlds.map((world) => world.name).join(', ');
+  return reach.allWorlds ? `Every world: ${names}` : names;
+}
+
 /** Where the role opens doors, and what it reaches. Only what Orbit can read is listed; what it cannot read is said. */
 export function UsedInTab({ role, universeId, universeName }: { role: RoleRow; universeId: string; universeName: string }) {
   const [data, setData] = useState<UsedIn | null>(null);
@@ -102,16 +110,8 @@ export function UsedInTab({ role, universeId, universeName }: { role: RoleRow; u
           <p className="text-sm text-muted-foreground">Worked out from who has it and where.</p>
         </div>
         <dl className="grid gap-4">
-          <Line label="Worlds">
-            {reach.worlds.length === 0
-              ? reach.held
-                ? 'Not in any world you can see'
-                : 'None yet: no one has it'
-              : reach.allWorlds
-                ? `Every world: ${reach.worlds.map((world) => world.name).join(', ')}`
-                : reach.worlds.map((world) => world.name).join(', ')}
-          </Line>
-          <Line label="Rooms">{reach.rooms.length === 0 ? (reach.held ? 'None you can see' : 'None yet') : names(reach.rooms, reach.roomsTotal)}</Line>
+          <Line label="Worlds">{worldsText(reach)}</Line>
+          <Line label="Rooms">{reach.hidden ? 'Not shown, as it depends on who has this role' : reach.rooms.length === 0 ? (reach.held ? 'None you can see' : 'None yet') : names(reach.rooms, reach.roomsTotal)}</Line>
           <Line label="Map areas">
             {areas.areas.length > 0 ? (
               <ul className="grid gap-1" aria-label="Map areas locked to this role">

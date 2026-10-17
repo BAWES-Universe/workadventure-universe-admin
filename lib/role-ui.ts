@@ -33,6 +33,8 @@ export interface RoleRow {
 export interface RolesResponse {
   roles: RoleRow[];
   canManageRoles: boolean;
+  /** Manage roles in every world and a role above Editor: what making a role (or a copy) asks. */
+  canCreateRoles: boolean;
   canGiveRoles: 'all' | string[];
 }
 
@@ -254,6 +256,14 @@ export function customRoles(roles: readonly RoleRow[]): RoleRow[] {
 export function movableRoles(roles: readonly RoleRow[], me: Pick<MeResponse, 'full' | 'highestPosition' | 'canManageRoles'>): RoleRow[] {
   if (!me.canManageRoles) return [];
   return customRoles(roles).filter((role) => me.full || (me.highestPosition !== null && role.position < me.highestPosition));
+}
+
+/**
+ * Whether the viewer sees who holds a role whose badge is hidden: people who change the Roles list or give roles
+ * somewhere (the server's rule for hiding them from everyone else).
+ */
+export function seesHiddenRoles(me: Pick<MeResponse, 'full' | 'canManageRoles' | 'giveWorlds'>): boolean {
+  return me.full || me.canManageRoles || me.giveWorlds === 'all' || me.giveWorlds.length > 0;
 }
 
 /** A role the viewer may give to people: below theirs, and only custom, Admin and Editor can be given. */

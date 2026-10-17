@@ -7,9 +7,11 @@
  *   members-only rooms) and Everyone (the open rooms), and for every other role there is none to list.
  * - Map areas: a map area is locked to roles in its map file (a WAM in map-storage), as read and write tags that are
  *   role keys. Orbit does not keep a copy, but map-storage serves the file, so it is read from there, a few at a
- *   time. A room whose file cannot be read is counted, never guessed.
+ *   time. The file's address is rebuilt from the slugs and the current map-storage address, as the rest of Orbit does
+ *   (the stored one can be stale). A room whose file cannot be read is counted, never guessed.
  */
 import { prisma } from '@/lib/db';
+import { getWamUrl } from '@/lib/map-storage';
 import { canSeeRoom, canSeeWorld } from '@/lib/room-visibility';
 import { keysOf, type PermissionKey } from '@/lib/permissions';
 import { EVERYONE_KEY, MEMBER_KEY, worldsOf, type WorldScope } from '@/lib/roles';
@@ -54,6 +56,8 @@ export interface UsedIn {
   reach: {
     /** Whether anyone holds the role at all. Only a yes or no: the worlds a viewer cannot see are never named or counted. */
     held: boolean;
+    /** The role's badge is off and the viewer neither gives nor manages roles: who holds it is not said, so nothing here is derived from it. */
+    hidden: boolean;
     allWorlds: boolean;
     worlds: { id: string; name: string }[];
     rooms: UsedInRoom[];
@@ -61,7 +65,7 @@ export interface UsedIn {
     mapAreas: {
       status: MapAreasStatus;
       areas: LockedArea[];
-      /** Rooms whose map file could not be read: not on map-storage, or the download failed. */
+      /** Rooms whose map file could not be read: the download failed or it is not on map-storage. */
       unread: number;
       /** Rooms with a map file that were not tried, because only the first MAX_MAPS_READ are read at once. */
       skipped: number;
@@ -95,14 +99,13 @@ export function areasLockedTo(wam: unknown, roleKey: string): { areaName: string
 
 type Fetcher = (url: string, init: { signal: AbortSignal }) => Promise<{ ok: boolean; json: () => Promise<unknown> }>;
 
-/** Map-storage's own address, which is the only place a map file is read from. */
-function mapStorageOrigin(): string | null {
-  const base = process.env.PUBLIC_MAP_STORAGE_URL;
-  if (!base) return null;
+/** The domain a map is filed under in map-storage: the same rule as the room and map routes. */
+function playDomain(): string {
+  if (process.env.DEFAULT_DOMAIN) return process.env.DEFAULT_DOMAIN;
   try {
-    return new URL(base).origin;
+    return new URL(process.env.PLAY_URL ?? '').hostname;
   } catch {
-    return null;
+    return 'workadventure.localhost';
   }
 }
 
@@ -123,16 +126,19 @@ async function readWam(url: string, fetcher: Fetcher): Promise<unknown | undefin
 interface RoomRecord {
   id: string;
   name: string;
+  slug: string;
   isPublic: boolean;
   wamUrl: string | null;
-  world: { id: string; name: string; isPublic: boolean; universe: { isPublic: boolean; ownerId: string } };
+  world: { id: string; name: string; slug: string; isPublic: boolean; universe: { isPublic: boolean; ownerId: string; slug: string } };
 }
 
 export interface UsedInInput {
   universeId: string;
-  role: { id: string; key: string; permissions: bigint };
+  role: { id: string; key: string; permissions: bigint; showBadge?: boolean };
   /** Who is looking: only the rooms they can see are named. */
   viewer: { id: string; isSuperAdmin: boolean };
+  /** They give or manage roles, so they see who holds a role whose badge is off (the server's rule, `seesHiddenRoles`). */
+  seesHidden?: boolean;
   fetcher?: Fetcher;
 }
 
@@ -155,9 +161,10 @@ export async function computeUsedIn(input: UsedInInput): Promise<UsedIn> {
       select: {
         id: true,
         name: true,
+        slug: true,
         isPublic: true,
         wamUrl: true,
-        world: { select: { id: true, name: true, isPublic: true, universe: { select: { isPublic: true, ownerId: true } } } },
+        world: { select: { id: true, name: true, slug: true, isPublic: true, universe: { select: { isPublic: true, ownerId: true, slug: true } } } },
       },
       orderBy: [{ world: { createdAt: 'asc' } }, { createdAt: 'asc' }],
     }),
@@ -169,8 +176,12 @@ export async function computeUsedIn(input: UsedInInput): Promise<UsedIn> {
   const openToEveryone = (room: RoomRecord) => room.isPublic && room.world.isPublic && room.world.universe.isPublic;
 
   // Where the role works: Everyone reaches every world; anyone else, the worlds its holders have it in
+  // A hidden role does not say who holds it, so what follows from that (worlds, rooms) is left out, not read
+  const hidden = role.key !== EVERYONE_KEY && role.key !== MEMBER_KEY && role.showBadge === false && !input.seesHidden;
   let scopes: WorldScope[];
-  if (role.key === EVERYONE_KEY) {
+  if (hidden) {
+    scopes = [];
+  } else if (role.key === EVERYONE_KEY) {
     scopes = [{ allWorlds: true, worldIds: [] }];
   } else if (role.key === MEMBER_KEY) {
     scopes = await prisma.universeMember.findMany({ where: { universeId }, select: { allWorlds: true, worldIds: true } });
@@ -200,15 +211,17 @@ export async function computeUsedIn(input: UsedInInput): Promise<UsedIn> {
   }
 
   // Map areas locked to the role: read the map files, a few at a time
-  const origin = mapStorageOrigin();
+  const storage = process.env.PUBLIC_MAP_STORAGE_URL;
   const areas: LockedArea[] = [];
   let status: MapAreasStatus = 'read';
   let unread = 0;
   let skipped = 0;
   let read = 0;
-  if (!origin) {
+  if (!storage) {
     status = 'not_configured';
   } else {
+    const domain = playDomain();
+    // A room with a map file has a stored address; the address that is read is rebuilt from where the room is now
     const withMap = visible.filter((room) => room.wamUrl);
     const batch = withMap.slice(0, MAX_MAPS_READ);
     skipped = withMap.length - batch.length;
@@ -216,13 +229,8 @@ export async function computeUsedIn(input: UsedInInput): Promise<UsedIn> {
     const worker = async () => {
       while (next < batch.length) {
         const room = batch[next++];
-        let url: URL | null = null;
-        try {
-          url = new URL(room.wamUrl as string);
-        } catch {
-          url = null;
-        }
-        const wam = url && url.origin === origin ? await readWam(url.toString(), fetcher) : undefined;
+        const url = getWamUrl(domain, room.world.universe.slug, room.world.slug, room.slug, storage);
+        const wam = await readWam(url, fetcher);
         if (wam === undefined) {
           unread += 1;
           continue;
@@ -241,6 +249,7 @@ export async function computeUsedIn(input: UsedInInput): Promise<UsedIn> {
     doors: { basis, rooms: doorRooms.slice(0, LIST_LIMIT).map(roomRef), roomsTotal: doorRooms.length },
     reach: {
       held,
+      hidden,
       allWorlds,
       worlds: reachedWorlds,
       rooms: reachRooms.slice(0, LIST_LIMIT).map(roomRef),

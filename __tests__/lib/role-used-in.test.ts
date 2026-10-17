@@ -41,13 +41,14 @@ describe('areasLockedTo', () => {
   });
 });
 
-const universe = { isPublic: true, ownerId: 'owner' };
+const universe = { isPublic: true, ownerId: 'owner', slug: 'u' };
 const room = (id: string, name: string, worldId: string, isPublic: boolean, wamUrl: string | null) => ({
   id,
   name,
+  slug: id,
   isPublic,
   wamUrl,
-  world: { id: worldId, name: worldId.toUpperCase(), isPublic: true, universe },
+  world: { id: worldId, name: worldId.toUpperCase(), slug: worldId, isPublic: true, universe },
 });
 
 const ROLE = { id: 'role-1', key: 'accountant', permissions: fromKeys(['GO_LIVE']) };
@@ -56,6 +57,7 @@ const VIEWER = { id: 'viewer', isSuperAdmin: false };
 beforeEach(() => {
   jest.resetAllMocks();
   process.env.PUBLIC_MAP_STORAGE_URL = 'https://maps.example.test';
+  process.env.DEFAULT_DOMAIN = 'd';
   worldFindMany.mockResolvedValue([
     { id: 'hq', name: 'HQ', isPublic: true, universe },
     { id: 'campus', name: 'Campus', isPublic: true, universe },
@@ -72,6 +74,7 @@ beforeEach(() => {
 
 afterAll(() => {
   delete process.env.PUBLIC_MAP_STORAGE_URL;
+  delete process.env.DEFAULT_DOMAIN;
 });
 
 const answers = (files: Record<string, unknown>) =>
@@ -120,12 +123,25 @@ describe('computeUsedIn', () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
-  it('only reads files from map-storage itself', async () => {
-    roomFindMany.mockResolvedValue([room('lobby', 'Lobby', 'hq', true, 'https://elsewhere.example.test/map.wam')]);
-    const fetcher = jest.fn();
+  it('rebuilds each map address from the slugs and the current map-storage address, not the stored one', async () => {
+    // The stored address points at a map-storage that has since moved
+    roomFindMany.mockResolvedValue([room('lobby', 'Lobby', 'hq', true, 'https://old-storage.example.test/d/u/hq/lobby/map.wam')]);
+    const fetcher = answers({ 'https://maps.example.test/d/u/hq/lobby/map.wam': wam([locked(['accountant'], [])], 'Reception') });
     const used = await computeUsedIn({ universeId: 'u', role: ROLE, viewer: VIEWER, fetcher });
-    expect(fetcher).not.toHaveBeenCalled();
-    expect(used.reach.mapAreas.status).toBe('partial');
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(fetcher.mock.calls[0][0]).toBe('https://maps.example.test/d/u/hq/lobby/map.wam');
+    expect(used.reach.mapAreas).toMatchObject({ status: 'read', read: 1, unread: 0 });
+    expect(used.reach.mapAreas.areas.map((area) => area.areaName)).toEqual(['Reception']);
+  });
+
+  it('files maps under the play domain the way the room routes do', async () => {
+    delete process.env.DEFAULT_DOMAIN;
+    process.env.PLAY_URL = 'https://play.example.test/';
+    roomFindMany.mockResolvedValue([room('lobby', 'Lobby', 'hq', true, 'stored')]);
+    const fetcher = answers({});
+    await computeUsedIn({ universeId: 'u', role: ROLE, viewer: VIEWER, fetcher });
+    expect(fetcher.mock.calls[0][0]).toBe('https://maps.example.test/play.example.test/u/hq/lobby/map.wam');
+    delete process.env.PLAY_URL;
   });
 
   it('treats a map that fails to download as unread', async () => {
@@ -201,23 +217,35 @@ describe('computeUsedIn', () => {
 
   it('counts maps past the cap apart from maps that could not be read', async () => {
     const many = Array.from({ length: MAX_MAPS_READ + 3 }, (_, index) => room(`r${index}`, `Room ${index}`, 'hq', true, `https://maps.example.test/d/u/hq/r${index}/map.wam`));
-    // One of the first maps is somewhere else, so it is tried and cannot be read
-    many[0] = room('r0', 'Room 0', 'hq', true, 'https://elsewhere.example.test/map.wam');
     roomFindMany.mockResolvedValue(many);
-    const fetcher = jest.fn(async () => ({ ok: true, json: async () => wam([]) }));
+    // One of the first maps is not on map-storage, so it is tried and cannot be read
+    const fetcher = jest.fn(async (url: string) => ({ ok: !url.endsWith('/r0/map.wam'), json: async () => wam([]) }));
     const used = await computeUsedIn({ universeId: 'u', role: ROLE, viewer: VIEWER, fetcher });
     const areas = used.reach.mapAreas;
     expect(areas.status).toBe('partial');
     expect(areas.skipped).toBe(3);
     expect(areas.unread).toBe(1);
     expect(areas.read).toBe(MAX_MAPS_READ - 1);
-    expect(fetcher).toHaveBeenCalledTimes(MAX_MAPS_READ - 1);
+    expect(fetcher).toHaveBeenCalledTimes(MAX_MAPS_READ);
   });
 
   it('reports only the cap when every map it tried was read', async () => {
     roomFindMany.mockResolvedValue(Array.from({ length: MAX_MAPS_READ + 2 }, (_, index) => room(`r${index}`, `Room ${index}`, 'hq', true, `https://maps.example.test/d/u/hq/r${index}/map.wam`)));
     const used = await computeUsedIn({ universeId: 'u', role: ROLE, viewer: VIEWER, fetcher: jest.fn(async () => ({ ok: true, json: async () => wam([]) })) });
     expect(used.reach.mapAreas).toMatchObject({ status: 'partial', skipped: 2, unread: 0, read: MAX_MAPS_READ });
+  });
+
+  it('says nothing about who holds a role whose badge is off to someone who neither gives nor manages roles', async () => {
+    memberRoleFindMany.mockResolvedValue([{ allWorlds: true, worldIds: [] }]);
+    const hiddenRole = { ...ROLE, showBadge: false };
+    const hidden = await computeUsedIn({ universeId: 'u', role: hiddenRole, viewer: VIEWER, seesHidden: false, fetcher: answers({}) });
+    expect(hidden.reach).toMatchObject({ hidden: true, held: false, allWorlds: false, worlds: [], rooms: [], roomsTotal: 0 });
+    expect(memberRoleFindMany).not.toHaveBeenCalled();
+    // The people who give or manage roles see it as usual, and so does anyone when the badge is on
+    const manager = await computeUsedIn({ universeId: 'u', role: hiddenRole, viewer: VIEWER, seesHidden: true, fetcher: answers({}) });
+    expect(manager.reach).toMatchObject({ hidden: false, held: true });
+    const shown = await computeUsedIn({ universeId: 'u', role: { ...ROLE, showBadge: true }, viewer: VIEWER, seesHidden: false, fetcher: answers({}) });
+    expect(shown.reach).toMatchObject({ hidden: false, held: true });
   });
 
   it('lists every permission for a role with Administrator', async () => {

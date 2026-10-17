@@ -8,6 +8,7 @@ import {
   firstMissing,
   freshColour,
   movableRoles,
+  seesHiddenRoles,
   permissionLockReason,
   permissionSummary,
   roleLine,
@@ -155,5 +156,18 @@ describe('where someone has a role', () => {
     expect(scopeLabel({ allWorlds: true, worldIds: [] }, worlds)).toBe('Everywhere');
     expect(scopeLabel({ allWorlds: false, worldIds: ['hq'] }, worlds)).toBe('HQ only');
     expect(scopeLabel({ allWorlds: false, worldIds: ['hq', 'campus'] }, worlds)).toBe('HQ, Campus');
+  });
+});
+
+describe('who sees the holders of a role whose badge is off', () => {
+  const base = { full: false, canManageRoles: false, giveWorlds: [] as 'all' | string[] };
+  it('is anyone who manages roles or gives them somewhere, and the owner', () => {
+    expect(seesHiddenRoles({ ...base, full: true })).toBe(true);
+    expect(seesHiddenRoles({ ...base, canManageRoles: true })).toBe(true);
+    expect(seesHiddenRoles({ ...base, giveWorlds: 'all' })).toBe(true);
+    expect(seesHiddenRoles({ ...base, giveWorlds: ['hq'] })).toBe(true);
+  });
+  it('is not anyone else', () => {
+    expect(seesHiddenRoles(base)).toBe(false);
   });
 });

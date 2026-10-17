@@ -8,7 +8,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useToast } from '@/components/ui/toast';
 import { useReplacePage } from '@/app/admin/orbit-frame-context';
 import { toWire } from '@/lib/permissions';
-import { changedCount, permissionsOf, roleLockReason, viewerFrom } from '@/lib/role-ui';
+import { changedCount, firstMissing, permissionsOf, roleLockReason, viewerFrom } from '@/lib/role-ui';
 import { EmptyCard, InContext, LoadError, LoadingRows, PageHeader } from '../ds';
 import { DisplayTab, type DisplayDraft } from './display-tab';
 import { MembersTab } from './members-tab';
@@ -184,7 +184,8 @@ export function RoleEditPage() {
         { value: 'members', label: 'Members' },
         { value: 'used-in', label: 'Used in' },
       ];
-  const showDuplicate = roles.canManageRoles && !isAdmin && !isEveryone;
+  // A copy is made like any new role: it needs the right to make one, and every permission it carries
+  const showDuplicate = roles.canCreateRoles && !isAdmin && !isEveryone && firstMissing(viewer, permissionsOf(role)) === null;
 
   return (
     <div className="grid min-w-0 grid-cols-1 gap-6">

@@ -1,7 +1,7 @@
 /** @jest-environment jsdom */
 
 import React from 'react';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { fromKeys, toWire } from '@/lib/permissions';
 import { RolesListPage } from '@/app/admin/components/roles/roles-list';
 import { RoleEditPage } from '@/app/admin/components/roles/role-editor';
@@ -78,13 +78,14 @@ const LEAD_ME: MeResponse = {
 let me = OWNER_ME;
 let roles = ROLES;
 let canManageRoles = true;
+let canCreateRoles = true;
 
 function serve(extra?: (url: string, init?: RequestInit) => Promise<Response> | undefined) {
   fetchMock.mockImplementation((url: string, init?: RequestInit) => {
     const special = extra?.(url, init);
     if (special) return special;
     if (url === '/api/admin/universes/u1') return json({ id: 'u1', name: 'BAWES', worlds: [{ id: 'hq', name: 'HQ' }, { id: 'campus', name: 'Campus' }] });
-    if (url === '/api/admin/universes/u1/roles') return json({ roles, canManageRoles, canGiveRoles: 'all' });
+    if (url === '/api/admin/universes/u1/roles') return json({ roles, canManageRoles, canCreateRoles: canManageRoles && canCreateRoles, canGiveRoles: 'all' });
     if (url === '/api/admin/universes/u1/me') return json(me);
     if (url.endsWith('/used-in')) {
       return json({
@@ -106,6 +107,7 @@ beforeEach(() => {
   me = OWNER_ME;
   roles = ROLES;
   canManageRoles = true;
+  canCreateRoles = true;
 });
 
 describe('Roles & permissions list', () => {
@@ -204,6 +206,16 @@ describe('Roles & permissions list', () => {
     expect((within(sheet).getByRole('radio', { name: /Blank/ }) as HTMLButtonElement).disabled).toBe(false);
     fireEvent.click(within(sheet).getByRole('radio', { name: /Copy a role/ }));
     expect(within(sheet).getByRole('button', { name: 'Accountant' })).toBeTruthy();
+  });
+
+  it('hides Create role and says what is needed when you manage roles but only from Editor or Member', async () => {
+    canCreateRoles = false;
+    me = { ...LEAD_ME, highestPosition: 2 };
+    serve();
+    render(<RolesListPage />);
+    await screen.findByText('Your roles');
+    expect(screen.queryByRole('button', { name: 'Create role' })).toBeNull();
+    expect(screen.getByText(/Needs a role above Editor to create roles/)).toBeTruthy();
   });
 
   it('hides Create role and says what is needed when you cannot manage roles', async () => {
@@ -345,6 +357,38 @@ describe('a role page', () => {
     open('acc');
     await screen.findByRole('heading', { name: 'People' });
     expect(screen.getByRole('searchbox', { name: 'Search permissions' })).toBeTruthy();
+  });
+
+  it('offers Duplicate only to someone the server would let make a role, and who has every permission it carries', async () => {
+    canCreateRoles = false;
+    serve();
+    open('acc');
+    await screen.findByRole('heading', { name: 'People' });
+    expect(screen.queryByRole('button', { name: 'Duplicate' })).toBeNull();
+  });
+
+  it('keeps Duplicate off a role that carries a permission the viewer lacks', async () => {
+    me = LEAD_ME;
+    serve();
+    open('mod');
+    await screen.findByRole('heading', { name: 'People' });
+    expect(screen.queryByRole('button', { name: 'Duplicate' })).toBeNull();
+    cleanup();
+    open('acc');
+    expect(await screen.findByRole('button', { name: 'Duplicate' })).toBeTruthy();
+  });
+
+  it('says who has a role with its badge off only to people who give or manage roles', async () => {
+    roles = ROLES.map((item) => (item.id === 'acc' ? { ...item, showBadge: false, people: null } : item));
+    me = { ...LEAD_ME, full: false, canManageRoles: false, giveWorlds: [], everywhere: toWire(BigInt(0)) };
+    canManageRoles = false;
+    serve();
+    open('acc');
+    fireEvent.mouseDown(await screen.findByRole('tab', { name: 'Members' }), { button: 0 });
+    fireEvent.click(screen.getByRole('tab', { name: 'Members' }));
+    expect(await screen.findByText('Only people who give or manage roles see who has this role.')).toBeTruthy();
+    expect(screen.queryByText('No one has it yet.')).toBeNull();
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/members?'))).toBe(false);
   });
 
   it('turns the badge off from Display as a change, and saves it as showBadge', async () => {

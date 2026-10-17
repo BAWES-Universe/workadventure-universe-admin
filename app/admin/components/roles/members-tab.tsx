@@ -13,7 +13,7 @@ import { LoadError, LoadingRows } from '../ds';
 import { PersonIcon } from '../profile-card';
 import { Panel } from './role-bits';
 import { SHEET_CLASS } from './create-role-sheet';
-import { canGiveRole, permissionsOf, scopeLabel, type MeResponse, type RoleRow, type WorldRef } from '@/lib/role-ui';
+import { canGiveRole, permissionsOf, scopeLabel, seesHiddenRoles, type MeResponse, type RoleRow, type WorldRef } from '@/lib/role-ui';
 
 interface MemberRow {
   userId: string;
@@ -57,6 +57,8 @@ export function MembersTab({
   const [giving, setGiving] = useState(false);
   const isMember = role.builtIn && role.key === 'member';
   const mayGive = canGiveRole(role, me);
+  // A role with its badge off doesn't say who has it to people who neither give nor manage roles
+  const hiddenFromYou = !isMember && !role.showBadge && !seesHiddenRoles(me);
 
   const load = useCallback(async () => {
     setFailed(false);
@@ -68,10 +70,19 @@ export function MembersTab({
   }, [universeId, role.id]);
 
   useEffect(() => {
-    if (!isMember) void load();
-  }, [isMember, load]);
+    if (!isMember && !hiddenFromYou) void load();
+  }, [isMember, hiddenFromYou, load]);
 
   const peopleHref = `/admin/universes/${universeId}/members`;
+
+  if (hiddenFromYou) {
+    return (
+      <Panel className="grid gap-3 p-5">
+        <h2 className="orbit-display text-lg font-bold">Who has it</h2>
+        <p className="text-sm text-muted-foreground">Only people who give or manage roles see who has this role.</p>
+      </Panel>
+    );
+  }
 
   if (isMember) {
     return (
