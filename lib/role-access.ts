@@ -80,10 +80,13 @@ export type Reach = { allWorlds: true } | { allWorlds: false; worldIds: string[]
 export function allows(access: Access, key: PermissionKey, reach: Reach): boolean {
   if (access.full) return true;
   if (reach.allWorlds) return has(access.everywhere, key);
-  return reach.worldIds.every((worldId) => {
-    const permissions = access.perWorld.get(worldId);
-    return permissions !== undefined && has(permissions, key);
-  });
+  // A deleted world stays listed in old scopes; it no longer exists, so it asks for nothing. Something that reaches
+  // only deleted worlds still needs the permission in some world.
+  const existing = reach.worldIds.filter((worldId) => access.perWorld.has(worldId));
+  if (existing.length === 0 && reach.worldIds.length > 0) {
+    return [...access.perWorld.values()].some((permissions) => has(permissions, key));
+  }
+  return existing.every((worldId) => has(access.perWorld.get(worldId)!, key));
 }
 
 /** The worlds where they have a permission: 'all' when it works in every world. */
