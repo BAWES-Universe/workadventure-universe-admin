@@ -48,6 +48,17 @@ describe('computeAccess', () => {
     expect(worldsAllowing(access, 'GIVE_ROLES')).toEqual(['a']);
   });
 
+  it('ignores worlds that were deleted, but still needs the permission somewhere', () => {
+    const access = computeAccess({
+      ...base,
+      roles: [{ key: 'mod', position: 20, permissions: flag('INVITE_AND_REMOVE'), allWorlds: false, worldIds: ['a'] }],
+    });
+    expect(allows(access, 'INVITE_AND_REMOVE', { allWorlds: false, worldIds: ['a', 'gone'] })).toBe(true);
+    expect(allows(access, 'INVITE_AND_REMOVE', { allWorlds: false, worldIds: ['gone'] })).toBe(true);
+    expect(allows(access, 'GIVE_ROLES', { allWorlds: false, worldIds: ['gone'] })).toBe(false);
+    expect(allows(access, 'INVITE_AND_REMOVE', { allWorlds: false, worldIds: ['b', 'gone'] })).toBe(false);
+  });
+
   it('counts Everyone and an all-worlds Member everywhere', () => {
     const access = computeAccess({ ...base, everyone: flag('GO_LIVE'), member: flag('SEND_MESSAGES') });
     expect(allows(access, 'GO_LIVE', { allWorlds: true })).toBe(true);
