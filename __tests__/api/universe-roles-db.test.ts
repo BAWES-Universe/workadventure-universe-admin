@@ -99,11 +99,12 @@ run('universe roles and people routes (real database)', () => {
     expect(status).toBe(404);
   });
 
-  it('lets an admin create a role at the bottom of the custom roles, never with a permission they lack', async () => {
+  it('puts a new role just below its creator, never with a permission they lack', async () => {
     const created = await as('admin', rolesRoute.POST, {}, { name: 'Event Host', color: '#22c55e', permissions: flag('GO_LIVE').toString() });
     expect(created.status).toBe(201);
     expect(created.body.role.key).toBe('event-host');
-    expect(created.body.role.position).toBe(11);
+    // Below Admin: the top of the custom roles
+    expect(created.body.role.position).toBe(21);
     role.host = created.body.role.id;
 
     const refused = await as('admin', rolesRoute.POST, {}, { name: 'Boss', color: '#22c55e', permissions: flag('ADMINISTRATOR').toString() });
@@ -151,9 +152,9 @@ run('universe roles and people routes (real database)', () => {
     const custom = await prisma.role.findMany({ where: { universeId, builtIn: false }, orderBy: { position: 'desc' } });
     expect((await as('mod', orderRoute.PUT, {}, { roleIds: custom.map((r) => r.id) })).status).toBe(403);
 
-    // Moderator stays on top; the two below it swap
-    const [top, ...rest] = custom.map((r) => r.id);
-    const wanted = [top, ...rest.reverse()];
+    // The top two swap: Moderator goes above Event Host
+    const [first, second, ...rest] = custom.map((r) => r.id);
+    const wanted = [second, first, ...rest];
     expect((await as('admin', orderRoute.PUT, {}, { roleIds: wanted })).status).toBe(200);
     const after = await prisma.role.findMany({ where: { universeId, builtIn: false }, orderBy: { position: 'desc' } });
     expect(after.map((r) => r.id)).toEqual(wanted);
@@ -216,5 +217,16 @@ run('universe roles and people routes (real database)', () => {
     expect((await as('admin', roleRoute.DELETE, { roleId: role.helper })).status).toBe(200);
     expect(await tagsOf('helper', worldA)).toEqual(['member']);
     expect(await tagsOf('outsider', worldA)).toEqual(['member']);
+  });
+
+  it('puts a role made by someone below Admin right under their own role', async () => {
+    const lead = await prisma.role.create({
+      data: { universeId, key: 'lead', name: 'Lead', position: 500, permissions: fromKeys(['MANAGE_ROLES', 'GO_LIVE']) },
+    });
+    await joinUniverse(prisma, { universeId, userId: people.helper, worlds: { allWorlds: true, worldIds: [] }, roles: [{ roleId: lead.id, scope: { allWorlds: true, worldIds: [] } }] });
+    const created = await as('helper', rolesRoute.POST, {}, { name: 'Squad', color: '#22c55e', permissions: flag('GO_LIVE').toString() });
+    expect(created.status).toBe(201);
+    expect(created.body.role.position).toBe(500);
+    expect((await prisma.role.findUnique({ where: { id: lead.id } }))?.position).toBe(501);
   });
 });
