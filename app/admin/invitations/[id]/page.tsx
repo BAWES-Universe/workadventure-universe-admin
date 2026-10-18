@@ -69,6 +69,8 @@ export default function InvitationPage() {
   const [load, setLoad] = useState<Load>({ state: 'loading' });
   const [attempt, setAttempt] = useState(0);
   const [outcome, setOutcome] = useState<'accepted' | 'declined' | null>(null);
+  // Roles the invitation offered that accepting could not give (one with Administrator works only in every world)
+  const [notGiven, setNotGiven] = useState<string[]>([]);
   const [pending, setPending] = useState<'accept' | 'decline' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const accepting = useRef(false);
@@ -132,6 +134,8 @@ export default function InvitationPage() {
     try {
       const response = await authenticatedFetch(`/api/memberships/invitations/${invitation.id}/accept`, { method: 'POST' });
       if (!response.ok) throw new Error('accept failed');
+      const answer = await response.json().catch(() => ({}));
+      setNotGiven(Array.isArray(answer?.rolesNotGiven) ? answer.rolesNotGiven : []);
       setOutcome('accepted');
       window.dispatchEvent(new CustomEvent(ORBIT_REFRESH_EVENT, { detail: { topic: 'memberships' } }));
     } catch {
@@ -166,7 +170,7 @@ export default function InvitationPage() {
       />
 
       {outcome === 'accepted' ? (
-        <Accepted invitation={invitation} />
+        <Accepted invitation={invitation} notGiven={notGiven} />
       ) : outcome === 'declined' ? (
         <section className="space-y-3 rounded-[18px] border bg-card p-5" data-testid="invitation-declined">
           <p className="text-[15px] font-semibold" role="status">
@@ -282,7 +286,7 @@ function RoleSection({ tags }: { tags: string[] }) {
 }
 
 /** Just accepted: you're in, and where to go. Visit only inside the game, where there's a room to go to. */
-function Accepted({ invitation }: { invitation: InvitationDetail }) {
+function Accepted({ invitation, notGiven }: { invitation: InvitationDetail; notGiven: string[] }) {
   const { world } = invitation;
   const { isReady, navigateToRoom } = useWorkAdventure();
   const [going, setGoing] = useState(false);
@@ -307,6 +311,12 @@ function Accepted({ invitation }: { invitation: InvitationDetail }) {
       <p className="text-[15px] font-semibold" role="status">
         You’re a member of {world.name}
       </p>
+      {notGiven.length > 0 && (
+        <p className="text-sm text-muted-foreground" data-testid="invitation-not-given">
+          You joined without {notGiven.join(', ')}. A role with Administrator works in every world, so it can’t come with an
+          invitation to one world. Ask an Admin of {world.universe.name} to give it to you.
+        </p>
+      )}
       {world.firstRoom && (
         <p className="text-sm text-muted-foreground">Visiting takes you to {world.firstRoom.name}, the world’s first room.</p>
       )}

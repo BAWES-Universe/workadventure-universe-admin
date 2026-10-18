@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import * as Sentry from '@sentry/nextjs';
 import { requireAuth, getClientIp } from '@/lib/auth';
@@ -184,6 +185,16 @@ export async function GET(request: NextRequest) {
       if (unverifiedAccount && hasAccessToken) {
         Sentry.captureMessage('Room access: an account joined with an access token Orbit could not verify, so it was answered as a guest', 'warning');
       }
+      // The identifier is whatever the caller sent, so that account's details never go with this visit (#408): it is
+      // answered, recorded and announced as the guest it is, under the name they typed, with no email, tags, chat or card.
+      const account = unverifiedAccount ? null : user;
+      // Who the visit and the Discord note are about: not under the id they sent when that account wasn't verified, so
+      // it never reads as that person's (#421). A guest id made from it instead, so their visits still group as one guest's.
+      const visitorUuid = unverifiedAccount ? unverifiedGuestId(finalUuid) : finalUuid;
+      if (unverifiedAccount) {
+        userName = name || null;
+        userEmail = null;
+      }
 
       // Find world and room
       const worldData = await prisma.world.findFirst({
@@ -258,12 +269,12 @@ export async function GET(request: NextRequest) {
         return NextResponse.json(error, { status: 403 });
       }
       
-      // Get world membership (for any user with User record, not just authenticated)
-      if (user) {
+      // Get world membership (for any user with User record, not just authenticated; never an account answered as a guest)
+      if (account) {
         membership = await prisma.worldMember.findUnique({
           where: {
             userId_worldId: {
-              userId: user.id,
+              userId: account.id,
               worldId: worldData.id,
             },
           },
@@ -313,10 +324,10 @@ export async function GET(request: NextRequest) {
       
       // Get visit card to determine visitCardUrl
       let visitCardUrl: string | null = null;
-      if (user) {
+      if (account) {
         try {
           const visitCard = await (prisma as any).visitCard.findUnique({
-            where: { userId: user.id },
+            where: { userId: account.id },
           });
           
           if (visitCard) {
@@ -324,7 +335,7 @@ export async function GET(request: NextRequest) {
             const baseUrl = process.env.NEXT_PUBLIC_API_URL || process.env.NEXT_PUBLIC_BASE_URL || process.env.BASE_URL || '';
             if (baseUrl) {
               // Encode UUID to handle special characters like @
-              const encodedUuid = encodeURIComponent(user.uuid);
+              const encodedUuid = encodeURIComponent(account.uuid);
               visitCardUrl = `${baseUrl}/api/profile/${encodedUuid}?embed=true`;
             } else {
               console.warn('[VisitCard] No base URL configured - cannot generate visitCardUrl');
@@ -486,18 +497,18 @@ export async function GET(request: NextRequest) {
       
       // Determine actual guest status for analytics: user is guest if they don't have a User record OR if they have one but isGuest is true
       // But if user has membership tags, they're not really a guest
-      const actualIsGuestForAnalytics = !user || (user.isGuest && membershipTags.length === 0);
+      const actualIsGuestForAnalytics = !account || (account.isGuest && membershipTags.length === 0);
       
       // Bots join rooms through this same check. Their joins are reconnects, not visits, so they aren't recorded.
       // (The Discord notification below still goes out as before.)
       if (!isBotIdentifier(finalUuid)) {
         await (prisma as any).roomAccess.create({
           data: {
-            userUuid: finalUuid,
-            userId: user?.id || null,
+            userUuid: visitorUuid,
+            userId: account?.id || null,
             ipAddress: ipAddress,
-            userName: user ? (user.name || userName) : userName,
-            userEmail: user ? (user.email || userEmail) : userEmail,
+            userName: account ? (account.name || userName) : userName,
+            userEmail: account ? (account.email || userEmail) : userEmail,
             isGuest: actualIsGuestForAnalytics,
             isAuthenticated: isAuthenticated,
             hasMembership: membershipTags.length > 0,
@@ -541,8 +552,8 @@ export async function GET(request: NextRequest) {
       // Build response
       const response: FetchMemberDataByUuidSuccessResponse = {
         status: "ok",
-        email: user?.email || null,
-        username: user?.name || userName || undefined,
+        email: account?.email || null,
+        username: account?.name || userName || undefined,
         userUuid: finalUuid,
         tags: verifiedTags,
         visitCardUrl: visitCardUrl,
@@ -558,20 +569,20 @@ export async function GET(request: NextRequest) {
         canEdit: has(permissions, 'EDIT_MAPS'),
         permissions: toWire(permissions),
         world: world,
-        chatID: chatID || user?.matrixChatId || undefined,
+        chatID: chatID || account?.matrixChatId || undefined,
       };
       
       // Send Discord webhook notification (non-blocking)
       // Ensure we use the user record's name/email if available (prefer user record over request params)
       // Always prefer user record values if user exists
-      const webhookUserName = user ? (user.name || userName) : userName;
-      const webhookUserEmail = user ? (user.email || userEmail) : userEmail;
+      const webhookUserName = account ? (account.name || userName) : userName;
+      const webhookUserEmail = account ? (account.email || userEmail) : userEmail;
       
       // Determine actual guest status for webhook: 
       // - If user has membership tags, they're not a guest
       // - If user exists and isGuest is false, they're not a guest
       // - Otherwise, they're a guest
-      const webhookIsGuest = !user || (user.isGuest && membershipTags.length === 0);
+      const webhookIsGuest = !account || (account.isGuest && membershipTags.length === 0);
       
       // Ensure membership tags are passed correctly
       const webhookTags = membershipTags;
@@ -579,7 +590,7 @@ export async function GET(request: NextRequest) {
       notifyRoomAccess({
         userName: webhookUserName,
         userEmail: webhookUserEmail,
-        userUuid: finalUuid,
+        userUuid: visitorUuid,
         isGuest: webhookIsGuest,
         tags: webhookTags,
         playUri: playUri,
@@ -630,3 +641,7 @@ export async function GET(request: NextRequest) {
   }
 }
 
+/** A guest id for someone who sent an account's id without signing in: the same each time, never that account's. */
+function unverifiedGuestId(claimed: string): string {
+  return `unverified-${createHash('sha256').update(claimed).digest('hex').slice(0, 32)}`;
+}
