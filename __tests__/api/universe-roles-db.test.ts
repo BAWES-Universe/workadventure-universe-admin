@@ -486,6 +486,9 @@ run('universe roles and people routes (real database)', () => {
     const fromProfile = await as('owner', userInviteRoute.POST, { id: people.late }, { worldId: worldB, tags: [boss.key] });
     expect(fromProfile.status).toBe(400);
     expect(await prisma.membershipInvitation.count({ where: { worldId: worldB, invitedUserId: people.late, status: 'pending' } })).toBe(0);
+    // Padded the way accepting would still read it
+    const padded = await prisma.user.create({ data: { uuid: `padded-${tag}`, email: `padded-${tag}@example.test`, name: 'padded' } });
+    expect((await as('owner', worldMembersRoute.POST, { id: worldB }, { userId: padded.id, tags: [` ${boss.key} `] })).status).toBe(400);
 
     // One sent before the role gained Administrator is accepted without it, and says so
     const stale = await prisma.user.create({ data: { uuid: `stale-${tag}`, email: `stale-${tag}@example.test`, name: 'stale' } });
