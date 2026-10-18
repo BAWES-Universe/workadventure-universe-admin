@@ -21,6 +21,7 @@ export interface PersonVisit {
   /** Only for people who may see IP addresses. */
   ip?: string;
   room: { id: string; name: string };
+  world: { id: string; name: string };
 }
 
 export interface VisitorPerson {
@@ -86,6 +87,7 @@ const VISIT_SELECT = {
   hasMembership: true,
   membershipTags: true,
   room: { select: { id: true, name: true } },
+  world: { select: { id: true, name: true } },
 } satisfies Prisma.RoomAccessSelect;
 
 type VisitRow = Prisma.RoomAccessGetPayload<{ select: typeof VISIT_SELECT }>;
@@ -102,6 +104,7 @@ function toVisit(viewer: Viewer | null, detail: AccessDetail, row: VisitRow): Pe
     signedIn: seen.isAuthenticated === true,
     ...(typeof seen.ipAddress === 'string' ? { ip: seen.ipAddress } : {}),
     room: row.room,
+    world: row.world,
   };
 }
 

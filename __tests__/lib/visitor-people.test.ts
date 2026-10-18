@@ -32,6 +32,7 @@ const visit = (id: string, userId: string | null, minutesAgo: number, extra: Rec
   hasMembership: false,
   membershipTags: [],
   room: { id: 'r1', name: 'HQ' },
+  world: { id: 'w1', name: 'Kuwait' },
   ...extra,
 });
 
@@ -66,8 +67,8 @@ describe('loadVisitorPeople', () => {
         visitCount: 23,
         ipCount: 2,
         visits: [
-          { id: 'a1', at: '2026-10-18T11:52:00.000Z', signedIn: true, ip: '10.0.0.1', room: { id: 'r1', name: 'HQ' } },
-          { id: 'a2', at: '2026-10-18T11:51:00.000Z', signedIn: false, ip: '10.0.0.2', room: { id: 'r1', name: 'HQ' } },
+          { id: 'a1', at: '2026-10-18T11:52:00.000Z', signedIn: true, ip: '10.0.0.1', room: { id: 'r1', name: 'HQ' }, world: { id: 'w1', name: 'Kuwait' } },
+          { id: 'a2', at: '2026-10-18T11:51:00.000Z', signedIn: false, ip: '10.0.0.2', room: { id: 'r1', name: 'HQ' }, world: { id: 'w1', name: 'Kuwait' } },
         ],
       },
       { key: 'g:browser-1', userId: null, name: 'Nova', woka: undefined, roles: [], visitCount: 2, ipCount: 1, visits: [expect.objectContaining({ id: 'a3', signedIn: false })] },
@@ -108,7 +109,7 @@ describe('loadPersonVisits', () => {
   it('loads more of one person’s visits after the ones shown', async () => {
     findMany.mockResolvedValue([visit('a9', 'fawaz', 60)]);
     expect(await loadPersonVisits(viewer, room, 'u:fawaz', { offset: 10, limit: 20 })).toEqual([
-      { id: 'a9', at: '2026-10-18T11:00:00.000Z', signedIn: true, ip: '10.0.0.1', room: { id: 'r1', name: 'HQ' } },
+      { id: 'a9', at: '2026-10-18T11:00:00.000Z', signedIn: true, ip: '10.0.0.1', room: { id: 'r1', name: 'HQ' }, world: { id: 'w1', name: 'Kuwait' } },
     ]);
     expect(findMany.mock.calls[0][0]).toEqual(expect.objectContaining({ where: { AND: [room, { userId: 'fawaz' }] }, skip: 10, take: 20 }));
   });
@@ -127,7 +128,7 @@ describe('loadPersonVisits', () => {
     detail.mockResolvedValue('minimal');
     findMany.mockResolvedValue([visit('a1', 'fawaz', 8)]);
     const [only] = await loadPersonVisits(viewer, room, 'a:a1', { offset: 0 });
-    expect(only).toEqual({ id: 'a1', at: '2026-10-18T11:52:00.000Z', signedIn: false, room: { id: 'r1', name: 'HQ' } });
+    expect(only).toEqual({ id: 'a1', at: '2026-10-18T11:52:00.000Z', signedIn: false, room: { id: 'r1', name: 'HQ' }, world: { id: 'w1', name: 'Kuwait' } });
     expect(findMany.mock.calls[0][0].where).toEqual({ AND: [room, { id: 'a1' }] });
   });
 

@@ -17,7 +17,7 @@ const fetchMock = jest.fn();
 jest.mock('@/lib/client-auth', () => ({ authenticatedFetch: (...args: unknown[]) => fetchMock(...args) }));
 
 const ago = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
-const visit = (id: string, minutes: number, signedIn: boolean, ip?: string, room = { id: 'r1', name: 'HQ' }) => ({ id, at: ago(minutes), signedIn, ...(ip ? { ip } : {}), room });
+const visit = (id: string, minutes: number, signedIn: boolean, ip?: string, room = { id: 'r1', name: 'HQ' }) => ({ id, at: ago(minutes), signedIn, ...(ip ? { ip } : {}), room, world: { id: 'w1', name: 'Kuwait' } });
 const fawaz = {
   key: 'u:fawaz',
   userId: 'fawaz',
@@ -83,6 +83,27 @@ describe('Visitors list', () => {
     fireEvent.click(within(card).getByRole('button', { name: '12 visits' }));
     expect(within(card).getAllByRole('link', { name: 'PawApp' })[0].getAttribute('href')).toBe('/admin/rooms/r2');
     expect(within(card).queryByText('104.23.200.156')).toBeNull();
+  });
+
+  it('names the room of a single visit on a world, and the world too on a universe', async () => {
+    serve(() => ({ people: [nova], total: 1, hasMore: false }));
+    const { unmount } = render(<VisitorPeople scope="world" id="w1" />);
+    const [card] = await screen.findAllByTestId('visitor-person');
+    expect(within(card).getByRole('link', { name: 'HQ' }).getAttribute('href')).toBe('/admin/rooms/r1');
+    expect(within(card).queryByRole('link', { name: 'Kuwait' })).toBeNull();
+    unmount();
+    render(<VisitorPeople scope="universe" id="u1" />);
+    const [universeCard] = await screen.findAllByTestId('visitor-person');
+    expect(within(universeCard).getByRole('link', { name: 'Kuwait' }).getAttribute('href')).toBe('/admin/worlds/w1');
+    expect(within(universeCard).getByRole('link', { name: 'HQ' }).getAttribute('href')).toBe('/admin/rooms/r1');
+  });
+
+  it('keeps a single visit on a room to the card, with no extra row', async () => {
+    serve(() => ({ people: [nova], total: 1, hasMore: false }));
+    render(<VisitorPeople scope="room" id="r1" />);
+    const [card] = await screen.findAllByTestId('visitor-person');
+    expect(within(card).queryByRole('link')).toBeNull();
+    expect(within(card).getByText('37.36.12.9')).toBeTruthy();
   });
 
   it('adds the next people with Show more', async () => {

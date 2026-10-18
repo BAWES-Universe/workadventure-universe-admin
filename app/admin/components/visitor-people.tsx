@@ -180,6 +180,12 @@ function PersonCard({
       ) : (
         <div className={styles.head}>{head}</div>
       )}
+      {/* One visit on a world or universe: where it was, since there is no list to open. */}
+      {person.visitCount === 1 && scope !== 'room' && (
+        <div className={styles.where}>
+          <Place visit={latest} scope={scope} />
+        </div>
+      )}
       {person.visitCount > 1 && (
         <>
           <button type="button" className={styles.strip} aria-expanded={expanded} aria-controls={visitsId} onClick={onToggle}>
@@ -195,13 +201,7 @@ function PersonCard({
                       {timeAgo(new Date(visit.at))}
                     </time>
                     <span className={styles.how}>{visit.signedIn ? 'Signed in' : 'Guest'}</span>
-                    {scope === 'room' ? (
-                      visit.ip && <span className={styles.ip}>{visit.ip}</span>
-                    ) : (
-                      <Link href={`/admin/rooms/${visit.room.id}`} className={styles.room}>
-                        {visit.room.name}
-                      </Link>
-                    )}
+                    {scope === 'room' ? visit.ip && <span className={styles.ip}>{visit.ip}</span> : <Place visit={visit} scope={scope} />}
                   </li>
                 ))}
               </ol>
@@ -215,5 +215,24 @@ function PersonCard({
         </>
       )}
     </li>
+  );
+}
+
+/** Where a visit was: the room on a world, the world and room on a universe, each a link. */
+function Place({ visit, scope }: { visit: PersonVisit; scope: Scope }) {
+  return (
+    <span className={styles.place}>
+      {scope === 'universe' && (
+        <>
+          <Link href={`/admin/worlds/${visit.world.id}`} className={styles.room}>
+            {visit.world.name}
+          </Link>
+          <span aria-hidden="true">›</span>
+        </>
+      )}
+      <Link href={`/admin/rooms/${visit.room.id}`} className={styles.room}>
+        {visit.room.name}
+      </Link>
+    </span>
   );
 }
