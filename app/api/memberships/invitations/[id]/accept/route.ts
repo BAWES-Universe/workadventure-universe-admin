@@ -58,6 +58,11 @@ export async function POST(
         roles: roleIds.map((roleId) => ({ roleId, scope: worlds })),
       });
 
+      // An invitation accepted earlier for the same world (before they left) is replaced by this one: a world keeps one
+      // accepted invitation per person
+      await tx.membershipInvitation.deleteMany({
+        where: { worldId: invitation.worldId, invitedUserId: invitation.invitedUserId, status: 'accepted', id: { not: id } },
+      });
       await tx.membershipInvitation.update({
         where: { id },
         data: {
