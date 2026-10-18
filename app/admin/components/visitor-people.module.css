@@ -30,6 +30,7 @@ a.head:hover .arrow { color: hsl(var(--foreground)); transform: translate(2px, -
 .visit .ip { margin-left: auto; }
 .place { display: inline-flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 0 6px; min-width: 0; margin: -8px 0 -8px auto; color: hsl(var(--muted-foreground)); }
 .room { display: inline-flex; align-items: center; min-height: 44px; min-width: 0; overflow-wrap: anywhere; color: hsl(var(--foreground)); font-weight: 600; text-decoration: underline; text-decoration-color: hsl(var(--foreground) / 0.3); text-underline-offset: 4px; }
+.private { display: inline-flex; align-items: center; min-height: 44px; color: hsl(var(--muted-foreground)); }
 .where { display: flex; align-items: center; min-height: 44px; padding: 0 14px 0 66px; border-top: 1px solid hsl(var(--border)); font-size: 12px; }
 .where .place { margin: 0; justify-content: flex-start; }
 .moreVisits { min-height: 44px; color: hsl(var(--foreground)); font-size: 13px; font-weight: 600; text-decoration: underline; text-decoration-color: hsl(var(--foreground) / 0.3); text-underline-offset: 4px; }
@@ -39,5 +40,6 @@ a.head:hover .arrow { color: hsl(var(--foreground)); transform: translate(2px, -
 @media (max-width: 380px) {
   .strip { padding-left: 14px; }
   .visits { padding-left: 14px; }
-  .where { padding-left: 14px; }
+  .private { display: inline-flex; align-items: center; min-height: 44px; color: hsl(var(--muted-foreground)); }
+.where { padding-left: 14px; }
 }

@@ -98,6 +98,15 @@ describe('Visitors list', () => {
     expect(within(universeCard).getByRole('link', { name: 'HQ' }).getAttribute('href')).toBe('/admin/rooms/r1');
   });
 
+  it('says a room or world was private instead of naming it', async () => {
+    serve(() => ({ people: [{ ...nova, visits: [{ ...nova.visits[0], room: null, world: null }] }], total: 1, hasMore: false }));
+    render(<VisitorPeople scope="universe" id="u1" />);
+    const [card] = await screen.findAllByTestId('visitor-person');
+    expect(within(card).getByText('Private world')).toBeTruthy();
+    expect(within(card).getByText('Private room')).toBeTruthy();
+    expect(within(card).queryByRole('link')).toBeNull();
+  });
+
   it('keeps a single visit on a room to the card, with no extra row', async () => {
     serve(() => ({ people: [nova], total: 1, hasMore: false }));
     render(<VisitorPeople scope="room" id="r1" />);
