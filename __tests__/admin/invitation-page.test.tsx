@@ -185,6 +185,20 @@ describe('The invitation page', () => {
     window.removeEventListener('orbit:refresh', refresh);
   });
 
+  it('says which role accepting could not give, and why', async () => {
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (init?.method === 'POST') return respond({ member: null, rolesNotGiven: ['Boss'] });
+      if (url === '/api/memberships/invitations/inv-1') return respond({ invitation: invitation() });
+      return respond({});
+    });
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: 'Accept' }));
+    const note = await screen.findByTestId('invitation-not-given');
+    expect(note.textContent?.replace(/\s+/g, ' ')).toBe(
+      'You joined without Boss. A role with Administrator works in every world, so it can’t come with an invitation to one world. Ask an Admin of Plugn to give it to you.',
+    );
+  });
+
   it('hides Visit outside the game', async () => {
     routeDetail({ invitation: invitation() });
     renderPage(game(false));
