@@ -42,7 +42,7 @@ beforeEach(() => fetchMock.mockReset());
 
 describe('Visitors list', () => {
   it('shows each person once, with their latest visit, role and IP, and a visits strip only when they came back', async () => {
-    serve(() => ({ people: [fawaz, nova, sara], total: 3 }));
+    serve(() => ({ people: [fawaz, nova, sara], total: 3, hasMore: false }));
     render(<VisitorPeople scope="room" id="r1" />);
     const cards = await screen.findAllByTestId('visitor-person');
     expect(cards).toHaveLength(3);
@@ -61,7 +61,7 @@ describe('Visitors list', () => {
   });
 
   it('opens every visit with when, how and the IP, and loads the rest on request', async () => {
-    serve((path) => (path.includes('person=') ? { visits: [visit('f10', 40, true, '94.129.203.235'), visit('f11', 41, false, '104.23.200.156')] } : { people: [fawaz], total: 1 }));
+    serve((path) => (path.includes('person=') ? { visits: [visit('f10', 40, true, '94.129.203.235'), visit('f11', 41, false, '104.23.200.156')] } : { people: [fawaz], total: 1, hasMore: false }));
     render(<VisitorPeople scope="room" id="r1" />);
     const [card] = await screen.findAllByTestId('visitor-person');
     fireEvent.click(within(card).getByRole('button', { name: '12 visits' }));
@@ -75,7 +75,7 @@ describe('Visitors list', () => {
   });
 
   it('names the room of each visit on a world, with no IP', async () => {
-    serve(() => ({ people: [fawaz], total: 1 }));
+    serve(() => ({ people: [fawaz], total: 1, hasMore: false }));
     render(<VisitorPeople scope="world" id="w1" />);
     const [card] = await screen.findAllByTestId('visitor-person');
     expect(within(card).queryByText('94.129.203.235')).toBeNull();
@@ -86,7 +86,7 @@ describe('Visitors list', () => {
   });
 
   it('adds the next people with Show more', async () => {
-    serve((path) => (path.endsWith('page=1') ? { people: [fawaz], total: 2 } : { people: [fawaz, nova], total: 2 }));
+    serve((path) => (path.endsWith('page=1') ? { people: [fawaz], total: 2, hasMore: true } : { people: [fawaz, nova], total: 2, hasMore: false }));
     render(<VisitorPeople scope="room" id="r1" />);
     expect(await screen.findByText('1 of 2 people')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Show more' }));
@@ -95,9 +95,18 @@ describe('Visitors list', () => {
     expect(fetchMock).toHaveBeenLastCalledWith('/api/admin/visitors?scope=room&id=r1&page=2');
   });
 
+  it('stops offering more once the last page is in, even if someone came back meanwhile and is counted twice', async () => {
+    // Fawaz came back while the list was open: page 2 repeats him, and nobody is left after it.
+    serve((path) => (path.endsWith('page=1') ? { people: [fawaz], total: 3, hasMore: true } : { people: [fawaz, nova], total: 3, hasMore: false }));
+    render(<VisitorPeople scope="room" id="r1" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Show more' }));
+    expect(await screen.findByText('2 of 3 people')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Show more' })).toBeNull();
+  });
+
   it('asks for the same page again after it failed, never skipping it', async () => {
     let failPage2 = true;
-    serve((path) => (path.endsWith('page=1') ? { people: [fawaz], total: 2 } : failPage2 ? null : { people: [nova], total: 2 }));
+    serve((path) => (path.endsWith('page=1') ? { people: [fawaz], total: 2, hasMore: true } : failPage2 ? null : { people: [nova], total: 2, hasMore: false }));
     render(<VisitorPeople scope="room" id="r1" />);
     fireEvent.click(await screen.findByRole('button', { name: 'Show more' }));
     expect(await screen.findByText(/couldn’t load more visitors/)).toBeTruthy();
@@ -109,7 +118,7 @@ describe('Visitors list', () => {
   });
 
   it('says when nobody came, with the plain people icon', async () => {
-    serve(() => ({ people: [], total: 0 }));
+    serve(() => ({ people: [], total: 0, hasMore: false }));
     const { container } = render(<VisitorPeople scope="universe" id="u1" />);
     expect(await screen.findByText('No visitors yet.')).toBeTruthy();
     expect(screen.getByText('Visits to this universe show up here.')).toBeTruthy();
@@ -120,7 +129,7 @@ describe('Visitors list', () => {
     serve(() => null);
     render(<VisitorPeople scope="room" id="r1" />);
     expect(await screen.findByText(/couldn’t load visitors/)).toBeTruthy();
-    serve(() => ({ people: [nova], total: 1 }));
+    serve(() => ({ people: [nova], total: 1, hasMore: false }));
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     expect(await screen.findByText('Nova')).toBeTruthy();
   });

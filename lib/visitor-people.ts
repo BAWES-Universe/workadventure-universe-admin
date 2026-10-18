@@ -105,12 +105,16 @@ function toVisit(viewer: Viewer | null, detail: AccessDetail, row: VisitRow): Pe
   };
 }
 
-/** One page of people, newest first, and how many people there are in all. */
+/**
+ * One page of people, newest first, how many people there are in all, and whether any come after this page. Someone who
+ * comes back while the list is open moves to the top and pushes the rest down, so the list counts pages by position, not
+ * by how many people it has shown.
+ */
 export async function loadVisitorPeople(
   viewer: Viewer | null,
   scope: AccessScope,
   { page = 1, limit = PEOPLE_PER_PAGE, lookingFromWorldId }: { page?: number; limit?: number; lookingFromWorldId?: string } = {},
-): Promise<{ people: VisitorPerson[]; total: number }> {
+): Promise<{ people: VisitorPerson[]; total: number; hasMore: boolean }> {
   const detail = await accessDetailFor(viewer, scope);
   const visits = Prisma.sql`SELECT id, accessed_at, ip_address, ${personKeySql(viewer, detail)} AS person FROM room_accesses WHERE ${scopeSql(scope)}`;
   const [groups, counted] = await Promise.all([
@@ -152,7 +156,8 @@ export async function loadVisitorPeople(
       },
     ];
   });
-  return { people, total: Number(counted[0]?.total ?? 0) };
+  const total = Number(counted[0]?.total ?? 0);
+  return { people, total, hasMore: (page - 1) * limit + groups.length < total };
 }
 
 /** More of one person's visits, after the ones already shown. Nothing when the viewer may not ask for that person. */

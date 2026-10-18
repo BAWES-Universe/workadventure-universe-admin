@@ -22,6 +22,7 @@ const MORE_VISITS = 20;
 export function VisitorPeople({ scope, id }: { scope: Scope; id: string }) {
   const [people, setPeople] = useState<VisitorPerson[] | null>(null);
   const [total, setTotal] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
   const [page, setPage] = useState(1);
   const [failed, setFailed] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -32,7 +33,7 @@ export function VisitorPeople({ scope, id }: { scope: Scope; id: string }) {
     authenticatedFetch(`/api/admin/visitors?scope=${scope}&id=${encodeURIComponent(id)}&page=${page}`)
       .then(async (response) => {
         if (!response.ok) throw new Error(`status ${response.status}`);
-        const data = (await response.json()) as { people: VisitorPerson[]; total: number };
+        const data = (await response.json()) as { people: VisitorPerson[]; total: number; hasMore: boolean };
         if (cancelled) return;
         // A page can repeat someone who came back while you were reading; keep them where they first showed.
         setPeople((current) => {
@@ -41,6 +42,7 @@ export function VisitorPeople({ scope, id }: { scope: Scope; id: string }) {
           return [...current, ...data.people.filter((person) => !shown.has(person.key))];
         });
         setTotal(data.total);
+        setHasMore(data.hasMore);
         setFailed(false);
       })
       .catch(() => {
@@ -100,7 +102,7 @@ export function VisitorPeople({ scope, id }: { scope: Scope; id: string }) {
           {people.length.toLocaleString()} of {total.toLocaleString()} {total === 1 ? 'person' : 'people'}
         </span>
         {/* After a page fails, Try again asks for that same page; Show more would skip it. */}
-        {people.length < total && !failed && (
+        {hasMore && !failed && (
           <Button variant="outline" className="h-11 px-5" disabled={loadingMore} onClick={showMore}>
             {loadingMore ? 'Loading…' : 'Show more'}
           </Button>

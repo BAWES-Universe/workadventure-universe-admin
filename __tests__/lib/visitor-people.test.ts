@@ -53,8 +53,9 @@ describe('loadVisitorPeople', () => {
         ? [visit('a1', 'fawaz', 8, { membershipTags: ['admin'], hasMembership: true }), visit('a2', 'fawaz', 9, { ipAddress: '10.0.0.2', isAuthenticated: false })]
         : [visit('a3', null, 30)],
     );
-    const { people, total } = await loadVisitorPeople(viewer, room);
+    const { people, total, hasMore } = await loadVisitorPeople(viewer, room);
     expect(total).toBe(214);
+    expect(hasMore).toBe(true);
     expect(people).toEqual([
       {
         key: 'u:fawaz',
@@ -88,9 +89,18 @@ describe('loadVisitorPeople', () => {
 
   it('asks for the page of people it was given', async () => {
     groups([]);
-    expect(await loadVisitorPeople(viewer, room, { page: 3, limit: 20 })).toEqual({ people: [], total: 0 });
+    expect(await loadVisitorPeople(viewer, room, { page: 3, limit: 20 })).toEqual({ people: [], total: 0, hasMore: false });
     const values = queryRaw.mock.calls.find(([strings]) => !strings.join('').includes('COUNT(DISTINCT person)'))!.slice(1);
     expect(values.slice(-2)).toEqual([20, 40]);
+  });
+
+  it('says more people are left by position, not by how many it returned', async () => {
+    // 21 people, page 2 of 20: the one row there is the last, even though the page before may have repeated someone.
+    groups([{ person: 'g:last', visits: 1, ips: 1 }], 21);
+    findMany.mockResolvedValue([visit('a9', null, 50)]);
+    expect((await loadVisitorPeople(viewer, room, { page: 2, limit: 20 })).hasMore).toBe(false);
+    groups([{ person: 'g:last', visits: 1, ips: 1 }], 22);
+    expect((await loadVisitorPeople(viewer, room, { page: 2, limit: 20 })).hasMore).toBe(true);
   });
 });
 
