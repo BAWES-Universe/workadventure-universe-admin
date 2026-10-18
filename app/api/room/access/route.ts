@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import * as Sentry from '@sentry/nextjs';
 import { requireAuth, getClientIp } from '@/lib/auth';
@@ -500,8 +501,9 @@ export async function GET(request: NextRequest) {
       if (!isBotIdentifier(finalUuid)) {
         await (prisma as any).roomAccess.create({
           data: {
-            // Not under the id they sent when that account wasn't verified, so it never reads as that person's visit (#421)
-            userUuid: unverifiedAccount ? null : finalUuid,
+            // Not under the id they sent when that account wasn't verified, so it never reads as that person's visit
+            // (#421). A guest id made from it instead, so their visits still count and group as one guest's.
+            userUuid: unverifiedAccount ? unverifiedGuestId(finalUuid) : finalUuid,
             userId: account?.id || null,
             ipAddress: ipAddress,
             userName: account ? (account.name || userName) : userName,
@@ -638,3 +640,7 @@ export async function GET(request: NextRequest) {
   }
 }
 
+/** A guest id for someone who sent an account's id without signing in: the same each time, never that account's. */
+function unverifiedGuestId(claimed: string): string {
+  return `unverified-${createHash('sha256').update(claimed).digest('hex').slice(0, 32)}`;
+}
