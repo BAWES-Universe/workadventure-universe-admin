@@ -1,51 +1,36 @@
 import { prisma } from '@/lib/db';
+import { has } from '@/lib/permissions';
+import { permissionsForWorld } from '@/lib/roles';
 import { isSuperAdmin } from '@/lib/super-admin';
 
 /**
- * Checks if a user can manage bots in a specific room
+ * Checks if a user can manage bots in a specific room (#423).
  * Returns true if:
- * 1. User is the Universe owner (room.world.universe.ownerId === userId), OR
- * 2. User is a WorldMember with 'admin' or 'editor' tag
+ * 1. User is the Universe owner, OR
+ * 2. User's permissions in the room's world include Manage bots: Everyone's, Member's, and every role of theirs that
+ *    works in that world (the same number the game gets, see permissionsForWorld). A person with no universe
+ *    membership is read from their world tags, so an admin or editor there keeps what the tags gave them.
  */
 export async function canManageBots(userId: string, roomId: string): Promise<boolean> {
-  // First, get the room with its world and universe relations
   const room = await prisma.room.findUnique({
     where: { id: roomId },
-    include: {
-      world: {
-        include: {
-          universe: {
-            select: {
-              ownerId: true,
-            },
-          },
-        },
-      },
-    },
+    select: { world: { select: { id: true, universeId: true, universe: { select: { ownerId: true } } } } },
   });
+  if (!room) return false;
 
-  if (!room) {
-    return false;
-  }
+  if (room.world.universe.ownerId === userId) return true;
 
-  // Check if user is the universe owner
-  const isUniverseOwner = room.world.universe.ownerId === userId;
-  if (isUniverseOwner) {
-    return true;
-  }
-
-  // Check if user is a WorldMember with admin or editor tags
-  const hasEditPermission = await prisma.worldMember.findFirst({
-    where: {
-      worldId: room.worldId,
-      userId: userId,
-      tags: {
-        hasSome: ['admin', 'editor'],
-      },
-    },
+  const member = await prisma.worldMember.findFirst({
+    where: { worldId: room.world.id, userId },
+    select: { tags: true },
   });
-
-  return !!hasEditPermission;
+  const permissions = await permissionsForWorld({
+    userId,
+    worldId: room.world.id,
+    universeId: room.world.universeId,
+    worldTags: member?.tags ?? [],
+  });
+  return has(permissions, 'MANAGE_BOTS');
 }
 
 
