@@ -8,10 +8,22 @@ import {
 
 export const runtime = 'nodejs';
 
-function response(body: unknown, status = 200) {
-  const result = NextResponse.json(body, { status });
+function applyMobileCorsHeaders(result: NextResponse, request?: NextRequest): NextResponse {
   result.headers.set('Cache-Control', 'no-store');
+  if (!request) return result;
+  const rawOrigin = request.headers.get('origin')?.trim() || '';
+  const userAgent = request.headers.get('user-agent');
+  if (rawOrigin && isMobileOrigin(rawOrigin, userAgent)) {
+    result.headers.set('Access-Control-Allow-Origin', rawOrigin);
+    result.headers.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    result.headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    result.headers.set('Vary', 'Origin');
+  }
   return result;
+}
+
+function response(body: unknown, status = 200, request?: NextRequest) {
+  return applyMobileCorsHeaders(NextResponse.json(body, { status }), request);
 }
 
 /**
@@ -32,6 +44,37 @@ function loginExpectedOrigin(request: NextRequest): string {
   return request.nextUrl.origin;
 }
 
+export async function OPTIONS(request: NextRequest) {
+  const rawOrigin = request.headers.get('origin')?.trim() || '';
+  const userAgent = request.headers.get('user-agent');
+  let allowedOrigin: string | null = null;
+  if (rawOrigin && isMobileOrigin(rawOrigin, userAgent)) {
+    allowedOrigin = rawOrigin;
+  } else if (rawOrigin) {
+    const expected = loginExpectedOrigin(request);
+    try {
+      if (new URL(rawOrigin).origin === expected) {
+        allowedOrigin = expected;
+      }
+    } catch {
+      allowedOrigin = null;
+    }
+  }
+  if (!allowedOrigin) {
+    const denied = NextResponse.json({ error: 'Cross-origin login is not allowed' }, { status: 403 });
+    denied.headers.set('Cache-Control', 'no-store');
+    denied.headers.set('Vary', 'Origin');
+    return denied;
+  }
+  const preflight = new NextResponse(null, { status: 204 });
+  preflight.headers.set('Cache-Control', 'no-store');
+  preflight.headers.set('Access-Control-Allow-Origin', allowedOrigin);
+  preflight.headers.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  preflight.headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  preflight.headers.set('Vary', 'Origin');
+  return preflight;
+}
+
 export async function POST(request: NextRequest) {
   const origin = request.headers.get('origin');
   const userAgent = request.headers.get('user-agent');
@@ -40,9 +83,9 @@ export async function POST(request: NextRequest) {
     // 500 with a clear message instead of a silent 403.
     const expected = loginExpectedOrigin(request);
     try {
-      if (new URL(origin).origin !== expected) return response({ error: 'Cross-origin login is not allowed' }, 403);
+      if (new URL(origin).origin !== expected) return response({ error: 'Cross-origin login is not allowed' }, 403, request);
     } catch {
-      return response({ error: 'Invalid origin' }, 403);
+      return response({ error: 'Invalid origin' }, 403, request);
     }
   }
 
@@ -58,7 +101,7 @@ export async function POST(request: NextRequest) {
       const fallbackOrigin =
         process.env.NODE_ENV === 'production' ? undefined : request.nextUrl.origin;
       if (typeof rawRedirectUri !== 'string' || !isValidRedirectUri(rawRedirectUri, fallbackOrigin)) {
-        return response({ error: 'Invalid redirect_uri' }, 400);
+        return response({ error: 'Invalid redirect_uri' }, 400, request);
       }
       validatedRedirectUri = rawRedirectUri.trim();
     }
@@ -66,17 +109,17 @@ export async function POST(request: NextRequest) {
       ? (body as { accessToken?: unknown }).accessToken
       : null;
     if (typeof accessToken !== 'string' || !accessToken.trim()) {
-      return response({ error: 'Access token required' }, 400);
+      return response({ error: 'Access token required' }, 400, request);
     }
     const session = await exchangeOidcAccessToken(accessToken);
     if (validatedRedirectUri) {
-      return response({ ...session, redirectUri: validatedRedirectUri });
+      return response({ ...session, redirectUri: validatedRedirectUri }, 200, request);
     }
-    return response(session);
+    return response(session, 200, request);
   } catch (error) {
-    if (error instanceof SyntaxError) return response({ error: 'Invalid JSON body' }, 400);
-    if (error instanceof SessionExchangeError) return response({ error: error.message }, error.status);
+    if (error instanceof SyntaxError) return response({ error: 'Invalid JSON body' }, 400, request);
+    if (error instanceof SessionExchangeError) return response({ error: error.message }, error.status, request);
     console.error('[Login] Session exchange failed:', error);
-    return response({ error: 'Internal server error' }, 500);
+    return response({ error: 'Internal server error' }, 500, request);
   }
 }

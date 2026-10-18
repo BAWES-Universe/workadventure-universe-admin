@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server';
-import { POST as loginPost } from '@/app/api/auth/login/route';
+import { OPTIONS as loginOptions, POST as loginPost } from '@/app/api/auth/login/route';
 import { OPTIONS as sessionOptions, POST as sessionPost } from '@/app/api/auth/session/route';
 import {
   DEFAULT_MOBILE_REDIRECT_URI,
@@ -228,6 +228,56 @@ describe('Mobile OIDC deep-link redirect & origin support (#6)', () => {
         })
       );
       expect(badRedirectRes.status).toBe(400);
+
+      const loginPreflight = await loginOptions(
+        new NextRequest('https://orbit.bawes.net/api/auth/login', {
+          method: 'OPTIONS',
+          headers: { Origin: 'bawes://callback' },
+        })
+      );
+      expect(loginPreflight.status).toBe(204);
+      expect(loginPreflight.headers.get('access-control-allow-origin')).toBe('bawes://callback');
+      expect(loginPreflight.headers.get('access-control-allow-methods')).toBe('POST, OPTIONS');
+      expect(loginPreflight.headers.get('access-control-allow-headers')).toBe(
+        'Content-Type, Authorization'
+      );
+
+      const deniedPreflight = await loginOptions(
+        new NextRequest('https://orbit.bawes.net/api/auth/login', {
+          method: 'OPTIONS',
+          headers: { Origin: 'https://evil.example', 'User-Agent': desktopChromeUa },
+        })
+      );
+      expect(deniedPreflight.status).toBe(403);
+      expect(deniedPreflight.headers.get('access-control-allow-origin')).toBeNull();
+
+      const missingOriginPreflight = await loginOptions(
+        new NextRequest('https://orbit.bawes.net/api/auth/login', {
+          method: 'OPTIONS',
+        })
+      );
+      expect(missingOriginPreflight.status).toBe(403);
+      expect(missingOriginPreflight.headers.get('access-control-allow-origin')).toBeNull();
+
+      const sameOriginWebPreflight = await loginOptions(
+        new NextRequest('https://orbit.bawes.net/api/auth/login', {
+          method: 'OPTIONS',
+          headers: { Origin: 'https://orbit.bawes.net', 'User-Agent': desktopChromeUa },
+        })
+      );
+      expect(sameOriginWebPreflight.status).toBe(204);
+      expect(sameOriginWebPreflight.headers.get('access-control-allow-origin')).toBe(
+        'https://orbit.bawes.net'
+      );
+
+      const androidPreflight = await loginOptions(
+        new NextRequest('https://orbit.bawes.net/api/auth/login', {
+          method: 'OPTIONS',
+          headers: { Origin: 'https://localhost', 'User-Agent': androidWebViewUa },
+        })
+      );
+      expect(androidPreflight.status).toBe(204);
+      expect(androidPreflight.headers.get('access-control-allow-origin')).toBe('https://localhost');
     });
   });
 
@@ -273,6 +323,8 @@ describe('Mobile OIDC deep-link redirect & origin support (#6)', () => {
       );
       expect(res.status).toBe(200);
       expect(res.headers.get('access-control-allow-origin')).toBe('bawes://callback');
+      expect(res.headers.get('access-control-allow-methods')).toBe('POST, OPTIONS');
+      expect(res.headers.get('access-control-allow-headers')).toBe('Content-Type, Authorization');
 
       const logoutRes = middleware(
         new NextRequest('https://orbit.bawes.net/api/auth/logout', {

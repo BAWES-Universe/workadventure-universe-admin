@@ -17,6 +17,8 @@ export function middleware(request: NextRequest) {
     request.nextUrl.pathname === '/api/auth/session';
   if (origin && isMobileOrigin(origin, userAgent) && isMobileAuthExchangeRoute) {
     response.headers.set('Access-Control-Allow-Origin', origin);
+    response.headers.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    response.headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     response.headers.set('Vary', 'Origin');
   }
 
