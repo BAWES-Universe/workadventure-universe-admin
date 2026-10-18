@@ -28,7 +28,7 @@ function setup(onValueChange = jest.fn(), defaultValue = 'b') {
   const list = screen.getByRole('tablist') as HTMLDivElement;
   // Three 100px tabs. jsdom computes no padding, so say so.
   list.style.padding = '0px';
-  Object.defineProperty(list, 'scrollWidth', { value: 300 });
+  Object.defineProperty(list, 'scrollWidth', { value: 300, configurable: true });
   Object.defineProperty(list, 'clientWidth', { value: 300 });
   list.setPointerCapture = jest.fn();
   list.hasPointerCapture = jest.fn(() => true);
@@ -138,4 +138,52 @@ it('follows a controlled value', () => {
     </Tabs>,
   );
   expect(selected()).toBe('Two');
+});
+
+describe('a bar with more tabs than fit', () => {
+  function overflowing() {
+    const view = setup();
+    // Six tabs' worth in a three-tab space, scrolled to the start; a scroll makes the bar measure itself again.
+    Object.defineProperty(view.list, 'scrollWidth', { value: 600 });
+    fireEvent.scroll(view.list);
+    return view;
+  }
+
+  it('scrolls sideways instead of making the page wider', () => {
+    const { list } = overflowing();
+    expect(list.dataset.scrolls).toBe('true');
+    expect(list.className).toContain('overflow-x-auto');
+    expect(list.className).toContain('[contain:inline-size]');
+    // A finger drag is the browser's to scroll the strip
+    expect(list.className).toContain('touch-manipulation');
+    expect(list.className).not.toContain('touch-pan-y');
+    // More tabs past the right edge, none past the left: only the right edge fades
+    expect(list.className).toContain('[mask-image:linear-gradient(to_left,transparent,#000_2rem)]');
+  });
+
+  it('a touch drag scrolls the strip and does not switch tabs', () => {
+    const { list, onValueChange } = overflowing();
+    // Far enough to be a whole tab and more, however wide the tabs are measured
+    pointer(list, 'pointerdown', 20, 0);
+    pointer(list, 'pointermove', 290, 300);
+    pointer(list, 'pointerup', 290, 450);
+    expect(list.dataset.dragging).toBeUndefined();
+    expect(onValueChange).not.toHaveBeenCalled();
+    expect(selected()).toBe('Two');
+  });
+
+  it('fades both edges once scrolled into the middle', () => {
+    const { list } = overflowing();
+    list.scrollLeft = 150;
+    fireEvent.scroll(list);
+    expect(list.className).toContain('[mask-image:linear-gradient(to_right,transparent,#000_2rem,#000_calc(100%-2rem),transparent)]');
+  });
+
+  it('a bar that fits keeps the tab swipe and no fade', () => {
+    const { list } = setup();
+    fireEvent.scroll(list);
+    expect(list.dataset.scrolls).toBeUndefined();
+    expect(list.className).toContain('touch-pan-y');
+    expect(list.className).not.toContain('mask-image');
+  });
 });

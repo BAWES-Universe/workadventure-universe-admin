@@ -4,7 +4,6 @@ import Link from 'next/link';
 import { useContext, useMemo, useState } from 'react';
 import { ArrowUpRight, EyeOff } from 'lucide-react';
 import type { LiveStatus, LivePlace, LiveView } from '@/lib/live-presence';
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { cn } from '@/lib/utils';
 import { WorkAdventureContext } from '../../workadventure-context';
 import { useLive } from '../../hooks/use-live';
@@ -161,22 +160,25 @@ function Chips({
   onChange: (value: string) => void;
 }) {
   return (
-    // A filter on the list below, not separate panels, so the tabs point at nothing (aria-controls).
-    <Tabs value={value} onValueChange={onChange} className="mb-3">
-      <TabsList aria-label="Show">
-        <TabsTrigger value={EVERYWHERE} aria-controls={undefined}>
-          Everywhere
-        </TabsTrigger>
-        {universes.map((universe) => (
-          <TabsTrigger key={universe.id} value={universe.id} aria-controls={undefined}>
-            {universe.name}
-          </TabsTrigger>
-        ))}
-        <TabsTrigger value={FRIENDS} aria-controls={undefined}>
-          Friends
-        </TabsTrigger>
-      </TabsList>
-    </Tabs>
+    <div className={styles.chips} role="group" aria-label="Show">
+      <button type="button" className={styles.chip} aria-pressed={value === EVERYWHERE} onClick={() => onChange(EVERYWHERE)}>
+        Everywhere
+      </button>
+      {universes.map((universe) => (
+        <button
+          key={universe.id}
+          type="button"
+          className={styles.chip}
+          aria-pressed={value === universe.id}
+          onClick={() => onChange(universe.id)}
+        >
+          {universe.name}
+        </button>
+      ))}
+      <button type="button" className={styles.chip} aria-pressed={value === FRIENDS} onClick={() => onChange(FRIENDS)}>
+        Friends
+      </button>
+    </div>
   );
 }
 
