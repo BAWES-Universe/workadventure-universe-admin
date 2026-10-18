@@ -87,9 +87,14 @@ describe('GET /api/room/access, what a guest visit keeps', () => {
     expect(permissionsForWorld).toHaveBeenCalledWith(expect.objectContaining({ userId: null, worldTags: [] }));
     expect(body.canEdit).toBe(false);
     expect(db.visitCard.findUnique).not.toHaveBeenCalled();
-    // The visit is a guest's, under the name they typed, keeping the Woka they picked
-    expect(db.roomAccess.create.mock.calls[0][0].data).toMatchObject({
-      userUuid: 'member-uuid',
+    // The visit is a guest's, under the name they typed, keeping the Woka they picked, and not under Mona's id, so her
+    // "last visited" and "previous room" never read it (#421). Their visits still group as one guest's.
+    const saved = db.roomAccess.create.mock.calls[0][0].data;
+    expect(saved.userUuid).toMatch(/^unverified-[0-9a-f]{32}$/);
+    expect(saved.userUuid).not.toContain('member-uuid');
+    await enter('userIdentifier=member-uuid&name=Nova');
+    expect(db.roomAccess.create.mock.calls[1][0].data.userUuid).toBe(saved.userUuid);
+    expect(saved).toMatchObject({
       userId: null,
       userName: 'Nova',
       userEmail: null,
