@@ -1,14 +1,14 @@
 'use client';
 
 import { localPeakHour } from '@/lib/analytics-peak';
-import { PersonIcon } from '../../components/profile-card';
 import { AlsoIn, Crumb, PlaceHero, SectionHead, StarButton, playPathOf, type RoomCardData } from '../../components/place-hero';
 import { useEntitySummaries } from '../../hooks/use-entity-summaries';
 import { useHere } from '../../hooks/use-place-data';
 import RecentVisitors from '../../components/recent-visitors';
+import { VisitorPeople } from '../../components/visitor-people';
 import RoomMembers from '../../components/room-members';
 
-import { useState, useEffect, useMemo, type ReactNode } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import Link from 'next/link';
 import { useRouter, useParams } from 'next/navigation';
 import { useWorkAdventure } from '@/app/admin/workadventure-context';
@@ -28,13 +28,13 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { AlertCircle, ArrowLeft, ChevronLeft, ChevronRight, Loader2, Navigation, Pencil, Star, Trash2 , LogIn } from 'lucide-react';
+import { AlertCircle, ArrowLeft, ChevronLeft, Loader2, Navigation, Pencil, Star, Trash2 , LogIn } from 'lucide-react';
 import { TemplateLibrary } from '@/components/templates/TemplateLibrary';
 import { TemplateDetail } from '@/components/templates/TemplateDetail';
 import { cn } from '@/lib/utils';
-import { timeAgo, timeAgoShort } from '@/lib/time-ago';
+import { timeAgoShort } from '@/lib/time-ago';
 import { authenticatedFetch } from '@/lib/client-auth';
-import { EmptyCard, EntityRow, Figure, Figures, InContext, KindIcon, LoadingRows, PageHeader, RolePills, SectionHeader, SettingSwitch, Settings, StatLine, StatusPill } from '../../components/ds';
+import { EmptyCard, Figure, Figures, InContext, KindIcon, LoadingRows, PageHeader, SectionHeader, SettingSwitch, Settings, StatusPill } from '../../components/ds';
 import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
 interface Room {
@@ -77,20 +77,6 @@ interface Room {
 }
 
 /** One visit, as the analytics API lists it. */
-interface Visit {
-  woka?: string[];
-  id: string;
-  accessedAt: string;
-  userId?: string | null;
-  userName?: string | null;
-  userEmail?: string | null;
-  userUuid?: string | null;
-  hasMembership?: boolean;
-  membershipTags: string[];
-  isAuthenticated?: boolean;
-  ipAddress?: string | null;
-  room: { id: string; name: string };
-}
 
 /** "4 PM": the hour a room is busiest, in the same short form everywhere. */
 function formatHour(hour: number): string {
@@ -103,19 +89,6 @@ function formatHour(hour: number): string {
 const tabClass = (active: boolean) =>
   `py-3 px-1 border-b-2 font-medium text-sm ${active ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground hover:border-muted-foreground'}`;
 
-/** A visitor without an account: the same look as a row, with nothing to open. */
-function StaticRow({ title, context, meta, woka }: { title: string; context?: ReactNode; meta?: ReactNode; woka?: string[] }) {
-  return (
-    <div className="flex min-h-[68px] items-center gap-3 rounded-[18px] border border-border bg-card px-3.5 py-3">
-      <PersonIcon woka={woka} name={title} face />
-      <div className="grid min-w-0 flex-1 gap-[3px]">
-        <strong className="text-sm font-semibold leading-snug [overflow-wrap:anywhere]">{title}</strong>
-        {context}
-        {meta}
-      </div>
-    </div>
-  );
-}
 
 export function RoomDetailPage({ view = 'details' }: { view?: 'details' | 'visitors' }) {
   const router = useRouter();
@@ -129,12 +102,10 @@ export function RoomDetailPage({ view = 'details' }: { view?: 'details' | 'visit
   const [error, setError] = useState<string | null>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [analytics, setAnalytics] = useState<any>(null);
-  const [analyticsLoading, setAnalyticsLoading] = useState(true);
   const [waNavigating, setWaNavigating] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [currentUser, setCurrentUser] = useState<any>(null);
-  const [isSuperAdmin, setIsSuperAdmin] = useState(false);
   const [currentRoomPath, setCurrentRoomPath] = useState<string | null>(null);
   const [togglingStar, setTogglingStar] = useState(false);
   const { here, known: hereKnown, byRoom } = useHere('room', id);
@@ -158,8 +129,6 @@ export function RoomDetailPage({ view = 'details' }: { view?: 'details' | 'visit
     };
   }, [worldId, id]);
   const [activeTab, setActiveTab] = useState<'details' | 'analytics'>(view === 'visitors' ? 'analytics' : 'details');
-  const [visitorsPage, setVisitorsPage] = useState(1);
-  const visitorsPerPage = 10;
   
   const { wa, isReady: waReady, navigateToRoom } = useWorkAdventure();
   
@@ -191,17 +160,11 @@ export function RoomDetailPage({ view = 'details' }: { view?: 'details' | 'visit
   useEffect(() => {
     if (roomLoaded) {
       // Fetch analytics on initial load to show totalAccesses count
-      fetchAnalytics(1);
+      fetchAnalytics();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomLoaded, id]);
 
-  useEffect(() => {
-    if (activeTab === 'analytics' && roomLoaded) {
-      // Fetch analytics when switching to analytics tab or changing page
-      fetchAnalytics(visitorsPage);
-    }
-  }, [visitorsPage, activeTab, roomLoaded]);
 
   useEffect(() => {
     if (room && wa && waReady) {
@@ -219,7 +182,6 @@ export function RoomDetailPage({ view = 'details' }: { view?: 'details' | 'visit
       }
       const data = await response.json();
       setCurrentUser(data.user);
-      setIsSuperAdmin(data.user?.isSuperAdmin || false);
     } catch (err) {
       router.push('/admin/login');
     }
@@ -316,19 +278,16 @@ export function RoomDetailPage({ view = 'details' }: { view?: 'details' | 'visit
   }
 
 
-  async function fetchAnalytics(page: number = 1) {
+  async function fetchAnalytics() {
     try {
-      setAnalyticsLoading(true);
       const { authenticatedFetch } = await import('@/lib/client-auth');
-      const response = await authenticatedFetch(`/api/admin/analytics/rooms/${id}?page=${page}&limit=${visitorsPerPage}`);
+      const response = await authenticatedFetch(`/api/admin/analytics/rooms/${id}?limit=1`);
       if (response.ok) {
         const data = await response.json();
         setAnalytics(data);
       }
     } catch (err) {
       console.error('Failed to fetch analytics:', err);
-    } finally {
-      setAnalyticsLoading(false);
     }
   }
 
@@ -572,6 +531,7 @@ export function RoomDetailPage({ view = 'details' }: { view?: 'details' | 'visit
         <PageHeader
           kind="people"
           title="Visitors"
+          plainIcon
           context={
             <InContext
               parts={[
@@ -1043,78 +1003,7 @@ export function RoomDetailPage({ view = 'details' }: { view?: 'details' | 'visit
 
           {activeTab === 'analytics' && (
             <section aria-labelledby="room-visitors">
-              {analyticsLoading ? (
-                <LoadingRows label="visitors" rows={3} />
-              ) : analytics && analytics.recentActivity && analytics.recentActivity.length > 0 ? (
-                <div className="space-y-4">
-                                    {/* People with an account and guests are different rows; one rule spaces them all the same. */}
-                  <div className="[&>*+*]:mt-2">
-                    {analytics.recentActivity.map((access: Visit) => {
-                      const userName = access.userName || access.userEmail || access.userUuid || 'Guest';
-                      const roles: string[] = access.hasMembership && access.membershipTags.length > 0 ? access.membershipTags : [];
-                      const context = (
-                        <StatLine
-                          items={[
-                            roles.length > 0 ? null : access.isAuthenticated ? 'Signed in' : 'Guest',
-                            timeAgo(new Date(access.accessedAt)),
-                          ]}
-                        />
-                      );
-                      const meta =
-                        roles.length > 0 || (isSuperAdmin && access.ipAddress) ? (
-                          <span className="flex flex-wrap items-center gap-2">
-                            {roles.length > 0 && <RolePills roles={roles} />}
-                            {isSuperAdmin && access.ipAddress && (
-                              <span className="font-mono text-xs text-muted-foreground">{access.ipAddress}</span>
-                            )}
-                          </span>
-                        ) : undefined;
-                      return access.userId ? (
-                        <EntityRow
-                          key={access.id}
-                          href={`/admin/users/${access.userId}`}
-                          kind="people"
-                          leading={<PersonIcon woka={access.woka} name={userName} face />}
-                          title={userName}
-                          context={context}
-                          meta={meta}
-                        />
-                      ) : (
-                        <StaticRow key={access.id} title={userName} context={context} meta={meta} woka={access.woka} />
-                      );
-                    })}
-                  </div>
-                  {analytics.pagination && analytics.pagination.totalPages > 1 && (
-                    <div className="flex flex-wrap items-center justify-between gap-3">
-                      <div className="text-sm text-muted-foreground">
-                        Showing {(analytics.pagination.page - 1) * analytics.pagination.limit + 1} to {Math.min(analytics.pagination.page * analytics.pagination.limit, analytics.pagination.total)} of {analytics.pagination.total} visitors
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => setVisitorsPage(prev => Math.max(1, prev - 1))}
-                          disabled={visitorsPage === 1}
-                        >
-                          <ChevronLeft aria-hidden="true" />
-                          Previous
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => setVisitorsPage(prev => prev + 1)}
-                          disabled={visitorsPage >= (analytics.pagination?.totalPages || 1)}
-                        >
-                          Next
-                          <ChevronRight aria-hidden="true" />
-                        </Button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <EmptyCard kind="people" title="No visitors yet." text="Visits to this room show up here." />
-              )}
+              <VisitorPeople scope="room" id={id} />
             </section>
           )}
         </>

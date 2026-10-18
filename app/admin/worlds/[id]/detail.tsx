@@ -21,18 +21,17 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { AlertCircle, ChevronLeft, ChevronRight, Loader2, Pencil, Plus, ShieldCheck, Trash2, UserPlus } from 'lucide-react';
-import { timeAgo } from '@/lib/time-ago';
+import { AlertCircle, Loader2, Pencil, Plus, ShieldCheck, Trash2, UserPlus } from 'lucide-react';
 import { activityStats } from '@/lib/analytics-peak';
-import { EmptyCard, EntityCard, EntityRow, Figure, Figures, InContext, LoadError, LoadingRows, PageHeader, RolePills, SectionHeader, SettingSwitch, Settings, StatLine, StatusPill, VisitLine } from '../../components/ds';
+import { EmptyCard, EntityCard, Figure, Figures, InContext, LoadError, LoadingRows, PageHeader, RolePills, SectionHeader, SettingSwitch, Settings, StatusPill, VisitLine } from '../../components/ds';
 import InviteSheet from '../../components/invite-sheet';
 import { useCanInvite } from '../../components/universe-people';
 import MemberList from '../../components/member-list';
 import MembersRow from '../../components/members-row';
 import { AddButton, BrowseButton, Crumb, PlaceHero, RoomRows, SectionHead, StarButton, playPathOf, type RoomRowData } from '../../components/place-hero';
 import WorldSafety, { useWorldSafety, waitingCount } from '../../components/world-safety';
-import { PersonIcon } from '../../components/profile-card';
 import RecentVisitors from '../../components/recent-visitors';
+import { VisitorPeople } from '../../components/visitor-people';
 import { useEntitySummaries } from '../../hooks/use-entity-summaries';
 import { useHere, useMembersPreview, useStarToggle } from '../../hooks/use-place-data';
 import { formatHour } from '../../hooks/use-room-analytics';
@@ -71,20 +70,6 @@ interface World {
 }
 
 /** One visit, as the analytics API lists it. */
-interface Visit {
-  woka?: string[];
-  id: string;
-  accessedAt: string;
-  userId?: string | null;
-  userName?: string | null;
-  userEmail?: string | null;
-  userUuid?: string | null;
-  hasMembership?: boolean;
-  membershipTags: string[];
-  isAuthenticated?: boolean;
-  ipAddress?: string | null;
-  room: { id: string; name: string };
-}
 
 const TAB_CLASS = 'orbit-press inline-flex h-10 items-center rounded-full px-4 text-sm font-semibold transition-colors';
 const tabClass = (active: boolean) =>
@@ -116,7 +101,6 @@ function WorldDetail({ view }: { view: WorldView }) {
   const [error, setError] = useState<string | null>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [analytics, setAnalytics] = useState<any>(null);
-  const [analyticsLoading, setAnalyticsLoading] = useState(true);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [currentUser, setCurrentUser] = useState<any>(null);
@@ -132,8 +116,6 @@ function WorldDetail({ view }: { view: WorldView }) {
   const safety = useWorldSafety(id);
   const waiting = waitingCount(safety.data);
   const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
-  const [visitorsPage, setVisitorsPage] = useState(1);
-  const visitorsPerPage = 10;
   // Each room's activity for its card, asked for once per room (a failure offers a retry, never a request loop).
   const roomIds = useMemo(() => world?.rooms?.map((room) => room.id) ?? [], [world]);
   const roomSummaries = useEntitySummaries('rooms', roomIds);
@@ -167,17 +149,11 @@ function WorldDetail({ view }: { view: WorldView }) {
   useEffect(() => {
     if (worldLoaded) {
       // Fetch analytics on initial load to show totalAccesses count
-      fetchAnalytics(1);
+      fetchAnalytics();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [worldLoaded, id]);
 
-  useEffect(() => {
-    if (activeTab === 'analytics' && worldLoaded) {
-      // Fetch analytics when switching to analytics tab or changing page
-      fetchAnalytics(visitorsPage);
-    }
-  }, [visitorsPage, activeTab, worldLoaded]);
 
   async function checkAuth() {
     try {
@@ -226,19 +202,16 @@ function WorldDetail({ view }: { view: WorldView }) {
     }
   }
 
-  async function fetchAnalytics(page: number = 1) {
+  async function fetchAnalytics() {
     try {
-      setAnalyticsLoading(true);
       const { authenticatedFetch } = await import('@/lib/client-auth');
-      const response = await authenticatedFetch(`/api/admin/analytics/worlds/${id}?page=${page}&limit=${visitorsPerPage}`);
+      const response = await authenticatedFetch(`/api/admin/analytics/worlds/${id}?limit=1`);
       if (response.ok) {
         const data = await response.json();
         setAnalytics(data);
       }
     } catch (err) {
       console.error('Failed to fetch analytics:', err);
-    } finally {
-      setAnalyticsLoading(false);
     }
   }
 
@@ -334,6 +307,7 @@ function WorldDetail({ view }: { view: WorldView }) {
       {view !== 'details' ? (
         <PageHeader
           kind={view === 'safety' ? 'world' : 'people'}
+          plainIcon={view === 'visitors'}
           title={VIEW_TITLE[view]}
           context={
             <InContext
@@ -553,81 +527,7 @@ function WorldDetail({ view }: { view: WorldView }) {
 
           {activeTab === 'analytics' && (
             <section aria-labelledby="world-visitors">
-              {analyticsLoading ? (
-                <LoadingRows label="visitors" rows={3} />
-              ) : analytics && analytics.recentActivity && analytics.recentActivity.length > 0 ? (
-                <div className="space-y-4">
-                                    <div>
-                    {analytics.recentActivity.map((access: Visit) => {
-                      const userName = access.userName || access.userEmail || access.userUuid || 'Guest';
-                      const when = timeAgo(new Date(access.accessedAt));
-                      const roles: string[] = access.hasMembership && access.membershipTags.length > 0 ? access.membershipTags : [];
-                      const who = roles.length > 0 ? null : access.isAuthenticated ? 'Signed in' : 'Guest';
-                      if (access.userId) {
-                        return (
-                          <EntityRow
-                            key={access.id}
-                            href={`/admin/users/${access.userId}`}
-                            kind="people"
-                            leading={<PersonIcon woka={access.woka} name={userName} face />}
-                            title={userName}
-                            context={<StatLine items={[who, when]} />}
-                            meta={roles.length > 0 ? <RolePills roles={roles} /> : undefined}
-                            trailing={
-                              <Link
-                                href={`/admin/rooms/${access.room.id}`}
-                                className="flex min-h-9 max-w-[9rem] items-center truncate text-xs font-semibold underline decoration-foreground/30 underline-offset-4 hover:decoration-foreground"
-                              >
-                                {access.room.name}
-                              </Link>
-                            }
-                          />
-                        );
-                      }
-                      return (
-                        <EntityRow
-                          key={access.id}
-                          href={`/admin/rooms/${access.room.id}`}
-                          kind="people"
-                          leading={<PersonIcon woka={access.woka} name={userName} face />}
-                          title={userName}
-                          context={<StatLine items={[who, `in ${access.room.name}`, when]} />}
-                          meta={roles.length > 0 ? <RolePills roles={roles} /> : undefined}
-                        />
-                      );
-                    })}
-                  </div>
-                  {analytics.pagination && analytics.pagination.totalPages > 1 && (
-                    <div className="flex flex-wrap items-center justify-between gap-3">
-                      <div className="text-sm text-muted-foreground">
-                        Showing {(analytics.pagination.page - 1) * analytics.pagination.limit + 1} to {Math.min(analytics.pagination.page * analytics.pagination.limit, analytics.pagination.total)} of {analytics.pagination.total} visitors
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => setVisitorsPage(prev => Math.max(1, prev - 1))}
-                          disabled={visitorsPage === 1}
-                        >
-                          <ChevronLeft aria-hidden="true" />
-                          Previous
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => setVisitorsPage(prev => prev + 1)}
-                          disabled={visitorsPage >= (analytics.pagination?.totalPages || 1)}
-                        >
-                          Next
-                          <ChevronRight aria-hidden="true" />
-                        </Button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <EmptyCard kind="people" title="No visitors yet." text="Visits to rooms in this world show up here." />
-              )}
+              <VisitorPeople scope="world" id={id} />
             </section>
           )}
 
