@@ -70,6 +70,19 @@ curl -X POST \
    - Requires: Authentication + permission check
    - Returns: 204 No Content
 
+6. **POST /api/bots/:id/access** - Can this person do this with this bot? (#426)
+   - Requires: `BOT_SERVICE_TOKEN` (the bot server and the game call it)
+   - Body: `{ "action": "chat" | "dm" | "summon", "person": { "signedIn": boolean, "identifier"?: string } }`.
+     `identifier` (their WorkAdventure identifier, an email when signed in) is required when `signedIn` is true and is
+     never read for a guest, so a guest cannot borrow someone else's roles.
+   - Returns: `{ "allowed": boolean, "code": "allowed" | "sign_in_required" | "not_allowed" | "no_room_access", "reason": string | null }`.
+     `reason` is a line the game can show as it is. A no is a 200. Anything that stops Orbit answering is an error
+     status (401 bad token, 400 bad body, 404 no such bot, 500), so the caller can tell "no" from "could not check".
+   - Decided by the permissions Chat with bots nearby, DM bots and Summon bots (Roles & permissions, Bots group),
+     read in the bot's world. Everyone has all three, so by default every bot works as it always has, guests included.
+     A private chat also needs sign-in and a room the person may see. The bot's creator, the owner of its universe,
+     super admins and Admin always pass.
+
 ### Files Created/Modified
 
 **New Files:**

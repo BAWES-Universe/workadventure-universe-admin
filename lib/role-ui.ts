@@ -176,7 +176,7 @@ export function permissionLockReason(
   return null;
 }
 
-/** How many of the 14 everyday permissions a number allows (Administrator allows all of them). */
+/** How many of the everyday permissions a number allows (Administrator allows all of them). */
 export function countOn(permissions: bigint): number {
   return PERMISSIONS.filter((info) => info.key !== 'ADMINISTRATOR' && has(permissions, info.key)).length;
 }
@@ -205,6 +205,9 @@ const SHORT: Record<PermissionKey, string> = {
   MODERATE_CALLS: 'moderate calls',
   MODERATE_AREA_CHATS: 'moderate area chats',
   MANAGE_BOTS: 'manage bots',
+  CHAT_BOTS_NEARBY: 'chat with bots nearby',
+  DM_BOTS: 'DM bots',
+  SUMMON_BOTS: 'summon bots',
   ADMINISTRATOR: 'administrator',
 };
 

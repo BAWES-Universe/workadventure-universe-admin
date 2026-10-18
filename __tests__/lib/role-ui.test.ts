@@ -89,9 +89,9 @@ describe('which switches are locked, and why', () => {
 });
 
 describe('counting and summaries', () => {
-  it('counts the 14 everyday permissions, Administrator standing for all of them', () => {
+  it('counts the 17 everyday permissions, Administrator standing for all of them', () => {
     expect(countOn(fromKeys(['GO_LIVE']))).toBe(1);
-    expect(countOn(fromKeys(['ADMINISTRATOR']))).toBe(14);
+    expect(countOn(fromKeys(['ADMINISTRATOR']))).toBe(17);
     expect(changedCount(fromKeys(['GO_LIVE']), fromKeys(['GO_LIVE', 'EDIT_MAPS']))).toBe(1);
   });
 
@@ -103,6 +103,11 @@ describe('counting and summaries', () => {
     expect(roleLine(role({ people: 1, permissions: toWire(fromKeys(['GO_LIVE'])) }))).toBe('1 person · Go live');
     expect(roleLine(role({ key: 'member', builtIn: true, people: 23 }))).toBe('23 people · Everyone who joined, given automatically');
     expect(roleLine(role({ key: 'everyone', builtIn: true, people: null }))).toBe('Every visitor · No extra permissions');
+    // A new universe's Everyone: the three bot permissions
+    const bots = toWire(fromKeys(['CHAT_BOTS_NEARBY', 'DM_BOTS', 'SUMMON_BOTS']));
+    expect(roleLine(role({ key: 'everyone', builtIn: true, people: null, permissions: bots }))).toBe(
+      'Every visitor · Chat with bots nearby, DM bots, summon bots',
+    );
   });
 });
 

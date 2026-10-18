@@ -37,6 +37,13 @@ export const EDITOR_DEFAULT_PERMISSIONS = combine(
   flag('MANAGE_BOTS'),
 );
 
+/**
+ * What the built-in Everyone starts with (#426): chat with a bot nearby, DM it and summon it, exactly what everyone can do
+ * with a bot before these permissions existed. Guests get Everyone's permissions, so they chat nearby and summon as now
+ * (a DM also needs sign-in, which the bot check asks for on its own).
+ */
+export const EVERYONE_DEFAULT_PERMISSIONS = combine(flag('CHAT_BOTS_NEARBY'), flag('DM_BOTS'), flag('SUMMON_BOTS'));
+
 export interface BuiltInRole {
   key: string;
   name: string;
@@ -49,7 +56,7 @@ export const BUILT_IN_ROLES: readonly BuiltInRole[] = [
   { key: ADMIN_KEY, name: 'Admin', color: '#F87171', permissions: ALL_PERMISSIONS, position: ADMIN_POSITION },
   { key: EDITOR_KEY, name: 'Editor', color: '#60A5FA', permissions: EDITOR_DEFAULT_PERMISSIONS, position: EDITOR_POSITION },
   { key: MEMBER_KEY, name: 'Member', color: '#A78BFA', permissions: BigInt(0), position: MEMBER_POSITION },
-  { key: EVERYONE_KEY, name: 'Everyone', color: '#A3A3B5', permissions: BigInt(0), position: EVERYONE_POSITION },
+  { key: EVERYONE_KEY, name: 'Everyone', color: '#A3A3B5', permissions: EVERYONE_DEFAULT_PERMISSIONS, position: EVERYONE_POSITION },
 ];
 
 export function isBuiltInKey(key: string): boolean {
@@ -224,7 +231,8 @@ export async function permissionsForWorld(
     db.role.findUnique({ where: { universeId_key: { universeId, key: EVERYONE_KEY } } }),
     db.role.findUnique({ where: { universeId_key: { universeId, key: MEMBER_KEY } } }),
   ]);
-  const everyonePermissions = parsePermissions(everyone?.permissions ?? 0) ?? BigInt(0);
+  // A universe with no Everyone row yet gets what ensureBuiltInRoles would give it, so bots keep working for everyone
+  const everyonePermissions = parsePermissions(everyone?.permissions ?? EVERYONE_DEFAULT_PERMISSIONS) ?? BigInt(0);
   if (!userId) return permissionsInWorld(worldId, everyonePermissions, null, []);
 
   const membership = await db.universeMember.findUnique({
