@@ -126,7 +126,13 @@ export function Segmented<T extends string>({ value, onChange, options, classNam
   const buttons = React.useRef<(HTMLButtonElement | null)[]>([])
   const enabled = options.map((option, index) => (option.disabled ? -1 : index)).filter((index) => index >= 0)
   const selected = options.findIndex((option) => option.value === value)
-  const tabbable = selected >= 0 ? selected : enabled[0]
+  // The tab stop is the picked option, unless that one is disabled (it can't take focus): then the first enabled one
+  const tabbable = selected >= 0 && enabled.includes(selected) ? selected : enabled[0]
+
+  /** Choosing the option that is already picked changes nothing, so it doesn't call back (a save would start for nothing). */
+  function pick(next: T) {
+    if (next !== value) onChange(next)
+  }
 
   function onKeyDown(event: React.KeyboardEvent, index: number) {
     const at = enabled.indexOf(index)
@@ -137,7 +143,7 @@ export function Segmented<T extends string>({ value, onChange, options, classNam
     else if (event.key === "End") next = enabled[enabled.length - 1]
     if (next === undefined) return
     event.preventDefault()
-    onChange(options[next].value)
+    pick(options[next].value)
     buttons.current[next]?.focus()
   }
 
@@ -163,7 +169,7 @@ export function Segmented<T extends string>({ value, onChange, options, classNam
             aria-checked={picked}
             disabled={option.disabled}
             tabIndex={index === tabbable ? 0 : -1}
-            onClick={() => onChange(option.value)}
+            onClick={() => pick(option.value)}
             onKeyDown={(event) => onKeyDown(event, index)}
             className={cn(
               "inline-flex h-11 items-center justify-center rounded-full px-3 text-[13px] font-semibold text-foreground/[.62] transition-[color,background-color,box-shadow] disabled:cursor-not-allowed disabled:opacity-50",

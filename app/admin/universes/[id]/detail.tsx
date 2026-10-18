@@ -3,6 +3,7 @@
 import { useIsSuperAdmin } from '../../admin-bootstrap-context';
 
 import RecentVisitors from '../../components/recent-visitors';
+import UniverseMembersRow from '../../components/universe-members-row';
 import { VisitorPeople } from '../../components/visitor-people';
 import { AddButton, BrowseButton, By, PlaceHero, Rank, SectionHead, StarButton, WorldGroups, playPathOf, type WorldGroupData } from '../../components/place-hero';
 
@@ -444,6 +445,7 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
           {activeTab === 'details' && (
             <>
               <RecentVisitors scope="universe" id={id} onOpenVisitors={() => router.push(`/admin/universes/${id}/visitors`)} />
+              <UniverseMembersRow universeId={id} />
               {universe.thumbnailUrl && (
                 // eslint-disable-next-line @next/next/no-img-element
                 <img src={universe.thumbnailUrl} alt={universe.name} className="h-12 w-12 object-cover rounded" />

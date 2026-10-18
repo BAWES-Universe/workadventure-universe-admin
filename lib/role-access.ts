@@ -76,6 +76,12 @@ export function computeAccess(input: AccessInput): Access {
 /** Where something applies: every world (today's and later ones), or the worlds listed. */
 export type Reach = { allWorlds: true } | { allWorlds: false; worldIds: string[] };
 
+/** Where an invitation would make someone a member: the worlds it names, or the one world of an older invitation. */
+export function invitationReach(invitation: { universeId: string | null; allWorlds: boolean; worldIds: string[]; worldId: string }): Reach {
+  if (!invitation.universeId) return { allWorlds: false, worldIds: [invitation.worldId] };
+  return invitation.allWorlds ? { allWorlds: true } : { allWorlds: false, worldIds: invitation.worldIds };
+}
+
 /** Whether they have a permission everywhere a change reaches. */
 export function allows(access: Access, key: PermissionKey, reach: Reach): boolean {
   if (access.full) return true;
