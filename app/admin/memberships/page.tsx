@@ -51,6 +51,19 @@ interface Invitation {
   invitedAt: string;
   tags: string[];
   message: string | null;
+  /** A universe invitation (#314): the universe they join, the worlds they get and the roles that come with it. */
+  universeId?: string | null;
+  allWorlds?: boolean;
+  worldIds?: string[];
+  roles?: { id: string; name: string; color: string }[];
+}
+
+/** Where a universe invitation lets them in. Its world is the first one picked, so only one world can be named. */
+function invitedWorlds(invitation: Invitation): string {
+  if (invitation.allWorlds) return 'Every world';
+  const worldIds = invitation.worldIds ?? [];
+  if (worldIds.length <= 1) return `${invitation.world.name} only`;
+  return `${worldIds.length} worlds`;
 }
 
 interface Membership {
@@ -220,24 +233,47 @@ export default function MyMembershipsPage() {
                 {invitations.map((invitation) => {
                   const from = invitation.invitedBy?.name || invitation.invitedBy?.email;
                   const busy = pendingInvitations.has(invitation.id);
+                  // A universe invitation shows the universe, the worlds and the roles it gives; an older one its world
+                  const toUniverse = !!invitation.universeId;
+                  const title = toUniverse ? invitation.world.universe.name : invitation.world.name;
+                  const message = invitation.message ? (
+                    <span className="text-xs italic text-muted-foreground [overflow-wrap:anywhere]">“{invitation.message}”</span>
+                  ) : null;
                   return (
                     <EntityRow
                       key={invitation.id}
                       href={`/admin/invitations/${invitation.id}`}
-                      kind="world"
+                      kind={toUniverse ? 'universe' : 'world'}
+                      leading={toUniverse ? <UniverseGlyph size={32} className="mx-1 shrink-0" aria-hidden="true" /> : undefined}
                       tone="waiting"
-                      title={invitation.world.name}
+                      title={title}
                       titleAside={<StatusPill status="waiting" />}
                       context={
-                        <span className="text-xs text-muted-foreground">
-                          {from ? `${from} invited you` : 'You’re invited'}
-                          {invitation.tags.length ? ` as ${invitation.tags.join(', ')}` : ''} · <Place kind="universe" label={invitation.world.universe.name} />
-                        </span>
+                        toUniverse ? (
+                          <span className="text-xs text-muted-foreground">
+                            {from ? `${from} invited you` : 'You’re invited'} · {invitedWorlds(invitation)}
+                          </span>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">
+                            {from ? `${from} invited you` : 'You’re invited'}
+                            {invitation.tags.length ? ` as ${invitation.tags.join(', ')}` : ''} · <Place kind="universe" label={invitation.world.universe.name} />
+                          </span>
+                        )
                       }
                       meta={
-                        invitation.message ? (
-                          <span className="text-xs italic text-muted-foreground [overflow-wrap:anywhere]">“{invitation.message}”</span>
-                        ) : undefined
+                        toUniverse ? (
+                          <span className="grid min-w-0 gap-1">
+                            <span className="inline-flex flex-wrap items-center gap-1.5">
+                              {(invitation.roles ?? []).length === 0 && <RoleChip name="Member" color="#A78BFA" />}
+                              {(invitation.roles ?? []).map((role) => (
+                                <RoleChip key={role.id} name={role.name} color={role.color} />
+                              ))}
+                            </span>
+                            {message}
+                          </span>
+                        ) : (
+                          message ?? undefined
+                        )
                       }
                       trailing={
                         // Declining asks first, as on You and the invitation page: it can't be undone.
@@ -261,7 +297,7 @@ export default function MyMembershipsPage() {
                             <Button
                               variant="outline"
                               className="h-11 w-11 p-0"
-                              aria-label={`Decline the invitation to ${invitation.world.name}`}
+                              aria-label={`Decline the invitation to ${title}`}
                               disabled={busy}
                               onClick={() => setConfirmingDecline(invitation.id)}
                             >
