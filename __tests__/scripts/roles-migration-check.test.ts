@@ -10,7 +10,7 @@ const root = path.join(__dirname, '../..');
 function run(env: Record<string, string>) {
   const result = spawnSync('npx', ['tsx', 'scripts/roles-migration-check.ts'], {
     cwd: root,
-    env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', ROLES_CHECK_ON_A_COPY: 'yes', ...env },
+    env: { NODE_ENV: 'test', PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', ROLES_CHECK_ON_A_COPY: 'yes', ...env },
     encoding: 'utf8',
     timeout: 60_000,
   });

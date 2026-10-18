@@ -12,7 +12,9 @@
  * - map editor access (today: an admin or editor tag; now: the Edit maps permission of their roles),
  * - the permission number the game gets, against what today's tags give it (admin 16383, editor 8416),
  * - that lib/roles.ts writes the same tags the migration wrote,
- * - that every pending invitation still gives the same tags.
+ * - that every invitation keeps its status and tags; a pending one carries exactly the roles its tags stand for, an
+ *   accepted, rejected or cancelled one no role its tags don't (only pending ones are read; re-sending one starts
+ *   again from its tags).
  * It prints the differences and exits 1 when any check fails. The copy is left migrated; the migration is not recorded
  * in _prisma_migrations, so throw the copy away afterwards.
  */
@@ -72,8 +74,8 @@ async function main() {
   }
 
   const before = await q<Row>('SELECT user_id, world_id, tags FROM world_members');
-  const pendingBefore = await q<{ id: string; tags: string[] }>(
-    "SELECT id, tags FROM membership_invitations WHERE status = 'pending'",
+  const invitationsBefore = await q<{ id: string; status: string; tags: string[] }>(
+    'SELECT id, status, tags FROM membership_invitations',
   );
   const rooms = await q<{
     id: string;
@@ -98,8 +100,8 @@ async function main() {
   const given = await q<{ member_id: string; role_id: string; all_worlds: boolean; world_ids: string[] }>(
     'SELECT member_id, role_id, all_worlds, world_ids FROM universe_member_roles',
   );
-  const pendingAfter = await q<{ id: string; role_ids: string[] }>(
-    "SELECT id, role_ids FROM membership_invitations WHERE status = 'pending'",
+  const invitationsAfter = await q<{ id: string; status: string; tags: string[]; role_ids: string[] }>(
+    'SELECT id, status, tags, role_ids FROM membership_invitations',
   );
 
   const failures: string[] = [];
@@ -197,14 +199,25 @@ async function main() {
     }
   }
 
-  // 6. Pending invitations give the same tags (plus member)
-  const pendingById = new Map(pendingAfter.map((row) => [row.id, row]));
-  for (const invitation of pendingBefore) {
-    const now = pendingById.get(invitation.id);
-    const keys = new Set((now?.role_ids ?? []).map((id) => roleById.get(id)?.key));
+  // 6. The migration rewrites every invitation, not only the pending ones. Each keeps its status and tags. A pending one
+  // gives the same tags (plus member) through its roles. Nothing reads the roles of an accepted, rejected or cancelled
+  // one (accepting needs pending, re-sending clears them and starts from the tags), and a tag nobody holds any more makes
+  // no role, so those may carry fewer roles than tags but never one their tags don't name.
+  const invitationsById = new Map(invitationsAfter.map((row) => [row.id, row]));
+  for (const invitation of invitationsBefore) {
+    const now = invitationsById.get(invitation.id);
+    if (!now) {
+      fail(`invitation ${invitation.id} lost`);
+      continue;
+    }
+    if (now.status !== invitation.status) fail(`invitation ${invitation.id} status ${invitation.status} -> ${now.status}`);
+    if (now.tags.join('\n') !== invitation.tags.join('\n')) fail(`invitation ${invitation.id} tags [${invitation.tags}] -> [${now.tags}]`);
+    const keys = new Set(now.role_ids.map((id) => roleById.get(id)?.key));
     keys.add(MEMBER_KEY);
     const wanted = new Set([...invitation.tags, MEMBER_KEY].filter((tag) => tag !== 'everyone'));
-    if (keys.size !== wanted.size || [...wanted].some((tag) => !keys.has(tag))) {
+    const extra = [...keys].some((key) => key === undefined || !wanted.has(key));
+    const missing = invitation.status === 'pending' && [...wanted].some((tag) => !keys.has(tag));
+    if (extra || missing) {
       fail(`invitation ${invitation.id} changed: [${invitation.tags}] -> [${[...keys]}]`);
     }
   }
@@ -213,7 +226,9 @@ async function main() {
   console.log(`Room entry checks: ${roomChecks}`);
   console.log(`Universes: ${new Set(worlds.map((world) => world.universe_id)).size}, people: ${members.length}, roles given: ${given.length}`);
   console.log(`Custom roles from typed tags: ${roles.filter((role) => !['admin', 'editor', 'member', 'everyone'].includes(role.key)).map((role) => role.key).join(', ') || 'none'}`);
-  console.log(`Pending invitations: ${pendingBefore.length}`);
+  const byStatus = new Map<string, number>();
+  for (const invitation of invitationsBefore) byStatus.set(invitation.status, (byStatus.get(invitation.status) ?? 0) + 1);
+  console.log(`Invitations: ${invitationsBefore.length} (${[...byStatus].map(([status, n]) => `${status} ${n}`).join(', ') || 'none'})`);
   console.log(`Rows that gained only the member tag (expected, everyone who joined is a Member): ${memberAdded.length}`);
   for (const line of memberAdded) console.log(`  ${line}`);
   if (failures.length > 0) {
