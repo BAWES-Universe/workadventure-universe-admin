@@ -60,7 +60,8 @@ export async function GET(request: NextRequest, { params }: Params) {
     const joined = member ?? (await ownerWithoutMembership(id, userId));
     if (!joined) return NextResponse.json({ error: 'Member not found' }, { status: 404 });
 
-    const theirHighest = Math.max(1, ...joined.roles.map((given) => given.role.position));
+    // The owner is above every role
+    const theirHighest = isOwner ? Infinity : Math.max(1, ...joined.roles.map((given) => given.role.position));
     // Member and Everyone come with joining, so they are never given or taken
     const roles = await prisma.role.findMany({
       where: { universeId: id, key: { notIn: ['member', 'everyone'] } },
