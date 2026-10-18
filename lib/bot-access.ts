@@ -1,6 +1,7 @@
 import { prisma } from '@/lib/db';
 import { has, type PermissionKey } from '@/lib/permissions';
-import { permissionsForWorld } from '@/lib/roles';
+import { ADMIN_KEY, worldAccessFor } from '@/lib/roles';
+import { verdictFor, type RuleBits } from '@/lib/bot-rules';
 import { canSeeRoom } from '@/lib/room-visibility';
 import { findUserByIdentifier } from '@/lib/user-identifier';
 import { isSuperAdmin } from '@/lib/super-admin';
@@ -10,8 +11,10 @@ import { isSuperAdmin } from '@/lib/super-admin';
  * privately, or call it over. The bot server and the game ask this with the service token before they let it happen,
  * and show `reason` when the answer is no.
  *
- * Until each bot has its own overrides, the answer comes from the role permissions in the bot's world (the same
- * number the game gets, see permissionsForWorld). Guests have no account, so they get Everyone's.
+ * The answer comes from the role permissions in the bot's world (the same number the game gets, see permissionsForWorld),
+ * then the bot's own rules (#427), in this order: its creator, the universe owner, super admins and Admin always pass;
+ * then the person's own row; then the rows of their roles; then Private bot, which shuts out everyone a row does not
+ * say Yes to; then the role permissions. Guests have no account, so they get Everyone's and Everyone's rows.
  */
 export type BotAction = 'chat' | 'dm' | 'summon';
 
@@ -38,14 +41,24 @@ export interface BotAccessAnswer {
   code: BotAccessCode;
   /** A line the game can show as it is. Null when allowed. */
   reason: string | null;
+  /** The owner's own line for people who may not chat with the bot, only on a refused chat when the owner wrote one. */
+  reply?: string;
 }
 
 const ALLOWED: BotAccessAnswer = { allowed: true, code: 'allowed', reason: null };
 
-function refusal(code: Exclude<BotAccessCode, 'allowed'>, action: BotAction, botName: string): BotAccessAnswer {
+function refusal(
+  code: Exclude<BotAccessCode, 'allowed'>,
+  action: BotAction,
+  botName: string,
+  fixedReply?: string | null,
+): BotAccessAnswer {
   if (code === 'sign_in_required') return { allowed: false, code, reason: `Sign in to message ${botName}.` };
   if (action === 'summon') return { allowed: false, code, reason: `${botName}'s owner limits who can call it over.` };
-  if (action === 'chat') return { allowed: false, code, reason: `${botName}'s owner limits who can chat with it.` };
+  if (action === 'chat') {
+    const reason = `${botName}'s owner limits who can chat with it.`;
+    return fixedReply ? { allowed: false, code, reason, reply: fixedReply } : { allowed: false, code, reason };
+  }
   return { allowed: false, code, reason: `You can't message ${botName} now.` };
 }
 
@@ -59,14 +72,29 @@ export function decideBotAccess(input: {
   signedIn: boolean;
   /** The bot's creator, the owner of its universe or a super admin: no permission needed. */
   passes: boolean;
+  /** Holds Admin here: the bot's rules never apply to them. */
+  isAdmin?: boolean;
   permissions: bigint;
+  /** Private bot: only a Yes from a row lets someone use it. */
+  privateBot?: boolean;
+  /** The person's own row for this bot, and the rows of the roles they have here. */
+  personRule?: RuleBits | null;
+  roleRules?: readonly RuleBits[];
+  /** What the owner wants refused people to hear when they chat nearby. */
+  fixedReply?: string | null;
   /** Whether they may see the bot's room: only a private chat asks. */
   canSeeRoom: boolean;
 }): BotAccessAnswer {
   const { action, botName } = input;
   if (action === 'dm' && !input.signedIn) return refusal('sign_in_required', action, botName);
   if (input.passes) return ALLOWED;
-  if (!has(input.permissions, ACTION_PERMISSION[action])) return refusal('not_allowed', action, botName);
+  if (!input.isAdmin) {
+    const verdict = verdictFor(action, input.personRule ?? null, input.roleRules ?? []);
+    if (verdict === 'no') return refusal('not_allowed', action, botName, input.fixedReply);
+    if (verdict === 'none' && (input.privateBot || !has(input.permissions, ACTION_PERMISSION[action]))) {
+      return refusal('not_allowed', action, botName, input.fixedReply);
+    }
+  }
   if (action === 'dm' && !input.canSeeRoom) return refusal('no_room_access', action, botName);
   return ALLOWED;
 }
@@ -91,6 +119,9 @@ export async function checkBotAccess(request: BotAccessRequest): Promise<BotAcce
       id: true,
       name: true,
       createdById: true,
+      privateBot: true,
+      refusalReply: true,
+      accessRules: { select: { roleId: true, userId: true, allow: true, deny: true } },
       room: {
         select: {
           isPublic: true,
@@ -109,20 +140,31 @@ export async function checkBotAccess(request: BotAccessRequest): Promise<BotAcce
   const membership = user
     ? await prisma.worldMember.findFirst({ where: { worldId: world.id, userId: user.id }, select: { tags: true } })
     : null;
-  const permissions = await permissionsForWorld({
+  const worldTags = membership?.tags ?? [];
+  const { permissions, roles } = await worldAccessFor({
     userId: user?.id ?? null,
     worldId: world.id,
     universeId: world.universeId,
-    worldTags: membership?.tags ?? [],
+    worldTags,
   });
   const superAdmin = !!user && isSuperAdmin(user.email);
+
+  const rules = bot.accessRules ?? [];
+  const roleIds = new Set(roles.map((role) => role.id));
+  const personRule = user ? (rules.find((rule) => rule.userId === user.id) ?? null) : null;
+  const roleRules = rules.filter((rule) => rule.roleId && roleIds.has(rule.roleId));
 
   return decideBotAccess({
     action,
     botName: bot.name,
     signedIn: person.signedIn,
     passes: !!user && (bot.createdById === user.id || world.universe.ownerId === user.id || superAdmin),
+    isAdmin: has(permissions, 'ADMINISTRATOR') || roles.some((role) => role.key === ADMIN_KEY) || worldTags.includes(ADMIN_KEY),
     permissions,
+    privateBot: bot.privateBot,
+    personRule,
+    roleRules,
+    fixedReply: bot.refusalReply,
     canSeeRoom: canSeeRoom(
       bot.room,
       user ? { id: user.id, isSuperAdmin: superAdmin } : null,

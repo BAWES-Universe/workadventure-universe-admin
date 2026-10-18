@@ -216,31 +216,45 @@ export function permissionsFromTags(tags: readonly string[]): bigint {
   return permissions;
 }
 
+export interface WorldAccess {
+  permissions: bigint;
+  /** The roles that apply to them in this world: Everyone, Member when they are in it, and each role that works there. */
+  roles: { id: string; key: string }[];
+}
+
 /**
  * Someone's permission number in one world, for the game: Everyone's, Member's when they are in it, and their roles
  * that work there. A person with no account (a guest) gets Everyone's. Owning the universe adds nothing here: in the
  * game an owner has the roles they hold, as today. A world member with no universe membership (a row written some
  * other way) is read from their tags, so they never lose what the tags give them.
+ *
+ * Also says which roles that number came from, for rules that name a role (per-bot rules, #427).
  */
-export async function permissionsForWorld(
+export async function worldAccessFor(
   place: { userId: string | null; worldId: string; universeId: string; worldTags?: readonly string[] },
   db: Db = prisma,
-): Promise<bigint> {
+): Promise<WorldAccess> {
   const { userId, worldId, universeId, worldTags = [] } = place;
   const [everyone, member] = await Promise.all([
     db.role.findUnique({ where: { universeId_key: { universeId, key: EVERYONE_KEY } } }),
     db.role.findUnique({ where: { universeId_key: { universeId, key: MEMBER_KEY } } }),
   ]);
+  const named = (row: { id?: string } | null, key: string) => (row?.id ? [{ id: row.id, key }] : []);
   // A universe with no Everyone row yet gets what ensureBuiltInRoles would give it, so bots keep working for everyone
   const everyonePermissions = parsePermissions(everyone?.permissions ?? EVERYONE_DEFAULT_PERMISSIONS) ?? BigInt(0);
-  if (!userId) return permissionsInWorld(worldId, everyonePermissions, null, []);
+  if (!userId) {
+    return { permissions: permissionsInWorld(worldId, everyonePermissions, null, []), roles: named(everyone, EVERYONE_KEY) };
+  }
 
   const membership = await db.universeMember.findUnique({
     where: { universeId_userId: { universeId, userId } },
-    include: { roles: { include: { role: { select: { key: true, position: true, permissions: true } } } } },
+    include: { roles: { include: { role: { select: { id: true, key: true, position: true, permissions: true } } } } },
   });
   if (!membership) {
-    return permissionsInWorld(worldId, everyonePermissions | permissionsFromTags(worldTags), null, []);
+    return {
+      permissions: permissionsInWorld(worldId, everyonePermissions | permissionsFromTags(worldTags), null, []),
+      roles: named(everyone, EVERYONE_KEY),
+    };
   }
 
   const roles: ScopedRole[] = membership.roles.map((given) => ({
@@ -251,10 +265,22 @@ export async function permissionsForWorld(
     worldIds: given.worldIds,
   }));
   const inWorld = coversWorld(membership, worldId) || roles.some((role) => coversWorld(role, worldId));
-  return permissionsInWorld(
+  const permissions = permissionsInWorld(
     worldId,
     everyonePermissions,
     { scope: membership, member: parsePermissions(member?.permissions ?? 0) ?? BigInt(0), inWorld },
     roles,
   );
+  const working = membership.roles
+    .filter((given) => coversWorld(given, worldId) && given.role.id)
+    .map((given) => ({ id: given.role.id, key: given.role.key }));
+  return { permissions, roles: [...named(everyone, EVERYONE_KEY), ...(inWorld ? named(member, MEMBER_KEY) : []), ...working] };
+}
+
+/** Someone's permission number in one world, for the game (see worldAccessFor). */
+export async function permissionsForWorld(
+  place: { userId: string | null; worldId: string; universeId: string; worldTags?: readonly string[] },
+  db: Db = prisma,
+): Promise<bigint> {
+  return (await worldAccessFor(place, db)).permissions;
 }

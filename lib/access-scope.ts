@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { validateAdminToken } from '@/lib/auth';
 import { getSessionUser, type SessionUser } from '@/lib/auth-session';
-import { canManageBots } from '@/lib/bot-permissions';
+import { canManageThisBot } from '@/lib/bot-permissions';
 
 /**
  * Who is making a request to the admin API.
@@ -111,13 +111,13 @@ export async function canManageRoom(userId: string, roomId: string): Promise<boo
   return !!member;
 }
 
-/** A bot is managed by whoever can manage the room it lives in. */
+/** A bot is managed by whoever can manage the room it lives in, unless the bot's own Manage rules say otherwise (#427). */
 export async function canManageBot(userId: string, botId: string): Promise<boolean> {
   const bot = await prisma.bot.findUnique({
     where: { id: botId },
-    select: { roomId: true },
+    select: { id: true, createdById: true, roomId: true },
   });
-  return !!bot && (await canManageBots(userId, bot.roomId));
+  return !!bot && (await canManageThisBot(userId, null, bot, { creatorPasses: false }));
 }
 
 export type AccessScope =
