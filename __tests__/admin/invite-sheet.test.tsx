@@ -135,6 +135,18 @@ it('says under a name whether they are your friend and when they last came, and 
   expect(personNote({ friend: false, visit: null })).toBeNull();
 });
 
+it('says Give membership when opened from a profile, and shows universes they are already in or invited to as not pickable', async () => {
+  open({
+    person: { userId: 'hanan', name: 'Hanan Aziz' },
+    giving: true,
+    universes: [{ id: 'u1', name: 'BAWES' }, { id: 'u2', name: 'Sandbox', status: 'member' }, { id: 'u3', name: 'Cup', status: 'invited' }],
+  });
+  expect(await screen.findByRole('heading', { name: 'Give Hanan membership' })).toBeTruthy();
+  expect((screen.getByRole('button', { name: 'BAWES' }) as HTMLButtonElement).disabled).toBe(false);
+  expect((screen.getByRole('button', { name: 'Sandbox Member' }) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByRole('button', { name: 'Cup Invited' }) as HTMLButtonElement).disabled).toBe(true);
+});
+
 it('shows the line handed in for the chosen universe under the person’s name', async () => {
   open({ person: { userId: 'hanan', name: 'Hanan Aziz', notes: { u1: 'Your friend · in HQ Lobby yesterday' } } });
   expect(await screen.findByText('Your friend · in HQ Lobby yesterday')).toBeTruthy();

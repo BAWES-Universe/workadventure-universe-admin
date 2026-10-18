@@ -80,17 +80,19 @@ function Group({ title, children }: { title: string; children: React.ReactNode }
  * search), then the roles on top of Member and where they work. A page that already knows the person opens it on step
  * two. There is no Member tick: everyone who joins is a Member.
  */
-export default function InviteSheet({ open, onOpenChange, universeId, universes, person: given, worldId, onSent }: {
+export default function InviteSheet({ open, onOpenChange, universeId, universes, person: given, worldId, onSent, giving }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   universeId: string;
   /** More than one universe the person could be invited to: step two offers them. */
-  universes?: { id: string; name: string }[];
+  universes?: { id: string; name: string; status?: 'member' | 'invited' }[];
   /** Skips step one. */
   person?: InvitePerson | null;
   /** A world to start with in "Some worlds" (a visitor's room's world). */
   worldId?: string | null;
   onSent?: () => void;
+  /** Opened from their profile's Give membership: the title says the same. */
+  giving?: boolean;
 }) {
   const { addToast } = useToast();
   const [chosenUniverse, setChosenUniverse] = useState(universeId);
@@ -204,7 +206,7 @@ export default function InviteSheet({ open, onOpenChange, universeId, universes,
   }
 
   const first = picked?.name.trim().split(/\s+/)[0] ?? '';
-  const title = picked ? `Invite ${first} to ${universeName}` : `Invite to ${universeName}`;
+  const title = picked ? (giving ? `Give ${first} membership` : `Invite ${first} to ${universeName}`) : `Invite to ${universeName}`;
   const toggleRole = (id: string) => {
     setRoleIds((current) => (current.includes(id) ? current.filter((value) => value !== id) : [...current, id]));
     if (adminIds.includes(id)) setAll(null);
@@ -301,8 +303,9 @@ export default function InviteSheet({ open, onOpenChange, universeId, universes,
           {universes && universes.length > 1 && (
             <div role="group" aria-label="Invite to" className="flex flex-wrap gap-2">
               {universes.map((universe) => (
-                <PickChip key={universe.id} picked={chosenUniverse === universe.id} onClick={() => { setChosenUniverse(universe.id); setRoleIds([]); setAll(null); setWorldIds([]); }}>
+                <PickChip key={universe.id} picked={chosenUniverse === universe.id} disabled={!!universe.status} onClick={() => { setChosenUniverse(universe.id); setRoleIds([]); setAll(null); setWorldIds([]); }}>
                   {universe.name}
+                  {universe.status && <span className="font-normal text-muted-foreground">{universe.status === 'member' ? 'Member' : 'Invited'}</span>}
                 </PickChip>
               ))}
             </div>

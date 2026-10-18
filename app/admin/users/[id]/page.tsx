@@ -34,6 +34,7 @@ import {
 import { ProfileActions, ProfileFrame, ProfileLinks, WokaAvatar } from '../../components/profile-card';
 import { inviteInGame, messageInGame, useGameCapability } from '../../components/orbit-bridge';
 import { PassportSection } from '../../components/passport';
+import { Planet } from '../../components/ds/planet-icon';
 import InviteSheet, { personNote } from '../../components/invite-sheet';
 
 interface WorldMembership {
@@ -225,6 +226,8 @@ export default function UserDetailPage() {
   const [isSuperAdmin, setIsSuperAdmin] = useState(false);
   const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
   const [invitableUniverses, setInvitableUniverses] = useState<{ id: string; name: string; note: string | null }[]>([]);
+  // Your universes they already belong to or have an invitation for: shown in the sheet, not pickable.
+  const [takenUniverses, setTakenUniverses] = useState<{ id: string; name: string; status: 'member' | 'invited' }[]>([]);
   const [, setWorldsLoading] = useState(false);
   const [universeAnalytics, setUniverseAnalytics] = useState<Record<string, Analytics>>({});
   const [worldAnalytics, setWorldAnalytics] = useState<Record<string, Analytics>>({});
@@ -385,6 +388,7 @@ export default function UserDetailPage() {
           ? (data.universes as Offered[]).map((universe) => ({ id: universe.id, name: universe.name, note: personNote({ friend: !!data.friend, visit: universe.visit }) }))
           : [],
       );
+      setTakenUniverses(Array.isArray(data.taken) ? data.taken : []);
     } catch (err) {
       console.error('Failed to fetch available worlds:', err);
       setInvitableUniverses([]);
@@ -546,23 +550,30 @@ export default function UserDetailPage() {
 
   const name = user.name || user.email || 'Someone';
   const isSelf = currentUser?.id === user.id;
-  const canInvite = Boolean(currentUser && !isSelf && invitableUniverses.length > 0);
+  // Guests can't accept: they have no Orbit sign-in, and signing in makes a different account.
+  const canInvite = Boolean(currentUser && !isSelf && !user.isGuest && invitableUniverses.length > 0);
   const showPrivate = isSuperAdmin || isSelf;
   const bio = user.visitCard?.bio?.trim();
   const links = user.visitCard?.links ?? [];
 
-  // The buttons on their card, in the order drawn: Invite, Message, Add friend, then Invite as member. The first is the main one.
+  // The buttons on their card, in the order drawn: Invite over, Message, the friend button, then Give membership.
   const online = !isSelf && Boolean(live?.people.some((person) => person.uuid === user.uuid));
   const blocked = connect?.relationship === 'blocked_by_me' || connect?.relationship === 'blocked_by_them';
   const friendButton = connect && !blocked ? FRIEND_BUTTON[connect.relationship] : undefined;
   const pills: ReactNode[] = [];
   const pillClass = 'h-11 min-w-0 gap-2 px-3';
-  const pillVariant = () => (pills.length === 0 ? 'default' : 'outline');
+  // The gradient goes to the first button that starts something; undoing ones and the universe invite stay plain.
+  let mainTaken = false;
+  const pillVariant = (go = true) => {
+    if (!go || mainTaken) return 'outline';
+    mainTaken = true;
+    return 'default';
+  };
   if (gameCanInvite && online) {
     pills.push(
       <Button key="invite" variant={pillVariant()} className={pillClass} onClick={() => inviteInGame(user.uuid, name)}>
         <UsersPlusIcon />
-        Invite
+        Invite over
       </Button>,
     );
   }
@@ -577,7 +588,7 @@ export default function UserDetailPage() {
   }
   if (friendButton) {
     pills.push(
-      <Button key="friend" variant={pillVariant()} className={pillClass} disabled={friendBusy} onClick={() => {
+      <Button key="friend" variant={pillVariant(friendButton.step === 'request' || friendButton.step === 'accept')} className={pillClass} disabled={friendBusy} onClick={() => {
           if (friendButton.step !== 'remove') return void changeFriendship(friendButton.step);
           setFriendError(null);
           setRemoveFriendOpen(true);
@@ -589,9 +600,9 @@ export default function UserDetailPage() {
   }
   if (canInvite) {
     pills.push(
-      <Button key="member" variant={pillVariant()} className={pillClass} onClick={() => setInviteDialogOpen(true)}>
-        <UserPlus aria-hidden="true" />
-        Invite as member
+      <Button key="member" variant={pillVariant(false)} className={pillClass} data-wide="" onClick={() => setInviteDialogOpen(true)}>
+        <Planet aria-hidden="true" />
+        <span className="truncate">Give membership</span>
       </Button>,
     );
   }
@@ -934,7 +945,8 @@ export default function UserDetailPage() {
           open={inviteDialogOpen}
           onOpenChange={setInviteDialogOpen}
           universeId={invitableUniverses[0].id}
-          universes={invitableUniverses}
+          universes={[...invitableUniverses, ...takenUniverses]}
+          giving
           person={{ userId: id, name, woka: user.woka, notes: Object.fromEntries(invitableUniverses.map((universe) => [universe.id, universe.note])) }}
           onSent={() => {
             fetchUser();

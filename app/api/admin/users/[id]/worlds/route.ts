@@ -67,9 +67,9 @@ export async function GET(
         universe: world.universe,
       }));
 
-    const { universes, friend } = await invitableUniverses(sessionUser, userId, hidden);
+    const { universes, taken, friend } = await invitableUniverses(sessionUser, userId, hidden);
 
-    return NextResponse.json({ worlds: availableWorlds, universes, friend });
+    return NextResponse.json({ worlds: availableWorlds, universes, taken, friend });
   } catch (error) {
     console.error('Error fetching worlds:', error);
     return NextResponse.json(
@@ -81,14 +81,19 @@ export async function GET(
 
 
 async function invitableUniverses(viewer: { id: string; isSuperAdmin: boolean }, personId: string, hidden: string | null) {
-  if (viewer.id === personId) return { universes: [], friend: false };
+  if (viewer.id === personId) return { universes: [], taken: [], friend: false };
   const candidates = await prisma.universe.findMany({
     where: {
       ...(hidden ? { ownerId: { not: hidden } } : {}),
       ...(viewer.isSuperAdmin ? {} : { OR: [{ ownerId: viewer.id }, { members: { some: { userId: viewer.id } } }] }),
-      NOT: [{ ownerId: personId }, { members: { some: { userId: personId } } }, { membershipInvitations: { some: { invitedUserId: personId, status: 'pending' } } }],
     },
-    select: { id: true, name: true },
+    select: {
+      id: true,
+      name: true,
+      ownerId: true,
+      members: { where: { userId: personId }, select: { id: true } },
+      membershipInvitations: { where: { invitedUserId: personId, status: 'pending' }, select: { id: true } },
+    },
     orderBy: { name: 'asc' },
   });
   // What the sheet says under their name, as the invite lists do: whether they are your friend, and when they last came
@@ -97,11 +102,19 @@ async function invitableUniverses(viewer: { id: string; isSuperAdmin: boolean },
     prisma.friendship.findUnique({ where: { user1Id_user2Id: orderedPair(viewer.id, personId) }, select: { status: true } }),
     accessForMany(prisma, candidates.map((universe) => universe.id), viewer),
   ]);
-  const invitable = candidates.filter((universe) => {
+  const yours = candidates.filter((universe) => {
     const access = accesses.get(universe.id);
     if (!access) return false;
     const worlds = worldsAllowing(access, 'INVITE_AND_REMOVE');
     return worlds === 'all' || worlds.length > 0;
+  });
+  // The sheet shows the ones they already belong to or are invited to, so it is clear why they can't be picked.
+  const status = (universe: (typeof yours)[number]) =>
+    universe.ownerId === personId || universe.members.length > 0 ? 'member' : universe.membershipInvitations.length > 0 ? 'invited' : null;
+  const invitable = yours.filter((universe) => !status(universe)).map(({ id, name }) => ({ id, name }));
+  const taken = yours.flatMap((universe) => {
+    const value = status(universe);
+    return value ? [{ id: universe.id, name: universe.name, status: value }] : [];
   });
   // Their latest visit in each of these universes: the newest row of each
   const visits = invitable.length
@@ -116,5 +129,5 @@ async function invitableUniverses(viewer: { id: string; isSuperAdmin: boolean },
     const visit = visits.find((row) => row.universeId === universe.id);
     return { ...universe, visit: visit ? { at: visit.accessedAt.toISOString(), room: visit.room, world: visit.world } : null };
   });
-  return { universes, friend: friendship?.status === 'accepted' };
+  return { universes, taken, friend: friendship?.status === 'accepted' };
 }
