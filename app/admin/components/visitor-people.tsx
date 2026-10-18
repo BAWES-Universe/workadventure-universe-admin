@@ -218,21 +218,26 @@ function PersonCard({
   );
 }
 
-/** Where a visit was: the room on a world, the world and room on a universe, each a link. */
+/** Where a visit was: the room on a world, the world and room on a universe, each a link, or "Private" when hidden. */
 function Place({ visit, scope }: { visit: PersonVisit; scope: Scope }) {
   return (
     <span className={styles.place}>
       {scope === 'universe' && (
         <>
-          <Link href={`/admin/worlds/${visit.world.id}`} className={styles.room}>
-            {visit.world.name}
-          </Link>
+          <PlaceLink place={visit.world} href="/admin/worlds/" label="Private world" />
           <span aria-hidden="true">›</span>
         </>
       )}
-      <Link href={`/admin/rooms/${visit.room.id}`} className={styles.room}>
-        {visit.room.name}
-      </Link>
+      <PlaceLink place={visit.room} href="/admin/rooms/" label="Private room" />
     </span>
+  );
+}
+
+function PlaceLink({ place, href, label }: { place: { id: string; name: string } | null; href: string; label: string }) {
+  if (!place) return <span className={styles.private}>{label}</span>;
+  return (
+    <Link href={href + place.id} className={styles.room}>
+      {place.name}
+    </Link>
   );
 }

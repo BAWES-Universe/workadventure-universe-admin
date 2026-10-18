@@ -2,20 +2,22 @@
  * The Visitors list: one entry per person, every visit still reachable, and nobody learns more than the visit records
  * already tell them.
  */
-jest.mock('@/lib/db', () => ({ prisma: { $queryRaw: jest.fn(), roomAccess: { findMany: jest.fn() } } }));
-jest.mock('@/lib/access-scope', () => ({ ...jest.requireActual('@/lib/access-scope'), accessDetailFor: jest.fn() }));
+jest.mock('@/lib/db', () => ({ prisma: { $queryRaw: jest.fn(), roomAccess: { findMany: jest.fn() }, room: { findMany: jest.fn() } } }));
+jest.mock('@/lib/access-scope', () => ({ ...jest.requireActual('@/lib/access-scope'), accessDetailFor: jest.fn(), memberWorldIdsOf: jest.fn() }));
 jest.mock('@/lib/woka-avatar', () => ({
   withWokas: jest.fn(async (records: { userId?: string }[]) => records.map((record) => ({ ...record, woka: record.userId ? [`/woka/${record.userId}.png`] : undefined }))),
 }));
 
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
-import { accessDetailFor, type Viewer } from '@/lib/access-scope';
+import { accessDetailFor, memberWorldIdsOf, type Viewer } from '@/lib/access-scope';
 import { loadPersonVisits, loadVisitorPeople, VISITS_SHOWN } from '@/lib/visitor-people';
 
 const queryRaw = prisma.$queryRaw as unknown as jest.Mock;
 const findMany = prisma.roomAccess.findMany as jest.Mock;
 const detail = accessDetailFor as jest.Mock;
+const findRooms = prisma.room.findMany as jest.Mock;
+const memberOf = memberWorldIdsOf as jest.Mock;
 const viewer = { kind: 'user', user: { id: 'me', uuid: 'me-uuid', email: null, name: 'Me', tags: [], isSuperAdmin: false } } as unknown as Viewer;
 const room = { roomId: 'r1' };
 
@@ -61,7 +63,19 @@ function newestQuery() {
 beforeEach(() => {
   jest.clearAllMocks();
   detail.mockResolvedValue('full');
+  memberOf.mockResolvedValue(new Set());
 });
+
+/** Rooms as the visibility rules read them: HQ is public in a public world; the others are whatever they are told. */
+function roomsAre(...rooms: { id: string; isPublic?: boolean; worldId?: string; worldPublic?: boolean }[]) {
+  findRooms.mockResolvedValue(
+    rooms.map(({ id, isPublic = true, worldId = 'w1', worldPublic = true }) => ({
+      id,
+      isPublic,
+      world: { id: worldId, isPublic: worldPublic, universe: { isPublic: true, ownerId: 'owner' } },
+    })),
+  );
+}
 
 describe('loadVisitorPeople', () => {
   it('shows each person once, as their newest visit shows them, with how many visits and IPs', async () => {
@@ -169,6 +183,46 @@ describe('loadVisitorPeople', () => {
     expect((await loadVisitorPeople(viewer, room, { page: 2, limit: 20 })).hasMore).toBe(false);
     groups([{ person: 'g:last', visits: 1, ips: 1 }], 22, { a9: 'g:last' });
     expect((await loadVisitorPeople(viewer, room, { page: 2, limit: 20 })).hasMore).toBe(true);
+  });
+});
+
+describe('private rooms and worlds inside a place someone may see', () => {
+  const vault = { room: { id: 'r2', name: 'Vault' } };
+  const hidden = { world: { id: 'w2', name: 'Secret World' }, room: { id: 'r3', name: 'Bunker' } };
+
+  it('counts visits to a private room on a world page, but does not name it', async () => {
+    groups([{ person: 'u:fawaz', visits: 2, ips: 1 }], 1, { a1: 'u:fawaz', a2: 'u:fawaz' });
+    findMany.mockResolvedValue([visit('a1', 'fawaz', 5), visit('a2', 'fawaz', 6, vault)]);
+    roomsAre({ id: 'r1' }, { id: 'r2', isPublic: false });
+    const [fawaz] = (await loadVisitorPeople(viewer, { worldId: 'w1' })).people;
+    expect(fawaz.visitCount).toBe(2);
+    expect(fawaz.visits.map((visit) => [visit.room, visit.world])).toEqual([
+      [{ id: 'r1', name: 'HQ' }, { id: 'w1', name: 'Kuwait' }],
+      [null, { id: 'w1', name: 'Kuwait' }],
+    ]);
+    expect(JSON.stringify(fawaz)).not.toContain('Vault');
+  });
+
+  it('hides a private world and its room on a universe page, also when loading more visits', async () => {
+    findMany.mockResolvedValue([visit('a3', 'fawaz', 5, hidden)]);
+    roomsAre({ id: 'r3', worldId: 'w2', worldPublic: false });
+    const [more] = await loadPersonVisits(viewer, { universeId: 'u1' }, 'u:fawaz');
+    expect(more.room).toBeNull();
+    expect(more.world).toBeNull();
+    expect(JSON.stringify(more)).not.toMatch(/Secret World|Bunker/);
+  });
+
+  it('names them for a member of that world, a super admin, and on the room’s own page', async () => {
+    findMany.mockResolvedValue([visit('a3', 'fawaz', 5, hidden)]);
+    roomsAre({ id: 'r3', isPublic: false, worldId: 'w2', worldPublic: false });
+    memberOf.mockResolvedValue(new Set(['w2']));
+    expect((await loadPersonVisits(viewer, { universeId: 'u1' }, 'u:fawaz'))[0]).toEqual(expect.objectContaining(hidden));
+    memberOf.mockResolvedValue(new Set());
+    findRooms.mockClear();
+    const boss = { kind: 'user', user: { id: 'boss', uuid: null, isSuperAdmin: true } } as unknown as Viewer;
+    expect((await loadPersonVisits(boss, { universeId: 'u1' }, 'u:fawaz'))[0]).toEqual(expect.objectContaining(hidden));
+    expect((await loadPersonVisits(viewer, { roomId: 'r3' }, 'u:fawaz'))[0]).toEqual(expect.objectContaining(hidden));
+    expect(findRooms).not.toHaveBeenCalled();
   });
 });
 
