@@ -97,7 +97,7 @@ export async function GET(
       const positions = new Map(BUILT_IN_POSITION);
       for (const role of await prisma.role.findMany({ where: { universeId: world.universeId }, select: { key: true, position: true } })) positions.set(role.key, role.position);
       const rankOf = (member: { userId: string; tags: string[] }) =>
-        world.universe.ownerId === member.userId ? -1e9 : -Math.max(0, ...member.tags.map((tag) => positions.get(tag.toLowerCase()) ?? 0));
+        world.universe.ownerId === member.userId ? -1e9 : -Math.max(0, ...member.tags.map((tag) => positions.get(tag) ?? 0));
       onlyIds = [...everyone].sort((a, b) => rankOf(a) - rankOf(b)).slice(0, limit).map((member) => member.id);
     }
 

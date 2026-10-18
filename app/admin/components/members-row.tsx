@@ -24,7 +24,7 @@ export function topRole(member: Pick<MemberPreview, 'isUniverseOwner' | 'tags'>)
  * role such as Accountant shows as itself. Null when none of their tags is a role the universe has.
  */
 export function topUniverseRole(member: Pick<MemberPreview, 'tags'>, byKey: ReadonlyMap<string, UniverseRole>): UniverseRole | null {
-  const held = member.tags.map((tag) => byKey.get(tag.toLowerCase())).filter((role): role is UniverseRole => !!role);
+  const held = member.tags.map((tag) => byKey.get(tag)).filter((role): role is UniverseRole => !!role);
   return held.sort((a, b) => b.position - a.position)[0] ?? null;
 }
 
