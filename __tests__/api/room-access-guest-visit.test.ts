@@ -103,6 +103,9 @@ describe('GET /api/room/access, what a guest visit keeps', () => {
       membershipTags: [],
       textureIds: ['body1'],
     });
-    expect(notifyRoomAccess).toHaveBeenCalledWith(expect.objectContaining({ userName: 'Nova', userEmail: null, isGuest: true, tags: [] }));
+    // The Discord note names the same guest id as the visit, not Mona's
+    expect(notifyRoomAccess).toHaveBeenCalledWith(
+      expect.objectContaining({ userName: 'Nova', userEmail: null, isGuest: true, tags: [], userUuid: saved.userUuid }),
+    );
   });
 });

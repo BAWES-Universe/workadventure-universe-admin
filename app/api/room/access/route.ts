@@ -188,6 +188,9 @@ export async function GET(request: NextRequest) {
       // The identifier is whatever the caller sent, so that account's details never go with this visit (#408): it is
       // answered, recorded and announced as the guest it is, under the name they typed, with no email, tags, chat or card.
       const account = unverifiedAccount ? null : user;
+      // Who the visit and the Discord note are about: not under the id they sent when that account wasn't verified, so
+      // it never reads as that person's (#421). A guest id made from it instead, so their visits still group as one guest's.
+      const visitorUuid = unverifiedAccount ? unverifiedGuestId(finalUuid) : finalUuid;
       if (unverifiedAccount) {
         userName = name || null;
         userEmail = null;
@@ -501,9 +504,7 @@ export async function GET(request: NextRequest) {
       if (!isBotIdentifier(finalUuid)) {
         await (prisma as any).roomAccess.create({
           data: {
-            // Not under the id they sent when that account wasn't verified, so it never reads as that person's visit
-            // (#421). A guest id made from it instead, so their visits still count and group as one guest's.
-            userUuid: unverifiedAccount ? unverifiedGuestId(finalUuid) : finalUuid,
+            userUuid: visitorUuid,
             userId: account?.id || null,
             ipAddress: ipAddress,
             userName: account ? (account.name || userName) : userName,
@@ -589,7 +590,7 @@ export async function GET(request: NextRequest) {
       notifyRoomAccess({
         userName: webhookUserName,
         userEmail: webhookUserEmail,
-        userUuid: finalUuid,
+        userUuid: visitorUuid,
         isGuest: webhookIsGuest,
         tags: webhookTags,
         playUri: playUri,
