@@ -9,6 +9,11 @@ import { NextRequest } from 'next/server';
 
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
 jest.mock('@/lib/woka-avatar', () => ({ withWokas: jest.fn(async (records: unknown[]) => records) }));
+jest.mock('@/lib/friends', () => ({
+  ...jest.requireActual('@/lib/friends'),
+  listFriends: jest.fn(async () => ({ friends: [], incoming: [], outgoing: [], blocked: [] })),
+  searchPeople: jest.fn(async () => []),
+}));
 
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
@@ -27,6 +32,7 @@ import { POST as accept } from '@/app/api/memberships/invitations/[id]/accept/ro
 import * as worldMembersRoute from '@/app/api/admin/worlds/[id]/members/route';
 import * as worldMemberRoute from '@/app/api/admin/worlds/[id]/members/[memberId]/route';
 import * as leaveWorldRoute from '@/app/api/memberships/my/world/[id]/route';
+import { GET as inviteCandidates } from '@/app/api/admin/universes/[id]/invite-candidates/route';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
 const session = getSessionUser as jest.Mock;
@@ -406,5 +412,47 @@ run('universe roles and people routes (real database)', () => {
     expect(moderator.body.canCancel).toBe(true);
     // The Admin has it everywhere
     expect(names((await as('admin', inviteRoute.GET, {})).body)).toEqual(['wanted-a', 'wanted-all', 'wanted-b']);
+  });
+  it('offers every visitor of the week to invite, however often members came in, and never a member or someone invited', async () => {
+    for (const who of ['visitor', 'invitee']) {
+      people[who] = (await prisma.user.create({ data: { uuid: `${who}-${tag}`, email: `${who}-${tag}@example.test`, name: who } })).id;
+    }
+    const room = await prisma.room.create({ data: { worldId: worldA, slug: 'lobby', name: 'Lobby' } });
+    const visit = (who: string, hoursAgo: number) => ({
+      userId: people[who],
+      ipAddress: '127.0.0.1',
+      universeId,
+      worldId: worldA,
+      roomId: room.id,
+      universeSlug: `roles-${tag}`,
+      worldSlug: 'a',
+      roomSlug: 'lobby',
+      playUri: 'http://localhost/play',
+      isGuest: false,
+      accessedAt: new Date(Date.now() - hoursAgo * 60 * 60 * 1000),
+    });
+    await prisma.membershipInvitation.create({
+      data: { worldId: worldA, universeId, allWorlds: false, worldIds: [worldA], invitedUserId: people.invitee, invitedByUserId: people.admin, status: 'pending', tags: [], roleIds: [] },
+    });
+    // The visitor came once, a day ago; since then members came in 451 times and the invitee 30 times
+    await prisma.roomAccess.createMany({
+      data: [visit('visitor', 24), ...Array.from({ length: 450 }, (_, n) => visit('helper', n / 100)), visit('mod', 2), ...Array.from({ length: 30 }, (_, n) => visit('invitee', n / 100))],
+    });
+
+    const offered = await as('admin', inviteCandidates, {});
+    expect(offered.status).toBe(200);
+    expect(offered.body.visitors.map((person: { userId: string }) => person.userId)).toEqual([people.visitor]);
+    expect(offered.body.visitors[0].room).toEqual({ id: room.id, name: 'Lobby' });
+  });
+
+  it('shows when a member last came only to people who manage members, and to the member themself', async () => {
+    const seen = await as('admin', memberRoute.GET, { userId: people.mod });
+    expect(seen.body.member.lastVisitedAt).toEqual(expect.any(String));
+    const own = await as('helper', memberRoute.GET, { userId: people.helper });
+    expect(own.body.member.lastVisitedAt).toEqual(expect.any(String));
+    // The helper only has a role with no permissions
+    const other = await as('helper', memberRoute.GET, { userId: people.mod });
+    expect(other.status).toBe(200);
+    expect(other.body.member).not.toHaveProperty('lastVisitedAt');
   });
 });
