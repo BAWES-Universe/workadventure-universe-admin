@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
+import { joinUniverse, roleIdsForTags } from '@/lib/universe-members';
 
 // POST /api/memberships/invitations/[id]/accept - Accept invitation
 export async function POST(
@@ -40,43 +41,23 @@ export async function POST(
       );
     }
 
-    // Check if user is already a member
-    const existingMember = await prisma.worldMember.findUnique({
-      where: {
-        userId_worldId: {
-          userId: sessionUser.id,
-          worldId: invitation.worldId,
-        },
-      },
-    });
-
-    if (existingMember) {
-      // Update invitation status to accepted even though member already exists
-      await prisma.membershipInvitation.update({
-        where: { id },
-        data: {
-          status: 'accepted',
-          respondedAt: new Date(),
-        },
-      });
-      return NextResponse.json({ 
-        message: 'Already a member',
-        member: existingMember 
-      });
-    }
-
-    // Use transaction to create member and update invitation
+    // Join the universe with the invitation's roles and worlds. Someone already in it keeps everything they have and
+    // gets these on top. An invitation sent before roles names one world and its tags.
+    const universeId = invitation.universeId ?? invitation.world.universeId;
     const result = await prisma.$transaction(async (tx) => {
-      // Create world member with tags from invitation
-      const member = await tx.worldMember.create({
-        data: {
-          userId: sessionUser.id,
-          worldId: invitation.worldId,
-          tags: invitation.tags, // Use tags from invitation
-        },
+      const roleIds = invitation.universeId
+        ? invitation.roleIds
+        : await roleIdsForTags(tx, universeId, invitation.tags);
+      const worlds = invitation.universeId
+        ? { allWorlds: invitation.allWorlds, worldIds: invitation.worldIds }
+        : { allWorlds: false, worldIds: [invitation.worldId] };
+      await joinUniverse(tx, {
+        universeId,
+        userId: sessionUser.id,
+        worlds,
+        roles: roleIds.map((roleId) => ({ roleId, scope: worlds })),
       });
 
-      // Update invitation
       await tx.membershipInvitation.update({
         where: { id },
         data: {
@@ -85,7 +66,9 @@ export async function POST(
         },
       });
 
-      return member;
+      return tx.worldMember.findUnique({
+        where: { userId_worldId: { userId: sessionUser.id, worldId: invitation.worldId } },
+      });
     });
 
     return NextResponse.json({ member: result });

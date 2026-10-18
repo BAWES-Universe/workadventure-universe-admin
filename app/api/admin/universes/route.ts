@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
+import { ensureBuiltInRoles } from '@/lib/roles';
 import { z } from 'zod';
 import { FEATURED_FORBIDDEN, refusesFeaturedChange } from '@/lib/featured';
 import { andNotSystemOwnedSql, hiddenSystemOwnerId } from '@/lib/system-user';
@@ -421,6 +422,8 @@ export async function POST(request: NextRequest) {
       },
     });
     
+    await ensureBuiltInRoles(prisma, universe.id);
+
     return NextResponse.json(universe, { status: 201 });
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized') {

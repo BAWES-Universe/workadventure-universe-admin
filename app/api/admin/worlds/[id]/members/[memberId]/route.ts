@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { getSessionUser } from '@/lib/auth-session';
+import { leaveWorld, setTagsInWorld } from '@/lib/universe-members';
 
 const updateMemberSchema = z.object({
   tags: z.array(z.string()).min(1),
@@ -88,12 +89,10 @@ export async function PATCH(
       );
     }
 
-    // Update member tags
-    const updated = await prisma.worldMember.update({
-      where: { id: memberId },
-      data: {
-        tags: data.tags,
-      },
+    // Their roles in this world become these tags' roles (lib/universe-members.ts), which writes the tags
+    await prisma.$transaction((tx) => setTagsInWorld(tx, worldId, member.userId, data.tags));
+    const updated = await prisma.worldMember.findUniqueOrThrow({
+      where: { userId_worldId: { userId: member.userId, worldId } },
       include: {
         user: {
           select: {
@@ -184,10 +183,8 @@ export async function DELETE(
       },
     });
 
-    // Remove member
-    await prisma.worldMember.delete({
-      where: { id: memberId },
-    });
+    // Remove member: their membership and roles stop working in this world
+    await prisma.$transaction((tx) => leaveWorld(tx, worldId, member.userId));
 
     return NextResponse.json({ success: true });
   } catch (error) {
