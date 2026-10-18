@@ -399,7 +399,8 @@ export async function POST(request: NextRequest) {
       await syncNewWorld(tx, created.universeId);
       created._count.members = await tx.worldMember.count({ where: { worldId: created.id } });
       return created;
-    });
+      // Adding every all-worlds member is a query or more each, past the 5 second default in a big universe
+    }, { timeout: 60_000 });
 
     return NextResponse.json(world, { status: 201 });
   } catch (error) {
