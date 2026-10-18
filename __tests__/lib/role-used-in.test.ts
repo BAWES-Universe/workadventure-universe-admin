@@ -271,6 +271,6 @@ describe('computeUsedIn', () => {
 
   it('lists every permission for a role with Administrator', async () => {
     const used = await computeUsedIn({ universeId: 'u', role: { ...ROLE, permissions: fromKeys(['ADMINISTRATOR']) }, viewer: VIEWER, fetcher: answers({}) });
-    expect(used.reach.permissions).toHaveLength(15);
+    expect(used.reach.permissions).toHaveLength(18);
   });
 });

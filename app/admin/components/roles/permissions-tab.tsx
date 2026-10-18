@@ -66,7 +66,7 @@ export function PermissionsTab({
   const intro = isAdmin
     ? `${on} of ${PERMISSION_TOTAL} on. Admin always has every permission, so these can’t be switched off. To give fewer, make your own role.`
     : isEveryone
-      ? `${on} of ${PERMISSION_TOTAL} on. Usually all off: rooms and map areas can still open to everyone on their own.`
+      ? `${on} of ${PERMISSION_TOTAL} on. Chat, DM and Summon bots start on, so bots work as they always have. The rest are usually off: rooms and map areas can still open to everyone on their own.`
       : `${on} of ${PERMISSION_TOTAL} on. Everything Everyone can do is included. Which rooms and areas this role opens is set on each room and area: see Used in.`;
 
   return (
