@@ -25,10 +25,19 @@ jest.mock('@/lib/avatar-catalog-validator', () => ({
   resolveCompanionTexture: jest.fn().mockResolvedValue({ valid: true, texture: null }),
 }));
 jest.mock('@/lib/super-admin', () => ({ isSuperAdmin: () => false }));
+jest.mock('@/lib/roles', () => {
+  const actual = jest.requireActual('@/lib/roles');
+  return {
+    ...actual,
+    // Mona's roles in this universe would let her edit maps
+    permissionsForWorld: jest.fn(async ({ userId }: { userId: string | null }) => actual.permissionsFromTags(userId === 'u1' ? ['admin'] : [])),
+  };
+});
 
 import { prisma } from '@/lib/db';
 import { GET as roomAccess } from '@/app/api/room/access/route';
 import { notifyRoomAccess } from '@/lib/discord';
+import { permissionsForWorld } from '@/lib/roles';
 
 const db = prisma as unknown as Record<string, Record<string, jest.Mock>>;
 
@@ -74,6 +83,9 @@ describe('GET /api/room/access, what a guest visit keeps', () => {
     // Nothing of Mona's account goes back to them
     expect(body).toMatchObject({ status: 'ok', email: null, username: 'Nova', tags: [], visitCardUrl: null });
     expect(body.chatID).toBeUndefined();
+    // Nor her roles: they are worked out as nobody's
+    expect(permissionsForWorld).toHaveBeenCalledWith(expect.objectContaining({ userId: null, worldTags: [] }));
+    expect(body.canEdit).toBe(false);
     expect(db.visitCard.findUnique).not.toHaveBeenCalled();
     // The visit is a guest's, under the name they typed, keeping the Woka they picked
     expect(db.roomAccess.create.mock.calls[0][0].data).toMatchObject({
