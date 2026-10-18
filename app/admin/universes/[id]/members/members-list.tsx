@@ -212,8 +212,8 @@ export function UniverseMembersPage() {
           </>
         }
         actions={
-          // One row, side by side, on a phone too
-          <div className="flex gap-2">
+          // Side by side on a phone; the second wraps under the first only where the two don't fit (the in-game panel)
+          <div className="flex flex-wrap gap-2">
             {canInvite && (
               <Button className="h-11 px-4" onClick={() => setInviting(true)}>
                 <UserPlus aria-hidden="true" />
