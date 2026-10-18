@@ -95,6 +95,19 @@ describe('Visitors list', () => {
     expect(fetchMock).toHaveBeenLastCalledWith('/api/admin/visitors?scope=room&id=r1&page=2');
   });
 
+  it('asks for the same page again after it failed, never skipping it', async () => {
+    let failPage2 = true;
+    serve((path) => (path.endsWith('page=1') ? { people: [fawaz], total: 2 } : failPage2 ? null : { people: [nova], total: 2 }));
+    render(<VisitorPeople scope="room" id="r1" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Show more' }));
+    expect(await screen.findByText(/couldn’t load more visitors/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Show more' })).toBeNull();
+    failPage2 = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText('2 of 2 people')).toBeTruthy();
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/admin/visitors?scope=room&id=r1&page=2');
+  });
+
   it('says when nobody came, with the plain people icon', async () => {
     serve(() => ({ people: [], total: 0 }));
     const { container } = render(<VisitorPeople scope="universe" id="u1" />);

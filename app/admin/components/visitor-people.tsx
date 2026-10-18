@@ -99,7 +99,8 @@ export function VisitorPeople({ scope, id }: { scope: Scope; id: string }) {
         <span>
           {people.length.toLocaleString()} of {total.toLocaleString()} {total === 1 ? 'person' : 'people'}
         </span>
-        {people.length < total && (
+        {/* After a page fails, Try again asks for that same page; Show more would skip it. */}
+        {people.length < total && !failed && (
           <Button variant="outline" className="h-11 px-5" disabled={loadingMore} onClick={showMore}>
             {loadingMore ? 'Loading…' : 'Show more'}
           </Button>
