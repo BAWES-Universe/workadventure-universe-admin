@@ -262,7 +262,7 @@ export async function GET(request: NextRequest) {
         // Check permission for sensitive data
         let hasPermission = false;
         if (includeSensitive && userId) {
-          hasPermission = await canManageThisBot(userId, null, bot, { creatorPasses: false }) || isSuperAdmin(userEmail);
+          hasPermission = isSuperAdmin(userEmail) || (await canManageThisBot(userId, null, bot, { creatorPasses: false }));
         }
 
         return transformBotToServerFormat(bot, includeSensitive, hasPermission);

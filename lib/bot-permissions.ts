@@ -57,18 +57,17 @@ export async function canManageThisBot(
   if (options.creatorPasses && bot.createdById === userId) return true;
   if (isSuperAdmin(userEmail)) return true;
 
-  const base = await canManageBots(userId, bot.roomId);
   const rules = await prisma.botAccessRule.findMany({
     where: { botId: bot.id },
     select: { roleId: true, userId: true, allow: true, deny: true },
   });
-  if (rules.length === 0) return base;
+  if (rules.length === 0) return canManageBots(userId, bot.roomId);
 
   const room = await prisma.room.findUnique({
     where: { id: bot.roomId },
     select: { world: { select: { id: true, universeId: true, universe: { select: { ownerId: true } } } } },
   });
-  if (!room) return base;
+  if (!room) return canManageBots(userId, bot.roomId);
   if (room.world.universe.ownerId === userId) return true;
 
   const member = await prisma.worldMember.findFirst({
@@ -94,7 +93,7 @@ export async function canManageThisBot(
   );
   if (verdict === 'yes') return true;
   if (verdict === 'no') return false;
-  return base;
+  return canManageBots(userId, bot.roomId);
 }
 
 /**

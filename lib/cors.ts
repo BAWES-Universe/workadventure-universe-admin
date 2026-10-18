@@ -21,7 +21,10 @@ export function trustedCorsHeaders(request?: { headers: { get(name: string): str
   };
   const origin = request?.headers.get('origin');
   if (!origin) return base;
-  const trusted = (process.env.CORS_ALLOWED_ORIGINS || '').split(',').filter(Boolean);
+  const trusted = (process.env.CORS_ALLOWED_ORIGINS || '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
   if (!trusted.includes(origin)) return { ...base, Vary: 'Origin' };
   return { ...base, 'Access-Control-Allow-Origin': origin, 'Access-Control-Allow-Credentials': 'true', Vary: 'Origin' };
 }
