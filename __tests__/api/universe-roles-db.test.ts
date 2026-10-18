@@ -264,6 +264,19 @@ run('universe roles and people routes (real database)', () => {
     expect((await as('admin', memberRoute.DELETE, { userId: people.owner })).status).toBe(404);
   });
 
+  it('never lets anyone but the owner change the owner\'s roles, even from Admin', async () => {
+    await joinUniverse(prisma, { universeId, userId: people.owner, worlds: { allWorlds: true, worldIds: [] }, roles: [] });
+    try {
+      expect((await as('admin', givenRoute.PUT, { userId: people.owner, roleId: role.helper }, { allWorlds: true, worldIds: [] })).status).toBe(403);
+      expect((await as('owner', givenRoute.PUT, { userId: people.owner, roleId: role.helper }, { allWorlds: true, worldIds: [] })).status).toBe(200);
+      expect((await as('admin', givenRoute.DELETE, { userId: people.owner, roleId: role.helper })).status).toBe(403);
+      expect((await as('admin', memberRoute.GET, { userId: people.owner })).body.can.giveRoleIds).toEqual([]);
+    } finally {
+      await prisma.universeMember.deleteMany({ where: { universeId, userId: people.owner } });
+      await prisma.worldMember.deleteMany({ where: { userId: people.owner, worldId: { in: [worldA, worldB] } } });
+    }
+  });
+
   it('lists members with emails only for those who manage people, and says what you may do', async () => {
     const asHelper = await as('helper', membersRoute.GET, {});
     expect(asHelper.status).toBe(200);
@@ -292,6 +305,14 @@ run('universe roles and people routes (real database)', () => {
     expect(rolesOf((await as('admin', membersRoute.GET, {})).body, people.mod)).toEqual([role.moderator]);
     expect((await as('helper', memberRoute.GET, { userId: people.mod })).body.member.roles).toEqual([]);
     expect((await as('mod', memberRoute.GET, { userId: people.mod })).body.member.roles).toHaveLength(1);
+    // The Roles list leaves it out too, except for people who handle roles and whoever holds it
+    const listed = async (who: string) => (await as(who, rolesRoute.GET, {})).body.roles.map((r: { id: string }) => r.id);
+    expect(await listed('helper')).not.toContain(role.moderator);
+    expect(await listed('mod')).toContain(role.moderator);
+    expect(await listed('admin')).toContain(role.moderator);
+    await prisma.role.update({ where: { id: role.helper }, data: { showBadge: false } });
+    expect(await listed('helper')).toContain(role.helper);
+    await prisma.role.update({ where: { id: role.helper }, data: { showBadge: true } });
     await prisma.role.update({ where: { id: role.moderator }, data: { showBadge: true } });
 
     const detail = await as('mod', memberRoute.GET, { userId: people.helper });

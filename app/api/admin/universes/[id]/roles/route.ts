@@ -11,20 +11,23 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const { id } = await params;
     const context = await universeContext(request, id);
     if (!context.ok) return context.response;
-    const { access } = context;
+    const { access, user } = context;
 
     await ensureBuiltInRoles(prisma, id);
-    const [roles, counts, members] = await Promise.all([
+    const [roles, counts, members, held] = await Promise.all([
       prisma.role.findMany({ where: { universeId: id }, orderBy: [{ position: 'desc' }, { name: 'asc' }] }),
       prisma.universeMemberRole.groupBy({ by: ['roleId'], where: { role: { universeId: id } }, _count: { _all: true } }),
       prisma.universeMember.count({ where: { universeId: id } }),
+      prisma.universeMemberRole.findMany({ where: { member: { universeId: id, userId: user.id } }, select: { roleId: true } }),
     ]);
     const countOf = new Map(counts.map((row) => [row.roleId, row._count._all]));
+    // A role whose badge is hidden is listed only to people who handle roles, and to whoever holds it
     const seesHidden = seesHiddenRoles(access);
+    const mine = new Set(held.map((row) => row.roleId));
     const manages = allows(access, 'MANAGE_ROLES', { allWorlds: true });
 
     return NextResponse.json({
-      roles: roles.map((role) => ({
+      roles: roles.filter((role) => role.showBadge || seesHidden || mine.has(role.id)).map((role) => ({
         ...roleForJson(role),
         // Everyone who joined is a Member; Everyone is everyone, so it has no count
         // A role whose badge is hidden doesn't say how many people hold it to anyone who can't see who does
