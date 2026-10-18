@@ -191,6 +191,24 @@ run('universe roles and people routes (real database)', () => {
     expect(await tagsOf('outsider', worldB)).toBeNull();
   });
 
+  it('lets someone who left accept a new invitation to a world they once accepted one for', async () => {
+    expect((await as('outsider', memberRoute.DELETE, { userId: people.outsider })).status).toBe(200);
+    const invited = await as('admin', inviteRoute.POST, {}, {
+      userId: people.outsider,
+      roleIds: [role.helper],
+      worlds: { allWorlds: false, worldIds: [worldA] },
+    });
+    expect(invited.status).toBe(201);
+    session.mockResolvedValue({ id: people.outsider, uuid: 'outsider', email: null, name: 'outsider', tags: [], isSuperAdmin: false });
+    const accepted = await accept(new NextRequest('http://localhost/api', { method: 'POST' }), {
+      params: Promise.resolve({ id: invited.body.invitation.id }),
+    });
+    expect(accepted.status).toBe(200);
+    expect(await tagsOf('outsider', worldA)).toEqual(['helper', 'member']);
+    const rows = await prisma.membershipInvitation.findMany({ where: { worldId: worldA, invitedUserId: people.outsider } });
+    expect(rows.map((row) => row.status)).toEqual(['accepted']);
+  });
+
   it('re-sends an old invitation the old way with its new tags, not the roles it once carried', async () => {
     // What the migration leaves on an invitation once sent as Admin and then cancelled
     const old = await prisma.membershipInvitation.create({
