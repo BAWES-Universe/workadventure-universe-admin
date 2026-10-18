@@ -28,6 +28,12 @@ jest.mock('@/lib/db', () => {
   const mockWorldMember = {
     findFirst: jest.fn(),
   };
+  const mockRole = {
+    findUnique: jest.fn(),
+  };
+  const mockUniverseMember = {
+    findUnique: jest.fn(),
+  };
   return {
     prisma: {
       $transaction: jest.fn(async (cb: Function) => cb({
@@ -39,6 +45,8 @@ jest.mock('@/lib/db', () => {
       user: mockUser,
       room: mockRoom,
       worldMember: mockWorldMember,
+      role: mockRole,
+      universeMember: mockUniverseMember,
       botMcpServer: mockBotMcpServer,
     },
   };
@@ -65,6 +73,7 @@ const MOCK_USER_ID = 'user-456';
 const MOCK_SERVER_ID = 'server-789';
 const MOCK_ROOM_ID = 'room-1';
 const MOCK_WORLD_ID = 'world-1';
+const MOCK_UNIVERSE_ID = 'universe-1';
 
 describe('/api/bots/[id]/mcp-servers', () => {
   beforeEach(() => {
@@ -96,9 +105,12 @@ describe('/api/bots/[id]/mcp-servers', () => {
     (prisma.room.findUnique as jest.Mock).mockResolvedValue({
       id: MOCK_ROOM_ID,
       worldId: MOCK_WORLD_ID,
-      world: { universe: { ownerId: 'universe-owner' } },
+      world: { id: MOCK_WORLD_ID, universeId: MOCK_UNIVERSE_ID, universe: { ownerId: 'universe-owner' } },
     });
     (prisma.worldMember.findFirst as jest.Mock).mockResolvedValue(null);
+    // No built-in permissions and no universe membership: bot management then follows the world tags
+    (prisma.role.findUnique as jest.Mock).mockResolvedValue(null);
+    (prisma.universeMember.findUnique as jest.Mock).mockResolvedValue(null);
   });
 
   describe('GET', () => {
@@ -648,7 +660,7 @@ describe('/api/bots/[id]/mcp-servers', () => {
       (prisma.room.findUnique as jest.Mock).mockResolvedValue({
         id: MOCK_ROOM_ID,
         worldId: MOCK_WORLD_ID,
-        world: { universe: { ownerId: MOCK_USER_ID } },
+        world: { id: MOCK_WORLD_ID, universeId: MOCK_UNIVERSE_ID, universe: { ownerId: MOCK_USER_ID } },
       });
       (prisma.botMcpServer.findMany as jest.Mock).mockResolvedValue([]);
 
@@ -680,8 +692,35 @@ describe('/api/bots/[id]/mcp-servers', () => {
 
       expect(response.status).toBe(204);
       expect(prisma.worldMember.findFirst).toHaveBeenCalledWith({
-        where: { worldId: MOCK_WORLD_ID, userId: MOCK_USER_ID, tags: { hasSome: ['admin', 'editor'] } },
+        where: { worldId: MOCK_WORLD_ID, userId: MOCK_USER_ID },
+        select: { tags: true },
       });
+    });
+
+    it('lets a custom role with Manage bots delete an MCP server of a bot someone else created', async () => {
+      (prisma.bot.findUnique as jest.Mock).mockResolvedValue({
+        id: MOCK_BOT_ID,
+        createdById: 'other-user',
+        roomId: MOCK_ROOM_ID,
+      });
+      (prisma.universeMember.findUnique as jest.Mock).mockResolvedValue({
+        allWorlds: true,
+        worldIds: [],
+        roles: [
+          { allWorlds: true, worldIds: [], role: { key: 'bot-keeper', position: 20, permissions: BigInt(1) << BigInt(13) } },
+        ],
+      });
+      (prisma.botMcpServer.findUnique as jest.Mock).mockResolvedValue({ id: MOCK_SERVER_ID, botId: MOCK_BOT_ID });
+      (prisma.botMcpServer.delete as jest.Mock).mockResolvedValue({});
+
+      const request = new NextRequest(`http://localhost:3333/api/bots/${MOCK_BOT_ID}/mcp-servers/${MOCK_SERVER_ID}`, {
+        method: 'DELETE',
+      });
+      const response = await DELETE(request, {
+        params: Promise.resolve({ id: MOCK_BOT_ID, serverId: MOCK_SERVER_ID }),
+      });
+
+      expect(response.status).toBe(204);
     });
 
     it('still refuses someone who is neither the creator, a room bot manager nor a super admin', async () => {
