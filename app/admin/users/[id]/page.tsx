@@ -34,7 +34,7 @@ import {
 import { ProfileActions, ProfileFrame, ProfileLinks, WokaAvatar } from '../../components/profile-card';
 import { inviteInGame, messageInGame, useGameCapability } from '../../components/orbit-bridge';
 import { PassportSection } from '../../components/passport';
-import InviteToWorldDialog from '../../components/invite-to-world-dialog';
+import InviteSheet, { personNote } from '../../components/invite-sheet';
 
 interface WorldMembership {
   id: string;
@@ -224,7 +224,7 @@ export default function UserDetailPage() {
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [isSuperAdmin, setIsSuperAdmin] = useState(false);
   const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
-  const [availableWorlds, setAvailableWorlds] = useState<unknown[]>([]);
+  const [invitableUniverses, setInvitableUniverses] = useState<{ id: string; name: string; note: string | null }[]>([]);
   const [, setWorldsLoading] = useState(false);
   const [universeAnalytics, setUniverseAnalytics] = useState<Record<string, Analytics>>({});
   const [worldAnalytics, setWorldAnalytics] = useState<Record<string, Analytics>>({});
@@ -365,7 +365,7 @@ export default function UserDetailPage() {
 
   async function fetchAvailableWorlds() {
     if (!currentUser || !user || currentUser.id === user.id) {
-      setAvailableWorlds([]);
+      setInvitableUniverses([]);
       return;
     }
 
@@ -379,10 +379,15 @@ export default function UserDetailPage() {
       }
 
       const data = await response.json();
-      setAvailableWorlds(data.worlds || []);
+      type Offered = { id: string; name: string; visit?: { at: string; room?: { name: string } | null; world?: { name: string } | null } | null };
+      setInvitableUniverses(
+        Array.isArray(data.universes)
+          ? (data.universes as Offered[]).map((universe) => ({ id: universe.id, name: universe.name, note: personNote({ friend: !!data.friend, visit: universe.visit }) }))
+          : [],
+      );
     } catch (err) {
       console.error('Failed to fetch available worlds:', err);
-      setAvailableWorlds([]);
+      setInvitableUniverses([]);
     } finally {
       setWorldsLoading(false);
     }
@@ -541,7 +546,7 @@ export default function UserDetailPage() {
 
   const name = user.name || user.email || 'Someone';
   const isSelf = currentUser?.id === user.id;
-  const canInvite = Boolean(currentUser && !isSelf && availableWorlds.length > 0);
+  const canInvite = Boolean(currentUser && !isSelf && invitableUniverses.length > 0);
   const showPrivate = isSuperAdmin || isSelf;
   const bio = user.visitCard?.bio?.trim();
   const links = user.visitCard?.links ?? [];
@@ -923,15 +928,20 @@ export default function UserDetailPage() {
         </AlertDialogContent>
       </AlertDialog>
 
-      <InviteToWorldDialog
-        userName={user.name || undefined}
-        open={inviteDialogOpen}
-        onOpenChange={setInviteDialogOpen}
-        userId={id}
-        onInviteSent={() => {
-          fetchUser();
-        }}
-      />
+      {invitableUniverses.length > 0 && (
+        <InviteSheet
+          key={invitableUniverses.map((universe) => universe.id).join(',')}
+          open={inviteDialogOpen}
+          onOpenChange={setInviteDialogOpen}
+          universeId={invitableUniverses[0].id}
+          universes={invitableUniverses}
+          person={{ userId: id, name, woka: user.woka, notes: Object.fromEntries(invitableUniverses.map((universe) => [universe.id, universe.note])) }}
+          onSent={() => {
+            fetchUser();
+            fetchAvailableWorlds();
+          }}
+        />
+      )}
     </div>
   );
 }

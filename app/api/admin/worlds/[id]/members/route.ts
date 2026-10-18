@@ -6,6 +6,7 @@ import { withWokas } from '@/lib/woka-avatar';
 import { viewerWorldId } from '@/lib/viewer-world';
 import { NOT_SYSTEM_USER } from '@/lib/system-user';
 import { canSeeWorld } from '@/lib/room-visibility';
+import { BUILT_IN_ROLES } from '@/lib/roles';
 
 const inviteMemberSchema = z.object({
   userId: z.string().uuid(),
@@ -17,8 +18,8 @@ const updateMemberSchema = z.object({
   tags: z.array(z.string()).min(1),
 });
 
-/** Highest role first, as the members list sorts them. */
-const MEMBER_ORDER = ['owner', 'admin', 'editor', 'member'];
+/** Where each built-in role ranks, so a face's highest role is found even when the universe's roles can't be read. */
+const BUILT_IN_POSITION = new Map(BUILT_IN_ROLES.map((role) => [role.key, role.position]));
 
 // Helper function to check if user can manage world members
 async function canManageWorldMembers(worldId: string, userId: string): Promise<boolean> {
@@ -63,7 +64,7 @@ export async function GET(
 
     const world = await prisma.world.findUnique({
       where: { id },
-      select: { id: true, isPublic: true, universe: { select: { name: true, isPublic: true, ownerId: true } } },
+      select: { id: true, isPublic: true, universeId: true, universe: { select: { name: true, isPublic: true, ownerId: true } } },
     });
     const isMember = !!world && !!(await prisma.worldMember.findUnique({
       where: { userId_worldId: { userId: sessionUser.id, worldId: id } },
@@ -92,10 +93,11 @@ export async function GET(
     const limit = Number.isFinite(limitParam) && limitParam > 0 ? Math.min(limitParam, 50) : null;
     let onlyIds: string[] | undefined;
     if (limit !== null) {
+      // Highest role first, custom roles by where the universe ranks them
+      const positions = new Map(BUILT_IN_POSITION);
+      for (const role of await prisma.role.findMany({ where: { universeId: world.universeId }, select: { key: true, position: true } })) positions.set(role.key, role.position);
       const rankOf = (member: { userId: string; tags: string[] }) =>
-        world.universe.ownerId === member.userId
-          ? 0
-          : Math.min(9, ...member.tags.map((tag) => MEMBER_ORDER.indexOf(tag.toLowerCase()) + 1 || 9));
+        world.universe.ownerId === member.userId ? -1e9 : -Math.max(0, ...member.tags.map((tag) => positions.get(tag) ?? 0));
       onlyIds = [...everyone].sort((a, b) => rankOf(a) - rankOf(b)).slice(0, limit).map((member) => member.id);
     }
 
@@ -156,6 +158,7 @@ export async function GET(
       yourTags,
       yourId: sessionUser.id,
       universeName: world.universe.name,
+      universeId: world.universeId,
     });
   } catch (error) {
     console.error('Error fetching world members:', error);

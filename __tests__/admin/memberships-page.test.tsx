@@ -46,7 +46,7 @@ describe('Memberships', () => {
     fetchMock.mockImplementation((url: string) => {
       if (url === '/api/auth/me') return json({ user: { id: 'me' } });
       if (url === '/api/memberships/invitations') return json({ invitations: [] });
-      if (url === '/api/memberships/my') return membershipsOk ? json({ memberships: [] }) : json({ error: 'down' }, 503);
+      if (url === '/api/memberships/my/universes') return membershipsOk ? json({ universes: [] }) : json({ error: 'down' }, 503);
       return json({});
     });
     render(<MyMembershipsPage />);
@@ -65,7 +65,7 @@ describe('Memberships', () => {
       if (url === '/api/auth/me') return json({ user: { id: 'me' } });
       if (url === '/api/memberships/invitations')
         return invitationsOk ? json({ invitations: [invitation('i1', 'Moon')] }) : json({}, 500);
-      if (url === '/api/memberships/my') return json({ memberships: [] });
+      if (url === '/api/memberships/my/universes') return json({ universes: [] });
       return json({});
     });
     render(<MyMembershipsPage />);
@@ -82,7 +82,7 @@ describe('Memberships', () => {
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
       if (url === '/api/auth/me') return json({ user: { id: 'me' } });
       if (url === '/api/memberships/invitations') return json({ invitations: remaining });
-      if (url === '/api/memberships/my') return json({ memberships: [] });
+      if (url === '/api/memberships/my/universes') return json({ universes: [] });
       if (init?.method === 'POST') {
         const id = url.split('/')[4];
         return new Promise((resolve) =>
@@ -124,5 +124,61 @@ describe('Memberships', () => {
     // Signed in once; each answer reloaded the lists once.
     expect(fetchMock.mock.calls.filter(([url]) => url === '/api/auth/me')).toHaveLength(1);
     expect(fetchMock.mock.calls.filter(([url]) => url === '/api/memberships/invitations')).toHaveLength(3);
+  });
+
+  const universe = {
+    universe: { id: 'u1', name: 'BAWES', worlds: [{ id: 'hq', name: 'HQ' }, { id: 'campus', name: 'Campus' }] },
+    isOwner: false,
+    joinedAt: '2026-10-01T00:00:00Z',
+    worlds: { allWorlds: true, worldIds: [] },
+    roles: [
+      { key: 'accountant', name: 'Accountant', color: '#34D399', allWorlds: true, worldIds: [] },
+      { key: 'editor', name: 'Editor', color: '#60A5FA', allWorlds: false, worldIds: ['hq'] },
+    ],
+  };
+
+  it('lists your universes with your roles there and where each works, and says you join a universe once', async () => {
+    fetchMock.mockImplementation((url: string) => {
+      if (url === '/api/auth/me') return json({ user: { id: 'me' } });
+      if (url === '/api/memberships/invitations') return json({ invitations: [] });
+      if (url === '/api/memberships/my/universes') return json({ universes: [universe, { ...universe, universe: { ...universe.universe, id: 'u2', name: 'Mine' }, isOwner: true, roles: [] }] });
+      return json({});
+    });
+    render(<MyMembershipsPage />);
+    const row = (await screen.findByText('BAWES')).closest('div[class*="row"]') as HTMLElement;
+    expect(row.textContent).toContain('HQ and Campus');
+    expect(row.textContent).toContain('Joined Oct 2026');
+    expect(row.textContent).toContain('Accountant');
+    expect(row.textContent).toContain('Editor');
+    expect(row.textContent).toContain('HQ only');
+    expect(screen.getByText(/You join a universe once/)).toBeTruthy();
+    // The owner has no one to ask: no Leave on a universe you own
+    expect(screen.getAllByRole('button', { name: /^Leave / })).toHaveLength(1);
+  });
+
+  it('asks before leaving, with Cancel as the way out, then leaves the universe and reloads', async () => {
+    let left = false;
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === '/api/auth/me') return json({ user: { id: 'me' } });
+      if (url === '/api/memberships/invitations') return json({ invitations: [] });
+      if (url === '/api/memberships/my/universes') return json({ universes: left ? [] : [universe] });
+      if (url === '/api/admin/universes/u1/members/me' && init?.method === 'DELETE') {
+        left = true;
+        return json({ success: true });
+      }
+      return json({});
+    });
+    render(<MyMembershipsPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Leave BAWES' }));
+    expect(await screen.findByText('Leave BAWES?')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByText('Leave BAWES?')).toBeNull());
+    expect(left).toBe(false);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Leave BAWES' }));
+    const dialog = await screen.findByRole('alertdialog');
+    fireEvent.click(Array.from(dialog.querySelectorAll('button')).find((button) => button.textContent === 'Leave')!);
+    await screen.findByText('No memberships yet.');
+    expect(left).toBe(true);
   });
 });

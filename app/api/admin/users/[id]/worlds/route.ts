@@ -2,8 +2,12 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { hiddenSystemOwnerId, notSystemWorld } from '@/lib/system-user';
+import { accessForMany, worldsAllowing } from '@/lib/role-access';
+import { orderedPair } from '@/lib/friends';
 
-// GET /api/admin/users/[id]/worlds - Get list of worlds current user can invite this user to
+// GET /api/admin/users/[id]/worlds - Get list of worlds current user can invite this user to, and the universes they can
+// invite this user to (the invite sheet's): Invite and remove people somewhere in it, and the person is not in it yet
+// and has no invitation waiting.
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -63,7 +67,9 @@ export async function GET(
         universe: world.universe,
       }));
 
-    return NextResponse.json({ worlds: availableWorlds });
+    const { universes, friend } = await invitableUniverses(sessionUser, userId, hidden);
+
+    return NextResponse.json({ worlds: availableWorlds, universes, friend });
   } catch (error) {
     console.error('Error fetching worlds:', error);
     return NextResponse.json(
@@ -73,3 +79,48 @@ export async function GET(
   }
 }
 
+
+async function invitableUniverses(viewer: { id: string; isSuperAdmin: boolean }, personId: string, hidden: string | null) {
+  if (viewer.id === personId) return { universes: [], friend: false };
+  const candidates = await prisma.universe.findMany({
+    where: {
+      ...(hidden ? { ownerId: { not: hidden } } : {}),
+      ...(viewer.isSuperAdmin ? {} : { OR: [{ ownerId: viewer.id }, { members: { some: { userId: viewer.id } } }] }),
+      // A pending invitation counts whether it names the universe or was sent the old way to one of its worlds
+      NOT: [
+        { ownerId: personId },
+        { members: { some: { userId: personId } } },
+        { membershipInvitations: { some: { invitedUserId: personId, status: 'pending' } } },
+        { worlds: { some: { membershipInvitations: { some: { invitedUserId: personId, status: 'pending' } } } } },
+      ],
+    },
+    select: { id: true, name: true },
+    orderBy: { name: 'asc' },
+  });
+  // What the sheet says under their name, as the invite lists do: whether they are your friend, and when they last came
+  // into this universe and where. Access to every candidate comes in one go, and so do the visits of the ones that pass.
+  const [friendship, accesses] = await Promise.all([
+    prisma.friendship.findUnique({ where: { user1Id_user2Id: orderedPair(viewer.id, personId) }, select: { status: true } }),
+    accessForMany(prisma, candidates.map((universe) => universe.id), viewer),
+  ]);
+  const invitable = candidates.filter((universe) => {
+    const access = accesses.get(universe.id);
+    if (!access) return false;
+    const worlds = worldsAllowing(access, 'INVITE_AND_REMOVE');
+    return worlds === 'all' || worlds.length > 0;
+  });
+  // Their latest visit in each of these universes: the newest row of each
+  const visits = invitable.length
+    ? await prisma.roomAccess.findMany({
+        where: { universeId: { in: invitable.map((universe) => universe.id) }, userId: personId },
+        orderBy: { accessedAt: 'desc' },
+        distinct: ['universeId'],
+        select: { universeId: true, accessedAt: true, room: { select: { name: true } }, world: { select: { name: true } } },
+      })
+    : [];
+  const universes = invitable.map((universe) => {
+    const visit = visits.find((row) => row.universeId === universe.id);
+    return { ...universe, visit: visit ? { at: visit.accessedAt.toISOString(), room: visit.room, world: visit.world } : null };
+  });
+  return { universes, friend: friendship?.status === 'accepted' };
+}

@@ -23,7 +23,13 @@ jest.mock('@/app/admin/components/orbit-bridge', () => ({
   messageInGame: (...args: unknown[]) => mockMessage(...args),
 }));
 jest.mock('@/app/admin/components/passport', () => ({ PassportSection: () => null }));
-jest.mock('@/app/admin/components/invite-to-world-dialog', () => ({ __esModule: true, default: () => null }));
+jest.mock('@/app/admin/components/invite-sheet', () => ({
+  __esModule: true,
+  default: ({ open, person, universeId, universes }: { open: boolean; person: { userId: string; name: string; notes?: Record<string, string | null> }; universeId: string; universes: { id: string }[] }) =>
+    open ? <div role="dialog">Invite {person.name} ({person.userId}) to {universeId} of {universes.length}{person.notes ? ` · ${person.notes[universeId] ?? 'no line'}` : ''}</div> : null,
+  personNote: ({ friend, visit }: { friend?: boolean; visit?: { room?: { name: string }; world?: { name: string } } | null }) =>
+    !friend && !visit ? null : [friend ? 'Your friend' : null, visit ? `in ${visit.world?.name} ${visit.room?.name}` : null].filter(Boolean).join(' · '),
+}));
 
 import UserDetailPage from '@/app/admin/users/[id]/page';
 
@@ -44,7 +50,7 @@ function json(body: unknown, ok = true) {
   return Promise.resolve({ ok, status: ok ? 200 : 400, json: async () => body });
 }
 
-function serve({ me = 'u-sara', connect, worlds = [] }: { me?: string; connect?: unknown; worlds?: unknown[] }) {
+function serve({ me = 'u-sara', connect, universes = [], friend = false }: { me?: string; connect?: unknown; universes?: unknown[]; friend?: boolean }) {
   mockFetch.mockImplementation((url: string, options?: RequestInit) => {
     if (url === '/api/auth/me') return json({ user: { id: me } });
     if (url === '/api/admin/users/u-ali') return json(ali);
@@ -52,7 +58,7 @@ function serve({ me = 'u-sara', connect, worlds = [] }: { me?: string; connect?:
       if (options?.method === 'POST') return json({ relationship: 'request_sent' });
       return json(connect ?? { available: false });
     }
-    if (url === '/api/admin/users/u-ali/worlds') return json({ worlds });
+    if (url === '/api/admin/users/u-ali/worlds') return json({ worlds: [], universes, friend });
     if (url.startsWith('/api/admin/analytics/users/')) return json({ total: 0, page: 1, limit: 10, totalPages: 0, firstAccess: null, lastAccess: null, accesses: [] });
     return json({ rooms: [] });
   });
@@ -78,7 +84,7 @@ describe('Someone’s profile buttons', () => {
   it('shows Invite, Message, Add friend and Invite as member in that order, while they are online in a game that can take them', async () => {
     mockPeople = [{ uuid: 'uuid-ali' }];
     mockCapabilities = ['invite', 'message'];
-    serve({ connect: { available: true, relationship: 'none', chatId: '@ali:chat' }, worlds: [{ id: 'w1' }] });
+    serve({ connect: { available: true, relationship: 'none', chatId: '@ali:chat' }, universes: [{ id: 'bawes', name: 'BAWES' }] });
     await open();
     await waitFor(() => expect(names()).toEqual(['Invite', 'Message', 'Add friend', 'Invite as member']));
 
@@ -86,6 +92,19 @@ describe('Someone’s profile buttons', () => {
     expect(mockInvite).toHaveBeenCalledWith('uuid-ali', 'Ali');
     fireEvent.click(screen.getByRole('button', { name: 'Message' }));
     expect(mockMessage).toHaveBeenCalledWith('uuid-ali', 'Ali', '@ali:chat');
+  });
+
+  it('opens the invite sheet with this person picked when Invite as member is tapped', async () => {
+    mockPeople = [{ uuid: 'uuid-ali' }];
+    mockCapabilities = ['invite', 'message'];
+    serve({
+      connect: { available: true, relationship: 'none', chatId: '@ali:chat' },
+      friend: true,
+      universes: [{ id: 'bawes', name: 'BAWES', visit: { at: '2026-10-16T10:00:00Z', room: { name: 'Lobby' }, world: { name: 'HQ' } } }, { id: 'other', name: 'Other', visit: null }],
+    });
+    await open();
+    fireEvent.click(await screen.findByRole('button', { name: 'Invite as member' }));
+    expect((await screen.findByRole('dialog')).textContent).toBe('Invite Ali (u-ali) to bawes of 2 · Your friend · in HQ Lobby');
   });
 
   it('leaves out Invite when they are offline', async () => {
@@ -212,7 +231,7 @@ describe('Someone’s profile buttons', () => {
       if (url === '/api/admin/users/u-bob') return json(bob);
       if (url === '/api/admin/users/u-ali/connect') return json({ available: true, relationship: 'none', chatId: '@ali:chat' });
       if (url === '/api/admin/users/u-bob/connect') return bobConnect;
-      if (url.endsWith('/worlds')) return json({ worlds: [] });
+      if (url.endsWith('/worlds')) return json({ worlds: [], universes: [] });
       if (url.startsWith('/api/admin/analytics/users/')) return json({ total: 0, page: 1, limit: 10, totalPages: 0, firstAccess: null, lastAccess: null, accesses: [] });
       return json({ rooms: [] });
     });

@@ -2,7 +2,7 @@
 
 import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import InviteSheet from '@/app/admin/components/invite-sheet';
+import InviteSheet, { personNote } from '@/app/admin/components/invite-sheet';
 import { ToastProvider } from '@/components/ui/toast';
 
 const fetchMock = jest.fn();
@@ -122,6 +122,22 @@ it('says what went wrong and stays open when the invite is refused', async () =>
   fetchMock.mockImplementationOnce(() => Promise.resolve({ ok: false, status: 400, json: () => Promise.resolve({ error: 'They already have an invitation to this universe' }) }));
   fireEvent.click(send);
   expect((await screen.findByRole('alert')).textContent).toBe('They already have an invitation to this universe');
+});
+
+it('says under a name whether they are your friend and when they last came, and nothing when there is nothing to say', () => {
+  const yesterday = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+  yesterday.setHours(12, 0, 0, 0);
+  const visit = { at: yesterday.toISOString(), room: { name: 'Lobby' }, world: { name: 'HQ' } };
+  expect(personNote({ friend: true, visit })).toBe('Your friend · in HQ Lobby yesterday');
+  expect(personNote({ friend: false, visit })).toBe('In HQ Lobby yesterday');
+  expect(personNote({ friend: true, visit: null })).toBe('Your friend');
+  expect(personNote({ friend: false, visit: null })).toBeNull();
+});
+
+it('shows the line handed in for the chosen universe under the person’s name', async () => {
+  open({ person: { userId: 'hanan', name: 'Hanan Aziz', notes: { u1: 'Your friend · in HQ Lobby yesterday' } } });
+  expect(await screen.findByText('Your friend · in HQ Lobby yesterday')).toBeTruthy();
 });
 
 it('sends Administrator to every world only: picking it takes the choice back to All worlds and locks Some worlds', async () => {

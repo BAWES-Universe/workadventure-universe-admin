@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import {
@@ -17,19 +17,19 @@ import { Check, Loader2, X } from 'lucide-react';
 import {
   EmptyCard,
   EntityRow,
+  KIND_ICON,
   LoadError,
   LoadingRows,
   PageHeader,
   Place,
-  RolePills,
   SectionHeader,
   StatLine,
   StatusPill,
-  VisitLine,
-  countPlace,
 } from '../components/ds';
-import { activityStats } from '@/lib/analytics-peak';
-import { useEntitySummaries } from '../hooks/use-entity-summaries';
+import { OWNER_PILL, worldsLabel } from '@/lib/member-roles';
+import { RoleChip } from '../components/universe-people';
+
+const UniverseGlyph = KIND_ICON.universe;
 
 interface Invitation {
   id: string;
@@ -54,44 +54,14 @@ interface Invitation {
 }
 
 interface Membership {
-  id: string;
-  tags: string[];
+  universe: { id: string; name: string; worlds: { id: string; name: string }[] };
+  isOwner: boolean;
   joinedAt: string;
-  lastVisited: string | null;
-  isUniverseOwner: boolean;
-  world: {
-    id: string;
-    name: string;
-    slug: string;
-    description: string | null;
-    thumbnailUrl: string | null;
-    universe: {
-      id: string;
-      name: string;
-      slug: string;
-      ownerId: string;
-    };
-    _count?: {
-      rooms?: number;
-      members?: number;
-      favorites?: number;
-    };
-  };
+  worlds: { allWorlds: boolean; worldIds: string[] };
+  roles: { key: string; name: string; color: string; allWorlds: boolean; worldIds: string[] }[];
 }
 
 type Loaded<T> = { status: 'loading' } | { status: 'error' } | { status: 'ready'; items: T[] };
-
-/** Deduplicate memberships by worldId (in case user is both owner and member). */
-function uniqueByWorld(list: Membership[]): Membership[] {
-  const seenWorlds = new Set<string>();
-  return list.filter((m) => {
-    if (seenWorlds.has(m.world.id)) {
-      return false;
-    }
-    seenWorlds.add(m.world.id);
-    return true;
-  });
-}
 
 async function readList<T>(url: string, key: string): Promise<T[]> {
   const { authenticatedFetch } = await import('@/lib/client-auth');
@@ -110,12 +80,11 @@ export default function MyMembershipsPage() {
   const [error, setError] = useState<string | null>(null);
   // Every invitation with an Accept or Decline on its way: each locks only its own row.
   const [pendingInvitations, setPendingInvitations] = useState<ReadonlySet<string>>(() => new Set());
-  const [leavingWorld, setLeavingWorld] = useState<string | null>(null);
+  const [leaving, setLeaving] = useState<Membership | null>(null);
+  const [me, setMe] = useState<string | null>(null);
 
   const invitations = invitationList.status === 'ready' ? invitationList.items : [];
   const memberships = membershipList.status === 'ready' ? membershipList.items : [];
-  const worldIds = useMemo(() => memberships.map((membership) => membership.world.id), [memberships]);
-  const worldSummaries = useEntitySummaries('worlds', worldIds);
 
   // A reload keeps what is shown until the answer arrives; only a failure replaces it (with a retry).
   // Answers can overlap (two invitations accepted at once): only the latest request of each list paints.
@@ -137,7 +106,7 @@ export default function MyMembershipsPage() {
     const request = ++membershipRequest.current;
     let next: Loaded<Membership>;
     try {
-      next = { status: 'ready', items: uniqueByWorld(await readList<Membership>('/api/memberships/my', 'memberships')) };
+      next = { status: 'ready', items: await readList<Membership>('/api/memberships/my/universes', 'universes') };
     } catch {
       next = { status: 'error' };
     }
@@ -157,6 +126,7 @@ export default function MyMembershipsPage() {
           router.push('/admin/login');
           return;
         }
+        setMe((await response.json().catch(() => ({})))?.user?.id ?? null);
         await fetchData();
       } catch {
         router.push('/admin/login');
@@ -204,24 +174,24 @@ export default function MyMembershipsPage() {
   // The invitation whose Decline is waiting for Keep or Decline.
   const [confirmingDecline, setConfirmingDecline] = useState<string | null>(null);
 
-  async function handleLeaveWorld(worldId: string) {
+  async function handleLeave(membership: Membership) {
     try {
       setError(null);
       const { authenticatedFetch } = await import('@/lib/client-auth');
-      const response = await authenticatedFetch(`/api/memberships/my/world/${worldId}`, {
+      const response = await authenticatedFetch(`/api/admin/universes/${membership.universe.id}/members/${me}`, {
         method: 'DELETE',
       });
 
       if (!response.ok) {
         const data = await response.json().catch(() => ({}));
-        throw new Error(data.error || 'Failed to leave world');
+        throw new Error(data.error || 'Couldn’t leave. Try again.');
       }
 
-      setLeavingWorld(null);
+      setLeaving(null);
       await loadMemberships();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to leave world');
-      setLeavingWorld(null);
+      setError(err instanceof Error ? err.message : 'Couldn’t leave. Try again.');
+      setLeaving(null);
     }
   }
 
@@ -313,65 +283,64 @@ export default function MyMembershipsPage() {
 
           <section
             className="grid min-w-0 gap-2"
-            {...(invitations.length > 0 ? { 'aria-labelledby': 'memberships-heading' } : { 'aria-label': 'Your worlds' })}
+            {...(invitations.length > 0 ? { 'aria-labelledby': 'memberships-heading' } : { 'aria-label': 'Your universes' })}
           >
-            {invitations.length > 0 && <SectionHeader id="memberships-heading" title="Worlds" count={memberships.length} />}
+            {invitations.length > 0 && <SectionHeader id="memberships-heading" title="Universes" count={memberships.length} />}
             {membershipList.status === 'error' ? (
               <LoadError label="your memberships" retry={() => void loadMemberships()} />
             ) : memberships.length === 0 ? (
               <EmptyCard
-                kind="world"
+                kind="universe"
                 title="No memberships yet."
-                text="You become a member when someone invites you to their world, or when you create a world of your own."
+                text="You become a member when someone invites you to their universe, or when you create one of your own."
                 href="/admin/you"
                 action="Go to You"
               />
             ) : (
               <div className="grid min-w-0 gap-0.5">
                 {memberships.map((membership) => {
-                  const analytics = worldSummaries.summary(membership.world.id);
-                  const you = analytics?.lastVisitedByUser?.accessedAt ?? null;
-                  const latest = analytics?.lastVisitedOverall?.accessedAt ?? null;
-                  const stars = membership.world._count?.favorites ?? 0;
+                  const names = new Map(membership.universe.worlds.map((world) => [world.id, world.name]));
+                  const inWorlds = membership.worlds.allWorlds ? membership.universe.worlds : membership.universe.worlds.filter((world) => membership.worlds.worldIds.includes(world.id));
+                  const where =
+                    inWorlds.length === 0 ? null : inWorlds.length <= 2 ? inWorlds.map((world) => world.name).join(' and ') : `${inWorlds.length} worlds`;
                   return (
                     <EntityRow
-                      key={membership.id}
-                      href={`/admin/worlds/${membership.world.id}`}
-                      kind="world"
-                      title={membership.world.name}
+                      key={membership.universe.id}
+                      href={`/admin/universes/${membership.universe.id}`}
+                      kind="universe"
+                      leading={<UniverseGlyph size={32} className="mx-1 shrink-0" aria-hidden="true" />}
+                      title={membership.universe.name}
                       context={
                         <StatLine
                           items={[
-                            <Place key="u" kind="universe" label={membership.world.universe.name} />,
-                            countPlace('room', membership.world._count?.rooms ?? 0, 'room'),
-                            countPlace('people', membership.world._count?.members ?? 0, 'member'),
-                            ...activityStats(analytics),
+                            "Universe",
+                            where,
+                            `Joined ${new Date(membership.joinedAt).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}`,
                           ]}
                         />
                       }
                       meta={
-                        <>
-                          <RolePills roles={[...(membership.isUniverseOwner ? ['owner'] : []), ...membership.tags]} />
-                          {analytics ? (
-                            <VisitLine you={you} latest={latest} youWereLast={analytics.youWereLast} />
-                          ) : (
-                            <StatLine
-                              items={[
-                                `Joined ${new Date(membership.joinedAt).toLocaleDateString()}`,
-                                membership.lastVisited && `last visited ${new Date(membership.lastVisited).toLocaleDateString()}`,
-                              ]}
-                            />
-                          )}
-                        </>
+                        <span className="inline-flex flex-wrap items-center gap-1.5">
+                          {membership.isOwner && <RoleChip name={OWNER_PILL.name} color={OWNER_PILL.color} />}
+                          {membership.roles.length === 0 && !membership.isOwner && <RoleChip name="Member" color="#A78BFA" />}
+                          {membership.roles.map((role) => {
+                            const roleWhere = worldsLabel(role, names);
+                            return (
+                              <span key={role.key} className="inline-flex items-center gap-1.5">
+                                <RoleChip name={role.name} color={role.color} />
+                                {roleWhere && <span className="text-xs text-muted-foreground">{roleWhere}</span>}
+                              </span>
+                            );
+                          })}
+                        </span>
                       }
-                      aside={stars > 0 ? `★ ${stars}` : undefined}
                       trailing={
-                        !membership.isUniverseOwner ? (
+                        !membership.isOwner ? (
                           <Button
                             variant="outline"
-                            className="h-9 px-4"
-                            onClick={() => setLeavingWorld(membership.world.id)}
-                            aria-label={`Leave ${membership.world.name}`}
+                            className="h-11 px-4"
+                            onClick={() => setLeaving(membership)}
+                            aria-label={`Leave ${membership.universe.name}`}
                           >
                             Leave
                           </Button>
@@ -382,28 +351,26 @@ export default function MyMembershipsPage() {
                 })}
               </div>
             )}
-            {memberships.length > 0 && worldSummaries.failed.length > 0 && (
-              <LoadError label="activity for some worlds" retry={() => worldSummaries.retry()} />
+            {memberships.length > 0 && (
+              <p className="text-sm text-muted-foreground">
+                You join a universe once. Your roles work in all of its worlds, unless someone who manages it limits a role to some worlds.
+              </p>
             )}
           </section>
         </>
       )}
 
-      {/* Leave World Dialog */}
-      <AlertDialog open={!!leavingWorld} onOpenChange={(open) => !open && setLeavingWorld(null)}>
+      <AlertDialog open={!!leaving} onOpenChange={(open) => !open && setLeaving(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Leave this world?</AlertDialogTitle>
+            <AlertDialogTitle>Leave {leaving?.universe.name}?</AlertDialogTitle>
             <AlertDialogDescription>
-              You lose access to it, and someone has to invite you again to come back.
+              You lose every role there and access to its member-only rooms. Someone has to invite you again to come back.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              variant="destructive"
-              onClick={() => leavingWorld && handleLeaveWorld(leavingWorld)}
-            >
+            <AlertDialogAction variant="destructive" onClick={() => leaving && handleLeave(leaving)}>
               Leave
             </AlertDialogAction>
           </AlertDialogFooter>
