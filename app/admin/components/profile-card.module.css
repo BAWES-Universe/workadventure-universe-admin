@@ -8,13 +8,16 @@
   #0d1526; }
 .identity { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 12px 14px; margin-top: -40px; }
 .identity > .avatar { grid-column: 1 / -1; }
-.identity > .who { grid-column: 1; display: grid; gap: 4px; }
+/* The name stays under the Woka however many rows the buttons take. */
+.identity > .who { grid-column: 1; display: grid; gap: 4px; align-self: start; }
 .identity > button { grid-column: 2; }
-/* Pill buttons (Invite, Message, Add friend, Invite as member): a wrapping row beside the name, two by two on a phone. */
-.identity > .pills { grid-column: 2; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; max-width: 26rem; }
+/* Pill buttons (Invite over, Message, Add friend, Give membership): a wrapping row beside the name. */
+.identity > .pills { grid-column: 2; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; max-width: 36rem; }
+/* On a phone, person buttons share a row and move down when their words don't fit; the universe invite has its own row. */
 @media (max-width: 640px) {
-  .identity > .pills { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); max-width: none; }
-  .identity > .pills[data-count='1'] { grid-template-columns: minmax(0, 1fr); }
+  .identity > .pills { grid-column: 1 / -1; max-width: none; }
+  .identity > .pills > * { flex: 1 1 0; min-width: max-content; }
+  .identity > .pills > [data-wide] { flex-basis: 100%; min-width: 0; }
 }
 @media (max-width: 400px) {
   .identity { grid-template-columns: minmax(0, 1fr); }
