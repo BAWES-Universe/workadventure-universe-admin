@@ -472,4 +472,22 @@ run('universe roles and people routes (real database)', () => {
       expect(await prisma.worldMember.findUnique({ where: { userId_worldId: { userId, worldId: created.body.id } } })).not.toBeNull();
     }
   });
+
+  it('lists an older invitation to a world the viewer may invite to, however many newer ones go elsewhere', async () => {
+    const early = await prisma.user.create({ data: { uuid: `early-${tag}`, email: `early-${tag}@example.test`, name: 'early' } });
+    await prisma.membershipInvitation.create({
+      data: { worldId: worldA, universeId, allWorlds: false, worldIds: [worldA], invitedUserId: early.id, invitedByUserId: people.admin, status: 'pending', tags: [], roleIds: [], invitedAt: new Date('2026-01-01T00:00:00Z') },
+    });
+    const crowd = Array.from({ length: 200 }, (_, index) => ({ uuid: `crowd-${index}-${tag}`, email: `crowd-${index}-${tag}@example.test`, name: `crowd ${index}` }));
+    await prisma.user.createMany({ data: crowd });
+    const crowdIds = (await prisma.user.findMany({ where: { uuid: { in: crowd.map((person) => person.uuid) } }, select: { id: true } })).map((person) => person.id);
+    await prisma.membershipInvitation.createMany({
+      data: crowdIds.map((userId) => ({ worldId: worldB, universeId, allWorlds: false, worldIds: [worldB], invitedUserId: userId, invitedByUserId: people.admin, status: 'pending', tags: [], roleIds: [] })),
+    });
+
+    // The Moderator invites and removes in world A only
+    const listed = await as('mod', inviteRoute.GET, {});
+    expect(listed.body.invitations.map((invitation: { userId: string }) => invitation.userId)).toContain(early.id);
+    await prisma.membershipInvitation.deleteMany({ where: { invitedUserId: { in: [early.id, ...crowdIds] } } });
+  });
 });
