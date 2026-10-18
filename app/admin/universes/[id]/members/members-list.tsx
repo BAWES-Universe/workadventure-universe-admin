@@ -110,6 +110,8 @@ export function UniverseMembersPage() {
   // The list the screen shows now, so an answer for an earlier search or filter is dropped
   const currentPath = useRef(listPath);
   currentPath.current = listPath;
+  // The list the rows on screen came from: until the new search or filter answers, they are the old list's
+  const shownPath = useRef<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -119,7 +121,9 @@ export function UniverseMembersPage() {
       .then(async (response) => {
         if (!response.ok) throw new Error(String(response.status));
         const body = (await response.json()) as Page;
-        if (!cancelled) setPage(body);
+        if (cancelled) return;
+        shownPath.current = listPath();
+        setPage(body);
       })
       .catch(() => {
         if (!cancelled) setFailed(true);
@@ -142,6 +146,8 @@ export function UniverseMembersPage() {
 
   async function showMore() {
     if (!page || more === 'busy') return;
+    // The old list's cursor means nothing to a new search or filter, so wait for the new list
+    if (shownPath.current !== listPath()) return;
     setVisible(Number.MAX_SAFE_INTEGER);
     if (!page.nextCursor) return;
     setMore('busy');
