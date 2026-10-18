@@ -219,4 +219,25 @@ describe('Memberships', () => {
     expect(text).toContain('Khalid invited you as member');
     expect(screen.getAllByRole('button', { name: 'Decline the invitation to BAWES' })).toHaveLength(3);
   });
+
+  it('says which roles an accepted invitation could not give, and why', async () => {
+    let remaining = [invitation('i1', 'Moon')];
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === '/api/auth/me') return json({ user: { id: 'me' } });
+      if (url === '/api/memberships/invitations') return json({ invitations: remaining });
+      if (url === '/api/memberships/my/universes') return json({ universes: [] });
+      if (init?.method === 'POST') {
+        remaining = [];
+        return json({ member: null, rolesNotGiven: ['Boss'] });
+      }
+      return json({});
+    });
+    render(<MyMembershipsPage />);
+    await screen.findByTestId('invitations');
+    fireEvent.click(screen.getByRole('button', { name: /Accept/ }));
+    const notice = await screen.findByRole('status');
+    expect(notice.textContent).toBe(
+      'You joined without Boss. A role with Administrator works in every world, so it can’t come with an invitation to some worlds. Ask an Admin of Uni to give it to you.',
+    );
+  });
 });

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { getSessionUser } from '@/lib/auth-session';
+import { ADMIN_EVERY_WORLD, tagsGiveAdministrator } from '@/lib/universe-members';
 import { withWokas } from '@/lib/woka-avatar';
 import { viewerWorldId } from '@/lib/viewer-world';
 import { NOT_SYSTEM_USER } from '@/lib/system-user';
@@ -198,6 +199,11 @@ export async function POST(
 
     if (!world) {
       return NextResponse.json({ error: 'World not found' }, { status: 404 });
+    }
+
+    // Sent this way an invitation names one world, and Administrator works in every world
+    if (await tagsGiveAdministrator(prisma, world.universeId, data.tags)) {
+      return NextResponse.json({ error: ADMIN_EVERY_WORLD }, { status: 400 });
     }
 
     // Check if user exists
