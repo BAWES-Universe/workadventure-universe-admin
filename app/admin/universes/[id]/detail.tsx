@@ -2,13 +2,12 @@
 
 import { useIsSuperAdmin } from '../../admin-bootstrap-context';
 
-import { PersonIcon } from '../../components/profile-card';
 import RecentVisitors from '../../components/recent-visitors';
+import { VisitorPeople } from '../../components/visitor-people';
 import { AddButton, BrowseButton, By, PlaceHero, Rank, SectionHead, StarButton, WorldGroups, playPathOf, type WorldGroupData } from '../../components/place-hero';
 
 import { useState, useEffect, useMemo } from 'react';
 import { useRouter, useParams } from 'next/navigation';
-import Link from 'next/link';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -25,12 +24,11 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { ChevronRight, AlertCircle, Loader2, Plus, Edit, Trash2, ChevronLeft } from 'lucide-react';
-import { timeAgo } from '@/lib/time-ago';
+import { AlertCircle, Loader2, Plus, Edit, Trash2 } from 'lucide-react';
 import { activityStats } from '@/lib/analytics-peak';
 import { useEntitySummaries } from '../../hooks/use-entity-summaries';
 import { useHere, useStarToggle, useUniverseRank, useWorldRooms } from '../../hooks/use-place-data';
-import { EmptyCard, EntityCard, EntityRow, Figure, Figures, InContext, KindIcon, LoadError, LoadingRows, PageHeader, Place, RolePills, SectionHeader, SettingSwitch, Settings, StatLine, StatusPill, VisitLine, count } from '../../components/ds';
+import { EmptyCard, EntityCard, EntityRow, Figure, Figures, InContext, KindIcon, LoadError, LoadingRows, PageHeader, SectionHeader, SettingSwitch, Settings, StatLine, StatusPill, VisitLine, count } from '../../components/ds';
 import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
 interface Universe {
@@ -83,7 +81,6 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
   const [error, setError] = useState<string | null>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [analytics, setAnalytics] = useState<any>(null);
-  const [analyticsLoading, setAnalyticsLoading] = useState(true);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   // Each world's activity for its card, asked for once per world (a failure offers a retry, never a request loop).
@@ -101,8 +98,6 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
   const roomSummaries = useEntitySummaries('rooms', roomIds);
   const [currentUser, setCurrentUser] = useState<any>(null);
   const [activeTab, setActiveTab] = useState<'details' | 'analytics'>(view === 'visitors' ? 'analytics' : 'details');
-  const [visitorsPage, setVisitorsPage] = useState(1);
-  const visitorsPerPage = 10;
   
   const isSuperAdmin = useIsSuperAdmin();
   const [formData, setFormData] = useState({
@@ -168,19 +163,16 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
     }
   }
 
-  async function fetchAnalytics(page: number = 1) {
+  async function fetchAnalytics() {
     try {
-      setAnalyticsLoading(true);
       const { authenticatedFetch } = await import('@/lib/client-auth');
-      const response = await authenticatedFetch(`/api/admin/analytics/universes/${id}?page=${page}&limit=${visitorsPerPage}`);
+      const response = await authenticatedFetch(`/api/admin/analytics/universes/${id}?limit=1`);
       if (response.ok) {
         const data = await response.json();
         setAnalytics(data);
       }
     } catch (err) {
       console.error('Failed to fetch analytics:', err);
-    } finally {
-      setAnalyticsLoading(false);
     }
   }
   
@@ -189,17 +181,11 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
   useEffect(() => {
     if (universeLoaded) {
       // Fetch analytics on initial load to show totalAccesses count
-      fetchAnalytics(1);
+      fetchAnalytics();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [universeLoaded, id]);
 
-  useEffect(() => {
-    if (activeTab === 'analytics' && universeLoaded) {
-      // Fetch analytics when switching to analytics tab or changing page
-      fetchAnalytics(visitorsPage);
-    }
-  }, [visitorsPage, activeTab, universeLoaded]);
 
   async function handleSave() {
     setSaving(true);
@@ -310,6 +296,7 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
       {view === 'visitors' ? (
         <PageHeader
           kind="people"
+          plainIcon
           title="Visitors"
           context={<InContext parts={[{ label: universe.name, href: `/admin/universes/${id}`, kind: 'universe' }]} />}
           stats={analytics ? <Figures><Figure value={analytics.totalAccesses || 0} label="accesses" /></Figures> : undefined}
@@ -485,111 +472,9 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
           )}
 
           {activeTab === 'analytics' && (
-            <>
-              {analyticsLoading ? (
-                <LoadingRows label="visitors" rows={3} />
-              ) : analytics && analytics.recentActivity && analytics.recentActivity.length > 0 ? (
-                <section className="space-y-4" aria-labelledby="universe-visitors">
-                                    <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">
-                    {analytics.recentActivity.map((access: any) => {
-                      const userName = access.userName || access.userUuid || 'Guest';
-                      const accessDate = new Date(access.accessedAt);
-                      const isClickable = !!access.userId;
-
-                      return (
-                        <div
-                          key={access.id}
-                          className="flex min-w-0 items-start gap-3 rounded-[18px] border border-border bg-card p-3"
-                        >
-                          <PersonIcon woka={access.woka} name={access.userName} size={32} face />
-                          <div className="min-w-0 flex-1 space-y-1">
-                            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                              {isClickable ? (
-                                <Link
-                                  href={`/admin/users/${access.userId}`}
-                                  className="min-w-0 truncate text-sm font-semibold text-foreground hover:underline"
-                                >
-                                  {userName}
-                                </Link>
-                              ) : (
-                                <span className="min-w-0 truncate text-sm font-semibold text-muted-foreground">{userName}</span>
-                              )}
-                              {access.hasMembership && access.membershipTags.length > 0 ? (
-                                <RolePills roles={access.membershipTags} />
-                              ) : (
-                                <span className="text-xs text-muted-foreground">
-                                  {access.isAuthenticated ? 'Signed in' : 'Guest'}
-                                </span>
-                              )}
-                            </div>
-                            <p className="text-xs text-muted-foreground break-words">
-                              <Place
-                                kind="world"
-                                label={
-                                  <Link
-                                    href={`/admin/worlds/${access.world.id}`}
-                                    className="font-medium text-foreground underline decoration-foreground/30 underline-offset-2 hover:decoration-foreground"
-                                  >
-                                    {access.world.name}
-                                  </Link>
-                                }
-                              />
-                              <span aria-hidden="true"> › </span>
-                              <Place
-                                kind="room"
-                                label={
-                                  <Link
-                                    href={`/admin/rooms/${access.room.id}`}
-                                    className="font-medium text-foreground underline decoration-foreground/30 underline-offset-2 hover:decoration-foreground"
-                                  >
-                                    {access.room.name}
-                                  </Link>
-                                }
-                              />
-                              {' · '}
-                              {timeAgo(accessDate)}
-                            </p>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                  {analytics.pagination && analytics.pagination.totalPages > 1 && (
-                    <div className="flex flex-wrap items-center justify-between gap-3">
-                      <div className="text-sm text-muted-foreground">
-                        Showing {(analytics.pagination.page - 1) * analytics.pagination.limit + 1} to {Math.min(analytics.pagination.page * analytics.pagination.limit, analytics.pagination.total)} of {analytics.pagination.total} visitors
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => setVisitorsPage(prev => Math.max(1, prev - 1))}
-                          disabled={visitorsPage === 1}
-                        >
-                          <ChevronLeft className="h-4 w-4 mr-1" />
-                          Previous
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => setVisitorsPage(prev => prev + 1)}
-                          disabled={visitorsPage >= (analytics.pagination?.totalPages || 1)}
-                        >
-                          Next
-                          <ChevronRight className="h-4 w-4 ml-1" />
-                        </Button>
-                      </div>
-                    </div>
-                  )}
-                </section>
-              ) : (
-                <EmptyCard
-                  kind="people"
-                  title="No visitors yet."
-                  text="Visits show up here once people come to this universe."
-                />
-              )}
-            </>
+            <section aria-label="Visitors">
+              <VisitorPeople scope="universe" id={id} />
+            </section>
           )}
 
         </>
