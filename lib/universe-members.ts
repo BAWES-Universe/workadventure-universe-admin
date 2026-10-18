@@ -88,7 +88,9 @@ export const ADMIN_EVERY_WORLD = 'A role with Administrator works in every world
  * in every world, so it can't be given in one world this way. (Admin can: it has every permission but Administrator.)
  */
 export async function tagsGiveAdministrator(db: Db, universeId: string, tags: readonly string[]): Promise<boolean> {
-  const roles = await db.role.findMany({ where: { universeId, key: { in: [...tags] } }, select: { permissions: true } });
+  // Trimmed the way roleIdsForTags reads them on accept, so a padded tag finds the same role
+  const keys = tags.map((tag) => tag.trim());
+  const roles = await db.role.findMany({ where: { universeId, key: { in: keys } }, select: { permissions: true } });
   return roles.some(isAdministratorRole);
 }
 
