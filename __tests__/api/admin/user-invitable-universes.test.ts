@@ -53,6 +53,7 @@ it('offers the universes where you may invite people, and only to people not in 
     { ownerId: 'person' },
     { members: { some: { userId: 'person' } } },
     { membershipInvitations: { some: { invitedUserId: 'person', status: 'pending' } } },
+    { worlds: { some: { membershipInvitations: { some: { invitedUserId: 'person', status: 'pending' } } } } },
   ]);
 });
 

@@ -12,6 +12,8 @@ interface Membership {
   world: { id: string; name: string };
   universeId?: string;
   status: 'owner' | 'member' | 'invited' | 'none' | 'guest';
+  /** In the universe through other worlds. */
+  inUniverse?: boolean;
   tags: string[];
   canInvite: boolean;
 }
@@ -44,7 +46,7 @@ export function VisitorMembership({ roomId, userId, name, woka }: { roomId: stri
       {membership && (
         <>
           <p role="status" className="text-sm font-semibold">
-            {membership.status === 'owner' ? 'Universe owner' : membership.status === 'member' ? 'Already a member' : membership.status === 'invited' ? 'Invitation pending' : universeName ? `Not in ${universeName}` : 'Not a member'}
+            {membership.status === 'owner' ? 'Universe owner' : membership.status === 'member' ? 'Already a member' : membership.status === 'invited' ? 'Invitation pending' : membership.inUniverse ? `Not in ${membership.world.name}` : universeName ? `Not in ${universeName}` : 'Not a member'}
           </p>
           {membership.status === 'member' && <RolePills roles={membership.tags} />}
           <p className="text-xs text-muted-foreground">
