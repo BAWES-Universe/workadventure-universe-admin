@@ -96,6 +96,39 @@ async function visitsOf(scope: AccessScope, where: Prisma.RoomAccessWhereInput, 
   return prisma.roomAccess.findMany({ where: { AND: [scope, where] }, orderBy: [{ accessedAt: 'desc' }, { id: 'desc' }], skip, take, select: VISIT_SELECT });
 }
 
+/**
+ * The newest visits of each person on a page, in two queries however many people there are: which visits are each
+ * person's newest, then those visits. A person counts only when the viewer may ask for them (the same rule as asking for
+ * more of their visits), and a visit belongs to a person by the same key that grouped the page.
+ */
+async function newestVisitsOf(
+  viewer: Viewer | null,
+  detail: AccessDetail,
+  scope: AccessScope,
+  visits: Prisma.Sql,
+  keys: string[],
+): Promise<Map<string, VisitRow[]>> {
+  const allowed = keys.filter((key) => visitsWhere(viewer, detail, key) !== null);
+  const byPerson = new Map(allowed.map((key) => [key, [] as VisitRow[]]));
+  if (allowed.length === 0) return byPerson;
+  const newest = await prisma.$queryRaw<Array<{ id: string; person: string }>>`
+    SELECT id, person FROM (
+      SELECT id, person, ROW_NUMBER() OVER (PARTITION BY person ORDER BY accessed_at DESC, id DESC) AS place
+      FROM (${visits}) AS v
+      WHERE person IN (${Prisma.join(allowed)})
+    ) AS ranked
+    WHERE place <= ${VISITS_SHOWN}`;
+  const personOf = new Map(newest.map((row) => [row.id, row.person]));
+  if (personOf.size === 0) return byPerson;
+  const rows = await prisma.roomAccess.findMany({
+    where: { AND: [scope, { id: { in: [...personOf.keys()] } }] },
+    orderBy: [{ accessedAt: 'desc' }, { id: 'desc' }],
+    select: VISIT_SELECT,
+  });
+  for (const row of rows) byPerson.get(personOf.get(row.id) ?? '')?.push(row);
+  return byPerson;
+}
+
 function toVisit(viewer: Viewer | null, detail: AccessDetail, row: VisitRow): PersonVisit {
   const seen = redactAccess(row, detailForRecord(viewer, row, detail));
   return {
@@ -129,12 +162,8 @@ export async function loadVisitorPeople(
       LIMIT ${limit} OFFSET ${(page - 1) * limit}`,
     prisma.$queryRaw<Array<{ total: bigint | number }>>`SELECT COUNT(DISTINCT person) AS total FROM (${visits}) AS v`,
   ]);
-  const rows = await Promise.all(
-    groups.map(async (group) => {
-      const where = visitsWhere(viewer, detail, group.person);
-      return where ? visitsOf(scope, where, 0, VISITS_SHOWN) : [];
-    }),
-  );
+  const newest = await newestVisitsOf(viewer, detail, scope, visits, groups.map((group) => group.person));
+  const rows = groups.map((group) => newest.get(group.person) ?? []);
   // Each person as their newest visit shows them, redacted the same way as one visit on its own.
   const faces = await withWokas(
     rows.map((personVisits) => {
