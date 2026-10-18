@@ -3,6 +3,15 @@
  *
  *   DATABASE_URL=postgres://...copy... ROLES_CHECK_ON_A_COPY=yes npx tsx scripts/roles-migration-check.ts
  *
+ * Or rebuild production's shape first, from the counts scripts/roles-shape.sql printed on production (read-only), into
+ * an empty local database at the schema before the roles migration:
+ *
+ *   DATABASE_URL=postgres://localhost/empty ROLES_CHECK_ON_A_COPY=yes npx tsx scripts/roles-migration-check.ts --from roles-shape.json
+ *
+ * The rebuild makes one user per person, the universes, worlds and rooms in the same order, every world member row with
+ * its tags exactly as counted (duplicates and empty lists included) and every invitation with its status and tags, then
+ * stops unless the database holds exactly the counted rows.
+ *
  * It refuses any database that is not on this machine (localhost, 127.0.0.1, ::1 or a local socket), whatever the flag says:
  * production's data is never copied here, it is rebuilt from counts (see the roles check page).
  *
@@ -18,6 +27,8 @@
  * It prints the differences and exits 1 when any check fails. The copy is left migrated; the migration is not recorded
  * in _prisma_migrations, so throw the copy away afterwards.
  */
+import { execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { Pool } from 'pg';
@@ -53,6 +64,105 @@ function isLocalDatabase(url: string | undefined): boolean {
   return local(host);
 }
 
+/** What scripts/roles-shape.sql prints: production's shape as counts, with no ids, names or tag text. */
+interface Shape {
+  complete: boolean;
+  totals: { universes: number; worlds: number; rooms: number; world_members: number; invitations: number; invitations_by_status: Record<string, number> };
+  universes: { u: number; public: boolean; worlds: { w: number; public: boolean; public_rooms: number; private_rooms: number }[] }[];
+  people: { u: number; owner: boolean; count: number; worlds: { w: number; tags: string[] }[] }[];
+  invitations: { u: number; w: number; status: string; tags: string[]; count: number }[];
+}
+
+/** Rebuilds a shape in an empty database, then proves the database holds exactly the counted rows. */
+async function rebuild(pool: Pool, shape: Shape) {
+  if (!shape.complete) throw new Error('The shape file says complete: false, so rows are missing from it. Nothing was rebuilt.');
+  const [{ n }] = (await pool.query('SELECT (SELECT count(*) FROM universes) + (SELECT count(*) FROM users) AS n')).rows;
+  if (Number(n) !== 0) throw new Error('Rebuild needs an empty database: it has universes or users.');
+  const client = await pool.connect();
+  const insert = (sql: string, values: unknown[]) => client.query(sql, values);
+  try {
+    await client.query('BEGIN');
+    const newUser = async () => {
+      const id = randomUUID();
+      await insert('INSERT INTO users (id, uuid, updated_at) VALUES ($1, $2, now())', [id, `shape-${id}`]);
+      return id;
+    };
+    const worlds = new Map<string, string>();
+    const owners = new Map<number, string>();
+    for (const universe of shape.universes) {
+      const id = randomUUID();
+      const owner = await newUser();
+      owners.set(universe.u, owner);
+      // created_at keeps the order the shape numbered them in
+      await insert(
+        `INSERT INTO universes (id, slug, name, owner_id, is_public, created_at, updated_at)
+         VALUES ($1, $2, $2, $3, $4, timestamp '2026-01-01' + make_interval(mins => $5), now())`,
+        [id, `u${universe.u}`, owner, universe.public, universe.u],
+      );
+      for (const world of universe.worlds) {
+        const worldId = randomUUID();
+        worlds.set(`${universe.u} ${world.w}`, worldId);
+        await insert(
+          `INSERT INTO worlds (id, universe_id, slug, name, is_public, created_at, updated_at)
+           VALUES ($1, $2, $3, $3, $4, timestamp '2026-01-01' + make_interval(mins => $5), now())`,
+          [worldId, id, `w${world.w}`, world.public, world.w],
+        );
+        for (let k = 0; k < world.public_rooms + world.private_rooms; k += 1) {
+          await insert('INSERT INTO rooms (id, world_id, slug, name, is_public, updated_at) VALUES ($1, $2, $3, $3, $4, now())', [
+            randomUUID(),
+            worldId,
+            `r${k}`,
+            k < world.public_rooms,
+          ]);
+        }
+      }
+    }
+    const world = (u: number, w: number) => {
+      const id = worlds.get(`${u} ${w}`);
+      if (!id) throw new Error(`The shape names world ${w} of universe ${u}, which it does not list`);
+      return id;
+    };
+    for (const person of shape.people) {
+      for (let k = 0; k < person.count; k += 1) {
+        const userId = person.owner ? owners.get(person.u)! : await newUser();
+        for (const row of person.worlds) {
+          await insert('INSERT INTO world_members (id, user_id, world_id, tags) VALUES ($1, $2, $3, $4)', [randomUUID(), userId, world(person.u, row.w), row.tags]);
+        }
+      }
+    }
+    for (const invitation of shape.invitations) {
+      for (let k = 0; k < invitation.count; k += 1) {
+        await insert(
+          'INSERT INTO membership_invitations (id, world_id, invited_user_id, invited_by_user_id, status, tags) VALUES ($1, $2, $3, $4, $5, $6)',
+          [randomUUID(), world(invitation.u, invitation.w), await newUser(), owners.get(invitation.u), invitation.status, invitation.tags],
+        );
+      }
+    }
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  // Exactly the counted rows, not about: every total and the invitations of each status
+  const counts = (
+    await pool.query(`SELECT (SELECT count(*) FROM universes)::int AS universes, (SELECT count(*) FROM worlds)::int AS worlds,
+      (SELECT count(*) FROM rooms)::int AS rooms, (SELECT count(*) FROM world_members)::int AS world_members,
+      (SELECT count(*) FROM membership_invitations)::int AS invitations,
+      (SELECT coalesce(jsonb_object_agg(status, n), '{}') FROM (SELECT status, count(*)::int AS n FROM membership_invitations GROUP BY status) s) AS invitations_by_status`)
+  ).rows[0];
+  const wanted = shape.totals;
+  const same =
+    (['universes', 'worlds', 'rooms', 'world_members', 'invitations'] as const).every((key) => counts[key] === Number(wanted[key])) &&
+    JSON.stringify(Object.entries(counts.invitations_by_status).sort()) ===
+      JSON.stringify(Object.entries(wanted.invitations_by_status).map(([status, n]) => [status, Number(n)]).sort());
+  console.log(`Rebuilt from the shape: ${JSON.stringify(counts)}`);
+  if (!same) throw new Error(`The rebuild does not match the shape's totals: ${JSON.stringify(wanted)}`);
+  console.log('Rebuild matches the shape exactly.');
+}
+
 const keyOf = (row: { user_id: string; world_id: string }) => `${row.user_id} ${row.world_id}`;
 
 async function main() {
@@ -72,6 +182,8 @@ async function main() {
     console.error('The roles migration is already applied here: use a copy taken before it.');
     process.exit(2);
   }
+  const from = process.argv.indexOf('--from');
+  if (from !== -1) await rebuild(pool, JSON.parse(fs.readFileSync(process.argv[from + 1], 'utf8')) as Shape);
 
   const before = await q<Row>('SELECT user_id, world_id, tags FROM world_members');
   const invitationsBefore = await q<{ id: string; status: string; tags: string[] }>(
@@ -231,6 +343,14 @@ async function main() {
   console.log(`Invitations: ${invitationsBefore.length} (${[...byStatus].map(([status, n]) => `${status} ${n}`).join(', ') || 'none'})`);
   console.log(`Rows that gained only the member tag (expected, everyone who joined is a Member): ${memberAdded.length}`);
   for (const line of memberAdded) console.log(`  ${line}`);
+  let head = 'unknown';
+  try {
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: path.join(__dirname, '..'), encoding: 'utf8' }).trim();
+    head = git('rev-parse', 'HEAD') + (git('status', '--porcelain', '--', 'scripts', 'prisma', 'lib') ? ' with local changes' : '');
+  } catch {
+    // not a git checkout
+  }
+  console.log(`Migration and check at commit ${head}`);
   if (failures.length > 0) {
     console.log(`\nDIFFERENCES: ${failures.length}`);
     for (const line of failures) console.log(`  ${line}`);
