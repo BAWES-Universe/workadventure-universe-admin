@@ -146,6 +146,25 @@ describe('Show more', () => {
     expect(screen.queryByText('Late Arrival')).toBeNull();
     expect(screen.getByText('Zed Only')).toBeTruthy();
   });
+
+  it('never asks for the old list’s next page with a new search that hasn’t answered yet', async () => {
+    const nine = Array.from({ length: 9 }, (_, n) => ({ ...MEMBERS[1], userId: `p${n}`, name: `Person ${n}`, email: null, roles: [] }));
+    const base = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
+      calls.push({ url, method: init?.method ?? 'GET', body: undefined });
+      if (url.includes('/u1/members?') && url.includes('q=zed')) return new Promise(() => {});
+      if (url.includes('/u1/members?') && !url.includes('cursor=')) return ok({ members: nine, total: 12, owner: null, nextCursor: 'c2' });
+      return base(url, init);
+    });
+    wrap(<UniverseMembersPage />);
+    await screen.findByText('Person 7');
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'zed' } });
+    fireEvent.submit(screen.getByRole('search'));
+    await waitFor(() => expect(calls.some((call) => call.url.includes('q=zed'))).toBe(true));
+    fireEvent.click(screen.getByRole('button', { name: /Show \d+ more/ }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(calls.some((call) => call.url.includes('cursor=c2'))).toBe(false);
+  });
 });
 
 describe('a member’s page', () => {

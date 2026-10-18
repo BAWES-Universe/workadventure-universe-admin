@@ -93,6 +93,8 @@ async function invitableUniverses(viewer: { id: string; isSuperAdmin: boolean },
       ownerId: true,
       members: { where: { userId: personId }, select: { id: true } },
       membershipInvitations: { where: { invitedUserId: personId, status: 'pending' }, select: { id: true } },
+      // A pending invitation counts whether it names the universe or was sent the old way to one of its worlds
+      worlds: { where: { membershipInvitations: { some: { invitedUserId: personId, status: 'pending' } } }, select: { id: true }, take: 1 },
     },
     orderBy: { name: 'asc' },
   });
@@ -110,7 +112,7 @@ async function invitableUniverses(viewer: { id: string; isSuperAdmin: boolean },
   });
   // The sheet shows the ones they already belong to or are invited to, so it is clear why they can't be picked.
   const status = (universe: (typeof yours)[number]) =>
-    universe.ownerId === personId || universe.members.length > 0 ? 'member' : universe.membershipInvitations.length > 0 ? 'invited' : null;
+    universe.ownerId === personId || universe.members.length > 0 ? 'member' : universe.membershipInvitations.length > 0 || universe.worlds.length > 0 ? 'invited' : null;
   const invitable = yours.filter((universe) => !status(universe)).map(({ id, name }) => ({ id, name }));
   const taken = yours.flatMap((universe) => {
     const value = status(universe);

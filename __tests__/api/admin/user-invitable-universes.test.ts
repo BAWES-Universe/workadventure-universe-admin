@@ -31,13 +31,14 @@ const holding = (kind: 'owner' | 'none' | string[]) => {
   });
 };
 
-/** A universe row as the route selects it: whether the person owns it, is in it, or has an invitation to it. */
-const universe = (id: string, name: string, person: { owner?: boolean; member?: boolean; invited?: boolean } = {}) => ({
+/** A universe row as the route selects it: whether the person owns it, is in it, or has an invitation to it or to one of its worlds. */
+const universe = (id: string, name: string, person: { owner?: boolean; member?: boolean; invited?: boolean; invitedToWorld?: boolean } = {}) => ({
   id,
   name,
   ownerId: person.owner ? 'person' : 'someone',
   members: person.member ? [{ id: 'm' }] : [],
   membershipInvitations: person.invited ? [{ id: 'i' }] : [],
+  worlds: person.invitedToWorld ? [{ id: 'w' }] : [],
 });
 
 beforeEach(() => {
@@ -61,14 +62,21 @@ it('offers the universes where you may invite people, and only to people not in 
   expect(where.OR).toEqual([{ ownerId: 'me' }, { members: { some: { userId: 'me' } } }]);
   expect(select.members).toEqual({ where: { userId: 'person' }, select: { id: true } });
   expect(select.membershipInvitations).toEqual({ where: { invitedUserId: 'person', status: 'pending' }, select: { id: true } });
+  // An invitation sent the old way to one of its worlds counts too
+  expect(select.worlds).toEqual({
+    where: { membershipInvitations: { some: { invitedUserId: 'person', status: 'pending' } } },
+    select: { id: true },
+    take: 1,
+  });
 });
 
-it('lists your universes the person already owns, is in or is invited to as taken, never as offered', async () => {
+it('lists your universes the person already owns, is in or is invited to (to the universe or one of its worlds) as taken, never as offered', async () => {
   db.universe.findMany.mockResolvedValue([
     universe('u1', 'BAWES', { member: true }),
     universe('u2', 'Sandbox'),
     universe('u3', 'Cup', { invited: true }),
     universe('u4', 'Theirs', { owner: true }),
+    universe('u5', 'Club', { invitedToWorld: true }),
   ]);
   const body = await (await call()).json();
   expect(body.universes).toEqual([{ id: 'u2', name: 'Sandbox', visit: null }]);
@@ -76,6 +84,7 @@ it('lists your universes the person already owns, is in or is invited to as take
     { id: 'u1', name: 'BAWES', status: 'member' },
     { id: 'u3', name: 'Cup', status: 'invited' },
     { id: 'u4', name: 'Theirs', status: 'member' },
+    { id: 'u5', name: 'Club', status: 'invited' },
   ]);
 });
 
