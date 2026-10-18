@@ -120,4 +120,28 @@ describe('GET /api/room/access, permissions from roles', () => {
     expect(body.permissions).toBe('8416');
     expect(body.canEdit).toBe(true);
   });
+  it('never hands the roles or tags of the account an unchecked identifier names to whoever sent it', async () => {
+    // No token: the identifier in the address is only what the caller sent
+    (authenticateRequest as jest.Mock).mockResolvedValue({ isAuthenticated: false });
+    roles([{ key: 'admin', permissions: 16383 }], ['admin', 'member']);
+    const url = `http://localhost/api/room/access?userIdentifier=${PERSON.uuid}&playUri=${encodeURIComponent('http://play.test/@/uni/world/room')}`;
+    const body = await (await roomAccess(new NextRequest(url, { headers: { Authorization: process.env.ADMIN_API_TOKEN as string } }))).json();
+    expect(body.status).toBe('ok');
+    expect(body.permissions).toBe('512');
+    expect(body.tags).toEqual([]);
+    expect(body.canEdit).toBe(false);
+    expect(db.universeMember.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('gives an unchecked identifier only Everyone when roles cannot be read, never its tags', async () => {
+    (authenticateRequest as jest.Mock).mockResolvedValue({ isAuthenticated: true, identifier: PERSON.uuid, email: PERSON.email });
+    (authenticateRequest as jest.Mock).mockResolvedValueOnce({ isAuthenticated: false });
+    db.worldMember.findUnique.mockResolvedValue({ id: 'm', tags: ['editor'] });
+    db.role.findUnique.mockRejectedValue(new Error('database down'));
+    const url = `http://localhost/api/room/access?userIdentifier=${PERSON.uuid}&playUri=${encodeURIComponent('http://play.test/@/uni/world/room')}&accessToken=stale`;
+    const body = await (await roomAccess(new NextRequest(url, { headers: { Authorization: process.env.ADMIN_API_TOKEN as string } }))).json();
+    expect(body.permissions).toBe('0');
+    expect(body.tags).toEqual([]);
+    expect(body.canEdit).toBe(false);
+  });
 });
