@@ -181,4 +181,42 @@ describe('Memberships', () => {
     await screen.findByText('No memberships yet.');
     expect(left).toBe(true);
   });
+  it('shows a universe invitation as the universe, the worlds it gives and its roles, and an older one as its world', async () => {
+    const toUniverse = (id: string, scope: { allWorlds: boolean; worldIds: string[] }, roles: { id: string; name: string; color: string }[]) => ({
+      ...invitation(id, 'HQ'),
+      world: { id: 'hq', name: 'HQ', slug: 'hq', universe: { id: 'u', name: 'BAWES', slug: 'bawes' } },
+      tags: [],
+      universeId: 'u',
+      ...scope,
+      roles,
+    });
+    fetchMock.mockImplementation((url: string) => {
+      if (url === '/api/auth/me') return json({ user: { id: 'me' } });
+      if (url === '/api/memberships/invitations')
+        return json({
+          invitations: [
+            toUniverse('i1', { allWorlds: true, worldIds: [] }, [{ id: 'r-admin', name: 'Admin', color: '#F87171' }]),
+            toUniverse('i2', { allWorlds: false, worldIds: ['hq'] }, []),
+            toUniverse('i3', { allWorlds: false, worldIds: ['hq', 'campus', 'lab'] }, []),
+            invitation('i4', 'Moon'),
+          ],
+        });
+      if (url === '/api/memberships/my/universes') return json({ universes: [] });
+      return json({});
+    });
+    render(<MyMembershipsPage />);
+    const list = await screen.findByTestId('invitations');
+    const text = list.textContent ?? '';
+    // Every world, as Admin: never "HQ" with no roles
+    expect(screen.getAllByText('BAWES')).toHaveLength(3);
+    expect(screen.getByText('Khalid invited you · Every world')).toBeTruthy();
+    expect(screen.getByText('Admin')).toBeTruthy();
+    expect(screen.getByText('Khalid invited you · HQ only')).toBeTruthy();
+    expect(screen.getByText('Khalid invited you · 3 worlds')).toBeTruthy();
+    expect(screen.getAllByText('Member')).toHaveLength(2);
+    // An older world invitation still names its world and tags
+    expect(screen.getByText('Moon')).toBeTruthy();
+    expect(text).toContain('Khalid invited you as member');
+    expect(screen.getAllByRole('button', { name: 'Decline the invitation to BAWES' })).toHaveLength(3);
+  });
 });
