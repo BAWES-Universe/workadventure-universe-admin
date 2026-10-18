@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { exchangeOidcAccessToken, SessionExchangeError } from '@/lib/oidc-session-exchange';
 import { resolveExpectedLoginOrigin } from '@/lib/auth';
+import {
+  isMobileOrigin,
+  isValidRedirectUri,
+} from '@/app/api/auth/redirect-uri';
 
 export const runtime = 'nodejs';
 
@@ -30,7 +34,8 @@ function loginExpectedOrigin(request: NextRequest): string {
 
 export async function POST(request: NextRequest) {
   const origin = request.headers.get('origin');
-  if (origin) {
+  const userAgent = request.headers.get('user-agent');
+  if (origin && !isMobileOrigin(origin, userAgent)) {
     // Computed before the try so a missing production config surfaces as a loud
     // 500 with a clear message instead of a silent 403.
     const expected = loginExpectedOrigin(request);
@@ -43,13 +48,31 @@ export async function POST(request: NextRequest) {
 
   try {
     const body: unknown = await request.json();
+    const rawRedirectUri =
+      typeof body === 'object' && body !== null
+        ? (body as { redirectUri?: unknown; redirect_uri?: unknown }).redirectUri ??
+          (body as { redirectUri?: unknown; redirect_uri?: unknown }).redirect_uri
+        : undefined;
+    let validatedRedirectUri: string | undefined;
+    if (rawRedirectUri !== undefined && rawRedirectUri !== null) {
+      const fallbackOrigin =
+        process.env.NODE_ENV === 'production' ? undefined : request.nextUrl.origin;
+      if (typeof rawRedirectUri !== 'string' || !isValidRedirectUri(rawRedirectUri, fallbackOrigin)) {
+        return response({ error: 'Invalid redirect_uri' }, 400);
+      }
+      validatedRedirectUri = rawRedirectUri.trim();
+    }
     const accessToken = typeof body === 'object' && body !== null && 'accessToken' in body
       ? (body as { accessToken?: unknown }).accessToken
       : null;
     if (typeof accessToken !== 'string' || !accessToken.trim()) {
       return response({ error: 'Access token required' }, 400);
     }
-    return response(await exchangeOidcAccessToken(accessToken));
+    const session = await exchangeOidcAccessToken(accessToken);
+    if (validatedRedirectUri) {
+      return response({ ...session, redirectUri: validatedRedirectUri });
+    }
+    return response(session);
   } catch (error) {
     if (error instanceof SyntaxError) return response({ error: 'Invalid JSON body' }, 400);
     if (error instanceof SessionExchangeError) return response({ error: error.message }, error.status);
