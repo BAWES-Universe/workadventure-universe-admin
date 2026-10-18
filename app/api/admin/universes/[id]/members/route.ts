@@ -22,6 +22,8 @@ function readCursor(value: string | null): RankCursor | null {
 }
 const writeCursor = (cursor: RankCursor) => Buffer.from(JSON.stringify(cursor)).toString('base64url');
 
+const reachesWorld = (worldId: string): Prisma.UniverseMemberRoleWhereInput[] => [{ allWorlds: true }, { worldIds: { has: worldId } }];
+
 // GET /api/admin/universes/[id]/members?q=&roleId=&worldId=&cursor= - Everyone who joined the universe, newest first.
 // `worldId` keeps the people whose membership or a role reaches that world.
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -69,7 +71,9 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
             OR: [
               { allWorlds: true },
               { worldIds: { has: worldId } },
-              { roles: { some: { OR: [{ allWorlds: true }, { worldIds: { has: worldId } }] } } },
+              // A role whose badge is hidden doesn't bring someone into a world's list for people who can't see it
+              { roles: { some: { OR: reachesWorld(worldId), ...(showHidden ? {} : { role: { showBadge: true } }) } } },
+              ...(showHidden ? [] : [{ userId: user.id, roles: { some: { OR: reachesWorld(worldId) } } }]),
             ],
           }
         : {}),
