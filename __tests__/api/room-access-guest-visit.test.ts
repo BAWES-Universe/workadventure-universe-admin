@@ -25,9 +25,19 @@ jest.mock('@/lib/avatar-catalog-validator', () => ({
   resolveCompanionTexture: jest.fn().mockResolvedValue({ valid: true, texture: null }),
 }));
 jest.mock('@/lib/super-admin', () => ({ isSuperAdmin: () => false }));
+jest.mock('@/lib/roles', () => {
+  const actual = jest.requireActual('@/lib/roles');
+  return {
+    ...actual,
+    // Mona's roles in this universe would let her edit maps
+    permissionsForWorld: jest.fn(async ({ userId }: { userId: string | null }) => actual.permissionsFromTags(userId === 'u1' ? ['admin'] : [])),
+  };
+});
 
 import { prisma } from '@/lib/db';
 import { GET as roomAccess } from '@/app/api/room/access/route';
+import { notifyRoomAccess } from '@/lib/discord';
+import { permissionsForWorld } from '@/lib/roles';
 
 const db = prisma as unknown as Record<string, Record<string, jest.Mock>>;
 
@@ -65,10 +75,29 @@ describe('GET /api/room/access, what a guest visit keeps', () => {
     expect(db.roomAccess.create.mock.calls[0][0].data).toMatchObject({ userName: null, textureIds: [] });
   });
 
-  it("does not copy the outfit onto a signed-in person's visit: their account has it", async () => {
-    db.user.findFirst.mockResolvedValue({ id: 'u1', uuid: 'member-uuid', email: 'm@example.test', name: 'Mona', isGuest: false });
-    db.worldMember.findUnique.mockResolvedValue({ id: 'm', tags: ['member'] });
-    await enter('userIdentifier=member-uuid&characterTextureIds[]=body1');
-    expect(db.roomAccess.create.mock.calls[0][0].data).toMatchObject({ userId: 'u1', textureIds: [] });
+  it("answers, records and announces someone who sends an account's id without signing in as the guest they are (#408)", async () => {
+    db.user.findFirst.mockResolvedValue({ id: 'u1', uuid: 'member-uuid', email: 'm@example.test', name: 'Mona', isGuest: false, matrixChatId: '@mona:chat' });
+    db.worldMember.findUnique.mockResolvedValue({ id: 'm', tags: ['admin'] });
+    db.visitCard.findUnique.mockResolvedValue({ userId: 'u1' });
+    const body = await enter('userIdentifier=member-uuid&name=Nova&characterTextureIds[]=body1');
+    // Nothing of Mona's account goes back to them
+    expect(body).toMatchObject({ status: 'ok', email: null, username: 'Nova', tags: [], visitCardUrl: null });
+    expect(body.chatID).toBeUndefined();
+    // Nor her roles: they are worked out as nobody's
+    expect(permissionsForWorld).toHaveBeenCalledWith(expect.objectContaining({ userId: null, worldTags: [] }));
+    expect(body.canEdit).toBe(false);
+    expect(db.visitCard.findUnique).not.toHaveBeenCalled();
+    // The visit is a guest's, under the name they typed, keeping the Woka they picked
+    expect(db.roomAccess.create.mock.calls[0][0].data).toMatchObject({
+      userUuid: 'member-uuid',
+      userId: null,
+      userName: 'Nova',
+      userEmail: null,
+      isGuest: true,
+      hasMembership: false,
+      membershipTags: [],
+      textureIds: ['body1'],
+    });
+    expect(notifyRoomAccess).toHaveBeenCalledWith(expect.objectContaining({ userName: 'Nova', userEmail: null, isGuest: true, tags: [] }));
   });
 });
