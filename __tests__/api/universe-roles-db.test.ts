@@ -32,6 +32,7 @@ import { POST as accept } from '@/app/api/memberships/invitations/[id]/accept/ro
 import * as worldMembersRoute from '@/app/api/admin/worlds/[id]/members/route';
 import * as worldMemberRoute from '@/app/api/admin/worlds/[id]/members/[memberId]/route';
 import * as leaveWorldRoute from '@/app/api/memberships/my/world/[id]/route';
+import * as userInviteRoute from '@/app/api/admin/users/[id]/invite/route';
 import { POST as createWorld } from '@/app/api/admin/worlds/route';
 import { GET as inviteCandidates } from '@/app/api/admin/universes/[id]/invite-candidates/route';
 
@@ -259,6 +260,8 @@ run('universe roles and people routes (real database)', () => {
       params: Promise.resolve({ id: invited.body.invitation.id }),
     });
     expect(accepted.status).toBe(200);
+    // ... and says so
+    expect((await accepted.json()).rolesNotGiven).toEqual(['Chief']);
     expect(await tagsOf('late', worldA)).toEqual(['member']);
     await prisma.role.delete({ where: { id: chief.id } });
   });
@@ -471,6 +474,46 @@ run('universe roles and people routes (real database)', () => {
     for (const { userId } of everywhere) {
       expect(await prisma.worldMember.findUnique({ where: { userId_worldId: { userId, worldId: created.body.id } } })).not.toBeNull();
     }
+  });
+
+  it('refuses to invite someone the way before roles with a role that has Administrator, and says why', async () => {
+    const boss = await prisma.role.create({
+      data: { universeId, key: `boss-${tag}`, name: 'Boss', position: 16, permissions: flag('ADMINISTRATOR') },
+    });
+    const asTag = await as('owner', worldMembersRoute.POST, { id: worldB }, { userId: people.late, tags: [boss.key] });
+    expect(asTag.status).toBe(400);
+    expect(asTag.body.error).toMatch(/Administrator works in every world/);
+    const fromProfile = await as('owner', userInviteRoute.POST, { id: people.late }, { worldId: worldB, tags: [boss.key] });
+    expect(fromProfile.status).toBe(400);
+    expect(await prisma.membershipInvitation.count({ where: { worldId: worldB, invitedUserId: people.late, status: 'pending' } })).toBe(0);
+
+    // One sent before the role gained Administrator is accepted without it, and says so
+    const stale = await prisma.user.create({ data: { uuid: `stale-${tag}`, email: `stale-${tag}@example.test`, name: 'stale' } });
+    people.stale = stale.id;
+    const pending = await prisma.membershipInvitation.create({
+      data: { worldId: worldB, invitedUserId: stale.id, invitedByUserId: people.owner, status: 'pending', tags: [boss.key] },
+    });
+    session.mockResolvedValue({ id: stale.id, uuid: 'stale', email: null, name: 'stale', tags: [], isSuperAdmin: false });
+    const accepted = await accept(new NextRequest('http://localhost/api', { method: 'POST' }), { params: Promise.resolve({ id: pending.id }) });
+    expect(accepted.status).toBe(200);
+    expect((await accepted.json()).rolesNotGiven).toEqual(['Boss']);
+    expect(await tagsOf('stale', worldB)).toEqual(['member']);
+    await prisma.role.delete({ where: { id: boss.id } });
+  });
+
+  it('still invites someone as Admin of one world the way before roles: Admin has no Administrator', async () => {
+    const keen = await prisma.user.create({ data: { uuid: `keen-${tag}`, email: `keen-${tag}@example.test`, name: 'keen' } });
+    const sent = await as('owner', worldMembersRoute.POST, { id: worldB }, { userId: keen.id, tags: ['admin'] });
+    expect(sent.status).toBe(201);
+  });
+
+  it('makes the owner an Admin of the first world of a new universe', async () => {
+    const founder = await prisma.user.create({ data: { uuid: `founder-${tag}`, email: `founder-${tag}@example.test`, name: 'founder' } });
+    people.founder = founder.id;
+    const fresh = await prisma.universe.create({ data: { slug: `fresh-${tag}`, name: 'Fresh', ownerId: founder.id, isPublic: false } });
+    const created = await as('founder', createWorld, {}, { universeId: fresh.id, slug: 'first', name: 'First', isPublic: false });
+    expect(created.status).toBe(201);
+    expect(await tagsOf('founder', created.body.id)).toEqual(['admin', 'member']);
   });
 
   it('lists an older invitation to a world the viewer may invite to, however many newer ones go elsewhere', async () => {

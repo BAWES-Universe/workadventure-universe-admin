@@ -51,7 +51,8 @@ export async function POST(
       const worlds = invitation.universeId
         ? { allWorlds: invitation.allWorlds, worldIds: invitation.worldIds }
         : { allWorlds: false, worldIds: [invitation.worldId] };
-      await joinUniverse(tx, {
+      // Administrator works in every world: one offered in only some (an older invitation) is not given, and they are told
+      const notGiven = await joinUniverse(tx, {
         universeId,
         userId: sessionUser.id,
         worlds,
@@ -71,12 +72,13 @@ export async function POST(
         },
       });
 
-      return tx.worldMember.findUnique({
+      const member = await tx.worldMember.findUnique({
         where: { userId_worldId: { userId: sessionUser.id, worldId: invitation.worldId } },
       });
+      return { member, notGiven };
     });
 
-    return NextResponse.json({ member: result });
+    return NextResponse.json({ member: result.member, rolesNotGiven: result.notGiven.map((role) => role.name) });
   } catch (error) {
     console.error('Error accepting invitation:', error);
     return NextResponse.json(
