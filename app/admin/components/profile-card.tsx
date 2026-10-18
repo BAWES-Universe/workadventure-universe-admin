@@ -494,9 +494,9 @@ export function ProfileActions({ count, children }: { count: number; children: R
 
 /**
  * A person in a list: their Woka when we have it, otherwise the people chip. `face` makes it a circle on the colour
- * the game gives their name, as in Recent visitors.
+ * the game gives their name, as in Recent visitors. `plain` drops the chip's box when there is no Woka.
  */
-export function PersonIcon({ woka, name, size = 40, face = false }: { woka?: string[] | null; name?: string | null; size?: number; face?: boolean }) {
+export function PersonIcon({ woka, name, size = 40, face = false, plain = false }: { woka?: string[] | null; name?: string | null; size?: number; face?: boolean; plain?: boolean }) {
   if (woka && woka.length > 0) return <WokaAvatar layers={woka} name={name ?? ''} size={size} tinted={face} round={face} />;
-  return <KindIcon kind="people" />;
+  return <KindIcon kind="people" plain={plain} />;
 }
