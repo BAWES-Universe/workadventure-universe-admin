@@ -277,6 +277,28 @@ run('universe roles and people routes (real database)', () => {
     }
   });
 
+  it('never lists someone in a world only because of a role whose badge is hidden, to people who cannot see it', async () => {
+    const hiddenOnly = await prisma.user.create({ data: { uuid: `hidden-${tag}`, email: `hidden-${tag}@example.test`, name: 'hidden' } });
+    people.hidden = hiddenOnly.id;
+    // In world A, with a role that also works in world B
+    await joinUniverse(prisma, { universeId, userId: people.hidden, worlds: { allWorlds: false, worldIds: [worldA] }, roles: [] });
+    const member = await prisma.universeMember.findUniqueOrThrow({ where: { universeId_userId: { universeId, userId: people.hidden } } });
+    await prisma.universeMemberRole.create({ data: { memberId: member.id, roleId: role.helper, allWorlds: false, worldIds: [worldA, worldB] } });
+    const inB = async (who: string) =>
+      (await as(who, membersRoute.GET, {}, undefined, `worldId=${worldB}`)).body.members.map((m: { userId: string }) => m.userId);
+    expect(await inB('helper')).toContain(people.hidden);
+    await prisma.role.update({ where: { id: role.helper }, data: { showBadge: false } });
+    try {
+      expect(await inB('helper')).not.toContain(people.hidden);
+      expect(await inB('hidden')).toContain(people.hidden);
+      expect(await inB('admin')).toContain(people.hidden);
+    } finally {
+      await prisma.role.update({ where: { id: role.helper }, data: { showBadge: true } });
+      await prisma.universeMember.delete({ where: { id: member.id } });
+      await prisma.worldMember.deleteMany({ where: { userId: people.hidden } });
+    }
+  });
+
   it('lists members with emails only for those who manage people, and says what you may do', async () => {
     const asHelper = await as('helper', membersRoute.GET, {});
     expect(asHelper.status).toBe(200);
