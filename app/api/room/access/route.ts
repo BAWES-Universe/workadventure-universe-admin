@@ -500,7 +500,8 @@ export async function GET(request: NextRequest) {
       if (!isBotIdentifier(finalUuid)) {
         await (prisma as any).roomAccess.create({
           data: {
-            userUuid: finalUuid,
+            // Not under the id they sent when that account wasn't verified, so it never reads as that person's visit (#421)
+            userUuid: unverifiedAccount ? null : finalUuid,
             userId: account?.id || null,
             ipAddress: ipAddress,
             userName: account ? (account.name || userName) : userName,
