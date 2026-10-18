@@ -22,17 +22,22 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     ]);
     const countOf = new Map(counts.map((row) => [row.roleId, row._count._all]));
     // A role whose badge is hidden is listed only to people who handle roles, and to whoever holds it
-    const showHidden = seesHiddenRoles(access);
+    const seesHidden = seesHiddenRoles(access);
     const mine = new Set(held.map((row) => row.roleId));
+    const manages = allows(access, 'MANAGE_ROLES', { allWorlds: true });
 
     return NextResponse.json({
-      roles: roles.filter((role) => role.showBadge || showHidden || mine.has(role.id)).map((role) => ({
+      roles: roles.filter((role) => role.showBadge || seesHidden || mine.has(role.id)).map((role) => ({
         ...roleForJson(role),
         // Everyone who joined is a Member; Everyone is everyone, so it has no count
-        people: role.key === 'member' ? members : role.key === 'everyone' ? null : countOf.get(role.id) ?? 0,
+        // A role whose badge is hidden doesn't say how many people hold it to anyone who can't see who does
+        people:
+          role.key === 'member' ? members : role.key === 'everyone' ? null : !role.showBadge && !seesHidden ? null : countOf.get(role.id) ?? 0,
         canEdit: allows(access, 'MANAGE_ROLES', { allWorlds: true }) && (access.full || role.position < access.highest),
       })),
-      canManageRoles: allows(access, 'MANAGE_ROLES', { allWorlds: true }),
+      canManageRoles: manages,
+      // Making a role also needs a role above Editor (a new role ranks below your highest), as POST asks
+      canCreateRoles: manages && (access.full || access.highest > CUSTOM_MIN_POSITION),
       canGiveRoles: worldsAllowing(access, 'GIVE_ROLES'),
     });
   } catch (error) {

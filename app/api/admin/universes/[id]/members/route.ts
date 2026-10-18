@@ -24,8 +24,8 @@ const writeCursor = (cursor: RankCursor) => Buffer.from(JSON.stringify(cursor)).
 
 const reachesWorld = (worldId: string): Prisma.UniverseMemberRoleWhereInput[] => [{ allWorlds: true }, { worldIds: { has: worldId } }];
 
-// GET /api/admin/universes/[id]/members?q=&roleId=&worldId=&cursor= - Everyone who joined the universe, newest first.
-// `worldId` keeps the people whose membership or a role reaches that world.
+// GET /api/admin/universes/[id]/members?q=&roleId=&withoutRoleId=&worldId=&cursor= - Everyone who joined the universe, newest
+// first. `worldId` keeps the people whose membership or a role reaches that world; `withoutRoleId` leaves out who has that role.
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
@@ -47,6 +47,13 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const roleId = filterRole && (filterRole.key === MEMBER_KEY || filterRole.key === EVERYONE_KEY) ? null : roleParam;
     // A role whose badge is hidden doesn't say who has it, not even through the filter
     const hiddenFilter = !!filterRole && !filterRole.showBadge && !showHidden;
+    // Who doesn't have a role yet, for giving it. Only for a role the viewer may see the holders of: the gaps would name them
+    const withoutParam = request.nextUrl.searchParams.get('withoutRoleId');
+    const withoutRole = withoutParam
+      ? await prisma.role.findFirst({ where: { id: withoutParam, universeId: id }, select: { id: true, key: true, showBadge: true } })
+      : null;
+    const withoutRoleId =
+      withoutRole && withoutRole.key !== MEMBER_KEY && withoutRole.key !== EVERYONE_KEY && (withoutRole.showBadge || showHidden) ? withoutRole.id : null;
     const cursor = request.nextUrl.searchParams.get('cursor');
     const where: Prisma.UniverseMemberWhereInput = {
       universeId: id,
@@ -77,6 +84,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
             ],
           }
         : {}),
+      ...(withoutRoleId ? { AND: [{ roles: { none: { roleId: withoutRoleId } } }] } : {}),
       ...(hiddenFilter ? { id: { in: [] } } : {}),
     };
 

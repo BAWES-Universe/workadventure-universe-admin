@@ -23,6 +23,7 @@ const tag = randomUUID().slice(0, 8);
 const PLAIN = 55;
 const ids: Record<string, string> = {};
 let universeId = '';
+const roleIds: Record<string, string> = {};
 
 interface Listed {
   members: { userId: string; roles: { roleId: string }[] }[];
@@ -68,6 +69,7 @@ run('the Members list in rank order (real database)', () => {
     const low1 = (await prisma.role.create({ data: { universeId, key: 'low-one', name: 'Low one', position: 10 } })).id;
     const low2 = (await prisma.role.create({ data: { universeId, key: 'low-two', name: 'Low two', position: 11 } })).id;
     const secret = (await prisma.role.create({ data: { universeId, key: 'secret', name: 'Secret', position: 500, showBadge: false } })).id;
+    Object.assign(roleIds, { low1, secret });
 
     // Everyone joined at a different moment; the Admin joined first of all, so only rank can put them on top
     const start = Date.parse('2026-01-01T00:00:00Z');
@@ -108,6 +110,14 @@ run('the Members list in rank order (real database)', () => {
     expect(plain[0]).toBe(ids.plain54);
     expect(plain[plain.length - 1]).toBe(ids.viewer);
     expect(plain.slice(0, PLAIN)).toEqual(Array.from({ length: PLAIN }, (_, n) => ids[`plain${PLAIN - 1 - n}`]));
+  });
+
+  it('leaves out who already has a role, newest first, on a real query', async () => {
+    session.mockResolvedValue({ id: ids.owner, uuid: 'owner', email: `owner-${tag}@example.test`, name: 'owner', tags: [], isSuperAdmin: false });
+    const response = await GET(new NextRequest(`http://localhost/api?withoutRoleId=${roleIds.low1}`), { params: Promise.resolve({ id: universeId }) });
+    const body: Listed = await response.json();
+    expect(body.total).toBe(PLAIN + 3);
+    expect(body.members.map((member) => member.userId)).not.toContain(ids.lows);
   });
 
   it('does not let a hidden role lift someone for a viewer who cannot see it', async () => {

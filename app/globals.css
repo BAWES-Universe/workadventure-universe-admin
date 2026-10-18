@@ -506,6 +506,8 @@ a[href] {
 .orbit-kind[data-kind='world'] { color: var(--kind-world-solid); }
 .orbit-kind[data-kind='room'] { color: var(--kind-room-solid); }
 .orbit-kind[data-kind='star'] { color: var(--kind-star-solid); }
+.orbit-kind[data-kind='role'],
+.orbit-kind[data-kind='everyone'] { color: hsl(var(--foreground)); }
 .orbit-kind[data-kind='people'] { background-image: var(--kind-people); }
 .orbit-kind[data-kind='people'][data-plain] { background-image: none; color: var(--kind-people-solid); }
 /* Admin tools: neutral, so a template or a bot never looks like a room or a person. */
