@@ -30,9 +30,15 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     if (!user) return NextResponse.json({ error: 'User not found' }, { status: 404 });
     const worldId = room.world.id;
     const universeId = room.world.universeId;
-    const [member, invitation, canInvite] = await Promise.all([
+    const [member, inUniverse, invitation, canInvite] = await Promise.all([
       prisma.worldMember.findUnique({ where: { userId_worldId: { userId, worldId } }, select: { tags: true } }),
-      prisma.membershipInvitation.findFirst({ where: { OR: [{ worldId }, { universeId }], invitedUserId: userId, status: 'pending' }, select: { id: true } }),
+      prisma.universeMember.findUnique({ where: { universeId_userId: { universeId, userId } }, select: { id: true } }),
+      // Any pending invitation into this universe, including one sent the old way to another of its worlds, as the
+      // invitation POST refuses a second one
+      prisma.membershipInvitation.findFirst({
+        where: { OR: [{ worldId }, { universeId }, { world: { universeId } }], invitedUserId: userId, status: 'pending' },
+        select: { id: true },
+      }),
       // Match the invitation POST: a session, and Invite and remove people in this world (from a role or as the owner).
       viewer.kind === 'user' ? mayInvite(viewer.user, universeId, worldId) : false,
     ]);
@@ -41,6 +47,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       world: { id: worldId, name: room.world.name },
       universeId,
       status: user.isGuest ? 'guest' : owner ? 'owner' : member ? 'member' : invitation ? 'invited' : 'none',
+      // In the universe, through other worlds: the card says they are not in this world, not that they are not in it at all
+      inUniverse: !!inUniverse,
       tags: member?.tags ?? [],
       canInvite: canInvite && !user.isGuest && !owner && !member && !invitation,
     }, { headers: { 'Cache-Control': 'no-store' } });

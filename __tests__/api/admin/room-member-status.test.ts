@@ -8,6 +8,7 @@ jest.mock('@/lib/db', () => ({ prisma: {
   room: { findUnique: jest.fn() },
   user: { findUnique: jest.fn() },
   worldMember: { findUnique: jest.fn() },
+  universeMember: { findUnique: jest.fn() },
   membershipInvitation: { findFirst: jest.fn() },
 } }));
 jest.mock('@/lib/access-scope', () => ({
@@ -44,6 +45,7 @@ beforeEach(() => {
   db.room.findUnique.mockResolvedValue({ world: { id: 'w1', name: 'HQ', universeId: 'u1', universe: { ownerId: 'owner' } } });
   db.user.findUnique.mockResolvedValue({ isGuest: false });
   db.worldMember.findUnique.mockResolvedValue(null);
+  db.universeMember.findUnique.mockResolvedValue(null);
   db.membershipInvitation.findFirst.mockResolvedValue(null);
 });
 
@@ -60,11 +62,19 @@ it('requires authentication and visitor-detail permission before querying member
 it('looks up current membership and pending invites in the room’s world, without exposing user details', async () => {
   const response = await call();
   expect(response.headers.get('Cache-Control')).toBe('no-store');
-  expect(await response.json()).toEqual({ world: { id: 'w1', name: 'HQ' }, universeId: 'u1', status: 'none', tags: [], canInvite: true });
+  expect(await response.json()).toEqual({ world: { id: 'w1', name: 'HQ' }, universeId: 'u1', status: 'none', inUniverse: false, tags: [], canInvite: true });
   expect(accessDetailFor).toHaveBeenCalledWith(expect.anything(), { roomId: 'r1' });
   expect(db.worldMember.findUnique).toHaveBeenCalledWith({ where: { userId_worldId: { userId: 'person', worldId: 'w1' } }, select: { tags: true } });
-  expect(db.membershipInvitation.findFirst).toHaveBeenCalledWith({ where: { OR: [{ worldId: 'w1' }, { universeId: 'u1' }], invitedUserId: 'person', status: 'pending' }, select: { id: true } });
+  expect(db.membershipInvitation.findFirst).toHaveBeenCalledWith({
+    where: { OR: [{ worldId: 'w1' }, { universeId: 'u1' }, { world: { universeId: 'u1' } }], invitedUserId: 'person', status: 'pending' },
+    select: { id: true },
+  });
   expect(accessFor).toHaveBeenCalledWith(expect.anything(), 'u1', { id: 'manager', isSuperAdmin: undefined });
+});
+
+it('says someone in the universe through other worlds is in it, and may still be invited to this world', async () => {
+  db.universeMember.findUnique.mockResolvedValue({ id: 'um' });
+  expect(await (await call()).json()).toMatchObject({ status: 'none', inUniverse: true, canInvite: true });
 });
 
 it('shows current roles, giving membership precedence over an old pending invite', async () => {

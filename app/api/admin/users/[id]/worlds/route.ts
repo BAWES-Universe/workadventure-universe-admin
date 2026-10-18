@@ -86,7 +86,13 @@ async function invitableUniverses(viewer: { id: string; isSuperAdmin: boolean },
     where: {
       ...(hidden ? { ownerId: { not: hidden } } : {}),
       ...(viewer.isSuperAdmin ? {} : { OR: [{ ownerId: viewer.id }, { members: { some: { userId: viewer.id } } }] }),
-      NOT: [{ ownerId: personId }, { members: { some: { userId: personId } } }, { membershipInvitations: { some: { invitedUserId: personId, status: 'pending' } } }],
+      // A pending invitation counts whether it names the universe or was sent the old way to one of its worlds
+      NOT: [
+        { ownerId: personId },
+        { members: { some: { userId: personId } } },
+        { membershipInvitations: { some: { invitedUserId: personId, status: 'pending' } } },
+        { worlds: { some: { membershipInvitations: { some: { invitedUserId: personId, status: 'pending' } } } } },
+      ],
     },
     select: { id: true, name: true },
     orderBy: { name: 'asc' },
