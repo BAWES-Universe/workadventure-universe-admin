@@ -6,10 +6,11 @@ import { NextRequest } from 'next/server';
 const roleFindMany = jest.fn();
 const groupBy = jest.fn();
 const memberCount = jest.fn();
+const heldRoles = jest.fn();
 jest.mock('@/lib/db', () => ({
   prisma: {
     role: { findMany: (...args: unknown[]) => roleFindMany(...args) },
-    universeMemberRole: { groupBy: (...args: unknown[]) => groupBy(...args) },
+    universeMemberRole: { groupBy: (...args: unknown[]) => groupBy(...args), findMany: (...args: unknown[]) => heldRoles(...args) },
     universeMember: { count: (...args: unknown[]) => memberCount(...args) },
   },
 }));
@@ -79,6 +80,7 @@ beforeEach(() => {
     { roleId: 'admin', _count: { _all: 1 } },
   ]);
   memberCount.mockResolvedValue(23);
+  heldRoles.mockResolvedValue([]);
 });
 
 describe('how many people hold a role', () => {
@@ -88,13 +90,20 @@ describe('how many people hold a role', () => {
     expect(people(body, 'lead')).toBe(3);
   });
 
-  it('is not said for a role whose badge is off to someone who neither gives nor manages roles', async () => {
+  it('is not said, and the role not listed, for a badge that is off, to someone who neither gives nor manages roles', async () => {
     const body = await list(viewerWith({ key: 'viewer-role', position: CUSTOM_MIN_POSITION + 5, permissions: BigInt(0) }));
-    expect(people(body, 'secret')).toBeNull();
+    expect(body.roles.map((item: { key: string }) => item.key)).not.toContain('secret');
     // Roles with their badge on are counted as ever, and Member is everyone who joined
     expect(people(body, 'lead')).toBe(3);
     expect(people(body, 'member')).toBe(23);
     expect(people(body, 'everyone')).toBeNull();
+  });
+
+  it('lists a role whose badge is off to whoever holds it, without saying how many do', async () => {
+    heldRoles.mockResolvedValue([{ roleId: 'secret' }]);
+    const body = await list(viewerWith({ key: 'secret', position: CUSTOM_MIN_POSITION + 1, permissions: BigInt(0) }));
+    expect(body.roles.map((item: { key: string }) => item.key)).toContain('secret');
+    expect(people(body, 'secret')).toBeNull();
   });
 
   it('is said to someone who gives roles, who is shown those roles on the Members page', async () => {
