@@ -32,6 +32,7 @@ import { POST as accept } from '@/app/api/memberships/invitations/[id]/accept/ro
 import * as worldMembersRoute from '@/app/api/admin/worlds/[id]/members/route';
 import * as worldMemberRoute from '@/app/api/admin/worlds/[id]/members/[memberId]/route';
 import * as leaveWorldRoute from '@/app/api/memberships/my/world/[id]/route';
+import { POST as createWorld } from '@/app/api/admin/worlds/route';
 import { GET as inviteCandidates } from '@/app/api/admin/universes/[id]/invite-candidates/route';
 
 const run = process.env.ROLES_DB_TEST === 'yes' ? describe : describe.skip;
@@ -454,5 +455,21 @@ run('universe roles and people routes (real database)', () => {
     const other = await as('helper', memberRoute.GET, { userId: people.mod });
     expect(other.status).toBe(200);
     expect(other.body.member).not.toHaveProperty('lastVisitedAt');
+  });
+
+  it('puts every all-worlds member in a new world, with time for a big universe to do it', async () => {
+    const transaction = jest.spyOn(prisma, '$transaction');
+    const created = await as('owner', createWorld, {}, { universeId, slug: `new-${tag}`, name: 'New', isPublic: false });
+    expect(created.status).toBe(201);
+    expect(transaction).toHaveBeenCalledWith(expect.any(Function), { timeout: 60_000 });
+    transaction.mockRestore();
+    const everywhere = await prisma.universeMember.findMany({
+      where: { universeId, OR: [{ allWorlds: true }, { roles: { some: { allWorlds: true } } }] },
+      select: { userId: true },
+    });
+    expect(everywhere.length).toBeGreaterThan(0);
+    for (const { userId } of everywhere) {
+      expect(await prisma.worldMember.findUnique({ where: { userId_worldId: { userId, worldId: created.body.id } } })).not.toBeNull();
+    }
   });
 });
