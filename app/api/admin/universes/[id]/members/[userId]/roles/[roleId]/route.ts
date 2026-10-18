@@ -6,7 +6,7 @@ import { badRequest, checkScope, failed, needs, scopeSchema, universeContext } f
 
 type Params = { params: Promise<{ id: string; userId: string; roleId: string }> };
 
-async function load(universeId: string, userId: string, roleId: string) {
+async function load(universeId: string, userId: string, roleId: string, ownerId: string) {
   const [role, member] = await Promise.all([
     prisma.role.findFirst({ where: { id: roleId, universeId } }),
     prisma.universeMember.findUnique({
@@ -15,7 +15,8 @@ async function load(universeId: string, userId: string, roleId: string) {
     }),
   ]);
   const given = member?.roles.find((row) => row.roleId === roleId) ?? null;
-  const theirHighest = Math.max(1, ...(member?.roles ?? []).map((row) => row.role.position));
+  // The owner is above every role, so only they (or a super admin) change their roles
+  const theirHighest = userId === ownerId ? Infinity : Math.max(1, ...(member?.roles ?? []).map((row) => row.role.position));
   return { role, member, given, theirHighest };
 }
 
@@ -30,9 +31,9 @@ export async function PUT(request: NextRequest, { params }: Params) {
     const { id, userId, roleId } = await params;
     const context = await universeContext(request, id);
     if (!context.ok) return context.response;
-    const { access, user } = context;
+    const { access, universe, user } = context;
 
-    const { role, member, given, theirHighest } = await load(id, userId, roleId);
+    const { role, member, given, theirHighest } = await load(id, userId, roleId, universe.ownerId);
     if (!role) return NextResponse.json({ error: 'Role not found' }, { status: 404 });
     if (!member) return NextResponse.json({ error: 'Member not found' }, { status: 404 });
     if (role.key === MEMBER_KEY || role.key === EVERYONE_KEY) return badRequest('Everyone who joined has this role');
@@ -69,9 +70,9 @@ export async function DELETE(request: NextRequest, { params }: Params) {
     const { id, userId, roleId } = await params;
     const context = await universeContext(request, id);
     if (!context.ok) return context.response;
-    const { access, user } = context;
+    const { access, universe, user } = context;
 
-    const { role, member, given, theirHighest } = await load(id, userId, roleId);
+    const { role, member, given, theirHighest } = await load(id, userId, roleId, universe.ownerId);
     if (!role || !member || !given) return NextResponse.json({ error: 'They do not have this role' }, { status: 404 });
     if (!ranksAbove(access, role)) return needs('a role above this one');
     if (!outranks(access, userId, user.id, theirHighest)) return needs('a role above theirs');

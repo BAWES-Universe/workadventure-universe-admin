@@ -31,7 +31,9 @@ export async function GET(request: NextRequest, { params }: Params) {
     const member = await findMember(id, userId);
     if (!member) return NextResponse.json({ error: 'Member not found' }, { status: 404 });
 
-    const theirHighest = Math.max(1, ...member.roles.map((given) => given.role.position));
+    const isOwner = userId === universe.ownerId;
+    // The owner is above every role
+    const theirHighest = isOwner ? Infinity : Math.max(1, ...member.roles.map((given) => given.role.position));
     // Member and Everyone come with joining, so they are never given or taken
     const roles = await prisma.role.findMany({
       where: { universeId: id, key: { notIn: ['member', 'everyone'] } },
@@ -40,7 +42,6 @@ export async function GET(request: NextRequest, { params }: Params) {
     const givable = worldsAllowing(access, 'GIVE_ROLES');
     // Someone else's roles are changed only from above them
     const canGiveAnywhere = (givable === 'all' || givable.length > 0) && (access.full || userId === user.id || theirHighest < access.highest);
-    const isOwner = userId === universe.ownerId;
 
     const [withWoka] = await withWokas([memberForJson(member, universe.ownerId, managesPeople(access) || userId === user.id, seesHiddenRoles(access) || userId === user.id)]);
     return NextResponse.json({

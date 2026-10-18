@@ -3,7 +3,7 @@ import { prisma } from '@/lib/db';
 import { parsePermissions } from '@/lib/permissions';
 import { ADMIN_POSITION, CUSTOM_MIN_POSITION, ensureBuiltInRoles } from '@/lib/roles';
 import { allows, mayChangePermissions, roleForJson, worldsAllowing } from '@/lib/role-access';
-import { badRequest, failed, keyForName, needs, roleFieldsSchema, universeContext } from '@/lib/universe-route';
+import { badRequest, failed, keyForName, needs, roleFieldsSchema, seesHiddenRoles, universeContext } from '@/lib/universe-route';
 
 // GET /api/admin/universes/[id]/roles - The Roles list, highest first, with how many people hold each one
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -11,18 +11,22 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const { id } = await params;
     const context = await universeContext(request, id);
     if (!context.ok) return context.response;
-    const { access } = context;
+    const { access, user } = context;
 
     await ensureBuiltInRoles(prisma, id);
-    const [roles, counts, members] = await Promise.all([
+    const [roles, counts, members, held] = await Promise.all([
       prisma.role.findMany({ where: { universeId: id }, orderBy: [{ position: 'desc' }, { name: 'asc' }] }),
       prisma.universeMemberRole.groupBy({ by: ['roleId'], where: { role: { universeId: id } }, _count: { _all: true } }),
       prisma.universeMember.count({ where: { universeId: id } }),
+      prisma.universeMemberRole.findMany({ where: { member: { universeId: id, userId: user.id } }, select: { roleId: true } }),
     ]);
     const countOf = new Map(counts.map((row) => [row.roleId, row._count._all]));
+    // A role whose badge is hidden is listed only to people who handle roles, and to whoever holds it
+    const showHidden = seesHiddenRoles(access);
+    const mine = new Set(held.map((row) => row.roleId));
 
     return NextResponse.json({
-      roles: roles.map((role) => ({
+      roles: roles.filter((role) => role.showBadge || showHidden || mine.has(role.id)).map((role) => ({
         ...roleForJson(role),
         // Everyone who joined is a Member; Everyone is everyone, so it has no count
         people: role.key === 'member' ? members : role.key === 'everyone' ? null : countOf.get(role.id) ?? 0,
