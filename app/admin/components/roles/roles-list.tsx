@@ -45,11 +45,6 @@ export function RolesListPage() {
   const data = state.status === 'ready' ? state.data : null;
   const movable = data ? movableRoles(data.roles.roles, { ...data.me, canManageRoles: data.roles.canManageRoles }) : [];
 
-  // Leaving the page mid-wait must not send a late save
-  useEffect(() => () => {
-    if (pending.current) clearTimeout(pending.current);
-  }, []);
-
   const changeOrder = useCallback((next: string[]) => {
     orderRef.current = next;
     revision.current += 1;
@@ -91,6 +86,16 @@ export function RolesListPage() {
     },
     [run],
   );
+
+  // Leaving the page before a move made with the arrow keys is saved saves it now, so the move isn't lost
+  const saveRef = useRef(save);
+  saveRef.current = save;
+  useEffect(() => () => {
+    if (!pending.current) return;
+    clearTimeout(pending.current);
+    pending.current = null;
+    if (latest.current) void saveRef.current(latest.current);
+  }, []);
 
   // The window listeners of a drag under way, taken off when it ends or the page goes
   const stopFollowing = useRef<(() => void) | null>(null);

@@ -157,6 +157,19 @@ describe('Roles & permissions list', () => {
     expect(screen.queryByRole('button', { name: /Move / })).toBeNull();
   });
 
+  it('saves a move made with the arrow keys when the page is left before the save would start', async () => {
+    serve((url, init) => (url.endsWith('/roles/order') && init?.method === 'PUT' ? json({ success: true }) : undefined));
+    const { unmount } = render(<RolesListPage />);
+    await screen.findByText('Your roles');
+    fireEvent.keyDown(screen.getByRole('button', { name: /Move Accountant/ }), { key: 'ArrowUp' });
+    unmount();
+    await waitFor(() => {
+      const put = fetchMock.mock.calls.find(([url, init]) => String(url).endsWith('/roles/order') && init?.method === 'PUT');
+      expect(put).toBeTruthy();
+      expect(JSON.parse(put![1].body)).toEqual({ roleIds: ['lead', 'acc', 'mod'] });
+    });
+  });
+
   it('moves a role with the arrow keys and saves the new order', async () => {
     serve((url, init) => (url.endsWith('/roles/order') && init?.method === 'PUT' ? json({ success: true }) : undefined));
     render(<RolesListPage />);
