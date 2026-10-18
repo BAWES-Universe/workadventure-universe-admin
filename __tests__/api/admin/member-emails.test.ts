@@ -9,6 +9,7 @@ jest.mock('@/lib/db', () => ({
     world: { findUnique: jest.fn() },
     worldMember: { findUnique: jest.fn(), findMany: jest.fn() },
     roomAccess: { findMany: jest.fn().mockResolvedValue([]) },
+    role: { findMany: jest.fn().mockResolvedValue([]) },
   },
 }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
@@ -19,6 +20,8 @@ import { getSessionUser } from '@/lib/auth-session';
 import { GET as getMembers } from '@/app/api/admin/worlds/[id]/members/route';
 
 const db = prisma as unknown as Record<string, Record<string, jest.Mock>>;
+
+jest.mock('@/lib/roles', () => ({ BUILT_IN_ROLES: [{ key: 'admin', position: 1_000_000 }, { key: 'editor', position: 2 }, { key: 'member', position: 1 }, { key: 'everyone', position: 0 }] }));
 
 const SESSIONS = {
   owner: { id: 'u-owner', uuid: 'uuid-owner', email: 'owner@example.test', name: 'Owner', tags: [], isSuperAdmin: false },
@@ -37,7 +40,7 @@ const MEMBERS = [
 function setUp(isPublic: boolean) {
   db.world.findUnique.mockImplementation(({ where, include }) => {
     if (where.id !== 'w') return Promise.resolve(null);
-    const world = { id: 'w', isPublic, universe: { name: 'Butterfly Universe', isPublic: true, ownerId: 'u-owner' } };
+    const world = { id: 'w', isPublic, universeId: 'u', universe: { name: 'Butterfly Universe', isPublic: true, ownerId: 'u-owner' } };
     // canManageWorldMembers asks for the caller's admin membership
     if (include?.members) {
       const userId = include.members.where.userId;
@@ -107,5 +110,21 @@ describe('GET /api/admin/worlds/[id]/members', () => {
     const preview = db.worldMember.findMany.mock.calls.at(-1)?.[0];
     expect(preview.where.id).toEqual({ in: ['m-2'] });
     expect(db.roomAccess.findMany).not.toHaveBeenCalled();
+  });
+
+  it('ranks the preview by where the universe ranks each role, so a custom role beats Member and Editor', async () => {
+    setUp(true);
+    const people = [
+      { id: 'm-1', userId: 'u-member', worldId: 'w', tags: ['member'], user: { id: 'u-member', name: 'Member', email: null } },
+      { id: 'm-3', userId: 'u-lina', worldId: 'w', tags: ['member', 'accountant'], user: { id: 'u-lina', name: 'Lina', email: null } },
+      { id: 'm-4', userId: 'u-omar', worldId: 'w', tags: ['member', 'editor'], user: { id: 'u-omar', name: 'Omar', email: null } },
+    ];
+    db.worldMember.findMany.mockResolvedValue(people);
+    db.role.findMany.mockResolvedValueOnce([{ key: 'accountant', position: 12 }]);
+    (getSessionUser as jest.Mock).mockResolvedValue(SESSIONS.member);
+    await getMembers(new NextRequest('http://localhost/api/admin/worlds/w/members?limit=2'), { params: Promise.resolve({ id: 'w' }) });
+    expect(db.role.findMany).toHaveBeenCalledWith({ where: { universeId: 'u' }, select: { key: true, position: true } });
+    const preview = db.worldMember.findMany.mock.calls.at(-1)?.[0];
+    expect(preview.where.id).toEqual({ in: ['m-3', 'm-4'] });
   });
 });

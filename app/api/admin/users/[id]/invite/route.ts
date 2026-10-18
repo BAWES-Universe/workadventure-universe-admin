@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { getSessionUser } from '@/lib/auth-session';
+import { ADMIN_EVERY_WORLD, tagsGiveAdministrator } from '@/lib/universe-members';
 
 const inviteToWorldSchema = z.object({
   worldId: z.string().uuid(),
@@ -76,6 +77,11 @@ export async function POST(
       return NextResponse.json({ error: 'World not found' }, { status: 404 });
     }
 
+    // Sent this way an invitation names one world, and Administrator works in every world
+    if (await tagsGiveAdministrator(prisma, world.universeId, data.tags)) {
+      return NextResponse.json({ error: ADMIN_EVERY_WORLD }, { status: 400 });
+    }
+
     // Check if user is already a member
     const existingMember = await prisma.worldMember.findUnique({
       where: {
@@ -130,6 +136,11 @@ export async function POST(
           status: 'pending',
           invitedByUserId: sessionUser.id,
           tags: data.tags,
+          // Sent this way it gives what its tags say, never the roles an earlier universe invitation carried
+          universeId: null,
+          roleIds: [],
+          allWorlds: false,
+          worldIds: [],
           message: data.message || null,
           invitedAt: new Date(),
           respondedAt: null,

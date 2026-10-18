@@ -98,6 +98,16 @@ describe('Segmented', () => {
     expect(onChange).toHaveBeenLastCalledWith('some');
   });
 
+  it('does not call back when the segment already picked is chosen again', () => {
+    const onChange = jest.fn();
+    render(<Segmented aria-label="Kind" value="a" onChange={onChange} options={[{ value: 'a', label: 'A' }, { value: 'b', label: 'B' }]} />);
+    fireEvent.click(screen.getByRole('radio', { name: 'A' }));
+    fireEvent.keyDown(screen.getByRole('radio', { name: 'A' }), { key: 'Home' });
+    expect(onChange).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('radio', { name: 'B' }));
+    expect(onChange).toHaveBeenCalledWith('b');
+  });
+
   it('skips a disabled segment', () => {
     const onChange = jest.fn();
     render(
@@ -146,3 +156,22 @@ it('Swatch is a named radio, ringed when picked', () => {
   expect(screen.getByRole('radio', { name: 'Violet' }).getAttribute('aria-checked')).toBe('true');
   expect(screen.getByRole('radio', { name: 'Violet' }).className).toContain('0_0_0_4px');
 });
+
+describe('Segmented tab stop', () => {
+  it('falls back to the first enabled option when the picked one is disabled, so the group can be tabbed into', () => {
+    render(
+      <Segmented
+        aria-label="Works in"
+        value="all"
+        onChange={() => {}}
+        options={[
+          { value: 'all', label: 'All worlds', disabled: true },
+          { value: 'some', label: 'Some worlds' },
+        ]}
+      />,
+    );
+    expect(screen.getByRole('radio', { name: 'All worlds' }).getAttribute('tabindex')).toBe('-1');
+    expect(screen.getByRole('radio', { name: 'Some worlds' }).getAttribute('tabindex')).toBe('0');
+  });
+});
+

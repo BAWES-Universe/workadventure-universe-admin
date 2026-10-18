@@ -76,6 +76,8 @@ export interface MembersPreview {
   yourId: string | null;
   /** The universe the world belongs to, for "You own …" and "Owns …" on a member card. */
   universeName: string | null;
+  /** The universe the world belongs to: where its roles and its Members page live. */
+  universeId: string | null;
 }
 
 /** A world's first members by rank, how many there are in all, and your own roles; the full list is its own page. */
@@ -96,6 +98,7 @@ export function useMembersPreview(worldId: string, limit = 8): MembersPreview | 
             yourTags: Array.isArray(body.yourTags) ? body.yourTags : [],
             yourId: typeof body.yourId === 'string' ? body.yourId : null,
             universeName: typeof body.universeName === 'string' ? body.universeName : null,
+            universeId: typeof body.universeId === 'string' ? body.universeId : null,
           });
         }
       })

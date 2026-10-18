@@ -13,7 +13,7 @@
 
 import Link from 'next/link';
 import type { CSSProperties, ReactNode } from 'react';
-import { ArrowUpRight, Bot, Cpu, DoorOpen, Earth, Globe2, LayoutTemplate, Lock, Map as MapIcon, Shirt, Star, Tags, Users, type LucideIcon } from 'lucide-react';
+import { ArrowUpRight, Bot, ChevronRight, Cpu, DoorOpen, Earth, Globe2, LayoutTemplate, Lock, Map as MapIcon, Shield, Shirt, Star, Tags, Users, type LucideIcon } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { timeAgo } from '@/lib/time-ago';
 import { universeColour } from '@/lib/universe-colour';
@@ -24,7 +24,7 @@ import { Planet } from './planet-icon';
 /** What players meet: each has its own colour. */
 export type EntityKind = 'universe' | 'world' | 'room' | 'star' | 'people';
 /** Super-admin tools: neutral chips, so they never read as a universe, world or room. */
-export type ToolKind = 'template' | 'category' | 'map' | 'bot' | 'provider' | 'avatar';
+export type ToolKind = 'template' | 'category' | 'map' | 'bot' | 'provider' | 'avatar' | 'role' | 'everyone';
 export type Kind = EntityKind | ToolKind;
 
 export const KIND_ICON: Record<Kind, LucideIcon> = {
@@ -39,10 +39,12 @@ export const KIND_ICON: Record<Kind, LucideIcon> = {
   bot: Bot,
   provider: Cpu,
   avatar: Shirt,
+  role: Shield,
+  everyone: Users,
 };
 
 /** Universe, world, room and star: a clean icon in their colour, no box, on the name's own line (as the room page). */
-const CLEAN = new Set<Kind>(['universe', 'world', 'room', 'star']);
+const CLEAN = new Set<Kind>(['universe', 'world', 'room', 'star', 'role', 'everyone']);
 export const isCleanKind = (kind: Kind) => CLEAN.has(kind);
 
 /** The kind's icon on the name's own line (inline layout). */
@@ -63,6 +65,8 @@ export const KIND_LABEL: Record<Kind, string> = {
   bot: 'Bot',
   provider: 'AI provider',
   avatar: 'Avatar set',
+  role: 'Role',
+  everyone: 'Everyone',
 };
 
 /** A universe's own colour as a style, for its chip, wash and planet. */
@@ -237,9 +241,12 @@ export function EntityRow({
   leading,
   tone,
   testId,
+  chevron,
 }: {
   href: string;
   kind: Kind;
+  /** The row opens a page inside Orbit (not another place): it ends in a chevron, not the arrow that leaves. */
+  chevron?: boolean;
   /** An item waiting for you (an invitation): an amber card. */
   tone?: 'waiting';
   universeId?: string | null;
@@ -290,7 +297,13 @@ export function EntityRow({
         {meta}
       </div>
       {aside && <div className={styles.aside}>{aside}</div>}
-      {trailing ? <div className={styles.trailing}>{trailing}</div> : <ArrowUpRight className={styles.arrow} size={16} aria-hidden="true" />}
+      {trailing ? (
+        <div className={styles.trailing}>{trailing}</div>
+      ) : chevron ? (
+        <ChevronRight className={styles.arrow} size={18} aria-hidden="true" />
+      ) : (
+        <ArrowUpRight className={styles.arrow} size={16} aria-hidden="true" />
+      )}
     </div>
   );
 }
@@ -349,6 +362,7 @@ export function EntityCard({
 /** A page's top: what it is, where it is, one status, and the page's actions. */
 export function PageHeader({
   kind,
+  icon,
   universeId,
   title,
   context,
@@ -359,6 +373,8 @@ export function PageHeader({
   plainIcon,
 }: {
   kind?: Kind;
+  /** A plain glyph in place of the kind's chip. */
+  icon?: ReactNode;
   plainIcon?: boolean;
   universeId?: string | null;
   title: string;
@@ -372,7 +388,7 @@ export function PageHeader({
   return (
     <header className={styles.pageHeader} data-testid="page-header">
       <div className={styles.pageTitleRow}>
-        {kind && <KindIcon kind={kind} universeId={universeId} size="lg" plain={plainIcon} />}
+        {icon ?? (kind && <KindIcon kind={kind} universeId={universeId} size="lg" plain={plainIcon} />)}
         <div className={styles.pageTitle}>
           <h1 className="orbit-display">{title}</h1>
           {(context || status) && (

@@ -12,6 +12,8 @@ import { companionWearableHere, wearableHere } from '@/lib/woka-wearable';
 import { canSeeRoom } from '@/lib/room-visibility';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { bansCoveringWorld } from '@/lib/moderation';
+import { permissionsForWorld, permissionsFromTags } from '@/lib/roles';
+import { has, toWire } from '@/lib/permissions';
 import type { FetchMemberDataByUuidSuccessResponse, ErrorApiData, ErrorApiRetryData, CompanionDetail } from '@/types/workadventure';
 
 export async function GET(request: NextRequest) {
@@ -516,13 +518,33 @@ export async function GET(request: NextRequest) {
         });
       }
       
+      // Their permissions in this world, from their roles (#314). The game reads this number for what admin and editor
+      // tags decide today, and falls back to the tags when it is missing.
+      // If they can't be read, the tags decide, as before roles: entering a room never fails over this.
+      // Both count only once they have signed in: the identifier in the address is whatever the caller sent, so anyone
+      // else is answered as a guest, with no tags and no permissions of the account it names.
+      const verifiedUserId = isAuthenticated && user ? user.id : null;
+      const verifiedTags = verifiedUserId ? membershipTags : [];
+      let permissions: bigint;
+      try {
+        permissions = await permissionsForWorld({
+          userId: verifiedUserId,
+          worldId: worldData.id,
+          universeId: worldData.universeId,
+          worldTags: verifiedTags,
+        });
+      } catch (error) {
+        Sentry.captureException(error);
+        permissions = permissionsFromTags(verifiedTags);
+      }
+
       // Build response
       const response: FetchMemberDataByUuidSuccessResponse = {
         status: "ok",
         email: user?.email || null,
         username: user?.name || userName || undefined,
         userUuid: finalUuid,
-        tags: membershipTags,
+        tags: verifiedTags,
         visitCardUrl: visitCardUrl,
         isCharacterTexturesValid: isTexturesValid,
         characterTextures: finalTextures,
@@ -533,7 +555,8 @@ export async function GET(request: NextRequest) {
         userRoomToken: "",
         activatedInviteUser: true,
         applications: [],
-        canEdit: membershipTags.includes('editor') || membershipTags.includes('admin'),
+        canEdit: has(permissions, 'EDIT_MAPS'),
+        permissions: toWire(permissions),
         world: world,
         chatID: chatID || user?.matrixChatId || undefined,
       };

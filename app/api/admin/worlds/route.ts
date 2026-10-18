@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
+import { ADMIN_KEY, syncNewWorld } from '@/lib/roles';
+import { joinUniverse, roleIdsForTags } from '@/lib/universe-members';
 import { z } from 'zod';
 import { FEATURED_FORBIDDEN, refusesFeaturedChange } from '@/lib/featured';
 import { andNotSystemOwnedSql, hiddenSystemOwnerId, notSystemWorld } from '@/lib/system-user';
@@ -360,42 +362,46 @@ export async function POST(request: NextRequest) {
       );
     }
     
-    const world = await prisma.world.create({
-      data: {
-        universeId: data.universeId,
-        slug: data.slug,
-        name: data.name,
-        description: data.description || null,
-        isPublic: data.isPublic,
-        featured: data.featured,
-        thumbnailUrl: data.thumbnailUrl || null,
-        // Add the creator as an admin member if userId is available
-        ...(userId && {
-          members: {
-            create: {
-              userId: userId,
-              tags: ['admin'], // Creator should be an admin
+    const world = await prisma.$transaction(async (tx) => {
+      const created = await tx.world.create({
+        data: {
+          universeId: data.universeId,
+          slug: data.slug,
+          name: data.name,
+          description: data.description || null,
+          isPublic: data.isPublic,
+          featured: data.featured,
+          thumbnailUrl: data.thumbnailUrl || null,
+        },
+        include: {
+          universe: {
+            select: {
+              id: true,
+              name: true,
+              slug: true,
             },
           },
-        }),
-      },
-      include: {
-        universe: {
-          select: {
-            id: true,
-            name: true,
-            slug: true,
+          _count: {
+            select: {
+              rooms: true,
+              members: true,
+            },
           },
         },
-        _count: {
-          select: {
-            rooms: true,
-            members: true,
-          },
-        },
-      },
-    });
-    
+      });
+
+      // The creator is an Admin of the new world, and everyone whose membership or a role works in every world is in it
+      if (userId) {
+        const [adminRoleId] = await roleIdsForTags(tx, created.universeId, [ADMIN_KEY]);
+        const scope = { allWorlds: false, worldIds: [created.id] };
+        await joinUniverse(tx, { universeId: created.universeId, userId, worlds: scope, roles: [{ roleId: adminRoleId, scope }] });
+      }
+      await syncNewWorld(tx, created.universeId);
+      created._count.members = await tx.worldMember.count({ where: { worldId: created.id } });
+      return created;
+      // Adding every all-worlds member is a query or more each, past the 5 second default in a big universe
+    }, { timeout: 60_000 });
+
     return NextResponse.json(world, { status: 201 });
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized') {

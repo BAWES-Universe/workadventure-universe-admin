@@ -23,7 +23,18 @@ jest.mock('@/app/admin/components/orbit-bridge', () => ({
   messageInGame: (...args: unknown[]) => mockMessage(...args),
 }));
 jest.mock('@/app/admin/components/passport', () => ({ PassportSection: () => null }));
-jest.mock('@/app/admin/components/invite-to-world-dialog', () => ({ __esModule: true, default: () => null }));
+jest.mock('@/app/admin/components/invite-sheet', () => ({
+  __esModule: true,
+  default: ({ open, person, universeId, universes, giving }: { open: boolean; person: { userId: string; name: string; notes?: Record<string, string | null> }; universeId: string; universes: { id: string; status?: string }[]; giving?: boolean }) =>
+    open ? (
+      <div role="dialog">
+        {giving ? 'Give' : 'Invite'} {person.name} ({person.userId}) to {universeId} of {universes.map((universe) => universe.id + (universe.status ? `:${universe.status}` : '')).join(',')}
+        {person.notes ? ` · ${person.notes[universeId] ?? 'no line'}` : ''}
+      </div>
+    ) : null,
+  personNote: ({ friend, visit }: { friend?: boolean; visit?: { room?: { name: string }; world?: { name: string } } | null }) =>
+    !friend && !visit ? null : [friend ? 'Your friend' : null, visit ? `in ${visit.world?.name} ${visit.room?.name}` : null].filter(Boolean).join(' · '),
+}));
 
 import UserDetailPage from '@/app/admin/users/[id]/page';
 
@@ -44,15 +55,15 @@ function json(body: unknown, ok = true) {
   return Promise.resolve({ ok, status: ok ? 200 : 400, json: async () => body });
 }
 
-function serve({ me = 'u-sara', connect, worlds = [] }: { me?: string; connect?: unknown; worlds?: unknown[] }) {
+function serve({ me = 'u-sara', connect, universes = [], taken = [], friend = false, guest = false }: { me?: string; connect?: unknown; universes?: unknown[]; taken?: unknown[]; friend?: boolean; guest?: boolean }) {
   mockFetch.mockImplementation((url: string, options?: RequestInit) => {
     if (url === '/api/auth/me') return json({ user: { id: me } });
-    if (url === '/api/admin/users/u-ali') return json(ali);
+    if (url === '/api/admin/users/u-ali') return json({ ...ali, isGuest: guest });
     if (url === '/api/admin/users/u-ali/connect') {
       if (options?.method === 'POST') return json({ relationship: 'request_sent' });
       return json(connect ?? { available: false });
     }
-    if (url === '/api/admin/users/u-ali/worlds') return json({ worlds });
+    if (url === '/api/admin/users/u-ali/worlds') return json({ worlds: [], universes, taken, friend });
     if (url.startsWith('/api/admin/analytics/users/')) return json({ total: 0, page: 1, limit: 10, totalPages: 0, firstAccess: null, lastAccess: null, accesses: [] });
     return json({ rooms: [] });
   });
@@ -64,6 +75,8 @@ async function open() {
 }
 
 const names = () => screen.queryAllByRole('button').map((button) => button.textContent);
+/** The gradient main button: Button's default variant. */
+const isMain = (name: string) => screen.getByRole('button', { name }).className.includes('--brand-gradient');
 
 describe('Someone’s profile buttons', () => {
   beforeEach(() => {
@@ -75,39 +88,78 @@ describe('Someone’s profile buttons', () => {
     mockId = 'u-ali';
   });
 
-  it('shows Invite, Message, Add friend and Invite as member in that order, while they are online in a game that can take them', async () => {
+  it('shows Invite over, Message, Add friend and Give membership in that order, while they are online in a game that can take them', async () => {
     mockPeople = [{ uuid: 'uuid-ali' }];
     mockCapabilities = ['invite', 'message'];
-    serve({ connect: { available: true, relationship: 'none', chatId: '@ali:chat' }, worlds: [{ id: 'w1' }] });
+    serve({ connect: { available: true, relationship: 'none', chatId: '@ali:chat' }, universes: [{ id: 'bawes', name: 'BAWES' }] });
     await open();
-    await waitFor(() => expect(names()).toEqual(['Invite', 'Message', 'Add friend', 'Invite as member']));
+    await waitFor(() => expect(names()).toEqual(['Invite over', 'Message', 'Add friend', 'Give membership']));
+    expect(isMain('Invite over')).toBe(true);
+    expect(isMain('Give membership')).toBe(false);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Invite' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Invite over' }));
     expect(mockInvite).toHaveBeenCalledWith('uuid-ali', 'Ali');
     fireEvent.click(screen.getByRole('button', { name: 'Message' }));
     expect(mockMessage).toHaveBeenCalledWith('uuid-ali', 'Ali', '@ali:chat');
   });
 
-  it('leaves out Invite when they are offline', async () => {
+  it('opens the invite sheet with this person picked when Give membership is tapped', async () => {
+    mockPeople = [{ uuid: 'uuid-ali' }];
+    mockCapabilities = ['invite', 'message'];
+    serve({
+      connect: { available: true, relationship: 'none', chatId: '@ali:chat' },
+      friend: true,
+      universes: [{ id: 'bawes', name: 'BAWES', visit: { at: '2026-10-16T10:00:00Z', room: { name: 'Lobby' }, world: { name: 'HQ' } } }, { id: 'other', name: 'Other', visit: null }],
+    });
+    await open();
+    fireEvent.click(await screen.findByRole('button', { name: 'Give membership' }));
+    expect((await screen.findByRole('dialog')).textContent).toBe('Give Ali (u-ali) to bawes of bawes,other · Your friend · in HQ Lobby');
+  });
+
+  it('shows the universes they already belong to or are invited to in the sheet, not pickable', async () => {
+    serve({
+      connect: { available: true, relationship: 'none', chatId: null },
+      universes: [{ id: 'sandbox', name: 'Sandbox', visit: null }],
+      taken: [{ id: 'bawes', name: 'BAWES', status: 'member' }, { id: 'cup', name: 'Cup', status: 'invited' }],
+    });
+    await open();
+    fireEvent.click(await screen.findByRole('button', { name: 'Give membership' }));
+    expect((await screen.findByRole('dialog')).textContent).toBe('Give Ali (u-ali) to sandbox of sandbox,bawes:member,cup:invited · no line');
+  });
+
+  it('has no Give membership when they are already in every universe you could offer', async () => {
+    serve({ connect: { available: true, relationship: 'none', chatId: null }, taken: [{ id: 'bawes', name: 'BAWES', status: 'member' }] });
+    await open();
+    await waitFor(() => expect(names()).toEqual(['Add friend']));
+  });
+
+  it('has no Give membership for a guest, who could not accept it', async () => {
+    serve({ guest: true, universes: [{ id: 'bawes', name: 'BAWES', visit: null }] });
+    await open();
+    await waitFor(() => expect(mockFetch).toHaveBeenCalledWith('/api/admin/users/u-ali/worlds', undefined));
+    expect(names()).toEqual([]);
+  });
+
+  it('leaves out Invite over when they are offline', async () => {
     mockCapabilities = ['message'];
     serve({ connect: { available: true, relationship: 'none', chatId: '@ali:chat' } });
     await open();
     await waitFor(() => expect(names()).toEqual(['Message', 'Add friend']));
   });
 
-  it('shows no Invite or Message outside the game, only Add friend', async () => {
+  it('shows no Invite over or Message outside the game, only Add friend', async () => {
     mockPeople = [{ uuid: 'uuid-ali' }];
     serve({ connect: { available: true, relationship: 'none', chatId: '@ali:chat' } });
     await open();
     await waitFor(() => expect(names()).toEqual(['Add friend']));
   });
 
-  it('shows only Invite when Message and Add friend are not available (a guest)', async () => {
+  it('shows only Invite over when Message and Add friend are not available (a guest)', async () => {
     mockPeople = [{ uuid: 'uuid-ali' }];
     mockCapabilities = ['invite', 'message'];
     serve({ connect: { available: false } });
     await open();
-    await waitFor(() => expect(names()).toEqual(['Invite']));
+    await waitFor(() => expect(names()).toEqual(['Invite over']));
   });
 
   it('shows none of them on your own profile', async () => {
@@ -127,6 +179,8 @@ describe('Someone’s profile buttons', () => {
     serve({ connect: { available: true, relationship, chatId: null } });
     await open();
     await waitFor(() => expect(names()).toEqual([label]));
+    // Undoing something is never the main button; accepting a request is.
+    expect(isMain(label)).toBe(relationship === 'request_received');
   });
 
   it('asks before removing a friend, and only removes on Remove friend', async () => {
@@ -212,7 +266,7 @@ describe('Someone’s profile buttons', () => {
       if (url === '/api/admin/users/u-bob') return json(bob);
       if (url === '/api/admin/users/u-ali/connect') return json({ available: true, relationship: 'none', chatId: '@ali:chat' });
       if (url === '/api/admin/users/u-bob/connect') return bobConnect;
-      if (url.endsWith('/worlds')) return json({ worlds: [] });
+      if (url.endsWith('/worlds')) return json({ worlds: [], universes: [] });
       if (url.startsWith('/api/admin/analytics/users/')) return json({ total: 0, page: 1, limit: 10, totalPages: 0, firstAccess: null, lastAccess: null, accesses: [] });
       return json({ rooms: [] });
     });

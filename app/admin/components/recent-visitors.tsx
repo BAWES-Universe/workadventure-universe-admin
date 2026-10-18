@@ -84,7 +84,7 @@ export default function RecentVisitors({ scope, id, onOpenVisitors, lastVisited 
         ))}
       </ul>
       <PersonSheet person={picked} onClose={() => setPicked(null)} description={picked && <>{picked.guest && 'Guest · '}Here {timeAgo(new Date(picked.at))} · {picked.room.name}</>}>
-        {scope === 'room' && picked && <VisitorMembership key={`${id}-${picked.key}`} roomId={id} userId={picked.guest ? null : picked.userId} />}
+        {scope === 'room' && picked && <VisitorMembership key={`${id}-${picked.key}`} roomId={id} userId={picked.guest ? null : picked.userId} name={picked.name} woka={picked.woka} />}
       </PersonSheet>
     </section>
   );

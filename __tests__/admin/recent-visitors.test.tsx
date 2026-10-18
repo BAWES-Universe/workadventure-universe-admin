@@ -1,7 +1,8 @@
 /** @jest-environment jsdom */
 
 import React from 'react';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render as renderPlain, screen, waitFor, within } from '@testing-library/react';
+import { ToastProvider } from '@/components/ui/toast';
 import RecentVisitors from '@/app/admin/components/recent-visitors';
 
 jest.mock('next/link', () => ({
@@ -13,6 +14,7 @@ jest.mock('next/link', () => ({
   ),
 }));
 
+const render = (ui: React.ReactElement) => renderPlain(<ToastProvider>{ui}</ToastProvider>);
 const fetchMock = jest.fn();
 jest.mock('@/lib/client-auth', () => ({ authenticatedFetch: (...args: unknown[]) => fetchMock(...args) }));
 
@@ -182,39 +184,46 @@ describe('Recent visitors', () => {
     expect(screen.queryByRole('button', { name: 'Invite as member' })).toBeNull();
   });
 
-  it('invites into the room’s world as a regular member, then shows pending until acceptance', async () => {
-    serve({
-      '/api/admin/recent-visitors': { visitors },
-      '/api/admin/rooms/r1/members/omar': { world: { id: 'w1', name: 'HQ' }, status: 'none', tags: [], canInvite: true },
-      '/api/admin/users/omar/invite': { invitation: { id: 'i1' } },
-    });
+  const universeRoutes = {
+    '/api/admin/universes/u1/invitations': { invitation: { id: 'i1' } },
+    '/api/admin/universes/u1/me': { highestPosition: null, full: true, giveWorlds: 'all', inviteWorlds: 'all' },
+    '/api/admin/universes/u1/roles': { roles: [{ id: 'r-editor', key: 'editor', name: 'Editor', color: '#60A5FA', builtIn: true, position: 2, permissions: '8416', people: 1 }] },
+    '/api/admin/universes/u1': { id: 'u1', name: 'BAWES', ownerId: 'owner', worlds: [{ id: 'w1', name: 'HQ' }, { id: 'w2', name: 'Campus' }] },
+  };
+  const inviteable = { world: { id: 'w1', name: 'HQ' }, universeId: 'u1', status: 'none', tags: [], canInvite: true };
+
+  it('opens the invite sheet with the visitor and the room’s world picked, then shows pending after one tap on Send invite', async () => {
+    serve({ '/api/admin/recent-visitors': { visitors }, '/api/admin/rooms/r1/members/omar': inviteable, ...universeRoutes });
+    render(<RecentVisitors scope="room" id="r1" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Omar, 1 minute ago' }));
+    expect(await screen.findByText('Not in BAWES')).toBeTruthy();
+    expect(screen.getByText('You pick their roles and worlds before the invite goes.')).toBeTruthy();
+    fireEvent.click(await screen.findByRole('button', { name: 'Invite as member' }));
+    expect(await screen.findByRole('heading', { name: 'Invite Omar to BAWES' })).toBeTruthy();
+    const send = await screen.findByRole('button', { name: 'Send invite' });
+    await waitFor(() => expect((send as HTMLButtonElement).disabled).toBe(false));
+    expect(screen.getByRole('button', { name: 'HQ' }).getAttribute('aria-pressed')).toBe('true');
+    fireEvent.click(send);
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith('/api/admin/universes/u1/invitations', expect.objectContaining({ method: 'POST', body: expect.stringContaining('"userId":"omar"') })),
+    );
+    const body = JSON.parse(fetchMock.mock.calls.find(([path, init]) => path === '/api/admin/universes/u1/invitations' && init?.method === 'POST')![1].body);
+    expect(body).toMatchObject({ userId: 'omar', roleIds: [], worlds: { allWorlds: false, worldIds: ['w1'] } });
+    expect(await screen.findByText('Invitation pending')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Invite as member' })).toBeNull();
+  });
+
+  it('says what went wrong and leaves the visitor invitable when the invite is refused', async () => {
+    serve({ '/api/admin/recent-visitors': { visitors }, '/api/admin/rooms/r1/members/omar': inviteable, ...universeRoutes });
     render(<RecentVisitors scope="room" id="r1" />);
     fireEvent.click(await screen.findByRole('button', { name: 'Omar, 1 minute ago' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Invite as member' }));
-    expect(fetchMock).toHaveBeenCalledWith('/api/admin/users/omar/invite', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ worldId: 'w1', tags: ['member'] }),
-    });
-    expect(await screen.findByText('Invitation pending')).toBeTruthy();
-    expect(screen.getByText('They become a member of HQ once they accept.')).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'Invite as member' })).toBeNull();
-    expect(screen.queryByText('Already a member')).toBeNull();
-  });
-
-  it('keeps a failed invite retryable and prevents duplicate submissions while sending', async () => {
-    serve({
-      '/api/admin/recent-visitors': { visitors },
-      '/api/admin/rooms/r1/members/omar': { world: { id: 'w1', name: 'HQ' }, status: 'none', tags: [], canInvite: true },
-    });
-    render(<RecentVisitors scope="room" id="r1" />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Omar, 1 minute ago' }));
-    const invite = await screen.findByRole('button', { name: 'Invite as member' });
-    let finish!: (value: unknown) => void;
-    fetchMock.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
-    fireEvent.click(invite);
-    expect(screen.getByRole('button', { name: 'Sending…' }).hasAttribute('disabled')).toBe(true);
-    finish({ ok: false, json: async () => ({ error: 'Please try again.' }) });
-    expect((await screen.findByRole('alert')).textContent).toContain('Please try again.');
-    expect(screen.getByRole('button', { name: 'Invite as member' }).hasAttribute('disabled')).toBe(false);
+    const send = await screen.findByRole('button', { name: 'Send invite' });
+    await waitFor(() => expect((send as HTMLButtonElement).disabled).toBe(false));
+    fetchMock.mockImplementationOnce(() => Promise.resolve({ ok: false, status: 400, json: async () => ({ error: 'Please try again.' }) }));
+    fireEvent.click(send);
+    expect((await screen.findByText('Please try again.')).textContent).toBe('Please try again.');
+    expect(screen.queryByText('Invitation pending')).toBeNull();
   });
 
   it('fails closed if status cannot load and rechecks when reopened', async () => {

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
+import { AdministratorScopeError, leaveWorld } from '@/lib/universe-members';
 
 // DELETE /api/memberships/my/world/[id] - Leave world
 export async function DELETE(
@@ -54,26 +55,25 @@ export async function DELETE(
       );
     }
 
-    // Cancel any pending invitations for this user to this world
-    await prisma.membershipInvitation.updateMany({
-      where: {
-        worldId: worldId,
-        invitedUserId: sessionUser.id,
-        status: 'pending',
-      },
-      data: {
-        status: 'cancelled',
-        respondedAt: new Date(),
-      },
-    });
-
-    // Remove membership
-    await prisma.worldMember.delete({
-      where: { id: membership.id },
+    // Cancel their pending invitations to this world and take them out of it, together: nothing changes if leaving is refused
+    await prisma.$transaction(async (tx) => {
+      await tx.membershipInvitation.updateMany({
+        where: {
+          worldId: worldId,
+          invitedUserId: sessionUser.id,
+          status: 'pending',
+        },
+        data: {
+          status: 'cancelled',
+          respondedAt: new Date(),
+        },
+      });
+      await leaveWorld(tx, worldId, sessionUser.id);
     });
 
     return NextResponse.json({ success: true });
   } catch (error) {
+    if (error instanceof AdministratorScopeError) return NextResponse.json({ error: error.message }, { status: 400 });
     console.error('Error leaving world:', error);
     return NextResponse.json(
       { error: 'Failed to leave world' },
