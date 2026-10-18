@@ -72,13 +72,15 @@ export async function GET(request: NextRequest, { params }: Params) {
     // The owner has every permission already: nothing to give
     const canGiveAnywhere = !isOwner && (givable === 'all' || givable.length > 0) && (access.full || userId === user.id || theirHighest < access.highest);
 
+    // Who came when is visitor detail: only for people who manage members, and for yourself
+    const seesVisits = managesPeople(access) || userId === user.id;
     const [[withWoka], lastVisitedAt] = await Promise.all([
       withWokas([memberForJson(joined, universe.ownerId, managesPeople(access) || userId === user.id, seesHiddenRoles(access) || userId === user.id)]),
-      lastVisitIn(id, userId),
+      seesVisits ? lastVisitIn(id, userId) : Promise.resolve(undefined),
     ]);
     return NextResponse.json({
-      // When they last came into any room of this universe, from the room visits
-      member: { ...withWoka, lastVisitedAt },
+      // When they last came into any room of this universe, from the room visits; left out when you may not see it
+      member: seesVisits ? { ...withWoka, lastVisitedAt } : withWoka,
       can: {
         // The roles you may give or take away (below your own), and the worlds where you may
         giveRoleIds: canGiveAnywhere

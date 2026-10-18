@@ -22,7 +22,8 @@ interface MemberAnswer {
     name: string | null;
     email: string | null;
     joinedAt: string;
-    lastVisitedAt: string | null;
+    /** Left out when you may not see who visited. */
+    lastVisitedAt?: string | null;
     isOwner: boolean;
     woka?: string[];
     worlds: Worlds;
@@ -313,7 +314,7 @@ export function MemberPage() {
           </div>
         </div>
         <p className="text-sm text-muted-foreground">
-          {[member.email, `Joined ${new Date(member.joinedAt).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}`, lastVisit(member.lastVisitedAt)].filter(Boolean).join(' · ')}
+          {[member.email, `Joined ${new Date(member.joinedAt).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}`, member.lastVisitedAt === undefined ? null : lastVisit(member.lastVisitedAt)].filter(Boolean).join(' · ')}
         </p>
       </header>
 

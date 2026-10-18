@@ -169,6 +169,13 @@ describe('GET invite-candidates', () => {
 
   it('lists this week’s visitors once each, then friends who did not visit, and leaves out members and pending invitations', async () => {
     asViewer('inviter');
+    // Each person's newest visit first, then those visits
+    db.roomAccess.groupBy.mockResolvedValueOnce([
+      { userId: 'hanan', _max: { accessedAt: new Date('2026-10-16T10:00:00Z') } },
+      { userId: 'sara', _max: { accessedAt: new Date('2026-10-16T09:00:00Z') } },
+      { userId: 'jana', _max: { accessedAt: new Date('2026-10-16T08:00:00Z') } },
+      { userId: 'reem', _max: { accessedAt: new Date('2026-10-14T08:00:00Z') } },
+    ]);
     db.roomAccess.findMany.mockResolvedValue([
       visit('hanan', 'Hanan', '2026-10-16T10:00:00Z'),
       visit('hanan', 'Hanan', '2026-10-15T10:00:00Z'),
@@ -191,11 +198,24 @@ describe('GET invite-candidates', () => {
     expect(body.visitors[1].friend).toBe(false);
     expect(body.friends.map((person: { userId: string }) => person.userId)).toEqual(['tariq']);
     expect(body.friends[0].lastVisitedAt).toBeNull();
-    // This week only, and never the owner or you
-    const asked = db.roomAccess.findMany.mock.calls[0][0].where;
-    expect(asked.universeId).toBe('u1');
-    expect(asked.userId.notIn).toEqual(['me', 'owner']);
-    expect(asked.accessedAt.gte).toBeInstanceOf(Date);
+    // This week only, one row per person, newest first, and never the owner, you, members or people invited already
+    const grouped = db.roomAccess.groupBy.mock.calls[0][0];
+    expect(grouped).toMatchObject({ by: ['userId'], orderBy: { _max: { accessedAt: 'desc' } }, take: 20 });
+    expect(grouped.where.universeId).toBe('u1');
+    expect(grouped.where.userId.notIn).toEqual(['me', 'owner']);
+    expect(grouped.where.accessedAt.gte).toBeInstanceOf(Date);
+    expect(grouped.where.user.AND).toEqual(
+      expect.arrayContaining([
+        { universeMemberships: { none: { universeId: 'u1' } } },
+        { membershipInvitationsReceived: { none: { status: 'pending', OR: [{ universeId: 'u1' }, { world: { universeId: 'u1' } }] } } },
+      ]),
+    );
+    expect(db.roomAccess.findMany.mock.calls[0][0].where.OR).toEqual([
+      { userId: 'hanan', accessedAt: new Date('2026-10-16T10:00:00Z') },
+      { userId: 'sara', accessedAt: new Date('2026-10-16T09:00:00Z') },
+      { userId: 'jana', accessedAt: new Date('2026-10-16T08:00:00Z') },
+      { userId: 'reem', accessedAt: new Date('2026-10-14T08:00:00Z') },
+    ]);
   });
 
   it('searches by name with the friends search once two letters are typed, never listing members', async () => {
