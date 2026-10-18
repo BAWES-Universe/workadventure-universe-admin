@@ -472,7 +472,6 @@ export default function AvatarSetDetailPage() {
     if (v === 'access' && (accessLists === 'idle' || accessLists === 'error')) void loadAccessLists();
   };
 
-  const tabTrigger = 'min-h-11 shrink-0 rounded-lg px-3 data-[state=active]:bg-card';
   const panel = 'mt-4 grid min-w-0 gap-4';
   const formCard = 'min-w-0 rounded-2xl border bg-card p-4 sm:p-5';
   const row = 'flex min-w-0 flex-wrap items-center gap-2 rounded-xl border border-border bg-card px-3 py-2 text-xs';
@@ -532,15 +531,15 @@ export default function AvatarSetDetailPage() {
       )}
 
       <Tabs value={activeTab} onValueChange={setTab} className="min-w-0">
-        <TabsList className="flex h-auto w-full justify-start gap-1 overflow-x-auto rounded-xl p-1">
-          <TabsTrigger value="overview" className={tabTrigger}>Overview</TabsTrigger>
-          <TabsTrigger value="layers" className={tabTrigger}>Layers ({set.layers?.length ?? 0})</TabsTrigger>
-          <TabsTrigger value="companions" className={tabTrigger}>Companions ({set.companions?.length ?? 0})</TabsTrigger>
-          <TabsTrigger value="scopes" className={tabTrigger}>Available in ({set.scopes?.length ?? 0})</TabsTrigger>
-          <TabsTrigger value="policies" className={tabTrigger}>Policies ({set.policies?.length ?? 0})</TabsTrigger>
-          <TabsTrigger value="grants" className={tabTrigger}>Grants ({set.userGrants?.length ?? 0})</TabsTrigger>
-          <TabsTrigger value="access" className={tabTrigger}>Access check</TabsTrigger>
-          <TabsTrigger value="audit" className={tabTrigger}>
+        <TabsList>
+          <TabsTrigger value="overview">Overview</TabsTrigger>
+          <TabsTrigger value="layers">Layers ({set.layers?.length ?? 0})</TabsTrigger>
+          <TabsTrigger value="companions">Companions ({set.companions?.length ?? 0})</TabsTrigger>
+          <TabsTrigger value="scopes">Available in ({set.scopes?.length ?? 0})</TabsTrigger>
+          <TabsTrigger value="policies">Policies ({set.policies?.length ?? 0})</TabsTrigger>
+          <TabsTrigger value="grants">Grants ({set.userGrants?.length ?? 0})</TabsTrigger>
+          <TabsTrigger value="access">Access check</TabsTrigger>
+          <TabsTrigger value="audit">
             Audit
             {set.auditLogs && <span className="ml-1">({set.auditLogs.length})</span>}
           </TabsTrigger>
