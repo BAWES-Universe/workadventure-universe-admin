@@ -102,6 +102,9 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   }
 }
 
+/** The most invitations listed at once, newest first. */
+const LISTED = 200;
+
 // GET /api/admin/universes/[id]/invitations - Invitations still waiting for an answer, newest first. Each person sees the
 // invitations they could send or take back: ones that name only worlds where they may invite and remove people (an
 // every-world invitation needs that permission everywhere). For everyone else the list is empty.
@@ -115,17 +118,24 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const where = worldsAllowing(access, 'INVITE_AND_REMOVE');
     if (where !== 'all' && where.length === 0) return NextResponse.json({ invitations: [], canCancel: false });
 
+    // Someone who may invite only in some worlds gets just the invitations that start in one of them (an invitation's
+    // world is always one it gives, and never a deleted one), and the newest 200 are counted after the rule below, so
+    // older ones of theirs are never pushed out by invitations elsewhere
     const rows = await prisma.membershipInvitation.findMany({
-      where: { status: 'pending', OR: [{ universeId: id }, { world: { universeId: id } }] },
+      where: {
+        status: 'pending',
+        OR: [{ universeId: id }, { world: { universeId: id } }],
+        ...(where === 'all' ? {} : { allWorlds: false, worldId: { in: where } }),
+      },
       include: {
         invitedUser: { select: { id: true, name: true, email: true } },
         invitedBy: { select: { id: true, name: true } },
       },
       orderBy: { invitedAt: 'desc' },
-      take: 200,
+      ...(where === 'all' ? { take: LISTED } : {}),
     });
     // The rule that cancelling uses, so everything listed can be taken back
-    const mine = rows.filter((row) => allows(access, 'INVITE_AND_REMOVE', invitationReach(row)));
+    const mine = rows.filter((row) => allows(access, 'INVITE_AND_REMOVE', invitationReach(row))).slice(0, LISTED);
     const invitations = mine.map((row) => ({
       id: row.id,
       userId: row.invitedUser.id,

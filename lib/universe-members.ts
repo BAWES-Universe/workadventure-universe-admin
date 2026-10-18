@@ -81,11 +81,25 @@ export interface JoinRequest {
   roles: { roleId: string; scope: WorldScope }[];
 }
 
+export const ADMIN_EVERY_WORLD = 'A role with Administrator works in every world, so it can’t be given in one world. Invite them from the universe’s Members page.';
+
+/**
+ * Whether tags sent the way before roles (one world and its tags) name a role with Administrator. Administrator works
+ * in every world, so it can't be given in one world this way. (Admin can: it has every permission but Administrator.)
+ */
+export async function tagsGiveAdministrator(db: Db, universeId: string, tags: readonly string[]): Promise<boolean> {
+  // Trimmed the way roleIdsForTags reads them on accept, so a padded tag finds the same role
+  const keys = tags.map((tag) => tag.trim());
+  const roles = await db.role.findMany({ where: { universeId, key: { in: keys } }, select: { permissions: true } });
+  return roles.some(isAdministratorRole);
+}
+
 /**
  * Join a universe, or add to an existing membership: worlds and roles are added to what they already have, never
- * taken away.
+ * taken away. Returns the roles that were not given because they are Administrator and were offered in only some
+ * worlds.
  */
-export async function joinUniverse(db: Db, request: JoinRequest): Promise<void> {
+export async function joinUniverse(db: Db, request: JoinRequest): Promise<{ id: string; name: string }[]> {
   const { universeId, userId } = request;
   await ensureBuiltInRoles(db, universeId);
   const existing = await db.universeMember.findUnique({
@@ -99,15 +113,19 @@ export async function joinUniverse(db: Db, request: JoinRequest): Promise<void> 
 
   const roles = await db.role.findMany({
     where: { universeId, id: { in: request.roles.map((given) => given.roleId) } },
-    select: { id: true, key: true, permissions: true },
+    select: { id: true, key: true, name: true, permissions: true },
   });
+  const notGiven: { id: string; name: string }[] = [];
   for (const given of request.roles) {
     const role = roles.find((candidate) => candidate.id === given.roleId);
     if (!role || role.key === MEMBER_KEY || role.key === EVERYONE_KEY || isEmptyScope(given.scope)) continue;
     const had = existing?.roles.find((row) => row.roleId === role.id);
     const scope = had ? unionScope(had, given.scope) : given.scope;
     // Administrator is never limited to some worlds: a role that gained it after being offered that way is not given
-    if (!scope.allWorlds && isAdministratorRole(role)) continue;
+    if (!scope.allWorlds && isAdministratorRole(role)) {
+      notGiven.push({ id: role.id, name: role.name });
+      continue;
+    }
     await db.universeMemberRole.upsert({
       where: { memberId_roleId: { memberId: member.id, roleId: role.id } },
       create: { memberId: member.id, roleId: role.id, ...scope },
@@ -115,6 +133,7 @@ export async function joinUniverse(db: Db, request: JoinRequest): Promise<void> 
     });
   }
   await syncWorldMembers(db, universeId, userId);
+  return notGiven;
 }
 
 /**

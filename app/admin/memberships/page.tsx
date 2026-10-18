@@ -91,6 +91,8 @@ export default function MyMembershipsPage() {
   const [membershipList, setMembershipList] = useState<Loaded<Membership>>({ status: 'loading' });
   // What went wrong with the last Accept, Decline or Leave (a failed list load shows its own retry instead).
   const [error, setError] = useState<string | null>(null);
+  // What the last Accept gave differently from what the invitation said (an older one offering Admin in one world).
+  const [notice, setNotice] = useState<string | null>(null);
   // Every invitation with an Accept or Decline on its way: each locks only its own row.
   const [pendingInvitations, setPendingInvitations] = useState<ReadonlySet<string>>(() => new Set());
   const [leaving, setLeaving] = useState<Membership | null>(null);
@@ -163,6 +165,7 @@ export default function MyMembershipsPage() {
     setPending(invitationId, true);
     try {
       setError(null);
+      setNotice(null);
       const { authenticatedFetch } = await import('@/lib/client-auth');
       const response = await authenticatedFetch(`/api/memberships/invitations/${invitationId}/${answer}`, {
         method: 'POST',
@@ -171,6 +174,14 @@ export default function MyMembershipsPage() {
       if (!response.ok) {
         const data = await response.json().catch(() => ({}));
         throw new Error(data.error || (answer === 'accept' ? 'Failed to accept invitation' : 'Failed to reject invitation'));
+      }
+
+      const notGiven: string[] = answer === 'accept' ? ((await response.json().catch(() => ({})))?.rolesNotGiven ?? []) : [];
+      if (notGiven.length > 0) {
+        const universe = invitations.find((invitation) => invitation.id === invitationId)?.world.universe.name ?? 'the universe';
+        setNotice(
+          `You joined without ${notGiven.join(', ')}. A role with Administrator works in every world, so it can’t come with an invitation to some worlds. Ask an Admin of ${universe} to give it to you.`,
+        );
       }
 
       // The row stays locked until the lists say what changed.
@@ -217,6 +228,12 @@ export default function MyMembershipsPage() {
       {error && (
         <p className="text-sm text-muted-foreground" role="alert">
           {error}
+        </p>
+      )}
+
+      {notice && (
+        <p className="text-sm text-muted-foreground" role="status">
+          {notice}
         </p>
       )}
 
