@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { FriendsError, listFriends, searchPeople, SEARCH_MAX_LENGTH, SEARCH_MIN_LENGTH } from '@/lib/friends';
 import { worldsAllowing } from '@/lib/role-access';
@@ -10,8 +11,6 @@ import { withWokas } from '@/lib/woka-avatar';
 const VISITOR_DAYS = 7;
 const VISITORS_SHOWN = 20;
 const FRIENDS_SHOWN = 50;
-/** Enough room visits to find that many different people. */
-const LOOK_BACK = 400;
 
 // GET /api/admin/universes/[id]/invite-candidates?q= - Who the invite sheet offers: people who visited this universe this
 // week, your friends who didn't, and, once you type a name, people found by name. Members, the owner, people who
@@ -29,11 +28,34 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const query = request.nextUrl.searchParams.get('q')?.trim().slice(0, SEARCH_MAX_LENGTH) ?? '';
     const since = new Date(Date.now() - VISITOR_DAYS * 24 * 60 * 60 * 1000);
 
-    const [visits, friendList, found] = await Promise.all([
-      prisma.roomAccess.findMany({
-        where: { universeId: id, userId: { not: null, notIn: [user.id, universe.ownerId] }, accessedAt: { gte: since }, user: { isGuest: false, AND: [NOT_SYSTEM_USER] } },
+    // This week's visitors who aren't in and weren't invited yet, newest first: the newest visit of each of them, so
+    // members coming and going, or one person coming often, never push anyone out of the list
+    const visitorsWhere = {
+      universeId: id,
+      userId: { not: null, notIn: [user.id, universe.ownerId] },
+      accessedAt: { gte: since },
+      user: {
+        isGuest: false,
+        AND: [
+          NOT_SYSTEM_USER,
+          { universeMemberships: { none: { universeId: id } } },
+          { membershipInvitationsReceived: { none: { status: 'pending', OR: [{ universeId: id }, { world: { universeId: id } }] } } },
+        ],
+      },
+    } satisfies Prisma.RoomAccessWhereInput;
+    const recentVisits = async () => {
+      const latest = await prisma.roomAccess.groupBy({
+        by: ['userId'],
+        where: visitorsWhere,
+        _max: { accessedAt: true },
+        orderBy: { _max: { accessedAt: 'desc' } },
+        take: VISITORS_SHOWN,
+      });
+      const newest = latest.flatMap((row) => (row.userId && row._max.accessedAt ? [{ userId: row.userId, accessedAt: row._max.accessedAt }] : []));
+      if (newest.length === 0) return [];
+      return prisma.roomAccess.findMany({
+        where: { universeId: id, OR: newest },
         orderBy: { accessedAt: 'desc' },
-        take: LOOK_BACK,
         select: {
           userId: true,
           accessedAt: true,
@@ -41,7 +63,11 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
           world: { select: { id: true, name: true } },
           user: { select: { name: true } },
         },
-      }),
+      });
+    };
+
+    const [visits, friendList, found] = await Promise.all([
+      recentVisits(),
       listFriends({ id: user.id, uuid: user.uuid, name: user.name, matrixChatId: null }),
       query.length >= SEARCH_MIN_LENGTH
         ? searchPeople({ id: user.id, uuid: user.uuid, name: user.name, matrixChatId: null }, query).catch((error) => {
