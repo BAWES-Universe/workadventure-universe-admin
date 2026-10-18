@@ -22,6 +22,10 @@ jest.mock('@/lib/db', () => ({
 jest.mock('@/lib/oidc', () => ({ authenticateRequest: jest.fn() }));
 jest.mock('@/lib/user-outfits', () => ({ currentOutfit: jest.fn().mockResolvedValue(null), recordOutfitPick: jest.fn().mockResolvedValue(undefined) }));
 jest.mock('@/lib/discord', () => ({ notifyRoomAccess: jest.fn().mockResolvedValue(undefined) }));
+jest.mock('@/lib/woka-wearable', () => ({
+  wearableHere: jest.fn().mockResolvedValue({ wearable: true }),
+  companionWearableHere: jest.fn().mockResolvedValue({ wearable: true }),
+}));
 jest.mock('@/lib/avatar-catalog-validator', () => ({
   resolveTextureUrls: jest.fn().mockResolvedValue({ valid: true, textures: [] }),
   resolveCompanionTexture: jest.fn().mockResolvedValue({ valid: true, texture: null }),
@@ -119,5 +123,20 @@ describe('GET /api/room/access, permissions from roles', () => {
     expect(body.status).toBe('ok');
     expect(body.permissions).toBe('8416');
     expect(body.canEdit).toBe(true);
+  });
+  it("records a signed-in person's visit as theirs, with their tags and without copying the outfit: their account has it", async () => {
+    roles([{ key: 'moderator', permissions: 2048 }], ['moderator', 'member']);
+    const url = `http://localhost/api/room/access?userIdentifier=${PERSON.uuid}&characterTextureIds[]=body1&playUri=${encodeURIComponent(
+      'http://play.test/@/uni/world/room',
+    )}&accessToken=signed-in-token`;
+    const body = await (await roomAccess(new NextRequest(url, { headers: { Authorization: process.env.ADMIN_API_TOKEN as string } }))).json();
+    expect(body).toMatchObject({ email: PERSON.email, username: 'Sara', tags: ['moderator', 'member'] });
+    expect(db.roomAccess.create.mock.calls[0][0].data).toMatchObject({
+      userId: 'u-sara',
+      userName: 'Sara',
+      isGuest: false,
+      membershipTags: ['moderator', 'member'],
+      textureIds: [],
+    });
   });
 });
