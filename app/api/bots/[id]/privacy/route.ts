@@ -12,6 +12,13 @@ export const runtime = 'nodejs';
 /** People listed for Forget; more than any bot page can show. */
 const MAX_PEOPLE = 200;
 
+/** The bot server falls back to the admin token when it has no service token; either way it only gets the answer. */
+function hasAdminToken(request: NextRequest): boolean {
+  const token = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '').trim();
+  const expected = process.env.ADMIN_API_TOKEN;
+  return !!token && !!expected && token === expected;
+}
+
 const bodySchema = z.object({ choice: z.enum(BOT_PRIVACY_CHOICES as [BotPrivacyChoice, ...BotPrivacyChoice[]]) }).strict();
 
 export async function OPTIONS(request: NextRequest) {
@@ -24,12 +31,12 @@ export async function OPTIONS(request: NextRequest) {
  * (`hidden`). A hidden bot also tells a manager how many people it remembers and lists who, by name and nothing more,
  * so one of them can be forgotten; a guest is a guest, and nobody's email or player id is sent.
  *
- * Auth: the bot server (service token) gets the answer alone; whoever manages the bot, or the admin token, gets it all.
+ * Auth: the bot server (service token, or the admin token it falls back to) gets the answer alone; whoever manages the bot gets it all.
  */
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params;
-    const fromBotServer = validateServiceToken(request);
+    const fromBotServer = validateServiceToken(request) || hasAdminToken(request);
     if (!fromBotServer) {
       const auth = await authorizeBotManager(request, id, { adminTokenReads: true });
       if (auth.response) return auth.response;

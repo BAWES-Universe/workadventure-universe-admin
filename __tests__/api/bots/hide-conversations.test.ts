@@ -205,6 +205,14 @@ describe('the setting', () => {
     expect(body).toEqual({ botId: 'bot-1', universeHides: true, choice: 'normal', hidden: true });
   });
 
+  it('tells the bot server the same short answer when it only has the admin token (never the names)', async () => {
+    botIs(true);
+    session.mockResolvedValue(null);
+    const body = await (await call(getPrivacy, 'GET', { token: 'admin-secret' })).json();
+    expect(body).toEqual({ botId: 'bot-1', universeHides: false, choice: 'private', hidden: true });
+    expect(db.botsMemory.findMany).not.toHaveBeenCalled();
+  });
+
   it('tells a manager the tally and, for a hidden bot, who by name only (never an email or player id)', async () => {
     botIs(true);
     db.botsMemory.findMany.mockResolvedValue([{ id: 5, userName: 'Bob', isGuest: false, updatedAt: new Date(4000), user: null }]);
