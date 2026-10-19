@@ -180,6 +180,22 @@ describe('probeChat', () => {
     expect(post.mock.calls[0][1].body).not.toHaveProperty('max_tokens');
   });
 
+  it('asks again with thinking off when the model refuses a non-streaming reply otherwise (open-source Qwen3)', async () => {
+    post
+      .mockResolvedValueOnce(answer(400, { error: { message: 'parameter.enable_thinking only support stream call' } }))
+      .mockResolvedValueOnce(answer(200, { choices: [] }));
+    expect(await probeChat({ kind: 'qwen', region: 'global', apiKey: 'sk-1', model: 'qwen3-32b' })).toEqual({ ok: true });
+    expect(post).toHaveBeenCalledTimes(2);
+    expect(post.mock.calls[0][1].body).not.toHaveProperty('enable_thinking');
+    expect(post.mock.calls[1][1].body).toMatchObject({ model: 'qwen3-32b', enable_thinking: false });
+  });
+
+  it('does not ask again for any other 400', async () => {
+    post.mockResolvedValue(answer(400, { error: { message: 'bad request' } }));
+    expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'm' })).toMatchObject({ ok: false, reason: 'other' });
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     [answer(401, {}), 'rejected'],
     [answer(429, {}), 'busy'],

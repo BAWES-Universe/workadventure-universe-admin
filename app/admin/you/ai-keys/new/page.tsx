@@ -70,7 +70,8 @@ export default function AddAiKeyPage() {
   const name = typedName ?? (info ? `My ${info.label}` : '');
   // The picked type stays on screen whatever is typed in the search
   const needle = find.trim().toLowerCase();
-  const matches = (entry: AiKeyKindInfo) => entry.kind === kind || !needle || `${entry.label} ${entry.benefit}`.toLowerCase().includes(needle);
+  // The listed-by-models.dev line is the same on every one of the "more" providers, so only their name is searched
+  const matches = (entry: AiKeyKindInfo) => entry.kind === kind || !needle || (entry.tier === 'more' ? entry.label : `${entry.label} ${entry.benefit}`).toLowerCase().includes(needle);
   const shown = AI_KEY_KINDS.filter((entry) => entry.tier !== 'hidden' && (entry.tier === 'named' ? matches(entry) : entry.kind === kind || (needle !== '' ? matches(entry) : showMore)));
   const ownComputer = shown.filter((entry) => entry.group === 'own-computer');
   const hosted = shown.filter((entry) => entry.group === 'hosted' && entry.tier === 'named');
