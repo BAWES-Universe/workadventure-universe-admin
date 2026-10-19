@@ -81,7 +81,7 @@ export type ProbeFailure = 'unreachable' | 'rejected' | 'busy' | 'credit' | 'gon
 /** What a provider says about one model in its list, when it says: can it call tools, take pictures, how much can it read. */
 export type ModelFacts = {
   tools?: boolean;
-  images?: boolean;
+  vision?: boolean;
   context?: number;
 };
 export type ModelFactsById = Record<string, ModelFacts>;
@@ -123,12 +123,12 @@ export function factsOf(entry: unknown): ModelFacts {
   const capabilities = isRecord(entry.capabilities) ? entry.capabilities : {};
   const architecture = isRecord(entry.architecture) ? entry.architecture : {};
   const tools = nonEmptyList(entry.supported_parameters) ? entry.supported_parameters.includes('tools') : asBoolean(capabilities.function_calling);
-  const images = nonEmptyList(architecture.input_modalities) ? architecture.input_modalities.includes('image') : asBoolean(capabilities.vision);
+  const vision = nonEmptyList(architecture.input_modalities) ? architecture.input_modalities.includes('image') : asBoolean(capabilities.vision);
   const rawContext = entry.context_length ?? entry.max_context_length ?? entry.context_window;
   const context = typeof rawContext === 'number' && Number.isFinite(rawContext) && rawContext > 0 ? Math.round(rawContext) : undefined;
   const facts: ModelFacts = {};
   if (tools !== undefined) facts.tools = tools;
-  if (images !== undefined) facts.images = images;
+  if (vision !== undefined) facts.vision = vision;
   if (context !== undefined) facts.context = context;
   return facts;
 }
@@ -207,6 +207,10 @@ export async function probeModels(input: KeyTargetInput & { apiKey?: unknown }):
     const clean = cleanModelId(id, info.kind);
     const known = factsOf(entry);
     if (models.includes(clean) && Object.keys(known).length > 0) facts[clean] = known;
+  }
+  // What the provider's docs say about a model its list says nothing about; the list's own word wins
+  for (const [id, documented] of Object.entries(info.knownFacts ?? {})) {
+    if (models.includes(id)) facts[id] = { ...documented, ...facts[id] };
   }
   return { ok: true, models, facts };
 }
