@@ -208,6 +208,13 @@ describe('Add a key: More providers', () => {
     expect(screen.getByRole('radio', { name: /^Nebius/ }).contains(docs)).toBe(false);
   });
 
+  it('searches the name of the long-tail providers only, not the line they all share', () => {
+    render(<AddAiKeyPage />);
+    fireEvent.change(screen.getByLabelText('Search providers'), { target: { value: 'models.dev' } });
+    expect(screen.queryByRole('radio', { name: /^Nebius/ })).toBeNull();
+    expect(screen.queryByText('More providers', { selector: 'h2' })).toBeNull();
+  });
+
   it('adds one of them like any other: same request, its own kind', async () => {
     fetchMock.mockImplementation((url: string) => (url.endsWith('/models') ? json({ ok: true, models: ['m-1'], facts: {} }) : json({ id: 'key-new' })));
     render(<AddAiKeyPage />);
