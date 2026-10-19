@@ -215,6 +215,16 @@ describe('probeChat', () => {
     expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'm' })).toMatchObject({ ok: false, reason: 'gone' });
   });
 
+  it('does not read across the fields of the answer: a request problem next to a code that says unsupported stays a request problem', async () => {
+    post.mockResolvedValue(answer(400, '{"error":{"message":"Bad value for this model","code":"unsupported_parameter"}}'));
+    expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'm' })).toMatchObject({ ok: false, reason: 'request' });
+  });
+
+  it('reads a plain-text 400 that says the model does not exist', async () => {
+    post.mockResolvedValue(answer(400, 'Model Not Exist'));
+    expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'm' })).toMatchObject({ ok: false, reason: 'gone' });
+  });
+
   it.each([
     ['max_tokens is too small for this model, use at least 1024'],
     ['invalid value for parameter temperature'],
