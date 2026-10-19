@@ -25,7 +25,7 @@ export interface BotAiOptions {
   /** The viewer's own keys lent to this bot's universe; empty unless the viewer made the bot. */
   keys: { id: string; name: string; kind: string | null; kindLabel: string; group: 'own-computer' | 'hosted' | null; universeName: string; status: 'working' | 'down'; ifDown: 'universe-ai' | 'stop'; model: string | null; supportsVision: boolean | null; visionModels: string[] }[];
   /** The key the bot is on now, when it is a personal key: whose it is and what it is called. */
-  currentKey: { id: string; name: string; ownerName: string | null; mine: boolean; status: 'working' | 'down'; ifDown: 'universe-ai' | 'stop'; group: 'own-computer' | 'hosted' | null; model: string | null; supportsVision: boolean | null } | null;
+  currentKey: { id: string; name: string; ownerName: string | null; mine: boolean; status: 'working' | 'down'; ifDown: 'universe-ai' | 'stop'; group: 'own-computer' | 'hosted' | null; model: string | null; supportsVision: boolean | null; visionModels: string[] } | null;
   /** What the owner picked for the bot's images (null = nothing picked), and, for "Another model", the key picked and whether it can be used now. */
   vision: { saved: VisionPick | null; savedKey: { name: string; problem: AnotherProblem | null } | null };
   /** Only for a super admin: the server's own providers, to pin a bot to one. */
@@ -106,7 +106,7 @@ export async function botAiOptions(input: {
       }),
       currentKey:
         current && current.ownerId
-          ? { id: current.providerId, name: current.name, ownerName: maker?.id === current.ownerId ? maker.name : null, mine: current.ownerId === input.viewer.id, status: current.downSince ? 'down' : 'working', ifDown: isIfDown(current.ifDown) ? current.ifDown : 'universe-ai', group: kindInfo((current.settings as { kind?: unknown } | null)?.kind)?.group ?? null, model: current.model, supportsVision: current.supportsVision }
+          ? { id: current.providerId, name: current.name, ownerName: maker?.id === current.ownerId ? maker.name : null, mine: current.ownerId === input.viewer.id, status: current.downSince ? 'down' : 'working', ifDown: isIfDown(current.ifDown) ? current.ifDown : 'universe-ai', group: kindInfo((current.settings as { kind?: unknown } | null)?.kind)?.group ?? null, model: current.model, supportsVision: current.supportsVision, visionModels: keyVisionModels(current) }
           : null,
       vision: { saved, savedKey },
       providers: providers ? providers.map((provider) => ({ id: provider.providerId, name: provider.name, type: provider.type, model: provider.model, enabled: provider.enabled })) : null,

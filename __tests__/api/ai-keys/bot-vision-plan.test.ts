@@ -40,7 +40,7 @@ const botOn = (ref: string | null, behaviorConfig: object | null = null) => ({
 });
 const ask = async () => (await GET(new NextRequest('http://localhost:3333/api/bots/b1/ai-credentials'), { params: Promise.resolve({ id: 'b1' }) })).json();
 const rows: Record<string, unknown> = {};
-const setRows = (...list: Array<{ providerId: string }>) => {
+const setRows = (...list: Array<{ providerId: string } & Record<string, unknown>>) => {
   for (const key of Object.keys(rows)) delete rows[key];
   for (const row of list) rows[row.providerId] = row;
 };

@@ -97,7 +97,7 @@ describe('GET /api/me/bot-ai', () => {
     db.botsAiProvider.findUnique.mockResolvedValue({ providerId: 'key-1', name: 'My DeepSeek', ownerId: 'mishari', settings: { kind: 'deepseek' }, model: 'deepseek-v4-flash', supportsVision: false });
     db.botsAiProvider.findMany.mockResolvedValueOnce([myKey]);
     const body = await (await get('botId=guide')).json();
-    expect(body.currentKey).toEqual({ id: 'key-1', name: 'My DeepSeek', ownerName: 'Mishari', mine: true, status: 'working', ifDown: 'universe-ai', group: 'hosted', model: 'deepseek-v4-flash', supportsVision: false });
+    expect(body.currentKey).toEqual({ id: 'key-1', name: 'My DeepSeek', ownerName: 'Mishari', mine: true, status: 'working', ifDown: 'universe-ai', group: 'hosted', model: 'deepseek-v4-flash', supportsVision: false, visionModels: ['deepseek-v4-flash-vision-exp'] });
     expect(body.viewerIsMaker).toBe(true);
   });
 
