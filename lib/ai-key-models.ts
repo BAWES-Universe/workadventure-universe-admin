@@ -202,16 +202,18 @@ export async function probeModels(input: KeyTargetInput & { apiKey?: unknown }):
     };
   }
   const facts: ModelFactsById = {};
+  // A set, not models.includes: a list can be thousands of entries long, and each one is looked up
+  const listed = new Set(models);
   for (const entry of entries) {
     const id = idOf(entry);
     if (id === null) continue;
     const clean = cleanModelId(id, info.kind);
     const known = factsOf(entry);
-    if (models.includes(clean) && Object.keys(known).length > 0) facts[clean] = known;
+    if (listed.has(clean) && Object.keys(known).length > 0) facts[clean] = known;
   }
   // What the provider's docs say about a model its list says nothing about; the list's own word wins
   for (const [id, documented] of Object.entries(info.knownFacts ?? {})) {
-    if (models.includes(id)) facts[id] = { ...documented, ...facts[id] };
+    if (listed.has(id)) facts[id] = { ...documented, ...facts[id] };
   }
   return { ok: true, models, facts };
 }
