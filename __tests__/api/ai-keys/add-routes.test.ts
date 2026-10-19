@@ -189,3 +189,27 @@ describe('POST /api/me/ai-keys: what the provider said about the model is saved 
     expect(provider.create.mock.calls[0][0].data.settings.caps).toBeUndefined();
   });
 });
+
+describe('POST /api/me/ai-keys: Claude (#975)', () => {
+  it('saves a Claude key as the anthropic type on Anthropic’s own base, encrypted, with what the list said about the model', async () => {
+    models.mockResolvedValue({ ok: true, models: ['claude-haiku-4-5'], facts: { 'claude-haiku-4-5': { images: true, context: 200000 } } });
+    const response = await post({ kind: 'claude', address: 'https://evil.example.com', apiKey: 'sk-ant-api03-abcd', model: 'claude-haiku-4-5' });
+    expect(response.status).toBe(201);
+    const data = provider.create.mock.calls[0][0].data;
+    expect(data).toMatchObject({
+      type: 'anthropic', endpoint: 'https://api.anthropic.com/v1', apiKeyEncrypted: 'enc(sk-ant-api03-abcd)', apiKeyLast4: 'abcd', name: 'My Claude',
+      model: 'claude-haiku-4-5', supportsVision: true, settings: { kind: 'claude', caps: { images: true, context: 200000 } }, tested: true,
+    });
+    expect(chat).toHaveBeenCalledWith(expect.objectContaining({ kind: 'claude', apiKey: 'sk-ant-api03-abcd', model: 'claude-haiku-4-5' }));
+    expect(JSON.stringify(await response.json())).not.toContain('sk-ant');
+  });
+
+  it('saves nothing when the model lists but Claude does not answer a chat call (a key with no credit)', async () => {
+    models.mockResolvedValue({ ok: true, models: ['claude-haiku-4-5'], facts: {} });
+    chat.mockResolvedValue({ ok: false, reason: 'credit', message: 'Claude says this key is out of credit.' });
+    const response = await post({ kind: 'claude', apiKey: 'sk-ant-api03-abcd', model: 'claude-haiku-4-5' });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: 'Claude says this key is out of credit.' });
+    expect(provider.create).not.toHaveBeenCalled();
+  });
+});

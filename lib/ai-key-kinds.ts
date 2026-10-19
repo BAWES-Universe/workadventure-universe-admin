@@ -4,9 +4,9 @@ import snapshot from '@/lib/ai-key-snapshot.json';
  * What a person can add as an AI key (#374), and how each kind is reached. Free of server code, so the Add a key page
  * and the routes read the same list. Each kind is saved as a provider `type` the bot server already speaks: `lmstudio`
  * for a server on your own computer (it calls `{address}/v1/chat/completions`), `openai` for every hosted one (it calls
- * `{base}/chat/completions`), with the kind kept in `settings.kind`.
+ * `{base}/chat/completions`), `anthropic` for Claude (it calls `{base}/messages`), with the kind kept in `settings.kind`.
  *
- * This list is the catalog. There are a few protocols in code (only `openai` for now) and every provider is one entry of
+ * This list is the catalog. There are a few protocols in code (`openai`, and Claude's own `anthropic`) and every provider is one entry of
  * data: where it lives, how a key is sent, how a key and a model are checked, and how a model id is written. A provider's
  * quirks are fields here, never `if (kind === ...)` in the checks, so adding a provider is adding an entry.
  */
@@ -20,10 +20,10 @@ export interface SetupStep {
   code?: string;
 }
 
-/** The wire format a provider speaks. Only the OpenAI chat format is built; Claude's own format comes with #975. */
-export type KeyProtocol = 'openai';
-/** How a key is sent: `Authorization: Bearer <key>`. */
-export type KeyAuth = 'bearer';
+/** The wire format a provider speaks: the OpenAI chat format (most of them), or Claude's own. */
+export type KeyProtocol = 'openai' | 'anthropic';
+/** How a key is sent: `Authorization: Bearer <key>`, or Claude's `x-api-key` with the API version. */
+export type KeyAuth = 'bearer' | 'x-api-key';
 /**
  * How a key is proven good when the model list can't. `models`: the model list needs the key, so a list that answers
  * proves it. `key-info`: the list is public (OpenRouter), so the provider's key-info addresses are asked too, and only a
@@ -51,7 +51,7 @@ export interface AiKeyKindInfo {
   benefit: string;
   steps: SetupStep[];
   /** The provider type the bot server uses for it. */
-  providerType: 'lmstudio' | 'openai';
+  providerType: 'lmstudio' | 'openai' | 'anthropic';
   /** Own-computer kinds always ask for an address; NVIDIA NIM may (your own NIM). */
   address: 'required' | 'optional' | 'none';
   /** Own-computer kinds only need a key if the server asks for one; hosted ones always do. */
@@ -134,6 +134,16 @@ const NAMED_KINDS: AiKeyKindInfo[] = [
     kind: 'deepseek', label: 'DeepSeek', group: 'hosted', providerType: 'openai', address: 'none', apiKey: 'required',
     benefit: 'Low prices.', base: 'https://api.deepseek.com',
     steps: [{ text: 'On platform.deepseek.com, open API keys.' }],
+  }),
+  define({
+    kind: 'claude', label: 'Claude', group: 'hosted', providerType: 'anthropic', address: 'none', apiKey: 'required',
+    // Claude has its own format: the key goes in x-api-key, chat is /messages, the model list is paged
+    protocol: 'anthropic', auth: 'x-api-key',
+    benefit: 'Anthropic’s Claude models.', base: 'https://api.anthropic.com/v1', docs: 'https://platform.claude.com/docs/en/about-claude/models/overview',
+    steps: [
+      { text: 'On console.anthropic.com, open API keys and create a key.' },
+      { text: 'Add some credit to the account first: a key with no credit can’t reply.' },
+    ],
   }),
   define({
     kind: 'vllm', label: 'vLLM', group: 'own-computer', providerType: 'lmstudio', address: 'required', apiKey: 'optional',
@@ -271,7 +281,22 @@ export function writeModelId(raw: string, kind: unknown): string {
 /** The headers that carry a key, by the provider's way of sending one. No key, no header. */
 export function authHeaders(info: AiKeyKindInfo, apiKey: string): Record<string, string> {
   if (!apiKey) return {};
+  if (info.auth === 'x-api-key') return { 'x-api-key': apiKey, 'anthropic-version': ANTHROPIC_VERSION };
   return { Authorization: `Bearer ${apiKey}` };
+}
+
+/** The API version Claude's calls name. */
+export const ANTHROPIC_VERSION = '2023-06-01';
+
+/** Where a chat call goes, after the base. */
+export function chatPath(info: AiKeyKindInfo): string {
+  return info.protocol === 'anthropic' ? '/messages' : '/chat/completions';
+}
+
+/** The smallest chat call that gets one reply, in the provider's own format. */
+export function chatProbeBody(info: AiKeyKindInfo, model: string): Record<string, unknown> {
+  if (info.protocol === 'anthropic') return { model, max_tokens: 32, messages: [{ role: 'user', content: 'Say ok.' }] };
+  return { model, messages: [{ role: 'user', content: 'Say ok.' }], stream: false, [info.tokenLimitField ?? 'max_tokens']: 16 };
 }
 
 const withoutSlash = (url: string) => url.replace(/\/+$/, '');

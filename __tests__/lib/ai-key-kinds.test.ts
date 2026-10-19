@@ -2,7 +2,7 @@
  * The catalog of AI key kinds (#374): the seven that exist keep behaving exactly as before, now as data. These rows are
  * the no-regression list for the move from if-statements to catalog fields.
  */
-import { AI_KEY_KINDS, authHeaders, hostedBase, isTypedEndpoint, kindInfo, providerBases, typedEndpoint, writeModelId } from '@/lib/ai-key-kinds';
+import { AI_KEY_KINDS, authHeaders, chatPath, chatProbeBody, hostedBase, isTypedEndpoint, kindInfo, providerBases, typedEndpoint, writeModelId } from '@/lib/ai-key-kinds';
 import { cleanModelIds, keyTarget } from '@/lib/ai-key-models';
 
 describe('the seven kinds, exactly as they were', () => {
@@ -27,8 +27,8 @@ describe('the seven kinds, exactly as they were', () => {
     expect(row(kind)).toMatchObject(expected);
   });
 
-  it('gives every kind the OpenAI chat format, a Bearer key, and the default key check, apart from OpenRouter', () => {
-    for (const info of AI_KEY_KINDS) {
+  it('gives every kind but Claude the OpenAI chat format, a Bearer key, and the default key check, apart from OpenRouter', () => {
+    for (const info of AI_KEY_KINDS.filter((entry) => entry.kind !== 'claude')) {
       expect(info.protocol).toBe('openai');
       expect(info.auth).toBe('bearer');
       expect(info.keyCheck).toEqual(info.kind === 'openrouter' ? { type: 'key-info', paths: ['/key', '/auth/key'] } : { type: 'models' });
@@ -75,7 +75,8 @@ describe('helpers', () => {
 });
 
 describe('the providers added after the seven', () => {
-  const added = AI_KEY_KINDS.slice(7, 21);
+  // Claude (right after the seven, with its own format) has its own describe below
+  const added = AI_KEY_KINDS.slice(8, 22);
 
   it('adds the named list and the two own-computer entries', () => {
     expect(added.map((entry) => entry.kind)).toEqual([
@@ -89,7 +90,7 @@ describe('the providers added after the seven', () => {
       for (const base of providerBases(info)) expect(base).toMatch(/^https:\/\/[^/]+/);
       expect(info.address === 'none' ? providerBases(info).length : 1).toBeGreaterThan(0);
       expect(info.apiKey).toBe('required');
-      expect(info.providerType).toBe('openai');
+      expect(info.providerType).toBe(info.kind === 'claude' ? 'anthropic' : 'openai');
     }
   });
 
@@ -134,9 +135,9 @@ describe('More providers, from the snapshot', () => {
   const more = AI_KEY_KINDS.filter((entry) => entry.tier === 'more');
   const named = AI_KEY_KINDS.filter((entry) => entry.tier === 'named');
 
-  it('follows the 21 named kinds, which keep their order', () => {
-    expect(AI_KEY_KINDS.slice(0, 21).every((entry) => entry.tier === 'named')).toBe(true);
-    expect(named).toHaveLength(21);
+  it('follows the 22 named kinds, which keep their order', () => {
+    expect(AI_KEY_KINDS.slice(0, 22).every((entry) => entry.tier === 'named')).toBe(true);
+    expect(named).toHaveLength(22);
     expect(more.length).toBeGreaterThanOrEqual(20);
   });
 
@@ -159,5 +160,39 @@ describe('More providers, from the snapshot', () => {
     expect(kindInfo(info.kind)).toBe(info);
     expect(isTypedEndpoint(info, info.base!)).toBe(false);
     expect(keyTarget({ kind: info.kind })).toMatchObject({ ok: true, target: { endpoint: info.base, modelsUrl: `${info.base}/models` } });
+  });
+});
+
+describe('Claude, the one kind with its own format (#975)', () => {
+  it('is a hosted kind of type anthropic, at Anthropic’s own address, shown by name', () => {
+    expect(kindInfo('claude')).toMatchObject({
+      label: 'Claude', group: 'hosted', providerType: 'anthropic', address: 'none', apiKey: 'required',
+      base: 'https://api.anthropic.com/v1', protocol: 'anthropic', auth: 'x-api-key', keyCheck: { type: 'models' }, modelId: 'as-is', tier: 'named',
+    });
+  });
+
+  it('sends the key in x-api-key with the API version, never as a Bearer header', () => {
+    expect(authHeaders(kindInfo('claude')!, 'sk-ant-1')).toEqual({ 'x-api-key': 'sk-ant-1', 'anthropic-version': '2023-06-01' });
+    expect(authHeaders(kindInfo('claude')!, '')).toEqual({});
+  });
+
+  it('chats at /messages with a body Claude accepts; every other kind chats at /chat/completions as before', () => {
+    expect(chatPath(kindInfo('claude')!)).toBe('/messages');
+    expect(chatProbeBody(kindInfo('claude')!, 'claude-haiku-4-5')).toEqual({ model: 'claude-haiku-4-5', max_tokens: 32, messages: [{ role: 'user', content: 'Say ok.' }] });
+    for (const info of AI_KEY_KINDS.filter((entry) => entry.kind !== 'claude')) expect(chatPath(info)).toBe('/chat/completions');
+    expect(chatProbeBody(kindInfo('openai')!, 'gpt-x')).toEqual({ model: 'gpt-x', messages: [{ role: 'user', content: 'Say ok.' }], stream: false, max_completion_tokens: 16 });
+  });
+
+  it('is the only kind that is not on the OpenAI format or a Bearer key', () => {
+    expect(AI_KEY_KINDS.filter((info) => info.protocol !== 'openai' || info.auth !== 'bearer').map((info) => info.kind)).toEqual(['claude']);
+  });
+
+  it('sits after the original seven, so their order does not move', () => {
+    const kinds = AI_KEY_KINDS.map((info) => info.kind);
+    expect(kinds.slice(0, 8)).toEqual(['lmstudio', 'ollama', 'openrouter', 'gemini', 'nim', 'openai', 'deepseek', 'claude']);
+  });
+
+  it('knows its address as the provider’s own, so no address guard applies', () => {
+    expect(isTypedEndpoint(kindInfo('claude')!, 'https://api.anthropic.com/v1')).toBe(false);
   });
 });
