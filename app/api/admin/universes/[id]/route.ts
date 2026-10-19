@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
+import { deleteWithHiddenBotData } from '@/lib/bot-privacy';
 import { z } from 'zod';
 import { FEATURED_FORBIDDEN, refusesFeaturedChange } from '@/lib/featured';
 import { wokaLayersFor } from '@/lib/woka-avatar';
@@ -361,9 +362,7 @@ export async function DELETE(
       );
     }
     
-    await prisma.universe.delete({
-      where: { id },
-    });
+    await deleteWithHiddenBotData({ room: { world: { universeId: id } } }, () => prisma.universe.delete({ where: { id } }));
     
     return NextResponse.json({ success: true });
   } catch (error) {

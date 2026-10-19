@@ -17,7 +17,7 @@ import { PATCH as patchUniverse } from '@/app/api/admin/universes/[id]/route';
 import { getSessionUser } from '@/lib/auth-session';
 import { canManageThisBot } from '@/lib/bot-permissions';
 import { prisma } from '@/lib/db';
-import { resolveBotPrivacy } from '@/lib/bot-privacy';
+import { deleteWithHiddenBotData, resolveBotPrivacy } from '@/lib/bot-privacy';
 
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
@@ -29,7 +29,7 @@ jest.mock('@/lib/db', () => ({
     bot: { findUnique: jest.fn(), findMany: jest.fn(), update: jest.fn() },
     universe: { findUnique: jest.fn(), update: jest.fn() },
     user: { findUnique: jest.fn() },
-    botsConversation: { findMany: jest.fn(), count: jest.fn(), findFirst: jest.fn(), aggregate: jest.fn() },
+    botsConversation: { findMany: jest.fn(), count: jest.fn(), findFirst: jest.fn(), aggregate: jest.fn(), deleteMany: jest.fn() },
     botsMemory: { findMany: jest.fn(), findFirst: jest.fn(), count: jest.fn(), aggregate: jest.fn(), upsert: jest.fn(), delete: jest.fn(), deleteMany: jest.fn() },
     botsAiUsage: { count: jest.fn() },
     botMemoryForget: { findMany: jest.fn(), create: jest.fn(), deleteMany: jest.fn(), updateMany: jest.fn() },
@@ -360,6 +360,49 @@ describe('the bot server really forgets (it saves a person again whenever they t
     expect(response.status).toBe(500);
     await new Promise((resolve) => setImmediate(resolve));
     expect(db.botsMemory.upsert).not.toHaveBeenCalled();
+  });
+});
+
+describe('deleting a bot, room, world or universe', () => {
+  const remove = jest.fn();
+
+  beforeEach(() => remove.mockReset().mockReturnValue('removed'));
+
+  it('is just the delete, with nothing else touched, when no bot in it hides its conversations (how it was)', async () => {
+    db.bot.findMany.mockResolvedValue([]);
+    expect(await deleteWithHiddenBotData({ roomId: 'r1' }, remove as never)).toBe('removed');
+    expect(remove).toHaveBeenCalledTimes(1);
+    expect(db.$transaction).not.toHaveBeenCalled();
+    expect(db.botsConversation.deleteMany).not.toHaveBeenCalled();
+    expect(db.botsMemory.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it('only looks at the bots that go with it, and only at those that hide', async () => {
+    db.bot.findMany.mockResolvedValue([]);
+    await deleteWithHiddenBotData({ roomId: 'r1' }, remove as never);
+    expect(db.bot.findMany).toHaveBeenCalledWith({
+      where: { AND: [{ roomId: 'r1' }, { OR: [{ hideConversations: true }, { room: { world: { universe: { hideBotConversations: true } } } }] }] },
+      select: { id: true },
+    });
+  });
+
+  it('removes the hidden bots\' transcripts, memory and forget rows in the same transaction as the delete', async () => {
+    db.bot.findMany.mockResolvedValue([{ id: 'bot-1' }, { id: 'bot-2' }]);
+    db.$transaction.mockImplementation(async (steps: unknown[]) => steps.map((_, index) => (index === steps.length - 1 ? 'removed' : { count: 1 })));
+    expect(await deleteWithHiddenBotData({ room: { worldId: 'w1' } }, remove as never)).toBe('removed');
+    const where = { where: { botId: { in: ['bot-1', 'bot-2'] } } };
+    expect(db.botsConversation.deleteMany).toHaveBeenCalledWith(where);
+    expect(db.botsMemory.deleteMany).toHaveBeenCalledWith(where);
+    expect(db.botMemoryForget.deleteMany).toHaveBeenCalledWith(where);
+    expect(db.$transaction.mock.calls[0][0]).toHaveLength(4);
+  });
+
+  it('does not take the data of a bot that does not hide, and takes nothing if the delete cannot happen', async () => {
+    db.bot.findMany.mockResolvedValue([{ id: 'bot-1' }]);
+    db.$transaction.mockRejectedValue(new Error('constraint'));
+    await expect(deleteWithHiddenBotData({ id: 'bot-1' }, remove as never)).rejects.toThrow('constraint');
+    // the data is deleted inside the transaction, so a rolled back delete rolls it back too
+    expect(db.$transaction).toHaveBeenCalledTimes(1);
   });
 });
 

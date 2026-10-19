@@ -1,3 +1,4 @@
+import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 
 /**
@@ -57,13 +58,36 @@ export async function isBotHidden(botId: string): Promise<boolean> {
   return (await loadBotPrivacy(botId))?.hidden === true;
 }
 
+/** The filter for bots that hide their conversations: their own choice is Private, or their universe hides them. */
+const HIDING_BOTS: Prisma.BotWhereInput = {
+  OR: [{ hideConversations: true }, { room: { world: { universe: { hideBotConversations: true } } } }],
+};
+
 /** Every bot that hides its conversations, for the pages that list across bots. */
 export async function hiddenBotIds(): Promise<string[]> {
-  const bots = await prisma.bot.findMany({
-    where: { OR: [{ hideConversations: true }, { room: { world: { universe: { hideBotConversations: true } } } }] },
-    select: { id: true },
-  });
+  const bots = await prisma.bot.findMany({ where: HIDING_BOTS, select: { id: true } });
   return bots.map((bot) => bot.id);
+}
+
+/**
+ * Delete a bot, or a room, world or universe that holds bots, without leaving the hidden transcripts and memory of
+ * its hidden bots behind. Transcripts and memory are kept by bot id, not tied to the bot row, so deleting the bot
+ * would leave them with nothing to say they were hidden, and the lists across bots would show them. The hidden bots'
+ * data goes in the same transaction as the delete. When no bot in it hides, this is just the delete, as before.
+ *
+ * `botsWhere` picks the bots that go with it, `remove` is the delete itself.
+ */
+export async function deleteWithHiddenBotData<T>(botsWhere: Prisma.BotWhereInput, remove: () => Prisma.PrismaPromise<T>): Promise<T> {
+  const hidden = await prisma.bot.findMany({ where: { AND: [botsWhere, HIDING_BOTS] }, select: { id: true } });
+  if (hidden.length === 0) return remove();
+  const botIdIn = { botId: { in: hidden.map((bot) => bot.id) } };
+  const results = await prisma.$transaction([
+    prisma.botsConversation.deleteMany({ where: botIdIn }),
+    prisma.botsMemory.deleteMany({ where: botIdIn }),
+    prisma.botMemoryForget.deleteMany({ where: botIdIn }),
+    remove(),
+  ]);
+  return results[results.length - 1] as T;
 }
 
 /** What a hidden bot may still tell a human: how many people it remembers and when that last changed. No text, no names. */
