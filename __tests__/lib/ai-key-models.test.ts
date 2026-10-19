@@ -377,7 +377,7 @@ describe('Claude (#975)', () => {
     [answer(402, {}), 'credit'],
     [answer(400, { type: 'error', error: { type: 'invalid_request_error', message: 'Your credit balance is too low to access the Anthropic API.' } }), 'credit'],
     [answer(400, { type: 'error', error: { type: 'invalid_request_error', message: 'You have reached your specified API usage limits.' } }), 'credit'],
-    [answer(400, { type: 'error', error: { type: 'invalid_request_error', message: 'model: bad id' } }), 'other'],
+    [answer(400, { type: 'error', error: { type: 'invalid_request_error', message: 'model: bad id' } }), 'request'],
     [answer(500, {}), 'unreachable'],
   ])('says why a Claude chat call failed for %j', async (reply, reason) => {
     post.mockResolvedValue(reply);
@@ -387,8 +387,8 @@ describe('Claude (#975)', () => {
   it('reads an ordinary 400 as an ordinary 400 for the other providers too (the credit wording is Claude’s)', async () => {
     // A Gemini 400 that merely mentions billing (a project without it enabled) is not an empty balance.
     post.mockResolvedValue(answer(400, 'API key not valid. Enable billing on the project'));
-    expect(await probeChat({ kind: 'gemini', apiKey: 'k-1234', model: 'm' })).toMatchObject({ ok: false, reason: 'other' });
-    expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'm' })).toMatchObject({ ok: false, reason: 'other' });
+    expect(await probeChat({ kind: 'gemini', apiKey: 'k-1234', model: 'm' })).toMatchObject({ ok: false, reason: 'request' });
+    expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'm' })).toMatchObject({ ok: false, reason: 'request' });
     // A 402 is still out of credit for any of them.
     post.mockResolvedValue(answer(402, {}));
     expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'm' })).toMatchObject({ ok: false, reason: 'credit' });
