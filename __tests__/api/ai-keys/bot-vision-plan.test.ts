@@ -120,7 +120,7 @@ describe('the owner picked', () => {
     bot.findUnique.mockResolvedValue(botOn('universe-ai', { vision: { choice: 'another', keyId: 'key-3', model: 'gemini-3-flash' } }));
     const body = await ask();
     expect(body.source).toBe('universe-ai');
-    expect(body.vision.credentials).toMatchObject({ providerId: 'key-3', model: 'gemini-3-flash' });
+    expect(body.vision.credentials).toMatchObject({ providerId: 'key-3', model: 'gemini-3-flash', visionModel: null, supportsVision: true });
   });
 
   it('leaves the images to the bot’s own model when the key picked can’t be used, never to Universe AI', async () => {

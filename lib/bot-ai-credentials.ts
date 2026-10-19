@@ -107,7 +107,7 @@ async function visionPlan(bot: BotForCredentials, main: ServedProvider): Promise
   return {
     choice: 'another',
     credentials: {
-      ...providerPayload({ ...usable.key, model: choice.model, supportsVision: true }),
+      ...providerPayload({ ...usable.key, model: choice.model, supportsVision: true, visionModel: null }),
       keyOwnerId: usable.key.ownerId!,
       keyKind: info?.kind ?? null,
       keyGroup: info?.group ?? null,
