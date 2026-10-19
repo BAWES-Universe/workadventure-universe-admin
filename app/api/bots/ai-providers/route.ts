@@ -37,7 +37,8 @@ export async function GET(request: NextRequest) {
     const typeParam = searchParams.get('type');
 
     // Build where clause
-    const where: any = {};
+    // Only the server's own providers: nobody's personal key (#374) is offered as a provider to pick or to see with.
+    const where: any = { ownerId: null };
     if (enabledParam !== null) {
       where.enabled = enabledParam === 'true';
     }

@@ -579,7 +579,7 @@ describe('AdminShell', () => {
     await renderShell('/admin');
     fireEvent.click(screen.getByTestId('orbit-menu-button'));
     const menu = await screen.findByRole('dialog');
-    for (const label of ['Avatar sets', 'Bots', 'AI providers', 'AI usage', 'Bot database', 'MCP servers']) {
+    for (const label of ['Avatar sets', 'Bots', 'Universe AI', 'AI usage', 'Bot database', 'MCP servers']) {
       expect(menu.textContent).toContain(label);
     }
     for (const label of ['Your universes', 'Stars', 'Memberships', 'Profile', 'Room templates', 'People']) {

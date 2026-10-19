@@ -4,6 +4,7 @@ import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { encryptApiKey } from '@/lib/encryption';
 import { isVisionEligible } from '@/lib/vision-models';
+import { UNIVERSE_AI_REF, resolveUniverseAiProvider } from '@/lib/universe-ai';
 
 /**
  * GET /api/admin/ai-providers
@@ -20,14 +21,34 @@ export async function GET(request: NextRequest) {
       );
     }
 
+    // Only the server's own providers: people's personal keys (#374) are never listed here, not even for a super admin.
     const providers = await prisma.botsAiProvider.findMany({
+      where: { ownerId: null },
       orderBy: {
         name: 'asc',
       },
     });
 
+    // Universe AI (#374): which one is the Default, and how many bots are on each. A bot is pinned when its ref is the
+    // provider's id; bots on Universe AI follow the Default.
+    const [defaultProvider, perRef] = await Promise.all([
+      resolveUniverseAiProvider(),
+      prisma.bot.groupBy({ by: ['aiProviderRef'], _count: { _all: true } }),
+    ]);
+    const botsOn = (ref: string) => perRef.find((entry) => entry.aiProviderRef === ref)?._count._all ?? 0;
+
     // Return providers with encrypted API keys (for display, we'll show masked version in UI)
-    return NextResponse.json(providers);
+    return NextResponse.json(
+      providers.map((provider) => {
+        const isDefault = provider.providerId === defaultProvider?.providerId;
+        return {
+          ...provider,
+          isDefault,
+          pinnedBots: botsOn(provider.providerId),
+          universeAiBots: isDefault ? botsOn(UNIVERSE_AI_REF) : 0,
+        };
+      })
+    );
   } catch (error) {
     console.error('Error listing AI providers:', error);
     return NextResponse.json(
