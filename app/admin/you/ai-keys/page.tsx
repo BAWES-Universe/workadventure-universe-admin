@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { Bot, Globe, KeyRound, Pencil, Plus, RefreshCw, Trash2, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -586,6 +586,8 @@ function EditKeySheet({
   const [failure, setFailure] = useState<string | null>(null);
   // The new address answered but doesn't have the saved model: the models it does have are shown to pick from
   const [pickOnNew, setPickOnNew] = useState(false);
+  // Only the newest model load may answer: a slow one for a sheet that was closed, reopened or retried is dropped
+  const latestLoad = useRef(0);
   const open = target !== null;
   const what = target?.what;
   const keyId = target?.key.id;
@@ -597,16 +599,19 @@ function EditKeySheet({
     setSearch('');
     setFailure(null);
     setModels({ status: 'loading' });
-    if (!keyId || what !== 'model') return;
-    let cancelled = false;
-    void loadModels(keyId, undefined, () => cancelled);
-    return () => {
-      cancelled = true;
+    // Closing or switching the sheet drops any load still on its way, including one started by save()
+    const dropLoads = () => {
+      latestLoad.current += 1;
     };
+    if (!keyId || what !== 'model') return dropLoads;
+    void loadModels(keyId, undefined);
+    return dropLoads;
   }, [keyId, what]);
 
   /** The models the key's provider lists, at its saved address or a new one being tried */
-  async function loadModels(id: string, newAddress: string | undefined, cancelled: () => boolean) {
+  async function loadModels(id: string, newAddress: string | undefined) {
+    const mine = ++latestLoad.current;
+    const cancelled = () => mine !== latestLoad.current;
     setModels({ status: 'loading' });
     try {
       const response = await authenticatedFetch(`/api/me/ai-keys/${encodeURIComponent(id)}/models`, {
@@ -647,7 +652,7 @@ function EditKeySheet({
           setModel(null);
           setSearch('');
           setFailure(body.error || null);
-          void loadModels(target.key.id, address.trim(), () => false);
+          void loadModels(target.key.id, address.trim());
           return;
         }
         throw new Error(body?.error || 'That didn’t work. Try again.');

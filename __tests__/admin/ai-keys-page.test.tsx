@@ -1,7 +1,7 @@
 /** @jest-environment jsdom */
 
 import React from 'react';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 
 /** The AI keys page (#374): your keys, what each spent this month, and Revoke with its confirm. */
 
@@ -364,6 +364,40 @@ describe('Change address and Change model', () => {
     await waitFor(() => expect(calls('PATCH')).toHaveLength(2));
     expect(JSON.parse(calls('PATCH')[1][1].body)).toEqual({ address: 'https://new.trycloudflare.com', model: 'mistral-7b' });
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  });
+
+  it('drops a slow model list for a sheet that was closed, so it never lands in the next one', async () => {
+    let releaseSlow: (value: unknown) => void = () => {};
+    let modelCalls = 0;
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url.endsWith('/models')) {
+        modelCalls += 1;
+        if (modelCalls === 1) return new Promise((resolve) => (releaseSlow = resolve));
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, models: ['qwen3-8b', 'llama-3.1-8b'] }) });
+      }
+      if (init?.method === 'PATCH') {
+        return Promise.resolve({ ok: false, status: 400, json: () => Promise.resolve({ error: 'That address doesn’t have qwen3-8b. Pick a model it has.', code: 'model-missing' }) });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ keys: [lmStudio] }) });
+    });
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Change address' }));
+    let dialog = await screen.findByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText('New address'), { target: { value: 'https://new.trycloudflare.com' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+    await within(dialog).findByRole('alert');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    fireEvent.click(await screen.findByRole('button', { name: 'Change model' }));
+    dialog = await screen.findByRole('dialog');
+    await within(dialog).findByRole('radio', { name: 'llama-3.1-8b' });
+    // The first, slow answer now arrives
+    await act(async () => {
+      releaseSlow({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, models: ['stale-model'] }) });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(within(dialog).queryByRole('radio', { name: 'stale-model' })).toBeNull();
+    expect(within(dialog).getByRole('radio', { name: 'llama-3.1-8b' })).toBeTruthy();
   });
 
   it('keeps the sheet open and shows the reason when the new address does not answer', async () => {
