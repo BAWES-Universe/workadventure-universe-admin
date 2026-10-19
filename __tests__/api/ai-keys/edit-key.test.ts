@@ -7,7 +7,7 @@ import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { PATCH } from '@/app/api/me/ai-keys/[id]/route';
 import { POST as listModels } from '@/app/api/me/ai-keys/[id]/models/route';
-import { editSavedKey } from '@/lib/ai-key-edit';
+import { editSavedKey, listModelsForSavedKey } from '@/lib/ai-key-edit';
 import { probeChat, probeModels, allowKeyAttempt } from '@/lib/ai-key-models';
 import { markWorking } from '@/lib/ai-key-health';
 
@@ -115,6 +115,22 @@ describe('editSavedKey', () => {
     const result = await editSavedKey('maker', 'key-2', { address: 'https://evil.example.com' });
     expect(result).toMatchObject({ ok: false, status: 400 });
     expect(probeModels).not.toHaveBeenCalled();
+  });
+
+  it('never sends a hosted key to a typed address, NVIDIA NIM included', async () => {
+    db.botsAiProvider.findFirst.mockResolvedValue({ ...openai, settings: { kind: 'nim' }, endpoint: 'https://integrate.api.nvidia.com/v1' });
+    const edited = await editSavedKey('maker', 'key-2', { address: 'https://attacker.example.com' });
+    expect(edited).toMatchObject({ ok: false, status: 400 });
+    const listed = await listModelsForSavedKey('maker', 'key-2', { address: 'https://attacker.example.com' });
+    expect(listed).toMatchObject({ ok: false, status: 400 });
+    expect(probeModels).not.toHaveBeenCalled();
+    expect(probeChat).not.toHaveBeenCalled();
+  });
+
+  it('still changes the model of a NIM key, at its own address', async () => {
+    db.botsAiProvider.findFirst.mockResolvedValue({ ...openai, settings: { kind: 'nim' }, endpoint: 'https://integrate.api.nvidia.com/v1' });
+    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4o-mini', 'llama-3.3'] });
+    expect(await editSavedKey('maker', 'key-2', { model: 'llama-3.3' })).toMatchObject({ ok: true, model: 'llama-3.3' });
   });
 
   it('finds only keys the caller owns, so a server provider or another person’s key is "not found"', async () => {
