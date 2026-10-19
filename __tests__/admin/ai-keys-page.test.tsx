@@ -20,6 +20,7 @@ const lmStudio = {
   address: 'lm.example.com',
   last4: null,
   month: { replies: 2310, tokens: 880_000 },
+  lentTo: [] as unknown[],
   createdAt: '2026-10-19T00:00:00.000Z',
 };
 const deepseek = {
@@ -31,6 +32,7 @@ const deepseek = {
   address: null,
   last4: '4f2a',
   month: { replies: 1, tokens: 1_240_000 },
+  lentTo: [] as unknown[],
   createdAt: '2026-10-19T00:00:00.000Z',
 };
 
@@ -97,5 +99,147 @@ describe('AI keys page', () => {
     fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Revoke' }));
     expect(await screen.findByText('That didn’t work. Try again.')).toBeTruthy();
     expect(screen.getByText('My LM Studio', { selector: 'h2' })).toBeTruthy();
+  });
+});
+
+const sam = { id: 'b1', name: 'Sam', replies: 1240 };
+const lentKey = {
+  ...deepseek,
+  lentTo: [
+    { universeId: 'bawes', universeName: 'BAWES Universe', ownedByYou: false, bots: [sam] },
+    { universeId: 'sandbox', universeName: 'Sandbox Universe', ownedByYou: true, bots: [] },
+  ],
+};
+
+/** The server's side of the sheets: the universes to lend to, and lend / pull / revoke answers. */
+function serve(keys: unknown[], universes: unknown[] = []) {
+  fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+    if (url === '/api/me/ai-keys/universes') return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ universes }) });
+    if (init?.method) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: 'ok' }) });
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ keys }) });
+  });
+}
+const calls = (method: string) => fetchMock.mock.calls.filter(([, init]) => init?.method === method);
+
+describe('Lent to', () => {
+  it('names each universe a key is lent to, the bots on it there and their replies', async () => {
+    serve([lentKey]);
+    render(<AiKeysPage />);
+    expect(await screen.findByText('BAWES Universe')).toBeTruthy();
+    expect(screen.getByText('Sam · 1,240 replies')).toBeTruthy();
+    expect(screen.getByText('Sandbox Universe')).toBeTruthy();
+    expect(screen.queryByText('No universe yet. Only you can see this key.')).toBeNull();
+  });
+
+  it('says plainly when a key is lent nowhere, and offers Lend to a universe', async () => {
+    serve([deepseek]);
+    render(<AiKeysPage />);
+    expect(await screen.findByText('No universe yet. Only you can see this key.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Lend to a universe' })).toBeTruthy();
+  });
+
+  it('describes in the Danger zone what revoking does: bots move and owners are told, or no bot runs on it', async () => {
+    serve([lentKey, lmStudio]);
+    render(<AiKeysPage />);
+    await screen.findByText('Revoke My DeepSeek');
+    expect(screen.getByText('Deletes it everywhere. Its bot moves to Universe AI and each universe owner is told.')).toBeTruthy();
+    expect(screen.getByText('Deletes it everywhere. No bot runs on it now.')).toBeTruthy();
+  });
+
+  it('does not say an owner is told when the bots are in the key owner’s own universe', async () => {
+    serve([{ ...deepseek, lentTo: [{ universeId: 'sandbox', universeName: 'Sandbox Universe', ownedByYou: true, bots: [sam] }] }]);
+    render(<AiKeysPage />);
+    expect(await screen.findByText('Deletes it everywhere. Its bot moves to Universe AI.')).toBeTruthy();
+  });
+
+  it('says in the revoke confirm who moves, who is told, and that adding it again won’t move them back', async () => {
+    serve([lentKey]);
+    render(<AiKeysPage />);
+    await screen.findByText('Revoke My DeepSeek');
+    fireEvent.click(screen.getByRole('button', { name: 'Revoke' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText(/Sam in BAWES Universe moves to Universe AI, and the owner of BAWES Universe is told\. Adding the key again later does not move Sam back\./)).toBeTruthy();
+  });
+});
+
+describe('Lend sheet', () => {
+  const universes = [
+    { id: 'uniboz', name: 'uniboz', access: 'manage' },
+    { id: 'bawes', name: 'BAWES Universe', access: 'manage' },
+    { id: 'sandbox', name: 'Sandbox Universe', access: 'owner' },
+  ];
+
+  it('lists universes where you can manage bots, with why, and "Already lent" for the ones that are', async () => {
+    serve([lentKey], universes);
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Lend to a universe' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(await within(dialog).findByText('You have Manage bots here')).toBeTruthy();
+    expect(within(dialog).getAllByText('Already lent')).toHaveLength(2);
+    expect(within(dialog).getByText(/Lending moves no bot/)).toBeTruthy();
+    const radios = within(dialog).getAllByRole('radio');
+    expect(radios.map((radio) => (radio as HTMLButtonElement).disabled)).toEqual([false, true, true]);
+    // The first one still free is picked
+    expect(radios[0].getAttribute('aria-checked')).toBe('true');
+  });
+
+  it('lends to the picked universe, then shows the list again', async () => {
+    serve([deepseek], universes);
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Lend to a universe' }));
+    const dialog = await screen.findByRole('dialog');
+    await within(dialog).findByText('You own it');
+    fireEvent.click(within(dialog).getByRole('radio', { name: /Sandbox Universe/ }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Lend' }));
+    await waitFor(() => expect(calls('POST')).toHaveLength(1));
+    const [url, init] = calls('POST')[0];
+    expect(url).toBe('/api/me/ai-keys/key-2/lend');
+    expect(JSON.parse(init.body)).toEqual({ universeId: 'sandbox' });
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  });
+
+  it('says so, and offers nothing to lend to, when you can’t manage bots anywhere', async () => {
+    serve([deepseek], []);
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Lend to a universe' }));
+    expect(await screen.findByTestId('lend-none')).toBeTruthy();
+    expect((within(await screen.findByRole('dialog')).getByRole('button', { name: 'Lend' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('shows the server’s reason when it refuses, and keeps the sheet open', async () => {
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === '/api/me/ai-keys/universes') return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ universes }) });
+      if (init?.method === 'POST') return Promise.resolve({ ok: false, status: 403, json: () => Promise.resolve({ error: 'You need Manage bots in that universe to lend a key to it.' }) });
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ keys: [deepseek] }) });
+    });
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Lend to a universe' }));
+    const dialog = await screen.findByRole('dialog');
+    await within(dialog).findByText('You own it');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Lend' }));
+    expect((await within(dialog).findByRole('alert')).textContent).toMatch(/Manage bots in that universe/);
+  });
+});
+
+describe('Pulling a key from a universe', () => {
+  it('asks first when bots would move, and says who moves and who is told', async () => {
+    serve([lentKey]);
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Pull My DeepSeek from BAWES Universe' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText(/Sam moves to Universe AI, and the owner of BAWES Universe is told/)).toBeTruthy();
+    expect(calls('DELETE')).toHaveLength(0);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Pull' }));
+    await waitFor(() => expect(calls('DELETE')).toHaveLength(1));
+    expect(calls('DELETE')[0][0]).toBe('/api/me/ai-keys/key-2/lend/bawes');
+  });
+
+  it('pulls at once, with nothing to confirm, when no bot is on the key there', async () => {
+    serve([lentKey]);
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Pull My DeepSeek from Sandbox Universe' }));
+    await waitFor(() => expect(calls('DELETE')).toHaveLength(1));
+    expect(calls('DELETE')[0][0]).toBe('/api/me/ai-keys/key-2/lend/sandbox');
+    expect(screen.queryByRole('dialog')).toBeNull();
   });
 });

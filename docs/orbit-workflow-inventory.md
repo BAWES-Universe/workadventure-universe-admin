@@ -49,6 +49,7 @@ routes each page calls.
 | My Memberships | `/admin/memberships` | `requiresAuth` | compact view | Menu → Personalize → My Memberships | none — needs one | preserve |
 | My Visit Card | `/admin/profile` | `requiresAuth` | compact view | Menu → Personalize → My Visit Card | none — needs one | preserve |
 | AI keys | `/admin/you/ai-keys` | `requiresAuth` | compact view | You → Settings → AI keys, or Menu → Personalize → AI keys | `__tests__/api/ai-keys/me-routes.test.ts` (own keys only) | preserve (added in #374) |
+| AI keys: lend to a universe, pull from it (bots there move to Universe AI), revoke (same) | `/admin/you/ai-keys` | `POST /api/me/ai-keys/:id/lend`, `DELETE /api/me/ai-keys/:id/lend/:universeId`, `GET /api/me/ai-keys/universes` | key owner; Manage bots (or owner) in the universe to lend | compact view | AI keys page | `__tests__/api/ai-keys/lend-routes.test.ts` | new (#374) |
 | Discover Universes | `/admin/discover/universes` | everyone signed in | both | Menu → Discover → Universes | none — needs one | preserve |
 | Discover Worlds | `/admin/discover/worlds` | everyone signed in | both | Menu → Discover → Worlds | none — needs one | preserve |
 | Discover Rooms | `/admin/discover/rooms` | everyone signed in | both | Menu → Discover → Rooms | none — needs one | preserve |
