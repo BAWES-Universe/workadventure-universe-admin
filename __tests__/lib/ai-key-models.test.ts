@@ -383,7 +383,7 @@ describe('Claude (#975)', () => {
 
   it('reads an ordinary 400 as an ordinary 400 for the other providers too (the credit wording is Claude’s)', async () => {
     // A Gemini 400 that merely mentions billing (a project without it enabled) is not an empty balance.
-    post.mockResolvedValue(answer(400, 'API key not valid. Enable billing on the project'));
+    post.mockResolvedValue(answer(400, 'Billing is not enabled for this project. Enable billing on the project'));
     expect(await probeChat({ kind: 'gemini', apiKey: 'k-1234', model: 'm' })).toMatchObject({ ok: false, reason: 'other' });
     expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'm' })).toMatchObject({ ok: false, reason: 'other' });
     // A 402 is still out of credit for any of them.
@@ -400,6 +400,13 @@ describe('Gemini answers a wrong key with a 400', () => {
     expect(await probeModels({ kind: 'gemini', apiKey: 'AIza-bad' })).toEqual({ ok: false, reason: 'rejected', message: 'Gemini didn’t accept this key.' });
     post.mockResolvedValue(wrong);
     expect(await probeChat({ kind: 'gemini', apiKey: 'AIza-bad', model: 'gemini-2.5-flash' })).toMatchObject({ ok: false, reason: 'rejected' });
+  });
+
+  it('also reads an expired key as one it did not accept', async () => {
+    get.mockResolvedValue(answer(400, { error: { code: 400, message: 'API key expired. Please renew the API key.', status: 'INVALID_ARGUMENT' } }));
+    expect(await probeModels({ kind: 'gemini', apiKey: 'AIza-old' })).toMatchObject({ ok: false, reason: 'rejected' });
+    get.mockResolvedValue(answer(400, { error: { message: 'bad', details: [{ reason: 'API_KEY_INVALID' }] } }));
+    expect(await probeModels({ kind: 'gemini', apiKey: 'AIza-old' })).toMatchObject({ ok: false, reason: 'rejected' });
   });
 
   it('reads any other 400 from Gemini, and a 400 from any other provider, as the ordinary error it is', async () => {
