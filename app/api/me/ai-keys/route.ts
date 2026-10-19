@@ -71,7 +71,9 @@ export async function POST(request: NextRequest) {
       return respond(request, { error: 'That model isn’t on the list. Load models again and pick one.' }, 400);
     }
     const chat = await probeChat({ kind: info.kind, address: input.address, region, apiKey, model });
-    if (!chat.ok) return respond(request, { error: chat.message }, 400);
+    // The model is on the list, so a 400 here is the provider refusing this tiny request (a reasoning model that wants a bigger
+    // cap, say), not a wrong key or model: it is saved, the same as the health check lets it pass
+    if (!chat.ok && chat.reason !== 'request') return respond(request, { error: chat.message }, 400);
     const row = await prisma.botsAiProvider.create({
       data: {
         providerId: `key-${randomUUID()}`,
