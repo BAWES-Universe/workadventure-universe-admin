@@ -45,7 +45,7 @@ describe('GET /api/me/ai-keys', () => {
 
   it('lists the facts saved on a key, and only the well-formed ones', async () => {
     provider.findMany.mockResolvedValue([
-      { ...row, settings: { kind: 'deepseek', caps: { tools: false, images: 'yes', context: 64000, secret: 'x' } } },
+      { ...row, settings: { kind: 'deepseek', caps: { tools: false, vision: 'yes', context: 64000, secret: 'x' } } },
       { ...row, providerId: 'key-2', settings: { kind: 'deepseek', caps: 'nope' } },
     ]);
     usage.groupBy.mockResolvedValue([]);
