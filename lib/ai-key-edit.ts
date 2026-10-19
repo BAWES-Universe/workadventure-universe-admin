@@ -126,7 +126,7 @@ export async function editSavedKey(ownerId: string, id: string, input: KeyEditIn
       tested: true,
       testedAt: new Date(),
       healthCheckedAt: new Date(),
-      ...(onList ? { settings, supportsVision: caps.images ?? null } : {}),
+      ...(onList ? { settings, supportsVision: caps.vision ?? null } : {}),
     },
   });
   // It just answered a real chat call, so a key that was Down is Working again

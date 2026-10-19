@@ -88,7 +88,7 @@ export async function POST(request: NextRequest) {
         maxTokens: 500,
         supportsStreaming: true,
         // The provider's word on pictures when it gave one; otherwise left to the bot server's own guess from the name
-        supportsVision: caps.images ?? null,
+        supportsVision: caps.vision ?? null,
         settings: { kind: info.kind, ...(region ? { region } : {}), ...(Object.keys(caps).length > 0 ? { caps } : {}) },
         tested: true,
         testedAt: new Date(),

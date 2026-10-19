@@ -42,10 +42,10 @@ const asDownReason = (value: string | null): DownReason => (value === 'rejected'
 function capsOf(settings: unknown): ModelFacts {
   const caps = typeof settings === 'object' && settings !== null ? (settings as { caps?: unknown }).caps : null;
   if (typeof caps !== 'object' || caps === null) return {};
-  const { tools, images, context } = caps as Record<string, unknown>;
+  const { tools, vision, context } = caps as Record<string, unknown>;
   return {
     ...(typeof tools === 'boolean' ? { tools } : {}),
-    ...(typeof images === 'boolean' ? { images } : {}),
+    ...(typeof vision === 'boolean' ? { vision } : {}),
     ...(typeof context === 'number' && context > 0 ? { context } : {}),
   };
 }

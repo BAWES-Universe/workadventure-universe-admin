@@ -256,14 +256,28 @@ describe('providers added to the catalog', () => {
   });
 });
 
+describe('model facts the provider’s docs give (DeepSeek’s list holds ids only)', () => {
+  it('gives Vision to deepseek-flash and not to V4 Pro, and nothing to a model the docs do not name', async () => {
+    get.mockResolvedValue(answer(200, { data: [{ id: 'deepseek-flash' }, { id: 'deepseek-v4-pro' }, { id: 'deepseek-v4-flash' }] }));
+    const result = await probeModels({ kind: 'deepseek', apiKey: 'sk-1' });
+    expect(result.ok && result.facts).toEqual({ 'deepseek-flash': { vision: true }, 'deepseek-v4-pro': { vision: false } });
+  });
+
+  it('leaves them out when the model is not on the list, and lets the list’s own word win', async () => {
+    get.mockResolvedValue(answer(200, { data: [{ id: 'deepseek-flash', capabilities: { vision: false } }] }));
+    const result = await probeModels({ kind: 'deepseek', apiKey: 'sk-1' });
+    expect(result.ok && result.facts).toEqual({ 'deepseek-flash': { vision: false } });
+  });
+});
+
 describe('model facts', () => {
   it('reads OpenRouter’s parameters, input kinds and context', () => {
-    expect(factsOf({ id: 'a/b', context_length: 200000, architecture: { input_modalities: ['text', 'image'] }, supported_parameters: ['temperature', 'tools'] })).toEqual({ tools: true, images: true, context: 200000 });
-    expect(factsOf({ id: 'a/c', architecture: { input_modalities: ['text'] }, supported_parameters: ['temperature'] })).toEqual({ tools: false, images: false });
+    expect(factsOf({ id: 'a/b', context_length: 200000, architecture: { input_modalities: ['text', 'image'] }, supported_parameters: ['temperature', 'tools'] })).toEqual({ tools: true, vision: true, context: 200000 });
+    expect(factsOf({ id: 'a/c', architecture: { input_modalities: ['text'] }, supported_parameters: ['temperature'] })).toEqual({ tools: false, vision: false });
   });
 
   it('reads Mistral’s capabilities and Groq’s context window', () => {
-    expect(factsOf({ id: 'mistral-large', capabilities: { function_calling: true, vision: false }, max_context_length: 131072 })).toEqual({ tools: true, images: false, context: 131072 });
+    expect(factsOf({ id: 'mistral-large', capabilities: { function_calling: true, vision: false }, max_context_length: 131072 })).toEqual({ tools: true, vision: false, context: 131072 });
     expect(factsOf({ id: 'llama', context_window: 8192 })).toEqual({ context: 8192 });
   });
 

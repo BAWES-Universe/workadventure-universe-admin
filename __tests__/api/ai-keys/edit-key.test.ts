@@ -75,11 +75,11 @@ describe('editSavedKey', () => {
 
   it('saves what the provider says about the new model, keeping the key’s kind and region', async () => {
     db.botsAiProvider.findFirst.mockResolvedValue({ ...openai, endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1', settings: { kind: 'qwen', region: 'china', caps: { tools: true } } });
-    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4o-mini', 'qwen-vl'], facts: { 'qwen-vl': { images: true, tools: false, context: 8192 } } });
+    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4o-mini', 'qwen-vl'], facts: { 'qwen-vl': { vision: true, tools: false, context: 8192 } } });
     await editSavedKey('maker', 'key-2', { model: 'qwen-vl' });
     expect(db.botsAiProvider.updateMany.mock.calls[0][0].data).toMatchObject({
       supportsVision: true,
-      settings: { kind: 'qwen', region: 'china', caps: { images: true, tools: false, context: 8192 } },
+      settings: { kind: 'qwen', region: 'china', caps: { vision: true, tools: false, context: 8192 } },
     });
   });
 

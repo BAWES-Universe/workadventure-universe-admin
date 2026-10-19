@@ -170,13 +170,13 @@ describe('POST /api/me/ai-keys: the key must really answer, and regions', () => 
 
 describe('POST /api/me/ai-keys: what the provider said about the model is saved on the key', () => {
   it('saves the facts of the model picked, and the provider’s word on pictures', async () => {
-    models.mockResolvedValue({ ok: true, models: ['qwen3-8b', 'gemma-3-12b'], facts: { 'qwen3-8b': { tools: false, images: true, context: 32768 }, 'gemma-3-12b': { tools: true } } });
+    models.mockResolvedValue({ ok: true, models: ['qwen3-8b', 'gemma-3-12b'], facts: { 'qwen3-8b': { tools: false, vision: true, context: 32768 }, 'gemma-3-12b': { tools: true } } });
     await post({ kind: 'lmstudio', address: 'https://lm.example.com', model: 'qwen3-8b' });
-    expect(provider.create.mock.calls[0][0].data).toMatchObject({ supportsVision: true, settings: { kind: 'lmstudio', caps: { tools: false, images: true, context: 32768 } } });
+    expect(provider.create.mock.calls[0][0].data).toMatchObject({ supportsVision: true, settings: { kind: 'lmstudio', caps: { tools: false, vision: true, context: 32768 } } });
   });
 
   it('says false on pictures when the provider said the model takes none, and null when it said nothing', async () => {
-    models.mockResolvedValue({ ok: true, models: ['qwen3-8b', 'gemma-3-12b'], facts: { 'qwen3-8b': { images: false } } });
+    models.mockResolvedValue({ ok: true, models: ['qwen3-8b', 'gemma-3-12b'], facts: { 'qwen3-8b': { vision: false } } });
     await post({ kind: 'lmstudio', address: 'https://lm.example.com', model: 'qwen3-8b' });
     expect(provider.create.mock.calls[0][0].data.supportsVision).toBe(false);
     await post({ kind: 'lmstudio', address: 'https://lm.example.com', model: 'gemma-3-12b' });
