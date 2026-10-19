@@ -68,6 +68,7 @@ The menu only hides entries; every API route enforces its own check.
 | Current location card | `/api/admin/rooms/from-play-uri`, `/api/admin/rooms/previous`, `/api/admin/analytics/rooms/:id` | signed in | compact view | Home (bottom bar) | analytics: `authorisation-scope.test.ts` (#208); the room lookups: none — needs one | analytics fixed in 0A (#208); rest preserve |
 | Recently visited | `/api/admin/rooms/recent` | signed in (own visits) | compact view | Home (bottom bar) | none — needs one | preserve |
 | Pending invitations alert | `/api/memberships/invitations` | signed in (own) | compact view | Home (bottom bar) | none — needs one | preserve |
+| Notices on Orbit home (a key is down, bots moved): list, dismiss | `/` (Orbit home) | `GET /api/me/notices`, `DELETE /api/me/notices/:id` | signed in (own) | compact view | Home (bottom bar) | `__tests__/admin/notices-alert.test.tsx`, `__tests__/api/me/notices.test.ts` | new |
 | Stats + quick create links | bootstrap | signed in | compact view | Home (bottom bar) | none — needs one | preserve |
 
 ## Universes, worlds, rooms
