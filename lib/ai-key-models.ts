@@ -46,6 +46,27 @@ export const KEY_LOOKS_WRONG = 'That key doesn’t look right. Paste it again.';
 /** OpenRouter's model list is well over the default cap, so a list may be a few MB. */
 const MODEL_LIST_MAX_BYTES = 5_000_000;
 
+/**
+ * OpenRouter lists its models to anyone, so a wrong key still gets a 200 there. Its key-info address does check the key;
+ * only a clear 401/403 from it counts, so a path it doesn't have (404) or a hiccup never blocks a good key.
+ */
+const OPENROUTER_KEY_PATHS = ['/key', '/auth/key'];
+
+async function openRouterRejectsKey(base: string, apiKey: string): Promise<boolean> {
+  for (const path of OPENROUTER_KEY_PATHS) {
+    try {
+      const checked = await checkPublicHttpsUrl(`${base}${path}`);
+      const result = await safeGet(checked, { headers: { Authorization: `Bearer ${apiKey}` } });
+      if (!result.ok) return false;
+      if (result.status === 401 || result.status === 403) return true;
+      if (result.status !== 404) return false;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
 export type LoadModelsResult = { ok: true; models: string[] } | { ok: false; message: string };
 
 const NOT_CHAT = /embed|whisper|tts|dall-e|moderation|rerank|transcribe|image|audio|realtime|guard|safety/i;
@@ -99,6 +120,9 @@ export async function loadModels(input: KeyTargetInput & { apiKey?: unknown }): 
     };
   }
   if (result.status !== 200) return { ok: false, message: `It answered with an error (${result.status}).` };
+  if (info.kind === 'openrouter' && apiKey && (await openRouterRejectsKey(info.base!, apiKey))) {
+    return { ok: false, message: `${info.label} didn’t accept this key.` };
+  }
 
   let ids: string[] = [];
   try {
