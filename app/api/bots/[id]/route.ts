@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { getSessionUser } from '@/lib/auth-session';
 import { prisma } from '@/lib/db';
-import { canManageBots } from '@/lib/bot-permissions';
+import { canManageBots, canManageThisBot } from '@/lib/bot-permissions';
 import { mayReadRoomBots } from '@/lib/bot-room-access';
 import { validateAccessToken } from '@/lib/oidc';
 import { parsePlayUri } from '@/lib/utils';
@@ -334,7 +334,7 @@ export async function PUT(
 
     // Check permissions (skip if admin token)
     if (!isAdminToken && userId) {
-      const hasPermission = await canManageBots(userId, existingBot.roomId);
+      const hasPermission = await canManageThisBot(userId, null, existingBot, { creatorPasses: false });
       if (!hasPermission) {
         const response = NextResponse.json(
           { error: 'You do not have permission to manage bots in this room' },
@@ -602,7 +602,7 @@ export async function DELETE(
 
     // Check permissions (skip if admin token)
     if (!isAdminToken && userId) {
-      const hasPermission = await canManageBots(userId, bot.roomId);
+      const hasPermission = await canManageThisBot(userId, null, bot, { creatorPasses: false });
       if (!hasPermission) {
         const response = NextResponse.json(
           { error: 'You do not have permission to manage bots in this room' },

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { getSessionUser } from '@/lib/auth-session';
 import { prisma } from '@/lib/db';
-import { canManageBots } from '@/lib/bot-permissions';
+import { canManageBots, canManageThisBot } from '@/lib/bot-permissions';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { parsePlayUri } from '@/lib/utils';
 import { validateAccessToken } from '@/lib/oidc';
@@ -262,7 +262,7 @@ export async function GET(request: NextRequest) {
         // Check permission for sensitive data
         let hasPermission = false;
         if (includeSensitive && userId) {
-          hasPermission = await canManageBots(userId, bot.roomId) || isSuperAdmin(userEmail);
+          hasPermission = isSuperAdmin(userEmail) || (await canManageThisBot(userId, null, bot, { creatorPasses: false }));
         }
 
         return transformBotToServerFormat(bot, includeSensitive, hasPermission);
@@ -365,7 +365,7 @@ export async function POST(request: NextRequest) {
       if (validatedData.botId) {
         const existingBot = await prisma.bot.findUnique({
           where: { id: validatedData.botId },
-          select: { roomId: true },
+          select: { id: true, createdById: true, roomId: true },
         });
         if (!existingBot) {
           const response = NextResponse.json(
@@ -377,7 +377,7 @@ export async function POST(request: NextRequest) {
           });
           return response;
         }
-        const hasExistingRoomPermission = await canManageBots(userId, existingBot.roomId);
+        const hasExistingRoomPermission = await canManageThisBot(userId, null, existingBot, { creatorPasses: false });
         if (!hasExistingRoomPermission) {
           const response = NextResponse.json(
             { error: 'You do not have permission to manage this bot' },

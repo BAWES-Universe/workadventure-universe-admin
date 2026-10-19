@@ -25,9 +25,12 @@ jest.mock('@/lib/auth', () => ({
   requireAuth: jest.fn(),
 }));
 
-jest.mock('@/lib/bot-permissions', () => ({
-  canManageBots: jest.fn(async () => true),
-}));
+jest.mock('@/lib/bot-permissions', () => {
+  const canManageBots = jest.fn(async (_userId?: string, _roomId?: string) => true);
+  // canManageThisBot is canManageBots for the bot's room until the bot has rules of its own (#427)
+  const canManageThisBot = jest.fn(async (userId: string, _email: string | null, bot: { roomId: string }) => canManageBots(userId, bot.roomId));
+  return { canManageBots, canManageThisBot };
+});
 
 jest.mock('@/lib/oidc', () => ({
   validateAccessToken: jest.fn(async () => null),

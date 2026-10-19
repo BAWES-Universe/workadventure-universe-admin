@@ -42,6 +42,9 @@ jest.mock('@/lib/db', () => ({
         state.memberships.get(where.universeId_userId.userId) ?? null,
       ),
     },
+    botAccessRule: {
+      findMany: jest.fn(async () => []),
+    },
   },
 }));
 
@@ -179,7 +182,7 @@ describe('canManageBots', () => {
 });
 
 describe('canManageBotMcpServers', () => {
-  const bot = { createdById: 'maker', roomId: 'room-hq' };
+  const bot = { id: 'bot-1', createdById: 'maker', roomId: 'room-hq' };
 
   it('lets the bot\'s creator in, with no role', async () => {
     expect(await canManageBotMcpServers('maker', null, bot)).toBe(true);

@@ -82,6 +82,28 @@ curl -X POST \
      read in the bot's world. Everyone has all three, so by default every bot works as it always has, guests included.
      A private chat also needs sign-in and a room the person may see. The bot's creator, the owner of its universe,
      super admins and Admin always pass.
+   - Then the bot's own rules (#427), in this order: the person's own row, the rows of their roles (a Yes from any role
+     beats a No from another, as in Discord), Private bot (only a Yes lets someone in), then the role permissions.
+     A refused chat nearby also carries `reply`, the owner's own line for refused people, when the owner wrote one;
+     the bot says it instead of calling the AI. A bot with no rows and Private bot off answers as above.
+
+7. **GET /api/bots/:id/permissions** and **PUT /api/bots/:id/permissions** - Who may use this bot (#427)
+   - Requires: whoever manages the bot (its creator, the universe owner, Admin, anyone with Manage bots, or anyone the
+     bot's own Manage rule says Yes to; a No takes it away). GET also takes the bot server's `ADMIN_API_TOKEN`.
+     Anyone else gets 404, as if the bot did not exist.
+   - GET returns `{ privateBot, refusalReply, dailyReplyCap, rules, roles }`: `rules` has one row per role or person with
+     `chat`, `dm`, `summon` and `manage` each `"yes" | "no" | "default"`; `roles` lists the roles a row can name (not
+     Admin, which always passes) with what each gives on its own (`defaults`), which is what Default means for it.
+   - PUT takes any of `{ privateBot: boolean, refusalReply: string | null (up to 500 characters), dailyReplyCap: 1..10000 }`
+     and returns the same as GET. `dailyReplyCap` is how many replies each person may get from this bot in a day (50
+     unless changed); it is only stored here, the limit itself comes with #1159.
+
+8. **PUT /api/bots/:id/permissions/rules** and **DELETE /api/bots/:id/permissions/rules?roleId=|userId=**
+   - PUT body: one of `{ roleId }`, `{ userId }` or `{ identifier }` (a person's uuid or email), and any of `chat`, `dm`,
+     `summon`, `manage` as `"yes" | "no" | "default"`. Only the actions sent change. Returns the row. Refused with a line
+     saying why: a role of another universe (404), Admin or the bot's owner (400, they always pass), a person who
+     does not exist (404), more than 200 rows (400), two people saving the same row at once (409, try again).
+   - DELETE takes the row off, so they follow the roles again; 404 when there was no such row.
 
 ### Files Created/Modified
 

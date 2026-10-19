@@ -34,6 +34,10 @@ jest.mock('@/lib/db', () => {
   const mockUniverseMember = {
     findUnique: jest.fn(),
   };
+  // No per-bot rules (#427): the room's Manage bots decides, as before
+  const mockBotAccessRule = {
+    findMany: jest.fn(async () => []),
+  };
   return {
     prisma: {
       $transaction: jest.fn(async (cb: Function) => cb({
@@ -48,6 +52,7 @@ jest.mock('@/lib/db', () => {
       role: mockRole,
       universeMember: mockUniverseMember,
       botMcpServer: mockBotMcpServer,
+      botAccessRule: mockBotAccessRule,
     },
   };
 });

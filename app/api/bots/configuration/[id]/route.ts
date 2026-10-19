@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { getSessionUser } from '@/lib/auth-session';
 import { prisma } from '@/lib/db';
-import { canManageBots } from '@/lib/bot-permissions';
+import { canManageThisBot } from '@/lib/bot-permissions';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { validateAccessToken } from '@/lib/oidc';
 import { transformBotToServerFormat } from '@/lib/bot-config-helpers';
@@ -163,7 +163,7 @@ export async function GET(
     // A session user may only read bots in rooms they can manage (the config carries chat instructions)
     let hasPermission = false;
     if (userId) {
-      hasPermission = await canManageBots(userId, bot.roomId) || isSuperAdmin(userEmail);
+      hasPermission = await canManageThisBot(userId, null, bot, { creatorPasses: false }) || isSuperAdmin(userEmail);
       if (!hasPermission) {
         // The same answer as for a bot that does not exist, so a stranger learns nothing about it
         const response = NextResponse.json(
@@ -231,6 +231,7 @@ export async function DELETE(
       where: { id: botId },
       select: {
         id: true,
+        createdById: true,
         roomId: true,
       },
     });
@@ -248,7 +249,7 @@ export async function DELETE(
 
     // Check permissions (skip if admin token)
     if (!isAdminToken && userId) {
-      const hasPermission = await canManageBots(userId, bot.roomId);
+      const hasPermission = await canManageThisBot(userId, null, bot, { creatorPasses: false });
       if (!hasPermission) {
         const response = NextResponse.json(
           { error: 'You do not have permission to delete bots in this room' },
