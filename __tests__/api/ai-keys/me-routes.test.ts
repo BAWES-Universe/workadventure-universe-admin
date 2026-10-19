@@ -54,6 +54,7 @@ describe('GET /api/me/ai-keys', () => {
     expect(body.keys).toEqual([{
       id: 'key-1', name: 'My DeepSeek', kind: 'deepseek', kindLabel: 'DeepSeek', model: 'deepseek-v4-flash', address: null,
       last4: '4f2a', month: { replies: 12, tokens: 3400 }, lentTo: [], createdAt: '2026-10-19T00:00:00.000Z',
+      status: 'working', downSince: null, downReason: null, ifDown: 'universe-ai',
     }]);
     expect(JSON.stringify(body)).not.toContain('secret');
   });

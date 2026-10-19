@@ -1,5 +1,6 @@
 import { prisma } from '@/lib/db';
 import { kindInfo, type AiKeyKind } from '@/lib/ai-key-kinds';
+import { isIfDown, type DownReason } from '@/lib/ai-key-health';
 
 export type { AiKeyKind };
 
@@ -23,8 +24,16 @@ export interface AiKeySummary {
   month: { replies: number; tokens: number };
   /** The universes it is lent to, and the bots running on it there with their replies this month. */
   lentTo: { universeId: string; universeName: string; /** The key's owner owns that universe. */ ownedByYou: boolean; bots: { id: string; name: string; replies: number }[] }[];
+  /** "working", or "down" with when it went down (ISO) and why. */
+  status: 'working' | 'down';
+  downSince: string | null;
+  downReason: 'stopped' | 'rejected' | 'errors' | null;
+  /** What its bots do while it is down. */
+  ifDown: 'universe-ai' | 'stop';
   createdAt: string;
 }
+
+const asDownReason = (value: string | null): DownReason => (value === 'rejected' || value === 'errors' ? value : 'stopped');
 
 function hostOf(endpoint: string | null): string | null {
   if (!endpoint) return null;
@@ -44,7 +53,7 @@ export async function listAiKeys(ownerId: string): Promise<AiKeySummary[]> {
   const rows = await prisma.botsAiProvider.findMany({
     where: { ownerId },
     orderBy: { createdAt: 'asc' },
-    select: { providerId: true, name: true, model: true, endpoint: true, apiKeyLast4: true, settings: true, createdAt: true },
+    select: { providerId: true, name: true, model: true, endpoint: true, apiKeyLast4: true, settings: true, createdAt: true, downSince: true, downReason: true, ifDown: true },
   });
   if (rows.length === 0) return [];
   const usage = await prisma.botsAiUsage.groupBy({
@@ -97,6 +106,10 @@ export async function listAiKeys(ownerId: string): Promise<AiKeySummary[]> {
             .filter((bot) => bot.aiProviderRef === row.providerId && bot.room.world.universeId === lend.universe.id)
             .map((bot) => ({ id: bot.id, name: bot.name, replies: repliesOf.get(`${row.providerId}:${bot.id}`) ?? 0 })),
         })),
+      status: row.downSince ? 'down' : 'working',
+      downSince: row.downSince ? row.downSince.toISOString() : null,
+      downReason: row.downSince ? asDownReason(row.downReason) : null,
+      ifDown: isIfDown(row.ifDown) ? row.ifDown : 'universe-ai',
       createdAt: row.createdAt.toISOString(),
     };
   });

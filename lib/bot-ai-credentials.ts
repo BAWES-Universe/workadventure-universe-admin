@@ -4,6 +4,7 @@ import { checkKeyForBot, type KeyForBot } from '@/lib/ai-key-pay';
 import { addNotice } from '@/lib/notices';
 import { UNIVERSE_AI_MISSING, UNIVERSE_AI_REF, resolveUniverseAiProvider } from '@/lib/universe-ai';
 import { kindInfo } from '@/lib/ai-key-kinds';
+import { RESTING_LINE, recheckIfDue } from '@/lib/ai-key-health';
 
 /**
  * What the bot server gets when it asks how a bot talks to its AI, by bot id (#374). The bot's own `aiProviderRef` decides:
@@ -13,9 +14,13 @@ import { kindInfo } from '@/lib/ai-key-kinds';
  *     access, the key was unlent some other way), the bot is moved to Universe AI right here, the universe's owner is told
  *     once, and Universe AI's provider is what comes back. Nobody is ever served a key that may not run the bot.
  * `source` says which of the three it was, so the bot server knows when it is talking through someone's own key.
+ * When a personal key is Down, its owner's choice decides: "Use Universe AI" serves Universe AI (`standingInFor` names the
+ * key), "Stop replying" serves `source: "resting"` with the one fixed line and no provider at all, so nothing goes to
+ * another AI. A Down key is checked again every 5 minutes, here, and is served again as soon as it answers.
  */
 export type BotAiCredentials =
-  | { status: 200; body: ReturnType<typeof providerPayload> & { source: 'provider' | 'universe-ai' | 'own-key'; movedFromKey?: string } & Partial<OwnKeyFacts> }
+  | { status: 200; body: ReturnType<typeof providerPayload> & { source: 'provider' | 'universe-ai' | 'own-key'; movedFromKey?: string; standingInFor?: string } & Partial<OwnKeyFacts> }
+  | { status: 200; body: { source: 'resting'; keyOwnerId: string; restingLine: string } }
   | { status: 400 | 404 | 503; error: string };
 
 /** What only a personal key's answer carries: whose it is, what kind it is, where it runs, and how the bot server should treat it. */
@@ -62,6 +67,12 @@ export async function credentialsForBot(botId: string): Promise<BotAiCredentials
 
   const verdict = await checkKeyForBot({ keyId: ref, keyOwnerId: provider.ownerId, makerId: bot.createdById, roomId: bot.roomId });
   if (verdict.ok) {
+    const health = await recheckIfDue(provider);
+    if (health.downSince) {
+      if (health.ifDown === 'stop') return { status: 200, body: { source: 'resting', keyOwnerId: provider.ownerId, restingLine: RESTING_LINE } };
+      const answer = await universeAi();
+      return answer.status === 200 && answer.body.source === 'universe-ai' ? { status: 200, body: { ...answer.body, standingInFor: ref } } : answer;
+    }
     const info = kindInfo((provider.settings as { kind?: unknown } | null)?.kind);
     return {
       status: 200,
@@ -85,7 +96,7 @@ export async function credentialsForBot(botId: string): Promise<BotAiCredentials
     console.error('[AiKeys] Could not tell the universe owner:', error instanceof Error ? error.message : 'unknown');
   }
   const answer = await universeAi();
-  return answer.status === 200 ? { status: 200, body: { ...answer.body, movedFromKey: ref } } : answer;
+  return answer.status === 200 && answer.body.source === 'universe-ai' ? { status: 200, body: { ...answer.body, movedFromKey: ref } } : answer;
 }
 
 async function universeAi(): Promise<BotAiCredentials> {

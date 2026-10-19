@@ -21,6 +21,10 @@ const lmStudio = {
   last4: null,
   month: { replies: 2310, tokens: 880_000 },
   lentTo: [] as unknown[],
+  status: 'working',
+  downSince: null,
+  downReason: null,
+  ifDown: 'universe-ai',
   createdAt: '2026-10-19T00:00:00.000Z',
 };
 const deepseek = {
@@ -33,6 +37,10 @@ const deepseek = {
   last4: '4f2a',
   month: { replies: 1, tokens: 1_240_000 },
   lentTo: [] as unknown[],
+  status: 'working',
+  downSince: null,
+  downReason: null,
+  ifDown: 'universe-ai',
   createdAt: '2026-10-19T00:00:00.000Z',
 };
 
@@ -241,5 +249,60 @@ describe('Pulling a key from a universe', () => {
     await waitFor(() => expect(calls('DELETE')).toHaveLength(1));
     expect(calls('DELETE')[0][0]).toBe('/api/me/ai-keys/key-2/lend/sandbox');
     expect(screen.queryByRole('dialog')).toBeNull();
+  });
+});
+
+describe('Working, Down and "If this is down"', () => {
+  const downLm = {
+    ...lmStudio,
+    status: 'down',
+    downSince: new Date(Date.now() - 60_000).toISOString(),
+    downReason: 'stopped',
+    lentTo: [{ universeId: 'u1', universeName: 'Sandbox Universe', ownedByYou: true, bots: [{ id: 'b1', name: 'Guide', replies: 5 }, { id: 'b2', name: 'Nora', replies: 3 }] }],
+  };
+
+  it('shows Working on a healthy key and nothing about being down', async () => {
+    answer([deepseek]);
+    render(<AiKeysPage />);
+    expect((await screen.findByTestId('ai-key-status')).textContent).toBe('Working');
+    expect(screen.queryByTestId('ai-key-down-text')).toBeNull();
+    expect(screen.queryByRole('button', { name: /Check now/ })).toBeNull();
+    expect(screen.getByTestId('ai-key-if-down-help').textContent).toBe('Bots keep replying on Universe AI until it’s back.');
+  });
+
+  it('says a key is down: why, what its bots do meanwhile (own-computer wording), and the 5-minute recheck', async () => {
+    answer([downLm]);
+    render(<AiKeysPage />);
+    expect((await screen.findByTestId('ai-key-status')).textContent).toBe('Down');
+    const text = screen.getByTestId('ai-key-down-text').textContent ?? '';
+    expect(text).toMatch(/^Down since .+: lm\.example\.com stopped answering\./);
+    expect(text).toContain('Guide and Nora reply on Universe AI until it’s back, so their conversations leave your computer meanwhile.');
+    expect(text).toContain('Universe checks every 5 minutes and switches back by itself.');
+    expect(screen.getByRole('button', { name: /Check now/ })).toBeTruthy();
+  });
+
+  it('says the bots rest when the owner chose Stop replying', async () => {
+    answer([{ ...downLm, ifDown: 'stop' }]);
+    render(<AiKeysPage />);
+    expect((await screen.findByTestId('ai-key-down-text')).textContent).toContain('Guide and Nora rest until it’s back.');
+    expect(screen.getByRole('radio', { name: 'Stop replying' }).getAttribute('aria-checked')).toBe('true');
+  });
+
+  it('saves the other choice, and puts the old one back when saving fails', async () => {
+    answer([deepseek]);
+    render(<AiKeysPage />);
+    const stop = await screen.findByRole('radio', { name: 'Stop replying' });
+    expect(screen.getByRole('radio', { name: 'Use Universe AI' }).getAttribute('aria-checked')).toBe('true');
+    fetchMock.mockImplementation(() => Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}) }));
+    fireEvent.click(stop);
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => url === '/api/me/ai-keys/key-2' && init?.method === 'PATCH' && init.body === JSON.stringify({ ifDown: 'stop' }))).toBe(true));
+    await waitFor(() => expect(screen.getByRole('radio', { name: 'Use Universe AI' }).getAttribute('aria-checked')).toBe('true'));
+  });
+
+  it('Check now asks the server and reloads the list', async () => {
+    answer([downLm]);
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByRole('button', { name: /Check now/ }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => url === '/api/me/ai-keys/key-1/check' && init?.method === 'POST')).toBe(true));
   });
 });
