@@ -211,7 +211,24 @@ describe('checkKey and checkAndRecord', () => {
     db.updateMany.mockResolvedValueOnce({ count: 0 }).mockResolvedValue({ count: 1 });
     await checkAndRecord(downNow(own));
     expect(notice).not.toHaveBeenCalled();
-    expect(db.updateMany).toHaveBeenLastCalledWith({ where: { providerId: 'key-2' }, data: expect.objectContaining({ downReason: 'stopped' }) });
+    expect(db.updateMany).toHaveBeenLastCalledWith({ where: { providerId: 'key-2' }, data: { healthCheckedAt: expect.any(Date) } });
+  });
+
+  it('a failed check never rewrites why a Down key went Down, so a key Down on failed replies keeps needing a chat reply', async () => {
+    probe.mockResolvedValue({ ok: true, models: ['m'] });
+    chat.mockResolvedValue({ ok: false, reason: 'other', message: 'chat failed' });
+    db.updateMany.mockResolvedValueOnce({ count: 0 }).mockResolvedValue({ count: 1 });
+    const key = downNow(hosted, { downReason: 'errors', model: 'deepseek-v4-flash' });
+    await checkAndRecord(key);
+    // The first write is the (refused) attempt to mark it Down; what lands afterwards is only the check time
+    expect(db.updateMany).toHaveBeenLastCalledWith({ where: { providerId: 'key-1' }, data: { healthCheckedAt: expect.any(Date) } });
+  });
+
+  it('a rejection on a Down key does change why', async () => {
+    probe.mockResolvedValue({ ok: false, message: 'no', reason: 'rejected' });
+    db.updateMany.mockResolvedValueOnce({ count: 0 }).mockResolvedValue({ count: 1 });
+    await checkAndRecord(downNow(hosted, { downReason: 'errors', model: 'm' }));
+    expect(db.updateMany).toHaveBeenLastCalledWith({ where: { providerId: 'key-1' }, data: { healthCheckedAt: expect.any(Date), downReason: 'rejected' } });
   });
 });
 

@@ -153,7 +153,12 @@ export async function checkAndRecord(key: KeyRow): Promise<KeyCheck> {
     await markWorking(key);
     await prisma.botsAiProvider.updateMany({ where: { providerId: key.providerId }, data: { healthCheckedAt: new Date() } });
   } else if (!(await markDown(key, result.reason))) {
-    await prisma.botsAiProvider.updateMany({ where: { providerId: key.providerId }, data: { healthCheckedAt: new Date(), downReason: result.reason } });
+    // Already Down: only a rejection changes why. Anything else keeps the reason it went Down with, because a key that went
+    // Down on failed replies must keep being checked by a chat reply, not just the model list.
+    await prisma.botsAiProvider.updateMany({
+      where: { providerId: key.providerId },
+      data: result.reason === 'rejected' ? { healthCheckedAt: new Date(), downReason: 'rejected' } : { healthCheckedAt: new Date() },
+    });
   }
   return result;
 }
