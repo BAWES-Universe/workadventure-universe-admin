@@ -653,6 +653,9 @@ model BotsAiProvider {
   ownerId           String?  @map("owner_id")
   // The last four characters of the key, kept so the owner can recognise it. The key itself is never sent to a browser.
   apiKeyLast4       String?  @map("api_key_last4") @db.VarChar(4)
+  // The provider Universe AI runs on (#374). At most one server provider has it (set in one transaction); a bot on
+  // Universe AI follows it. Personal keys never have it.
+  isDefault         Boolean  @default(false) @map("is_default")
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")
 

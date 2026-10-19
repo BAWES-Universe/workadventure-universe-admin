@@ -10,7 +10,9 @@ jest.mock('@/lib/db', () => ({
       create: jest.fn(),
       update: jest.fn(),
       findMany: jest.fn(),
+      findFirst: jest.fn(),
     },
+    bot: { groupBy: jest.fn(async () => []) },
   },
 }));
 

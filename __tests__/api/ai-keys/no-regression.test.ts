@@ -17,9 +17,9 @@ import { POST as trackUsage } from '@/app/api/bots/ai-usage/route';
 
 jest.mock('@/lib/db', () => ({
   prisma: {
-    botsAiProvider: { findUnique: jest.fn(), findMany: jest.fn(), update: jest.fn(), delete: jest.fn(), create: jest.fn() },
+    botsAiProvider: { findUnique: jest.fn(), findFirst: jest.fn(), findMany: jest.fn(), update: jest.fn(), delete: jest.fn(), create: jest.fn() },
     botsAiUsage: { findMany: jest.fn(async () => []), create: jest.fn(async () => ({})) },
-    bot: { findMany: jest.fn(async () => []) },
+    bot: { findMany: jest.fn(async () => []), groupBy: jest.fn(async () => []), count: jest.fn(async () => 0) },
   },
 }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => ({ id: 'admin-1', email: 'admin@bawes.net' })) }));
@@ -27,7 +27,7 @@ jest.mock('@/lib/super-admin', () => ({ isSuperAdmin: jest.fn(() => true) }));
 jest.mock('@/lib/service-tokens', () => ({ validateServiceToken: jest.fn(() => true), requireServiceToken: jest.fn() }));
 jest.mock('@/lib/encryption', () => ({ decryptApiKey: jest.fn((value: string) => value.replace('enc:', '')) }));
 
-const provider = prisma.botsAiProvider as unknown as Record<'findUnique' | 'findMany' | 'update' | 'delete' | 'create', jest.Mock>;
+const provider = prisma.botsAiProvider as unknown as Record<'findUnique' | 'findFirst' | 'findMany' | 'update' | 'delete' | 'create', jest.Mock>;
 const usage = prisma.botsAiUsage as unknown as Record<'findMany' | 'create', jest.Mock>;
 
 const deepseek = {
@@ -65,9 +65,19 @@ describe('migration: nothing existing is rewritten', () => {
 describe('the super admin provider pages still work, and never show a personal key', () => {
   it('lists only the server providers, in the same order, with the same fields', async () => {
     provider.findMany.mockResolvedValue([deepseek, lmstudio]);
+    provider.findFirst.mockResolvedValue(deepseek);
     const response = await adminList(req('/api/admin/ai-providers'));
     expect(provider.findMany).toHaveBeenCalledWith({ where: { ownerId: null }, orderBy: { name: 'asc' } });
-    expect(await response.json()).toEqual(JSON.parse(JSON.stringify([deepseek, lmstudio])));
+    // Every field it had is still there, unchanged; Universe AI (#374) only adds isDefault and the two bot counts
+    const rows = await response.json();
+    expect(rows).toEqual(
+      JSON.parse(JSON.stringify([deepseek, lmstudio])).map((row: object, index: number) => ({
+        ...row,
+        isDefault: index === 0,
+        pinnedBots: 0,
+        universeAiBots: 0,
+      }))
+    );
   });
 
   it('shows one server provider as before', async () => {

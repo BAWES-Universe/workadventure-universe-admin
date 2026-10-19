@@ -84,7 +84,7 @@ export const ROUTES: RouteDefinition[] = [
   { pattern: '/admin/bots/mcp-servers', title: 'MCP servers', parent: '/admin/bots' },
   { pattern: '/admin/bots/[id]', title: 'Bot', parent: '/admin/bots' },
   { pattern: '/admin/bots/[id]/mcp-servers', title: 'Bot MCP servers', parent: '/admin/bots/[id]' },
-  { pattern: '/admin/ai-providers', title: 'AI providers', parent: '/admin' },
+  { pattern: '/admin/ai-providers', title: 'Universe AI', parent: '/admin' },
   { pattern: '/admin/ai-providers/new', title: 'New provider', parent: '/admin/ai-providers' },
   { pattern: '/admin/ai-providers/usage', title: 'AI usage', parent: '/admin/ai-providers' },
   { pattern: '/admin/ai-providers/[id]', title: 'Provider', parent: '/admin/ai-providers' },
