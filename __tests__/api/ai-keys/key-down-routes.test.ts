@@ -127,13 +127,21 @@ describe('POST /api/bots/:id/ai-health', () => {
   it('counts a failed reply against the key the bot runs on, never one named in the request', async () => {
     const response = await post({ ok: false, providerId: 'someone-elses-key' });
     expect(response.status).toBe(204);
-    expect(recordReply).toHaveBeenCalledWith('key-1', { ok: false, rejected: false });
+    expect(recordReply).toHaveBeenCalledWith('key-1', { ok: false, rejected: false, status: undefined });
   });
 
   it('passes a rejection and a good reply through', async () => {
     await post({ ok: false, rejected: true });
     await post({ ok: true });
-    expect((recordReply as jest.Mock).mock.calls).toEqual([['key-1', { ok: false, rejected: true }], ['key-1', { ok: true }]]);
+    expect((recordReply as jest.Mock).mock.calls).toEqual([['key-1', { ok: false, rejected: true, status: undefined }], ['key-1', { ok: true }]]);
+  });
+
+  it('passes the provider’s HTTP status along when it is a real one, and drops anything else', async () => {
+    await post({ ok: false, status: 429 });
+    await post({ ok: false, status: 'boom' });
+    await post({ ok: false, status: 99999 });
+    await post({ ok: false, status: 4.5 });
+    expect((recordReply as jest.Mock).mock.calls.map((call) => call[1].status)).toEqual([429, undefined, undefined, undefined]);
   });
 
   it('refuses a body without ok', async () => {
