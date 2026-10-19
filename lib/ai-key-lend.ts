@@ -2,7 +2,7 @@ import { prisma } from '@/lib/db';
 import { has } from '@/lib/permissions';
 import { permissionsForWorld } from '@/lib/roles';
 import { addNotice } from '@/lib/notices';
-import { UNIVERSE_AI_REF } from '@/lib/universe-ai';
+import { UNIVERSE_AI_REF, resolveUniverseAiProvider } from '@/lib/universe-ai';
 
 /**
  * Lending a personal AI key to a universe (#374). A person may lend a key where they have Manage bots: the universe's
@@ -67,7 +67,9 @@ export interface MovedBots {
 
 /**
  * Moves every bot on this key (optionally only in one universe) to Universe AI, and tells each universe's owner once.
- * The owner is not told about their own action. A notice that can't be saved is logged; the bots have moved either way.
+ * The owner is not told about their own action, unless Universe AI has no enabled provider: then the bots can't reply
+ * until a super admin switches one on, and that is never left unsaid. A notice that can't be saved is logged; the bots
+ * have moved either way.
  */
 export async function moveBotsOffKey(
   providerId: string,
@@ -99,8 +101,13 @@ export async function moveBotsOffKey(
   const universes = [...byUniverse.values()];
   const who = options.actor.name || 'Someone';
   const moment = new Date().toISOString();
+  // If this can't be checked the move still stands and the usual notice goes out
+  const universeAiMissing = await resolveUniverseAiProvider().then(
+    (provider) => !provider,
+    () => false,
+  );
   for (const universe of universes) {
-    if (universe.ownerId === options.actor.id) continue;
+    if (universe.ownerId === options.actor.id && !universeAiMissing) continue;
     const names = universe.botNames;
     try {
       await addNotice({
@@ -110,7 +117,9 @@ export async function moveBotsOffKey(
         title: names.length === 1 ? `${names[0]} moved to Universe AI` : `${names.length} bots moved to Universe AI`,
         body: `${who} ${options.why === 'revoked' ? 'revoked their AI key' : `pulled their AI key from ${universe.name}`}. ${
           names.length === 1 ? 'The bot now replies' : `The ${names.length} bots now reply`
-        } on Universe AI.`,
+        } on Universe AI.${
+          universeAiMissing ? ' Universe AI has no provider switched on yet, so they stay quiet until a super admin enables one.' : ''
+        }`,
         href: `/admin/universes/${universe.id}`,
       });
     } catch (error) {

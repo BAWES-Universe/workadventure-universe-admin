@@ -44,6 +44,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     });
     return respond(request, { status: 'lent' }, 200);
   } catch (error) {
+    // The key was revoked, or the universe deleted, between the checks above and the save
+    if ((error as { code?: unknown })?.code === 'P2003') return respond(request, { error: 'Key or universe not found' }, 404);
     console.error('[AiKeys] Lend failed:', error instanceof Error ? error.message : 'unknown');
     return respond(request, { error: 'Internal server error' }, 500);
   }
