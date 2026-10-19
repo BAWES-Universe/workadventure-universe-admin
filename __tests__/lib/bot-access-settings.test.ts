@@ -243,7 +243,7 @@ describe('saving a rule', () => {
   });
 
   it('the creator always uses their own bot, so only Manage this bot can be set for them (#433)', async () => {
-    for (const body of [{ chat: 'no' }, { dm: 'no' }, { summon: 'yes' }, { chat: 'default', manage: 'yes' }] as const) {
+    for (const body of [{ chat: 'no' }, { dm: 'no' }, { summon: 'yes' }, { chat: 'default', dm: 'no', manage: 'yes' }] as const) {
       await expect(saveBotRule(place, { userId: 'u-maker', ...body })).rejects.toMatchObject({
         status: 400,
         message: expect.stringContaining('Only "Manage this bot"'),
@@ -252,6 +252,8 @@ describe('saving a rule', () => {
     expect(state.rows).toHaveLength(0);
     await expect(saveBotRule(place, { userId: 'u-maker', manage: 'yes' })).resolves.toMatchObject({ manage: 'yes', chat: 'default' });
     expect(state.rows).toHaveLength(1);
+    // a whole row sent back with the unchanged Default values is fine
+    await expect(saveBotRule(place, { userId: 'u-maker', chat: 'default', dm: 'default', summon: 'default', manage: 'no' })).resolves.toMatchObject({ manage: 'no', chat: 'default' });
   });
 
   it('stops at the most rules a bot can have', async () => {
