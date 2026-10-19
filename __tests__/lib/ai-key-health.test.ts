@@ -251,6 +251,22 @@ describe('checkKey and checkAndRecord', () => {
       expect(chat).not.toHaveBeenCalled();
     });
 
+    it.each([['a Working key whose model is off the list', null], ['a Down key', 'errors']])('%s is not failed by a probe the provider refused as a bad request (400, 413, 422)', async (_name, downReason) => {
+      probe.mockResolvedValue({ ok: true, models: ['something-else'] });
+      chat.mockResolvedValue({ ok: false, reason: 'request', message: 'DeepSeek lists its models, but a chat call to deepseek-v4-flash failed (400). Check the model.' });
+      expect(await checkKey(downNow(withModel(hosted), { downReason }))).toEqual({ ok: true });
+    });
+
+    it('a key whose provider lists its models to anyone (Vercel AI Gateway) is asked to chat on every check', async () => {
+      const vercel: KeyRow = { ...hosted, settings: { kind: 'vercel' }, endpoint: 'https://ai-gateway.vercel.sh/v1', model: 'openai/gpt-4o' };
+      probe.mockResolvedValue({ ok: true, models: ['openai/gpt-4o'] });
+      chat.mockResolvedValueOnce({ ok: false, reason: 'rejected', message: 'Vercel AI Gateway didn’t accept this key.' });
+      expect(await checkKey(vercel)).toMatchObject({ ok: false, reason: 'rejected' });
+      chat.mockResolvedValueOnce({ ok: true });
+      expect(await checkKey(vercel)).toEqual({ ok: true });
+      expect(chat).toHaveBeenCalledTimes(2);
+    });
+
     it('a model that has dropped off the list is asked directly, and the answer decides', async () => {
       probe.mockResolvedValue({ ok: true, models: ['something-else'] });
       chat.mockResolvedValueOnce({ ok: true });
