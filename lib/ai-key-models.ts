@@ -228,13 +228,18 @@ export async function probeChat(input: KeyTargetInput & { apiKey?: unknown; mode
     if (error instanceof AddressError) return { ok: false, message: ADDRESS_PROBLEM_TEXT[error.problem], reason: error.problem === 'unresolved' ? 'unreachable' : 'other' };
     return { ok: false, message: 'That address can’t be used.', reason: 'other' };
   }
-  const result = await safeRequest(checked, {
-    method: 'POST',
-    headers: authHeaders(info, apiKey),
-    body: { model: input.model, messages: [{ role: 'user', content: 'Say ok.' }], stream: false, [info.tokenLimitField ?? 'max_tokens']: 16 },
-    timeoutMs: 30_000,
-    maxBytes: 200_000,
-  });
+  const ask = (extra: Record<string, unknown>) =>
+    safeRequest(checked, {
+      method: 'POST',
+      headers: authHeaders(info, apiKey),
+      body: { model: input.model, messages: [{ role: 'user', content: 'Say ok.' }], stream: false, [info.tokenLimitField ?? 'max_tokens']: 16, ...extra },
+      timeoutMs: 30_000,
+      maxBytes: 200_000,
+    });
+  let result = await ask({});
+  // Alibaba's thinking models (open-source Qwen3 among them) refuse a non-streaming reply unless thinking is off. The bot server
+  // handles that the same way when it asks for one-shot replies; the check must not call such a model broken.
+  if (result.ok && result.status === 400 && /enable_thinking/i.test(result.body)) result = await ask({ enable_thinking: false });
   if (!result.ok) return { ok: false, reason: 'unreachable', message: `${info.label} didn’t answer. Try again in a moment.` };
   if (result.status >= 200 && result.status < 300) return { ok: true };
   if (result.status === 401 || result.status === 403) return { ok: false, reason: 'rejected', message: `${info.label} didn’t accept this key.` };
