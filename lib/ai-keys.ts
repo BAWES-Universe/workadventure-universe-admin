@@ -1,33 +1,13 @@
 import { prisma } from '@/lib/db';
+import { kindInfo, type AiKeyKind } from '@/lib/ai-key-kinds';
+
+export type { AiKeyKind };
 
 /**
  * Personal AI keys (#374). A key is a BotsAiProvider row with an `ownerId`; the rows with none are the server's own
  * providers, which these functions never touch. Kinds are what a person picks (LM Studio, DeepSeek, ...); each one
  * is stored as a provider `type` the bot server already speaks, with its kind kept in `settings.kind`.
  */
-
-export type AiKeyKind = 'lmstudio' | 'ollama' | 'openrouter' | 'gemini' | 'nim' | 'openai' | 'deepseek';
-
-export interface AiKeyKindInfo {
-  kind: AiKeyKind;
-  label: string;
-  /** On your own computer, or hosted with an API key. */
-  group: 'own-computer' | 'hosted';
-}
-
-export const AI_KEY_KINDS: AiKeyKindInfo[] = [
-  { kind: 'lmstudio', label: 'LM Studio', group: 'own-computer' },
-  { kind: 'ollama', label: 'Ollama or llama.cpp', group: 'own-computer' },
-  { kind: 'openrouter', label: 'OpenRouter', group: 'hosted' },
-  { kind: 'gemini', label: 'Gemini', group: 'hosted' },
-  { kind: 'nim', label: 'NVIDIA NIM', group: 'hosted' },
-  { kind: 'openai', label: 'OpenAI', group: 'hosted' },
-  { kind: 'deepseek', label: 'DeepSeek', group: 'hosted' },
-];
-
-export function kindInfo(kind: unknown): AiKeyKindInfo | null {
-  return AI_KEY_KINDS.find((entry) => entry.kind === kind) ?? null;
-}
 
 /** What the AI keys page shows for one key. Never holds the key, encrypted or not. */
 export interface AiKeySummary {

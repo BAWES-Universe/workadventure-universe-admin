@@ -7,7 +7,7 @@ import fs from 'fs';
 import path from 'path';
 import { NextRequest } from 'next/server';
 import { prisma } from '@/lib/db';
-import { GET as adminList } from '@/app/api/admin/ai-providers/route';
+import { GET as adminList, POST as adminCreate } from '@/app/api/admin/ai-providers/route';
 import { GET as adminGet, DELETE as adminDelete } from '@/app/api/admin/ai-providers/[id]/route';
 import { POST as adminTest } from '@/app/api/admin/ai-providers/[id]/test/route';
 import { GET as adminUsage } from '@/app/api/admin/ai-providers/usage/route';
@@ -17,7 +17,7 @@ import { POST as trackUsage } from '@/app/api/bots/ai-usage/route';
 
 jest.mock('@/lib/db', () => ({
   prisma: {
-    botsAiProvider: { findUnique: jest.fn(), findMany: jest.fn(), update: jest.fn(), delete: jest.fn() },
+    botsAiProvider: { findUnique: jest.fn(), findMany: jest.fn(), update: jest.fn(), delete: jest.fn(), create: jest.fn() },
     botsAiUsage: { findMany: jest.fn(async () => []), create: jest.fn(async () => ({})) },
     bot: { findMany: jest.fn(async () => []) },
   },
@@ -27,7 +27,7 @@ jest.mock('@/lib/super-admin', () => ({ isSuperAdmin: jest.fn(() => true) }));
 jest.mock('@/lib/service-tokens', () => ({ validateServiceToken: jest.fn(() => true), requireServiceToken: jest.fn() }));
 jest.mock('@/lib/encryption', () => ({ decryptApiKey: jest.fn((value: string) => value.replace('enc:', '')) }));
 
-const provider = prisma.botsAiProvider as unknown as Record<'findUnique' | 'findMany' | 'update' | 'delete', jest.Mock>;
+const provider = prisma.botsAiProvider as unknown as Record<'findUnique' | 'findMany' | 'update' | 'delete' | 'create', jest.Mock>;
 const usage = prisma.botsAiUsage as unknown as Record<'findMany' | 'create', jest.Mock>;
 
 const deepseek = {
@@ -92,6 +92,19 @@ describe('the super admin provider pages still work, and never show a personal k
   it('keeps the usage page to the server providers', async () => {
     await adminUsage(req('/api/admin/ai-providers/usage'));
     expect(usage.findMany.mock.calls[0][0].where.provider).toEqual({ ownerId: null });
+  });
+});
+
+describe('the New provider form of the super admin is unchanged', () => {
+  it('still creates a server provider, and a body that names an owner cannot make it someone’s key', async () => {
+    provider.findUnique.mockResolvedValue(null);
+    provider.create.mockResolvedValue({ providerId: 'x' });
+    const response = await adminCreate(req('/api/admin/ai-providers', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ providerId: 'x', name: 'X', type: 'openai', endpoint: 'https://api.openai.com/v1', model: 'gpt-4o', ownerId: 'user-a' }),
+    }));
+    expect(response.status).toBe(201);
+    expect(provider.create.mock.calls[0][0].data).not.toHaveProperty('ownerId');
   });
 });
 

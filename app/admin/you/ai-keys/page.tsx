@@ -1,7 +1,8 @@
 'use client';
 
 import { useState } from 'react';
-import { KeyRound, Trash2 } from 'lucide-react';
+import Link from 'next/link';
+import { KeyRound, Plus, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/components/ui/toast';
 import { authenticatedFetch } from '@/lib/client-auth';
@@ -59,6 +60,12 @@ export default function AiKeysPage() {
         <p className="max-w-[60ch] text-[15px] text-muted-foreground">
           Your own AI, hosted or on your own computer. Bots you make can run on it.
         </p>
+        <Button asChild className="h-11 w-fit px-5">
+          <Link href="/admin/you/ai-keys/new">
+            <Plus aria-hidden="true" />
+            Add a key
+          </Link>
+        </Button>
       </PageHeader>
 
       {result.status === 'loading' && <LoadingRows label="your AI keys" rows={2} />}
