@@ -431,6 +431,11 @@ describe('reading one bot\'s data', () => {
     db.bot.findUnique.mockImplementation(async (args: MockArgs) =>
       ({ 'bot-mine': { roomId: 'room-mine' }, 'bot-other': { roomId: 'room-other' } } as Record<string, { roomId: string }>)[args.where.id] ?? null,
     );
+    // a bot found for the privacy check (#435) also brings its universe; neither hides conversations here
+    db.bot.findUnique.mockImplementation(async (args: MockArgs) => {
+      const roomId = ({ 'bot-mine': 'room-mine', 'bot-other': 'room-other' } as Record<string, string>)[args.where.id];
+      return roomId ? { roomId, hideConversations: null, room: { world: { universe: { hideBotConversations: false } } } } : null;
+    });
     (canManageBots as jest.Mock).mockImplementation(async (userId: string, roomId: string) =>
       userId === 'u-alice' && roomId === 'room-mine',
     );

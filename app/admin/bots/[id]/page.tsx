@@ -16,6 +16,8 @@ import {
 import { AlertCircle, ChevronDown, Server } from 'lucide-react';
 import BotTexturePicker from '@/components/bot-texture-picker';
 import { BotToolCallSwitch } from '@/components/bot-tool-call-switch';
+import { BotPrivacyCard, type BotPrivacyState } from '@/components/bot-privacy-card';
+import { BotConversationsPrivate, BotMemoryPrivate, type BotPrivacyDetails } from '@/components/bot-private-notice';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
@@ -214,6 +216,12 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
   const [conversationsLoading, setConversationsLoading] = useState(false);
   const [emotions, setEmotions] = useState<EmotionData[]>([]);
   const [emotionsLoading, setEmotionsLoading] = useState(false);
+  // Hide bot conversations (#435). Until this has loaded the tabs that would show text wait, and a failure says so:
+  // they never fall back to showing it.
+  const [privacy, setPrivacy] = useState<(BotPrivacyState & BotPrivacyDetails) | null>(null);
+  const [privacyFailed, setPrivacyFailed] = useState(false);
+  const privacyLoaded = privacy !== null;
+  const hidden = privacy?.hidden === true;
   // A tab whose data didn't load says so, rather than looking empty.
   const [tabErrors, setTabErrors] = useState<{ metrics?: boolean; conversations?: boolean; emotions?: boolean }>({});
   const [conversationPage, setConversationPage] = useState(1);
@@ -305,6 +313,31 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
     }
   }, [botId, authChecked, fetchBot]);
 
+  const fetchPrivacy = useCallback(async () => {
+    if (!botId) return;
+    try {
+      const { authenticatedFetch } = await import('@/lib/client-auth');
+      const response = await authenticatedFetch(`/api/bots/${botId}/privacy`);
+      if (response.status === 404) {
+        // A deleted bot: its leftovers are shown as they always were.
+        setPrivacy({ universeHides: false, choice: 'follow', hidden: false, people: 0, lastUpdated: null, replies: 0 });
+        setPrivacyFailed(false);
+        return;
+      }
+      if (!response.ok) throw new Error('privacy');
+      setPrivacy(await response.json());
+      setPrivacyFailed(false);
+    } catch {
+      setPrivacyFailed(true);
+    }
+  }, [botId]);
+
+  useEffect(() => {
+    if (botId && authChecked) {
+      fetchPrivacy();
+    }
+  }, [botId, authChecked, fetchPrivacy]);
+
   // Fetch metrics when metrics tab is active
   useEffect(() => {
     if (activeTab === 'metrics' && botId && !metricsLoading) {
@@ -314,18 +347,27 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
 
   // Fetch conversations when conversations tab is active
   useEffect(() => {
-    if (activeTab === 'conversations' && botId && !conversationsLoading) {
+    if (activeTab === 'conversations' && botId && !conversationsLoading && privacyLoaded && !hidden) {
       fetchConversations();
       fetchConversationStats();
     }
-  }, [activeTab, botId, conversationPage]);
+  }, [activeTab, botId, conversationPage, privacyLoaded, hidden]);
 
   // Fetch emotions when emotions tab is active
   useEffect(() => {
-    if (activeTab === 'emotions' && botId && !emotionsLoading && emotions.length === 0) {
+    if (activeTab === 'emotions' && botId && !emotionsLoading && emotions.length === 0 && privacyLoaded && !hidden) {
       fetchEmotions();
     }
-  }, [activeTab, botId]);
+  }, [activeTab, botId, privacyLoaded, hidden]);
+
+  // Turning Hide bot conversations on takes what this page already loaded off the screen too.
+  useEffect(() => {
+    if (hidden) {
+      setConversations([]);
+      setConversationStats(null);
+      setEmotions([]);
+    }
+  }, [hidden]);
 
   async function fetchMetrics() {
     if (!botId) return;
@@ -678,6 +720,8 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
                       behaviorConfig: { ...current.behaviorConfig, showToolCalls },
                     } : current)}
                   />
+                  {privacy && <BotPrivacyCard key={bot.id} botId={bot.id} privacy={privacy} onChanged={fetchPrivacy} />}
+                  {privacyFailed && !privacy && <LoadError label="the Hide bot conversations setting" retry={fetchPrivacy} />}
                 </div>
               </section>
 
@@ -907,6 +951,12 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
         </TabsContent>
 
         <TabsContent value="conversations" className="mt-6 grid min-w-0 gap-6">
+          {!privacy ? (
+            privacyFailed ? <LoadError label="conversations" retry={fetchPrivacy} /> : <LoadingRows label="conversations" rows={4} />
+          ) : hidden ? (
+            <BotConversationsPrivate replies={privacy.replies} />
+          ) : (
+          <>
           {conversationStats && (
             <Figures>
               <Figure value={conversationStats.totalConversations} label="conversations" />
@@ -982,10 +1032,16 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
                 )}
             </div>
           )}
+          </>
+          )}
         </TabsContent>
 
         <TabsContent value="emotions" className="mt-6 grid min-w-0 gap-6">
-          {emotionsLoading ? (
+          {!privacy ? (
+            privacyFailed ? <LoadError label="emotions" retry={fetchPrivacy} /> : <LoadingRows label="emotions" rows={2} />
+          ) : hidden ? (
+            <BotMemoryPrivate botId={botId} details={privacy} onForgotten={fetchPrivacy} />
+          ) : emotionsLoading ? (
             <LoadingRows label="emotions" rows={2} />
           ) : tabErrors.emotions ? (
             <LoadError label="emotions" retry={fetchEmotions} />
