@@ -27,9 +27,10 @@ export type KeyAuth = 'bearer';
 /**
  * How a key is proven good when the model list can't. `models`: the model list needs the key, so a list that answers
  * proves it. `key-info`: the list is public (OpenRouter), so the provider's key-info addresses are asked too, and only a
- * clear 401/403 from one counts.
+ * clear 401/403 from one counts. `chat`: the list is public and has no key-info address (Vercel AI Gateway), so only a tiny chat
+ * reply proves the key: every health check asks for one.
  */
-export type KeyCheck = { type: 'models' } | { type: 'key-info'; paths: string[] };
+export type KeyCheck = { type: 'models' } | { type: 'key-info'; paths: string[] } | { type: 'chat' };
 /** How a model id is written for a chat call: as listed, or without the `models/` the list puts in front (Gemini). */
 export type ModelIdRule = 'as-is' | 'strip-models-prefix';
 /** Where the Add a key page shows it: by name, under More providers, or not at all. */
@@ -137,7 +138,7 @@ const NAMED_KINDS: AiKeyKindInfo[] = [
   define({
     kind: 'deepseek', label: 'DeepSeek', group: 'hosted', providerType: 'openai', address: 'none', apiKey: 'required',
     benefit: 'Low prices.', base: 'https://api.deepseek.com',
-    // Only deepseek-flash takes pictures (its docs: the Vision guide); V4 Pro does not. So a new key starts on it, with Vision.
+    // Only deepseek-flash takes images (its docs: the Vision guide); V4 Pro does not. So a new key starts on it, with Vision.
     suggestedModel: 'deepseek-flash',
     knownFacts: { 'deepseek-flash': { vision: true }, 'deepseek-v4-pro': { vision: false } },
     steps: [{ text: 'On platform.deepseek.com, open API keys.' }],
@@ -228,7 +229,7 @@ const NAMED_KINDS: AiKeyKindInfo[] = [
     steps: [{ text: 'On huggingface.co, open Settings, then Access Tokens, and create a token that can make inference calls.' }],
   }),
   define({
-    kind: 'vercel', label: 'Vercel AI Gateway', group: 'hosted', providerType: 'openai', address: 'none', apiKey: 'required',
+    kind: 'vercel', label: 'Vercel AI Gateway', group: 'hosted', providerType: 'openai', address: 'none', apiKey: 'required', keyCheck: { type: 'chat' },
     benefit: 'Models from many providers behind one key.', base: 'https://ai-gateway.vercel.sh/v1', docs: 'https://vercel.com/docs/ai-gateway',
     steps: [{ text: 'In your Vercel dashboard, open AI Gateway, then API Keys, and create one.' }],
   }),

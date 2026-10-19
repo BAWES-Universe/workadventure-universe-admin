@@ -192,7 +192,7 @@ describe('probeChat', () => {
 
   it('does not ask again for any other 400', async () => {
     post.mockResolvedValue(answer(400, { error: { message: 'bad request' } }));
-    expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'm' })).toMatchObject({ ok: false, reason: 'other' });
+    expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'm' })).toMatchObject({ ok: false, reason: 'request' });
     expect(post).toHaveBeenCalledTimes(1);
   });
 
@@ -201,7 +201,10 @@ describe('probeChat', () => {
     [answer(429, {}), 'busy'],
     [answer(404, {}), 'gone'],
     [answer(402, {}), 'credit'],
-    [answer(400, {}), 'other'],
+    [answer(400, {}), 'request'],
+    [answer(413, {}), 'request'],
+    [answer(422, {}), 'request'],
+    [answer(418, {}), 'other'],
     [answer(503, {}), 'unreachable'],
     [{ ok: false, reason: 'timeout' }, 'unreachable'],
   ])('says why a chat call failed for %j', async (reply, reason) => {
