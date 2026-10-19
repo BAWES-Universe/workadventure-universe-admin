@@ -43,7 +43,7 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     if (changesWhere) {
       if (!allowKeyAttempt(user.id)) return respond(request, { error: 'Too many tries. Wait a minute and try again.' }, 429);
       const edited = await editSavedKey(user.id, id, input);
-      if (!edited.ok) return respond(request, { error: edited.message }, edited.status);
+      if (!edited.ok) return respond(request, { error: edited.message, ...(edited.code ? { code: edited.code } : {}) }, edited.status);
     }
     if (isIfDown(input.ifDown)) {
       const result = await prisma.botsAiProvider.updateMany({ where: { providerId: id, ownerId: user.id }, data: { ifDown: input.ifDown } });

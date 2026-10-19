@@ -17,7 +17,7 @@ export interface KeyEditInput {
 
 export type KeyEditResult =
   | { ok: true; model: string; endpoint: string }
-  | { ok: false; status: 400 | 404 | 500; message: string };
+  | { ok: false; status: 400 | 404 | 500; message: string; code?: 'model-missing' };
 
 const KEY_SELECT = {
   providerId: true,
@@ -99,7 +99,12 @@ export async function editSavedKey(ownerId: string, id: string, input: KeyEditIn
     return { ok: false, status: 400, message: 'That model isn’t on the list. Load models again and pick one.' };
   }
   const chat = await probeChat({ kind: info.kind, address, apiKey, model });
-  if (!chat.ok) return { ok: false, status: 400, message: chat.message };
+  if (!chat.ok) {
+    // The new address can't give the saved model (not on its list, or it says it has none): the person picks one it has
+    // in the same step, instead of being stuck with a model that was only on the old address.
+    const missing = typedAddress && typedModel === null && (chat.reason === 'gone' || (chat.reason === 'other' && !models.models.includes(model)));
+    return { ok: false, status: 400, message: missing ? `That address doesn’t have ${model}. Pick a model it has.` : chat.message, ...(missing ? { code: 'model-missing' as const } : {}) };
+  }
 
   // Same row, same id: lends and the bots running on it stay exactly as they are
   await prisma.botsAiProvider.updateMany({

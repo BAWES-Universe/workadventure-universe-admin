@@ -99,6 +99,35 @@ describe('editSavedKey', () => {
     expect(db.botsAiProvider.updateMany).not.toHaveBeenCalled();
   });
 
+  it('tells the person to pick a model when the new address does not have the saved one', async () => {
+    (probeChat as jest.Mock).mockResolvedValue({ ok: false, reason: 'gone', message: 'My LM Studio no longer has the model qwen3-8b.' });
+    expect(await editSavedKey('maker', 'key-1', { address: 'https://new.trycloudflare.com' })).toEqual({
+      ok: false, status: 400, code: 'model-missing', message: 'That address doesn’t have qwen3-8b. Pick a model it has.',
+    });
+    // Another kind of failure on a listed model is not a missing model
+    (probeChat as jest.Mock).mockResolvedValue({ ok: false, reason: 'unreachable', message: 'It didn’t answer.' });
+    expect(await editSavedKey('maker', 'key-1', { address: 'https://new.trycloudflare.com' })).toEqual({ ok: false, status: 400, message: 'It didn’t answer.' });
+    // A model that is not listed and gets a non-answer is a missing model too
+    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['other-model'] });
+    (probeChat as jest.Mock).mockResolvedValue({ ok: false, reason: 'other', message: 'It answered with an error (400).' });
+    expect(await editSavedKey('maker', 'key-1', { address: 'https://new.trycloudflare.com' })).toMatchObject({ ok: false, code: 'model-missing' });
+    expect(db.botsAiProvider.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('saves the new address and a model picked on it in one step', async () => {
+    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['llama-3.1-8b'] });
+    const result = await editSavedKey('maker', 'key-1', { address: 'https://new.trycloudflare.com', model: 'llama-3.1-8b' });
+    expect(result).toEqual({ ok: true, model: 'llama-3.1-8b', endpoint: 'https://new.trycloudflare.com' });
+    expect(db.botsAiProvider.updateMany.mock.calls[0][0].data).toMatchObject({ endpoint: 'https://new.trycloudflare.com', model: 'llama-3.1-8b' });
+  });
+
+  it('answers the route with the code so the page can offer the models', async () => {
+    (probeChat as jest.Mock).mockResolvedValue({ ok: false, reason: 'gone', message: 'x' });
+    const response = await patch('key-1', { address: 'https://new.trycloudflare.com' });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: 'That address doesn’t have qwen3-8b. Pick a model it has.', code: 'model-missing' });
+  });
+
   it('turns a Down key Working once the new address answers', async () => {
     db.botsAiProvider.findFirst.mockResolvedValue({ ...lmStudio, downSince: new Date('2026-10-19T12:00:00Z') });
     await editSavedKey('maker', 'key-1', { address: 'https://new.trycloudflare.com' });
