@@ -99,6 +99,7 @@ describe('GET /api/bots/:id/ai-credentials with a key that may be down', () => {
   it('does not ask about a key that may not run the bot: that bot moves to Universe AI as before', async () => {
     db.botsAiProvider.findUnique.mockResolvedValue(down());
     (checkKeyForBot as jest.Mock).mockResolvedValue({ ok: false, reason: 'not-lent' });
+    db.bot.updateMany.mockResolvedValue({ count: 1 });
     const body = await (await ask()).json();
     expect(recheckIfDue).not.toHaveBeenCalled();
     expect(body).toMatchObject({ source: 'universe-ai', movedFromKey: 'key-1' });
