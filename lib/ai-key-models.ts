@@ -240,7 +240,8 @@ export async function probeChat(input: KeyTargetInput & { apiKey?: unknown; mode
       method: 'POST',
       headers: authHeaders(info, apiKey),
       body: { model: input.model, messages: [{ role: 'user', content: 'Say ok.' }], stream: false, [info.tokenLimitField ?? 'max_tokens']: 16, ...extra },
-      timeoutMs: 30_000,
+      // A server on your own computer may load its model on the first call, which can take well over 30 seconds
+      timeoutMs: info.group === 'own-computer' ? 120_000 : 30_000,
       maxBytes: 200_000,
     });
   let result = await ask({});
