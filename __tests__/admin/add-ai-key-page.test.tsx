@@ -165,3 +165,20 @@ describe('Add a key: more providers, regions and search', () => {
     expect(screen.queryByRole('radiogroup', { name: 'Region' })).toBeNull();
   });
 });
+
+describe('Add a key: a model that cannot use bot tools', () => {
+  it('warns once such a model is picked, and not for one the provider said nothing about', async () => {
+    fetchMock.mockImplementation(() => json({ ok: true, models: ['big-model', 'tiny-chat'], facts: { 'tiny-chat': { tools: false } } }));
+    render(<AddAiKeyPage />);
+    fireEvent.click(screen.getByRole('radio', { name: /^LM Studio/ }));
+    fireEvent.change(screen.getByLabelText('Address'), { target: { value: 'https://lm.example.com' } });
+    fireEvent.click(screen.getByRole('button', { name: /Load models/ }));
+    await screen.findByText(/It answered/);
+    fireEvent.click(screen.getByRole('radio', { name: 'big-model' }));
+    expect(screen.queryByTestId('no-tools-warning')).toBeNull();
+    fireEvent.click(screen.getByRole('radio', { name: 'tiny-chat' }));
+    expect(screen.getByTestId('no-tools-warning').textContent).toBe('This model can’t use bot tools. Bots on it can still chat.');
+    // The warning does not stop Add key
+    expect((addButton() as HTMLButtonElement).disabled).toBe(false);
+  });
+});

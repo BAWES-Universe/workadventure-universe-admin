@@ -1,6 +1,7 @@
 import { prisma } from '@/lib/db';
 import { kindInfo, type AiKeyKind } from '@/lib/ai-key-kinds';
 import { isIfDown, type DownReason } from '@/lib/ai-key-health';
+import type { ModelFacts } from '@/lib/ai-key-models';
 
 export type { AiKeyKind };
 
@@ -17,6 +18,8 @@ export interface AiKeySummary {
   kind: AiKeyKind | null;
   kindLabel: string;
   model: string | null;
+  /** What the provider said about the model when the key was added or its model changed; empty when it said nothing. */
+  caps: ModelFacts;
   /** The host of an own-computer key's address, e.g. "lm.example.com"; null for a hosted key. */
   address: string | null;
   /** The last four characters of a hosted key. */
@@ -34,6 +37,18 @@ export interface AiKeySummary {
 }
 
 const asDownReason = (value: string | null): DownReason => (value === 'rejected' || value === 'errors' || value === 'credit' || value === 'model' ? value : 'stopped');
+
+/** The model facts saved on a key (`settings.caps`): only the ones that are well-formed. */
+function capsOf(settings: unknown): ModelFacts {
+  const caps = typeof settings === 'object' && settings !== null ? (settings as { caps?: unknown }).caps : null;
+  if (typeof caps !== 'object' || caps === null) return {};
+  const { tools, images, context } = caps as Record<string, unknown>;
+  return {
+    ...(typeof tools === 'boolean' ? { tools } : {}),
+    ...(typeof images === 'boolean' ? { images } : {}),
+    ...(typeof context === 'number' && context > 0 ? { context } : {}),
+  };
+}
 
 function hostOf(endpoint: string | null): string | null {
   if (!endpoint) return null;
@@ -93,6 +108,7 @@ export async function listAiKeys(ownerId: string): Promise<AiKeySummary[]> {
       kind: info?.kind ?? null,
       kindLabel: info?.label ?? 'AI',
       model: row.model,
+      caps: capsOf(row.settings),
       address: info?.group === 'own-computer' ? hostOf(row.endpoint) : null,
       last4: row.apiKeyLast4,
       month: { replies: Number(sum?.apiCalls ?? 0), tokens: Number(sum?.tokensUsed ?? 0) },

@@ -1,5 +1,5 @@
 import { AddressError, checkPublicHttpsUrl, safeGet, safeRequest } from '@/lib/ai-key-fetch';
-import { allowKeyAttempt, cleanModelIds, keyTarget, loadModels, probeChat, probeModels } from '@/lib/ai-key-models';
+import { allowKeyAttempt, cleanModelIds, factsOf, keyTarget, loadModels, probeChat, probeModels } from '@/lib/ai-key-models';
 
 jest.mock('@/lib/ai-key-fetch', () => ({
   ...jest.requireActual('@/lib/ai-key-fetch'),
@@ -59,7 +59,7 @@ describe('loadModels', () => {
   it('lists the models of a server that answers, sending the key as a bearer token', async () => {
     get.mockResolvedValue(answer(200, { data: [{ id: 'qwen3-8b' }, { id: 'llama-3.1-8b-instruct' }] }));
     const result = await loadModels({ kind: 'lmstudio', address: 'https://lm.example.com', apiKey: 'k-1234' });
-    expect(result).toEqual({ ok: true, models: ['llama-3.1-8b-instruct', 'qwen3-8b'] });
+    expect(result).toEqual({ ok: true, models: ['llama-3.1-8b-instruct', 'qwen3-8b'], facts: {} });
     expect(check).toHaveBeenCalledWith('https://lm.example.com/v1/models');
     expect(get).toHaveBeenCalledWith(checkedOk, { headers: { Authorization: 'Bearer k-1234' }, maxBytes: 5_000_000 });
   });
@@ -85,7 +85,7 @@ describe('loadModels', () => {
     });
     it('accepts a good key', async () => {
       get.mockResolvedValueOnce(list).mockResolvedValueOnce(answer(200, { data: {} }));
-      expect(await loadModels({ kind: 'openrouter', apiKey: 'sk-or-good' })).toEqual({ ok: true, models: ['openai/gpt-4o'] });
+      expect(await loadModels({ kind: 'openrouter', apiKey: 'sk-or-good' })).toEqual({ ok: true, models: ['openai/gpt-4o'], facts: {} });
     });
     it('tries the older address when the first is not there, and never blocks a key on a hiccup', async () => {
       get.mockResolvedValueOnce(list).mockResolvedValueOnce(answer(404, {})).mockResolvedValueOnce(answer(403, {}));
@@ -215,8 +215,8 @@ describe('allowKeyAttempt', () => {
 
 describe('providers added to the catalog', () => {
   it('reads a model list that is a bare array (Together AI), as well as { data: [...] }', async () => {
-    get.mockResolvedValue(answer(200, [{ id: 'meta-llama/Llama-3.3-70B-Instruct-Turbo', type: 'chat' }, { id: 'Qwen/Qwen3-235B' }]));
-    expect(await loadModels({ kind: 'together', apiKey: 'sk-1' })).toEqual({ ok: true, models: ['meta-llama/Llama-3.3-70B-Instruct-Turbo', 'Qwen/Qwen3-235B'] });
+    get.mockResolvedValue(answer(200, [{ id: 'meta-llama/Llama-3.3-70B-Instruct-Turbo', type: 'chat', context_length: 131072 }, { id: 'Qwen/Qwen3-235B' }]));
+    expect(await loadModels({ kind: 'together', apiKey: 'sk-1' })).toEqual({ ok: true, models: ['meta-llama/Llama-3.3-70B-Instruct-Turbo', 'Qwen/Qwen3-235B'], facts: { 'meta-llama/Llama-3.3-70B-Instruct-Turbo': { context: 131072 } } });
     expect(check).toHaveBeenCalledWith('https://api.together.xyz/v1/models');
   });
 
@@ -237,5 +237,35 @@ describe('providers added to the catalog', () => {
     post.mockResolvedValue(answer(200, {}));
     expect(await probeChat({ kind: 'kimi', region: 'global', apiKey: 'sk-1', model: 'kimi-k2' })).toEqual({ ok: true });
     expect(check).toHaveBeenLastCalledWith('https://api.moonshot.ai/v1/chat/completions');
+  });
+});
+
+describe('model facts', () => {
+  it('reads OpenRouter’s parameters, input kinds and context', () => {
+    expect(factsOf({ id: 'a/b', context_length: 200000, architecture: { input_modalities: ['text', 'image'] }, supported_parameters: ['temperature', 'tools'] })).toEqual({ tools: true, images: true, context: 200000 });
+    expect(factsOf({ id: 'a/c', architecture: { input_modalities: ['text'] }, supported_parameters: ['temperature'] })).toEqual({ tools: false, images: false });
+  });
+
+  it('reads Mistral’s capabilities and Groq’s context window', () => {
+    expect(factsOf({ id: 'mistral-large', capabilities: { function_calling: true, vision: false }, max_context_length: 131072 })).toEqual({ tools: true, images: false, context: 131072 });
+    expect(factsOf({ id: 'llama', context_window: 8192 })).toEqual({ context: 8192 });
+  });
+
+  it('leaves out what a provider does not say: unknown is never "no"', () => {
+    expect(factsOf({ id: 'qwen3-8b' })).toEqual({});
+    expect(factsOf({ id: 'x', supported_parameters: [], architecture: { input_modalities: [] }, context_length: 0 })).toEqual({});
+    expect(factsOf('nope')).toEqual({});
+    expect(factsOf(null)).toEqual({});
+  });
+
+  it('comes back with the list, for the models that are on it, under the id the bot server will use', async () => {
+    get.mockResolvedValue(answer(200, { data: [
+      { id: 'models/gemini-2.5-flash', context_length: 1048576 },
+      { id: 'text-embedding-004', context_length: 2048 },
+      { id: 'plain-model' },
+    ] }));
+    const result = await probeModels({ kind: 'gemini', apiKey: 'sk-1' });
+    expect(result).toMatchObject({ ok: true, models: ['gemini-2.5-flash', 'plain-model'] });
+    expect(result.ok && result.facts).toEqual({ 'gemini-2.5-flash': { context: 1048576 } });
   });
 });

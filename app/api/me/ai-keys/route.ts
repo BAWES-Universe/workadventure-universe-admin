@@ -4,7 +4,7 @@ import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { listAiKeys } from '@/lib/ai-keys';
 import { MAX_AI_KEYS } from '@/lib/ai-key-kinds';
-import { KEY_CHARACTERS, KEY_LOOKS_WRONG, allowKeyAttempt, keyTarget, loadModels, probeChat } from '@/lib/ai-key-models';
+import { KEY_CHARACTERS, KEY_LOOKS_WRONG, allowKeyAttempt, keyTarget, loadModels, modelCaps, probeChat } from '@/lib/ai-key-models';
 import { encryptApiKey } from '@/lib/encryption';
 import { meOriginAllowed, meRespond } from '@/lib/me-route';
 
@@ -70,6 +70,8 @@ export async function POST(request: NextRequest) {
     if (!checked.models.includes(model)) {
       return respond(request, { error: 'That model isn’t on the list. Load models again and pick one.' }, 400);
     }
+    // What the provider said about this model, from the list it just gave (never from the request)
+    const caps = modelCaps(checked.facts, model);
     const chat = await probeChat({ kind: info.kind, address: input.address, region, apiKey, model });
     if (!chat.ok) return respond(request, { error: chat.message }, 400);
     const row = await prisma.botsAiProvider.create({
@@ -85,8 +87,9 @@ export async function POST(request: NextRequest) {
         temperature: 0.7,
         maxTokens: 500,
         supportsStreaming: true,
-        supportsVision: null,
-        settings: { kind: info.kind, ...(region ? { region } : {}) },
+        // The provider's word on pictures when it gave one; otherwise left to the bot server's own guess from the name
+        supportsVision: caps.images ?? null,
+        settings: { kind: info.kind, ...(region ? { region } : {}), ...(Object.keys(caps).length > 0 ? { caps } : {}) },
         tested: true,
         testedAt: new Date(),
         ownerId: user.id,

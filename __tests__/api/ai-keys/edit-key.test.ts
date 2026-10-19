@@ -43,7 +43,7 @@ beforeEach(() => {
   (allowKeyAttempt as jest.Mock).mockReturnValue(true);
   db.botsAiProvider.findFirst.mockResolvedValue(lmStudio);
   db.botsAiProvider.updateMany.mockResolvedValue({ count: 1 });
-  (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['qwen3-8b', 'llama-3.1-8b'] });
+  (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['qwen3-8b', 'llama-3.1-8b'], facts: {} });
   (probeChat as jest.Mock).mockResolvedValue({ ok: true });
 });
 
@@ -58,18 +58,47 @@ describe('editSavedKey', () => {
     expect(call.where).toEqual({ providerId: 'key-1', ownerId: 'maker' });
     expect(call.data).toMatchObject({ endpoint: 'https://new.trycloudflare.com', model: 'qwen3-8b', tested: true });
     // Lends are other rows keyed on the provider; the edit only ever updates the one provider row
-    expect(Object.keys(call.data).sort()).toEqual(['endpoint', 'healthCheckedAt', 'model', 'tested', 'testedAt']);
+    // The model is on the list, so what the provider says about it is refreshed too; nothing else changes
+    expect(Object.keys(call.data).sort()).toEqual(['endpoint', 'healthCheckedAt', 'model', 'settings', 'supportsVision', 'tested', 'testedAt']);
     expect(db.bot.updateMany).not.toHaveBeenCalled();
   });
 
   it('changes the model, checks it is on the list, and asks the saved key for a reply from it', async () => {
     db.botsAiProvider.findFirst.mockResolvedValue(openai);
-    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4o-mini', 'gpt-4.1'] });
+    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4o-mini', 'gpt-4.1'], facts: {} });
     const result = await editSavedKey('maker', 'key-2', { model: 'gpt-4.1' });
     expect(result).toMatchObject({ ok: true, model: 'gpt-4.1' });
     expect(probeModels).toHaveBeenCalledWith(expect.objectContaining({ apiKey: 'sk-secret' }));
     expect(probeChat).toHaveBeenCalledWith(expect.objectContaining({ apiKey: 'sk-secret', model: 'gpt-4.1' }));
     expect(db.botsAiProvider.updateMany.mock.calls[0][0].data.model).toBe('gpt-4.1');
+  });
+
+  it('saves what the provider says about the new model, keeping the key’s kind and region', async () => {
+    db.botsAiProvider.findFirst.mockResolvedValue({ ...openai, endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1', settings: { kind: 'qwen', region: 'china', caps: { tools: true } } });
+    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4o-mini', 'qwen-vl'], facts: { 'qwen-vl': { images: true, tools: false, context: 8192 } } });
+    await editSavedKey('maker', 'key-2', { model: 'qwen-vl' });
+    expect(db.botsAiProvider.updateMany.mock.calls[0][0].data).toMatchObject({
+      supportsVision: true,
+      settings: { kind: 'qwen', region: 'china', caps: { images: true, tools: false, context: 8192 } },
+    });
+  });
+
+  it('drops the old facts when the provider says nothing about the new model', async () => {
+    db.botsAiProvider.findFirst.mockResolvedValue({ ...openai, settings: { kind: 'openai', caps: { tools: false } } });
+    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4o-mini', 'gpt-4.1'], facts: {} });
+    await editSavedKey('maker', 'key-2', { model: 'gpt-4.1' });
+    const data = db.botsAiProvider.updateMany.mock.calls[0][0].data;
+    expect(data.settings).toEqual({ kind: 'openai' });
+    expect(data.supportsVision).toBeNull();
+  });
+
+  it('leaves the facts alone when the saved model is one the list misses', async () => {
+    db.botsAiProvider.findFirst.mockResolvedValue({ ...lmStudio, settings: { kind: 'lmstudio', caps: { tools: true } } });
+    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['other-model'], facts: {} });
+    await editSavedKey('maker', 'key-1', { address: 'https://new.trycloudflare.com' });
+    const data = db.botsAiProvider.updateMany.mock.calls[0][0].data;
+    expect(data.settings).toBeUndefined();
+    expect(data.supportsVision).toBeUndefined();
   });
 
   it('refuses a model that is not on the list, and saves nothing', async () => {
@@ -80,7 +109,7 @@ describe('editSavedKey', () => {
   });
 
   it('keeps the saved model when only the address changes, even if the list misses it (the chat reply decides)', async () => {
-    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['other-model'] });
+    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['other-model'], facts: {} });
     const result = await editSavedKey('maker', 'key-1', { address: 'https://new.trycloudflare.com' });
     expect(result).toMatchObject({ ok: true, model: 'qwen3-8b' });
   });
@@ -129,7 +158,7 @@ describe('editSavedKey', () => {
 
   it('still changes the model of a NIM key, at its own address', async () => {
     db.botsAiProvider.findFirst.mockResolvedValue({ ...openai, settings: { kind: 'nim' }, endpoint: 'https://integrate.api.nvidia.com/v1' });
-    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4o-mini', 'llama-3.3'] });
+    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4o-mini', 'llama-3.3'], facts: {} });
     expect(await editSavedKey('maker', 'key-2', { model: 'llama-3.3' })).toMatchObject({ ok: true, model: 'llama-3.3' });
   });
 
@@ -193,10 +222,10 @@ describe('PATCH /api/me/ai-keys/:id', () => {
 describe('POST /api/me/ai-keys/:id/models', () => {
   it('lists models with the saved key, never returning the key', async () => {
     db.botsAiProvider.findFirst.mockResolvedValue(openai);
-    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4.1'] });
+    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4.1'], facts: { 'gpt-4.1': { tools: true } } });
     const res = await models('key-2', {});
     const body = await res.json();
-    expect(body).toEqual({ ok: true, models: ['gpt-4.1'] });
+    expect(body).toEqual({ ok: true, models: ['gpt-4.1'], facts: { 'gpt-4.1': { tools: true } } });
     expect(JSON.stringify(body)).not.toContain('sk-secret');
     expect(probeModels).toHaveBeenCalledWith(expect.objectContaining({ apiKey: 'sk-secret', address: 'https://api.openai.com/v1' }));
   });

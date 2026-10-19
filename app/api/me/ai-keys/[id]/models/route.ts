@@ -27,7 +27,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   if (!allowKeyAttempt(user.id)) return respond(request, { ok: false, message: 'Too many tries. Wait a minute and try again.' }, 429);
   try {
     const result = await listModelsForSavedKey(user.id, id, { address });
-    if (result.ok) return respond(request, { ok: true, models: result.models });
+    if (result.ok) return respond(request, { ok: true, models: result.models, facts: result.facts });
     if (result.status === 404) return respond(request, { error: result.message }, 404);
     return respond(request, { ok: false, message: result.message });
   } catch (error) {

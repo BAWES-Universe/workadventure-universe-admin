@@ -1,7 +1,7 @@
 import { prisma } from '@/lib/db';
 import { decryptApiKey } from '@/lib/encryption';
 import { kindInfo } from '@/lib/ai-key-kinds';
-import { cleanModelId, keyTarget, probeChat, probeModels } from '@/lib/ai-key-models';
+import { cleanModelId, keyTarget, modelCaps, probeChat, probeModels, type ModelFactsById } from '@/lib/ai-key-models';
 import { markWorking } from '@/lib/ai-key-health';
 
 /**
@@ -41,6 +41,8 @@ function canMoveAddress(info: { group: string }): boolean {
   return info.group === 'own-computer';
 }
 
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+
 /** The address to try: the one typed, or the one saved. A hosted kind with a fixed address takes none. */
 function addressToTry(typed: unknown, saved: string | null): string | undefined {
   return typeof typed === 'string' && typed.trim() ? typed : (saved ?? undefined);
@@ -61,7 +63,7 @@ export async function listModelsForSavedKey(
   ownerId: string,
   id: string,
   input: { address?: unknown },
-): Promise<{ ok: true; models: string[] } | { ok: false; status: 400 | 404 | 500; message: string }> {
+): Promise<{ ok: true; models: string[]; facts: ModelFactsById } | { ok: false; status: 400 | 404 | 500; message: string }> {
   const key = await loadOwnKey(ownerId, id);
   if (!key) return { ok: false, status: 404, message: 'Key not found' };
   const info = kindInfo((key.settings as { kind?: unknown } | null)?.kind);
@@ -70,7 +72,7 @@ export async function listModelsForSavedKey(
     return { ok: false, status: 400, message: `${info.label} can’t be moved to another address.` };
   }
   const result = await probeModels({ kind: info.kind, address: addressToTry(input.address, key.endpoint), apiKey: savedApiKey(key) });
-  return result.ok ? { ok: true, models: result.models } : { ok: false, status: 400, message: result.message };
+  return result.ok ? { ok: true, models: result.models, facts: result.facts } : { ok: false, status: 400, message: result.message };
 }
 
 export async function editSavedKey(ownerId: string, id: string, input: KeyEditInput): Promise<KeyEditResult> {
@@ -101,10 +103,26 @@ export async function editSavedKey(ownerId: string, id: string, input: KeyEditIn
   const chat = await probeChat({ kind: info.kind, address, apiKey, model });
   if (!chat.ok) return { ok: false, status: 400, message: chat.message };
 
+  // What the provider says about the model now in use. A saved model the list misses keeps what it had.
+  const onList = models.models.includes(model);
+  const caps = modelCaps(models.facts, model);
+  const settings = { ...(isRecord(key.settings) ? key.settings : {}) };
+  if (onList) {
+    if (Object.keys(caps).length > 0) settings.caps = caps;
+    else delete settings.caps;
+  }
+
   // Same row, same id: lends and the bots running on it stay exactly as they are
   await prisma.botsAiProvider.updateMany({
     where: { providerId: id, ownerId },
-    data: { endpoint: target.target.endpoint, model, tested: true, testedAt: new Date(), healthCheckedAt: new Date() },
+    data: {
+      endpoint: target.target.endpoint,
+      model,
+      tested: true,
+      testedAt: new Date(),
+      healthCheckedAt: new Date(),
+      ...(onList ? { settings, supportsVision: caps.images ?? null } : {}),
+    },
   });
   // It just answered a real chat call, so a key that was Down is Working again
   if (key.downSince) await markWorking({ providerId: key.providerId, ownerId });

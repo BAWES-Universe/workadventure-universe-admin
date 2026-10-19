@@ -241,6 +241,11 @@ export default function AiKeysPage() {
             </div>
             <p className="text-sm text-muted-foreground [overflow-wrap:anywhere]">{describe(key)}</p>
           </header>
+          {key.caps?.tools === false && (
+            <p className="text-sm text-[#F5C451]" data-testid="ai-key-no-tools">
+              {NO_TOOLS}
+            </p>
+          )}
           {key.status === 'down' && (
             <p className="text-[15px] leading-snug text-muted-foreground" data-testid="ai-key-down-text">
               {downText(key)}
@@ -562,7 +567,9 @@ function LendSheet({
 const SEARCH_FROM = 8;
 const SHOWN = 30;
 
-type ModelList = { status: 'loading' } | { status: 'ready'; models: string[] } | { status: 'failed'; message: string };
+type ModelList = { status: 'loading' } | { status: 'ready'; models: string[]; facts: Record<string, { tools?: boolean }> } | { status: 'failed'; message: string };
+
+const NO_TOOLS = 'This model can’t use bot tools. Bots on it can still chat.';
 
 /**
  * Change a saved key's address or model (#374). The key stays the same key, so it stays lent and its bots stay on it:
@@ -602,9 +609,9 @@ function EditKeySheet({
       body: JSON.stringify({}),
     })
       .then(async (response) => {
-        const data = (await response.json().catch(() => ({}))) as { ok?: boolean; models?: string[]; message?: string };
+        const data = (await response.json().catch(() => ({}))) as { ok?: boolean; models?: string[]; facts?: Record<string, { tools?: boolean }>; message?: string };
         if (cancelled) return;
-        if (data.ok && Array.isArray(data.models)) setModels({ status: 'ready', models: data.models });
+        if (data.ok && Array.isArray(data.models)) setModels({ status: 'ready', models: data.models, facts: data.facts ?? {} });
         else setModels({ status: 'failed', message: data.message || 'Couldn’t load the models. Try again.' });
       })
       .catch(() => {
@@ -701,6 +708,11 @@ function EditKeySheet({
                 ))}
                 {visible.length === 0 && <p className="text-[13px] text-muted-foreground">No model matches that.</p>}
               </div>
+              {model && models.facts[model]?.tools === false && (
+                <p className="text-sm text-[#F5C451]" data-testid="no-tools-warning">
+                  {NO_TOOLS}
+                </p>
+              )}
             </>
           )}
         </div>
