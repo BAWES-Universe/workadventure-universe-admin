@@ -186,7 +186,17 @@ describe('checkKey and checkAndRecord', () => {
       expect(await checkKey(erred(hosted))).toEqual({ ok: false, busy: true, message: 'busy' });
     });
 
-    it('is the only kind of Down that needs the chat call: a Working key, or one Down for another reason, is checked by its model list as today', async () => {
+    it('also needs the chat reply when replies were rejected, so a key that may list models but not chat does not flap back', async () => {
+      probe.mockResolvedValue({ ok: true, models: ['m'] });
+      chat.mockResolvedValue({ ok: false, reason: 'rejected', message: 'DeepSeek didn’t accept this key.' });
+      const rejected = downNow(hosted, { downReason: 'rejected', model: 'deepseek-v4-flash' });
+      expect(await checkKey(rejected)).toMatchObject({ ok: false, reason: 'rejected' });
+      expect(chat).toHaveBeenCalledTimes(1);
+      chat.mockResolvedValue({ ok: true });
+      expect(await checkKey(rejected)).toEqual({ ok: true });
+    });
+
+    it('is the only kind of Down (with rejected replies) that needs the chat call: a Working key, or one Down for another reason, is checked by its model list as today', async () => {
       probe.mockResolvedValue({ ok: true, models: ['m'] });
       expect(await checkKey(hosted)).toEqual({ ok: true });
       expect(await checkKey(downNow(hosted, { downReason: 'stopped', model: 'm' }))).toEqual({ ok: true });
