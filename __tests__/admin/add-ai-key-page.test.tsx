@@ -226,6 +226,8 @@ describe('Add a key: More providers', () => {
     fireEvent.click(addButton());
     await waitFor(() => expect(push).toHaveBeenCalledWith('/admin/you/ai-keys'));
     expect(JSON.parse(fetchMock.mock.calls.at(-1)![1].body)).toMatchObject({ kind: 'nebius', apiKey: 'sk-1', model: 'm-1' });
+  });
+});
 
 describe('Add a key: DeepSeek starts on the model that has Vision', () => {
   it('picks deepseek-flash, shows Vision next to it, and adds the key on it', async () => {
