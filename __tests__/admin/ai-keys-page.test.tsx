@@ -340,6 +340,32 @@ describe('Change address and Change model', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   });
 
+  it('offers the models the new address has when it does not have the saved one, and saves both together', async () => {
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url.endsWith('/models')) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, models: ['mistral-7b', 'llama-3.1-8b'] }) });
+      if (init?.method === 'PATCH') {
+        const body = JSON.parse(String(init.body));
+        return body.model
+          ? Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: 'saved' }) })
+          : Promise.resolve({ ok: false, status: 400, json: () => Promise.resolve({ error: 'That address doesn’t have qwen3-8b. Pick a model it has.', code: 'model-missing' }) });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ keys: [lmStudio] }) });
+    });
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Change address' }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText('New address'), { target: { value: 'https://new.trycloudflare.com' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+    expect((await within(dialog).findByRole('alert')).textContent).toMatch(/doesn’t have qwen3-8b/);
+    fireEvent.click(await within(dialog).findByRole('radio', { name: 'mistral-7b' }));
+    // The models were asked of the NEW address
+    expect(fetchMock.mock.calls.some(([url, init]) => String(url).endsWith('/models') && init?.body === JSON.stringify({ address: 'https://new.trycloudflare.com' }))).toBe(true);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(calls('PATCH')).toHaveLength(2));
+    expect(JSON.parse(calls('PATCH')[1][1].body)).toEqual({ address: 'https://new.trycloudflare.com', model: 'mistral-7b' });
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  });
+
   it('keeps the sheet open and shows the reason when the new address does not answer', async () => {
     serveEdit([lmStudio], { patchStatus: 400, patch: { error: 'It didn’t answer. Is the server running and the tunnel up?' } });
     render(<AiKeysPage />);
