@@ -136,9 +136,10 @@ export const AI_KEY_KINDS: AiKeyKindInfo[] = [
   define({
     kind: 'deepseek', label: 'DeepSeek', group: 'hosted', providerType: 'openai', address: 'none', apiKey: 'required',
     benefit: 'Low prices.', base: 'https://api.deepseek.com',
-    // Only deepseek-v4-flash takes images (its docs: the Vision guide); V4 Pro does not. So a new key starts on it, with Vision.
+    // Plain V4 Flash and V4 Pro take text only; the image model is the separate deepseek-v4-flash-vision-exp (experimental).
+    // A new key starts on the stable text model, and the image one shows Vision so it can be picked on purpose.
     suggestedModel: 'deepseek-v4-flash',
-    knownFacts: { 'deepseek-v4-flash': { vision: true }, 'deepseek-v4-pro': { vision: false } },
+    knownFacts: { 'deepseek-v4-flash': { vision: false }, 'deepseek-v4-flash-vision-exp': { vision: true }, 'deepseek-v4-pro': { vision: false } },
     steps: [{ text: 'On platform.deepseek.com, open API keys.' }],
   }),
   define({
