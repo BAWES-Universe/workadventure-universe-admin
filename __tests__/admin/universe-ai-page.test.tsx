@@ -63,7 +63,7 @@ describe('Universe AI page', () => {
     const third = row('OpenAI vision');
     expect(within(third).queryByRole('button', { name: /default/i })).toBeNull();
     expect(within(third).getByRole('button', { name: 'Enable OpenAI vision' })).toBeTruthy();
-    expect(within(third).getByText(/Describes pictures/)).toBeTruthy();
+    expect(within(third).getByText(/Describes images/)).toBeTruthy();
   });
 
   it('asks before changing the Default, says who moves, and sends only isDefault', async () => {
