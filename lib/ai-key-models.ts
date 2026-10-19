@@ -1,4 +1,4 @@
-import { ADDRESS_PROBLEM_TEXT, AddressError, checkPublicHttpsUrl, safeGet } from '@/lib/ai-key-fetch';
+import { ADDRESS_PROBLEM_TEXT, AddressError, checkPublicHttpsUrl, safeGet, safeRequest } from '@/lib/ai-key-fetch';
 import { kindInfo, type AiKeyKind, type AiKeyKindInfo } from '@/lib/ai-key-kinds';
 
 /**
@@ -155,6 +155,41 @@ export async function probeModels(input: KeyTargetInput & { apiKey?: unknown }):
     };
   }
   return { ok: true, models };
+}
+
+/**
+ * Asks the key's provider for one tiny reply from the saved model. A model list can answer while chat does not (the model
+ * was removed, chat credit ran out), so this is what proves a key that went Down on failed replies works again.
+ */
+export async function probeChat(input: KeyTargetInput & { apiKey?: unknown; model: string }): Promise<{ ok: true } | { ok: false; message: string; reason: ProbeFailure }> {
+  const resolved = keyTarget(input);
+  if (!resolved.ok) return { ...resolved, reason: 'other' };
+  const { info, modelsUrl } = resolved.target;
+  const apiKey = typeof input.apiKey === 'string' ? input.apiKey.trim() : '';
+  if (apiKey && !KEY_CHARACTERS.test(apiKey)) return { ok: false, message: KEY_LOOKS_WRONG, reason: 'other' };
+  let checked;
+  try {
+    checked = await checkPublicHttpsUrl(modelsUrl.replace(/\/models$/, '/chat/completions'));
+  } catch (error) {
+    if (error instanceof AddressError) return { ok: false, message: ADDRESS_PROBLEM_TEXT[error.problem], reason: error.problem === 'unresolved' ? 'unreachable' : 'other' };
+    return { ok: false, message: 'That address can’t be used.', reason: 'other' };
+  }
+  const result = await safeRequest(checked, {
+    method: 'POST',
+    headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+    body: { model: input.model, messages: [{ role: 'user', content: 'Say ok.' }], stream: false, [info.tokenLimitField ?? 'max_tokens']: 16 },
+    timeoutMs: 30_000,
+    maxBytes: 200_000,
+  });
+  if (!result.ok) return { ok: false, reason: 'unreachable', message: `${info.label} didn’t answer. Try again in a moment.` };
+  if (result.status >= 200 && result.status < 300) return { ok: true };
+  if (result.status === 401 || result.status === 403) return { ok: false, reason: 'rejected', message: `${info.label} didn’t accept this key.` };
+  if (result.status === 429) return { ok: false, reason: 'busy', message: `${info.label} is busy right now. Try again in a moment.` };
+  return {
+    ok: false,
+    reason: result.status >= 500 ? 'unreachable' : 'other',
+    message: `${info.label} lists its models, but a chat call to ${input.model} failed (${result.status}). Check the model.`,
+  };
 }
 
 export async function loadModels(input: KeyTargetInput & { apiKey?: unknown }): Promise<LoadModelsResult> {

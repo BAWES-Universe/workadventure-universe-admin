@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events';
 import https from 'https';
 import { lookup } from 'dns/promises';
-import { AddressError, checkPublicHttpsUrl, isPublicAddress, parsePublicHttpsUrl, safeGet } from '@/lib/ai-key-fetch';
+import { AddressError, checkPublicHttpsUrl, isPublicAddress, parsePublicHttpsUrl, safeGet, safeRequest } from '@/lib/ai-key-fetch';
 
 jest.mock('dns/promises', () => ({ lookup: jest.fn() }));
 const lookupMock = lookup as unknown as jest.Mock;
@@ -106,13 +106,15 @@ describe('safeGet', () => {
   type RequestOptions = { hostname: string; servername: string; lookup: (host: string, options: object, callback: (...args: unknown[]) => void) => void; path: string; headers: Record<string, string> };
   let requestSpy: jest.SpyInstance;
   let seen: RequestOptions | null;
+  let sent: unknown;
 
-  function fakeRequest(respond: (res: EventEmitter & { statusCode?: number }, req: EventEmitter & { destroy: jest.Mock; end: () => void }) => void) {
+  function fakeRequest(respond: (res: EventEmitter & { statusCode?: number }, req: EventEmitter & { destroy: jest.Mock; end: (body?: unknown) => void }) => void) {
     requestSpy = jest.spyOn(https, 'request').mockImplementation(((options: RequestOptions, callback: (res: unknown) => void) => {
       seen = options;
       const req = Object.assign(new EventEmitter(), { destroy: jest.fn(), end: () => respond(Object.assign(new EventEmitter(), {}) as never, req) });
       const res = Object.assign(new EventEmitter(), { statusCode: 200 });
-      req.end = () => {
+      req.end = (body?: unknown) => {
+        sent = body;
         callback(res);
         respond(res, req);
       };
@@ -147,6 +149,21 @@ describe('safeGet', () => {
     const all = jest.fn();
     seen!.lookup('lm.example.com', { all: true }, all);
     expect(all).toHaveBeenCalledWith(null, [{ address: '93.184.216.34', family: 4 }]);
+  });
+
+  it('sends a JSON body with a POST to the checked address, with its length, and a GET sends none', async () => {
+    fakeRequest((res) => {
+      res.emit('data', Buffer.from('{}'));
+      res.emit('end');
+    });
+    await safeRequest(checked, { method: 'POST', body: { model: 'm' }, headers: { Authorization: 'Bearer x' } });
+    expect((requestSpy.mock.calls[0][0] as { method: string }).method).toBe('POST');
+    expect(seen?.headers).toMatchObject({ 'Content-Type': 'application/json', 'Content-Length': '13', Authorization: 'Bearer x' });
+    expect(String(sent)).toBe('{"model":"m"}');
+    requestSpy.mockClear();
+    await safeGet(checked);
+    expect((requestSpy.mock.calls[0][0] as { method: string }).method).toBe('GET');
+    expect(sent).toBeUndefined();
   });
 
   it('hands a redirect back as it is and follows nothing', async () => {

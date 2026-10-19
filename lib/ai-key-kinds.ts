@@ -29,6 +29,8 @@ export interface AiKeyKindInfo {
   apiKey: 'required' | 'optional';
   /** Hosted kinds: where the bot server sends chat calls, and the list of models is read from `{base}/models`. */
   base?: string;
+  /** What this provider calls the reply-length limit on a chat call (OpenAI's newer models refuse `max_tokens`). Default `max_tokens`. */
+  tokenLimitField?: 'max_tokens' | 'max_completion_tokens';
 }
 
 const TUNNEL = 'Make it reachable from the web. Run:';
@@ -72,7 +74,7 @@ export const AI_KEY_KINDS: AiKeyKindInfo[] = [
   },
   {
     kind: 'openai', label: 'OpenAI', group: 'hosted', providerType: 'openai', address: 'none', apiKey: 'required',
-    benefit: 'The GPT models.', base: 'https://api.openai.com/v1',
+    benefit: 'The GPT models.', base: 'https://api.openai.com/v1', tokenLimitField: 'max_completion_tokens',
     steps: [{ text: 'On platform.openai.com, open API keys.' }],
   },
   {

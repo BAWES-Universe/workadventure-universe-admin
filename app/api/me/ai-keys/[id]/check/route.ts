@@ -26,7 +26,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   try {
     const key = await prisma.botsAiProvider.findFirst({
       where: { providerId: id, ownerId: user.id },
-      select: { providerId: true, name: true, ownerId: true, endpoint: true, apiKeyEncrypted: true, settings: true, downSince: true, ifDown: true, healthCheckedAt: true },
+      select: { providerId: true, name: true, ownerId: true, endpoint: true, apiKeyEncrypted: true, settings: true, downSince: true, ifDown: true, healthCheckedAt: true, model: true, downReason: true },
     });
     if (!key) return respond(request, { error: 'Key not found' }, 404);
     if (!allowKeyAttempt(user.id)) return respond(request, { error: 'Too many tries. Wait a minute and try again.' }, 429);

@@ -1,7 +1,7 @@
 import { prisma } from '@/lib/db';
 import { decryptApiKey } from '@/lib/encryption';
 import { kindInfo } from '@/lib/ai-key-kinds';
-import { probeModels } from '@/lib/ai-key-models';
+import { probeChat, probeModels, type ProbeFailure } from '@/lib/ai-key-models';
 import { addNotice, clearNotices } from '@/lib/notices';
 
 /**
@@ -36,6 +36,9 @@ export interface KeyRow {
   downSince: Date | null;
   ifDown: string;
   healthCheckedAt: Date | null;
+  /** The model it was added with, and why it is Down: a key that went Down on failed replies is only trusted again once a chat call works. */
+  model?: string | null;
+  downReason?: string | null;
 }
 
 /** Writes the notice for the person who owns the key; the own-computer wording says conversations leave the computer. */
@@ -93,9 +96,12 @@ export async function markWorking(key: Pick<KeyRow, 'providerId' | 'ownerId'>, n
   return true;
 }
 
-/** Asks the key's provider for its model list with the saved key: the same check Add key runs. */
 export type KeyCheck = { ok: true } | { ok: false; reason: DownReason; message: string } | { ok: false; busy: true; message: string };
 
+/**
+ * Asks the key's provider for its model list with the saved key: the same check Add key runs. A key that went Down on
+ * failed replies must also get one tiny chat reply from its saved model, because a model list can answer while chat does not.
+ */
 export async function checkKey(key: KeyRow): Promise<KeyCheck> {
   const info = kindInfo((key.settings as { kind?: unknown } | null)?.kind);
   if (!info) return { ok: false, reason: 'stopped', message: 'This key’s type is not known.' };
@@ -105,8 +111,17 @@ export async function checkKey(key: KeyRow): Promise<KeyCheck> {
   } catch {
     return { ok: false, reason: 'rejected', message: 'The saved key can’t be read. Add it again.' };
   }
-  const result = await probeModels({ kind: info.kind, address: key.endpoint ?? undefined, apiKey });
-  if (result.ok) return { ok: true };
+  const address = key.endpoint ?? undefined;
+  const models = await probeModels({ kind: info.kind, address, apiKey });
+  if (!models.ok) return failed(models);
+  if (key.downSince && key.downReason === 'errors' && key.model) {
+    const chat = await probeChat({ kind: info.kind, address, apiKey, model: key.model });
+    if (!chat.ok) return failed(chat);
+  }
+  return { ok: true };
+}
+
+function failed(result: { message: string; reason: ProbeFailure }): KeyCheck {
   // The provider answered that it is busy: that says nothing about the key, so it is left as it is
   if (result.reason === 'busy') return { ok: false, busy: true, message: result.message };
   return { ok: false, reason: result.reason === 'rejected' ? 'rejected' : 'stopped', message: result.message };
@@ -122,6 +137,8 @@ const KEY_SELECT = {
   downSince: true,
   ifDown: true,
   healthCheckedAt: true,
+  model: true,
+  downReason: true,
 } as const;
 
 /** Checks the key now and updates its state: Working if it answers, Down if not. Used by Check now and the 5-minute recheck. */

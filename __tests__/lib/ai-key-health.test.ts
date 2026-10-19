@@ -1,17 +1,18 @@
 import { prisma } from '@/lib/db';
 import { addNotice, clearNotices } from '@/lib/notices';
-import { probeModels } from '@/lib/ai-key-models';
+import { probeChat, probeModels } from '@/lib/ai-key-models';
 import { checkAndRecord, checkKey, markDown, markWorking, recheckIfDue, recordReply, RECHECK_MS, type KeyRow } from '@/lib/ai-key-health';
 
 jest.mock('@/lib/db', () => ({ prisma: { botsAiProvider: { findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn(), updateMany: jest.fn() } } }));
 jest.mock('@/lib/notices', () => ({ addNotice: jest.fn(), clearNotices: jest.fn() }));
-jest.mock('@/lib/ai-key-models', () => ({ probeModels: jest.fn() }));
+jest.mock('@/lib/ai-key-models', () => ({ probeModels: jest.fn(), probeChat: jest.fn() }));
 jest.mock('@/lib/encryption', () => ({ decryptApiKey: jest.fn((value: string) => value.replace('enc:', '')) }));
 
 const db = prisma.botsAiProvider as unknown as Record<'findFirst' | 'findUnique' | 'update' | 'updateMany', jest.Mock>;
 const notice = addNotice as jest.Mock;
 const clear = clearNotices as jest.Mock;
 const probe = probeModels as jest.Mock;
+const chat = probeChat as jest.Mock;
 
 const hosted: KeyRow = {
   providerId: 'key-1', name: 'My DeepSeek', ownerId: 'owner', endpoint: 'https://api.deepseek.com', apiKeyEncrypted: 'enc:sk-secret',
@@ -21,7 +22,7 @@ const own: KeyRow = { ...hosted, providerId: 'key-2', name: 'My LM Studio', endp
 const downNow = (key: KeyRow, over: Partial<KeyRow> = {}): KeyRow => ({ ...key, downSince: new Date('2026-10-19T12:00:00Z'), ...over });
 
 beforeEach(() => {
-  for (const fn of [...Object.values(db), notice, clear, probe]) fn.mockReset();
+  for (const fn of [...Object.values(db), notice, clear, probe, chat]) fn.mockReset();
   db.updateMany.mockResolvedValue({ count: 1 });
   notice.mockResolvedValue(true);
 });
@@ -160,6 +161,37 @@ describe('checkKey and checkAndRecord', () => {
     expect(clear).not.toHaveBeenCalled();
     expect(db.updateMany).toHaveBeenCalledTimes(1);
     expect(db.updateMany).toHaveBeenCalledWith({ where: { providerId: 'key-2' }, data: { healthCheckedAt: expect.any(Date) } });
+  });
+
+  describe('a key that went Down on failed replies', () => {
+    const erred = (key: KeyRow) => downNow(key, { downReason: 'errors', model: 'deepseek-v4-flash' });
+
+    it('is trusted again only when a chat reply from its saved model works, not on the model list alone', async () => {
+      probe.mockResolvedValue({ ok: true, models: ['m'] });
+      chat.mockResolvedValue({ ok: false, reason: 'other', message: 'DeepSeek lists its models, but a chat call to deepseek-v4-flash failed (404). Check the model.' });
+      expect(await checkAndRecord(erred(hosted))).toMatchObject({ ok: false, reason: 'stopped' });
+      expect(chat).toHaveBeenCalledWith({ kind: 'deepseek', address: 'https://api.deepseek.com', apiKey: 'sk-secret', model: 'deepseek-v4-flash' });
+      expect(clear).not.toHaveBeenCalled();
+    });
+
+    it('comes back when chat works', async () => {
+      probe.mockResolvedValue({ ok: true, models: ['m'] });
+      chat.mockResolvedValue({ ok: true });
+      expect(await checkKey(erred(hosted))).toEqual({ ok: true });
+    });
+
+    it('stays as it is while chat is only busy', async () => {
+      probe.mockResolvedValue({ ok: true, models: ['m'] });
+      chat.mockResolvedValue({ ok: false, reason: 'busy', message: 'busy' });
+      expect(await checkKey(erred(hosted))).toEqual({ ok: false, busy: true, message: 'busy' });
+    });
+
+    it('is the only kind of Down that needs the chat call: a Working key, or one Down for another reason, is checked by its model list as today', async () => {
+      probe.mockResolvedValue({ ok: true, models: ['m'] });
+      expect(await checkKey(hosted)).toEqual({ ok: true });
+      expect(await checkKey(downNow(hosted, { downReason: 'stopped', model: 'm' }))).toEqual({ ok: true });
+      expect(chat).not.toHaveBeenCalled();
+    });
   });
 
   it('a failed check marks a Working key Down', async () => {
