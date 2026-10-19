@@ -201,13 +201,16 @@ function isUniqueViolation(error: unknown): boolean {
 
 /**
  * Who a manager of this bot may name in a rule: people in this universe (and its owner and the bot's creator), and
- * anyone who can be found by name, which is every signed-in person who has not switched it off. Nobody else, so adding
+ * anyone who can be found by name, which is every signed-in person who has not switched it off, and people already on
+ * this bot's list (the manager can see them, so they must stay editable). Nobody else, so adding
  * a person by uuid or email can never tell a manager whether some other account exists, or what its name is.
  */
 function nameableInRules(place: BotPlace): Prisma.UserWhereInput {
   return {
     OR: [
       { id: place.universeOwnerId },
+      // someone already on this bot's list stays editable, whatever they changed since
+      { botAccessRules: { some: { botId: place.id } } },
       ...(place.createdById ? [{ id: place.createdById }] : []),
       { universeMemberships: { some: { universeId: place.universeId } } },
       { worldMemberships: { some: { world: { universeId: place.universeId } } } },

@@ -45,6 +45,8 @@ function matches(user: Person, where: Record<string, unknown>): boolean {
         return user[key] === value;
       case 'isGuest':
         return (user.isGuest ?? false) === value;
+      case 'botAccessRules':
+        return state.rows.some((row) => row.userId === user.id && row.botId === (value as { some: { botId: string } }).some.botId);
       case 'universeMemberships':
         return (user.universeIds ?? []).includes((value as { some: { universeId: string } }).some.universeId);
       case 'worldMemberships':
@@ -317,6 +319,14 @@ describe('saving a rule', () => {
     expect(new Set(answers.map((answer) => JSON.stringify(answer))).size).toBe(1);
     expect(answers[0]).toEqual({ status: 404, message: 'That person was not found' });
     expect(state.rows).toHaveLength(0);
+  });
+
+  it('someone already on the list stays editable after they leave or hide (Sentry finding on #462)', async () => {
+    state.rows.push({ id: 'rule-old', botId: 'bot-1', roleId: null, userId: 'u-hidden', allow: BIT.chat, deny: BigInt(0) });
+    await expect(saveBotRule(place, { userId: 'u-hidden', dm: 'no' })).resolves.toMatchObject({ userId: 'u-hidden', chat: 'yes', dm: 'no' });
+    // another bot's list does not open the door
+    state.rows[0].botId = 'bot-2';
+    await expect(saveBotRule(place, { userId: 'u-hidden', dm: 'no' })).rejects.toMatchObject({ status: 404 });
   });
 
   it('a hidden super admin cannot be told apart from an account that is not there', async () => {
