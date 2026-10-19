@@ -110,7 +110,7 @@ export type SafeGetResult =
 export function safeGet(checked: CheckedAddress, options: SafeGetOptions = {}): Promise<SafeGetResult> {
   const { timeoutMs = 10_000, maxBytes = 1_000_000, headers = {} } = options;
   const { url, address, family } = checked;
-  return new Promise((resolve) => {
+  return new Promise<SafeGetResult>((resolve) => {
     let settled = false;
     const finish = (result: SafeGetResult) => {
       if (settled) return;
@@ -154,5 +154,5 @@ export function safeGet(checked: CheckedAddress, options: SafeGetOptions = {}): 
     }, timeoutMs);
     request.on('error', () => finish({ ok: false, reason: 'unreachable' }));
     request.end();
-  });
+  }).catch(() => ({ ok: false as const, reason: 'unreachable' as const }));
 }

@@ -52,6 +52,15 @@ describe('POST /api/me/ai-keys', () => {
     expect(JSON.stringify(await response.json())).not.toContain('sk-abcdef');
   });
 
+  it('refuses a key with a smart quote, a zero-width space or a space as a plain 400, saving nothing', async () => {
+    for (const apiKey of ['sk-abc\u201Cdef', 'sk-\u200Babc', 'sk-a b', 'sk-é']) {
+      const response = await post({ kind: 'deepseek', apiKey, model: 'm' });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: 'That key doesn’t look right. Paste it again.' });
+    }
+    expect(provider.create).not.toHaveBeenCalled();
+  });
+
   it('asks the provider before saving: a key that does not answer is never saved', async () => {
     models.mockResolvedValue({ ok: false, message: 'DeepSeek didn’t accept this key.' });
     const response = await post({ kind: 'deepseek', apiKey: 'sk-bad', model: 'm' });
