@@ -584,36 +584,44 @@ function EditKeySheet({
   const [search, setSearch] = useState('');
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
+  // The new address answered but doesn't have the saved model: the models it does have are shown to pick from
+  const [pickOnNew, setPickOnNew] = useState(false);
   const open = target !== null;
   const what = target?.what;
   const keyId = target?.key.id;
 
   useEffect(() => {
     setAddress('');
+    setPickOnNew(false);
     setModel(null);
     setSearch('');
     setFailure(null);
     setModels({ status: 'loading' });
     if (!keyId || what !== 'model') return;
     let cancelled = false;
-    authenticatedFetch(`/api/me/ai-keys/${encodeURIComponent(keyId)}/models`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
-    })
-      .then(async (response) => {
-        const data = (await response.json().catch(() => ({}))) as { ok?: boolean; models?: string[]; message?: string };
-        if (cancelled) return;
-        if (data.ok && Array.isArray(data.models)) setModels({ status: 'ready', models: data.models });
-        else setModels({ status: 'failed', message: data.message || 'Couldn’t load the models. Try again.' });
-      })
-      .catch(() => {
-        if (!cancelled) setModels({ status: 'failed', message: 'Couldn’t load the models. Try again.' });
-      });
+    void loadModels(keyId, undefined, () => cancelled);
     return () => {
       cancelled = true;
     };
   }, [keyId, what]);
+
+  /** The models the key's provider lists, at its saved address or a new one being tried */
+  async function loadModels(id: string, newAddress: string | undefined, cancelled: () => boolean) {
+    setModels({ status: 'loading' });
+    try {
+      const response = await authenticatedFetch(`/api/me/ai-keys/${encodeURIComponent(id)}/models`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newAddress ? { address: newAddress } : {}),
+      });
+      const data = (await response.json().catch(() => ({}))) as { ok?: boolean; models?: string[]; message?: string };
+      if (cancelled()) return;
+      if (data.ok && Array.isArray(data.models)) setModels({ status: 'ready', models: data.models });
+      else setModels({ status: 'failed', message: data.message || 'Couldn’t load the models. Try again.' });
+    } catch {
+      if (!cancelled()) setModels({ status: 'failed', message: 'Couldn’t load the models. Try again.' });
+    }
+  }
 
   const visible = useMemo(() => {
     if (models.status !== 'ready') return [];
@@ -629,10 +637,19 @@ function EditKeySheet({
       const response = await authenticatedFetch(`/api/me/ai-keys/${encodeURIComponent(target.key.id)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(target.what === 'address' ? { address: address.trim() } : { model }),
+        body: JSON.stringify(target.what === 'address' ? (pickOnNew ? { address: address.trim(), model } : { address: address.trim() }) : { model }),
       });
       if (!response.ok) {
         const body = await response.json().catch(() => null);
+        if (target.what === 'address' && !pickOnNew && body?.code === 'model-missing') {
+          // Offer the models the new address does have, to pick one and save both together
+          setPickOnNew(true);
+          setModel(null);
+          setSearch('');
+          setFailure(body.error || null);
+          void loadModels(target.key.id, address.trim(), () => false);
+          return;
+        }
         throw new Error(body?.error || 'That didn’t work. Try again.');
       }
       onSaved(target.key, target.what);
@@ -643,7 +660,8 @@ function EditKeySheet({
     }
   }
 
-  const ready = target?.what === 'address' ? address.trim() !== '' : model !== null && model !== target?.key.model;
+  const picking = target?.what === 'model' || pickOnNew;
+  const ready = picking ? model !== null && (pickOnNew || model !== target?.key.model) : address.trim() !== '';
 
   return (
     <FormSheet
@@ -669,12 +687,13 @@ function EditKeySheet({
             placeholder="https://lm.example.com"
             value={address}
             onChange={(event) => setAddress(event.target.value)}
+            disabled={pickOnNew}
             className="h-11 rounded-xl"
           />
           <p className="text-[13px] text-muted-foreground">Now: {target.key.address}. Must start with https:// and be reachable from the internet.</p>
         </div>
       )}
-      {target?.what === 'model' && (
+      {picking && (
         <div className="grid gap-3" aria-live="polite">
           {models.status === 'loading' && <p className="text-sm text-muted-foreground">Loading the models…</p>}
           {models.status === 'failed' && (
@@ -684,7 +703,7 @@ function EditKeySheet({
           )}
           {models.status === 'ready' && (
             <>
-              <p className="text-sm text-muted-foreground">Now: {target.key.model ?? 'no model'}</p>
+              {!pickOnNew && <p className="text-sm text-muted-foreground">Now: {target?.key.model ?? 'no model'}</p>}
               {models.models.length > SEARCH_FROM && (
                 <Input
                   type="search"
