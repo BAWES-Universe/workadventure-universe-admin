@@ -12,7 +12,6 @@ import {
   type RuleAction,
   type RuleValue,
 } from '@/lib/bot-rules';
-import { isSuperAdmin } from '@/lib/super-admin';
 import { PEOPLE_PREFERENCE_KEYS } from '@/lib/people-settings';
 
 /**
@@ -244,7 +243,9 @@ async function resolveSubject(
 
   const user = await findPersonForRule(place, body);
   if (!user) throw new BotSettingsError(404, 'That person was not found');
-  if (user.id === place.universeOwnerId || isSuperAdmin(user.email)) {
+  // Only the owner, who is already known to every manager. A super admin is saved like anyone else (their rule changes
+  // nothing, as they always pass), so refusing them would tell a manager who is one
+  if (user.id === place.universeOwnerId) {
     throw new BotSettingsError(400, "The bot's owner always passes, so a rule for them would do nothing");
   }
   // The creator always chats with, messages and calls over their own bot, but manages it only while they hold Manage
