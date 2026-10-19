@@ -414,8 +414,8 @@ describe('Gemini answers a wrong key with a 400', () => {
 
   it('reads any other 400 from Gemini, and a 400 from any other provider, as the ordinary error it is', async () => {
     post.mockResolvedValue(answer(400, { error: { message: 'Unsupported parameter' } }));
-    expect(await probeChat({ kind: 'gemini', apiKey: 'k-1234', model: 'm' })).toMatchObject({ ok: false, reason: 'other' });
+    expect(await probeChat({ kind: 'gemini', apiKey: 'k-1234', model: 'm' })).toMatchObject({ ok: false, reason: 'request' });
     post.mockResolvedValue(wrong);
-    expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'm' })).toMatchObject({ ok: false, reason: 'other' });
+    expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'm' })).toMatchObject({ ok: false, reason: 'request' });
   });
 });
