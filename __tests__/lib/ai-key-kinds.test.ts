@@ -27,11 +27,12 @@ describe('the seven kinds, exactly as they were', () => {
     expect(row(kind)).toMatchObject(expected);
   });
 
-  it('gives every kind the OpenAI chat format, a Bearer key, and the default key check, apart from OpenRouter', () => {
+  it('gives every kind the OpenAI chat format, a Bearer key, and the default key check, apart from OpenRouter and Vercel', () => {
     for (const info of AI_KEY_KINDS) {
       expect(info.protocol).toBe('openai');
       expect(info.auth).toBe('bearer');
-      expect(info.keyCheck).toEqual(info.kind === 'openrouter' ? { type: 'key-info', paths: ['/key', '/auth/key'] } : { type: 'models' });
+      const expected = info.kind === 'openrouter' ? { type: 'key-info', paths: ['/key', '/auth/key'] } : info.kind === 'vercel' ? { type: 'chat' } : { type: 'models' };
+      expect(info.keyCheck).toEqual(expected);
     }
   });
 });
