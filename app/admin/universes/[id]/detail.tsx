@@ -85,6 +85,7 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
   const [isEditing, setIsEditing] = useState(false);
   const [analytics, setAnalytics] = useState<any>(null);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [showAgainDialogOpen, setShowAgainDialogOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   // Each world's activity for its card, asked for once per world (a failure offers a retry, never a request loop).
   const worldIds = useMemo(() => universe?.worlds?.map((world) => world.id) ?? [], [universe]);
@@ -191,6 +192,15 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [universeLoaded, id]);
 
+
+  // Switching "Hide bot conversations" off shows every saved conversation again, so ask first.
+  function handleSaveClick() {
+    if (universe?.hideBotConversations === true && !formData.hideBotConversations) {
+      setShowAgainDialogOpen(true);
+      return;
+    }
+    handleSave();
+  }
 
   async function handleSave() {
     setSaving(true);
@@ -441,7 +451,7 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
               >
                 Cancel
               </Button>
-              <Button onClick={handleSave} disabled={saving}>
+              <Button onClick={handleSaveClick} disabled={saving}>
                 {saving ? (
                   <>
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -496,6 +506,28 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
 
         </>
       )}
+
+      <AlertDialog open={showAgainDialogOpen} onOpenChange={setShowAgainDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Show bot conversations again?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Saved conversations will show again in Orbit, and your bots go back to sending analytics and error reports as before. Bots set to Private stay hidden.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                setShowAgainDialogOpen(false);
+                handleSave();
+              }}
+            >
+              Save
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
         <AlertDialogContent>
