@@ -25,7 +25,7 @@ const manages = canManageThisBot as jest.Mock;
 const mocked = settings as unknown as Record<'loadBotPlace' | 'readBotSettings' | 'saveBotSettings' | 'saveBotRule' | 'deleteBotRule', jest.Mock>;
 
 const PLACE = { id: 'bot-1', createdById: 'u-maker', roomId: 'room-1', universeId: 'u1', universeOwnerId: 'u-owner' };
-const SETTINGS = { privateBot: true, refusalReply: 'Not for you.', dailyReplyCap: 50, rules: [], roles: [] };
+const SETTINGS = { privateBot: true, refusalReply: 'Not for you.', dailyReplyCap: null, rules: [], roles: [] };
 const params = { params: Promise.resolve({ id: 'bot-1' }) };
 
 function call(handler: (r: NextRequest, c: typeof params) => Promise<Response>, method: string, body?: unknown, { path = '', token }: { path?: string; token?: string } = {}) {
@@ -122,6 +122,12 @@ describe('saving settings', () => {
     expect(response.status).toBe(200);
     expect(mocked.saveBotSettings).toHaveBeenCalledWith('bot-1', { privateBot: true, refusalReply: 'Not for you.', dailyReplyCap: 20 });
     expect(await response.json()).toEqual(SETTINGS);
+  });
+
+  it('takes the limit off with null', async () => {
+    const response = await call(PUT, 'PUT', { dailyReplyCap: null });
+    expect(response.status).toBe(200);
+    expect(mocked.saveBotSettings).toHaveBeenCalledWith('bot-1', { dailyReplyCap: null });
   });
 
   it.each([

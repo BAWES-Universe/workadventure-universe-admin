@@ -29,7 +29,8 @@ export const settingsSchema = z
     privateBot: z.boolean().optional(),
     /** Empty or only spaces clears it, and the bot says a plain default line. */
     refusalReply: z.string().max(REFUSAL_REPLY_MAX).nullable().optional(),
-    dailyReplyCap: z.number().int().min(DAILY_CAP_MIN).max(DAILY_CAP_MAX).optional(),
+    /** Replies each person may get in a day. null = no limit, which is how every bot starts. */
+    dailyReplyCap: z.number().int().min(DAILY_CAP_MIN).max(DAILY_CAP_MAX).nullable().optional(),
   })
   .strict()
   .refine((body) => Object.keys(body).length > 0, { message: 'Nothing to change' });
@@ -186,7 +187,7 @@ export async function readBotSettings(botId: string) {
 }
 
 export async function saveBotSettings(botId: string, body: z.infer<typeof settingsSchema>) {
-  const data: { privateBot?: boolean; refusalReply?: string | null; dailyReplyCap?: number } = {};
+  const data: { privateBot?: boolean; refusalReply?: string | null; dailyReplyCap?: number | null } = {};
   if (body.privateBot !== undefined) data.privateBot = body.privateBot;
   if ('refusalReply' in body) data.refusalReply = cleanRefusalReply(body.refusalReply);
   if (body.dailyReplyCap !== undefined) data.dailyReplyCap = body.dailyReplyCap;
