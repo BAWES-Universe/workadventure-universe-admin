@@ -447,7 +447,7 @@ describe('Models that cannot use bot tools', () => {
     await screen.findByText('My DeepSeek', { selector: 'h2' });
     const warnings = screen.getAllByTestId('ai-key-no-tools');
     expect(warnings).toHaveLength(1);
-    expect(warnings[0].textContent).toBe('This model can’t use bot tools. Bots on it can still chat.');
+    expect(warnings[0].textContent).toBe('This model has no Tools. Bots on it can still chat.');
   });
 
   it('says nothing for a key saved before this was known', async () => {
@@ -468,6 +468,6 @@ describe('Models that cannot use bot tools', () => {
     fireEvent.click(await within(dialog).findByRole('radio', { name: 'qwen3-8b' }));
     expect(within(dialog).queryByTestId('no-tools-warning')).toBeNull();
     fireEvent.click(within(dialog).getByRole('radio', { name: 'tiny-chat' }));
-    expect(within(dialog).getByTestId('no-tools-warning').textContent).toMatch(/can’t use bot tools/);
+    expect(within(dialog).getByTestId('no-tools-warning').textContent).toMatch(/has no Tools/);
   });
 });

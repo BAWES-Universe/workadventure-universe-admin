@@ -170,13 +170,13 @@ describe('POST /api/me/ai-keys: the key must really answer, and regions', () => 
 
 describe('POST /api/me/ai-keys: what the provider said about the model is saved on the key', () => {
   it('saves the facts of the model picked, and the provider’s word on pictures', async () => {
-    models.mockResolvedValue({ ok: true, models: ['qwen3-8b', 'gemma-3-12b'], facts: { 'qwen3-8b': { tools: false, images: true, context: 32768 }, 'gemma-3-12b': { tools: true } } });
+    models.mockResolvedValue({ ok: true, models: ['qwen3-8b', 'gemma-3-12b'], facts: { 'qwen3-8b': { tools: false, vision: true, context: 32768 }, 'gemma-3-12b': { tools: true } } });
     await post({ kind: 'lmstudio', address: 'https://lm.example.com', model: 'qwen3-8b' });
-    expect(provider.create.mock.calls[0][0].data).toMatchObject({ supportsVision: true, settings: { kind: 'lmstudio', caps: { tools: false, images: true, context: 32768 } } });
+    expect(provider.create.mock.calls[0][0].data).toMatchObject({ supportsVision: true, settings: { kind: 'lmstudio', caps: { tools: false, vision: true, context: 32768 } } });
   });
 
   it('says false on pictures when the provider said the model takes none, and null when it said nothing', async () => {
-    models.mockResolvedValue({ ok: true, models: ['qwen3-8b', 'gemma-3-12b'], facts: { 'qwen3-8b': { images: false } } });
+    models.mockResolvedValue({ ok: true, models: ['qwen3-8b', 'gemma-3-12b'], facts: { 'qwen3-8b': { vision: false } } });
     await post({ kind: 'lmstudio', address: 'https://lm.example.com', model: 'qwen3-8b' });
     expect(provider.create.mock.calls[0][0].data.supportsVision).toBe(false);
     await post({ kind: 'lmstudio', address: 'https://lm.example.com', model: 'gemma-3-12b' });
@@ -192,13 +192,13 @@ describe('POST /api/me/ai-keys: what the provider said about the model is saved 
 
 describe('POST /api/me/ai-keys: Claude (#975)', () => {
   it('saves a Claude key as the anthropic type on Anthropic’s own base, encrypted, with what the list said about the model', async () => {
-    models.mockResolvedValue({ ok: true, models: ['claude-haiku-4-5'], facts: { 'claude-haiku-4-5': { images: true, context: 200000 } } });
+    models.mockResolvedValue({ ok: true, models: ['claude-haiku-4-5'], facts: { 'claude-haiku-4-5': { vision: true, context: 200000 } } });
     const response = await post({ kind: 'claude', address: 'https://evil.example.com', apiKey: 'sk-ant-api03-abcd', model: 'claude-haiku-4-5' });
     expect(response.status).toBe(201);
     const data = provider.create.mock.calls[0][0].data;
     expect(data).toMatchObject({
       type: 'anthropic', endpoint: 'https://api.anthropic.com/v1', apiKeyEncrypted: 'enc(sk-ant-api03-abcd)', apiKeyLast4: 'abcd', name: 'My Claude',
-      model: 'claude-haiku-4-5', supportsVision: true, settings: { kind: 'claude', caps: { images: true, context: 200000 } }, tested: true,
+      model: 'claude-haiku-4-5', supportsVision: true, settings: { kind: 'claude', caps: { vision: true, context: 200000 } }, tested: true,
     });
     expect(chat).toHaveBeenCalledWith(expect.objectContaining({ kind: 'claude', apiKey: 'sk-ant-api03-abcd', model: 'claude-haiku-4-5' }));
     expect(JSON.stringify(await response.json())).not.toContain('sk-ant');
