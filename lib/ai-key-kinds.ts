@@ -1,3 +1,5 @@
+import snapshot from '@/lib/ai-key-snapshot.json';
+
 /**
  * What a person can add as an AI key (#374), and how each kind is reached. Free of server code, so the Add a key page
  * and the routes read the same list. Each kind is saved as a provider `type` the bot server already speaks: `lmstudio`
@@ -80,7 +82,7 @@ function define(input: Omit<AiKeyKindInfo, Defaulted> & Partial<Pick<AiKeyKindIn
 
 const TUNNEL = 'Make it reachable from the web. Run:';
 
-export const AI_KEY_KINDS: AiKeyKindInfo[] = [
+const NAMED_KINDS: AiKeyKindInfo[] = [
   define({
     kind: 'lmstudio', label: 'LM Studio', group: 'own-computer', providerType: 'lmstudio', address: 'required', apiKey: 'optional',
     benefit: 'Free. Runs on your computer, so conversations go only there.',
@@ -224,6 +226,32 @@ export const AI_KEY_KINDS: AiKeyKindInfo[] = [
     steps: [{ text: 'In your Vercel dashboard, open AI Gateway, then API Keys, and create one.' }],
   }),
 ];
+
+/**
+ * More providers, from lib/ai-key-snapshot.json (built by scripts/build-ai-key-snapshot.mjs from the models.dev project).
+ * They only differ from each other by name and address, so each is a default entry; the ones listed by hand above win
+ * if an id is ever the same.
+ */
+const NAMED_IDS = new Set(NAMED_KINDS.map((entry) => entry.kind));
+const MORE_KINDS: AiKeyKindInfo[] = snapshot.providers
+  .filter((provider) => !NAMED_IDS.has(provider.id))
+  .map((provider) =>
+    define({
+      kind: provider.id,
+      label: provider.label,
+      group: 'hosted',
+      providerType: 'openai',
+      address: 'none',
+      apiKey: 'required',
+      benefit: 'Listed by models.dev; we haven’t tried it ourselves.',
+      base: provider.base,
+      docs: 'docs' in provider ? provider.docs : undefined,
+      steps: [{ text: `Create an API key in ${provider.label}’s dashboard.` }],
+      tier: 'more',
+    }),
+  );
+
+export const AI_KEY_KINDS: AiKeyKindInfo[] = [...NAMED_KINDS, ...MORE_KINDS];
 
 export function kindInfo(kind: unknown): AiKeyKindInfo | null {
   return AI_KEY_KINDS.find((entry) => entry.kind === kind) ?? null;

@@ -75,7 +75,7 @@ describe('helpers', () => {
 });
 
 describe('the providers added after the seven', () => {
-  const added = AI_KEY_KINDS.slice(7);
+  const added = AI_KEY_KINDS.slice(7, 21);
 
   it('adds the named list and the two own-computer entries', () => {
     expect(added.map((entry) => entry.kind)).toEqual([
@@ -127,5 +127,37 @@ describe('the providers added after the seven', () => {
     expect(keyTarget({ kind: 'qwen', region: 'global' })).toMatchObject({ ok: true, target: { modelsUrl: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models', region: 'global' } });
     expect(keyTarget({ kind: 'qwen' })).toEqual({ ok: false, message: 'Pick a region first.' });
     expect(keyTarget({ kind: 'custom', address: 'https://x.example.com/anything' })).toMatchObject({ ok: true, target: { endpoint: 'https://x.example.com', modelsUrl: 'https://x.example.com/v1/models' } });
+  });
+});
+
+describe('More providers, from the snapshot', () => {
+  const more = AI_KEY_KINDS.filter((entry) => entry.tier === 'more');
+  const named = AI_KEY_KINDS.filter((entry) => entry.tier === 'named');
+
+  it('follows the 21 named kinds, which keep their order', () => {
+    expect(AI_KEY_KINDS.slice(0, 21).every((entry) => entry.tier === 'named')).toBe(true);
+    expect(named).toHaveLength(21);
+    expect(more.length).toBeGreaterThanOrEqual(20);
+  });
+
+  it('is hosted with a key, on the OpenAI type, at one https address, and never takes a typed address', () => {
+    for (const info of more) {
+      expect(info).toMatchObject({ group: 'hosted', providerType: 'openai', address: 'none', apiKey: 'required', protocol: 'openai' });
+      expect(info.base).toMatch(/^https:\/\/[^\s$]+[^/]$/);
+      expect(info.regions).toBeUndefined();
+      expect(info.steps.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('never repeats a provider the page names by hand', () => {
+    const labels = new Set(named.map((entry) => entry.label.toLowerCase()));
+    for (const info of more) expect(labels.has(info.label.toLowerCase())).toBe(false);
+  });
+
+  it('is found by its id like any other kind, and keeps the address guard off (it is the provider’s own address)', () => {
+    const info = more[0];
+    expect(kindInfo(info.kind)).toBe(info);
+    expect(isTypedEndpoint(info, info.base!)).toBe(false);
+    expect(keyTarget({ kind: info.kind })).toMatchObject({ ok: true, target: { endpoint: info.base, modelsUrl: `${info.base}/models` } });
   });
 });

@@ -182,3 +182,42 @@ describe('Add a key: a model that cannot use bot tools', () => {
     expect((addButton() as HTMLButtonElement).disabled).toBe(false);
   });
 });
+
+describe('Add a key: More providers', () => {
+  it('keeps the long tail out of sight until asked for, with a count', () => {
+    render(<AddAiKeyPage />);
+    expect(screen.queryByText('More providers', { selector: 'h2' })).toBeNull();
+    expect(screen.queryByRole('radio', { name: /^Nebius/ })).toBeNull();
+    const button = screen.getByRole('button', { name: /^More providers \(\d+\)$/ });
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(button);
+    expect(screen.getByText('More providers', { selector: 'h2' })).toBeTruthy();
+    expect(screen.getByRole('radio', { name: /^Nebius/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Show fewer providers' }).getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('finds one by searching, without opening the list, and shows how to get a key and where to read more', () => {
+    render(<AddAiKeyPage />);
+    fireEvent.change(screen.getByLabelText('Search providers'), { target: { value: 'nebius' } });
+    fireEvent.click(screen.getByRole('radio', { name: /^Nebius/ }));
+    expect(screen.getByText(/Create an API key in Nebius/)).toBeTruthy();
+    const docs = screen.getByRole('link', { name: /Read about Nebius/ });
+    expect(docs.getAttribute('href')).toMatch(/^https:\/\//);
+    expect(docs.getAttribute('rel')).toContain('noreferrer');
+    // A link is never inside the radio button itself
+    expect(screen.getByRole('radio', { name: /^Nebius/ }).contains(docs)).toBe(false);
+  });
+
+  it('adds one of them like any other: same request, its own kind', async () => {
+    fetchMock.mockImplementation((url: string) => (url.endsWith('/models') ? json({ ok: true, models: ['m-1'], facts: {} }) : json({ id: 'key-new' })));
+    render(<AddAiKeyPage />);
+    fireEvent.change(screen.getByLabelText('Search providers'), { target: { value: 'nebius' } });
+    fireEvent.click(screen.getByRole('radio', { name: /^Nebius/ }));
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'sk-1' } });
+    fireEvent.click(screen.getByRole('button', { name: /Load models/ }));
+    await screen.findByText(/It answered/);
+    fireEvent.click(addButton());
+    await waitFor(() => expect(push).toHaveBeenCalledWith('/admin/you/ai-keys'));
+    expect(JSON.parse(fetchMock.mock.calls.at(-1)![1].body)).toMatchObject({ kind: 'nebius', apiKey: 'sk-1', model: 'm-1' });
+  });
+});
