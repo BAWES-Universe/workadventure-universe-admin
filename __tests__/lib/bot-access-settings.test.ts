@@ -283,14 +283,25 @@ describe('saving a rule', () => {
     expect(state.rows).toHaveLength(0);
   });
 
-  it('refuses a person who does not exist, and the universe owner and a super admin, saying why', async () => {
+  it('refuses a person who does not exist, and the universe owner, saying why', async () => {
     await expect(saveBotRule(place, { userId: 'nope', chat: 'no' })).rejects.toMatchObject({ status: 404 });
     await expect(saveBotRule(place, { identifier: 'nobody@example.com', chat: 'no' })).rejects.toMatchObject({ status: 404 });
-    for (const userId of ['u-owner', 'u-root']) {
-      await expect(saveBotRule(place, { userId, chat: 'no' })).rejects.toMatchObject({ status: 400, message: expect.stringContaining('always passes') });
-      await expect(saveBotRule(place, { userId, manage: 'no' })).rejects.toMatchObject({ status: 400, message: expect.stringContaining('always passes') });
-    }
+    await expect(saveBotRule(place, { userId: 'u-owner', chat: 'no' })).rejects.toMatchObject({ status: 400, message: expect.stringContaining('always passes') });
+    await expect(saveBotRule(place, { userId: 'u-owner', manage: 'no' })).rejects.toMatchObject({ status: 400, message: expect.stringContaining('always passes') });
     expect(state.rows).toHaveLength(0);
+  });
+
+  it('treats a super admin like any other person, so a manager cannot tell who is one (Sentry finding on #458)', async () => {
+    const asAdmin = await saveBotRule(place, { userId: 'u-root', chat: 'no' });
+    expect(asAdmin).toMatchObject({ userId: 'u-root', chat: 'no', person: { name: 'Root' } });
+    state.rows = [];
+    const asOther = await saveBotRule(place, { userId: 'u-stranger', chat: 'no' });
+    expect(Object.keys(asAdmin).sort()).toEqual(Object.keys(asOther).sort());
+    // a hidden super admin who is not in the universe answers like any hidden account
+    state.users.find((user) => user.id === 'u-root')!.findable = false;
+    await expect(saveBotRule(place, { userId: 'u-root', chat: 'no' }).catch((error) => [error.status, error.message])).resolves.toEqual(
+      await saveBotRule(place, { userId: 'u-hidden', chat: 'no' }).catch((error) => [error.status, error.message]),
+    );
   });
 
   it('only names people of this universe or people who can be found by name (Sentry finding on #458)', async () => {
