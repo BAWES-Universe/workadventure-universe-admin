@@ -234,7 +234,7 @@ const NAMED_KINDS: AiKeyKindInfo[] = [
     steps: [{ text: 'On cloud.cerebras.ai, open API Keys and create one.' }],
   }),
   define({
-    kind: 'huggingface', label: 'Hugging Face', group: 'hosted', providerType: 'openai', address: 'none', apiKey: 'required',
+    kind: 'huggingface', label: 'Hugging Face', group: 'hosted', providerType: 'openai', address: 'none', apiKey: 'required', keyCheck: { type: 'chat' },
     benefit: 'Thousands of open models through one token.', base: 'https://router.huggingface.co/v1', docs: 'https://huggingface.co/docs/inference-providers',
     steps: [{ text: 'On huggingface.co, open Settings, then Access Tokens, and create a token that can make inference calls.' }],
   }),
