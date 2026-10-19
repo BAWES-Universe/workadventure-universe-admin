@@ -4,7 +4,7 @@ import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { listAiKeys } from '@/lib/ai-keys';
 import { MAX_AI_KEYS } from '@/lib/ai-key-kinds';
-import { KEY_CHARACTERS, KEY_LOOKS_WRONG, allowKeyAttempt, keyTarget, loadModels } from '@/lib/ai-key-models';
+import { KEY_CHARACTERS, KEY_LOOKS_WRONG, allowKeyAttempt, keyTarget, loadModels, probeChat } from '@/lib/ai-key-models';
 import { encryptApiKey } from '@/lib/encryption';
 import { meOriginAllowed, meRespond } from '@/lib/me-route';
 
@@ -30,9 +30,10 @@ export async function GET(request: NextRequest) {
 }
 
 /**
- * POST /api/me/ai-keys { kind, address?, apiKey?, model, name? } - add a key for the caller. The provider is asked for
- * its models first, so a key that doesn't answer is never saved and the model is one it really has. The key is stored
- * encrypted and never sent back.
+ * POST /api/me/ai-keys { kind, address?, region?, apiKey?, model, name? } - add a key for the caller. The provider is asked
+ * for its models first, then for one tiny reply from the model picked, so a key that doesn't answer is never saved and the
+ * model is one it really has (some providers list their models to anyone, so the list alone can't prove a key). The key
+ * is stored encrypted and never sent back.
  */
 export async function POST(request: NextRequest) {
   if (!meOriginAllowed(request)) return respond(request, { error: 'Origin not allowed' }, 403);
@@ -45,11 +46,11 @@ export async function POST(request: NextRequest) {
     return respond(request, { error: 'Invalid JSON body' }, 400);
   }
   if (typeof body !== 'object' || body === null || Array.isArray(body)) return respond(request, { error: 'Expected an object' }, 400);
-  const input = body as { kind?: unknown; address?: unknown; apiKey?: unknown; model?: unknown; name?: unknown };
+  const input = body as { kind?: unknown; address?: unknown; region?: unknown; apiKey?: unknown; model?: unknown; name?: unknown };
 
   const resolved = keyTarget(input);
   if (!resolved.ok) return respond(request, { error: resolved.message }, 400);
-  const { info, endpoint } = resolved.target;
+  const { info, endpoint, region } = resolved.target;
 
   const model = typeof input.model === 'string' ? input.model.trim() : '';
   if (!model || model.length > 255) return respond(request, { error: 'Pick a model first.' }, 400);
@@ -69,6 +70,8 @@ export async function POST(request: NextRequest) {
     if (!checked.models.includes(model)) {
       return respond(request, { error: 'That model isn’t on the list. Load models again and pick one.' }, 400);
     }
+    const chat = await probeChat({ kind: info.kind, address: input.address, region, apiKey, model });
+    if (!chat.ok) return respond(request, { error: chat.message }, 400);
     const row = await prisma.botsAiProvider.create({
       data: {
         providerId: `key-${randomUUID()}`,
@@ -83,7 +86,7 @@ export async function POST(request: NextRequest) {
         maxTokens: 500,
         supportsStreaming: true,
         supportsVision: null,
-        settings: { kind: info.kind },
+        settings: { kind: info.kind, ...(region ? { region } : {}) },
         tested: true,
         testedAt: new Date(),
         ownerId: user.id,

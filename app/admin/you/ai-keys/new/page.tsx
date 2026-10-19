@@ -44,6 +44,8 @@ export default function AddAiKeyPage() {
   const router = useRouter();
   const { addToast } = useToast();
   const [kind, setKind] = useState<AiKeyKind | null>(null);
+  const [region, setRegion] = useState<string | null>(null);
+  const [find, setFind] = useState('');
   const [address, setAddress] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [models, setModels] = useState<Models>({ status: 'none' });
@@ -55,8 +57,17 @@ export default function AddAiKeyPage() {
 
   const info = kindInfo(kind);
   const name = typedName ?? (info ? `My ${info.label}` : '');
-  const ownComputer = AI_KEY_KINDS.filter((entry) => entry.group === 'own-computer');
-  const hosted = AI_KEY_KINDS.filter((entry) => entry.group === 'hosted');
+  // The picked type stays on screen whatever is typed in the search
+  const needle = find.trim().toLowerCase();
+  const shown = AI_KEY_KINDS.filter((entry) => entry.kind === kind || !needle || `${entry.label} ${entry.benefit}`.toLowerCase().includes(needle));
+  const ownComputer = shown.filter((entry) => entry.group === 'own-computer');
+  const hosted = shown.filter((entry) => entry.group === 'hosted');
+
+  function pickKind(next: AiKeyKind) {
+    setKind(next);
+    setRegion(null);
+    changed();
+  }
 
   // Anything that decides what the provider would answer clears the loaded list: a model picked for another key
   // or address is never kept.
@@ -69,6 +80,7 @@ export default function AddAiKeyPage() {
 
   const canLoad =
     !!info &&
+    (!info.regions || region !== null) &&
     (info.address !== 'required' || address.trim() !== '') &&
     (info.apiKey !== 'required' || apiKey.trim() !== '');
 
@@ -81,7 +93,7 @@ export default function AddAiKeyPage() {
       const response = await authenticatedFetch('/api/me/ai-keys/models', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ kind: info.kind, address, apiKey }),
+        body: JSON.stringify({ kind: info.kind, address, ...(region ? { region } : {}), apiKey }),
       });
       const data: { ok?: boolean; models?: string[]; message?: string } = await response.json().catch(() => ({}));
       if (data.ok && Array.isArray(data.models)) {
@@ -104,7 +116,7 @@ export default function AddAiKeyPage() {
       const response = await authenticatedFetch('/api/me/ai-keys', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ kind: info.kind, address, apiKey, model, name }),
+        body: JSON.stringify({ kind: info.kind, address, ...(region ? { region } : {}), apiKey, model, name }),
       });
       if (!response.ok) {
         const data: { error?: string } = await response.json().catch(() => ({}));
@@ -139,21 +151,52 @@ export default function AddAiKeyPage() {
       >
         <fieldset className="grid gap-4">
           <legend className="mb-1 text-[15px] font-semibold">Type</legend>
+          {AI_KEY_KINDS.length > SEARCH_FROM && (
+            <Input
+              type="search"
+              aria-label="Search providers"
+              placeholder="Search providers"
+              value={find}
+              onChange={(event) => setFind(event.target.value)}
+              className="h-11 rounded-xl"
+            />
+          )}
           <div role="radiogroup" aria-label="Type" className="grid gap-4">
-            <div className="grid gap-2">
+            {shown.length === 0 && <p className={FIELD_HINT}>No provider matches that. “Any OpenAI-compatible server” takes any address that speaks the OpenAI format.</p>}
+            {ownComputer.length > 0 && <div className="grid gap-2">
               <h2 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">On your own computer</h2>
               {ownComputer.map((entry) => (
-                <KindCard key={entry.kind} info={entry} picked={kind === entry.kind} onPick={() => { setKind(entry.kind); changed(); }} />
+                <KindCard key={entry.kind} info={entry} picked={kind === entry.kind} onPick={() => pickKind(entry.kind)} />
               ))}
-            </div>
-            <div className="grid gap-2">
+            </div>}
+            {hosted.length > 0 && <div className="grid gap-2">
               <h2 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Hosted, with an API key</h2>
               {hosted.map((entry) => (
-                <KindCard key={entry.kind} info={entry} picked={kind === entry.kind} onPick={() => { setKind(entry.kind); changed(); }} />
+                <KindCard key={entry.kind} info={entry} picked={kind === entry.kind} onPick={() => pickKind(entry.kind)} />
               ))}
-            </div>
+            </div>}
           </div>
         </fieldset>
+
+        {info?.regions && (
+          <fieldset className="grid gap-2">
+            <legend className="mb-1 text-[15px] font-semibold">Region</legend>
+            <div role="radiogroup" aria-label="Region" className="grid gap-2 sm:grid-cols-2">
+              {info.regions.map((entry) => (
+                <PickCard
+                  key={entry.id}
+                  role="radio"
+                  picked={region === entry.id}
+                  onClick={() => { setRegion(entry.id); changed(); }}
+                  indicator={<Radio checked={region === entry.id} />}
+                  title={entry.label}
+                  description={new URL(entry.base).host}
+                />
+              ))}
+            </div>
+            <p className={FIELD_HINT}>A key only works in the region it was made in.</p>
+          </fieldset>
+        )}
 
         {info && info.address !== 'none' && (
           <div className="grid gap-1.5">

@@ -3,15 +3,16 @@ import { POST } from '@/app/api/me/ai-keys/route';
 import { POST as loadModelsRoute } from '@/app/api/me/ai-keys/models/route';
 import { getSessionUser } from '@/lib/auth-session';
 import { prisma } from '@/lib/db';
-import { loadModels } from '@/lib/ai-key-models';
+import { loadModels, probeChat } from '@/lib/ai-key-models';
 
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
 jest.mock('@/lib/db', () => ({ prisma: { botsAiProvider: { count: jest.fn(), create: jest.fn(), findMany: jest.fn() }, botsAiUsage: { groupBy: jest.fn() } } }));
 jest.mock('@/lib/encryption', () => ({ encryptApiKey: jest.fn((key: string) => `enc(${key})`) }));
-jest.mock('@/lib/ai-key-models', () => ({ ...jest.requireActual('@/lib/ai-key-models'), loadModels: jest.fn(), allowKeyAttempt: jest.fn(() => true) }));
+jest.mock('@/lib/ai-key-models', () => ({ ...jest.requireActual('@/lib/ai-key-models'), loadModels: jest.fn(), probeChat: jest.fn(), allowKeyAttempt: jest.fn(() => true) }));
 
 const provider = prisma.botsAiProvider as unknown as Record<'count' | 'create', jest.Mock>;
 const models = loadModels as jest.Mock;
+const chat = probeChat as jest.Mock;
 const alice = { id: 'user-a', uuid: 'uuid-a', email: 'a@example.com', name: 'A', tags: [], isSuperAdmin: false };
 
 const post = (body: unknown, route: typeof POST = POST) =>
@@ -23,6 +24,7 @@ beforeEach(() => {
   provider.count.mockResolvedValue(0);
   provider.create.mockResolvedValue({ providerId: 'key-new' });
   models.mockResolvedValue({ ok: true, models: ['qwen3-8b', 'gemma-3-12b'] });
+  chat.mockResolvedValue({ ok: true });
 });
 
 describe('POST /api/me/ai-keys', () => {
@@ -120,5 +122,48 @@ describe('POST /api/me/ai-keys/models', () => {
   it('refuses a body that is not an object', async () => {
     expect((await post('[1]', loadModelsRoute)).status).toBe(400);
     expect((await post('nope', loadModelsRoute)).status).toBe(400);
+  });
+});
+
+describe('POST /api/me/ai-keys: the key must really answer, and regions', () => {
+  it('asks the model for one tiny reply before saving, with the key and address that were typed', async () => {
+    const response = await post({ kind: 'lmstudio', address: 'https://lm.example.com', apiKey: 'sk-1', model: 'qwen3-8b' });
+    expect(response.status).toBe(201);
+    expect(chat).toHaveBeenCalledWith(expect.objectContaining({ kind: 'lmstudio', address: 'https://lm.example.com', apiKey: 'sk-1', model: 'qwen3-8b' }));
+  });
+
+  it('saves nothing when the model lists but does not answer a chat call (a provider that lists models to anyone)', async () => {
+    chat.mockResolvedValue({ ok: false, reason: 'rejected', message: 'Vercel AI Gateway didn’t accept this key.' });
+    const response = await post({ kind: 'vercel', apiKey: 'sk-bad', model: 'qwen3-8b' });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: 'Vercel AI Gateway didn’t accept this key.' });
+    expect(provider.create).not.toHaveBeenCalled();
+  });
+
+  it('saves a region kind on the base of the region picked, and remembers which', async () => {
+    const response = await post({ kind: 'qwen', region: 'china', apiKey: 'sk-abcd1234', model: 'qwen3-8b' });
+    expect(response.status).toBe(201);
+    const data = provider.create.mock.calls[0][0].data;
+    expect(data).toMatchObject({ type: 'openai', endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1', settings: { kind: 'qwen', region: 'china' }, name: 'My Qwen' });
+    expect(chat).toHaveBeenCalledWith(expect.objectContaining({ region: 'china' }));
+  });
+
+  it('asks for a region rather than guessing one', async () => {
+    const response = await post({ kind: 'kimi', apiKey: 'sk-1', model: 'm' });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: 'Pick a region first.' });
+    expect(provider.create).not.toHaveBeenCalled();
+  });
+
+  it('ignores a typed address for a hosted kind, and does not keep a region for a kind without them', async () => {
+    await post({ kind: 'groq', address: 'https://evil.example.com', region: 'china', apiKey: 'sk-1', model: 'qwen3-8b' });
+    expect(provider.create.mock.calls[0][0].data).toMatchObject({ endpoint: 'https://api.groq.com/openai/v1', settings: { kind: 'groq' } });
+    expect(provider.create.mock.calls[0][0].data.settings.region).toBeUndefined();
+  });
+
+  it('saves Any OpenAI-compatible as the local type with no key needed', async () => {
+    const response = await post({ kind: 'custom', address: 'https://llm.example.com/v1', model: 'qwen3-8b' });
+    expect(response.status).toBe(201);
+    expect(provider.create.mock.calls[0][0].data).toMatchObject({ type: 'lmstudio', endpoint: 'https://llm.example.com', apiKeyEncrypted: null, settings: { kind: 'custom' } });
   });
 });

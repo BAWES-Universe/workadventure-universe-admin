@@ -1,5 +1,5 @@
 import { ADDRESS_PROBLEM_TEXT, AddressError, checkPublicHttpsUrl, safeGet, safeRequest } from '@/lib/ai-key-fetch';
-import { authHeaders, kindInfo, typedEndpoint, writeModelId, type AiKeyKind, type AiKeyKindInfo } from '@/lib/ai-key-kinds';
+import { authHeaders, hostedBase, kindInfo, typedEndpoint, writeModelId, type AiKeyKind, type AiKeyKindInfo } from '@/lib/ai-key-kinds';
 
 /**
  * Asks a key's provider which models it has. This is also the check that it answers: Add key stays off until the list
@@ -12,11 +12,15 @@ export interface KeyTarget {
   endpoint: string;
   /** The model list address. */
   modelsUrl: string;
+  /** The region picked, for a kind that has them. */
+  region: string | null;
 }
 
 export interface KeyTargetInput {
   kind?: unknown;
   address?: unknown;
+  /** The region id, for a kind that has regions. */
+  region?: unknown;
 }
 
 /** Works out where a key's provider lives, or says in plain words what is wrong with the address. */
@@ -25,7 +29,9 @@ export function keyTarget(input: KeyTargetInput): { ok: true; target: KeyTarget 
   if (!info) return { ok: false, message: 'Pick a type first.' };
   const typed = typeof input.address === 'string' ? input.address.trim() : '';
   if (info.address === 'none' || (info.address === 'optional' && !typed)) {
-    return { ok: true, target: { info, endpoint: info.base!, modelsUrl: `${info.base}/models` } };
+    const hosted = hostedBase(info, { region: input.region, address: input.address });
+    if (!hosted.ok) return hosted;
+    return { ok: true, target: { info, endpoint: hosted.base, modelsUrl: `${hosted.base}/models`, region: hosted.region } };
   }
   if (!typed) return { ok: false, message: 'Paste the https address of your server.' };
   let origin: string;
@@ -35,7 +41,7 @@ export function keyTarget(input: KeyTargetInput): { ok: true; target: KeyTarget 
   } catch {
     return { ok: false, message: ADDRESS_PROBLEM_TEXT['not-https'] };
   }
-  return { ok: true, target: { info, endpoint: typedEndpoint(info, origin), modelsUrl: `${origin}/v1/models` } };
+  return { ok: true, target: { info, endpoint: typedEndpoint(info, origin), modelsUrl: `${origin}/v1/models`, region: null } };
 }
 
 /** What a key may be made of (visible ASCII, no spaces): anything else cannot go in an Authorization header. */
@@ -135,14 +141,15 @@ export async function probeModels(input: KeyTargetInput & { apiKey?: unknown }):
     return { ok: false, reason: 'busy', message: `${info.label} is busy right now. Try again in a moment.` };
   }
   if (result.status !== 200) return { ok: false, message: `It answered with an error (${result.status}).`, reason: result.status >= 500 ? 'unreachable' : 'other' };
-  if (info.keyCheck.type === 'key-info' && info.base && apiKey && (await keyInfoRejectsKey(info.base, info.keyCheck.paths, apiKey))) {
+  if (info.keyCheck.type === 'key-info' && apiKey && (await keyInfoRejectsKey(resolved.target.endpoint, info.keyCheck.paths, apiKey))) {
     return { ok: false, message: `${info.label} didn’t accept this key.`, reason: 'rejected' };
   }
 
   let ids: string[] = [];
   try {
     const data: unknown = JSON.parse(result.body);
-    const list = typeof data === 'object' && data !== null ? (data as { data?: unknown }).data : null;
+    // Most providers answer { data: [...] }; some (Together) answer the bare array
+    const list = Array.isArray(data) ? data : typeof data === 'object' && data !== null ? (data as { data?: unknown }).data : null;
     if (!Array.isArray(list)) throw new Error('shape');
     ids = list.map((entry) => (typeof entry === 'object' && entry !== null ? (entry as { id?: unknown }).id : null)).filter((id): id is string => typeof id === 'string');
   } catch {

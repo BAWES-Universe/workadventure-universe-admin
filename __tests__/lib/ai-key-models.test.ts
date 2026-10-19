@@ -212,3 +212,30 @@ describe('allowKeyAttempt', () => {
     expect(allowKeyAttempt('p', start + 61_000)).toBe(true);
   });
 });
+
+describe('providers added to the catalog', () => {
+  it('reads a model list that is a bare array (Together AI), as well as { data: [...] }', async () => {
+    get.mockResolvedValue(answer(200, [{ id: 'meta-llama/Llama-3.3-70B-Instruct-Turbo', type: 'chat' }, { id: 'Qwen/Qwen3-235B' }]));
+    expect(await loadModels({ kind: 'together', apiKey: 'sk-1' })).toEqual({ ok: true, models: ['meta-llama/Llama-3.3-70B-Instruct-Turbo', 'Qwen/Qwen3-235B'] });
+    expect(check).toHaveBeenCalledWith('https://api.together.xyz/v1/models');
+  });
+
+  it('asks the region that was picked, and a saved key finds its region from its endpoint', async () => {
+    get.mockResolvedValue(answer(200, { data: [{ id: 'qwen3-max' }] }));
+    await loadModels({ kind: 'qwen', region: 'china', apiKey: 'sk-1' });
+    expect(check).toHaveBeenLastCalledWith('https://dashscope.aliyuncs.com/compatible-mode/v1/models');
+    await loadModels({ kind: 'qwen', address: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1', apiKey: 'sk-1' });
+    expect(check).toHaveBeenLastCalledWith('https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models');
+  });
+
+  it('asks a region kind for its region before calling anyone', async () => {
+    expect(await loadModels({ kind: 'glm', apiKey: 'sk-1' })).toEqual({ ok: false, message: 'Pick a region first.' });
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  it('sends a chat call to the region’s own address', async () => {
+    post.mockResolvedValue(answer(200, {}));
+    expect(await probeChat({ kind: 'kimi', region: 'global', apiKey: 'sk-1', model: 'kimi-k2' })).toEqual({ ok: true });
+    expect(check).toHaveBeenLastCalledWith('https://api.moonshot.ai/v1/chat/completions');
+  });
+});

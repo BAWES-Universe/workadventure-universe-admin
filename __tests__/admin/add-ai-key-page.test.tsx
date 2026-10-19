@@ -30,7 +30,7 @@ describe('Add a key', () => {
     expect(screen.getByText('On your own computer')).toBeTruthy();
     expect(screen.getByText('Hosted, with an API key')).toBeTruthy();
     for (const label of ['LM Studio', 'Ollama or llama.cpp', 'OpenRouter', 'Gemini', 'NVIDIA NIM', 'OpenAI', 'DeepSeek']) {
-      expect(screen.getByRole('radio', { name: new RegExp(label) })).toBeTruthy();
+      expect(screen.getByRole('radio', { name: new RegExp(`^${label}`) })).toBeTruthy();
     }
     expect(screen.queryByLabelText('Address')).toBeNull();
     expect((addButton() as HTMLButtonElement).disabled).toBe(true);
@@ -116,5 +116,52 @@ describe('Add a key', () => {
     fireEvent.click(addButton());
     expect(await screen.findByText('You can have up to 10 keys. Revoke one you don’t use.')).toBeTruthy();
     expect(push).not.toHaveBeenCalled();
+  });
+});
+
+describe('Add a key: more providers, regions and search', () => {
+  it('lists the added providers, and filters them as you type, keeping the picked one on screen', () => {
+    render(<AddAiKeyPage />);
+    for (const label of ['vLLM', 'Any OpenAI-compatible server', 'Qwen', 'Kimi', 'GLM \\(Z.ai\\)', 'xAI', 'Mistral', 'Groq', 'Together AI', 'Fireworks AI', 'DeepInfra', 'Cerebras', 'Hugging Face', 'Vercel AI Gateway']) {
+      expect(screen.getByRole('radio', { name: new RegExp(`^${label}`) })).toBeTruthy();
+    }
+    fireEvent.click(screen.getByRole('radio', { name: /^Groq/ }));
+    fireEvent.change(screen.getByLabelText('Search providers'), { target: { value: 'mistral' } });
+    expect(screen.getByRole('radio', { name: /^Mistral/ })).toBeTruthy();
+    expect(screen.getByRole('radio', { name: /^Groq/ })).toBeTruthy();
+    expect(screen.queryByRole('radio', { name: /^Cerebras/ })).toBeNull();
+  });
+
+  it('says so, and points to Any OpenAI-compatible, when nothing matches', () => {
+    render(<AddAiKeyPage />);
+    fireEvent.change(screen.getByLabelText('Search providers'), { target: { value: 'zzz' } });
+    expect(screen.getByText(/No provider matches that/)).toBeTruthy();
+  });
+
+  it('asks for a region on Qwen, Kimi and GLM, keeps Load models off until one is picked, and sends it', async () => {
+    fetchMock.mockImplementation(() => json({ ok: true, models: ['kimi-k2'] }));
+    render(<AddAiKeyPage />);
+    fireEvent.click(screen.getByRole('radio', { name: /^Kimi/ }));
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'sk-1' } });
+    expect((screen.getByRole('button', { name: /Load models/ }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole('radio', { name: /^China/ }));
+    expect(screen.getByText('A key only works in the region it was made in.')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: /Load models/ }));
+    await screen.findByText(/It answered/);
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({ kind: 'kimi', region: 'china' });
+  });
+
+  it('forgets the region when another type is picked', () => {
+    render(<AddAiKeyPage />);
+    fireEvent.click(screen.getByRole('radio', { name: /^Qwen/ }));
+    fireEvent.click(screen.getByRole('radio', { name: /^Global/ }));
+    fireEvent.click(screen.getByRole('radio', { name: /^Kimi/ }));
+    expect(screen.getByRole('radio', { name: /^Global/ }).getAttribute('aria-checked')).toBe('false');
+  });
+
+  it('shows no region for a provider that has one address', () => {
+    render(<AddAiKeyPage />);
+    fireEvent.click(screen.getByRole('radio', { name: /^Mistral/ }));
+    expect(screen.queryByRole('radiogroup', { name: 'Region' })).toBeNull();
   });
 });
