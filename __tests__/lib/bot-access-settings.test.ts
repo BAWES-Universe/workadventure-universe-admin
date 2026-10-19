@@ -4,10 +4,23 @@
  */
 type Row = { id: string; botId: string; roleId: string | null; userId: string | null; allow: bigint; deny: bigint };
 
+type Person = {
+  id: string;
+  uuid: string;
+  email: string | null;
+  name: string | null;
+  isGuest?: boolean;
+  /** Universes they joined, and universes they have a world in through the older world membership. */
+  universeIds?: string[];
+  worldUniverseIds?: string[];
+  /** false = switched "findable by name" off (the preference row is stored only then). */
+  findable?: boolean;
+};
+
 const state = {
   rows: [] as Row[],
   roles: [] as { id: string; key: string; name: string; color: string; builtIn: boolean; permissions: bigint; position: number; universeId: string }[],
-  users: [] as { id: string; uuid: string; email: string | null; name: string | null }[],
+  users: [] as Person[],
   bot: { privateBot: false, refusalReply: null as string | null, dailyReplyCap: null as number | null },
   /** Make the next N conditional updates find a row that changed meanwhile. */
   staleUpdates: 0,
@@ -15,6 +28,40 @@ const state = {
   conflictOnCreate: false,
   next: 1,
 };
+
+/** Runs the part of a Prisma user filter this file uses against the stand-in users; anything else fails loudly. */
+function matches(user: Person, where: Record<string, unknown>): boolean {
+  return Object.entries(where).every(([key, value]) => {
+    switch (key) {
+      case 'AND':
+        return (value as Record<string, unknown>[]).every((part) => matches(user, part));
+      case 'OR':
+        return (value as Record<string, unknown>[]).some((part) => matches(user, part));
+      case 'NOT':
+        return !matches(user, value as Record<string, unknown>);
+      case 'id':
+      case 'uuid':
+      case 'email':
+        return user[key] === value;
+      case 'isGuest':
+        return (user.isGuest ?? false) === value;
+      case 'botAccessRules':
+        return state.rows.some((row) => row.userId === user.id && row.botId === (value as { some: { botId: string } }).some.botId);
+      case 'universeMemberships':
+        return (user.universeIds ?? []).includes((value as { some: { universeId: string } }).some.universeId);
+      case 'worldMemberships':
+        return (user.worldUniverseIds ?? []).includes((value as { some: { world: { universeId: string } } }).some.world.universeId);
+      case 'preferences':
+        // the only preference asked about is findableByName switched off
+      {
+        const { some } = value as { some: { key: string; value: { equals: boolean } } };
+        return some.key === 'people.findableByName' && some.value.equals === false && user.findable === false;
+      }
+      default:
+        throw new Error(`The test stand-in does not know the filter ${key}`);
+    }
+  });
+}
 
 const withJoins = (row: Row) => ({
   ...row,
@@ -40,9 +87,7 @@ jest.mock('@/lib/db', () => ({
     },
     user: {
       findUnique: jest.fn(async ({ where }: { where: { id: string } }) => state.users.find((user) => user.id === where.id) ?? null),
-      findFirst: jest.fn(async ({ where }: { where: { OR: { uuid?: string; email?: string }[] } }) =>
-        state.users.find((user) => where.OR.some((cond) => cond.uuid === user.uuid || cond.email === user.email)) ?? null,
-      ),
+      findFirst: jest.fn(async ({ where }: { where: Record<string, unknown> }) => state.users.find((user) => matches(user, where)) ?? null),
     },
     botAccessRule: {
       findFirst: jest.fn(async ({ where }: { where: { botId: string; roleId?: string; userId?: string } }) =>
@@ -104,10 +149,16 @@ beforeEach(() => {
   state.rows = [];
   state.roles = [R('r-admin', 'admin', ALL_PERMISSIONS), R('r-everyone', 'everyone', EVERYONE_DEFAULT_PERMISSIONS), R('r-acc', 'accountant'), R('r-other', 'accountant', BigInt(0), 'u2')];
   state.users = [
-    { id: 'u-mishari', uuid: 'uuid-mishari', email: 'mishari@example.com', name: 'Mishari' },
+    { id: 'u-mishari', uuid: 'uuid-mishari', email: 'mishari@example.com', name: 'Mishari', universeIds: ['u1'] },
     { id: 'u-maker', uuid: 'uuid-maker', email: 'maker@example.com', name: 'Maker' },
     { id: 'u-owner', uuid: 'uuid-owner', email: 'owner@example.com', name: 'Owner' },
     { id: 'u-root', uuid: 'uuid-root', email: 'root@example.com', name: 'Root' },
+    { id: 'u-stranger', uuid: 'uuid-stranger', email: 'stranger@example.com', name: 'Stranger' },
+    { id: 'u-hidden', uuid: 'uuid-hidden', email: 'hidden@example.com', name: 'Hidden', findable: false },
+    { id: 'u-guest', uuid: 'uuid-guest', email: null, name: 'Guest', isGuest: true },
+    { id: 'u-elsewhere', uuid: 'uuid-elsewhere', email: 'elsewhere@example.com', name: 'Elsewhere', universeIds: ['u2'], findable: false },
+    { id: 'u-shy-member', uuid: 'uuid-shy', email: 'shy@example.com', name: 'Shy', universeIds: ['u1'], findable: false },
+    { id: 'u-old-member', uuid: 'uuid-old', email: 'old@example.com', name: 'Old', worldUniverseIds: ['u1'], findable: false },
   ];
   state.bot = { privateBot: false, refusalReply: null, dailyReplyCap: null };
   state.staleUpdates = 0;
@@ -240,6 +291,47 @@ describe('saving a rule', () => {
       await expect(saveBotRule(place, { userId, manage: 'no' })).rejects.toMatchObject({ status: 400, message: expect.stringContaining('always passes') });
     }
     expect(state.rows).toHaveLength(0);
+  });
+
+  it('only names people of this universe or people who can be found by name (Sentry finding on #458)', async () => {
+    // members of this universe, even when they are not findable by name (joined directly, or through an older world membership)
+    for (const userId of ['u-mishari', 'u-shy-member', 'u-old-member']) {
+      await expect(saveBotRule(place, { userId, chat: 'no' })).resolves.toMatchObject({ userId });
+    }
+    // anyone signed in who has not switched finding off, member or not
+    await expect(saveBotRule(place, { identifier: 'stranger@example.com', chat: 'no' })).resolves.toMatchObject({ userId: 'u-stranger', person: { name: 'Stranger' } });
+    await expect(saveBotRule(place, { identifier: 'uuid-stranger', chat: 'no' })).resolves.toMatchObject({ userId: 'u-stranger' });
+    state.rows = [];
+    await expect(saveBotRule(place, { identifier: 'maker@example.com', manage: 'yes' })).resolves.toMatchObject({ userId: 'u-maker' });
+  });
+
+  it('answers the same for an account that is hidden, a guest, one that is not there, and one in another universe', async () => {
+    const answers: unknown[] = [];
+    for (const body of [
+      { userId: 'u-hidden' }, { identifier: 'hidden@example.com' }, { identifier: 'uuid-hidden' },
+      { userId: 'u-guest' }, { identifier: 'uuid-guest' },
+      { userId: 'u-elsewhere' }, { identifier: 'elsewhere@example.com' },
+      { userId: 'nope' }, { identifier: 'nobody@example.com' },
+    ]) {
+      const error = await saveBotRule(place, { ...body, chat: 'no' }).catch((caught) => caught);
+      answers.push({ status: error.status, message: error.message });
+    }
+    expect(new Set(answers.map((answer) => JSON.stringify(answer))).size).toBe(1);
+    expect(answers[0]).toEqual({ status: 404, message: 'That person was not found' });
+    expect(state.rows).toHaveLength(0);
+  });
+
+  it('someone already on the list stays editable after they leave or hide (Sentry finding on #462)', async () => {
+    state.rows.push({ id: 'rule-old', botId: 'bot-1', roleId: null, userId: 'u-hidden', allow: BIT.chat, deny: BigInt(0) });
+    await expect(saveBotRule(place, { userId: 'u-hidden', dm: 'no' })).resolves.toMatchObject({ userId: 'u-hidden', chat: 'yes', dm: 'no' });
+    // another bot's list does not open the door
+    state.rows[0].botId = 'bot-2';
+    await expect(saveBotRule(place, { userId: 'u-hidden', dm: 'no' })).rejects.toMatchObject({ status: 404 });
+  });
+
+  it('a hidden super admin cannot be told apart from an account that is not there', async () => {
+    state.users.find((user) => user.id === 'u-root')!.findable = false;
+    await expect(saveBotRule(place, { identifier: 'root@example.com', chat: 'no' })).rejects.toMatchObject({ status: 404, message: 'That person was not found' });
   });
 
   it('the creator always uses their own bot, so only Manage this bot can be set for them (#433)', async () => {

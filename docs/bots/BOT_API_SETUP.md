@@ -104,7 +104,7 @@ curl -X POST \
      `summon`, `manage` as `"yes" | "no" | "default"`. Only the actions sent change. Returns the row. Refused with a line
      saying why: a role of another universe (404), Admin, the universe owner or a super admin (400, they always pass),
      chat, dm or summon for the bot's creator (400, they always use their own bot; only `manage` can be set for them), a
-     person who does not exist (404), more than 200 rows (400), two people saving the same row at once (409, try again).
+     person who does not exist or may not be named here (404, the same answer for both: only people of this universe, its owner, the bot's creator and people findable by name can be named, so a rule can never be used to find out whether some email has an account), more than 200 rows (400), two people saving the same row at once (409, try again).
    - DELETE takes the row off, so they follow the roles again; 404 when there was no such row.
 
 ### Files Created/Modified

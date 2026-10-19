@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { has, parsePermissions } from '@/lib/permissions';
 import { ADMIN_KEY } from '@/lib/roles';
@@ -12,7 +13,7 @@ import {
   type RuleValue,
 } from '@/lib/bot-rules';
 import { isSuperAdmin } from '@/lib/super-admin';
-import { findUserByIdentifier } from '@/lib/user-identifier';
+import { PEOPLE_PREFERENCE_KEYS } from '@/lib/people-settings';
 
 /**
  * What an owner can set on one bot (#427): who may use it (rules for roles and people, and Private bot), the line
@@ -198,6 +199,37 @@ function isUniqueViolation(error: unknown): boolean {
   return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 'P2002';
 }
 
+/**
+ * Who a manager of this bot may name in a rule: people in this universe (and its owner and the bot's creator), and
+ * anyone who can be found by name, which is every signed-in person who has not switched it off, and people already on
+ * this bot's list (the manager can see them, so they must stay editable). Nobody else, so adding
+ * a person by uuid or email can never tell a manager whether some other account exists, or what its name is.
+ */
+function nameableInRules(place: BotPlace): Prisma.UserWhereInput {
+  return {
+    OR: [
+      { id: place.universeOwnerId },
+      // someone already on this bot's list stays editable, whatever they changed since
+      { botAccessRules: { some: { botId: place.id } } },
+      ...(place.createdById ? [{ id: place.createdById }] : []),
+      { universeMemberships: { some: { universeId: place.universeId } } },
+      { worldMemberships: { some: { world: { universeId: place.universeId } } } },
+      {
+        isGuest: false,
+        NOT: { preferences: { some: { key: PEOPLE_PREFERENCE_KEYS.findableByName, value: { equals: false } } } },
+      },
+    ],
+  };
+}
+
+/** The person a rule names, or null for "no such account" and "not someone you may name", which look the same. */
+function findPersonForRule(place: BotPlace, body: z.infer<typeof ruleSchema>) {
+  const named: Prisma.UserWhereInput = body.userId
+    ? { id: body.userId }
+    : { OR: [{ uuid: body.identifier as string }, { email: body.identifier as string }] };
+  return prisma.user.findFirst({ where: { AND: [named, nameableInRules(place)] } });
+}
+
 /** Which role or person a row is for, checked: it exists, is in this bot's universe, and could actually be limited. */
 async function resolveSubject(
   place: BotPlace,
@@ -210,9 +242,7 @@ async function resolveSubject(
     return { roleId: role.id };
   }
 
-  const user = body.userId
-    ? await prisma.user.findUnique({ where: { id: body.userId } })
-    : await findUserByIdentifier(body.identifier as string);
+  const user = await findPersonForRule(place, body);
   if (!user) throw new BotSettingsError(404, 'That person was not found');
   if (user.id === place.universeOwnerId || isSuperAdmin(user.email)) {
     throw new BotSettingsError(400, "The bot's owner always passes, so a rule for them would do nothing");
