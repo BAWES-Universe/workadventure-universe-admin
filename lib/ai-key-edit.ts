@@ -32,6 +32,15 @@ const KEY_SELECT = {
   healthCheckedAt: true,
 } as const;
 
+/**
+ * Only a key for a server on your own computer can be pointed at another address (a tunnel changes address on restart).
+ * A hosted key, NVIDIA NIM included, stays with its provider: it is never sent to an address typed later, where it
+ * could never be seen again to be checked.
+ */
+function canMoveAddress(info: { group: string }): boolean {
+  return info.group === 'own-computer';
+}
+
 /** The address to try: the one typed, or the one saved. A hosted kind with a fixed address takes none. */
 function addressToTry(typed: unknown, saved: string | null): string | undefined {
   return typeof typed === 'string' && typed.trim() ? typed : (saved ?? undefined);
@@ -57,8 +66,8 @@ export async function listModelsForSavedKey(
   if (!key) return { ok: false, status: 404, message: 'Key not found' };
   const info = kindInfo((key.settings as { kind?: unknown } | null)?.kind);
   if (!info) return { ok: false, status: 400, message: 'This key’s type is not known.' };
-  if (typeof input.address === 'string' && input.address.trim() && info.address === 'none') {
-    return { ok: false, status: 400, message: `${info.label} has a fixed address.` };
+  if (typeof input.address === 'string' && input.address.trim() && !canMoveAddress(info)) {
+    return { ok: false, status: 400, message: `${info.label} can’t be moved to another address.` };
   }
   const result = await probeModels({ kind: info.kind, address: addressToTry(input.address, key.endpoint), apiKey: savedApiKey(key) });
   return result.ok ? { ok: true, models: result.models } : { ok: false, status: 400, message: result.message };
@@ -71,7 +80,7 @@ export async function editSavedKey(ownerId: string, id: string, input: KeyEditIn
   if (!info) return { ok: false, status: 400, message: 'This key’s type is not known.' };
 
   const typedAddress = typeof input.address === 'string' && input.address.trim() ? input.address : null;
-  if (typedAddress && info.address === 'none') return { ok: false, status: 400, message: `${info.label} has a fixed address.` };
+  if (typedAddress && !canMoveAddress(info)) return { ok: false, status: 400, message: `${info.label} can’t be moved to another address.` };
   const typedModel = typeof input.model === 'string' ? input.model.trim() : null;
   if (typedModel !== null && (!typedModel || typedModel.length > 255)) return { ok: false, status: 400, message: 'Pick a model first.' };
   if (!typedAddress && typedModel === null) return { ok: false, status: 400, message: 'Nothing to change.' };
