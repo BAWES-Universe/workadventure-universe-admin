@@ -46,6 +46,27 @@ export const KEY_LOOKS_WRONG = 'That key doesn’t look right. Paste it again.';
 /** OpenRouter's model list is well over the default cap, so a list may be a few MB. */
 const MODEL_LIST_MAX_BYTES = 5_000_000;
 
+/**
+ * OpenRouter lists its models to anyone, so a wrong key still gets a 200 there. Its key-info address does check the key;
+ * only a clear 401/403 from it counts, so a path it doesn't have (404) or a hiccup never blocks a good key.
+ */
+const OPENROUTER_KEY_PATHS = ['/key', '/auth/key'];
+
+async function openRouterRejectsKey(base: string, apiKey: string): Promise<boolean> {
+  for (const path of OPENROUTER_KEY_PATHS) {
+    try {
+      const checked = await checkPublicHttpsUrl(`${base}${path}`);
+      const result = await safeGet(checked, { headers: { Authorization: `Bearer ${apiKey}` } });
+      if (!result.ok) return false;
+      if (result.status === 401 || result.status === 403) return true;
+      if (result.status !== 404) return false;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
 export type LoadModelsResult = { ok: true; models: string[] } | { ok: false; message: string };
 
 /** Why a check failed, for deciding what to do about it: nobody answered, the provider said no, or something else. */
@@ -106,6 +127,9 @@ export async function probeModels(input: KeyTargetInput & { apiKey?: unknown }):
     };
   }
   if (result.status !== 200) return { ok: false, message: `It answered with an error (${result.status}).`, reason: result.status >= 500 ? 'unreachable' : 'other' };
+  if (info.kind === 'openrouter' && apiKey && (await openRouterRejectsKey(info.base!, apiKey))) {
+    return { ok: false, message: `${info.label} didn’t accept this key.`, reason: 'rejected' };
+  }
 
   let ids: string[] = [];
   try {
