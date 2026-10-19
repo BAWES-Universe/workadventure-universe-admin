@@ -2,7 +2,8 @@ import { NextRequest } from 'next/server';
 import { POST } from '@/app/api/bots/configuration/route';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
-import { canManageBots } from '@/lib/bot-permissions';
+import { canManageBots, canManageThisBot } from '@/lib/bot-permissions';
+import { transformBotToServerFormat } from '@/lib/bot-config-helpers';
 
 jest.mock('@/lib/db', () => ({
   prisma: {
@@ -457,6 +458,42 @@ describe('/api/bots/configuration', () => {
       );
 
       expect(response.status).toBe(404);
+      expect(prisma.bot.update).not.toHaveBeenCalled();
+    });
+
+    it('lets a Yes on Manage this bot update the bot in its own room without Manage bots there (CodeRabbit finding on #458)', async () => {
+      (canManageBots as jest.Mock).mockResolvedValue(false);
+      (canManageThisBot as jest.Mock).mockResolvedValueOnce(true).mockResolvedValueOnce(true);
+      (prisma.bot.findUnique as jest.Mock).mockResolvedValueOnce({ id: botId, createdById: 'someone', roomId: 'room-123' });
+
+      const response = await POST(configRequest({ ...validBody, botId }));
+
+      expect(response.status).toBe(200);
+      expect(canManageBots).not.toHaveBeenCalled();
+      expect(prisma.bot.update).toHaveBeenCalled();
+      // the answer shows what the bot's own check says too, not the room's
+      expect(transformBotToServerFormat).toHaveBeenLastCalledWith(expect.anything(), true, true);
+    });
+
+    it('still refuses that person when the bot says no, and anyone to a missing bot without Manage bots (403 before 404)', async () => {
+      (canManageBots as jest.Mock).mockResolvedValue(false);
+      (canManageThisBot as jest.Mock).mockResolvedValueOnce(false);
+      (prisma.bot.findUnique as jest.Mock).mockResolvedValueOnce({ id: botId, createdById: 'someone', roomId: 'room-123' });
+      expect((await POST(configRequest({ ...validBody, botId }))).status).toBe(403);
+
+      (prisma.bot.findUnique as jest.Mock).mockResolvedValueOnce(null);
+      expect((await POST(configRequest({ ...validBody, botId }))).status).toBe(403);
+      expect(prisma.bot.update).not.toHaveBeenCalled();
+    });
+
+    it('creating a bot, or moving one to another room, still needs Manage bots in the room it lands in', async () => {
+      (canManageBots as jest.Mock).mockResolvedValue(false);
+      expect((await POST(configRequest(validBody))).status).toBe(403);
+      expect(prisma.bot.create).not.toHaveBeenCalled();
+
+      (prisma.bot.findUnique as jest.Mock).mockResolvedValueOnce({ id: botId, createdById: 'someone', roomId: 'room-999' });
+      expect((await POST(configRequest({ ...validBody, botId }))).status).toBe(403);
+      expect(canManageBots).toHaveBeenLastCalledWith('user-1', 'room-123');
       expect(prisma.bot.update).not.toHaveBeenCalled();
     });
 
