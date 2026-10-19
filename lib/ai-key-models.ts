@@ -95,6 +95,19 @@ export type ProbeModelsResult = { ok: true; models: string[]; facts: ModelFactsB
 const MODEL_REFUSED =
   /model_not_found|(unknown|unsupported|nonexistent|no such|invalid)\s+model|model[^.\n]{0,60}(does not exist|doesn't exist|not exist|not found|not supported|unsupported|not available|unavailable|no access|not have access|don't have access|do not have access|not allowed|permission|deprecated|decommissioned|retired)|(does not exist|not found|no access)[^.\n]{0,40}model/i;
 
+/** The words of an error answer, one per line (message, code, type), so the pattern above never reads across fields of the JSON. */
+function errorWords(body: string): string {
+  try {
+    const data = JSON.parse(body) as Record<string, unknown>;
+    const error = typeof data.error === 'object' && data.error !== null ? (data.error as Record<string, unknown>) : data;
+    const parts = [error.message, error.code, error.type, data.message, data.detail].filter((part): part is string => typeof part === 'string');
+    if (parts.length > 0) return parts.join('\n');
+  } catch {
+    // Not JSON: the plain text is what it said
+  }
+  return body;
+}
+
 const NOT_CHAT = /embed|whisper|tts|dall-e|moderation|rerank|transcribe|image|audio|realtime|guard|safety/i;
 
 /** One model id as the bot server will use it. Gemini lists "models/gemini-flash-latest" but takes "gemini-flash-latest". */
@@ -262,7 +275,7 @@ export async function probeChat(input: KeyTargetInput & { apiKey?: unknown; mode
   if (result.status === 402) return { ok: false, reason: 'credit', message: `${info.label} says this key is out of credit.` };
   if (result.status === 404) return { ok: false, reason: 'gone', message: `${info.label} no longer has the model ${input.model}.` };
   // Some providers answer a model they do not have, or one this key may not use, with a 400 or 422 instead of a 404
-  if ((result.status === 400 || result.status === 422) && MODEL_REFUSED.test(result.body)) {
+  if ((result.status === 400 || result.status === 422) && MODEL_REFUSED.test(errorWords(result.body))) {
     return { ok: false, reason: 'gone', message: `${info.label} won’t give this key the model ${input.model}.` };
   }
   return {
