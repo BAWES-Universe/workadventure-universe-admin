@@ -69,8 +69,11 @@ async function openRouterRejectsKey(base: string, apiKey: string): Promise<boole
 
 export type LoadModelsResult = { ok: true; models: string[] } | { ok: false; message: string };
 
-/** Why a check failed, for deciding what to do about it: nobody answered, the provider said no, or something else. */
-export type ProbeFailure = 'unreachable' | 'rejected' | 'other';
+/**
+ * Why a check failed, for deciding what to do about it: nobody answered, the provider said no, it was too busy to say
+ * (a 429: it answered, so the key is neither proven good nor bad), or something else.
+ */
+export type ProbeFailure = 'unreachable' | 'rejected' | 'busy' | 'other';
 export type ProbeModelsResult = { ok: true; models: string[] } | { ok: false; message: string; reason: ProbeFailure };
 
 const NOT_CHAT = /embed|whisper|tts|dall-e|moderation|rerank|transcribe|image|audio|realtime|guard|safety/i;
@@ -125,6 +128,9 @@ export async function probeModels(input: KeyTargetInput & { apiKey?: unknown }):
           ? 'The server asked for a key, or didn’t accept the one you gave.'
           : `${info.label} didn’t accept this key.`,
     };
+  }
+  if (result.status === 429) {
+    return { ok: false, reason: 'busy', message: `${info.label} is busy right now. Try again in a moment.` };
   }
   if (result.status !== 200) return { ok: false, message: `It answered with an error (${result.status}).`, reason: result.status >= 500 ? 'unreachable' : 'other' };
   if (info.kind === 'openrouter' && apiKey && (await openRouterRejectsKey(info.base!, apiKey))) {

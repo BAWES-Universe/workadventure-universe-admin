@@ -94,7 +94,9 @@ export async function markWorking(key: Pick<KeyRow, 'providerId' | 'ownerId'>, n
 }
 
 /** Asks the key's provider for its model list with the saved key: the same check Add key runs. */
-export async function checkKey(key: KeyRow): Promise<{ ok: true } | { ok: false; reason: DownReason; message: string }> {
+export type KeyCheck = { ok: true } | { ok: false; reason: DownReason; message: string } | { ok: false; busy: true; message: string };
+
+export async function checkKey(key: KeyRow): Promise<KeyCheck> {
   const info = kindInfo((key.settings as { kind?: unknown } | null)?.kind);
   if (!info) return { ok: false, reason: 'stopped', message: 'This key’s type is not known.' };
   let apiKey: string | undefined;
@@ -105,6 +107,8 @@ export async function checkKey(key: KeyRow): Promise<{ ok: true } | { ok: false;
   }
   const result = await probeModels({ kind: info.kind, address: key.endpoint ?? undefined, apiKey });
   if (result.ok) return { ok: true };
+  // The provider answered that it is busy: that says nothing about the key, so it is left as it is
+  if (result.reason === 'busy') return { ok: false, busy: true, message: result.message };
   return { ok: false, reason: result.reason === 'rejected' ? 'rejected' : 'stopped', message: result.message };
 }
 
@@ -121,8 +125,13 @@ const KEY_SELECT = {
 } as const;
 
 /** Checks the key now and updates its state: Working if it answers, Down if not. Used by Check now and the 5-minute recheck. */
-export async function checkAndRecord(key: KeyRow): Promise<{ ok: true } | { ok: false; reason: DownReason; message: string }> {
+export async function checkAndRecord(key: KeyRow): Promise<KeyCheck> {
   const result = await checkKey(key);
+  if ('busy' in result) {
+    // Neither Working nor Down is proven: keep the state, and look again at the next due check
+    await prisma.botsAiProvider.updateMany({ where: { providerId: key.providerId }, data: { healthCheckedAt: new Date() } });
+    return result;
+  }
   if (result.ok) {
     await markWorking(key);
     await prisma.botsAiProvider.updateMany({ where: { providerId: key.providerId }, data: { healthCheckedAt: new Date() } });

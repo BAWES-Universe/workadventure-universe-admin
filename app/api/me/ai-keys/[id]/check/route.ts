@@ -15,7 +15,7 @@ export async function OPTIONS(request: NextRequest) {
 
 /**
  * POST /api/me/ai-keys/:id/check - "Check now": asks the key's provider if it answers, marks the key Working or Down
- * from the answer, and says which, with a plain sentence when it is down (#374). Only the key's owner can; anyone else
+ * from the answer (a provider that is only busy changes nothing), and says which, with a plain sentence when it is down (#374). Only the key's owner can; anyone else
  * gets the same "not found" as for a key that does not exist.
  */
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -31,6 +31,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     if (!key) return respond(request, { error: 'Key not found' }, 404);
     if (!allowKeyAttempt(user.id)) return respond(request, { error: 'Too many tries. Wait a minute and try again.' }, 429);
     const result = await checkAndRecord(key);
+    if (!result.ok && 'busy' in result) return respond(request, { status: 'busy', message: `${result.message} ${key.name} stays as it is.` });
     return respond(request, result.ok ? { status: 'working' } : { status: 'down', message: result.message });
   } catch (error) {
     console.error('[AiKeys] Check failed:', error instanceof Error ? error.message : 'unknown');

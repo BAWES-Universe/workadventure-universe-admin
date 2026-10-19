@@ -153,6 +153,15 @@ describe('checkKey and checkAndRecord', () => {
     expect(await checkKey(hosted)).toMatchObject({ ok: false, reason: 'stopped' });
   });
 
+  it('a provider that is only busy (429) changes nothing: not Down, not Working, only the check time moves', async () => {
+    probe.mockResolvedValue({ ok: false, message: 'DeepSeek is busy right now. Try again in a moment.', reason: 'busy' });
+    expect(await checkAndRecord(own)).toEqual({ ok: false, busy: true, message: 'DeepSeek is busy right now. Try again in a moment.' });
+    expect(notice).not.toHaveBeenCalled();
+    expect(clear).not.toHaveBeenCalled();
+    expect(db.updateMany).toHaveBeenCalledTimes(1);
+    expect(db.updateMany).toHaveBeenCalledWith({ where: { providerId: 'key-2' }, data: { healthCheckedAt: expect.any(Date) } });
+  });
+
   it('a failed check marks a Working key Down', async () => {
     probe.mockResolvedValue({ ok: false, message: 'It didn’t answer.', reason: 'unreachable' });
     expect(await checkAndRecord(own)).toMatchObject({ ok: false });

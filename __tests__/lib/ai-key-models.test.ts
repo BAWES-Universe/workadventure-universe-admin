@@ -1,5 +1,5 @@
 import { AddressError, checkPublicHttpsUrl, safeGet } from '@/lib/ai-key-fetch';
-import { allowKeyAttempt, cleanModelIds, keyTarget, loadModels } from '@/lib/ai-key-models';
+import { allowKeyAttempt, cleanModelIds, keyTarget, loadModels, probeModels } from '@/lib/ai-key-models';
 
 jest.mock('@/lib/ai-key-fetch', () => ({
   ...jest.requireActual('@/lib/ai-key-fetch'),
@@ -133,6 +133,7 @@ describe('loadModels', () => {
     [answer(403, {}), 'lmstudio', 'The server asked for a key, or didn’t accept the one you gave.'],
     [answer(302, ''), 'lmstudio', 'It answered with an error (302).'],
     [answer(500, {}), 'openai', 'It answered with an error (500).'],
+    [answer(429, {}), 'openai', 'OpenAI is busy right now. Try again in a moment.'],
     [answer(200, '<html>not json</html>'), 'lmstudio', 'It answered, but not like an AI server.'],
     [answer(200, { nope: true }), 'lmstudio', 'It answered, but not like an AI server.'],
     [answer(200, { data: [] }), 'lmstudio', 'It answered, but no model is loaded. Load one in your server first.'],
@@ -141,6 +142,13 @@ describe('loadModels', () => {
     get.mockResolvedValue(reply);
     const result = await loadModels({ kind, address: 'https://lm.example.com', apiKey: 'k-1234' });
     expect(result).toEqual({ ok: false, message });
+  });
+});
+
+describe('probeModels, a busy provider', () => {
+  it('says "busy" for a 429, so a health check can tell it from a key that stopped working', async () => {
+    get.mockResolvedValue(answer(429, {}));
+    expect(await probeModels({ kind: 'deepseek', apiKey: 'k-1234' })).toMatchObject({ ok: false, reason: 'busy' });
   });
 });
 
