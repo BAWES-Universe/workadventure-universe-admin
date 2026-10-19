@@ -98,6 +98,8 @@ curl -X POST \
    - PUT takes any of `{ privateBot: boolean, refusalReply: string | null (up to 500 characters), dailyReplyCap: 1..10000 | null }`
      and returns the same as GET. `dailyReplyCap` is how many replies each person may get from this bot in a day;
      **null is no limit, and every bot starts with no limit**. It is only stored here: nothing limits replies today.
+   - A Yes on Manage this bot (a person's row or a role's) only counts while the person is still in the universe, because
+     rows stay when someone leaves. Everyone cannot be given Manage this bot (400); give it to a role or a person.
 
 8. **PUT /api/bots/:id/permissions/rules** and **DELETE /api/bots/:id/permissions/rules?roleId=|userId=**
    - PUT body: one of `{ roleId }`, `{ userId }` or `{ identifier }` (a person's uuid or email), and any of `chat`, `dm`,
