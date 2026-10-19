@@ -13,6 +13,7 @@ import {
   Layers,
   Server,
   DoorOpen,
+  KeyRound,
 } from 'lucide-react';
 import { LucideIcon } from 'lucide-react';
 import { Planet } from '@/app/admin/components/ds/planet-icon';
@@ -50,6 +51,7 @@ export const NAV_ITEMS: NavItem[] = [
   { href: '/admin/stars', label: 'Stars', icon: Star, group: 'my' },
   { href: '/admin/memberships', label: 'Memberships', icon: Mail, requiresAuth: true, group: 'my' },
   { href: '/admin/you', label: 'Profile', icon: UserCircle, requiresAuth: true, group: 'my' },
+  { href: '/admin/you/ai-keys', label: 'AI keys', icon: KeyRound, requiresAuth: true, group: 'my' },
 
   // Discover section
   { href: '/admin/discover/universes', label: 'Universes', icon: Planet, group: 'discover' },

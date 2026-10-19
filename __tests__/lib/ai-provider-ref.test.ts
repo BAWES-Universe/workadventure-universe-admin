@@ -26,8 +26,13 @@ describe('checkAiProviderRef', () => {
     await expect(checkAiProviderRef('deepseek')).resolves.toBeNull();
     expect(findUnique).toHaveBeenCalledWith({
       where: { providerId: 'deepseek' },
-      select: { providerId: true },
+      select: { providerId: true, ownerId: true },
     });
+  });
+
+  it('rejects a ref that names someone\u2019s personal key (#374): no bot is pointed at a key by its id', async () => {
+    findUnique.mockResolvedValueOnce({ providerId: 'key-1', ownerId: 'user-a' });
+    await expect(checkAiProviderRef('key-1')).resolves.toBe('AI provider "key-1" does not exist');
   });
 
   it('rejects a ref that names no provider', async () => {

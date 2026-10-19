@@ -101,11 +101,13 @@ describe('You: Get started comes back', () => {
     expect(screen.queryByRole('button', { name: /Sign out/ })).toBeNull();
   });
 
-  it('has no Settings at all while Get started shows', async () => {
+  it('holds only the AI keys row in Settings while Get started shows', async () => {
     stored(false);
     render(<YouPage />);
     await screen.findByTestId('get-started');
-    expect(screen.queryByRole('heading', { name: 'Settings' })).toBeNull();
+    expect(screen.getByRole('heading', { name: 'Settings' })).toBeTruthy();
+    expect(screen.getByTestId('ai-keys-row').getAttribute('href')).toBe('/admin/you/ai-keys');
+    expect(screen.queryByRole('button', { name: 'Show' })).toBeNull();
   });
 
   it('does not flash the Show row while it is still unknown whether every step is done', async () => {

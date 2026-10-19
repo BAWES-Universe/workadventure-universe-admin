@@ -29,7 +29,8 @@ export async function GET(
       where: { providerId: id },
     });
 
-    if (!provider) {
+    // A person's personal key (#374) is not a server provider: it is never shown or changed from here.
+    if (!provider || provider.ownerId) {
       return NextResponse.json(
         { error: 'Provider not found' },
         { status: 404 }
@@ -108,7 +109,7 @@ export async function PATCH(
       where: { providerId: id },
     });
 
-    if (!existing) {
+    if (!existing || existing.ownerId) {
       return NextResponse.json(
         { error: 'Provider not found' },
         { status: 404 }
@@ -249,7 +250,7 @@ export async function DELETE(
       where: { providerId: id },
     });
 
-    if (!existing) {
+    if (!existing || existing.ownerId) {
       return NextResponse.json(
         { error: 'Provider not found' },
         { status: 404 }
