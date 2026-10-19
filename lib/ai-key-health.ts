@@ -147,7 +147,8 @@ export async function checkKey(key: KeyRow): Promise<KeyCheck> {
   const address = key.endpoint ?? undefined;
   const models = await probeModels({ kind: info.kind, address, apiKey });
   if (!models.ok) return failed(models);
-  if (key.model && (key.downSince || !models.models.includes(cleanModelId(key.model, info.kind)))) {
+  // A kind whose model list is public proves nothing about the key, so only a chat reply does
+  if (key.model && (info.keyCheck.type === 'chat' || key.downSince || !models.models.includes(cleanModelId(key.model, info.kind)))) {
     const chat = await probeChat({ kind: info.kind, address, apiKey, model: key.model });
     // The provider took the key and the model but refused this tiny request (a reasoning model that wants a bigger cap, say):
     // that is the request's problem, not the key's, and a real reply's 400 is not counted against a key either
