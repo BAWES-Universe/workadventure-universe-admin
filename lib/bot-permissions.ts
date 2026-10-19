@@ -98,14 +98,16 @@ export async function canManageThisBot(
 
 /**
  * Checks if a user can see and change a bot's MCP servers.
- * Returns true for whoever created the bot, anyone who can manage bots in its
- * room (see canManageBots), and super admins; then the bot's own Manage rules
- * apply (see canManageThisBot).
+ * Returns true for anyone who can manage bots in its room (see canManageBots) and
+ * super admins; then the bot's own Manage rules apply (see canManageThisBot). The
+ * bot's creator gets no extra way in: someone who has lost Manage bots in the room
+ * can no longer change the bot's tools, the same as they can no longer edit or
+ * delete the bot.
  */
 export async function canManageBotMcpServers(
   userId: string,
   userEmail: string | null,
   bot: ManagedBot
 ): Promise<boolean> {
-  return canManageThisBot(userId, userEmail, bot, { creatorPasses: true });
+  return canManageThisBot(userId, userEmail, bot, { creatorPasses: false });
 }

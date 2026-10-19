@@ -80,6 +80,18 @@ const MOCK_ROOM_ID = 'room-1';
 const MOCK_WORLD_ID = 'world-1';
 const MOCK_UNIVERSE_ID = 'universe-1';
 
+function givenManageBots(has: boolean) {
+  (prisma.universeMember.findUnique as jest.Mock).mockResolvedValue(
+    has
+      ? {
+          allWorlds: true,
+          worldIds: [],
+          roles: [{ allWorlds: true, worldIds: [], role: { key: 'bot-keeper', position: 20, permissions: BigInt(1) << BigInt(13) } }],
+        }
+      : null,
+  );
+}
+
 describe('/api/bots/[id]/mcp-servers', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -113,9 +125,10 @@ describe('/api/bots/[id]/mcp-servers', () => {
       world: { id: MOCK_WORLD_ID, universeId: MOCK_UNIVERSE_ID, universe: { ownerId: 'universe-owner' } },
     });
     (prisma.worldMember.findFirst as jest.Mock).mockResolvedValue(null);
-    // No built-in permissions and no universe membership: bot management then follows the world tags
+    // No built-in permissions. The user holds a custom role with Manage bots (the bot's creator gets no way in of their
+    // own); tests about who is refused take the role away
     (prisma.role.findUnique as jest.Mock).mockResolvedValue(null);
-    (prisma.universeMember.findUnique as jest.Mock).mockResolvedValue(null);
+    givenManageBots(true);
   });
 
   describe('GET', () => {
@@ -262,6 +275,7 @@ describe('/api/bots/[id]/mcp-servers', () => {
     });
 
     it('should answer as if the bot did not exist when the user is not owner or super admin', async () => {
+      givenManageBots(false);
       (prisma.bot.findUnique as jest.Mock).mockResolvedValue({
         id: MOCK_BOT_ID,
         createdById: 'some-other-user',
@@ -617,6 +631,7 @@ describe('/api/bots/[id]/mcp-servers', () => {
     });
 
     it('should return 403 if user is not authorized', async () => {
+      givenManageBots(false);
       (prisma.bot.findUnique as jest.Mock).mockResolvedValue({
         id: MOCK_BOT_ID,
         createdById: 'some-other-user',
@@ -654,6 +669,13 @@ describe('/api/bots/[id]/mcp-servers', () => {
       const response = await GET(request, { params: Promise.resolve({ id: MOCK_BOT_ID }) });
 
       expect(response.status).toBe(200);
+    });
+
+    it('refuses the bot\'s own creator once they no longer hold Manage bots', async () => {
+      givenManageBots(false);
+      const request = new NextRequest(`http://localhost:3333/api/bots/${MOCK_BOT_ID}/mcp-servers`, { method: 'GET' });
+      const response = await GET(request, { params: Promise.resolve({ id: MOCK_BOT_ID }) });
+      expect(response.status).toBe(404);
     });
 
     it('lets the universe owner manage the MCP servers of a bot someone else created', async () => {
@@ -728,7 +750,8 @@ describe('/api/bots/[id]/mcp-servers', () => {
       expect(response.status).toBe(204);
     });
 
-    it('still refuses someone who is neither the creator, a room bot manager nor a super admin', async () => {
+    it('still refuses someone who is neither a room bot manager nor a super admin', async () => {
+      givenManageBots(false);
       (prisma.bot.findUnique as jest.Mock).mockResolvedValue({
         id: MOCK_BOT_ID,
         createdById: 'other-user',

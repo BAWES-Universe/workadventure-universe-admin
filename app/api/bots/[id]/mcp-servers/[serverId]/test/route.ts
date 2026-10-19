@@ -495,7 +495,7 @@ async function testMcpConnection(server: { serverUrl: string; authType: string; 
  * POST /api/bots/[id]/mcp-servers/[serverId]/test
  * Test connection to an MCP server. Calls tools/list on the server
  * with the stored auth credentials (decrypted server-side only).
- * Gated by canManageBotMcpServers (bot creator, room bot manager or super admin).
+ * Gated by canManageBotMcpServers (room bot manager or super admin).
  */
 export async function POST(
   request: NextRequest,

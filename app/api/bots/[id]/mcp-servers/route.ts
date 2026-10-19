@@ -183,7 +183,7 @@ const createMcpServerSchema = z.object({
 
 /**
  * GET /api/bots/[id]/mcp-servers
- * List all MCP servers for a bot. Gated by canManageBotMcpServers: the bot's creator, anyone who can manage bots in its room, or a super admin.
+ * List all MCP servers for a bot. Gated by canManageBotMcpServers: anyone who can manage bots in its room, or a super admin.
  */
 export async function GET(
   request: NextRequest,
