@@ -251,6 +251,12 @@ describe('checkKey and checkAndRecord', () => {
       expect(chat).not.toHaveBeenCalled();
     });
 
+    it.each([['a Working key whose model is off the list', null], ['a Down key', 'errors']])('%s is not failed by a probe the provider refused as a bad request (400, 413, 422)', async (_name, downReason) => {
+      probe.mockResolvedValue({ ok: true, models: ['something-else'] });
+      chat.mockResolvedValue({ ok: false, reason: 'request', message: 'DeepSeek lists its models, but a chat call to deepseek-v4-flash failed (400). Check the model.' });
+      expect(await checkKey(downNow(withModel(hosted), { downReason }))).toEqual({ ok: true });
+    });
+
     it('a model that has dropped off the list is asked directly, and the answer decides', async () => {
       probe.mockResolvedValue({ ok: true, models: ['something-else'] });
       chat.mockResolvedValueOnce({ ok: true });
