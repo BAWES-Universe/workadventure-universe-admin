@@ -138,8 +138,10 @@ describe('editSavedKey', () => {
     expect(await editSavedKey('maker', 'key-1', { address: 'https://new.trycloudflare.com' })).toEqual({ ok: false, status: 400, message: 'It didn’t answer.' });
     // A model that is not listed and gets a non-answer is a missing model too
     (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['other-model'] });
-    (probeChat as jest.Mock).mockResolvedValue({ ok: false, reason: 'other', message: 'It answered with an error (400).' });
-    expect(await editSavedKey('maker', 'key-1', { address: 'https://new.trycloudflare.com' })).toMatchObject({ ok: false, code: 'model-missing' });
+    for (const reason of ['other', 'request']) {
+      (probeChat as jest.Mock).mockResolvedValue({ ok: false, reason, message: 'It answered with an error (400).' });
+      expect(await editSavedKey('maker', 'key-1', { address: 'https://new.trycloudflare.com' })).toMatchObject({ ok: false, code: 'model-missing' });
+    }
     expect(db.botsAiProvider.updateMany).not.toHaveBeenCalled();
   });
 
