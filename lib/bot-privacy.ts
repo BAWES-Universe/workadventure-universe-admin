@@ -53,6 +53,24 @@ export async function loadBotPrivacy(botId: string): Promise<BotPrivacy | null> 
   return resolveBotPrivacy(bot.room.world.universe.hideBotConversations, bot.hideConversations);
 }
 
+/**
+ * A bot that hides its conversations is moved to a room whose universe does not hide them: without help it would stop
+ * being hidden and show what it wrote before (transcripts and memory belong to the bot, not to the room). True when
+ * the move must also set the bot to Private, so the move changes nothing about who can read what it already wrote.
+ * A manager can still pick Normal afterwards, on purpose.
+ */
+export async function mustStayPrivateAfterMove(botId: string, newRoomId: string): Promise<boolean> {
+  const [current, target] = await Promise.all([
+    loadBotPrivacy(botId),
+    prisma.room.findUnique({
+      where: { id: newRoomId },
+      select: { world: { select: { universe: { select: { hideBotConversations: true } } } } },
+    }),
+  ]);
+  if (!current?.hidden || !target) return false;
+  return !target.world.universe.hideBotConversations && current.choice !== 'private';
+}
+
 /** Is this bot hidden? A bot that is gone is not. */
 export async function isBotHidden(botId: string): Promise<boolean> {
   return (await loadBotPrivacy(botId))?.hidden === true;

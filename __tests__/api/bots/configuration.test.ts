@@ -11,6 +11,9 @@ jest.mock('@/lib/db', () => ({
       update: jest.fn(),
       findUnique: jest.fn(),
     },
+    room: {
+      findUnique: jest.fn(), // Hide bot conversations (#435): looked up when an update moves the bot to another room
+    },
     user: {
       findFirst: jest.fn(),
       create: jest.fn(),
@@ -250,6 +253,27 @@ describe('/api/bots/configuration', () => {
       expect(data.behaviorConfig.walkSpeed).toBe(2);
       expect(data.behaviorConfig.assignedSpace).toEqual({ center: { x: 9, y: 9 }, radius: 7 });
       expect(data.behaviorConfig.behaviorType).toBe('idle'); // synced to scalar
+    });
+
+    it('keeps a hidden bot Private when the update moves it to a room in a universe that does not hide (#435)', async () => {
+      (prisma.bot.findUnique as jest.Mock).mockImplementation(async (args: { select?: { hideConversations?: boolean } }) =>
+        args.select?.hideConversations
+          ? { hideConversations: null, room: { world: { universe: { hideBotConversations: true } } } }
+          : { id: 'bot-1', roomId: 'room-old', createdById: null, behaviorConfig: null },
+      );
+      (prisma.room.findUnique as jest.Mock).mockResolvedValue({ id: 'room-123', world: { universe: { hideBotConversations: false } } });
+      const response = await POST(configRequest({ ...validBody, botId: '00000000-0000-4000-8000-000000000001' }));
+
+      expect(response.status).toBe(200);
+      expect((prisma.bot.update as jest.Mock).mock.calls[0][0].data).toMatchObject({ roomId: 'room-123', hideConversations: true });
+    });
+
+    it('does not touch privacy when the update leaves the bot in its room', async () => {
+      (prisma.bot.findUnique as jest.Mock).mockImplementation(async () => ({ id: 'bot-1', roomId: 'room-123', createdById: null, behaviorConfig: null }));
+      const response = await POST(configRequest({ ...validBody, botId: '00000000-0000-4000-8000-000000000001' }));
+
+      expect(response.status).toBe(200);
+      expect((prisma.bot.update as jest.Mock).mock.calls[0][0].data).not.toHaveProperty('hideConversations');
     });
 
     it('syncs embedded behaviorConfig.behaviorType when behaviorType changes without behaviorConfig in the body', async () => {

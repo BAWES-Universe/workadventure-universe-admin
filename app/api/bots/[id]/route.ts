@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { getSessionUser } from '@/lib/auth-session';
 import { prisma } from '@/lib/db';
-import { deleteWithHiddenBotData } from '@/lib/bot-privacy';
+import { deleteWithHiddenBotData, mustStayPrivateAfterMove } from '@/lib/bot-privacy';
 import { canManageBots, canManageThisBot } from '@/lib/bot-permissions';
 import { mayReadRoomBots } from '@/lib/bot-room-access';
 import { validateAccessToken } from '@/lib/oidc';
@@ -438,6 +438,11 @@ export async function PUT(
       }
     }
 
+    // Hide bot conversations (#435): a move out of a hiding universe keeps the bot Private, so what it wrote stays hidden
+    const keepPrivate = resolvedRoomId && resolvedRoomId !== existingBot.roomId
+      ? await mustStayPrivateAfterMove(id, resolvedRoomId)
+      : false;
+
     // The provider ref must name an existing provider (an unchanged ref is let through)
     if (validatedData.aiProviderRef) {
       const providerError = await checkAiProviderRef(validatedData.aiProviderRef, existingBot.aiProviderRef);
@@ -456,6 +461,7 @@ export async function PUT(
     // Prepare update data (only include fields that were provided)
     const updateData: any = {};
     if (resolvedRoomId !== undefined) updateData.roomId = resolvedRoomId;
+    if (keepPrivate) updateData.hideConversations = true;
     if (validatedData.name !== undefined) updateData.name = validatedData.name;
     if (validatedData.description !== undefined) updateData.description = validatedData.description;
     if (validatedData.characterTextureId !== undefined) updateData.characterTextureId = validatedData.characterTextureId;
