@@ -230,10 +230,10 @@ describe('Add a key: More providers', () => {
 });
 
 describe('Add a key: DeepSeek starts on the model that has Vision', () => {
-  it('picks deepseek-flash, shows Vision next to it, and adds the key on it', async () => {
+  it('picks deepseek-v4-flash, shows Vision next to it, and adds the key on it', async () => {
     fetchMock.mockImplementation((url: string) =>
       url.endsWith('/models')
-        ? json({ ok: true, models: ['deepseek-flash', 'deepseek-v4-pro'], facts: { 'deepseek-flash': { vision: true }, 'deepseek-v4-pro': { vision: false } } })
+        ? json({ ok: true, models: ['deepseek-v4-flash', 'deepseek-v4-pro'], facts: { 'deepseek-v4-flash': { vision: true }, 'deepseek-v4-pro': { vision: false } } })
         : json({ id: 'key-new' }),
     );
     render(<AddAiKeyPage />);
@@ -241,17 +241,17 @@ describe('Add a key: DeepSeek starts on the model that has Vision', () => {
     fireEvent.change(screen.getByLabelText(/API key/), { target: { value: 'sk-test' } });
     fireEvent.click(screen.getByRole('button', { name: /Load models/ }));
     await screen.findByText(/It answered/);
-    expect((screen.getByRole('radio', { name: /^deepseek-flash/ }) as HTMLElement).getAttribute('aria-checked')).toBe('true');
-    expect(screen.getByRole('radio', { name: /^deepseek-flash/ }).textContent).toContain('Vision');
+    expect((screen.getByRole('radio', { name: /^deepseek-v4-flash/ }) as HTMLElement).getAttribute('aria-checked')).toBe('true');
+    expect(screen.getByRole('radio', { name: /^deepseek-v4-flash/ }).textContent).toContain('Vision');
     expect(screen.getByRole('radio', { name: /^deepseek-v4-pro/ }).textContent).not.toContain('Vision');
     fireEvent.click(addButton());
     await waitFor(() => expect(push).toHaveBeenCalled());
     const add = fetchMock.mock.calls.find((call) => !String(call[0]).endsWith('/models'))!;
-    expect(JSON.parse(add[1].body)).toMatchObject({ kind: 'deepseek', model: 'deepseek-flash' });
+    expect(JSON.parse(add[1].body)).toMatchObject({ kind: 'deepseek', model: 'deepseek-v4-flash' });
   });
 
   it('picks nothing when the list does not hold the suggested model', async () => {
-    fetchMock.mockImplementation(() => json({ ok: true, models: ['deepseek-v4-pro', 'deepseek-v4-flash'] }));
+    fetchMock.mockImplementation(() => json({ ok: true, models: ['deepseek-v4-pro', 'deepseek-chat'] }));
     render(<AddAiKeyPage />);
     fireEvent.click(screen.getByRole('radio', { name: /^DeepSeek/ }));
     fireEvent.change(screen.getByLabelText(/API key/), { target: { value: 'sk-test' } });

@@ -206,6 +206,25 @@ describe('probeChat', () => {
   });
 
   it.each([
+    ['The model `gpt-9` does not exist or you do not have access to it.'],
+    ['Model Not Exist'],
+    ['unknown model: foo'],
+    ['{"error":{"code":"model_not_found"}}'],
+  ])('reads a 400 that says the model is the problem (%s) as a model the key cannot use', async (message) => {
+    post.mockResolvedValue(answer(400, { error: { message } }));
+    expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'm' })).toMatchObject({ ok: false, reason: 'gone' });
+  });
+
+  it.each([
+    ['max_tokens is too small for this model, use at least 1024'],
+    ['invalid value for parameter temperature'],
+    ['unknown parameter: enable_thinking'],
+  ])('keeps a 400 about the request itself (%s) as the request’s problem', async (message) => {
+    post.mockResolvedValue(answer(400, { error: { message } }));
+    expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'm' })).toMatchObject({ ok: false, reason: 'request' });
+  });
+
+  it.each([
     [answer(401, {}), 'rejected'],
     [answer(429, {}), 'busy'],
     [answer(404, {}), 'gone'],
@@ -269,16 +288,16 @@ describe('providers added to the catalog', () => {
 });
 
 describe('model facts the provider’s docs give (DeepSeek’s list holds ids only)', () => {
-  it('gives Vision to deepseek-flash and not to V4 Pro, and nothing to a model the docs do not name', async () => {
-    get.mockResolvedValue(answer(200, { data: [{ id: 'deepseek-flash' }, { id: 'deepseek-v4-pro' }, { id: 'deepseek-v4-flash' }] }));
+  it('gives Vision to deepseek-v4-flash and not to V4 Pro, and nothing to a model the docs do not name', async () => {
+    get.mockResolvedValue(answer(200, { data: [{ id: 'deepseek-v4-flash' }, { id: 'deepseek-v4-pro' }, { id: 'deepseek-v4-flash' }] }));
     const result = await probeModels({ kind: 'deepseek', apiKey: 'sk-1' });
-    expect(result.ok && result.facts).toEqual({ 'deepseek-flash': { vision: true }, 'deepseek-v4-pro': { vision: false } });
+    expect(result.ok && result.facts).toEqual({ 'deepseek-v4-flash': { vision: true }, 'deepseek-v4-pro': { vision: false } });
   });
 
   it('leaves them out when the model is not on the list, and lets the list’s own word win', async () => {
-    get.mockResolvedValue(answer(200, { data: [{ id: 'deepseek-flash', capabilities: { vision: false } }] }));
+    get.mockResolvedValue(answer(200, { data: [{ id: 'deepseek-v4-flash', capabilities: { vision: false } }] }));
     const result = await probeModels({ kind: 'deepseek', apiKey: 'sk-1' });
-    expect(result.ok && result.facts).toEqual({ 'deepseek-flash': { vision: false } });
+    expect(result.ok && result.facts).toEqual({ 'deepseek-v4-flash': { vision: false } });
   });
 });
 
