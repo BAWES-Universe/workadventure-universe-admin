@@ -71,6 +71,13 @@ describe('POST /api/me/ai-keys/:id/lend', () => {
     expect(lendAccess).toHaveBeenCalledWith('user-a', 'uni-1');
   });
 
+  it('is "not found", not a 500, when the key or universe went away between the checks and the save', async () => {
+    key.findFirst.mockResolvedValue({ providerId: 'key-1' });
+    (lendAccess as jest.Mock).mockResolvedValue('manage');
+    lends.upsert.mockRejectedValue(Object.assign(new Error('Foreign key constraint failed'), { code: 'P2003' }));
+    expect((await post({ universeId: 'uni-1' })).status).toBe(404);
+  });
+
   it('says so with a 500 when it can’t save', async () => {
     key.findFirst.mockRejectedValue(new Error('db down'));
     const spy = jest.spyOn(console, 'error').mockImplementation(() => {});
