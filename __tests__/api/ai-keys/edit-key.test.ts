@@ -145,6 +145,13 @@ describe('editSavedKey', () => {
     expect(db.botsAiProvider.updateMany).not.toHaveBeenCalled();
   });
 
+  it('saves when the model is listed and the provider only refused the tiny reply with a 400', async () => {
+    (probeChat as jest.Mock).mockResolvedValue({ ok: false, reason: 'request', message: 'a chat call failed (400).' });
+    const result = await editSavedKey('maker', 'key-1', { address: 'https://new.trycloudflare.com' });
+    expect(result).toMatchObject({ ok: true, model: 'qwen3-8b' });
+    expect(db.botsAiProvider.updateMany).toHaveBeenCalledTimes(1);
+  });
+
   it('saves the new address and a model picked on it in one step', async () => {
     (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['llama-3.1-8b'], facts: {} });
     const result = await editSavedKey('maker', 'key-1', { address: 'https://new.trycloudflare.com', model: 'llama-3.1-8b' });

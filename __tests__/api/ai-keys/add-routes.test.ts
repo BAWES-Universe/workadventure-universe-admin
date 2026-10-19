@@ -140,6 +140,13 @@ describe('POST /api/me/ai-keys: the key must really answer, and regions', () => 
     expect(provider.create).not.toHaveBeenCalled();
   });
 
+  it('saves a listed model whose tiny reply the provider refused with a 400 (the request, not the key or the model)', async () => {
+    chat.mockResolvedValue({ ok: false, reason: 'request', message: 'lists its models, but a chat call failed (400).' });
+    const response = await post({ kind: 'lmstudio', address: 'https://lm.example.com', apiKey: 'sk-1', model: 'qwen3-8b' });
+    expect(response.status).toBe(201);
+    expect(provider.create).toHaveBeenCalledTimes(1);
+  });
+
   it('saves a region kind on the base of the region picked, and remembers which', async () => {
     const response = await post({ kind: 'qwen', region: 'china', apiKey: 'sk-abcd1234', model: 'qwen3-8b' });
     expect(response.status).toBe(201);
