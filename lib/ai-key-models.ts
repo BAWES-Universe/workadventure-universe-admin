@@ -88,6 +88,13 @@ export type ModelFacts = {
 export type ModelFactsById = Record<string, ModelFacts>;
 export type ProbeModelsResult = { ok: true; models: string[]; facts: ModelFactsById } | { ok: false; message: string; reason: ProbeFailure };
 
+/**
+ * What a provider's 400 or 422 says when the problem is the model (it does not exist, or this key may not use it) and not the
+ * request. Only these words count: a bare "invalid" does not, because a refused token limit says "invalid" too.
+ */
+const MODEL_REFUSED =
+  /model_not_found|(unknown|unsupported|nonexistent|no such|invalid)\s+model|model[^.\n]{0,60}(does not exist|doesn't exist|not exist|not found|not supported|unsupported|not available|unavailable|no access|not have access|don't have access|do not have access|not allowed|permission|deprecated|decommissioned|retired)|(does not exist|not found|no access)[^.\n]{0,40}model/i;
+
 const NOT_CHAT = /embed|whisper|tts|dall-e|moderation|rerank|transcribe|image|audio|realtime|guard|safety/i;
 
 /** One model id as the bot server will use it. Gemini lists "models/gemini-flash-latest" but takes "gemini-flash-latest". */
@@ -293,6 +300,10 @@ export async function probeChat(input: KeyTargetInput & { apiKey?: unknown; mode
   // Claude says "out of credit" and "spend limit reached" as a plain 400; other providers' 400s are about the request
   if (result.status === 402 || (info.protocol === 'anthropic' && result.status === 400 && /credit balance|usage limits|billing/i.test(result.body))) return { ok: false, reason: 'credit', message: `${info.label} says this key is out of credit.` };
   if (result.status === 404) return { ok: false, reason: 'gone', message: `${info.label} no longer has the model ${input.model}.` };
+  // Some providers answer a model they do not have, or one this key may not use, with a 400 or 422 instead of a 404
+  if ((result.status === 400 || result.status === 422) && MODEL_REFUSED.test(result.body)) {
+    return { ok: false, reason: 'gone', message: `${info.label} won’t give this key the model ${input.model}.` };
+  }
   return {
     ok: false,
     reason: result.status >= 500 ? 'unreachable' : [400, 413, 422].includes(result.status) ? 'request' : 'other',
