@@ -2,6 +2,7 @@ import { prisma } from '@/lib/db';
 import { permissionsForWorld } from '@/lib/roles';
 import { addNotice } from '@/lib/notices';
 import { flag } from '@/lib/permissions';
+import { resolveUniverseAiProvider } from '@/lib/universe-ai';
 import { lendAccess, lendableUniverses, moveBotsOffKey } from '@/lib/ai-key-lend';
 
 jest.mock('@/lib/db', () => ({
@@ -14,6 +15,7 @@ jest.mock('@/lib/db', () => ({
 }));
 jest.mock('@/lib/roles', () => ({ permissionsForWorld: jest.fn() }));
 jest.mock('@/lib/notices', () => ({ addNotice: jest.fn() }));
+jest.mock('@/lib/universe-ai', () => ({ ...jest.requireActual('@/lib/universe-ai'), resolveUniverseAiProvider: jest.fn() }));
 
 const db = prisma as unknown as {
   universe: Record<'findUnique' | 'findMany', jest.Mock>;
@@ -26,6 +28,7 @@ const notice = addNotice as jest.Mock;
 
 beforeEach(() => {
   jest.resetAllMocks();
+  (resolveUniverseAiProvider as jest.Mock).mockResolvedValue({ providerId: 'server-1' });
   db.worldMember.findMany.mockResolvedValue([]);
   db.universeMember.findMany.mockResolvedValue([]);
   db.universe.findMany.mockResolvedValue([]);
@@ -103,6 +106,24 @@ describe('moveBotsOffKey', () => {
     await moveBotsOffKey('key-1', { actor, why: 'revoked' });
     expect(db.bot.updateMany).toHaveBeenCalled();
     expect(notice).not.toHaveBeenCalled();
+  });
+
+  it('says so when Universe AI has no provider, and tells the owner even of their own action', async () => {
+    (resolveUniverseAiProvider as jest.Mock).mockResolvedValue(null);
+    db.bot.findMany.mockResolvedValue([bot('b1', 'Sam', { ...bawes, ownerId: 'u1' })]);
+    await moveBotsOffKey('key-1', { actor, why: 'revoked' });
+    expect(db.bot.updateMany).toHaveBeenCalled();
+    expect(notice).toHaveBeenCalledTimes(1);
+    expect(notice.mock.calls[0][0].body).toBe(
+      'Mishari revoked their AI key. The bot now replies on Universe AI. Universe AI has no provider switched on yet, so they stay quiet until a super admin enables one.',
+    );
+  });
+
+  it('moves the bots and sends the usual notice when Universe AI can’t be checked', async () => {
+    (resolveUniverseAiProvider as jest.Mock).mockRejectedValue(new Error('db down'));
+    db.bot.findMany.mockResolvedValue([bot('b1', 'Sam', bawes)]);
+    await moveBotsOffKey('key-1', { actor, why: 'revoked' });
+    expect(notice.mock.calls[0][0].body).toBe('Mishari revoked their AI key. The bot now replies on Universe AI.');
   });
 
   it('tells nobody when a request that ran at the same time already moved the bots', async () => {
