@@ -2,11 +2,11 @@ import { NextRequest } from 'next/server';
 import { prisma } from '@/lib/db';
 import { GET } from '@/app/api/me/bot-ai/route';
 import { getSessionUser } from '@/lib/auth-session';
-import { canManageBots } from '@/lib/bot-permissions';
+import { canManageBots, canManageThisBot } from '@/lib/bot-permissions';
 import { resolveRoomIdFromPlayUri } from '@/lib/bot-config-helpers';
 
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
-jest.mock('@/lib/bot-permissions', () => ({ canManageBots: jest.fn() }));
+jest.mock('@/lib/bot-permissions', () => ({ canManageBots: jest.fn(), canManageThisBot: jest.fn() }));
 jest.mock('@/lib/bot-config-helpers', () => ({ resolveRoomIdFromPlayUri: jest.fn() }));
 jest.mock('@/lib/db', () => ({
   prisma: {
@@ -32,6 +32,7 @@ beforeEach(() => {
   jest.resetAllMocks();
   (getSessionUser as jest.Mock).mockResolvedValue(mishari);
   (canManageBots as jest.Mock).mockResolvedValue(true);
+  (canManageThisBot as jest.Mock).mockResolvedValue(true);
   db.room.findUnique.mockResolvedValue(sandbox);
   db.user.findUnique.mockResolvedValue({ id: 'mishari', name: 'Mishari' });
   db.botsAiProvider.findFirst.mockResolvedValue({ providerId: 'deepseek-flash', enabled: true });
@@ -122,6 +123,17 @@ describe('GET /api/me/bot-ai', () => {
     (canManageBots as jest.Mock).mockResolvedValue(true);
     db.botsAiProvider.findFirst.mockResolvedValue(null);
     expect((await (await get('roomId=11111111-1111-1111-1111-111111111111')).json()).universeAi).toEqual({ available: false });
+  });
+
+  it('holds a bot to its own Manage rules: room-level Manage bots alone does not show whose key it runs on', async () => {
+    db.bot.findUnique.mockResolvedValue({ id: 'sam', roomId: 'room-1', aiProviderRef: 'key-m', createdById: 'maker', createdBy: { id: 'maker', name: 'Mishari' } });
+    db.botsAiProvider.findUnique.mockResolvedValue({ providerId: 'key-m', name: 'Mishari’s Claude', ownerId: 'maker' });
+    (canManageThisBot as jest.Mock).mockResolvedValue(false);
+    const response = await get('botId=sam');
+    expect(response.status).toBe(403);
+    expect(JSON.stringify(await response.json())).not.toContain('Claude');
+    expect(canManageThisBot).toHaveBeenCalledWith('mishari', null, { id: 'sam', createdById: 'maker', roomId: 'room-1' }, { creatorPasses: false });
+    expect(db.botsAiProvider.findUnique).not.toHaveBeenCalled();
   });
 
   it('is "not found" for a bot or room that is not there', async () => {

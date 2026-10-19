@@ -1,5 +1,5 @@
 import { prisma } from '@/lib/db';
-import { canManageBots } from '@/lib/bot-permissions';
+import { canManageBots, canManageThisBot } from '@/lib/bot-permissions';
 import { kindInfo } from '@/lib/ai-key-kinds';
 import { isIfDown } from '@/lib/ai-key-health';
 import { resolveUniverseAiProvider, UNIVERSE_AI_REF } from '@/lib/universe-ai';
@@ -36,7 +36,7 @@ export async function botAiOptions(input: {
   const bot = input.botId
     ? await prisma.bot.findUnique({
         where: { id: input.botId },
-        select: { id: true, roomId: true, aiProviderRef: true, createdBy: { select: { id: true, name: true } } },
+        select: { id: true, roomId: true, aiProviderRef: true, createdById: true, createdBy: { select: { id: true, name: true } } },
       })
     : null;
   if (input.botId && !bot) return { ok: false, status: 404, error: 'Bot not found' };
@@ -48,8 +48,13 @@ export async function botAiOptions(input: {
     select: { world: { select: { universe: { select: { id: true, name: true } } } } },
   });
   if (!room) return { ok: false, status: 404, error: 'Room not found' };
-  // Choosing what a bot runs on is part of managing bots there
-  if (!input.viewer.isSuperAdmin && !(await canManageBots(input.viewer.id, roomId))) {
+  // Choosing what a bot runs on is part of managing bots there; for a bot that exists, the same bar as reading its
+  // configuration, so a bot's own Manage rules also decide who learns whose key it runs on
+  const allowed = input.viewer.isSuperAdmin
+    || (bot
+      ? await canManageThisBot(input.viewer.id, null, { id: bot.id, createdById: bot.createdById, roomId: bot.roomId }, { creatorPasses: false })
+      : await canManageBots(input.viewer.id, roomId));
+  if (!allowed) {
     return { ok: false, status: 403, error: 'You do not have permission to manage bots in this room' };
   }
   const universe = room.world.universe;
