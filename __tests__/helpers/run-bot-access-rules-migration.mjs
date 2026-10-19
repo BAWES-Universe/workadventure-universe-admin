@@ -9,6 +9,7 @@ import { PGlite } from '@electric-sql/pglite';
 
 const MIGRATIONS = path.join(path.dirname(fileURLToPath(import.meta.url)), '../../prisma/migrations');
 const TARGET = '20261019100000_bot_access_rules';
+const CAPS = '20261019120000_bot_reply_caps_optional';
 
 const db = new PGlite();
 const names = fs
@@ -58,6 +59,16 @@ const results = {
   capOk: await attempt("UPDATE bots SET daily_reply_cap = 10000 WHERE id = 'bot1'"),
   unknownBot: await attempt(insert('role_id', "'nope', 'r-acc'")),
 };
+
+// The follow-up: reply limits start empty. A 50 nobody chose goes; a number someone set stays.
+await db.exec("UPDATE bots SET daily_reply_cap = 30 WHERE id = 'bot1'");
+await run(CAPS);
+results.capsAfter = (await db.query('SELECT id, daily_reply_cap FROM bots ORDER BY id')).rows;
+await db.exec("INSERT INTO bots (id, room_id, name, updated_at) VALUES ('bot3', 'room1', 'Fresh', now())");
+results.freshBot = (await db.query("SELECT daily_reply_cap FROM bots WHERE id = 'bot3'")).rows[0];
+results.capNullOk = await attempt("UPDATE bots SET daily_reply_cap = NULL WHERE id = 'bot1'");
+results.capStillZero = await attempt("UPDATE bots SET daily_reply_cap = 0 WHERE id = 'bot1'");
+await db.exec("DELETE FROM bots WHERE id = 'bot3'");
 
 // Deleting a role, a person or a bot takes their rows with it
 const count = async () => (await db.query('SELECT count(*)::int AS n FROM bot_access_rules')).rows[0].n;

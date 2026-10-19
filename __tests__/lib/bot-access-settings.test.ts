@@ -8,7 +8,7 @@ const state = {
   rows: [] as Row[],
   roles: [] as { id: string; key: string; name: string; color: string; builtIn: boolean; permissions: bigint; position: number; universeId: string }[],
   users: [] as { id: string; uuid: string; email: string | null; name: string | null }[],
-  bot: { privateBot: false, refusalReply: null as string | null, dailyReplyCap: 50 },
+  bot: { privateBot: false, refusalReply: null as string | null, dailyReplyCap: null as number | null },
   /** Make the next N conditional updates find a row that changed meanwhile. */
   staleUpdates: 0,
   /** Make the next create fail because the same row was just added. */
@@ -109,7 +109,7 @@ beforeEach(() => {
     { id: 'u-owner', uuid: 'uuid-owner', email: 'owner@example.com', name: 'Owner' },
     { id: 'u-root', uuid: 'uuid-root', email: 'root@example.com', name: 'Root' },
   ];
-  state.bot = { privateBot: false, refusalReply: null, dailyReplyCap: 50 };
+  state.bot = { privateBot: false, refusalReply: null, dailyReplyCap: null };
   state.staleUpdates = 0;
   state.conflictOnCreate = false;
   state.next = 1;
@@ -123,6 +123,7 @@ describe('what a request may say', () => {
     expect(settingsSchema.safeParse({ privateBot: true }).success).toBe(true);
     expect(settingsSchema.safeParse({ refusalReply: null }).success).toBe(true);
     expect(settingsSchema.safeParse({ dailyReplyCap: 50 }).success).toBe(true);
+    expect(settingsSchema.safeParse({ dailyReplyCap: null }).success).toBe(true);
     for (const bad of [{}, { name: 'x' }, { dailyReplyCap: 0 }, { dailyReplyCap: 10001 }, { dailyReplyCap: 2.5 }, { dailyReplyCap: '50' }, { privateBot: 'yes' }, { refusalReply: 'x'.repeat(501) }, null, 'text']) {
       expect(settingsSchema.safeParse(bad).success).toBe(false);
     }
@@ -151,11 +152,19 @@ describe('what a request may say', () => {
 describe('saving settings', () => {
   it('changes only what is sent', async () => {
     await saveBotSettings('bot-1', { privateBot: true });
-    expect(state.bot).toEqual({ privateBot: true, refusalReply: null, dailyReplyCap: 50 });
+    expect(state.bot).toEqual({ privateBot: true, refusalReply: null, dailyReplyCap: null });
     await saveBotSettings('bot-1', { refusalReply: '  Not for you.  ', dailyReplyCap: 20 });
     expect(state.bot).toEqual({ privateBot: true, refusalReply: 'Not for you.', dailyReplyCap: 20 });
     await saveBotSettings('bot-1', { refusalReply: '   ' });
     expect(state.bot.refusalReply).toBeNull();
+  });
+
+  it('no limit is the start, and a limit can be taken off again', async () => {
+    expect(state.bot.dailyReplyCap).toBeNull();
+    await saveBotSettings('bot-1', { dailyReplyCap: 50 });
+    expect(state.bot.dailyReplyCap).toBe(50);
+    await saveBotSettings('bot-1', { dailyReplyCap: null });
+    expect(state.bot.dailyReplyCap).toBeNull();
   });
 });
 
@@ -259,9 +268,9 @@ describe('taking a row off', () => {
 });
 
 describe('reading a bot’s settings', () => {
-  it('gives a bot nobody has touched its defaults: open, no line, 50 a day, no rows', async () => {
+  it('gives a bot nobody has touched its defaults: open, no line, no reply limit, no rows', async () => {
     const settings = await readBotSettings('bot-1');
-    expect(settings).toMatchObject({ privateBot: false, refusalReply: null, dailyReplyCap: 50, rules: [] });
+    expect(settings).toMatchObject({ privateBot: false, refusalReply: null, dailyReplyCap: null, rules: [] });
   });
 
   it('lists the roles a row can name, never Admin, with what each gives on its own', async () => {
