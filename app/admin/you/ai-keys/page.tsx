@@ -274,7 +274,7 @@ export default function AiKeysPage() {
                     if (lent.bots.length > 0) setPulling({ key, lent });
                     else void pull(key, lent);
                   }}
-                  className="orbit-press flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-foreground/15 text-foreground/85 hover:border-foreground/30"
+                  className="orbit-press flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-foreground hover:bg-foreground/[0.08]"
                 >
                   <X size={18} aria-hidden="true" />
                 </button>
