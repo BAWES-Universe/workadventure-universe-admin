@@ -2,7 +2,7 @@ import { z } from 'zod';
 import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { has, parsePermissions } from '@/lib/permissions';
-import { ADMIN_KEY } from '@/lib/roles';
+import { ADMIN_KEY, EVERYONE_KEY } from '@/lib/roles';
 import {
   RULE_ACTIONS,
   RULE_PERMISSION,
@@ -238,6 +238,10 @@ async function resolveSubject(
     const role = await prisma.role.findUnique({ where: { id: body.roleId }, select: { id: true, key: true, universeId: true } });
     if (!role || role.universeId !== place.universeId) throw new BotSettingsError(404, 'That role is not in this universe');
     if (role.key === ADMIN_KEY) throw new BotSettingsError(400, "Admin always passes, so a rule for it would do nothing");
+    // Everyone includes people who never joined, so a Yes there would hand the bot to anyone with an account
+    if (role.key === EVERYONE_KEY && body.manage === 'yes') {
+      throw new BotSettingsError(400, 'Everyone cannot be given "Manage this bot". Give it to a role or to a person');
+    }
     return { roleId: role.id };
   }
 

@@ -276,6 +276,16 @@ describe('saving a rule', () => {
     await expect(saveBotRule(place, { roleId: 'r-acc', chat: 'yes' })).rejects.toThrow('connection lost');
   });
 
+  it('refuses Yes on Manage this bot for Everyone, but not a No or the other actions (CodeRabbit finding on #458)', async () => {
+    await expect(saveBotRule(place, { roleId: 'r-everyone', manage: 'yes' })).rejects.toMatchObject({
+      status: 400,
+      message: expect.stringContaining('Everyone cannot be given "Manage this bot"'),
+    });
+    expect(state.rows).toHaveLength(0);
+    await expect(saveBotRule(place, { roleId: 'r-everyone', manage: 'no' })).resolves.toMatchObject({ manage: 'no' });
+    await expect(saveBotRule(place, { roleId: 'r-everyone', chat: 'no', manage: 'default' })).resolves.toMatchObject({ chat: 'no', manage: 'default' });
+  });
+
   it('refuses a role from another universe, a role that does not exist, and Admin', async () => {
     await expect(saveBotRule(place, { roleId: 'r-other', chat: 'no' })).rejects.toMatchObject({ status: 404 });
     await expect(saveBotRule(place, { roleId: 'nope', chat: 'no' })).rejects.toMatchObject({ status: 404 });
