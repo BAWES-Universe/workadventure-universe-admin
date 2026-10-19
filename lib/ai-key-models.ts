@@ -282,8 +282,8 @@ export async function probeChat(input: KeyTargetInput & { apiKey?: unknown; mode
   if (result.status >= 200 && result.status < 300) return { ok: true };
   if (result.status === 401 || result.status === 403) return { ok: false, reason: 'rejected', message: `${info.label} didn’t accept this key.` };
   if (result.status === 429 || result.status === 529) return { ok: false, reason: 'busy', message: `${info.label} is busy right now. Try again in a moment.` };
-  // Claude says "out of credit" and "spend limit reached" as a plain 400
-  if (result.status === 402 || (result.status === 400 && /credit balance|usage limits|billing/i.test(result.body))) return { ok: false, reason: 'credit', message: `${info.label} says this key is out of credit.` };
+  // Claude says "out of credit" and "spend limit reached" as a plain 400; other providers' 400s are about the request
+  if (result.status === 402 || (info.protocol === 'anthropic' && result.status === 400 && /credit balance|usage limits|billing/i.test(result.body))) return { ok: false, reason: 'credit', message: `${info.label} says this key is out of credit.` };
   if (result.status === 404) return { ok: false, reason: 'gone', message: `${info.label} no longer has the model ${input.model}.` };
   return {
     ok: false,

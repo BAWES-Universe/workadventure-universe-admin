@@ -368,8 +368,12 @@ describe('Claude (#975)', () => {
   });
 
   it('reads an ordinary 400 as an ordinary 400 for the other providers too (the credit wording is Claude’s)', async () => {
-    post.mockResolvedValue(answer(400, 'something about billing'));
-    // A 400 whose text mentions billing is out of credit for any provider that sends it; the other providers do not.
-    expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'm' })).toMatchObject({ ok: false });
+    // A Gemini 400 that merely mentions billing (a project without it enabled) is not an empty balance.
+    post.mockResolvedValue(answer(400, 'API key not valid. Enable billing on the project'));
+    expect(await probeChat({ kind: 'gemini', apiKey: 'k-1234', model: 'm' })).toMatchObject({ ok: false, reason: 'other' });
+    expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'm' })).toMatchObject({ ok: false, reason: 'other' });
+    // A 402 is still out of credit for any of them.
+    post.mockResolvedValue(answer(402, {}));
+    expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'm' })).toMatchObject({ ok: false, reason: 'credit' });
   });
 });
