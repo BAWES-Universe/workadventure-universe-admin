@@ -4,7 +4,7 @@ import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { listAiKeys } from '@/lib/ai-keys';
 import { MAX_AI_KEYS } from '@/lib/ai-key-kinds';
-import { allowKeyAttempt, keyTarget, loadModels } from '@/lib/ai-key-models';
+import { KEY_CHARACTERS, KEY_LOOKS_WRONG, allowKeyAttempt, keyTarget, loadModels } from '@/lib/ai-key-models';
 import { encryptApiKey } from '@/lib/encryption';
 import { meOriginAllowed, meRespond } from '@/lib/me-route';
 
@@ -57,7 +57,7 @@ export async function POST(request: NextRequest) {
   if (typedName.length > 60) return respond(request, { error: 'Keep the name under 60 characters.' }, 400);
   const name = typedName || `My ${info.label}`;
   const apiKey = typeof input.apiKey === 'string' ? input.apiKey.trim() : '';
-  if (apiKey.length > 512 || /[\s\u0000-\u001f]/.test(apiKey)) return respond(request, { error: 'That key doesn’t look right. Paste it again.' }, 400);
+  if (apiKey && !KEY_CHARACTERS.test(apiKey)) return respond(request, { error: KEY_LOOKS_WRONG }, 400);
 
   if (!allowKeyAttempt(user.id)) return respond(request, { error: 'Too many tries. Wait a minute and try again.' }, 429);
   try {

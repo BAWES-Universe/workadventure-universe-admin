@@ -59,13 +59,27 @@ describe('loadModels', () => {
     const result = await loadModels({ kind: 'lmstudio', address: 'https://lm.example.com', apiKey: 'k-1234' });
     expect(result).toEqual({ ok: true, models: ['llama-3.1-8b-instruct', 'qwen3-8b'] });
     expect(check).toHaveBeenCalledWith('https://lm.example.com/v1/models');
-    expect(get).toHaveBeenCalledWith(checkedOk, { headers: { Authorization: 'Bearer k-1234' } });
+    expect(get).toHaveBeenCalledWith(checkedOk, { headers: { Authorization: 'Bearer k-1234' }, maxBytes: 5_000_000 });
   });
 
   it('sends no key header when there is no key', async () => {
     get.mockResolvedValue(answer(200, { data: [{ id: 'm' }] }));
     await loadModels({ kind: 'lmstudio', address: 'https://lm.example.com' });
-    expect(get).toHaveBeenCalledWith(checkedOk, { headers: {} });
+    expect(get).toHaveBeenCalledWith(checkedOk, { headers: {}, maxBytes: 5_000_000 });
+  });
+
+  it('allows a model list of a few MB (OpenRouter’s is large) but not an endless one', async () => {
+    get.mockResolvedValue(answer(200, { data: [{ id: 'm' }] }));
+    await loadModels({ kind: 'openrouter', apiKey: 'sk-or-1' });
+    expect(get.mock.calls[0][1].maxBytes).toBe(5_000_000);
+  });
+
+  it('turns a key with a character a header cannot carry into a plain message, and calls nothing', async () => {
+    for (const apiKey of ['sk-abc\u201Cdef', 'sk-\u200Babc', 'sk-é', 'sk-a\u0007b', 'sk-a b']) {
+      expect(await loadModels({ kind: 'openai', apiKey })).toEqual({ ok: false, message: 'That key doesn’t look right. Paste it again.' });
+    }
+    expect(check).not.toHaveBeenCalled();
+    expect(get).not.toHaveBeenCalled();
   });
 
   it('asks for the key before calling a hosted provider', async () => {

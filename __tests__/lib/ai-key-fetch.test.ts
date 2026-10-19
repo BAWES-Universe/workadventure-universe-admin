@@ -123,6 +123,13 @@ describe('safeGet', () => {
   const checked = { url: new URL('https://lm.example.com/v1/models'), address: '93.184.216.34', family: 4 as const };
   afterEach(() => requestSpy?.mockRestore());
 
+  it('answers "unreachable" instead of throwing when Node refuses the request (a header it cannot send)', async () => {
+    requestSpy = jest.spyOn(https, 'request').mockImplementation((() => {
+      throw Object.assign(new TypeError('Invalid character in header content'), { code: 'ERR_INVALID_CHAR' });
+    }) as never);
+    expect(await safeGet(checked, { headers: { Authorization: 'Bearer sk-\u201C' } })).toEqual({ ok: false, reason: 'unreachable' });
+  });
+
   it('connects to the address that was checked, with the name for the certificate, and never looks the name up again', async () => {
     fakeRequest((res) => {
       res.emit('data', Buffer.from('{"data":[]}'));

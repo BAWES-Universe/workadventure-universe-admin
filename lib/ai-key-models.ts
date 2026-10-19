@@ -39,6 +39,13 @@ export function keyTarget(input: KeyTargetInput): { ok: true; target: KeyTarget 
   return { ok: true, target: { info, endpoint: origin, modelsUrl: `${origin}/v1/models` } };
 }
 
+/** What a key may be made of (visible ASCII, no spaces): anything else cannot go in an Authorization header. */
+export const KEY_CHARACTERS = /^[\x21-\x7e]{1,512}$/;
+export const KEY_LOOKS_WRONG = 'That key doesn’t look right. Paste it again.';
+
+/** OpenRouter's model list is well over the default cap, so a list may be a few MB. */
+const MODEL_LIST_MAX_BYTES = 5_000_000;
+
 export type LoadModelsResult = { ok: true; models: string[] } | { ok: false; message: string };
 
 const NOT_CHAT = /embed|whisper|tts|dall-e|moderation|rerank|transcribe|image|audio|realtime|guard|safety/i;
@@ -60,6 +67,8 @@ export async function loadModels(input: KeyTargetInput & { apiKey?: unknown }): 
   const { info, modelsUrl } = resolved.target;
   const apiKey = typeof input.apiKey === 'string' ? input.apiKey.trim() : '';
   if (info.apiKey === 'required' && !apiKey) return { ok: false, message: 'Paste your API key first.' };
+  // A header can only carry plain visible characters: a pasted smart quote or zero-width space would make Node throw
+  if (apiKey && !KEY_CHARACTERS.test(apiKey)) return { ok: false, message: KEY_LOOKS_WRONG };
 
   let checked;
   try {
@@ -69,7 +78,7 @@ export async function loadModels(input: KeyTargetInput & { apiKey?: unknown }): 
     return { ok: false, message: 'That address can’t be used.' };
   }
 
-  const result = await safeGet(checked, { headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {} });
+  const result = await safeGet(checked, { headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {}, maxBytes: MODEL_LIST_MAX_BYTES });
   if (!result.ok) {
     if (result.reason === 'too-large') return { ok: false, message: 'It answered, but not like an AI server.' };
     return {
