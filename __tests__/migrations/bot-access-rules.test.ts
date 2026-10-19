@@ -48,6 +48,16 @@ describe('bot access rules migration', () => {
     expect(String(result[key])).toContain(constraint);
   });
 
+  it('the follow-up starts every bot with no reply limit, keeps a number someone set, and still refuses a cap of zero', () => {
+    expect(result.capsAfter).toEqual([
+      { id: 'bot1', daily_reply_cap: 30 },
+      { id: 'bot2', daily_reply_cap: null },
+    ]);
+    expect(result.freshBot).toEqual({ daily_reply_cap: null });
+    expect(result.capNullOk).toBe('accepted');
+    expect(String(result.capStillZero)).toContain('bots_daily_reply_cap_range');
+  });
+
   it('accepts the biggest daily cap', () => {
     expect(result.capOk).toBe('accepted');
   });

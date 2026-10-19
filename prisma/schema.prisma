@@ -566,8 +566,8 @@ model Bot {
   privateBot          Boolean  @default(false) @map("private_bot")
   // What the bot says to people who may not chat with it; null = a plain default line. Never reaches the AI.
   refusalReply        String?  @map("refusal_reply") @db.VarChar(500)
-  // Replies each person may get from this bot in a day. Stored here; the limit itself comes with #1159.
-  dailyReplyCap       Int      @default(50) @map("daily_reply_cap")
+  // Replies each person may get from this bot in a day; null = no limit. Stored here; nothing reads it yet (#1159).
+  dailyReplyCap       Int?     @map("daily_reply_cap")
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
   createdById         String?  @map("created_by_id")

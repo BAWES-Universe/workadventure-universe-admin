@@ -12,7 +12,7 @@ export async function OPTIONS(request: NextRequest) {
 
 /**
  * GET /api/bots/:id/permissions
- * Who may use this bot (#427): Private bot, the line refused people hear, the daily cap for each person, every rule
+ * Who may use this bot (#427): Private bot, the line refused people hear, the daily reply limit for each person (none until the owner sets one), every rule
  * for a role or a person, and the roles a rule can name with what each gives by default.
  *
  * Auth: whoever manages the bot, or the bot server's admin token.
@@ -34,7 +34,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 
 /**
  * PUT /api/bots/:id/permissions
- * Body: any of { privateBot: boolean, refusalReply: string | null, dailyReplyCap: 1..10000 }. Only what is sent changes.
+ * Body: any of { privateBot: boolean, refusalReply: string | null, dailyReplyCap: 1..10000 | null }.
+ * null is no limit. Only what is sent changes.
  * Response: the same as GET.
  *
  * Auth: whoever manages the bot.

@@ -94,9 +94,9 @@ curl -X POST \
    - GET returns `{ privateBot, refusalReply, dailyReplyCap, rules, roles }`: `rules` has one row per role or person with
      `chat`, `dm`, `summon` and `manage` each `"yes" | "no" | "default"`; `roles` lists the roles a row can name (not
      Admin, which always passes) with what each gives on its own (`defaults`), which is what Default means for it.
-   - PUT takes any of `{ privateBot: boolean, refusalReply: string | null (up to 500 characters), dailyReplyCap: 1..10000 }`
-     and returns the same as GET. `dailyReplyCap` is how many replies each person may get from this bot in a day (50
-     unless changed); it is only stored here, the limit itself comes with #1159.
+   - PUT takes any of `{ privateBot: boolean, refusalReply: string | null (up to 500 characters), dailyReplyCap: 1..10000 | null }`
+     and returns the same as GET. `dailyReplyCap` is how many replies each person may get from this bot in a day;
+     **null is no limit, and every bot starts with no limit**. It is only stored here: nothing limits replies today.
 
 8. **PUT /api/bots/:id/permissions/rules** and **DELETE /api/bots/:id/permissions/rules?roleId=|userId=**
    - PUT body: one of `{ roleId }`, `{ userId }` or `{ identifier }` (a person's uuid or email), and any of `chat`, `dm`,
