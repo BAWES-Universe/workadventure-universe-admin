@@ -149,7 +149,9 @@ export async function checkKey(key: KeyRow): Promise<KeyCheck> {
   if (!models.ok) return failed(models);
   if (key.model && (key.downSince || !models.models.includes(cleanModelId(key.model, info.kind)))) {
     const chat = await probeChat({ kind: info.kind, address, apiKey, model: key.model });
-    if (!chat.ok) return failed(chat);
+    // The provider took the key and the model but refused this tiny request (a reasoning model that wants a bigger cap, say):
+    // that is the request's problem, not the key's, and a real reply's 400 is not counted against a key either
+    if (!chat.ok && chat.reason !== 'request') return failed(chat);
   }
   return { ok: true };
 }
