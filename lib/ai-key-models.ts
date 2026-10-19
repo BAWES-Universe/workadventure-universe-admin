@@ -202,16 +202,18 @@ export async function probeModels(input: KeyTargetInput & { apiKey?: unknown }):
     };
   }
   const facts: ModelFactsById = {};
+  // A set, not models.includes: a list can be thousands of entries long, and each one is looked up
+  const listed = new Set(models);
   for (const entry of entries) {
     const id = idOf(entry);
     if (id === null) continue;
     const clean = cleanModelId(id, info.kind);
     const known = factsOf(entry);
-    if (models.includes(clean) && Object.keys(known).length > 0) facts[clean] = known;
+    if (listed.has(clean) && Object.keys(known).length > 0) facts[clean] = known;
   }
   // What the provider's docs say about a model its list says nothing about; the list's own word wins
   for (const [id, documented] of Object.entries(info.knownFacts ?? {})) {
-    if (models.includes(id)) facts[id] = { ...documented, ...facts[id] };
+    if (listed.has(id)) facts[id] = { ...documented, ...facts[id] };
   }
   return { ok: true, models, facts };
 }
@@ -238,7 +240,8 @@ export async function probeChat(input: KeyTargetInput & { apiKey?: unknown; mode
       method: 'POST',
       headers: authHeaders(info, apiKey),
       body: { model: input.model, messages: [{ role: 'user', content: 'Say ok.' }], stream: false, [info.tokenLimitField ?? 'max_tokens']: 16, ...extra },
-      timeoutMs: 30_000,
+      // A server on your own computer may load its model on the first call, which can take well over 30 seconds
+      timeoutMs: info.group === 'own-computer' ? 120_000 : 30_000,
       maxBytes: 200_000,
     });
   let result = await ask({});

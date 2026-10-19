@@ -166,6 +166,15 @@ describe('probeChat', () => {
     });
   });
 
+  it('gives a server on your own computer two minutes (its model may load on the first call), and a hosted provider thirty seconds', async () => {
+    post.mockResolvedValue(answer(200, {}));
+    await probeChat({ kind: 'lmstudio', address: 'https://lm.example.com', model: 'qwen' });
+    expect(post.mock.calls[0][1]).toMatchObject({ timeoutMs: 120_000 });
+    post.mockClear();
+    await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'deepseek-v4-flash' });
+    expect(post.mock.calls[0][1]).toMatchObject({ timeoutMs: 30_000 });
+  });
+
   it('finds an own-computer server’s chat address under /v1, with no key header when there is no key', async () => {
     post.mockResolvedValue(answer(200, {}));
     await probeChat({ kind: 'lmstudio', address: 'https://lm.example.com/v1', model: 'llama' });
