@@ -102,7 +102,7 @@ export async function editSavedKey(ownerId: string, id: string, input: KeyEditIn
   if (!chat.ok) {
     // The new address can't give the saved model (not on its list, or it says it has none): the person picks one it has
     // in the same step, instead of being stuck with a model that was only on the old address.
-    const missing = typedAddress && typedModel === null && (chat.reason === 'gone' || (chat.reason === 'other' && !models.models.includes(model)));
+    const missing = typedAddress && typedModel === null && (chat.reason === 'gone' || ((chat.reason === 'other' || chat.reason === 'request') && !models.models.includes(model)));
     return { ok: false, status: 400, message: missing ? `That address doesn’t have ${model}. Pick a model it has.` : chat.message, ...(missing ? { code: 'model-missing' as const } : {}) };
   }
 
