@@ -74,6 +74,35 @@ describe('loadModels', () => {
     expect(get.mock.calls[0][1].maxBytes).toBe(5_000_000);
   });
 
+  describe('OpenRouter, whose model list is public', () => {
+    const list = answer(200, { data: [{ id: 'openai/gpt-4o' }] });
+    it('refuses a key its key-info address rejects, though the list came back', async () => {
+      get.mockResolvedValueOnce(list).mockResolvedValueOnce(answer(401, {}));
+      expect(await loadModels({ kind: 'openrouter', apiKey: 'sk-or-bad' })).toEqual({ ok: false, message: 'OpenRouter didn’t accept this key.' });
+      expect(check.mock.calls[1][0]).toBe('https://openrouter.ai/api/v1/key');
+    });
+    it('accepts a good key', async () => {
+      get.mockResolvedValueOnce(list).mockResolvedValueOnce(answer(200, { data: {} }));
+      expect(await loadModels({ kind: 'openrouter', apiKey: 'sk-or-good' })).toEqual({ ok: true, models: ['openai/gpt-4o'] });
+    });
+    it('tries the older address when the first is not there, and never blocks a key on a hiccup', async () => {
+      get.mockResolvedValueOnce(list).mockResolvedValueOnce(answer(404, {})).mockResolvedValueOnce(answer(403, {}));
+      expect((await loadModels({ kind: 'openrouter', apiKey: 'k' })).ok).toBe(false);
+      expect(check.mock.calls[2][0]).toBe('https://openrouter.ai/api/v1/auth/key');
+      get.mockReset();
+      get.mockResolvedValueOnce(list).mockResolvedValueOnce({ ok: false, reason: 'timeout' });
+      expect((await loadModels({ kind: 'openrouter', apiKey: 'k' })).ok).toBe(true);
+      get.mockReset();
+      get.mockResolvedValueOnce(list).mockResolvedValueOnce(answer(404, {})).mockResolvedValueOnce(answer(404, {}));
+      expect((await loadModels({ kind: 'openrouter', apiKey: 'k' })).ok).toBe(true);
+    });
+    it('asks nothing extra of any other provider', async () => {
+      get.mockResolvedValue(answer(200, { data: [{ id: 'deepseek-chat' }] }));
+      await loadModels({ kind: 'deepseek', apiKey: 'k' });
+      expect(get).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it('turns a key with a character a header cannot carry into a plain message, and calls nothing', async () => {
     for (const apiKey of ['sk-abc\u201Cdef', 'sk-\u200Babc', 'sk-é', 'sk-a\u0007b', 'sk-a b']) {
       expect(await loadModels({ kind: 'openai', apiKey })).toEqual({ ok: false, message: 'That key doesn’t look right. Paste it again.' });
