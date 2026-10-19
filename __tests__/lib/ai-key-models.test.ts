@@ -298,16 +298,16 @@ describe('providers added to the catalog', () => {
 });
 
 describe('model facts the provider’s docs give (DeepSeek’s list holds ids only)', () => {
-  it('gives Vision to deepseek-v4-flash and not to V4 Pro, and nothing to a model the docs do not name', async () => {
-    get.mockResolvedValue(answer(200, { data: [{ id: 'deepseek-v4-flash' }, { id: 'deepseek-v4-pro' }, { id: 'deepseek-v4-flash' }] }));
+  it('gives Vision to the image model only, not to V4 Flash or V4 Pro, and nothing to a model the docs do not name', async () => {
+    get.mockResolvedValue(answer(200, { data: [{ id: 'deepseek-v4-flash' }, { id: 'deepseek-v4-flash-vision-exp' }, { id: 'deepseek-v4-pro' }, { id: 'deepseek-chat' }, { id: 'deepseek-v4-flash' }] }));
     const result = await probeModels({ kind: 'deepseek', apiKey: 'sk-1' });
-    expect(result.ok && result.facts).toEqual({ 'deepseek-v4-flash': { vision: true }, 'deepseek-v4-pro': { vision: false } });
+    expect(result.ok && result.facts).toEqual({ 'deepseek-v4-flash': { vision: false }, 'deepseek-v4-flash-vision-exp': { vision: true }, 'deepseek-v4-pro': { vision: false } });
   });
 
   it('leaves them out when the model is not on the list, and lets the list’s own word win', async () => {
-    get.mockResolvedValue(answer(200, { data: [{ id: 'deepseek-v4-flash', capabilities: { vision: false } }] }));
+    get.mockResolvedValue(answer(200, { data: [{ id: 'deepseek-v4-flash-vision-exp', capabilities: { vision: false } }] }));
     const result = await probeModels({ kind: 'deepseek', apiKey: 'sk-1' });
-    expect(result.ok && result.facts).toEqual({ 'deepseek-v4-flash': { vision: false } });
+    expect(result.ok && result.facts).toEqual({ 'deepseek-v4-flash-vision-exp': { vision: false } });
   });
 });
 
