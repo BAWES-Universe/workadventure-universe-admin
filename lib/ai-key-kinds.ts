@@ -70,6 +70,8 @@ export interface AiKeyKindInfo {
   typedEndpointSuffix: '' | '/v1';
   keyCheck: KeyCheck;
   modelId: ModelIdRule;
+  /** Some providers answer a wrong key with a 400 and not a 401. This text in the answer says it was the key (Gemini). */
+  wrongKeyText?: string;
   tier: KeyTier;
 }
 
@@ -112,6 +114,8 @@ const NAMED_KINDS: AiKeyKindInfo[] = [
     kind: 'gemini', label: 'Gemini', group: 'hosted', providerType: 'openai', address: 'none', apiKey: 'required',
     // It lists "models/gemini-flash-latest" but takes "gemini-flash-latest"
     modelId: 'strip-models-prefix',
+    // A wrong key is answered with a 400, "Please pass a valid API key", not a 401
+    wrongKeyText: 'valid API key',
     benefit: 'Google’s models, with a free tier to start.', base: 'https://generativelanguage.googleapis.com/v1beta/openai',
     steps: [{ text: 'On aistudio.google.com, choose Get API key.' }],
   }),
@@ -283,6 +287,12 @@ export function authHeaders(info: AiKeyKindInfo, apiKey: string): Record<string,
   if (!apiKey) return {};
   if (info.auth === 'x-api-key') return { 'x-api-key': apiKey, 'anthropic-version': ANTHROPIC_VERSION };
   return { Authorization: `Bearer ${apiKey}` };
+}
+
+/** Whether a provider's answer says the key was refused: a 401 or 403, or the 400 some providers use for it. */
+export function keyRefused(info: AiKeyKindInfo, status: number, body: string): boolean {
+  if (status === 401 || status === 403) return true;
+  return status === 400 && !!info.wrongKeyText && body.includes(info.wrongKeyText);
 }
 
 /** The API version Claude's calls name. */

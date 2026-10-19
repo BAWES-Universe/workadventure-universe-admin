@@ -357,3 +357,21 @@ describe('Claude (#975)', () => {
     expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'm' })).toMatchObject({ ok: false });
   });
 });
+
+describe('Gemini answers a wrong key with a 400', () => {
+  const wrong = answer(400, { error: { code: 400, message: 'Please pass a valid API key', status: 'INVALID_ARGUMENT' } });
+
+  it('reads it as a key it did not accept, in the model list and in a chat call', async () => {
+    get.mockResolvedValue(wrong);
+    expect(await probeModels({ kind: 'gemini', apiKey: 'AIza-bad' })).toEqual({ ok: false, reason: 'rejected', message: 'Gemini didn’t accept this key.' });
+    post.mockResolvedValue(wrong);
+    expect(await probeChat({ kind: 'gemini', apiKey: 'AIza-bad', model: 'gemini-2.5-flash' })).toMatchObject({ ok: false, reason: 'rejected' });
+  });
+
+  it('reads any other 400 from Gemini, and a 400 from any other provider, as the ordinary error it is', async () => {
+    post.mockResolvedValue(answer(400, { error: { message: 'Unsupported parameter' } }));
+    expect(await probeChat({ kind: 'gemini', apiKey: 'k-1234', model: 'm' })).toMatchObject({ ok: false, reason: 'other' });
+    post.mockResolvedValue(wrong);
+    expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'm' })).toMatchObject({ ok: false, reason: 'other' });
+  });
+});
