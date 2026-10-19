@@ -213,8 +213,13 @@ async function resolveSubject(
     ? await prisma.user.findUnique({ where: { id: body.userId } })
     : await findUserByIdentifier(body.identifier as string);
   if (!user) throw new BotSettingsError(404, 'That person was not found');
-  if (user.id === place.createdById || user.id === place.universeOwnerId || isSuperAdmin(user.email)) {
+  if (user.id === place.universeOwnerId || isSuperAdmin(user.email)) {
     throw new BotSettingsError(400, "The bot's owner always passes, so a rule for them would do nothing");
+  }
+  // The creator always chats with, messages and calls over their own bot, but manages it only while they hold Manage
+  // bots, so Manage this bot is the one thing a rule can still change for them
+  if (user.id === place.createdById && ['chat', 'dm', 'summon'].some((action) => body[action as RuleAction])) {
+    throw new BotSettingsError(400, 'The bot\'s creator always chats with it, messages it and calls it over. Only "Manage this bot" can be set for them');
   }
   return { userId: user.id };
 }
