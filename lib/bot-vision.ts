@@ -2,6 +2,7 @@ import type { BotsAiProvider } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { kindInfo } from '@/lib/ai-key-kinds';
 import { checkKeyForBot, KEY_FOR_BOT_TEXT } from '@/lib/ai-key-pay';
+import { recheckIfDue } from '@/lib/ai-key-health';
 import { resolveVisionSupport } from '@/lib/vision-models';
 import { UNIVERSE_AI_MISSING, resolveUniverseAiProvider } from '@/lib/universe-ai';
 
@@ -69,18 +70,25 @@ export type AnotherProblem = 'gone' | 'not-maker' | 'not-lent' | 'no-access' | '
 
 /**
  * Whether the key picked for "Another model" can look at images for this bot now: it is there, it is the maker's, it is lent
- * here, the maker can still manage bots in the room, the model is one with Vision on it, and the key isn't Down.
+ * here, the maker can still manage bots in the room, the model is one with Vision on it, and the key isn't Down (`recheck`: a Down
+ * key is asked to check itself again when it is due, as a main key is).
  */
 export async function usableVisionKey(
   pick: Extract<VisionPick, { choice: 'another' }>,
-  bot: { createdById: string | null; roomId: string }
+  bot: { createdById: string | null; roomId: string },
+  options: { recheck?: boolean } = {}
 ): Promise<{ ok: true; key: BotsAiProvider } | { ok: false; problem: AnotherProblem; key: BotsAiProvider | null }> {
   const key = await prisma.botsAiProvider.findUnique({ where: { providerId: pick.keyId } });
   if (!key || !key.ownerId) return { ok: false, problem: 'gone', key: null };
   const verdict = await checkKeyForBot({ keyId: key.providerId, keyOwnerId: key.ownerId, makerId: bot.createdById, roomId: bot.roomId });
   if (!verdict.ok) return { ok: false, problem: verdict.reason, key };
   if (!keyVisionModels(key).includes(pick.model)) return { ok: false, problem: 'no-model', key };
-  if (key.downSince) return { ok: false, problem: 'down', key };
+  if (key.downSince) {
+    // A key used only for images is never asked for as a bot's main key, so nothing else would check it again: ask here (the
+    // 5-minute rule is the same). The answer does not wait for the check; the next request sees what it found.
+    if (options.recheck) void recheckIfDue({ ...key, ifDown: 'universe-ai' });
+    return { ok: false, problem: 'down', key };
+  }
   return { ok: true, key };
 }
 

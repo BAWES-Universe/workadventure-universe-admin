@@ -101,7 +101,7 @@ async function visionPlan(bot: BotForCredentials, main: ServedProvider): Promise
       : null);
   if (!choice || (!picked && choice.choice === 'this')) return undefined;
   if (choice.choice !== 'another') return choice;
-  const usable = await usableVisionKey(choice, { createdById: bot.createdById, roomId: bot.roomId });
+  const usable = await usableVisionKey(choice, { createdById: bot.createdById, roomId: bot.roomId }, { recheck: true });
   if (!usable.ok) return { choice: 'this', problem: 'key' };
   const info = kindInfo((usable.key.settings as { kind?: unknown } | null)?.kind);
   return {

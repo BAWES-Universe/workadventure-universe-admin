@@ -7,6 +7,7 @@ import { NextRequest } from 'next/server';
 import { prisma } from '@/lib/db';
 import { GET } from '@/app/api/bots/[id]/ai-credentials/route';
 import { checkKeyForBot } from '@/lib/ai-key-pay';
+import { recheckIfDue } from '@/lib/ai-key-health';
 import { requireServiceToken } from '@/lib/service-tokens';
 
 jest.mock('@/lib/db', () => ({
@@ -18,6 +19,7 @@ jest.mock('@/lib/db', () => ({
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
 jest.mock('@/lib/ai-key-pay', () => ({ ...jest.requireActual('@/lib/ai-key-pay'), checkKeyForBot: jest.fn() }));
 jest.mock('@/lib/notices', () => ({ addNotice: jest.fn() }));
+jest.mock('@/lib/ai-key-health', () => ({ ...jest.requireActual('@/lib/ai-key-health'), recheckIfDue: jest.fn(async (key: unknown) => key) }));
 
 const bot = prisma.bot as unknown as Record<'findUnique' | 'updateMany', jest.Mock>;
 const provider = prisma.botsAiProvider as unknown as Record<'findUnique' | 'findFirst', jest.Mock>;
@@ -46,6 +48,7 @@ const setRows = (...list: Array<{ providerId: string } & Record<string, unknown>
 };
 
 beforeEach(() => {
+  (recheckIfDue as jest.Mock).mockClear();
   bot.findUnique.mockReset();
   provider.findUnique.mockReset();
   provider.findFirst.mockReset();
@@ -137,6 +140,23 @@ describe('the owner picked', () => {
       bot.findUnique.mockResolvedValue(botOn('key-2', pick));
       expect((await ask()).vision).toEqual({ choice: 'this', problem: 'key' });
     }
+  });
+
+  it('asks a Down key picked only for images to check itself again, without making the reply wait for it', async () => {
+    const pick = { vision: { choice: 'another', keyId: 'key-1', model: 'deepseek-v4-flash-vision-exp' } };
+    const down = { ...deepseekKey, downSince: new Date(), ifDown: 'stop' };
+    setRows(universeAiProvider, down, lmStudioKey);
+    bot.findUnique.mockResolvedValue(botOn('key-2', pick));
+    expect((await ask()).vision).toEqual({ choice: 'this', problem: 'key' });
+    // the recheck is asked as a Universe-AI-meanwhile key, so it is never awaited
+    expect(recheckIfDue).toHaveBeenCalledWith(expect.objectContaining({ providerId: 'key-1', ifDown: 'universe-ai' }));
+  });
+
+  it('does not ask a working key to check itself', async () => {
+    const pick = { vision: { choice: 'another', keyId: 'key-1', model: 'deepseek-v4-flash-vision-exp' } };
+    bot.findUnique.mockResolvedValue(botOn('key-2', pick));
+    await ask();
+    expect(recheckIfDue).not.toHaveBeenCalledWith(expect.objectContaining({ providerId: 'key-1' }));
   });
 
   it('ignores a saved pick it can’t read, as if nothing were picked', async () => {
