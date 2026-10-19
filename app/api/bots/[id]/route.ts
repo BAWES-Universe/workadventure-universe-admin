@@ -9,7 +9,8 @@ import { parsePlayUri } from '@/lib/utils';
 import { z } from 'zod';
 import { checkAiProviderRef } from '@/lib/ai-provider-ref';
 import { toolTimeoutSecondsSchema } from '@/lib/bot-tool-timeout';
-import { keepToolCallSetting } from '@/lib/bot-config-helpers';
+import { keepToolCallSetting, keepVisionPick } from '@/lib/bot-config-helpers';
+import { checkConfigVision } from '@/lib/bot-vision';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Prisma
 export const runtime = 'nodejs';
@@ -456,6 +457,23 @@ export async function PUT(
       }
     }
 
+    // Where the bot's images go is checked like its provider: a key may only be picked by the person who made the bot
+    {
+      const visionError = await checkConfigVision(validatedData.behaviorConfig, {
+        storedConfig: existingBot.behaviorConfig,
+        actorId: userId ?? null,
+        makerId: existingBot.createdById ?? null,
+        roomId: resolvedRoomId ?? existingBot.roomId,
+      });
+      if (visionError) {
+        const response = NextResponse.json({ error: visionError }, { status: 400 });
+        Object.entries(corsHeaders()).forEach(([key, value]) => {
+          response.headers.set(key, value);
+        });
+        return response;
+      }
+    }
+
     // Prepare update data (only include fields that were provided)
     const updateData: any = {};
     if (resolvedRoomId !== undefined) updateData.roomId = resolvedRoomId;
@@ -465,7 +483,7 @@ export async function PUT(
     if (validatedData.enabled !== undefined) updateData.enabled = validatedData.enabled;
     if (validatedData.behaviorType !== undefined) updateData.behaviorType = validatedData.behaviorType;
     if (validatedData.behaviorConfig !== undefined) {
-      updateData.behaviorConfig = keepToolCallSetting(existingBot.behaviorConfig, validatedData.behaviorConfig);
+      updateData.behaviorConfig = keepVisionPick(existingBot.behaviorConfig, keepToolCallSetting(existingBot.behaviorConfig, validatedData.behaviorConfig));
     }
     if (validatedData.chatInstructions !== undefined) updateData.chatInstructions = validatedData.chatInstructions;
     if (validatedData.movementInstructions !== undefined) updateData.movementInstructions = validatedData.movementInstructions;

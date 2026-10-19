@@ -122,6 +122,35 @@ describe('/api/bots/configuration', () => {
       expect(prisma.bot.create).not.toHaveBeenCalled();
     });
 
+    it('refuses a Vision pick of a key when no person is saving (the admin token), and says nothing for the others', async () => {
+      const pick = { choice: 'another', keyId: 'key-abc', model: 'deepseek-v4-flash-vision-exp' };
+      (prisma.botsAiProvider.findUnique as jest.Mock).mockResolvedValueOnce({ ownerId: 'user-a' });
+
+      const refused = await POST(configRequest({ ...validBody, behaviorConfig: { vision: pick } }));
+      expect(refused.status).toBe(400);
+      expect((await refused.json()).error).toBe('That key isn’t there.');
+      expect(prisma.bot.create).not.toHaveBeenCalled();
+
+      const nonsense = await POST(configRequest({ ...validBody, behaviorConfig: { vision: { choice: 'sideways' } } }));
+      expect(nonsense.status).toBe(400);
+      expect((await nonsense.json()).error).toBe('Pick where images go: This model, Another model or Universe AI.');
+
+      const picked = await POST(configRequest({ ...validBody, behaviorConfig: { vision: { choice: 'this' } } }));
+      expect(picked.status).toBe(201);
+      const cleared = await POST(configRequest({ ...validBody, behaviorConfig: { vision: null } }));
+      expect(cleared.status).toBe(201);
+    });
+
+    it('lets a save carry the Vision pick the bot already has, whoever saves it', async () => {
+      const pick = { choice: 'another', keyId: 'key-abc', model: 'deepseek-v4-flash-vision-exp' };
+      (prisma.bot.findUnique as jest.Mock).mockResolvedValue({ aiProviderRef: null, createdById: 'maker', behaviorConfig: { vision: pick } });
+
+      const response = await POST(configRequest({ ...validBody, botId: '00000000-0000-4000-8000-000000000001', behaviorConfig: { vision: pick } }));
+
+      expect(response.status).toBe(200);
+      expect(prisma.botsAiProvider.findUnique).not.toHaveBeenCalled();
+    });
+
     it('saves an existing bot whose unchanged provider was deleted', async () => {
       (prisma.bot.findUnique as jest.Mock).mockResolvedValue({ aiProviderRef: 'gone', behaviorConfig: null });
 
