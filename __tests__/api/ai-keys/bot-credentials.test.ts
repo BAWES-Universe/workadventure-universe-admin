@@ -123,15 +123,46 @@ describe('GET /api/bots/:id/ai-credentials', () => {
     provider.findUnique.mockResolvedValue(ownKey);
     provider.findFirst.mockResolvedValue(deepseek);
     verdict.mockResolvedValue({ ok: false, reason });
+    bot.updateMany.mockResolvedValue({ count: 1 });
     const body = await (await ask()).json();
     expect(bot.updateMany).toHaveBeenCalledWith({ where: { id: 'b1', aiProviderRef: 'key-1' }, data: { aiProviderRef: 'universe-ai' } });
     expect(addNotice).toHaveBeenCalledTimes(1);
     const notice = (addNotice as jest.Mock).mock.calls[0][0];
-    expect(notice).toMatchObject({ userId: 'universe-owner', kind: 'ai-key-moved', dedupeKey: 'moved:key-1:b1', title: 'Sam moved to Universe AI', href: '/admin/universes/uni-1' });
+    expect(notice).toMatchObject({ userId: 'universe-owner', kind: 'ai-key-moved', dedupeKey: expect.stringMatching(/^moved:key-1:b1:\d{4}-/), title: 'Sam moved to Universe AI', href: '/admin/universes/uni-1' });
     expect(notice.body).toMatch(text);
     expect(body).toMatchObject({ providerId: 'deepseek-flash', source: 'universe-ai', movedFromKey: 'key-1' });
     // The key itself never goes out
     expect(JSON.stringify(body)).not.toContain('lm.example.com');
+  });
+
+  it('tells nobody when another request already moved the bot, and still serves Universe AI', async () => {
+    bot.findUnique.mockResolvedValue(botOn('key-1'));
+    provider.findUnique.mockResolvedValue(ownKey);
+    provider.findFirst.mockResolvedValue(deepseek);
+    verdict.mockResolvedValue({ ok: false, reason: 'not-lent' });
+    bot.updateMany.mockResolvedValue({ count: 0 });
+    const body = await (await ask()).json();
+    expect(addNotice).not.toHaveBeenCalled();
+    expect(body).toMatchObject({ source: 'universe-ai', movedFromKey: 'key-1' });
+  });
+
+  it('gives each move its own notice key, so a dismissed notice never hides a later move of the same bot off the same key', async () => {
+    bot.findUnique.mockResolvedValue(botOn('key-1'));
+    provider.findUnique.mockResolvedValue(ownKey);
+    provider.findFirst.mockResolvedValue(deepseek);
+    verdict.mockResolvedValue({ ok: false, reason: 'not-lent' });
+    bot.updateMany.mockResolvedValue({ count: 1 });
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'setTimeout'] });
+    try {
+      jest.setSystemTime(new Date('2026-10-19T12:00:00Z'));
+      await ask();
+      jest.setSystemTime(new Date('2026-10-20T12:00:00Z'));
+      await ask();
+    } finally {
+      jest.useRealTimers();
+    }
+    const keys = (addNotice as jest.Mock).mock.calls.map((call) => call[0].dedupeKey);
+    expect(keys).toEqual(['moved:key-1:b1:2026-10-19T12:00:00.000Z', 'moved:key-1:b1:2026-10-20T12:00:00.000Z']);
   });
 
   it('still answers on Universe AI when the notice can’t be saved, and logs it', async () => {
@@ -139,6 +170,7 @@ describe('GET /api/bots/:id/ai-credentials', () => {
     provider.findUnique.mockResolvedValue(ownKey);
     provider.findFirst.mockResolvedValue(deepseek);
     verdict.mockResolvedValue({ ok: false, reason: 'not-lent' });
+    bot.updateMany.mockResolvedValue({ count: 1 });
     (addNotice as jest.Mock).mockRejectedValue(new Error('db down'));
     const spy = jest.spyOn(console, 'error').mockImplementation(() => {});
     expect((await ask()).status).toBe(200);
