@@ -131,7 +131,8 @@ export type KeyCheck = { ok: true } | { ok: false; reason: DownReason; message: 
 
 /**
  * Asks the key's provider for its model list with the saved key: the same check Add key runs. A key that went Down on
- * failed replies must also get one tiny chat reply from its saved model, because a model list can answer while chat does not.
+ * failed or rejected replies must also get one tiny chat reply from its saved model, because a model list can answer
+ * while chat does not (a key that may list models but not chat is rejected on every reply).
  */
 export async function checkKey(key: KeyRow): Promise<KeyCheck> {
   const info = kindInfo((key.settings as { kind?: unknown } | null)?.kind);
@@ -145,7 +146,7 @@ export async function checkKey(key: KeyRow): Promise<KeyCheck> {
   const address = key.endpoint ?? undefined;
   const models = await probeModels({ kind: info.kind, address, apiKey });
   if (!models.ok) return failed(models);
-  if (key.downSince && key.downReason === 'errors' && key.model) {
+  if (key.downSince && (key.downReason === 'errors' || key.downReason === 'rejected') && key.model) {
     const chat = await probeChat({ kind: info.kind, address, apiKey, model: key.model });
     if (!chat.ok) return failed(chat);
   }
