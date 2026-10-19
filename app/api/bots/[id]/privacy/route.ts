@@ -3,7 +3,7 @@ import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
 import { prisma } from '@/lib/db';
 import { authorizeBotManager, json } from '@/lib/bot-access-api';
-import { BOT_PRIVACY_CHOICES, loadBotPrivacy, memoryTally, storedFor, type BotPrivacyChoice } from '@/lib/bot-privacy';
+import { BOT_PRIVACY_CHOICES, loadBotPrivacy, memoryTally, storedFor, takeForgets, type BotPrivacyChoice } from '@/lib/bot-privacy';
 import { validateServiceToken } from '@/lib/service-tokens';
 import { trustedCorsHeaders } from '@/lib/cors';
 
@@ -31,7 +31,8 @@ export async function OPTIONS(request: NextRequest) {
  * (`hidden`). A hidden bot also tells a manager how many people it remembers and lists who, by name and nothing more,
  * so one of them can be forgotten; a guest is a guest, and nobody's email or player id is sent.
  *
- * Auth: the bot server (service token, or the admin token it falls back to) gets the answer alone; whoever manages the bot gets it all.
+ * Auth: the bot server (service token, or the admin token it falls back to) gets the answer, plus the people it must
+ * forget when a manager asked (`forget`, see POST /api/bots/:id/forget); whoever manages the bot gets it all.
  */
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -43,7 +44,15 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     }
     const privacy = await loadBotPrivacy(id);
     if (!privacy) return json(request, { error: 'Bot not found' }, 404);
-    if (fromBotServer) return json(request, { botId: id, ...privacy });
+    if (fromBotServer) {
+      // The bot server asks every 30 seconds, so a Forget reaches it even while nobody is talking to the bot
+      const forgetting = await takeForgets(id);
+      return json(request, {
+        botId: id,
+        ...privacy,
+        ...(forgetting.everyone || forgetting.userUuids.size > 0 ? { forget: { everyone: forgetting.everyone, userUuids: [...forgetting.userUuids] } } : {}),
+      });
+    }
 
     const [tally, replies, people] = await Promise.all([
       memoryTally(id),

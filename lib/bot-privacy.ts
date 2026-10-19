@@ -74,3 +74,27 @@ export async function memoryTally(botId: string): Promise<{ people: number; last
 
 /** How long a forget stays after the bot server was told, in case the answer was lost on the way. */
 export const FORGET_GRACE_MS = 60_000;
+
+/**
+ * The people this bot has been asked to forget (#435), and marks them as told to the bot server. The bot server asks
+ * every 30 seconds (the privacy answer) and hears it again with its next memory save. A row stays a minute after the
+ * bot server was first told, so an answer that got lost is told again and a save in that minute still skips them;
+ * after that it is removed, and what the bot learns about the person from then on is saved as usual.
+ */
+export async function takeForgets(botId: string): Promise<{ everyone: boolean; userUuids: Set<string> }> {
+  const now = new Date();
+  const rows = await prisma.botMemoryForget.findMany({ where: { botId }, select: { id: true, userUuid: true, reportedAt: true } });
+  const expired = rows.filter((row) => row.reportedAt && now.getTime() - row.reportedAt.getTime() > FORGET_GRACE_MS);
+  const live = rows.filter((row) => !expired.includes(row));
+  if (expired.length > 0) {
+    await prisma.botMemoryForget.deleteMany({ where: { id: { in: expired.map((row) => row.id) } } });
+  }
+  const fresh = live.filter((row) => !row.reportedAt);
+  if (fresh.length > 0) {
+    await prisma.botMemoryForget.updateMany({ where: { id: { in: fresh.map((row) => row.id) } }, data: { reportedAt: now } });
+  }
+  return {
+    everyone: live.some((row) => row.userUuid === null),
+    userUuids: new Set(live.flatMap((row) => (row.userUuid === null ? [] : [row.userUuid]))),
+  };
+}

@@ -296,7 +296,7 @@ describe('Forget', () => {
   });
 });
 
-describe('the bot server really forgets (it saves everything it remembers every few minutes)', () => {
+describe('the bot server really forgets (it saves a person again whenever they talk to the bot)', () => {
   const save = (body: unknown) => call(saveMemory, 'POST', { token: 'service-secret', body });
   const saved = () => db.botsMemory.upsert.mock.calls.map((callArgs) => callArgs[0].where.botId_userUuid.userUuid);
 
@@ -329,6 +329,29 @@ describe('the bot server really forgets (it saves everything it remembers every 
     await new Promise((resolve) => setImmediate(resolve));
     expect(db.botMemoryForget.deleteMany).toHaveBeenCalledWith({ where: { id: { in: ['f3'] } } });
     expect(saved()).toEqual(['uuid-bob']);
+  });
+
+  it('tells the bot server on its 30-second privacy check too, so a forget lands while nobody is talking to the bot', async () => {
+    botIs(true);
+    db.botMemoryForget.findMany.mockResolvedValue([{ id: 'f1', userUuid: 'uuid-bob', reportedAt: null }, { id: 'f4', userUuid: null, reportedAt: new Date(Date.now() - 20_000) }]);
+    const body = await (await call(getPrivacy, 'GET', { token: 'service-secret' })).json();
+    expect(body).toEqual({ botId: 'bot-1', universeHides: false, choice: 'private', hidden: true, forget: { everyone: true, userUuids: ['uuid-bob'] } });
+    expect(db.botMemoryForget.updateMany).toHaveBeenCalledWith({ where: { id: { in: ['f1'] } }, data: { reportedAt: expect.any(Date) } });
+  });
+
+  it('adds nothing to the privacy check of a bot nobody asked to forget anything', async () => {
+    const body = await (await call(getPrivacy, 'GET', { token: 'service-secret' })).json();
+    expect(body).toEqual({ botId: 'bot-1', universeHides: false, choice: 'follow', hidden: false });
+    expect(db.botMemoryForget.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('never hands the forget list to a person, only to the bot server', async () => {
+    botIs(true);
+    db.botMemoryForget.findMany.mockResolvedValue([{ id: 'f1', userUuid: 'uuid-bob', reportedAt: null }]);
+    db.botsMemory.findMany.mockResolvedValue([]);
+    const body = await (await call(getPrivacy)).json();
+    expect(JSON.stringify(body)).not.toContain('uuid-bob');
+    expect(db.botMemoryForget.updateMany).not.toHaveBeenCalled();
   });
 
   it('fails the save, so the bot server tries again, when it cannot tell who was forgotten', async () => {

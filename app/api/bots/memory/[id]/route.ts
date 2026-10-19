@@ -3,7 +3,7 @@ import { prisma } from '@/lib/db';
 import { requireServiceToken, validateServiceToken } from '@/lib/service-tokens';
 import { botReadDenied, getViewer } from '@/lib/access-scope';
 import { corsHeaders } from '@/lib/cors';
-import { FORGET_GRACE_MS, isBotHidden, memoryTally } from '@/lib/bot-privacy';
+import { isBotHidden, memoryTally, takeForgets } from '@/lib/bot-privacy';
 
 export const runtime = 'nodejs';
 
@@ -433,27 +433,4 @@ export async function POST(
       { status: 500, headers: corsHeaders() }
     );
   }
-}
-
-/**
- * The people this bot has been asked to forget (#435), and marks them as told to the bot server. A row stays a minute
- * after the bot server was told, so a retry of the same save (the answer got lost) is still skipped and told again;
- * after that it is removed, and what the bot learns about the person from then on is saved as usual.
- */
-async function takeForgets(botId: string): Promise<{ everyone: boolean; userUuids: Set<string> }> {
-  const now = new Date();
-  const rows = await prisma.botMemoryForget.findMany({ where: { botId }, select: { id: true, userUuid: true, reportedAt: true } });
-  const expired = rows.filter((row) => row.reportedAt && now.getTime() - row.reportedAt.getTime() > FORGET_GRACE_MS);
-  const live = rows.filter((row) => !expired.includes(row));
-  if (expired.length > 0) {
-    await prisma.botMemoryForget.deleteMany({ where: { id: { in: expired.map((row) => row.id) } } });
-  }
-  const fresh = live.filter((row) => !row.reportedAt);
-  if (fresh.length > 0) {
-    await prisma.botMemoryForget.updateMany({ where: { id: { in: fresh.map((row) => row.id) } }, data: { reportedAt: now } });
-  }
-  return {
-    everyone: live.some((row) => row.userUuid === null),
-    userUuids: new Set(live.flatMap((row) => (row.userUuid === null ? [] : [row.userUuid]))),
-  };
 }

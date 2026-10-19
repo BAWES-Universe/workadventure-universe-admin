@@ -22,9 +22,10 @@ export async function OPTIONS(request: NextRequest) {
  * POST /api/bots/:id/forget
  * Hide bot conversations (#435): make a hidden bot forget one person or everyone. Body: { memoryId } or { everyone: true }.
  *
- * The saved rows go now. The bot server keeps what it remembers in memory and saves all of it every few minutes, so a
- * forget row is left too: the next save skips these people and the bot server is told to drop them (see the memory
- * save in app/api/bots/memory/[id]/route.ts). Within minutes the bot has truly forgotten.
+ * The saved rows go now. The bot server also holds what it remembers in memory and saves a person again whenever they
+ * talk to the bot, so a forget row is left too: the bot server hears it within 30 seconds (its privacy check, see
+ * app/api/bots/[id]/privacy/route.ts) and drops these people, and a save that still carries one is skipped (see the
+ * memory save in app/api/bots/memory/[id]/route.ts). The bot has truly forgotten within about 30 seconds.
  *
  * Only for a bot that hides its conversations: a manager who can read them uses the usual cleanup.
  *
