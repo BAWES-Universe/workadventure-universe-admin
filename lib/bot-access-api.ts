@@ -35,7 +35,7 @@ export async function authorizeBotManager(request: NextRequest, botId: string, o
       sessionUser.id,
       sessionUser.email,
       { id: place.id, createdById: place.createdById, roomId: place.roomId },
-      { creatorPasses: true },
+      { creatorPasses: false },
     ))
   ) {
     return { response: json(request, { error: 'Bot not found' }, 404) };

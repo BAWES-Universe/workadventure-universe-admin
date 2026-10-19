@@ -20,6 +20,11 @@ jest.mock('@/lib/db', () => ({
   },
 }));
 
+// These tests are about the routes' own work; who may use them is tested in bot-permissions and mcp-servers
+jest.mock('@/lib/bot-permissions', () => ({
+  canManageBotMcpServers: jest.fn().mockResolvedValue(true),
+}));
+
 jest.mock('@/lib/auth-session', () => ({
   getSessionUser: jest.fn().mockResolvedValue({ id: 'user-1' }),
 }));

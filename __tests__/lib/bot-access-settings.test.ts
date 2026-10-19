@@ -232,13 +232,28 @@ describe('saving a rule', () => {
     expect(state.rows).toHaveLength(0);
   });
 
-  it('refuses a person who does not exist, and the owner, the creator and a super admin, saying why', async () => {
+  it('refuses a person who does not exist, and the universe owner and a super admin, saying why', async () => {
     await expect(saveBotRule(place, { userId: 'nope', chat: 'no' })).rejects.toMatchObject({ status: 404 });
     await expect(saveBotRule(place, { identifier: 'nobody@example.com', chat: 'no' })).rejects.toMatchObject({ status: 404 });
-    for (const userId of ['u-maker', 'u-owner', 'u-root']) {
+    for (const userId of ['u-owner', 'u-root']) {
       await expect(saveBotRule(place, { userId, chat: 'no' })).rejects.toMatchObject({ status: 400, message: expect.stringContaining('always passes') });
+      await expect(saveBotRule(place, { userId, manage: 'no' })).rejects.toMatchObject({ status: 400, message: expect.stringContaining('always passes') });
     }
     expect(state.rows).toHaveLength(0);
+  });
+
+  it('the creator always uses their own bot, so only Manage this bot can be set for them (#433)', async () => {
+    for (const body of [{ chat: 'no' }, { dm: 'no' }, { summon: 'yes' }, { chat: 'default', dm: 'no', manage: 'yes' }] as const) {
+      await expect(saveBotRule(place, { userId: 'u-maker', ...body })).rejects.toMatchObject({
+        status: 400,
+        message: expect.stringContaining('Only "Manage this bot"'),
+      });
+    }
+    expect(state.rows).toHaveLength(0);
+    await expect(saveBotRule(place, { userId: 'u-maker', manage: 'yes' })).resolves.toMatchObject({ manage: 'yes', chat: 'default' });
+    expect(state.rows).toHaveLength(1);
+    // a whole row sent back with the unchanged Default values is fine
+    await expect(saveBotRule(place, { userId: 'u-maker', chat: 'default', dm: 'default', summon: 'default', manage: 'no' })).resolves.toMatchObject({ manage: 'no', chat: 'default' });
   });
 
   it('stops at the most rules a bot can have', async () => {

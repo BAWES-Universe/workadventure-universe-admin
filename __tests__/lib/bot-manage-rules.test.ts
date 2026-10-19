@@ -92,12 +92,32 @@ describe('a bot with no rules', () => {
     expect(await manage('plain')).toBe(false);
   });
 
-  it('keeps the creator’s and the super admin’s extra ways in, only where the caller allows them', async () => {
-    expect(await canManageBotMcpServers('maker', null, bot)).toBe(true);
+  it('keeps the super admin’s extra way in, and gives the creator none, for the bot’s tools', async () => {
+    expect(await canManageBotMcpServers('maker', null, bot)).toBe(false);
     expect(await manage('maker')).toBe(false);
     process.env.SUPER_ADMINS = 'root@example.com';
     expect(await canManageBotMcpServers('someone', 'root@example.com', bot)).toBe(true);
     expect(await manage('someone', null)).toBe(false);
+  });
+});
+
+describe('row 22: the bot’s creator loses the room', () => {
+  it('a creator with no role left cannot manage their bot, with or without rules on it; the owner and Admin still can', async () => {
+    member('ad', [everywhere(ADMIN)]);
+    for (const withRules of [false, true]) {
+      state.rules = [];
+      if (withRules) rule({ userId: 'someone-else' }, { chat: 'yes' });
+      expect(await manage('maker')).toBe(false);
+      expect(await canManageBotMcpServers('maker', null, bot)).toBe(false);
+      expect(await manage('ad')).toBe(true);
+      expect(await manage('owner')).toBe(true);
+    }
+  });
+
+  it('a creator who still holds Manage bots keeps managing their bot', async () => {
+    member('maker', [everywhere(EDITOR)]);
+    expect(await manage('maker')).toBe(true);
+    expect(await canManageBotMcpServers('maker', null, bot)).toBe(true);
   });
 });
 

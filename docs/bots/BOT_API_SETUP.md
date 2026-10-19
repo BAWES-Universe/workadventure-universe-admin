@@ -88,8 +88,9 @@ curl -X POST \
      the bot says it instead of calling the AI. A bot with no rows and Private bot off answers as above.
 
 7. **GET /api/bots/:id/permissions** and **PUT /api/bots/:id/permissions** - Who may use this bot (#427)
-   - Requires: whoever manages the bot (its creator, the universe owner, Admin, anyone with Manage bots, or anyone the
-     bot's own Manage rule says Yes to; a No takes it away). GET also takes the bot server's `ADMIN_API_TOKEN`.
+   - Requires: whoever manages the bot (the universe owner, Admin, anyone with Manage bots in its room, or anyone the
+     bot's own Manage rule says Yes to; a No takes it away). The bot's creator gets no extra way in here: once they no
+     longer hold Manage bots they cannot change who may use the bot or its tools (#433). GET also takes the bot server's `ADMIN_API_TOKEN`.
      Anyone else gets 404, as if the bot did not exist.
    - GET returns `{ privateBot, refusalReply, dailyReplyCap, rules, roles }`: `rules` has one row per role or person with
      `chat`, `dm`, `summon` and `manage` each `"yes" | "no" | "default"`; `roles` lists the roles a row can name (not
@@ -101,8 +102,9 @@ curl -X POST \
 8. **PUT /api/bots/:id/permissions/rules** and **DELETE /api/bots/:id/permissions/rules?roleId=|userId=**
    - PUT body: one of `{ roleId }`, `{ userId }` or `{ identifier }` (a person's uuid or email), and any of `chat`, `dm`,
      `summon`, `manage` as `"yes" | "no" | "default"`. Only the actions sent change. Returns the row. Refused with a line
-     saying why: a role of another universe (404), Admin or the bot's owner (400, they always pass), a person who
-     does not exist (404), more than 200 rows (400), two people saving the same row at once (409, try again).
+     saying why: a role of another universe (404), Admin, the universe owner or a super admin (400, they always pass),
+     chat, dm or summon for the bot's creator (400, they always use their own bot; only `manage` can be set for them), a
+     person who does not exist (404), more than 200 rows (400), two people saving the same row at once (409, try again).
    - DELETE takes the row off, so they follow the roles again; 404 when there was no such row.
 
 ### Files Created/Modified
