@@ -100,8 +100,18 @@ describe('GET /api/bots/:id/ai-credentials', () => {
     verdict.mockResolvedValue({ ok: true });
     const body = await (await ask()).json();
     expect(verdict).toHaveBeenCalledWith({ keyId: 'key-1', keyOwnerId: 'maker', makerId: 'maker', roomId: 'room-1' });
-    expect(body).toMatchObject({ providerId: 'key-1', source: 'own-key', keyOwnerId: 'maker', keyKind: 'lmstudio', keyGroup: 'own-computer', endpoint: 'https://lm.example.com' });
+    expect(body).toMatchObject({ providerId: 'key-1', source: 'own-key', keyOwnerId: 'maker', keyKind: 'lmstudio', keyGroup: 'own-computer', keyAddressTyped: true, endpoint: 'https://lm.example.com' });
     expect(bot.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('says a hosted key at its provider’s own base is not a typed address, and your own NIM address is', async () => {
+    const hosted = { ...ownKey, providerId: 'key-2', type: 'openai', endpoint: 'https://api.deepseek.com', settings: { kind: 'deepseek' } };
+    bot.findUnique.mockResolvedValue(botOn('key-2'));
+    verdict.mockResolvedValue({ ok: true });
+    provider.findUnique.mockResolvedValue(hosted);
+    expect(await (await ask()).json()).toMatchObject({ keyGroup: 'hosted', keyAddressTyped: false });
+    provider.findUnique.mockResolvedValue({ ...hosted, endpoint: 'https://nim.example.com/v1', settings: { kind: 'nim' } });
+    expect(await (await ask()).json()).toMatchObject({ keyKind: 'nim', keyAddressTyped: true });
   });
 
   it.each([

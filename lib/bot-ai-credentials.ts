@@ -29,6 +29,8 @@ export interface OwnKeyFacts {
   keyKind: string | null;
   /** "own-computer" keys are reached at an address the person typed (the bot server applies the same address guard); "hosted" ones at the provider's own. */
   keyGroup: 'own-computer' | 'hosted' | null;
+  /** True when the person typed the address (an own-computer key, or their own NIM): the bot server must apply the address guard before every call. */
+  keyAddressTyped: boolean;
 }
 
 /** Why a bot was moved off a key when nobody asked, for the universe owner's notice. */
@@ -76,7 +78,15 @@ export async function credentialsForBot(botId: string): Promise<BotAiCredentials
     const info = kindInfo((provider.settings as { kind?: unknown } | null)?.kind);
     return {
       status: 200,
-      body: { ...providerPayload(provider), source: 'own-key', keyOwnerId: provider.ownerId, keyKind: info?.kind ?? null, keyGroup: info?.group ?? null },
+      body: {
+        ...providerPayload(provider),
+        source: 'own-key',
+        keyOwnerId: provider.ownerId,
+        keyKind: info?.kind ?? null,
+        keyGroup: info?.group ?? null,
+        // A hosted kind sits at its provider's fixed base; anything else is an address the person typed
+        keyAddressTyped: !info || info.group === 'own-computer' || provider.endpoint !== info.base,
+      },
     };
   }
 
