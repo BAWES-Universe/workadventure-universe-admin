@@ -69,20 +69,24 @@ export async function credentialsForBot(botId: string): Promise<BotAiCredentials
     };
   }
 
-  // The key may no longer run this bot: the bot moves to Universe AI now, and the universe's owner is told once.
-  await prisma.bot.updateMany({ where: { id: bot.id, aiProviderRef: ref }, data: { aiProviderRef: UNIVERSE_AI_REF } });
-  const universe = bot.room.world.universe;
-  try {
-    await addNotice({
-      userId: universe.ownerId,
-      kind: 'ai-key-moved',
-      dedupeKey: `moved:${ref}:${bot.id}`,
-      title: `${bot.name} moved to Universe AI`,
-      body: `${MOVED_BECAUSE[verdict.reason]} It now replies on Universe AI.`,
-      href: `/admin/universes/${universe.id}`,
-    });
-  } catch (error) {
-    console.error('[AiKeys] Could not tell the universe owner:', error instanceof Error ? error.message : 'unknown');
+  // The key may no longer run this bot: the bot moves to Universe AI now, and the universe's owner is told once. Only the
+  // request that really moved it tells (a second, racing one finds nothing to move), so every move gets its own notice
+  // even if the owner dismissed an earlier one for the same bot and key.
+  const moved = await prisma.bot.updateMany({ where: { id: bot.id, aiProviderRef: ref }, data: { aiProviderRef: UNIVERSE_AI_REF } });
+  if (moved.count > 0) {
+    const universe = bot.room.world.universe;
+    try {
+      await addNotice({
+        userId: universe.ownerId,
+        kind: 'ai-key-moved',
+        dedupeKey: `moved:${ref}:${bot.id}:${new Date().toISOString()}`,
+        title: `${bot.name} moved to Universe AI`,
+        body: `${MOVED_BECAUSE[verdict.reason]} It now replies on Universe AI.`,
+        href: `/admin/universes/${universe.id}`,
+      });
+    } catch (error) {
+      console.error('[AiKeys] Could not tell the universe owner:', error instanceof Error ? error.message : 'unknown');
+    }
   }
   const answer = await universeAi();
   return answer.status === 200 ? { status: 200, body: { ...answer.body, movedFromKey: ref } } : answer;
