@@ -183,7 +183,8 @@ describe('probeChat', () => {
   it.each([
     [answer(401, {}), 'rejected'],
     [answer(429, {}), 'busy'],
-    [answer(404, {}), 'other'],
+    [answer(404, {}), 'gone'],
+    [answer(402, {}), 'credit'],
     [answer(400, {}), 'other'],
     [answer(503, {}), 'unreachable'],
     [{ ok: false, reason: 'timeout' }, 'unreachable'],
@@ -192,10 +193,12 @@ describe('probeChat', () => {
     expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'gone' })).toMatchObject({ ok: false, reason });
   });
 
-  it('names the model when the list works but chat does not', async () => {
+  it('names the model when the provider no longer has it, and the status for any other chat failure', async () => {
     post.mockResolvedValue(answer(404, {}));
-    expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'gone' })).toMatchObject({
-      message: 'DeepSeek lists its models, but a chat call to gone failed (404). Check the model.',
+    expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'gone' })).toMatchObject({ message: 'DeepSeek no longer has the model gone.' });
+    post.mockResolvedValue(answer(400, {}));
+    expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'm' })).toMatchObject({
+      message: 'DeepSeek lists its models, but a chat call to m failed (400). Check the model.',
     });
   });
 });

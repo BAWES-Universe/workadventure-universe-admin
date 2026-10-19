@@ -71,19 +71,24 @@ export type LoadModelsResult = { ok: true; models: string[] } | { ok: false; mes
 
 /**
  * Why a check failed, for deciding what to do about it: nobody answered, the provider said no, it was too busy to say
- * (a 429: it answered, so the key is neither proven good nor bad), or something else.
+ * (a 429: it answered, so the key is neither proven good nor bad), it has no credit left (402), the model is not there
+ * (a chat call's 404), or something else.
  */
-export type ProbeFailure = 'unreachable' | 'rejected' | 'busy' | 'other';
+export type ProbeFailure = 'unreachable' | 'rejected' | 'busy' | 'credit' | 'gone' | 'other';
 export type ProbeModelsResult = { ok: true; models: string[] } | { ok: false; message: string; reason: ProbeFailure };
 
 const NOT_CHAT = /embed|whisper|tts|dall-e|moderation|rerank|transcribe|image|audio|realtime|guard|safety/i;
+
+/** One model id as the bot server will use it. Gemini lists "models/gemini-flash-latest" but takes "gemini-flash-latest". */
+export function cleanModelId(raw: string, kind: AiKeyKind): string {
+  return (kind === 'gemini' ? raw.replace(/^models\//, '') : raw).trim();
+}
 
 /** Tidy a provider's list: plain ids, no duplicates, chat models first by name. */
 export function cleanModelIds(ids: string[], kind: AiKeyKind): string[] {
   const seen = new Set<string>();
   for (const raw of ids) {
-    // Gemini lists "models/gemini-flash-latest" but takes "gemini-flash-latest".
-    const id = (kind === 'gemini' ? raw.replace(/^models\//, '') : raw).trim();
+    const id = cleanModelId(raw, kind);
     if (id && id.length <= 255 && !NOT_CHAT.test(id)) seen.add(id);
   }
   return [...seen].sort((a, b) => a.localeCompare(b));
@@ -185,6 +190,8 @@ export async function probeChat(input: KeyTargetInput & { apiKey?: unknown; mode
   if (result.status >= 200 && result.status < 300) return { ok: true };
   if (result.status === 401 || result.status === 403) return { ok: false, reason: 'rejected', message: `${info.label} didn’t accept this key.` };
   if (result.status === 429) return { ok: false, reason: 'busy', message: `${info.label} is busy right now. Try again in a moment.` };
+  if (result.status === 402) return { ok: false, reason: 'credit', message: `${info.label} says this key is out of credit.` };
+  if (result.status === 404) return { ok: false, reason: 'gone', message: `${info.label} no longer has the model ${input.model}.` };
   return {
     ok: false,
     reason: result.status >= 500 ? 'unreachable' : 'other',

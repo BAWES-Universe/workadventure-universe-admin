@@ -1,7 +1,7 @@
 import { prisma } from '@/lib/db';
 import { decryptApiKey } from '@/lib/encryption';
 import { kindInfo } from '@/lib/ai-key-kinds';
-import { probeChat, probeModels, type ProbeFailure } from '@/lib/ai-key-models';
+import { cleanModelId, probeChat, probeModels, type ProbeFailure } from '@/lib/ai-key-models';
 import { addNotice, clearNotices } from '@/lib/notices';
 
 /**
@@ -130,8 +130,10 @@ export async function markWorking(key: Pick<KeyRow, 'providerId' | 'ownerId'>, n
 export type KeyCheck = { ok: true } | { ok: false; reason: DownReason; message: string } | { ok: false; busy: true; message: string };
 
 /**
- * Asks the key's provider for its model list with the saved key: the same check Add key runs. A key that went Down on
- * failed replies must also get one tiny chat reply from its saved model, because a model list can answer while chat does not.
+ * Asks the key's provider for its model list with the saved key: the same check Add key runs. Then the saved model must
+ * really answer: a Down key must get one tiny chat reply from it before it is trusted again, and a key whose model is
+ * not on the list is asked too (a list can miss an alias that chat accepts, so the chat reply decides, not the list).
+ * A model list can answer while chat does not (the model was removed, the credit ran out).
  */
 export async function checkKey(key: KeyRow): Promise<KeyCheck> {
   const info = kindInfo((key.settings as { kind?: unknown } | null)?.kind);
@@ -145,7 +147,7 @@ export async function checkKey(key: KeyRow): Promise<KeyCheck> {
   const address = key.endpoint ?? undefined;
   const models = await probeModels({ kind: info.kind, address, apiKey });
   if (!models.ok) return failed(models);
-  if (key.downSince && key.downReason === 'errors' && key.model) {
+  if (key.model && (key.downSince || !models.models.includes(cleanModelId(key.model, info.kind)))) {
     const chat = await probeChat({ kind: info.kind, address, apiKey, model: key.model });
     if (!chat.ok) return failed(chat);
   }
@@ -155,7 +157,9 @@ export async function checkKey(key: KeyRow): Promise<KeyCheck> {
 function failed(result: { message: string; reason: ProbeFailure }): KeyCheck {
   // The provider answered that it is busy: that says nothing about the key, so it is left as it is
   if (result.reason === 'busy') return { ok: false, busy: true, message: result.message };
-  return { ok: false, reason: result.reason === 'rejected' ? 'rejected' : 'stopped', message: result.message };
+  const reason: DownReason =
+    result.reason === 'rejected' ? 'rejected' : result.reason === 'credit' ? 'credit' : result.reason === 'gone' ? 'model' : 'stopped';
+  return { ok: false, reason, message: result.message };
 }
 
 const KEY_SELECT = {
@@ -184,11 +188,10 @@ export async function checkAndRecord(key: KeyRow): Promise<KeyCheck> {
     await markWorking(key);
     await prisma.botsAiProvider.updateMany({ where: { providerId: key.providerId }, data: { healthCheckedAt: new Date() } });
   } else if (!(await markDown(key, result.reason))) {
-    // Already Down: only a rejection changes why. Anything else keeps the reason it went Down with, because a key that went
-    // Down on failed replies must keep being checked by a chat reply, not just the model list.
+    // Already Down: a plainer "stopped" never replaces a better explanation, but a rejection, no credit or a missing model does.
     await prisma.botsAiProvider.updateMany({
       where: { providerId: key.providerId },
-      data: result.reason === 'rejected' ? { healthCheckedAt: new Date(), downReason: 'rejected' } : { healthCheckedAt: new Date() },
+      data: result.reason === 'stopped' || result.reason === 'errors' ? { healthCheckedAt: new Date() } : { healthCheckedAt: new Date(), downReason: result.reason },
     });
   }
   return result;
