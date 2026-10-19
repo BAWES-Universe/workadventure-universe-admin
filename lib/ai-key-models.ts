@@ -72,9 +72,10 @@ export type LoadModelsResult = { ok: true; models: string[] } | { ok: false; mes
 /**
  * Why a check failed, for deciding what to do about it: nobody answered, the provider said no, it was too busy to say
  * (a 429: it answered, so the key is neither proven good nor bad), it has no credit left (402), the model is not there
- * (a chat call's 404), or something else.
+ * (a chat call's 404), the provider took the key but refused the probe's own request (a 400, 413 or 422: it says nothing about
+ * the key, the way a reply's 400 is not counted against it), or something else.
  */
-export type ProbeFailure = 'unreachable' | 'rejected' | 'busy' | 'credit' | 'gone' | 'other';
+export type ProbeFailure = 'unreachable' | 'rejected' | 'busy' | 'credit' | 'gone' | 'request' | 'other';
 export type ProbeModelsResult = { ok: true; models: string[] } | { ok: false; message: string; reason: ProbeFailure };
 
 const NOT_CHAT = /embed|whisper|tts|dall-e|moderation|rerank|transcribe|image|audio|realtime|guard|safety/i;
@@ -194,7 +195,7 @@ export async function probeChat(input: KeyTargetInput & { apiKey?: unknown; mode
   if (result.status === 404) return { ok: false, reason: 'gone', message: `${info.label} no longer has the model ${input.model}.` };
   return {
     ok: false,
-    reason: result.status >= 500 ? 'unreachable' : 'other',
+    reason: result.status >= 500 ? 'unreachable' : [400, 413, 422].includes(result.status) ? 'request' : 'other',
     message: `${info.label} lists its models, but a chat call to ${input.model} failed (${result.status}). Check the model.`,
   };
 }
