@@ -45,14 +45,17 @@ const role = (over: Partial<RoleRow> & Pick<RoleRow, 'id' | 'key' | 'name'>): Ro
   ...over,
 });
 
+// What a new universe's Everyone starts with (lib/roles.ts EVERYONE_DEFAULT_PERMISSIONS; not imported, it reaches the database)
+const EVERYONE_DEFAULT_PERMISSIONS = fromKeys(['CHAT_BOTS_NEARBY', 'DM_BOTS', 'SUMMON_BOTS']);
+
 const ROLES: RoleRow[] = [
-  role({ id: 'admin', key: 'admin', name: 'Admin', builtIn: true, position: 1_000_000, permissions: '16383', people: 1, color: '#F87171' }),
+  role({ id: 'admin', key: 'admin', name: 'Admin', builtIn: true, position: 1_000_000, permissions: '131071', people: 1, color: '#F87171' }),
   role({ id: 'lead', key: 'lead', name: 'Lead', position: 40, people: 1, canEdit: false }),
   role({ id: 'mod', key: 'moderator', name: 'Moderator', position: 13, people: 1, permissions: toWire(fromKeys(['MODERATE_CALLS'])) }),
   role({ id: 'acc', key: 'accountant', name: 'Accountant', position: 12, people: 2 }),
   role({ id: 'editor', key: 'editor', name: 'Editor', builtIn: true, position: 2, permissions: toWire(fromKeys(['EDIT_MAPS'])), people: 1 }),
   role({ id: 'member', key: 'member', name: 'Member', builtIn: true, position: 1, people: 23 }),
-  role({ id: 'everyone', key: 'everyone', name: 'Everyone', builtIn: true, position: 0, people: null }),
+  role({ id: 'everyone', key: 'everyone', name: 'Everyone', builtIn: true, position: 0, people: null, permissions: toWire(EVERYONE_DEFAULT_PERMISSIONS) }),
 ];
 
 const OWNER_ME: MeResponse = {
@@ -340,10 +343,10 @@ describe('a role page', () => {
     for (const group of ['People', 'Places', 'Broadcast', 'Calls and chat', 'Bots', 'Owner level']) {
       expect(screen.getByRole('heading', { name: group })).toBeTruthy();
     }
-    expect(screen.getAllByRole('switch')).toHaveLength(15);
+    expect(screen.getAllByRole('switch')).toHaveLength(18);
     // The universe's name is filled in
     expect(screen.getByText('Reach all of BAWES')).toBeTruthy();
-    expect(screen.getByText('0 of 14 on', { exact: false })).toBeTruthy();
+    expect(screen.getByText('0 of 17 on', { exact: false })).toBeTruthy();
   });
 
   it('shows Save only after a change, saves just what changed, and Undo puts it back', async () => {
@@ -441,7 +444,7 @@ describe('a role page', () => {
     open('admin');
     await screen.findByRole('heading', { name: 'People' });
     const switches = screen.getAllByRole('switch') as HTMLButtonElement[];
-    expect(switches).toHaveLength(14);
+    expect(switches).toHaveLength(17);
     expect(switches.every((toggle) => toggle.disabled && toggle.getAttribute('aria-checked') === 'true')).toBe(true);
     expect(screen.getByText(/Admin always has every permission/)).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Duplicate' })).toBeNull();
@@ -503,6 +506,45 @@ describe('a role page', () => {
     await waitFor(() => {
       const patch = fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH');
       expect(JSON.parse(patch![1].body)).toEqual({ showBadge: false });
+    });
+  });
+
+  it('lists the three bot permissions under Bots, after Manage bots, with their copy', async () => {
+    serve();
+    open('acc');
+    const bots = await screen.findByRole('region', { name: 'Bots' });
+    const rows = within(bots).getAllByRole('switch').map((toggle) => toggle.id);
+    expect(rows).toEqual(['perm-MANAGE_BOTS', 'perm-CHAT_BOTS_NEARBY', 'perm-DM_BOTS', 'perm-SUMMON_BOTS']);
+    expect(within(bots).getByText('Chat with bots nearby')).toBeTruthy();
+    expect(within(bots).getByText('Walk up to a bot on the map and chat in its bubble. Everyone in the bubble sees it.')).toBeTruthy();
+    expect(within(bots).getByText('DM bots')).toBeTruthy();
+    expect(within(bots).getByText('Private one-to-one chat with a bot, from anywhere. Only they and the bot see it. Needs sign-in.')).toBeTruthy();
+    expect(within(bots).getByText('Summon bots')).toBeTruthy();
+    expect(within(bots).getByText('Call a bot over in its own room. Guests too.')).toBeTruthy();
+  });
+
+  it('shows the three bot switches on for Everyone, so bots work as they always have', async () => {
+    serve();
+    open('everyone');
+    await screen.findByRole('heading', { name: 'Bots' });
+    const on = (key: string) => screen.getByRole('switch', { name: new RegExp(key) }).getAttribute('aria-checked');
+    expect(on('Chat with bots nearby')).toBe('true');
+    expect(on('DM bots')).toBe('true');
+    expect(on('Summon bots')).toBe('true');
+    expect(screen.getByRole('switch', { name: 'Manage bots' }).getAttribute('aria-checked')).toBe('false');
+    expect(screen.getByText('3 of 17 on', { exact: false })).toBeTruthy();
+    expect(screen.getByText(/Chat, DM and Summon bots start on/)).toBeTruthy();
+  });
+
+  it('lets Everyone switch one off and saves just that bit', async () => {
+    serve((url, init) => (url.endsWith('/roles/everyone') && init?.method === 'PATCH' ? json({ role: {} }) : undefined));
+    open('everyone');
+    fireEvent.click(await screen.findByRole('switch', { name: 'Summon bots' }));
+    expect(screen.getByText('2 of 17 on', { exact: false })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => {
+      const patch = fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH');
+      expect(JSON.parse(patch![1].body)).toEqual({ permissions: toWire(EVERYONE_DEFAULT_PERMISSIONS & ~BigInt(65536)) });
     });
   });
 

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { getSessionUser } from '@/lib/auth-session';
 import { prisma } from '@/lib/db';
-import { canManageBots } from '@/lib/bot-permissions';
+import { canManageBots, canManageThisBot } from '@/lib/bot-permissions';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { parsePlayUri } from '@/lib/utils';
 import { validateAccessToken } from '@/lib/oidc';
@@ -262,7 +262,7 @@ export async function GET(request: NextRequest) {
         // Check permission for sensitive data
         let hasPermission = false;
         if (includeSensitive && userId) {
-          hasPermission = await canManageBots(userId, bot.roomId) || isSuperAdmin(userEmail);
+          hasPermission = isSuperAdmin(userEmail) || (await canManageThisBot(userId, null, bot, { creatorPasses: false }));
         }
 
         return transformBotToServerFormat(bot, includeSensitive, hasPermission);
@@ -345,8 +345,18 @@ export async function POST(request: NextRequest) {
 
     // Check permissions (skip if admin token)
     if (!isAdminToken && userId) {
-      const hasPermission = await canManageBots(userId, roomId);
-      if (!hasPermission) {
+      const existingBot = validatedData.botId
+        ? await prisma.bot.findUnique({
+            where: { id: validatedData.botId },
+            select: { id: true, createdById: true, roomId: true },
+          })
+        : null;
+
+      // Changing a bot that stays in its room is decided by the bot's own check (the same as PUT /api/bots/:id), so a
+      // Yes on "Manage this bot" works here too. Creating a bot, or moving one to another room, needs Manage bots in
+      // the room it lands in.
+      const staysInItsRoom = existingBot !== null && existingBot.roomId === roomId;
+      if (!staysInItsRoom && !(await canManageBots(userId, roomId))) {
         const response = NextResponse.json(
           { error: 'You do not have permission to manage bots in this room' },
           { status: 403 }
@@ -358,15 +368,11 @@ export async function POST(request: NextRequest) {
       }
 
       // IDOR guard: when updating an existing bot, the botId must belong to a
-      // room the user can manage. The roomUrl permission check above covers the
-      // DESTINATION room — without this, a user who manages room A could submit
+      // room the user can manage. The check above covers the DESTINATION room
+      // when it differs — without this, a user who manages room A could submit
       // a botId from room B (CWE-639: authorization bypass via user-controlled
       // key).
       if (validatedData.botId) {
-        const existingBot = await prisma.bot.findUnique({
-          where: { id: validatedData.botId },
-          select: { roomId: true },
-        });
         if (!existingBot) {
           const response = NextResponse.json(
             { error: 'Bot not found' },
@@ -377,7 +383,7 @@ export async function POST(request: NextRequest) {
           });
           return response;
         }
-        const hasExistingRoomPermission = await canManageBots(userId, existingBot.roomId);
+        const hasExistingRoomPermission = await canManageThisBot(userId, null, existingBot, { creatorPasses: false });
         if (!hasExistingRoomPermission) {
           const response = NextResponse.json(
             { error: 'You do not have permission to manage this bot' },
@@ -542,7 +548,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Transform to server format (include sensitive data for creator)
-    const hasPermission = isAdminToken || (userId !== null ? await canManageBots(userId, roomId) : false);
+    const hasPermission = isAdminToken || (userId !== null ? await canManageThisBot(userId, null, bot, { creatorPasses: false }) : false);
     const transformedBot = await transformBotToServerFormat(bot, true, hasPermission);
 
     const response = NextResponse.json(transformedBot, { status: statusCode });

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { validateAdminToken } from '@/lib/auth';
 import { getSessionUser, type SessionUser } from '@/lib/auth-session';
-import { canManageBots } from '@/lib/bot-permissions';
+import { canManageThisBot } from '@/lib/bot-permissions';
 
 /**
  * Who is making a request to the admin API.
@@ -92,18 +92,32 @@ export async function canManageWorldMembers(userId: string, worldId: string): Pr
   return !!member;
 }
 
-/** A room is managed by whoever can manage its world (same rule as bot management). */
+/**
+ * A room is managed by the owner of its universe, or by a world member tagged `admin` or `editor`. This is not the
+ * Manage bots permission: who sees visitor details does not change with it.
+ */
 export async function canManageRoom(userId: string, roomId: string): Promise<boolean> {
-  return canManageBots(userId, roomId);
+  const room = await prisma.room.findUnique({
+    where: { id: roomId },
+    select: { worldId: true, world: { select: { universe: { select: { ownerId: true } } } } },
+  });
+  if (!room) return false;
+  if (room.world.universe.ownerId === userId) return true;
+
+  const member = await prisma.worldMember.findFirst({
+    where: { worldId: room.worldId, userId, tags: { hasSome: ['admin', 'editor'] } },
+    select: { id: true },
+  });
+  return !!member;
 }
 
-/** A bot is managed by whoever can manage the room it lives in. */
+/** A bot is managed by whoever can manage the room it lives in, unless the bot's own Manage rules say otherwise (#427). */
 export async function canManageBot(userId: string, botId: string): Promise<boolean> {
   const bot = await prisma.bot.findUnique({
     where: { id: botId },
-    select: { roomId: true },
+    select: { id: true, createdById: true, roomId: true },
   });
-  return !!bot && (await canManageBots(userId, bot.roomId));
+  return !!bot && (await canManageThisBot(userId, null, bot, { creatorPasses: false }));
 }
 
 export type AccessScope =

@@ -21,10 +21,12 @@ jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => nul
 jest.mock('@/lib/auth', () => ({ requireAuth: jest.fn() }));
 jest.mock('@/lib/super-admin', () => ({ isSuperAdmin: jest.fn(() => false) }));
 jest.mock('@/lib/oidc', () => ({ validateAccessToken: jest.fn(async () => null) }));
-jest.mock('@/lib/bot-permissions', () => ({
-  canManageBots: jest.fn(async () => false),
-  canManageBotMcpServers: jest.fn(async () => false),
-}));
+jest.mock('@/lib/bot-permissions', () => {
+  const canManageBots = jest.fn(async (_userId?: string, _roomId?: string) => false);
+  // canManageThisBot is canManageBots for the bot's room until the bot has rules of its own (#427)
+  const canManageThisBot = jest.fn(async (userId: string, _email: string | null, bot: { roomId: string }) => canManageBots(userId, bot.roomId));
+  return { canManageBots, canManageThisBot, canManageBotMcpServers: jest.fn(async () => false) };
+});
 jest.mock('@/lib/bot-config-helpers', () => ({
   resolveRoomIdFromPlayUri: jest.fn(async () => 'room-1'),
   transformBotToServerFormat: jest.fn(async (bot: unknown) => bot),

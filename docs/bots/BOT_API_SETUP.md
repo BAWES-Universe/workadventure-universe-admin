@@ -70,6 +70,46 @@ curl -X POST \
    - Requires: Authentication + permission check
    - Returns: 204 No Content
 
+6. **POST /api/bots/:id/access** - Can this person do this with this bot? (#426)
+   - Requires: `BOT_SERVICE_TOKEN` (the bot server and the game call it)
+   - Body: `{ "action": "chat" | "dm" | "summon", "person": { "signedIn": boolean, "identifier"?: string } }`.
+     `identifier` (their WorkAdventure identifier, an email when signed in) is required when `signedIn` is true and is
+     never read for a guest, so a guest cannot borrow someone else's roles.
+   - Returns: `{ "allowed": boolean, "code": "allowed" | "sign_in_required" | "not_allowed" | "no_room_access", "reason": string | null }`.
+     `reason` is a line the game can show as it is. A no is a 200. Anything that stops Orbit answering is an error
+     status (401 bad token, 400 bad body, 404 no such bot, 500), so the caller can tell "no" from "could not check".
+   - Decided by the permissions Chat with bots nearby, DM bots and Summon bots (Roles & permissions, Bots group),
+     read in the bot's world. Everyone has all three, so by default every bot works as it always has, guests included.
+     A private chat also needs sign-in and a room the person may see. The bot's creator, the owner of its universe,
+     super admins and Admin always pass.
+   - Then the bot's own rules (#427), in this order: the person's own row, the rows of their roles (a Yes from any role
+     beats a No from another, as in Discord), Private bot (only a Yes lets someone in), then the role permissions.
+     A refused chat nearby also carries `reply`, the owner's own line for refused people, when the owner wrote one;
+     the bot says it instead of calling the AI. A bot with no rows and Private bot off answers as above.
+
+7. **GET /api/bots/:id/permissions** and **PUT /api/bots/:id/permissions** - Who may use this bot (#427)
+   - Requires: whoever manages the bot (the universe owner, Admin, anyone with Manage bots in its room, or anyone the
+     bot's own Manage rule says Yes to; a No takes it away). The bot's creator gets no extra way in here: once they no
+     longer hold Manage bots they cannot change who may use the bot or its tools (#433). GET also takes the bot server's `ADMIN_API_TOKEN`.
+     Anyone else gets 404, as if the bot did not exist.
+   - GET returns `{ privateBot, refusalReply, dailyReplyCap, rules, roles }`: `rules` has one row per role or person with
+     `chat`, `dm`, `summon` and `manage` each `"yes" | "no" | "default"`; `roles` lists the roles a row can name (not
+     Admin, which always passes) with what each gives on its own (`defaults`), which is what Default means for it.
+   - PUT takes any of `{ privateBot: boolean, refusalReply: string | null (up to 500 characters), dailyReplyCap: 1..10000 | null }`
+     and returns the same as GET. `dailyReplyCap` is how many replies each person may get from this bot in a day;
+     **null is no limit, and every bot starts with no limit**. It is only stored here: nothing limits replies today.
+   - A Yes on Manage this bot (a person's row or a role's) only counts while the person is still in the universe, because
+     rows stay when someone leaves. Everyone cannot be given Manage this bot (400); give it to a role or a person.
+
+8. **PUT /api/bots/:id/permissions/rules** and **DELETE /api/bots/:id/permissions/rules?roleId=|userId=**
+   - PUT body: one of `{ roleId }`, `{ userId }` or `{ identifier }` (a person's uuid or email), and any of `chat`, `dm`,
+     `summon`, `manage` as `"yes" | "no" | "default"`. Only the actions sent change. Returns the row. Refused with a line
+     saying why: a role of another universe (404), Admin or the universe owner (400, they always pass; a super admin
+     is saved like anyone else, so a rule cannot show who is one),
+     chat, dm or summon for the bot's creator (400, they always use their own bot; only `manage` can be set for them), a
+     person who does not exist or may not be named here (404, the same answer for both: only people of this universe, its owner, the bot's creator and people findable by name can be named, so a rule can never be used to find out whether some email has an account), more than 200 rows (400), two people saving the same row at once (409, try again).
+   - DELETE takes the row off, so they follow the roles again; 404 when there was no such row.
+
 ### Files Created/Modified
 
 **New Files:**

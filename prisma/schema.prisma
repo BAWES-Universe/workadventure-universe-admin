@@ -44,6 +44,7 @@ model User {
   membershipInvitationsReceived MembershipInvitation[] @relation("InvitedUser")
   botsCreated       Bot[] @relation("BotCreatedBy")
   botsUpdated       Bot[] @relation("BotUpdatedBy")
+  botAccessRules    BotAccessRule[]
   botConversations BotsConversation[]
   botMemories      BotsMemory[]
   avatarGrants     UserAvatarGrant[]
@@ -231,6 +232,7 @@ model Role {
 
   universe    Universe             @relation(fields: [universeId], references: [id], onDelete: Cascade)
   assignments UniverseMemberRole[]
+  botRules    BotAccessRule[]
 
   @@unique([universeId, key])
   @@map("roles")
@@ -560,6 +562,12 @@ model Bot {
   toolTimeoutSeconds  Int?     @map("tool_timeout_seconds")
   // The companion (pet) that walks with the bot: a companion texture id from the room's companion list, or none.
   companionTextureId  String?  @map("companion_texture_id") @db.VarChar(100)
+  // Who may use the bot (#427). Private: only the roles and people with a Yes in accessRules (and its owner and Admin).
+  privateBot          Boolean  @default(false) @map("private_bot")
+  // What the bot says to people who may not chat with it; null = a plain default line. Never reaches the AI.
+  refusalReply        String?  @map("refusal_reply") @db.VarChar(500)
+  // Replies each person may get from this bot in a day; null = no limit. Stored here; nothing reads it yet (#1159).
+  dailyReplyCap       Int?     @map("daily_reply_cap")
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
   createdById         String?  @map("created_by_id")
@@ -569,9 +577,35 @@ model Bot {
   createdBy User? @relation("BotCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
   updatedBy User? @relation("BotUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
   mcpServers BotMcpServer[]
+  accessRules BotAccessRule[]
 
   @@index([roomId])
   @@map("bots")
+}
+
+// One role's or one person's No / Default / Yes for a bot (#427), the same shape room overrides will reuse: two
+// numbers over the permission bits in lib/permissions.ts. `allow` has a bit set where the answer is Yes, `deny` where
+// it is No, and a bit in neither is Default (the roles decide). Only the four bot bits are ever set, never both.
+// A row is for a role or for a person, never both (a check in the migration).
+model BotAccessRule {
+  id        String   @id @default(uuid())
+  botId     String   @map("bot_id")
+  roleId    String?  @map("role_id")
+  userId    String?  @map("user_id")
+  allow     BigInt   @default(0)
+  deny      BigInt   @default(0)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  bot  Bot   @relation(fields: [botId], references: [id], onDelete: Cascade)
+  role Role? @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([botId, roleId])
+  @@unique([botId, userId])
+  @@index([roleId])
+  @@index([userId])
+  @@map("bot_access_rules")
 }
 
 // Bot MCP Servers
