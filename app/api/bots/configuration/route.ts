@@ -396,12 +396,14 @@ export async function POST(request: NextRequest) {
       const currentProvider = validatedData.botId
         ? await prisma.bot.findUnique({
             where: { id: validatedData.botId },
-            select: { aiProviderRef: true },
+            select: { aiProviderRef: true, createdById: true },
           })
         : null;
       const providerError = await checkAiProviderRef(
         validatedData.aiProviderRef,
-        currentProvider?.aiProviderRef
+        currentProvider?.aiProviderRef,
+        // A bot's maker is whoever created it; a new bot's maker is the person saving it
+        { actorId: userId ?? null, makerId: validatedData.botId ? currentProvider?.createdById ?? null : userId ?? null, roomId }
       );
       if (providerError) {
       const response = NextResponse.json(

@@ -475,7 +475,7 @@ export async function POST(request: NextRequest) {
     }
 
     // The provider ref must name an existing provider
-    const providerError = await checkAiProviderRef(validatedData.aiProviderRef);
+    const providerError = await checkAiProviderRef(validatedData.aiProviderRef, undefined, { actorId: userId ?? null, makerId: userId ?? null, roomId });
     if (providerError) {
       const response = NextResponse.json(
         { error: providerError },

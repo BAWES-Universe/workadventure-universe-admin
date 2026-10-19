@@ -1,0 +1,95 @@
+import { prisma } from '@/lib/db';
+import { providerPayload } from '@/lib/ai-provider-payload';
+import { checkKeyForBot, type KeyForBot } from '@/lib/ai-key-pay';
+import { addNotice } from '@/lib/notices';
+import { UNIVERSE_AI_MISSING, UNIVERSE_AI_REF, resolveUniverseAiProvider } from '@/lib/universe-ai';
+import { kindInfo } from '@/lib/ai-key-kinds';
+
+/**
+ * What the bot server gets when it asks how a bot talks to its AI, by bot id (#374). The bot's own `aiProviderRef` decides:
+ *   - a server provider's id: that provider, as always;
+ *   - "universe-ai": whichever provider is the Default now;
+ *   - a personal key: that key, but only while it may run this bot (see lib/ai-key-pay.ts). When it may not (the maker lost
+ *     access, the key was unlent some other way), the bot is moved to Universe AI right here, the universe's owner is told
+ *     once, and Universe AI's provider is what comes back. Nobody is ever served a key that may not run the bot.
+ * `source` says which of the three it was, so the bot server knows when it is talking through someone's own key.
+ */
+export type BotAiCredentials =
+  | { status: 200; body: ReturnType<typeof providerPayload> & { source: 'provider' | 'universe-ai' | 'own-key'; movedFromKey?: string } & Partial<OwnKeyFacts> }
+  | { status: 400 | 404 | 503; error: string };
+
+/** What only a personal key's answer carries: whose it is, what kind it is, where it runs, and how the bot server should treat it. */
+export interface OwnKeyFacts {
+  keyOwnerId: string;
+  keyKind: string | null;
+  /** "own-computer" keys are reached at an address the person typed (the bot server applies the same address guard); "hosted" ones at the provider's own. */
+  keyGroup: 'own-computer' | 'hosted' | null;
+}
+
+/** Why a bot was moved off a key when nobody asked, for the universe owner's notice. */
+const MOVED_BECAUSE: Record<Exclude<KeyForBot, { ok: true }>['reason'], string> = {
+  'not-maker': 'The key it ran on isn’t its maker’s.',
+  'not-lent': 'The key it ran on is no longer lent to this universe.',
+  'no-access': 'Its maker can no longer manage bots here, so it can’t run on their key.',
+  'no-room': 'Its room could not be found.',
+};
+
+export async function credentialsForBot(botId: string): Promise<BotAiCredentials> {
+  const bot = await prisma.bot.findUnique({
+    where: { id: botId },
+    select: {
+      id: true,
+      name: true,
+      aiProviderRef: true,
+      createdById: true,
+      roomId: true,
+      room: { select: { world: { select: { universe: { select: { id: true, name: true, ownerId: true } } } } } },
+    },
+  });
+  if (!bot) return { status: 404, error: 'Bot not found' };
+  const ref = bot.aiProviderRef;
+  if (!ref) return { status: 404, error: 'This bot has no AI provider' };
+
+  if (ref === UNIVERSE_AI_REF) return universeAi();
+
+  const provider = await prisma.botsAiProvider.findUnique({ where: { providerId: ref } });
+  if (!provider) return { status: 404, error: 'Provider not found' };
+
+  if (!provider.ownerId) {
+    if (!provider.enabled) return { status: 400, error: 'Provider is not enabled' };
+    return { status: 200, body: { ...providerPayload(provider), source: 'provider' } };
+  }
+
+  const verdict = await checkKeyForBot({ keyId: ref, keyOwnerId: provider.ownerId, makerId: bot.createdById, roomId: bot.roomId });
+  if (verdict.ok) {
+    const info = kindInfo((provider.settings as { kind?: unknown } | null)?.kind);
+    return {
+      status: 200,
+      body: { ...providerPayload(provider), source: 'own-key', keyOwnerId: provider.ownerId, keyKind: info?.kind ?? null, keyGroup: info?.group ?? null },
+    };
+  }
+
+  // The key may no longer run this bot: the bot moves to Universe AI now, and the universe's owner is told once.
+  await prisma.bot.updateMany({ where: { id: bot.id, aiProviderRef: ref }, data: { aiProviderRef: UNIVERSE_AI_REF } });
+  const universe = bot.room.world.universe;
+  try {
+    await addNotice({
+      userId: universe.ownerId,
+      kind: 'ai-key-moved',
+      dedupeKey: `moved:${ref}:${bot.id}`,
+      title: `${bot.name} moved to Universe AI`,
+      body: `${MOVED_BECAUSE[verdict.reason]} It now replies on Universe AI.`,
+      href: `/admin/universes/${universe.id}`,
+    });
+  } catch (error) {
+    console.error('[AiKeys] Could not tell the universe owner:', error instanceof Error ? error.message : 'unknown');
+  }
+  const answer = await universeAi();
+  return answer.status === 200 ? { status: 200, body: { ...answer.body, movedFromKey: ref } } : answer;
+}
+
+async function universeAi(): Promise<BotAiCredentials> {
+  const provider = await resolveUniverseAiProvider();
+  if (!provider) return { status: 503, error: UNIVERSE_AI_MISSING };
+  return { status: 200, body: { ...providerPayload(provider), source: 'universe-ai' } };
+}

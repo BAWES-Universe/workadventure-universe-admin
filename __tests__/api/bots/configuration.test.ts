@@ -112,6 +112,16 @@ describe('/api/bots/configuration', () => {
       expect(prisma.bot.update).not.toHaveBeenCalled();
     });
 
+    it('refuses a personal AI key when no person is saving (the admin token), as if it did not exist', async () => {
+      (prisma.botsAiProvider.findUnique as jest.Mock).mockResolvedValueOnce({ providerId: 'key-abc', ownerId: 'user-a' });
+
+      const response = await POST(configRequest({ ...validBody, aiProviderRef: 'key-abc' }));
+
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toBe('AI provider "key-abc" does not exist');
+      expect(prisma.bot.create).not.toHaveBeenCalled();
+    });
+
     it('saves an existing bot whose unchanged provider was deleted', async () => {
       (prisma.bot.findUnique as jest.Mock).mockResolvedValue({ aiProviderRef: 'gone', behaviorConfig: null });
 

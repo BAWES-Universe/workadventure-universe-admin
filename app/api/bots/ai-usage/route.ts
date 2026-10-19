@@ -18,6 +18,7 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const {
       botId,
+      userId: talkedUserId = null,
       providerId: sentProviderId,
       tokensUsed = 0,
       apiCalls = 1,
@@ -68,6 +69,9 @@ export async function POST(request: NextRequest) {
           latency,
           error,
           timestamp: timestamp ? new Date(timestamp) : new Date(),
+          // Who talked (as the bot server knows them) and whose key paid; the key's owner comes from the provider row, never from the request
+          talkedUserId: typeof talkedUserId === 'string' && talkedUserId ? talkedUserId.slice(0, 255) : null,
+          keyOwnerId: provider.ownerId ?? null,
         },
       })
       .catch((err) => {
