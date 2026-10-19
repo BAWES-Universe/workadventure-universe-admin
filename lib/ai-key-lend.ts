@@ -82,7 +82,12 @@ export async function moveBotsOffKey(
   });
   if (bots.length === 0) return { count: 0, universes: [] };
 
-  await prisma.bot.updateMany({ where: { id: { in: bots.map((bot) => bot.id) } }, data: { aiProviderRef: UNIVERSE_AI_REF } });
+  // Only rows still on the key move, so a second request that ran at the same time finds nothing left to move and tells nobody
+  const moved = await prisma.bot.updateMany({
+    where: { id: { in: bots.map((bot) => bot.id) }, aiProviderRef: providerId },
+    data: { aiProviderRef: UNIVERSE_AI_REF },
+  });
+  if (moved.count === 0) return { count: 0, universes: [] };
 
   const byUniverse = new Map<string, MovedBots['universes'][number]>();
   for (const bot of bots) {

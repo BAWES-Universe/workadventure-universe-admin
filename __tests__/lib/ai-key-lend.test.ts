@@ -29,6 +29,7 @@ beforeEach(() => {
   db.worldMember.findMany.mockResolvedValue([]);
   db.universeMember.findMany.mockResolvedValue([]);
   db.universe.findMany.mockResolvedValue([]);
+  db.bot.updateMany.mockImplementation(async ({ where }: { where: { id: { in: string[] } } }) => ({ count: where.id.in.length }));
 });
 
 describe('lendAccess', () => {
@@ -81,7 +82,7 @@ describe('moveBotsOffKey', () => {
     notice.mockResolvedValue(true);
     const result = await moveBotsOffKey('key-1', { actor, why: 'revoked' });
     expect(db.bot.findMany.mock.calls[0][0].where).toEqual({ aiProviderRef: 'key-1' });
-    expect(db.bot.updateMany).toHaveBeenCalledWith({ where: { id: { in: ['b1', 'b2', 'b3'] } }, data: { aiProviderRef: 'universe-ai' } });
+    expect(db.bot.updateMany).toHaveBeenCalledWith({ where: { id: { in: ['b1', 'b2', 'b3'] }, aiProviderRef: 'key-1' }, data: { aiProviderRef: 'universe-ai' } });
     expect(result.count).toBe(3);
     expect(notice).toHaveBeenCalledTimes(2);
     expect(notice.mock.calls[0][0]).toMatchObject({ userId: 'owner-bawes', kind: 'ai-key-moved', title: 'Sam moved to Universe AI', href: '/admin/universes/bawes' });
@@ -101,6 +102,13 @@ describe('moveBotsOffKey', () => {
     db.bot.findMany.mockResolvedValue([bot('b1', 'Sam', { ...bawes, ownerId: 'u1' })]);
     await moveBotsOffKey('key-1', { actor, why: 'revoked' });
     expect(db.bot.updateMany).toHaveBeenCalled();
+    expect(notice).not.toHaveBeenCalled();
+  });
+
+  it('tells nobody when a request that ran at the same time already moved the bots', async () => {
+    db.bot.findMany.mockResolvedValue([bot('b1', 'Sam', bawes)]);
+    db.bot.updateMany.mockResolvedValue({ count: 0 });
+    expect(await moveBotsOffKey('key-1', { actor, why: 'revoked' })).toEqual({ count: 0, universes: [] });
     expect(notice).not.toHaveBeenCalled();
   });
 
