@@ -1,5 +1,5 @@
 import { ADDRESS_PROBLEM_TEXT, AddressError, checkPublicHttpsUrl, safeGet, safeRequest } from '@/lib/ai-key-fetch';
-import { kindInfo, type AiKeyKind, type AiKeyKindInfo } from '@/lib/ai-key-kinds';
+import { authHeaders, kindInfo, typedEndpoint, writeModelId, type AiKeyKind, type AiKeyKindInfo } from '@/lib/ai-key-kinds';
 
 /**
  * Asks a key's provider which models it has. This is also the check that it answers: Add key stays off until the list
@@ -35,8 +35,7 @@ export function keyTarget(input: KeyTargetInput): { ok: true; target: KeyTarget 
   } catch {
     return { ok: false, message: ADDRESS_PROBLEM_TEXT['not-https'] };
   }
-  if (info.kind === 'nim') return { ok: true, target: { info, endpoint: `${origin}/v1`, modelsUrl: `${origin}/v1/models` } };
-  return { ok: true, target: { info, endpoint: origin, modelsUrl: `${origin}/v1/models` } };
+  return { ok: true, target: { info, endpoint: typedEndpoint(info, origin), modelsUrl: `${origin}/v1/models` } };
 }
 
 /** What a key may be made of (visible ASCII, no spaces): anything else cannot go in an Authorization header. */
@@ -47,13 +46,11 @@ export const KEY_LOOKS_WRONG = 'That key doesn’t look right. Paste it again.';
 const MODEL_LIST_MAX_BYTES = 5_000_000;
 
 /**
- * OpenRouter lists its models to anyone, so a wrong key still gets a 200 there. Its key-info address does check the key;
- * only a clear 401/403 from it counts, so a path it doesn't have (404) or a hiccup never blocks a good key.
+ * A provider whose model list is public (OpenRouter) still gets a 200 for a wrong key. Its key-info addresses do check the
+ * key; only a clear 401/403 from one counts, so a path it doesn't have (404) or a hiccup never blocks a good key.
  */
-const OPENROUTER_KEY_PATHS = ['/key', '/auth/key'];
-
-async function openRouterRejectsKey(base: string, apiKey: string): Promise<boolean> {
-  for (const path of OPENROUTER_KEY_PATHS) {
+async function keyInfoRejectsKey(base: string, paths: string[], apiKey: string): Promise<boolean> {
+  for (const path of paths) {
     try {
       const checked = await checkPublicHttpsUrl(`${base}${path}`);
       const result = await safeGet(checked, { headers: { Authorization: `Bearer ${apiKey}` } });
@@ -81,7 +78,7 @@ const NOT_CHAT = /embed|whisper|tts|dall-e|moderation|rerank|transcribe|image|au
 
 /** One model id as the bot server will use it. Gemini lists "models/gemini-flash-latest" but takes "gemini-flash-latest". */
 export function cleanModelId(raw: string, kind: AiKeyKind): string {
-  return (kind === 'gemini' ? raw.replace(/^models\//, '') : raw).trim();
+  return writeModelId(raw, kind);
 }
 
 /** Tidy a provider's list: plain ids, no duplicates, chat models first by name. */
@@ -112,7 +109,7 @@ export async function probeModels(input: KeyTargetInput & { apiKey?: unknown }):
     return { ok: false, message: 'That address can’t be used.', reason: 'other' };
   }
 
-  const result = await safeGet(checked, { headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {}, maxBytes: MODEL_LIST_MAX_BYTES });
+  const result = await safeGet(checked, { headers: authHeaders(info, apiKey), maxBytes: MODEL_LIST_MAX_BYTES });
   if (!result.ok) {
     if (result.reason === 'too-large') return { ok: false, message: 'It answered, but not like an AI server.', reason: 'other' };
     return {
@@ -138,7 +135,7 @@ export async function probeModels(input: KeyTargetInput & { apiKey?: unknown }):
     return { ok: false, reason: 'busy', message: `${info.label} is busy right now. Try again in a moment.` };
   }
   if (result.status !== 200) return { ok: false, message: `It answered with an error (${result.status}).`, reason: result.status >= 500 ? 'unreachable' : 'other' };
-  if (info.kind === 'openrouter' && apiKey && (await openRouterRejectsKey(info.base!, apiKey))) {
+  if (info.keyCheck.type === 'key-info' && info.base && apiKey && (await keyInfoRejectsKey(info.base, info.keyCheck.paths, apiKey))) {
     return { ok: false, message: `${info.label} didn’t accept this key.`, reason: 'rejected' };
   }
 
@@ -181,7 +178,7 @@ export async function probeChat(input: KeyTargetInput & { apiKey?: unknown; mode
   }
   const result = await safeRequest(checked, {
     method: 'POST',
-    headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+    headers: authHeaders(info, apiKey),
     body: { model: input.model, messages: [{ role: 'user', content: 'Say ok.' }], stream: false, [info.tokenLimitField ?? 'max_tokens']: 16 },
     timeoutMs: 30_000,
     maxBytes: 200_000,
