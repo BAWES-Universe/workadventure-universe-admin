@@ -229,11 +229,11 @@ describe('Add a key: More providers', () => {
   });
 });
 
-describe('Add a key: DeepSeek starts on the model that has Vision', () => {
-  it('picks deepseek-v4-flash, shows Vision next to it, and adds the key on it', async () => {
+describe('Add a key: DeepSeek shows which model has Vision', () => {
+  it('starts on deepseek-v4-flash, shows Vision only next to the image model, and adds the key on it', async () => {
     fetchMock.mockImplementation((url: string) =>
       url.endsWith('/models')
-        ? json({ ok: true, models: ['deepseek-v4-flash', 'deepseek-v4-pro'], facts: { 'deepseek-v4-flash': { vision: true }, 'deepseek-v4-pro': { vision: false } } })
+        ? json({ ok: true, models: ['deepseek-v4-flash', 'deepseek-v4-flash-vision-exp', 'deepseek-v4-pro'], facts: { 'deepseek-v4-flash': { vision: false }, 'deepseek-v4-flash-vision-exp': { vision: true }, 'deepseek-v4-pro': { vision: false } } })
         : json({ id: 'key-new' }),
     );
     render(<AddAiKeyPage />);
@@ -241,8 +241,9 @@ describe('Add a key: DeepSeek starts on the model that has Vision', () => {
     fireEvent.change(screen.getByLabelText(/API key/), { target: { value: 'sk-test' } });
     fireEvent.click(screen.getByRole('button', { name: /Load models/ }));
     await screen.findByText(/It answered/);
-    expect((screen.getByRole('radio', { name: /^deepseek-v4-flash/ }) as HTMLElement).getAttribute('aria-checked')).toBe('true');
-    expect(screen.getByRole('radio', { name: /^deepseek-v4-flash/ }).textContent).toContain('Vision');
+    expect((screen.getByRole('radio', { name: 'deepseek-v4-flash' }) as HTMLElement).getAttribute('aria-checked')).toBe('true');
+    expect(screen.getByRole('radio', { name: /^deepseek-v4-flash-vision-exp/ }).textContent).toContain('Vision');
+    expect(screen.getByRole('radio', { name: 'deepseek-v4-flash' }).textContent).not.toContain('Vision');
     expect(screen.getByRole('radio', { name: /^deepseek-v4-pro/ }).textContent).not.toContain('Vision');
     fireEvent.click(addButton());
     await waitFor(() => expect(push).toHaveBeenCalled());
