@@ -75,7 +75,7 @@ export function TurnOnConfirm({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onConfirm: () => void;
-  /** What it covers, e.g. "every bot in Arabic Courtyard". */
+  /** What it covers, e.g. "bots in Arabic Courtyard". */
   scope: string;
 }) {
   return (
@@ -188,7 +188,7 @@ export function UniverseAdvanced({
           setConfirm(false);
           onChange(true);
         }}
-        scope={`every bot in ${universeName}`}
+        scope={`bots in ${universeName}`}
       />
     </section>
   );
