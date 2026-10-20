@@ -65,7 +65,7 @@ export function TelemetryInfo({ open, onOpenChange }: { open: boolean; onOpenCha
   );
 }
 
-/** Turning it back on asks once, because the chat text starts going to analytics and error reports again. Turning it off asks nothing. */
+/** Turning it back on asks once, because chats saved while it was off become readable again. Turning it off asks nothing. */
 export function TurnOnConfirm({
   open,
   onOpenChange,
@@ -84,7 +84,7 @@ export function TurnOnConfirm({
         <AlertDialogHeader>
           <AlertDialogTitle>Turn bot chat telemetry on?</AlertDialogTitle>
           <AlertDialogDescription>
-            Chats with {scope} go to analytics and error reports again.
+            Chats with {scope} go to analytics and error reports again. Super admins can read saved chats on the admin pages, including ones from while it was off.
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
