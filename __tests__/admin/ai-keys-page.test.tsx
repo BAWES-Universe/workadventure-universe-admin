@@ -264,6 +264,20 @@ describe('Pulling a key from a universe', () => {
     await waitFor(() => expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ variant: 'error', description: 'That didn’t work. Try again.' })));
     expect(screen.getByText('Sandbox Universe')).toBeTruthy();
   });
+
+  it('says the connection failed, not the browser’s words, when a pull never gets an answer', async () => {
+    mockAddToast.mockClear();
+    fetchMock.mockImplementation((url: string, init?: RequestInit) =>
+      init?.method === 'DELETE'
+        ? Promise.reject(new TypeError('Failed to fetch'))
+        : Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ keys: [lentKey] }) }),
+    );
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Pull My DeepSeek from Sandbox Universe' }));
+    await waitFor(() =>
+      expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ variant: 'error', description: 'We couldn’t reach Universe. Check your connection and try again.' })),
+    );
+  });
 });
 
 describe('Working, Down and "If this is down"', () => {
