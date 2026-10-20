@@ -4,7 +4,10 @@
 --
 -- Nothing may change for any universe or bot on day one: no universe hides bot conversations, no bot has its own
 -- choice, nobody has been asked to be forgotten, and the transcripts and what the bots remember are all still there.
--- The first three lines must say 0. Compare the last two with the same lines run before the release: they must match.
+-- With -At every label prints on its own line, then its count. The counts under the first three labels (universes that
+-- hide, bots with their own choice, forget rows) must be 0. The counts under "saved transcripts" and "saved bot
+-- memories" must match the same two counts from the run before the release. Before the migration the first three
+-- queries fail (their columns and table do not exist yet): psql reports that and carries on to the last two.
 \echo universes that hide bot conversations
 SELECT count(*)::text FROM "universes" WHERE "hide_bot_conversations";
 
