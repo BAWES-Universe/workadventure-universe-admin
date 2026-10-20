@@ -13,9 +13,11 @@ const bodySchema = z
     person: z.object({
       signedIn: z.boolean(),
       identifier: z.string().trim().min(1).max(320).nullish(),
+      chatId: z.string().trim().min(1).max(320).nullish(),
     }),
   })
-  .refine((body) => !body.person.signedIn || !!body.person.identifier, { message: 'A signed-in person needs an identifier', path: ['person', 'identifier'] });
+  .refine((body) => !body.person.signedIn || !!body.person.identifier || !!body.person.chatId, { message: 'A signed-in person needs an identifier', path: ['person', 'identifier'] })
+  .refine((body) => !body.person.chatId || (body.action === 'dm' && !body.person.identifier), { message: 'A chat ID names the person only for a private chat, and never with an identifier', path: ['person', 'chatId'] });
 
 /**
  * OPTIONS /api/bots/:botId/access
@@ -30,8 +32,12 @@ export async function OPTIONS() {
  * Can this person do this with this bot? (#426)
  *
  * Auth: BOT_SERVICE_TOKEN
- * Body: { action: "chat" | "dm" | "summon", person: { signedIn: boolean, identifier?: string } }
- * Response: { allowed: boolean, code: "allowed" | "sign_in_required" | "not_allowed" | "no_room_access", reason: string | null }
+ * Body: { action: "chat" | "dm" | "summon", person: { signedIn: boolean, identifier?: string, chatId?: string } }
+ * Response: { allowed: boolean, code: "allowed" | "sign_in_required" | "not_allowed" | "no_room_access" | "unknown_person"
+ *   | "shared_chat_id" | "banned", reason: string | null, person?: { uuid: string, name: string | null } }
+ *
+ * A private chat that reached the bot over chat names the person by their chat ID instead (action "dm" only): Orbit
+ * finds the one account with it, refuses an ID no account or two accounts have, and answers with whose it is.
  *
  * A no is a 200 with `allowed: false` and a line to show. Anything that stops Orbit answering is an error status, so
  * the caller can tell "no" from "could not check".

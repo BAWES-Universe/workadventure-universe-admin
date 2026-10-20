@@ -49,6 +49,7 @@ jest.mock('@/lib/db', () => ({
         state.users.find((user) => where.OR.some((cond) => cond.uuid === user.uuid || cond.email === user.email)) ?? null,
       ),
     },
+    ban: { findFirst: jest.fn(async () => null) },
     worldMember: {
       findFirst: jest.fn(async ({ where }: { where: { worldId: string; userId: string } }) =>
         state.worldMembers.find((row) => row.worldId === where.worldId && row.userId === where.userId) ?? null,
