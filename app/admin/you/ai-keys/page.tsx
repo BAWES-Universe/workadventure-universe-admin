@@ -104,7 +104,7 @@ function downText(key: AiKeySummary): string {
       : key.ifDown === 'stop'
         ? ` ${names(bots)} ${one ? 'rests' : 'rest'} until it’s back.`
         : ` ${names(bots)} ${one ? 'replies' : 'reply'} on Universe AI until it’s back${own ? `, so ${one ? 'its' : 'their'} conversations leave your computer meanwhile` : ''}.`;
-  return `Down since ${sinceText(key.downSince ?? new Date().toISOString())}: ${subject} ${phrase}.${meanwhile} Universe checks every 5 minutes and switches back by itself.`;
+  return `Down since ${sinceText(key.downSince ?? new Date().toISOString())}: ${subject} ${phrase}.${meanwhile} While its bots are in use, Universe checks it every 5 minutes and switches back by itself.`;
 }
 
 /** The line under "If this is down", for the choice that is picked. */

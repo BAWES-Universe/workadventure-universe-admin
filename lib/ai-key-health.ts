@@ -91,7 +91,7 @@ async function tellOwner(key: KeyRow, since: Date, reason: DownReason) {
       dedupeKey: `${noticePrefix(key.providerId)}${since.toISOString()}`,
       title: `${key.name} is down`,
       badge: 'Down',
-      body: `${what} ${meanwhile} Universe checks every 5 minutes and switches back by itself.`,
+      body: `${what} ${meanwhile} While its bots are in use, Universe checks it every 5 minutes and switches back by itself.`,
       href: '/admin/you/ai-keys',
     });
   } catch (error) {
