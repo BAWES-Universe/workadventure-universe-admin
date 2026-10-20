@@ -54,11 +54,12 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
 
     const person = await prisma.botsMemory.findFirst({ where: { id: parsed.data.memoryId, botId: id }, select: { id: true, userUuid: true } });
     if (!person) return json(request, { error: 'The bot does not remember that person.' }, 404);
-    await prisma.$transaction([
+    // deleteMany, not delete: two managers pressing Forget on the same person at once must both succeed.
+    const [, deleted] = await prisma.$transaction([
       prisma.botMemoryForget.create({ data: { botId: id, userUuid: person.userUuid } }),
-      prisma.botsMemory.delete({ where: { id: person.id } }),
+      prisma.botsMemory.deleteMany({ where: { id: person.id } }),
     ]);
-    return json(request, { forgotten: 1, everyone: false });
+    return json(request, { forgotten: deleted.count, everyone: false });
   } catch (error) {
     Sentry.captureException(error, { tags: { area: 'bot-privacy' } });
     console.error('Error forgetting bot memory:', error);

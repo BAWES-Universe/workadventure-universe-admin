@@ -279,12 +279,23 @@ describe('Forget', () => {
   it('forgets one person by the id the list gave, never by a player id from the caller', async () => {
     botIs(true);
     db.botsMemory.findFirst.mockResolvedValue({ id: 5, userUuid: 'bob@example.com' });
+    db.botsMemory.deleteMany.mockResolvedValue({ count: 1 });
     const response = await call(forget, 'POST', { body: { memoryId: 5 } });
     expect(await response.json()).toEqual({ forgotten: 1, everyone: false });
     expect(db.botsMemory.findFirst).toHaveBeenCalledWith({ where: { id: 5, botId: 'bot-1' }, select: { id: true, userUuid: true } });
     expect(db.botMemoryForget.create).toHaveBeenCalledWith({ data: { botId: 'bot-1', userUuid: 'bob@example.com' } });
-    expect(db.botsMemory.delete).toHaveBeenCalledWith({ where: { id: 5 } });
+    expect(db.botsMemory.deleteMany).toHaveBeenCalledWith({ where: { id: 5 } });
     expect((await call(forget, 'POST', { body: { userUuid: 'x' } })).status).toBe(400);
+  });
+
+  it('succeeds when another manager forgot the same person a moment earlier', async () => {
+    botIs(true);
+    db.botsMemory.findFirst.mockResolvedValue({ id: 5, userUuid: 'bob@example.com' });
+    db.botsMemory.deleteMany.mockResolvedValue({ count: 0 });
+    const response = await call(forget, 'POST', { body: { memoryId: 5 } });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ forgotten: 0, everyone: false });
+    expect(db.botMemoryForget.create).toHaveBeenCalled();
   });
 
   it('says so when the bot does not remember that person, and refuses a stranger', async () => {
