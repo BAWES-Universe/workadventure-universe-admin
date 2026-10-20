@@ -13,7 +13,7 @@ import { LoadError, LoadingRows, PageHeader, count } from '../../components/ds';
 import { FormSheet } from '../../components/form-sheet';
 import { Planet } from '../../components/ds/planet-icon';
 import { PickCard, Radio, Segmented } from '@/components/ui/choice';
-import { useAiKeys } from '../../hooks/use-ai-keys';
+import { aiKeyError, useAiKeys } from '../../hooks/use-ai-keys';
 
 /** 880000 -> "880k", 1200000 -> "1.2M": a token count that fits a phone. */
 function compact(value: number): string {
@@ -159,7 +159,10 @@ export default function AiKeysPage() {
       setPulling(null);
       addToast({ description: `${key.name} pulled from ${lent.universeName}`, variant: 'success', duration: 2500 });
     } catch (error) {
-      setFailure(error instanceof Error ? error.message : 'That didn’t work. Try again.');
+      const message = error instanceof Error ? error.message : 'That didn’t work. Try again.';
+      // With no bots on it there is no sheet open to show the message in
+      if (lent.bots.length > 0) setFailure(message);
+      else addToast({ description: message, variant: 'error', duration: 4000 });
     } finally {
       setBusy(false);
     }
@@ -170,7 +173,7 @@ export default function AiKeysPage() {
     try {
       const response = await authenticatedFetch(`/api/me/ai-keys/${encodeURIComponent(key.id)}/check`, { method: 'POST' });
       const body = (await response.json().catch(() => null)) as { status?: string; message?: string; error?: string } | null;
-      if (!response.ok) throw new Error(body?.error || 'That didn’t work. Try again.');
+      if (!response.ok) throw new Error(aiKeyError(response.status, body?.error));
       retry();
       addToast(
         body?.status === 'working'
@@ -277,6 +280,7 @@ export default function AiKeysPage() {
                 <button
                   type="button"
                   aria-label={`Pull ${key.name} from ${lent.universeName}`}
+                  disabled={busy}
                   onClick={() => {
                     setFailure(null);
                     if (lent.bots.length > 0) setPulling({ key, lent });
@@ -489,7 +493,7 @@ function LendSheet({
       });
       if (!response.ok) {
         const body = await response.json().catch(() => null);
-        throw new Error(body?.error || 'That didn’t work. Try again.');
+        throw new Error(aiKeyError(response.status, body?.error));
       }
       onLent(keyToLend, universes.find((universe) => universe.id === picked)?.name ?? 'the universe');
     } catch (error) {
@@ -662,7 +666,7 @@ function EditKeySheet({
           void loadModels(target.key.id, address.trim());
           return;
         }
-        throw new Error(body?.error || 'That didn’t work. Try again.');
+        throw new Error(aiKeyError(response.status, body?.error));
       }
       onSaved(target.key, target.what);
     } catch (error) {
