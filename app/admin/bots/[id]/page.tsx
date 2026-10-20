@@ -328,6 +328,8 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
       setPrivacy(await response.json());
       setPrivacyFailed(false);
     } catch {
+      // Drop what was shown: a refresh after Forget that fails must not leave the forgotten person on screen.
+      setPrivacy(null);
       setPrivacyFailed(true);
     }
   }, [botId]);
