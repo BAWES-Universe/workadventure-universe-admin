@@ -63,7 +63,10 @@ test('asks before switching Hide bot conversations off, and saves only after Sav
   fireEvent.click(toggle);
   fireEvent.click(screen.getByRole('button', { name: /Save/ }));
   expect(await screen.findByText('Show bot conversations again?')).toBeInTheDocument();
-  expect(screen.getByText(/Saved conversations will show again/)).toBeInTheDocument();
+  // Only what is true: what was saved before hiding and the bots' memory come back; the hidden time was never saved
+  expect(screen.getByText(/Conversations saved before you hid them, and what your bots remember, show again in Orbit/)).toBeInTheDocument();
+  expect(screen.getByText(/those from while they were hidden were never saved/)).toBeInTheDocument();
+  expect(screen.queryByText(/Saved conversations will show again/)).not.toBeInTheDocument();
   expect(patches).toHaveLength(0);
   fireEvent.click(screen.getAllByRole('button', { name: 'Save' }).pop() as HTMLElement);
   await waitFor(() => expect(patches).toHaveLength(1));

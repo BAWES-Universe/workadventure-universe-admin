@@ -193,7 +193,7 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
   }, [universeLoaded, id]);
 
 
-  // Switching "Hide bot conversations" off shows every saved conversation again, so ask first.
+  // Switching "Hide bot conversations" off shows what was saved before it was on, and what the bots remember, again, so ask first.
   function handleSaveClick() {
     if (universe?.hideBotConversations === true && !formData.hideBotConversations) {
       setShowAgainDialogOpen(true);
@@ -512,7 +512,7 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
           <AlertDialogHeader>
             <AlertDialogTitle>Show bot conversations again?</AlertDialogTitle>
             <AlertDialogDescription>
-              Saved conversations will show again in Orbit, and your bots go back to sending analytics and error reports as before. Bots set to Private stay hidden.
+              Conversations saved before you hid them, and what your bots remember, show again in Orbit; those from while they were hidden were never saved. Bots go back to saving conversations and sending analytics and error reports, except bots set to Private.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
