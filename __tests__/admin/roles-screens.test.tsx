@@ -516,11 +516,11 @@ describe('a role page', () => {
     const rows = within(bots).getAllByRole('switch').map((toggle) => toggle.id);
     expect(rows).toEqual(['perm-MANAGE_BOTS', 'perm-CHAT_BOTS_NEARBY', 'perm-DM_BOTS', 'perm-SUMMON_BOTS']);
     expect(within(bots).getByText('Chat with bots nearby')).toBeTruthy();
-    expect(within(bots).getByText('Walk up to a bot on the map and chat in its bubble. Everyone in the bubble sees it.')).toBeTruthy();
+    expect(within(bots).getByText('Lets people walk up to a bot on the map and chat in its bubble. Everyone in the bubble sees it.')).toBeTruthy();
     expect(within(bots).getByText('DM bots')).toBeTruthy();
-    expect(within(bots).getByText('Private one-to-one chat with a bot, from anywhere. Only they and the bot see it. Needs sign-in.')).toBeTruthy();
+    expect(within(bots).getByText('Lets signed-in people chat privately with a bot, one to one, from anywhere. Only they and the bot see it.')).toBeTruthy();
     expect(within(bots).getByText('Summon bots')).toBeTruthy();
-    expect(within(bots).getByText('Call a bot over in its own room. Guests too.')).toBeTruthy();
+    expect(within(bots).getByText('Lets people, including guests, summon a bot to them in its own room.')).toBeTruthy();
   });
 
   it('shows the three bot switches on for Everyone, so bots work as they always have', async () => {
