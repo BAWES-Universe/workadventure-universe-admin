@@ -8,6 +8,7 @@ import { cn } from '@/lib/utils';
 import { WorkAdventureContext } from '../../workadventure-context';
 import { useLive } from '../../hooks/use-live';
 import { Context, NameGlyph, Place, SectionHeader } from '../ds';
+import { PersonSheet } from '../person-sheet';
 import { WokaAvatar } from '../profile-card';
 import { DoorEnterIcon } from './door-enter-icon';
 import styles from './live.module.css';
@@ -126,21 +127,24 @@ function PlaceCard({ place, friendsOnly = false }: { place: LivePlace; friendsOn
   );
 }
 
-function PersonRow({ person, hereRoomId }: { person: Person; hereRoomId: string | null }) {
+function PersonRow({ person, hereRoomId, onOpen }: { person: Person; hereRoomId: string | null; onOpen: () => void }) {
   const { place } = person;
   return (
     <li className={styles.person} data-testid="live-person">
-      <WokaAvatar layers={person.woka} name={person.name} size={40} />
-      <div className={styles.who}>
-        <strong>
-          <span>{person.name}</span>
-          <Dot status={person.status} />
-          <span className="sr-only">{STATUS_LABEL[person.status]}</span>
-        </strong>
-        <div className={styles.where}>
-          <Place kind="room" label={place.name} /> · <Place kind="universe" label={place.universe.name} /> › <Place kind="world" label={place.world.name} />
-        </div>
-      </div>
+      {/* The whole row opens their profile card; Go sits above it. */}
+      <button type="button" className={styles.personOpen} onClick={onOpen} aria-haspopup="dialog">
+        <WokaAvatar layers={person.woka} name={person.name} size={40} />
+        <span className={styles.who}>
+          <strong>
+            <span>{person.name}</span>
+            <Dot status={person.status} />
+            <span className="sr-only">{STATUS_LABEL[person.status]}</span>
+          </strong>
+          <span className={styles.where}>
+            <Place kind="room" label={place.name} /> · <Place kind="universe" label={place.universe.name} /> › <Place kind="world" label={place.world.name} />
+          </span>
+        </span>
+      </button>
       {place.roomId === hereRoomId ? (
         <span className={styles.sameRoom}>Here</span>
       ) : (
@@ -244,6 +248,7 @@ export function LiveNowView({ view, layout }: { view: LiveView; layout: Layout }
   }, [view.places]);
   // On Orbit home, the universe you're in comes first; everywhere else, everywhere.
   const [picked, setPicked] = useState<string | null>(null);
+  const [opened, setOpened] = useState<Person | null>(null);
   const filter = picked ?? (layout.startsWith('home') && here ? here.universe.id : EVERYWHERE);
   const active =
     filter === EVERYWHERE || filter === FRIENDS || universes.some((universe) => universe.id === filter) ? filter : EVERYWHERE;
@@ -312,10 +317,16 @@ export function LiveNowView({ view, layout }: { view: LiveView; layout: Layout }
       ) : (
         <ul className={styles.people} id={layout === 'all' ? 'people' : undefined}>
           {people.slice(0, peopleLimit).map((person) => (
-            <PersonRow key={person.uuid} person={person} hereRoomId={hereRoomId} />
+            <PersonRow key={person.uuid} person={person} hereRoomId={hereRoomId} onOpen={() => setOpened(person)} />
           ))}
         </ul>
       )}
+      <PersonSheet
+        person={opened}
+        onClose={() => setOpened(null)}
+        testId="live-person-sheet"
+        description={opened && <>{STATUS_LABEL[opened.status]} · In {opened.place.name}</>}
+      />
       <Note />
     </section>
   );

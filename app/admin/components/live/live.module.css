@@ -43,11 +43,17 @@
 .youHere { margin-left: auto; font-size: 12px; font-weight: 700; color: #6d28d9; white-space: nowrap; }
 :global(.dark) .youHere { color: #c4b5fd; }
 .people { display: grid; gap: 6px; }
-.person { display: flex; align-items: center; gap: 12px; min-width: 0; padding: 10px 12px; border-radius: 16px; border: 1px solid hsl(var(--border)); background: hsl(var(--card)); }
-.who { min-width: 0; flex: 1; }
+.person { position: relative; display: flex; align-items: center; gap: 12px; min-width: 0; padding: 10px 12px; border-radius: 16px; border: 1px solid hsl(var(--border)); background: hsl(var(--card)); transition: border-color 160ms; }
+.person:hover { border-color: hsl(var(--foreground) / .22); }
+/* The row's button: its box covers the row, and Go sits above it. */
+.personOpen { display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1; text-align: left; color: inherit; outline: none; }
+.personOpen::after { content: ''; position: absolute; inset: 0; z-index: 1; border-radius: inherit; }
+.personOpen:focus-visible::after { box-shadow: 0 0 0 2px hsl(var(--ring)); }
+.person .go { position: relative; z-index: 2; }
+.who { display: block; min-width: 0; flex: 1; }
 .who strong { display: flex; align-items: center; gap: 7px; font-size: 14px; min-width: 0; }
 .who strong > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.where { font-size: 12px; color: hsl(var(--muted-foreground)); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.where { display: block; font-size: 12px; color: hsl(var(--muted-foreground)); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .go { flex: none; height: 34px; padding: 0 12px; border-radius: 999px; border: 1px solid hsl(var(--foreground) / 0.18); font-size: 12px; font-weight: 700; display: inline-flex; align-items: center; gap: 5px; transition: border-color 120ms ease, background-color 120ms ease; }
 .go:hover { border-color: hsl(var(--foreground) / 0.35); background: hsl(var(--foreground) / 0.05); }
 .sameRoom { flex: none; font-size: 12px; font-weight: 600; color: hsl(var(--muted-foreground)); padding: 0 6px; }
