@@ -5,7 +5,8 @@
  * transcript or what a bot remembers, super admins included, while the bot server still reads and writes memory.
  */
 import { NextRequest } from 'next/server';
-import { GET as getConversations } from '@/app/api/bots/[id]/conversations/route';
+import { GET as getConversations, POST as saveConversation } from '@/app/api/bots/[id]/conversations/route';
+import { PUT as updateConversation } from '@/app/api/bots/[id]/conversations/[conversationId]/route';
 import { GET as getConversationStats } from '@/app/api/bots/[id]/conversations/stats/route';
 import { GET as getEmotions } from '@/app/api/bots/[id]/emotions/route';
 import { GET as getMemory, POST as saveMemory } from '@/app/api/bots/memory/[id]/route';
@@ -29,7 +30,7 @@ jest.mock('@/lib/db', () => ({
     bot: { findUnique: jest.fn(), findMany: jest.fn(), update: jest.fn() },
     universe: { findUnique: jest.fn(), update: jest.fn() },
     user: { findUnique: jest.fn() },
-    botsConversation: { findMany: jest.fn(), count: jest.fn(), findFirst: jest.fn(), aggregate: jest.fn(), deleteMany: jest.fn() },
+    botsConversation: { findMany: jest.fn(), count: jest.fn(), findFirst: jest.fn(), aggregate: jest.fn(), deleteMany: jest.fn(), create: jest.fn(), update: jest.fn() },
     botsMemory: { findMany: jest.fn(), findFirst: jest.fn(), count: jest.fn(), aggregate: jest.fn(), upsert: jest.fn(), delete: jest.fn(), deleteMany: jest.fn() },
     botsAiUsage: { count: jest.fn() },
     botMemoryForget: { findMany: jest.fn(), create: jest.fn(), deleteMany: jest.fn(), updateMany: jest.fn() },
@@ -195,6 +196,48 @@ describe('on: nobody reads text, super admins included', () => {
     manages.mockResolvedValue(false);
     expect((await call(getConversations)).status).toBe(403);
     expect((await call(getEmotions)).status).toBe(403);
+  });
+});
+
+describe('the bot server cannot save a transcript for a hidden bot', () => {
+  const transcript = { userUuid: 'uuid-bob', userName: 'Bob', messages: [{ sender: 'person', message: 'my secret plan', timestamp: 1 }], startedAt: 1, messageCount: 1 };
+  const putParams = { params: Promise.resolve({ id: 'bot-1', conversationId: '9' }) };
+  const put = (body: unknown) =>
+    updateConversation(
+      new NextRequest('http://localhost:3333/api/bots/bot-1/conversations/9', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer service-secret' },
+        body: JSON.stringify(body),
+      }),
+      putParams,
+    );
+
+  it('stores nothing on create or update and says it skipped, when the bot is Private or its universe hides', async () => {
+    for (const [own, universe] of [[true, false], [null, true]] as const) {
+      botIs(own, universe);
+      const created = await call(saveConversation, 'POST', { token: 'service-secret', body: transcript });
+      expect(created.status).toBe(200);
+      expect(await created.json()).toEqual({ conversationId: null, status: 'skipped' });
+      const updated = await put({ messages: transcript.messages, messageCount: 2 });
+      expect(updated.status).toBe(200);
+      expect(await updated.json()).toEqual({ status: 'skipped' });
+    }
+    expect(db.botsConversation.create).not.toHaveBeenCalled();
+    expect(db.botsConversation.update).not.toHaveBeenCalled();
+  });
+
+  it('saves as before when the bot is not hidden', async () => {
+    db.botsConversation.create.mockResolvedValue({ id: 9 });
+    const created = await call(saveConversation, 'POST', { token: 'service-secret', body: { ...transcript, isGuest: true } });
+    expect(await created.json()).toEqual({ conversationId: '9', status: 'created' });
+    db.botsConversation.findFirst.mockResolvedValue({ id: 9, startedAt: new Date(1), endedAt: new Date(1) });
+    db.botsConversation.update.mockResolvedValue({});
+    expect(await (await put({ messages: transcript.messages, messageCount: 1 })).json()).toEqual({ status: 'updated' });
+  });
+
+  it('still refuses a caller without the service token, hidden or not', async () => {
+    botIs(true);
+    expect((await call(saveConversation, 'POST', { body: transcript })).status).toBe(401);
   });
 });
 

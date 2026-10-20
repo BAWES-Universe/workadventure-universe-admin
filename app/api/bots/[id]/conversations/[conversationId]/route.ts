@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { requireServiceToken } from '@/lib/service-tokens';
 import { corsHeaders } from '@/lib/cors';
+import { isBotHidden } from '@/lib/bot-privacy';
 
 export const runtime = 'nodejs';
 
@@ -27,7 +28,7 @@ export async function OPTIONS() {
  *   "endReason": "user_left"     // Optional: reason for ending conversation
  * }
  * 
- * Response: { status: "updated" }
+ * Response: { status: "updated" }, or { status: "skipped" } when the bot hides its conversations (#435): nothing is stored
  */
 export async function PUT(
   request: NextRequest,
@@ -37,6 +38,13 @@ export async function PUT(
     requireServiceToken(request);
 
     const { id: botId, conversationId } = await params;
+
+    // Hide bot conversations (#435): a conversation saved before the bot was hidden gets no new words either.
+    // A failed check answers 500 and stores nothing.
+    if (await isBotHidden(botId)) {
+      return NextResponse.json({ status: 'skipped' as const }, { headers: corsHeaders() });
+    }
+
     const body = await request.json();
 
     const {
