@@ -39,7 +39,7 @@ export function TelemetryInfo({ open, onOpenChange }: { open: boolean; onOpenCha
             <strong className="font-semibold">On (default)</strong>
             <ul className="grid list-disc gap-1 pl-5 text-muted-foreground">
               <li>Bot chats go to our analytics and error reports, so we can find and fix bots that misbehave.</li>
-              <li>Super admins can read them on the admin pages.</li>
+              <li>The Universe team can read them on the admin pages.</li>
             </ul>
           </div>
           <div className="grid gap-1">
@@ -75,7 +75,7 @@ export function TurnOnConfirm({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onConfirm: () => void;
-  /** What it covers, e.g. "bots in Arabic Courtyard". */
+  /** What it covers, e.g. "every bot in Arabic Courtyard". */
   scope: string;
 }) {
   return (
@@ -84,7 +84,7 @@ export function TurnOnConfirm({
         <AlertDialogHeader>
           <AlertDialogTitle>Turn bot chat telemetry on?</AlertDialogTitle>
           <AlertDialogDescription>
-            Chats with {scope} go to analytics and error reports again. Super admins can read saved chats on the admin pages, including ones from while it was off.
+            Chats with {scope} go to analytics and error reports again. The Universe team can read saved chats on the admin pages, including ones from while it was off.
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
@@ -188,7 +188,7 @@ export function UniverseAdvanced({
           setConfirm(false);
           onChange(true);
         }}
-        scope={`bots in ${universeName}`}
+        scope={`every bot in ${universeName}`}
       />
     </section>
   );
