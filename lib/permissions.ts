@@ -57,9 +57,9 @@ export const PERMISSIONS: readonly PermissionInfo[] = [
   { key: 'MODERATE_CALLS', bit: 11, group: 'calls', label: 'Moderate calls', description: "Mute someone's mic or camera without asking, mute everyone, lower hands, bring people on stage or send them back, remove someone from a call, and lead every Jitsi and BigBlueButton meeting. Anyone in a call can still ask someone to mute, and they can say no." },
   { key: 'MODERATE_AREA_CHATS', bit: 12, group: 'calls', label: 'Moderate area chats', description: 'Moderator in the chat of every map area: delete messages and remove people from it.' },
   { key: 'MANAGE_BOTS', bit: 13, group: 'bots', label: 'Manage bots', description: 'Create bots, change what they say and where they stand.' },
-  { key: 'CHAT_BOTS_NEARBY', bit: 14, group: 'bots', label: 'Chat with bots nearby', description: 'Walk up to a bot on the map and chat in its bubble. Everyone in the bubble sees it.' },
-  { key: 'DM_BOTS', bit: 15, group: 'bots', label: 'DM bots', description: 'Private one-to-one chat with a bot, from anywhere. Only they and the bot see it. Needs sign-in.' },
-  { key: 'SUMMON_BOTS', bit: 16, group: 'bots', label: 'Summon bots', description: 'Summon a bot in its own room. Guests too.' },
+  { key: 'CHAT_BOTS_NEARBY', bit: 14, group: 'bots', label: 'Chat with bots nearby', description: 'Lets people walk up to a bot on the map and chat in its bubble. Everyone in the bubble sees it.' },
+  { key: 'DM_BOTS', bit: 15, group: 'bots', label: 'DM bots', description: 'Lets signed-in people chat privately with a bot, one to one, from anywhere. Only they and the bot see it.' },
+  { key: 'SUMMON_BOTS', bit: 16, group: 'bots', label: 'Summon bots', description: 'Lets people, including guests, summon a bot to them in its own room.' },
   { key: 'ADMINISTRATOR', bit: 30, group: 'owner', label: 'Administrator', description: "Like owning {universe}: all permissions in every world, gets past every room and area rule, and can't be limited to some worlds." },
 ];
 
