@@ -31,6 +31,7 @@ import { useEntitySummaries } from '../../hooks/use-entity-summaries';
 import { useHere, useStarToggle, useUniverseRank, useWorldRooms } from '../../hooks/use-place-data';
 import { EmptyCard, EntityCard, EntityRow, Figure, Figures, InContext, KindIcon, LoadError, LoadingRows, PageHeader, SectionHeader, SettingSwitch, Settings, StatLine, StatusPill, VisitLine, count } from '../../components/ds';
 import { useReplacePage } from '@/app/admin/orbit-frame-context';
+import { UniverseAdvanced } from '@/components/bot-telemetry';
 
 interface Universe {
   id: string;
@@ -41,7 +42,7 @@ interface Universe {
   isPublic: boolean;
   featured: boolean;
   thumbnailUrl: string | null;
-  /** Hide bot conversations (#435). */
+  /** Bot chat telemetry is off (#435); stored as hide-conversations. */
   hideBotConversations?: boolean;
   createdAt: string;
   canEdit?: boolean;
@@ -85,7 +86,6 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
   const [isEditing, setIsEditing] = useState(false);
   const [analytics, setAnalytics] = useState<any>(null);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
-  const [showAgainDialogOpen, setShowAgainDialogOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   // Each world's activity for its card, asked for once per world (a failure offers a retry, never a request loop).
   const worldIds = useMemo(() => universe?.worlds?.map((world) => world.id) ?? [], [universe]);
@@ -192,15 +192,6 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [universeLoaded, id]);
 
-
-  // Switching "Hide bot conversations" off shows what was saved before it was on, and what the bots remember, again, so ask first.
-  function handleSaveClick() {
-    if (universe?.hideBotConversations === true && !formData.hideBotConversations) {
-      setShowAgainDialogOpen(true);
-      return;
-    }
-    handleSave();
-  }
 
   async function handleSave() {
     setSaving(true);
@@ -430,15 +421,12 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
               )}
             </Settings>
 
-            <Settings label="Bots">
-              <SettingSwitch
-                id="hideBotConversations"
-                label="Hide bot conversations"
-                hint="Hides your bots' conversations and what they remember from Orbit, analytics and error reports. The bots work the same. Messages are still stored and still sent to the AI provider you chose."
-                checked={formData.hideBotConversations}
-                onChange={(checked) => setFormData({ ...formData, hideBotConversations: checked })}
-              />
-            </Settings>
+            <UniverseAdvanced
+              universeName={universe.name}
+              telemetryOn={!formData.hideBotConversations}
+              onChange={(on) => setFormData({ ...formData, hideBotConversations: !on })}
+              confirmTurnOn={universe.hideBotConversations === true}
+            />
 
             <div className="flex flex-col-reverse sm:flex-row justify-end gap-3 pt-4">
               <Button
@@ -450,7 +438,7 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
               >
                 Cancel
               </Button>
-              <Button onClick={handleSaveClick} disabled={saving}>
+              <Button onClick={handleSave} disabled={saving}>
                 {saving ? (
                   <>
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -505,28 +493,6 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
 
         </>
       )}
-
-      <AlertDialog open={showAgainDialogOpen} onOpenChange={setShowAgainDialogOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Show bot conversations again?</AlertDialogTitle>
-            <AlertDialogDescription>
-              Conversations saved before you hid them, and what your bots remember, show again in Orbit; those from while they were hidden were never saved. Bots go back to saving conversations and sending analytics and error reports, except bots set to Private.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => {
-                setShowAgainDialogOpen(false);
-                handleSave();
-              }}
-            >
-              Save
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
 
       <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
         <AlertDialogContent>

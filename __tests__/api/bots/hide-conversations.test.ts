@@ -303,7 +303,7 @@ describe('the setting', () => {
     botIs(null, true);
     const refused = await call(putPrivacy, 'PUT', { body: { choice: 'normal' } });
     expect(refused.status).toBe(409);
-    expect((await refused.json()).error).toMatch(/universe hides bot conversations/);
+    expect((await refused.json()).error).toMatch(/telemetry is off for every bot in this universe/);
     expect(db.bot.update).not.toHaveBeenCalled();
     expect((await call(putPrivacy, 'PUT', { body: { choice: 'follow' } })).status).toBe(200);
     expect((await call(putPrivacy, 'PUT', { body: { choice: 'private' } })).status).toBe(200);

@@ -81,7 +81,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   } catch (error) {
     Sentry.captureException(error, { tags: { area: 'bot-privacy' } });
     console.error('Error reading bot privacy:', error);
-    return json(request, { error: 'Failed to read the privacy setting' }, 500);
+    return json(request, { error: 'Failed to read bot chat telemetry' }, 500);
   }
 }
 
@@ -104,7 +104,7 @@ export async function PUT(request: NextRequest, { params }: { params: Promise<{ 
     const current = await loadBotPrivacy(id);
     if (!current) return json(request, { error: 'Bot not found' }, 404);
     if (current.universeHides && parsed.data.choice === 'normal') {
-      return json(request, { error: 'This universe hides bot conversations, so a bot in it cannot be set to Normal. The universe owner can change that.' }, 409);
+      return json(request, { error: 'Bot chat telemetry is off for every bot in this universe, so it cannot be turned on for one bot. The universe owner can change that.' }, 409);
     }
 
     await prisma.bot.update({ where: { id }, data: { hideConversations: storedFor(parsed.data.choice) } });
@@ -113,6 +113,6 @@ export async function PUT(request: NextRequest, { params }: { params: Promise<{ 
   } catch (error) {
     Sentry.captureException(error, { tags: { area: 'bot-privacy' } });
     console.error('Error saving bot privacy:', error);
-    return json(request, { error: 'Failed to save the privacy setting' }, 500);
+    return json(request, { error: 'Failed to save bot chat telemetry' }, 500);
   }
 }

@@ -41,7 +41,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     if (!parsed.success) return json(request, { error: 'Invalid request data', details: parsed.error.issues }, 400);
 
     if (!(await isBotHidden(id))) {
-      return json(request, { error: 'Forget is for bots that hide their conversations.' }, 409);
+      return json(request, { error: 'Forget is for bots whose chat telemetry is off.' }, 409);
     }
 
     if ('everyone' in parsed.data) {

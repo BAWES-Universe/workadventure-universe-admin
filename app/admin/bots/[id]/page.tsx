@@ -16,7 +16,7 @@ import {
 import { AlertCircle, ChevronDown, Server } from 'lucide-react';
 import BotTexturePicker from '@/components/bot-texture-picker';
 import { BotToolCallSwitch } from '@/components/bot-tool-call-switch';
-import { BotPrivacyCard, type BotPrivacyState } from '@/components/bot-privacy-card';
+import type { BotPrivacy } from '@/lib/bot-privacy';
 import { BotConversationsPrivate, BotMemoryPrivate, type BotPrivacyDetails } from '@/components/bot-private-notice';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
@@ -216,9 +216,9 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
   const [conversationsLoading, setConversationsLoading] = useState(false);
   const [emotions, setEmotions] = useState<EmotionData[]>([]);
   const [emotionsLoading, setEmotionsLoading] = useState(false);
-  // Hide bot conversations (#435). Until this has loaded the tabs that would show text wait, and a failure says so:
+  // Bot chat telemetry (#435). Until this has loaded the tabs that would show text wait, and a failure says so:
   // they never fall back to showing it.
-  const [privacy, setPrivacy] = useState<(BotPrivacyState & BotPrivacyDetails) | null>(null);
+  const [privacy, setPrivacy] = useState<(BotPrivacy & BotPrivacyDetails) | null>(null);
   const [privacyFailed, setPrivacyFailed] = useState(false);
   const privacyLoaded = privacy !== null;
   const hidden = privacy?.hidden === true;
@@ -360,7 +360,7 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
     }
   }, [activeTab, botId, privacyLoaded, hidden]);
 
-  // Turning Hide bot conversations on takes what this page already loaded off the screen too.
+  // Turning bot chat telemetry off takes what this page already loaded off the screen too.
   useEffect(() => {
     if (hidden) {
       setConversations([]);
@@ -720,8 +720,7 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
                       behaviorConfig: { ...current.behaviorConfig, showToolCalls },
                     } : current)}
                   />
-                  {privacy && <BotPrivacyCard key={bot.id} botId={bot.id} privacy={privacy} onChanged={fetchPrivacy} />}
-                  {privacyFailed && !privacy && <LoadError label="the Hide bot conversations setting" retry={fetchPrivacy} />}
+                  {privacyFailed && !privacy && <LoadError label="the bot chat telemetry setting" retry={fetchPrivacy} />}
                 </div>
               </section>
 

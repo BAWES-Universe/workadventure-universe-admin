@@ -42,7 +42,7 @@ export default function MemoryBrowsePage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [pagination, setPagination] = useState<PageInfo | null>(null);
-  // Hide bot conversations (#435): how many were left out because their bots are private.
+  // Bot chat telemetry (#435): how many were left out because it is off for their bots.
   const [hiddenCount, setHiddenCount] = useState(0);
   const [filters, setFilters] = useState({
     botId: '',
@@ -178,7 +178,7 @@ export default function MemoryBrowsePage() {
 
       {hiddenCount > 0 && (
         <p className="text-sm text-muted-foreground" role="status">
-          {hiddenCount.toLocaleString()} {hiddenCount === 1 ? 'memory entry' : 'memory entries'} not shown: Hide bot conversations is on for {hiddenCount === 1 ? 'the bot' : 'their bots'}.
+          {hiddenCount.toLocaleString()} {hiddenCount === 1 ? 'memory entry' : 'memory entries'} not shown: bot chat telemetry is off for {hiddenCount === 1 ? 'the bot' : 'their bots'}.
         </p>
       )}
 
