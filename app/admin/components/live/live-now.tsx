@@ -321,14 +321,18 @@ export function LiveNowView({ view, layout }: { view: LiveView; layout: Layout }
           ))}
         </ul>
       )}
-      <PersonSheet
-        person={opened}
-        onClose={() => setOpened(null)}
-        testId="live-person-sheet"
-        description={opened && <>{STATUS_LABEL[opened.status]} · In {opened.place.name}</>}
-      />
       <Note />
     </section>
+  );
+
+  // Outside People online, so a refresh that empties the list doesn't unmount an open card and bring it back later.
+  const personSheet = (
+    <PersonSheet
+      person={opened}
+      onClose={() => setOpened(null)}
+      testId="live-person-sheet"
+      description={opened && <>{STATUS_LABEL[opened.status]} · In {opened.place.name}</>}
+    />
   );
 
   if (layout === 'home-column') {
@@ -336,6 +340,7 @@ export function LiveNowView({ view, layout }: { view: LiveView; layout: Layout }
       <aside className={styles.column} aria-label="Live now">
         {placesSection}
         {peopleSection}
+        {personSheet}
       </aside>
     );
   }
@@ -343,6 +348,7 @@ export function LiveNowView({ view, layout }: { view: LiveView; layout: Layout }
     <div className={layout === 'space' ? styles.split : 'grid gap-8'}>
       {placesSection}
       {peopleSection}
+      {personSheet}
     </div>
   );
 }

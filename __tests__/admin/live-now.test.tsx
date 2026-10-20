@@ -96,6 +96,21 @@ describe('Live now', () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/admin/users/u-Omar'));
   });
 
+  it('keeps an open profile card through a refresh that empties People online, and it stays closed once closed', async () => {
+    fetchMock.mockResolvedValue({ ok: true, json: async () => ({}) });
+    const { rerender } = render(<LiveNowView view={view} layout="space" />);
+    fireEvent.click(within(screen.getAllByTestId('live-person')[1]).getByRole('button', { name: /Omar/ }));
+    await screen.findByTestId('live-person-sheet');
+    const emptied: LiveView = { available: true, generatedAt: 2, places: [], people: [] };
+    rerender(<LiveNowView view={emptied} layout="space" />);
+    expect(screen.queryByTestId('people-online')).toBeNull();
+    expect(screen.getByTestId('live-person-sheet')).toBeTruthy();
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByTestId('live-person-sheet')).toBeNull());
+    rerender(<LiveNowView view={view} layout="space" />);
+    expect(screen.queryByTestId('live-person-sheet')).toBeNull();
+  });
+
   it('filters by universe', () => {
     render(<LiveNowView view={view} layout="space" />);
     fireEvent.click(screen.getByRole('button', { name: 'Fun Zone' }));
