@@ -520,7 +520,7 @@ describe('a role page', () => {
     expect(within(bots).getByText('DM bots')).toBeTruthy();
     expect(within(bots).getByText('Private one-to-one chat with a bot, from anywhere. Only they and the bot see it. Needs sign-in.')).toBeTruthy();
     expect(within(bots).getByText('Summon bots')).toBeTruthy();
-    expect(within(bots).getByText('Call a bot over in its own room. Guests too.')).toBeTruthy();
+    expect(within(bots).getByText('Summon a bot in its own room. Guests too.')).toBeTruthy();
   });
 
   it('shows the three bot switches on for Everyone, so bots work as they always have', async () => {
