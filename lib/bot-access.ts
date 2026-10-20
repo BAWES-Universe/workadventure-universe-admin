@@ -8,8 +8,8 @@ import { isSuperAdmin } from '@/lib/super-admin';
 import { bansCoveringWorld } from '@/lib/moderation';
 
 /**
- * Can this person do this with this bot? (#426) What people do with a bot: chat in its bubble on the map, message it
- * privately, or summon it. The bot server and the game ask this with the service token before they let it happen,
+ * Can this person do this with this bot? (#426) What people do with a bot: chat in its bubble on the map, send it
+ * direct messages, or summon it. The bot server and the game ask this with the service token before they let it happen,
  * and show `reason` when the answer is no.
  *
  * The answer comes from the role permissions in the bot's world (the same number the game gets, see permissionsForWorld),
@@ -30,17 +30,17 @@ const ACTION_PERMISSION: Record<BotAction, PermissionKey> = {
 export type BotAccessCode =
   /** Allowed. */
   | 'allowed'
-  /** A private chat needs an account. */
+  /** A direct message needs an account. */
   | 'sign_in_required'
   /** The roles this person has don't allow it. */
   | 'not_allowed'
-  /** A private chat with a bot in a room this person can't see. */
+  /** A direct message with a bot in a room this person can't see. */
   | 'no_room_access'
-  /** A private chat from a chat account no Orbit account has. */
+  /** A direct message from a chat account no Orbit account has. */
   | 'unknown_person'
-  /** A private chat from a chat account two Orbit accounts claim: Orbit can't tell whose it is. */
+  /** A direct message from a chat account two Orbit accounts claim: Orbit can't tell whose it is. */
   | 'shared_chat_id'
-  /** A private chat from someone banned from the bot's world. */
+  /** A direct message from someone banned from the bot's world. */
   | 'banned';
 
 export interface BotAccessAnswer {
@@ -75,7 +75,7 @@ function refusal(
 }
 
 /**
- * The decision itself, from what was found out about the person. A private chat always needs sign-in, even for an
+ * The decision itself, from what was found out about the person. A direct message always needs sign-in, even for an
  * owner. The bot's creator, the universe's owner, super admins and Admin pass; everyone else needs the permission.
  */
 export function decideBotAccess(input: {
@@ -94,7 +94,7 @@ export function decideBotAccess(input: {
   roleRules?: readonly RuleBits[];
   /** What the owner wants refused people to hear when they chat nearby. */
   fixedReply?: string | null;
-  /** Whether they may see the bot's room: only a private chat asks. */
+  /** Whether they may see the bot's room: only a direct message asks. */
   canSeeRoom: boolean;
 }): BotAccessAnswer {
   const { action, botName } = input;
@@ -120,7 +120,7 @@ export interface BotAccessRequest {
     /** Their WorkAdventure identifier: their email when signed in. */
     identifier?: string | null;
     /**
-     * Their chat (Matrix) ID, for a private chat that reached the bot over chat, where the bot server knows nothing
+     * Their chat (Matrix) ID, for a direct message that reached the bot over chat, where the bot server knows nothing
      * else about them. Orbit finds the one account that has it, and that account's guest flag decides signed in.
      */
     chatId?: string | null;
@@ -171,7 +171,7 @@ export async function checkBotAccess(request: BotAccessRequest): Promise<BotAcce
     user = person.signedIn && person.identifier ? await findUserByIdentifier(person.identifier) : null;
   }
 
-  // A private chat can come from anywhere, so a ban from the bot's world keeps it out too. Chatting nearby and
+  // A direct message can come from anywhere, so a ban from the bot's world keeps it out too. Chatting nearby and
   // summoning need the person in the room, which a ban already stops.
   if (action === 'dm' && user) {
     const ban = await prisma.ban.findFirst({

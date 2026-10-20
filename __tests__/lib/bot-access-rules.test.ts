@@ -300,7 +300,7 @@ describe('row 13: a person’s row beats their role’s', () => {
   });
 });
 
-describe('row 14: the room still counts for a private chat', () => {
+describe('row 14: the room still counts for a direct message', () => {
   beforeEach(() => {
     state.bot!.isPublicRoom = false;
   });

@@ -237,7 +237,7 @@ describe('a permission turned off', () => {
     }
   });
 
-  it('even the owner needs an account for a private chat', async () => {
+  it('even the owner needs an account for a direct message', async () => {
     expect((await ask('dm', GUEST))!.code).toBe('sign_in_required');
   });
 
@@ -248,7 +248,7 @@ describe('a permission turned off', () => {
   });
 });
 
-describe('a private chat and the room', () => {
+describe('a direct message and the room', () => {
   beforeEach(() => {
     state.bot!.isPublicRoom = false;
   });
@@ -275,7 +275,7 @@ describe('a private chat and the room', () => {
   });
 });
 
-describe('a private chat that reached the bot over chat', () => {
+describe('a direct message that reached the bot over chat', () => {
   const chatOf = (user: { id: string }, chatId: string, extra: { name?: string; isGuest?: boolean } = {}) => {
     const row = state.users.find((candidate) => candidate.id === user.id)!;
     Object.assign(row, { matrixChatId: chatId, ...extra });
@@ -356,7 +356,7 @@ describe('decideBotAccess', () => {
     expect(decideBotAccess({ ...base, action: 'dm', signedIn: false }).reason).toBe('Sign in to message Atlas.');
   });
 
-  it('only asks about the room for a private chat', () => {
+  it('only asks about the room for a direct message', () => {
     const everyone = EVERYONE_DEFAULT_PERMISSIONS;
     expect(decideBotAccess({ ...base, permissions: everyone, canSeeRoom: false }).allowed).toBe(true);
     expect(decideBotAccess({ ...base, action: 'summon', permissions: everyone, canSeeRoom: false }).allowed).toBe(true);
