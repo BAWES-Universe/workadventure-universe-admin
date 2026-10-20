@@ -3,7 +3,7 @@ import { prisma } from '@/lib/db';
 import { requireServiceToken, validateServiceToken } from '@/lib/service-tokens';
 import { botReadDenied, getViewer } from '@/lib/access-scope';
 import { corsHeaders } from '@/lib/cors';
-import { isBotHidden, memoryTally, takeForgets } from '@/lib/bot-privacy';
+import { forgetNotice, isBotHidden, memoryTally, takeForgets } from '@/lib/bot-privacy';
 
 export const runtime = 'nodejs';
 
@@ -408,14 +408,13 @@ export async function POST(
       }
     })();
 
+    // Only when someone asked the bot to forget: the people to drop from what it keeps in memory.
+    const forget = forgetNotice(forgetting);
     return NextResponse.json(
       {
         status: 'saved',
         saveType,
-        // Only when someone asked the bot to forget: the people to drop from what it keeps in memory.
-        ...(forgetting.everyone || forgetting.userUuids.size > 0
-          ? { forget: { everyone: forgetting.everyone, userUuids: [...forgetting.userUuids] } }
-          : {}),
+        ...(forget ? { forget } : {}),
       },
       { headers: corsHeaders() }
     );
