@@ -84,7 +84,7 @@ export function TurnOnConfirm({
         <AlertDialogHeader>
           <AlertDialogTitle>Turn bot chat telemetry on?</AlertDialogTitle>
           <AlertDialogDescription>
-            Chats with {scope} go to analytics and error reports again.
+            Chats with {scope} go to analytics and error reports again. While it was off, chats were still saved, but not shown on the admin pages or sent to analytics; they can be reached in the database if ever needed.
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>

@@ -90,7 +90,7 @@ test('turning it back on asks once, with the exact words, and only Turn on chang
   expect(toggle).not.toBeChecked();
   fireEvent.click(toggle);
   expect(await screen.findByText('Turn bot chat telemetry on?')).toBeInTheDocument();
-  expect(screen.getByText(/Chats with bots in Test universe go to analytics and error reports again\./)).toBeInTheDocument();
+  expect(screen.getByText(/Chats with bots in Test universe go to analytics and error reports again\. While it was off, chats were still saved, but not shown on the admin pages or sent to analytics; they can be reached in the database if ever needed\./)).toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
   expect(screen.getByRole('switch', { name: 'Bot chat telemetry' })).not.toBeChecked();
   fireEvent.click(screen.getByRole('switch', { name: 'Bot chat telemetry' }));
