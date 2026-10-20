@@ -26,15 +26,13 @@ export interface BotPrivacyDetails {
   remembered?: { id: number; name: string | null; isGuest: boolean; updatedAt: number }[];
 }
 
-/** The Conversations tab of a bot that hides its conversations: a notice and the count, never a transcript. */
+/** The Conversations tab of a bot whose chat telemetry is off: a notice and the count, never a transcript. */
 export function BotConversationsPrivate({ replies }: { replies: number }) {
   return (
     <EmptyCard
       kind="bot"
-      title="Private"
-      text={`This bot’s conversations are not shown. It has made ${replies.toLocaleString()} AI ${replies === 1 ? 'call' : 'calls'} so far (see Usage). Transcripts saved before this was switched on stay hidden until they are deleted.`}
-      href="/admin/bots/database"
-      action="Delete old transcripts"
+      title="Telemetry is off for this bot"
+      text={`Its chats are saved, but not shown here. ${replies.toLocaleString()} ${replies === 1 ? 'reply' : 'replies'} so far (see Usage).`}
     />
   );
 }
@@ -42,7 +40,7 @@ export function BotConversationsPrivate({ replies }: { replies: number }) {
 type Target = { kind: 'everyone' } | { kind: 'person'; id: number; name: string };
 
 /**
- * The Emotions tab of a bot that hides its conversations: how many people it remembers and when that last changed,
+ * The Emotions tab of a bot whose chat telemetry is off: how many people it remembers and when that last changed,
  * with Forget for one person or everyone. What it remembers is never shown.
  */
 export function BotMemoryPrivate({ botId, details, onForgotten }: { botId: string; details: BotPrivacyDetails; onForgotten: () => void }) {
@@ -84,7 +82,7 @@ export function BotMemoryPrivate({ botId, details, onForgotten }: { botId: strin
   return (
     <div className="grid min-w-0 gap-4">
       <section aria-labelledby="bot-memory-private" className="min-w-0">
-        <SectionHeader id="bot-memory-private" title="Private" />
+        <SectionHeader id="bot-memory-private" title="Telemetry is off for this bot" />
         <div className="grid gap-3 rounded-2xl border bg-card p-4 sm:p-5">
           <p className="text-sm">
             {details.people === 0
