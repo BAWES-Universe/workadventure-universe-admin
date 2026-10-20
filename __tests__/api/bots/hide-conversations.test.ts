@@ -382,6 +382,30 @@ describe('the bot server really forgets (it saves a person again whenever they t
     await new Promise((resolve) => setImmediate(resolve));
     expect(db.botsMemory.upsert).not.toHaveBeenCalled();
   });
+
+  it('takes out what a save just wrote for someone whose Forget landed while it was running', async () => {
+    db.botMemoryForget.findMany.mockResolvedValueOnce([]).mockResolvedValue([{ id: 'f9', userUuid: 'uuid-bob', reportedAt: null }]);
+    const response = await save({ memories: [{ userUuid: 'uuid-bob' }, { userUuid: 'uuid-cy' }] });
+    expect(await response.json()).toEqual({ status: 'saved', saveType: 'periodic' });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(saved()).toEqual(['uuid-bob', 'uuid-cy']);
+    expect(db.botsMemory.deleteMany).toHaveBeenCalledTimes(1);
+    expect(db.botsMemory.deleteMany).toHaveBeenCalledWith({ where: { botId: 'bot-1', userUuid: { in: ['uuid-bob'] } } });
+    expect(db.botMemoryForget.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('deletes nothing after a save when nobody was forgotten, and a failed re-check does not fail the save', async () => {
+    const response = await save({ memories: [{ userUuid: 'uuid-bob' }] });
+    expect(response.status).toBe(200);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(db.botsMemory.deleteMany).not.toHaveBeenCalled();
+
+    db.botMemoryForget.findMany.mockResolvedValueOnce([]).mockRejectedValue(new Error('db down'));
+    const again = await save({ memories: [{ userUuid: 'uuid-bob' }] });
+    expect(again.status).toBe(200);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(db.botsMemory.deleteMany).not.toHaveBeenCalled();
+  });
 });
 
 describe('deleting a bot, room, world or universe', () => {

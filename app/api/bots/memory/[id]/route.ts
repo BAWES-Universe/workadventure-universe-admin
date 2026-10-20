@@ -3,7 +3,7 @@ import { prisma } from '@/lib/db';
 import { requireServiceToken, validateServiceToken } from '@/lib/service-tokens';
 import { botReadDenied, getViewer } from '@/lib/access-scope';
 import { corsHeaders } from '@/lib/cors';
-import { forgetNotice, isBotHidden, memoryTally, takeForgets } from '@/lib/bot-privacy';
+import { dropForgottenFrom, forgetNotice, isBotHidden, memoryTally, takeForgets } from '@/lib/bot-privacy';
 
 export const runtime = 'nodejs';
 
@@ -169,6 +169,7 @@ export async function POST(
     const memoryEntries = (Array.isArray(memories) ? memories : []).filter((memory: { userUuid?: unknown }) => !forgets(memory.userUuid));
     
     // Process memories asynchronously (fire-and-forget pattern)
+    const written: string[] = [];
     (async () => {
       try {
         for (const memory of memoryEntries) {
@@ -283,6 +284,7 @@ export async function POST(
               lastEmotionUpdate: lastEmotionUpdate ? new Date(lastEmotionUpdate) : null,
             },
           });
+          written.push(userUuid);
         }
 
         // Handle immediate emotion updates (if emotions provided directly)
@@ -401,10 +403,20 @@ export async function POST(
               lastEmotionUpdate: new Date(),
             },
           });
+          written.push(body.userUuid);
         }
       } catch (err) {
         // Log error but don't block response (fire-and-forget)
         console.error('Error processing memory entries:', err);
+      }
+
+      // A Forget pressed while this save was running (#495): the check above was made before the first person was
+      // written, so take out what was just written for anyone forgotten since. The save itself is already done, so a
+      // failure here is only logged.
+      try {
+        await dropForgottenFrom(botId, written);
+      } catch (err) {
+        console.error('Error checking for a Forget after a memory save:', err instanceof Error ? err.message : 'unknown');
       }
     })();
 
