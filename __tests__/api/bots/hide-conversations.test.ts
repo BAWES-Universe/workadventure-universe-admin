@@ -101,7 +101,8 @@ describe('the answer: universe default, bot choice', () => {
 });
 
 describe('off: everything answers as it did', () => {
-  it('shows a manager the transcripts, with the same fields', async () => {
+  it('shows a super admin the transcripts, with the same fields', async () => {
+    session.mockResolvedValue({ id: 'u-root', email: 'root@example.com', isSuperAdmin: true });
     const response = await call(getConversations);
     const body = await response.json();
     expect(response.status).toBe(200);
@@ -110,14 +111,26 @@ describe('off: everything answers as it did', () => {
     expect(body).not.toHaveProperty('private');
   });
 
-  it('shows the conversation figures, the emotions and the saved memory', async () => {
+  it('shows a manager the conversation figures, and a super admin the emotions and the saved memory', async () => {
     expect((await (await call(getConversationStats)).json()).totalConversations).toBe(1);
-    db.botsMemory.findMany.mockResolvedValue([{ userUuid: 'uuid-bob', userId: null, userName: 'Bob', isGuest: false, emotions: { botEmotion: { joy: 80 } }, lastEmotionUpdate: new Date(7), user: null }]);
+    session.mockResolvedValue({ id: 'u-root', email: 'root@example.com', isSuperAdmin: true });
+        db.botsMemory.findMany.mockResolvedValue([{ userUuid: 'uuid-bob', userId: null, userName: 'Bob', isGuest: false, emotions: { botEmotion: { joy: 80 } }, lastEmotionUpdate: new Date(7), user: null }]);
     expect((await (await call(getEmotions)).json())[0].emotions).toEqual({ botEmotion: { joy: 80 } });
     db.botsMemory.findMany.mockResolvedValue([{ ...MEMORY_ROW, updatedAt: new Date(1) }]);
     const memory = await (await call(getMemory, 'GET', { token: 'service-secret' })).json();
     expect(memory.memories[0].memories).toEqual(MEMORY_ROW.memories);
     expect(memory).not.toHaveProperty('private');
+  });
+
+  it('keeps what people said and what the bot remembers from a manager: only super admins read it (#503)', async () => {
+    for (const handler of [getConversations, getEmotions, getMemory]) {
+      const response = await call(handler);
+      expect(response.status).toBe(403);
+    }
+    expect(db.botsConversation.findMany).not.toHaveBeenCalled();
+    expect(db.botsMemory.findMany).not.toHaveBeenCalled();
+    session.mockResolvedValue(null);
+    for (const handler of [getConversations, getEmotions, getMemory]) expect((await call(handler)).status).toBe(401);
   });
 
   it('lists every bot across bots, with nothing left out and no extra filter', async () => {
@@ -161,7 +174,8 @@ describe('on: nobody reads text, super admins included', () => {
 
   it('hides emotions, and gives a person only the tally of what the bot remembers', async () => {
     botIs(true);
-    expect(await (await call(getEmotions)).json()).toEqual([]);
+    session.mockResolvedValue({ id: 'u-root', email: 'root@example.com', isSuperAdmin: true });
+        expect(await (await call(getEmotions)).json()).toEqual([]);
     expect(db.botsMemory.findMany).not.toHaveBeenCalled();
     const memory = await (await call(getMemory)).json();
     expect(memory).toEqual({ memories: [], private: true, people: 3, lastUpdated: 9000 });
