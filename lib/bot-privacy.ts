@@ -2,9 +2,9 @@ import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 
 /**
- * Hide bot conversations (#435). A universe can hide what its bots write down: Orbit then shows nobody (super admins
- * included) a transcript or what a bot remembers, and the bot server sends none of it to PostHog or Sentry. The bot
- * still remembers people exactly as before; this only decides who can read it.
+ * Bot chat telemetry (#435, stored as hide-conversations). A universe can switch its bots' chat telemetry off: Orbit
+ * then shows nobody a transcript or what a bot remembers, and the bot server sends none of it to PostHog or Sentry.
+ * Bots always save their chats and remember people exactly as before (#514); this only decides where the text goes.
  *
  * Each bot follows its universe unless its managers pick Private or Normal. A universe that hides them wins: a
  * manager cannot loosen it. Everything starts off, so nothing changes until an owner switches it on.

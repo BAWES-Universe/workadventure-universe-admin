@@ -1,5 +1,5 @@
 /**
- * Hide bot conversations (#435): the no-regression list for the Orbit half.
+ * Bot chat telemetry (#435, #514): the no-regression list for the Orbit half.
  *
  * Off (the default) every page, API and bot-server call answers exactly as before. On, nobody who can sign in reads a
  * transcript or what a bot remembers, super admins included, while the bot server still reads and writes memory.
@@ -213,7 +213,7 @@ describe('on: nobody reads text, super admins included', () => {
   });
 });
 
-describe('the bot server cannot save a transcript for a hidden bot', () => {
+describe('the bot server saves the transcript of a hidden bot too', () => {
   const transcript = { userUuid: 'uuid-bob', userName: 'Bob', messages: [{ sender: 'person', message: 'my secret plan', timestamp: 1 }], startedAt: 1, messageCount: 1 };
   const putParams = { params: Promise.resolve({ id: 'bot-1', conversationId: '9' }) };
   const put = (body: unknown) =>
@@ -226,18 +226,23 @@ describe('the bot server cannot save a transcript for a hidden bot', () => {
       putParams,
     );
 
-  it('stores nothing on create or update and says it skipped, when the bot is Private or its universe hides', async () => {
+  it('saves the chat on create and update, when the bot is Private or its universe hides (telemetry off)', async () => {
     for (const [own, universe] of [[true, false], [null, true]] as const) {
+      db.botsConversation.create.mockClear();
+      db.botsConversation.update.mockClear();
       botIs(own, universe);
+      db.botsConversation.create.mockResolvedValue({ id: 9 });
       const created = await call(saveConversation, 'POST', { token: 'service-secret', body: transcript });
       expect(created.status).toBe(200);
-      expect(await created.json()).toEqual({ conversationId: null, status: 'skipped' });
+      expect(await created.json()).toEqual({ conversationId: '9', status: 'created' });
+      db.botsConversation.findFirst.mockResolvedValue({ id: 9, startedAt: new Date(1), endedAt: new Date(1) });
+      db.botsConversation.update.mockResolvedValue({});
       const updated = await put({ messages: transcript.messages, messageCount: 2 });
       expect(updated.status).toBe(200);
-      expect(await updated.json()).toEqual({ status: 'skipped' });
+      expect(await updated.json()).toEqual({ status: 'updated' });
+      expect(db.botsConversation.create).toHaveBeenCalledTimes(1);
+      expect(db.botsConversation.update).toHaveBeenCalledTimes(1);
     }
-    expect(db.botsConversation.create).not.toHaveBeenCalled();
-    expect(db.botsConversation.update).not.toHaveBeenCalled();
   });
 
   it('saves as before when the bot is not hidden', async () => {
