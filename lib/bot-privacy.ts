@@ -114,6 +114,12 @@ export async function memoryTally(botId: string): Promise<{ people: number; last
   return { people: tally._count._all, lastUpdated: tally._max.updatedAt?.getTime() ?? null };
 }
 
+export interface Forgetting {
+  everyone: boolean;
+  userUuids: Set<string>;
+  rows: { id: string; userUuid: string | null }[];
+}
+
 /** How long a forget stays after the bot server was told, in case the answer was lost on the way. */
 export const FORGET_GRACE_MS = 60_000;
 
@@ -123,7 +129,7 @@ export const FORGET_GRACE_MS = 60_000;
  * bot server was first told, so an answer that got lost is told again and a save in that minute still skips them;
  * after that it is removed, and what the bot learns about the person from then on is saved as usual.
  */
-export async function takeForgets(botId: string): Promise<{ everyone: boolean; userUuids: Set<string> }> {
+export async function takeForgets(botId: string): Promise<Forgetting> {
   const now = new Date();
   const rows = await prisma.botMemoryForget.findMany({ where: { botId }, select: { id: true, userUuid: true, reportedAt: true } });
   const expired = rows.filter((row) => row.reportedAt && now.getTime() - row.reportedAt.getTime() > FORGET_GRACE_MS);
@@ -138,5 +144,16 @@ export async function takeForgets(botId: string): Promise<{ everyone: boolean; u
   return {
     everyone: live.some((row) => row.userUuid === null),
     userUuids: new Set(live.flatMap((row) => (row.userUuid === null ? [] : [row.userUuid]))),
+    rows: live.map((row) => ({ id: row.id, userUuid: row.userUuid })),
   };
+}
+
+/**
+ * What the bot server is told to forget, or nothing when nobody was. Each row comes with its id: the same Forget is
+ * repeated for a minute, so the bot server applies a row once by its id, and a second Forget of the same person within
+ * that minute is a new row it still applies (`userUuid` null is everyone).
+ */
+export function forgetNotice(forgetting: Forgetting): { everyone: boolean; userUuids: string[]; rows: Forgetting['rows'] } | undefined {
+  if (!forgetting.everyone && forgetting.userUuids.size === 0) return undefined;
+  return { everyone: forgetting.everyone, userUuids: [...forgetting.userUuids], rows: forgetting.rows };
 }

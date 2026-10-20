@@ -3,7 +3,7 @@ import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
 import { prisma } from '@/lib/db';
 import { authorizeBotManager, json } from '@/lib/bot-access-api';
-import { BOT_PRIVACY_CHOICES, loadBotPrivacy, memoryTally, storedFor, takeForgets, type BotPrivacyChoice } from '@/lib/bot-privacy';
+import { BOT_PRIVACY_CHOICES, forgetNotice, loadBotPrivacy, memoryTally, storedFor, takeForgets, type BotPrivacyChoice } from '@/lib/bot-privacy';
 import { validateServiceToken } from '@/lib/service-tokens';
 import { trustedCorsHeaders } from '@/lib/cors';
 
@@ -46,12 +46,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     if (!privacy) return json(request, { error: 'Bot not found' }, 404);
     if (fromBotServer) {
       // The bot server asks every 30 seconds, so a Forget reaches it even while nobody is talking to the bot
-      const forgetting = await takeForgets(id);
-      return json(request, {
-        botId: id,
-        ...privacy,
-        ...(forgetting.everyone || forgetting.userUuids.size > 0 ? { forget: { everyone: forgetting.everyone, userUuids: [...forgetting.userUuids] } } : {}),
-      });
+      const forget = forgetNotice(await takeForgets(id));
+      return json(request, { botId: id, ...privacy, ...(forget ? { forget } : {}) });
     }
 
     const [tally, replies, people] = await Promise.all([

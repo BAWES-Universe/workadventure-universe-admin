@@ -314,7 +314,7 @@ describe('the bot server really forgets (it saves a person again whenever they t
   it('skips a forgotten person, saves the rest, tells the bot server, and marks the row told', async () => {
     db.botMemoryForget.findMany.mockResolvedValue([{ id: 'f1', userUuid: 'uuid-bob', reportedAt: null }]);
     const response = await save({ memories: [{ userUuid: 'uuid-bob' }, { userUuid: 'uuid-cy' }] });
-    expect(await response.json()).toEqual({ status: 'saved', saveType: 'periodic', forget: { everyone: false, userUuids: ['uuid-bob'] } });
+    expect(await response.json()).toEqual({ status: 'saved', saveType: 'periodic', forget: { everyone: false, userUuids: ['uuid-bob'], rows: [{ id: 'f1', userUuid: 'uuid-bob' }] } });
     await new Promise((resolve) => setImmediate(resolve));
     expect(saved()).toEqual(['uuid-cy']);
     expect(db.botMemoryForget.updateMany).toHaveBeenCalledWith({ where: { id: { in: ['f1'] } }, data: { reportedAt: expect.any(Date) } });
@@ -323,7 +323,7 @@ describe('the bot server really forgets (it saves a person again whenever they t
   it('skips everybody when everyone was forgotten, emotion-only saves included', async () => {
     db.botMemoryForget.findMany.mockResolvedValue([{ id: 'f2', userUuid: null, reportedAt: null }]);
     const response = await save({ memories: [{ userUuid: 'uuid-bob' }], saveType: 'immediate', emotions: { joy: 1 }, userUuid: 'uuid-cy' });
-    expect((await response.json()).forget).toEqual({ everyone: true, userUuids: [] });
+    expect((await response.json()).forget).toEqual({ everyone: true, userUuids: [], rows: [{ id: 'f2', userUuid: null }] });
     await new Promise((resolve) => setImmediate(resolve));
     expect(db.botsMemory.upsert).not.toHaveBeenCalled();
   });
@@ -346,8 +346,18 @@ describe('the bot server really forgets (it saves a person again whenever they t
     botIs(true);
     db.botMemoryForget.findMany.mockResolvedValue([{ id: 'f1', userUuid: 'uuid-bob', reportedAt: null }, { id: 'f4', userUuid: null, reportedAt: new Date(Date.now() - 20_000) }]);
     const body = await (await call(getPrivacy, 'GET', { token: 'service-secret' })).json();
-    expect(body).toEqual({ botId: 'bot-1', universeHides: false, choice: 'private', hidden: true, forget: { everyone: true, userUuids: ['uuid-bob'] } });
+    expect(body).toEqual({ botId: 'bot-1', universeHides: false, choice: 'private', hidden: true, forget: { everyone: true, userUuids: ['uuid-bob'], rows: [{ id: 'f1', userUuid: 'uuid-bob' }, { id: 'f4', userUuid: null }] } });
     expect(db.botMemoryForget.updateMany).toHaveBeenCalledWith({ where: { id: { in: ['f1'] } }, data: { reportedAt: expect.any(Date) } });
+  });
+
+  it('sends each Forget with its own id, so a second Forget of the same person within the minute is not taken for a repeat', async () => {
+    botIs(true);
+    db.botMemoryForget.findMany.mockResolvedValue([
+      { id: 'f1', userUuid: 'uuid-bob', reportedAt: new Date(Date.now() - 20_000) },
+      { id: 'f5', userUuid: 'uuid-bob', reportedAt: null },
+    ]);
+    const body = await (await call(getPrivacy, 'GET', { token: 'service-secret' })).json();
+    expect(body.forget).toEqual({ everyone: false, userUuids: ['uuid-bob'], rows: [{ id: 'f1', userUuid: 'uuid-bob' }, { id: 'f5', userUuid: 'uuid-bob' }] });
   });
 
   it('adds nothing to the privacy check of a bot nobody asked to forget anything', async () => {
