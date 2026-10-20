@@ -297,7 +297,6 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
       {view === 'visitors' ? (
         <PageHeader
           kind="people"
-          plainIcon
           title="Visitors"
           context={<InContext parts={[{ label: universe.name, href: `/admin/universes/${id}`, kind: 'universe' }]} />}
           stats={analytics ? <Figures><Figure value={analytics.totalAccesses || 0} label="accesses" /></Figures> : undefined}

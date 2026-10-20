@@ -255,7 +255,7 @@ async function resolveSubject(
   // The creator always chats with, messages and calls over their own bot, but manages it only while they hold Manage
   // bots, so Manage this bot is the one thing a rule can still change for them
   if (user.id === place.createdById && ['chat', 'dm', 'summon'].some((action) => body[action as RuleAction] && body[action as RuleAction] !== 'default')) {
-    throw new BotSettingsError(400, 'The bot\'s creator always chats with it, messages it and calls it over. Only "Manage this bot" can be set for them');
+    throw new BotSettingsError(400, 'The bot\'s creator always chats with it, messages it and summons it. Only "Manage this bot" can be set for them');
   }
   return { userId: user.id };
 }
