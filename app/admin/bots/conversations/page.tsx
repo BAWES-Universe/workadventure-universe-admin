@@ -43,6 +43,8 @@ export default function ConversationsBrowsePage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [pagination, setPagination] = useState<PageInfo | null>(null);
+  // Hide bot conversations (#435): how many were left out because their bots are private.
+  const [hiddenCount, setHiddenCount] = useState(0);
   const [filters, setFilters] = useState({
     botId: '',
     userUuid: '',
@@ -116,6 +118,7 @@ export default function ConversationsBrowsePage() {
       const data = await response.json();
       setConversations(data.conversations || []);
       setPagination(data.pagination || null);
+      setHiddenCount(typeof data.hiddenCount === 'number' ? data.hiddenCount : 0);
       setError(null);
     } catch (err) {
       console.error('Error fetching conversations:', err);
@@ -208,6 +211,12 @@ export default function ConversationsBrowsePage() {
       </FilterRow>
 
       {error && <LoadError label="conversations" retry={fetchConversations} />}
+
+      {hiddenCount > 0 && (
+        <p className="text-sm text-muted-foreground" role="status">
+          {hiddenCount.toLocaleString()} {hiddenCount === 1 ? 'conversation' : 'conversations'} not shown: Hide bot conversations is on for {hiddenCount === 1 ? 'the bot' : 'their bots'}.
+        </p>
+      )}
 
       {loading && conversations.length === 0 ? (
         <LoadingRows label="conversations" rows={5} />

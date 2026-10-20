@@ -9,6 +9,7 @@ import { validateAccessToken } from '@/lib/oidc';
 import { resolveRoomIdFromPlayUri, transformBotToServerFormat } from '@/lib/bot-config-helpers';
 import { checkAiProviderRef } from '@/lib/ai-provider-ref';
 import { toolTimeoutSecondsSchema } from '@/lib/bot-tool-timeout';
+import { mustStayPrivateAfterMove } from '@/lib/bot-privacy';
 import { z } from 'zod';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Prisma
@@ -482,11 +483,14 @@ export async function POST(request: NextRequest) {
       // the stored JSON's embedded behaviorType stale (divergent from the
       // scalar column). Provided config still merges over the existing one;
       // assignedSpace is preserved unless the request explicitly supplies it.
+      let keepPrivate = false;
       {
         const existing = await prisma.bot.findUnique({
           where: { id: validatedData.botId },
-          select: { behaviorConfig: true },
+          select: { behaviorConfig: true, roomId: true },
         });
+        // Hide bot conversations (#435): a move out of a hiding universe keeps the bot Private
+        keepPrivate = !!existing?.roomId && existing.roomId !== roomId && (await mustStayPrivateAfterMove(validatedData.botId, roomId));
         const existingConfig = (existing?.behaviorConfig as Record<string, unknown> | null) || {};
         const provided = (validatedData.behaviorConfig || {}) as Record<string, unknown>;
         updateData.behaviorConfig = {
@@ -500,7 +504,7 @@ export async function POST(request: NextRequest) {
       }
       bot = await prisma.bot.update({
         where: { id: validatedData.botId },
-        data: updateData,
+        data: keepPrivate ? { ...updateData, hideConversations: true } : updateData,
         include: {
           room: {
             include: {

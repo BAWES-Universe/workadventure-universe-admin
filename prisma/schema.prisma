@@ -81,6 +81,9 @@ model Universe {
   isPublic    Boolean  @default(true) @map("is_public")
   featured    Boolean  @default(false) // For discovery
   thumbnailUrl String? @map("thumbnail_url")
+  // Hide bot conversations (#435): Orbit shows no transcript or bot memory text for any bot here, and the bot server
+  // sends none to PostHog or Sentry. Bots still remember people either way. Off by default.
+  hideBotConversations Boolean @default(false) @map("hide_bot_conversations")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
@@ -568,6 +571,9 @@ model Bot {
   refusalReply        String?  @map("refusal_reply") @db.VarChar(500)
   // Replies each person may get from this bot in a day; null = no limit. Stored here; nothing reads it yet (#1159).
   dailyReplyCap       Int?     @map("daily_reply_cap")
+  // Hide bot conversations (#435) for this bot alone. null = follow the universe (default), true = Private, false = Normal.
+  // A universe that hides them wins: a bot cannot be loosened below it.
+  hideConversations   Boolean? @map("hide_conversations")
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
   createdById         String?  @map("created_by_id")
@@ -733,6 +739,21 @@ model BotsTestResult {
   @@index([testSuite])
   @@index([createdAt])
   @@map("bots_test_results")
+}
+
+// Someone the owner asked a bot to forget (#435). The bot server keeps what it remembers in memory and saves all of it
+// every few minutes, so deleting the saved rows is not enough: the next save would bring them back. This row makes the
+// save endpoint skip the person (userUuid null = everyone) and tell the bot server to drop them. It is kept a minute
+// after it was told, in case the answer was lost, then removed.
+model BotMemoryForget {
+  id         String    @id @default(uuid())
+  botId      String    @map("bot_id") @db.VarChar(255)
+  userUuid   String?   @map("user_uuid") @db.VarChar(255)
+  createdAt  DateTime  @default(now()) @map("created_at")
+  reportedAt DateTime? @map("reported_at")
+
+  @@index([botId])
+  @@map("bot_memory_forgets")
 }
 
 // Bot Memory
