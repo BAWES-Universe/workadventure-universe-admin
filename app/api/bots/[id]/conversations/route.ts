@@ -23,6 +23,7 @@ export async function OPTIONS() {
  * Auth: BOT_SERVICE_TOKEN
  * 
  * Response: { conversationId: string, status: "created" | "updated" }
+ *          or { conversationId: null, status: "skipped" } when the bot hides its conversations (#435): nothing is stored
  */
 export async function POST(
   request: NextRequest,
@@ -32,6 +33,13 @@ export async function POST(
     requireServiceToken(request);
 
     const { id: botId } = await params;
+
+    // Hide bot conversations (#435): a hidden bot's transcript is never saved, whatever the bot server sends.
+    // A failed check answers 500 and stores nothing.
+    if (await isBotHidden(botId)) {
+      return NextResponse.json({ conversationId: null, status: 'skipped' as const }, { headers: corsHeaders() });
+    }
+
     const body = await request.json();
 
     const {
