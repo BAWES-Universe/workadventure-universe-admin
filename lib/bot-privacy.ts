@@ -149,6 +149,24 @@ export async function takeForgets(botId: string): Promise<Forgetting> {
 }
 
 /**
+ * Takes out of the saved memory the people a Forget asked for after a save had checked, among the ones that save just
+ * wrote. The save checks who was forgotten once and then writes people one by one, so a Forget pressed in between
+ * would be written back. Reads the rows as they are and marks nothing as told. Returns how many people it removed.
+ */
+export async function dropForgottenFrom(botId: string, written: string[]): Promise<number> {
+  if (written.length === 0) return 0;
+  const now = Date.now();
+  const rows = await prisma.botMemoryForget.findMany({ where: { botId }, select: { userUuid: true, reportedAt: true } });
+  const live = rows.filter((row) => !row.reportedAt || now - row.reportedAt.getTime() <= FORGET_GRACE_MS);
+  const everyone = live.some((row) => row.userUuid === null);
+  const forgotten = new Set(live.flatMap((row) => (row.userUuid === null ? [] : [row.userUuid])));
+  const drop = written.filter((userUuid) => everyone || forgotten.has(userUuid));
+  if (drop.length === 0) return 0;
+  await prisma.botsMemory.deleteMany({ where: { botId, userUuid: { in: drop } } });
+  return drop.length;
+}
+
+/**
  * What the bot server is told to forget, or nothing when nobody was. Each row comes with its id: the same Forget is
  * repeated for a minute, so the bot server applies a row once by its id, and a second Forget of the same person within
  * that minute is a new row it still applies (`userUuid` null is everyone).
