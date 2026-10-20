@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { requireServiceToken, validateServiceToken } from '@/lib/service-tokens';
-import { botReadDenied, getViewer } from '@/lib/access-scope';
+import { botContentReadDenied, getViewer } from '@/lib/access-scope';
 import { corsHeaders } from '@/lib/cors';
 import { dropForgottenFrom, forgetNotice, isBotHidden, memoryTally, takeForgets } from '@/lib/bot-privacy';
 
@@ -35,7 +35,7 @@ export async function GET(
     const isServiceToken = validateServiceToken(request);
     const { id: botId } = await params;
     if (!isServiceToken) {
-      const denied = await botReadDenied(request, botId, corsHeaders());
+      const denied = await botContentReadDenied(request, corsHeaders());
       if (denied) return denied;
       // Hide bot conversations (#435): a person gets the tally, never the contents. The bot server reads everything
       // back as always, with its service token or, when it has none, the admin token it falls back to.
