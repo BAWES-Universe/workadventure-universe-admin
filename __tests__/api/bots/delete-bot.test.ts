@@ -8,6 +8,7 @@ jest.mock('@/lib/db', () => ({
   prisma: {
     bot: {
       findUnique: jest.fn(),
+      findMany: jest.fn().mockResolvedValue([]), // Hide bot conversations (#435): no bot hides, so a delete is just the delete
       deleteMany: jest.fn(),
     },
     user: {
