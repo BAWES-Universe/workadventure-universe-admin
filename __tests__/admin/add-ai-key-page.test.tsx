@@ -67,6 +67,34 @@ describe('Add a key', () => {
     expect(JSON.parse(init.body)).toEqual({ kind: 'lmstudio', address: 'https://lm.example.com', apiKey: '', model: 'qwen3-8b', name: 'My LM Studio' });
   });
 
+  it('asks for the model name when the provider has no model list, and adds it as typed (#456)', async () => {
+    fetchMock.mockImplementation((url: string) =>
+      url.endsWith('/models') ? json({ ok: false, noList: true, message: 'Groq doesn’t share a list of its models. Type the model name.' }) : json({ id: 'key-new' }),
+    );
+    render(<AddAiKeyPage />);
+    fireEvent.click(screen.getByRole('radio', { name: /Groq/ }));
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'gsk-1234' } });
+    fireEvent.click(screen.getByRole('button', { name: /Load models/ }));
+    const field = await screen.findByLabelText('Model name');
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect((addButton() as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(field, { target: { value: ' llama-3.3-70b ' } });
+    expect((addButton() as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(addButton());
+    await waitFor(() => expect(push).toHaveBeenCalledWith('/admin/you/ai-keys'));
+    expect(JSON.parse(fetchMock.mock.calls.at(-1)![1].body)).toMatchObject({ kind: 'groq', apiKey: 'gsk-1234', model: 'llama-3.3-70b' });
+  });
+
+  it('shows no model name field for a provider that has a list', async () => {
+    fetchMock.mockImplementation(() => json({ ok: true, models: ['a', 'b'] }));
+    render(<AddAiKeyPage />);
+    fireEvent.click(screen.getByRole('radio', { name: /Gemini/ }));
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'k-1234' } });
+    fireEvent.click(screen.getByRole('button', { name: /Load models/ }));
+    await screen.findByText(/It answered/);
+    expect(screen.queryByLabelText('Model name')).toBeNull();
+  });
+
   it('says why the models did not load, and keeps Add key off', async () => {
     fetchMock.mockImplementation(() => json({ ok: false, message: 'That address points to a private network, so Universe can’t reach it.' }));
     render(<AddAiKeyPage />);

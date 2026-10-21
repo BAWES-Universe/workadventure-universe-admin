@@ -12,7 +12,7 @@ import { authenticatedFetch } from '@/lib/client-auth';
 import { AI_KEY_KINDS, kindInfo, type AiKeyKind, type AiKeyKindInfo } from '@/lib/ai-key-kinds';
 import { PageHeader } from '../../../components/ds';
 
-type Models = { status: 'none' } | { status: 'loading' } | { status: 'ready'; models: string[]; facts: Record<string, { tools?: boolean; vision?: boolean }> } | { status: 'failed'; message: string };
+type Models = { status: 'none' } | { status: 'loading' } | { status: 'ready'; models: string[]; facts: Record<string, { tools?: boolean; vision?: boolean }> } | { status: 'failed'; message: string } | { status: 'typed' };
 
 /** Said when a provider's own list says the model cannot call tools (it does not say, for most models, and then nothing is said). */
 const NO_TOOLS = 'This model has no Tools. Bots on it can still chat.';
@@ -110,12 +110,15 @@ export default function AddAiKeyPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ kind: info.kind, address, ...(region ? { region } : {}), apiKey }),
       });
-      const data: { ok?: boolean; models?: string[]; facts?: Record<string, { tools?: boolean; vision?: boolean }>; message?: string } = await response.json().catch(() => ({}));
+      const data: { ok?: boolean; models?: string[]; facts?: Record<string, { tools?: boolean; vision?: boolean }>; message?: string; noList?: boolean } = await response.json().catch(() => ({}));
       if (data.ok && Array.isArray(data.models)) {
         setModels({ status: 'ready', models: data.models, facts: data.facts ?? {} });
         // The one model there is, is the one picked; otherwise the one this provider suggests, when it lists it.
         if (data.models.length === 1) setModel(data.models[0]);
         else if (info.suggestedModel && data.models.includes(info.suggestedModel)) setModel(info.suggestedModel);
+      } else if (data.noList) {
+        // This provider has no model list: the model is typed, and Add key proves it with one tiny reply
+        setModels({ status: 'typed' });
       } else {
         setModels({ status: 'failed', message: data.message ?? 'That didn’t work. Try again.' });
       }
@@ -132,7 +135,7 @@ export default function AddAiKeyPage() {
       const response = await authenticatedFetch('/api/me/ai-keys', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ kind: info.kind, address, ...(region ? { region } : {}), apiKey, model, name }),
+        body: JSON.stringify({ kind: info.kind, address, ...(region ? { region } : {}), apiKey, model: model.trim(), name }),
       });
       if (!response.ok) {
         const data: { error?: string } = await response.json().catch(() => ({}));
@@ -275,6 +278,24 @@ export default function AddAiKeyPage() {
               </Button>
             </div>
             {models.status === 'none' && <p className={FIELD_HINT}>Load models to check that it answers, then pick one.</p>}
+            {models.status === 'typed' && (
+              <div className="grid gap-1.5">
+                <Label htmlFor="ai-key-model-name">Model name</Label>
+                <Input
+                  id="ai-key-model-name"
+                  autoComplete="off"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  maxLength={255}
+                  value={model ?? ''}
+                  onChange={(event) => setModel(event.target.value.trim() === '' ? null : event.target.value)}
+                  className="h-11 rounded-xl"
+                />
+                <p className={FIELD_HINT}>
+                  {info.label} doesn’t share a list of its models. Type the name as {info.label} writes it. Add key checks it with one tiny reply.
+                </p>
+              </div>
+            )}
             {models.status === 'failed' && (
               <p role="alert" className="text-sm text-[#fca5a5]">
                 {models.message}
@@ -327,7 +348,7 @@ export default function AddAiKeyPage() {
         )}
 
         <div className="grid gap-2">
-          <Button type="submit" className="h-11" disabled={!info || !model || name.trim() === '' || saving}>
+          <Button type="submit" className="h-11" disabled={!info || !model || model.trim() === '' || name.trim() === '' || saving}>
             {saving ? 'Adding…' : 'Add key'}
           </Button>
           <Button type="button" variant="outline" className="h-11" disabled={saving} onClick={() => router.back()}>

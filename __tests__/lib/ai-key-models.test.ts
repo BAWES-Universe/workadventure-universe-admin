@@ -154,6 +154,29 @@ describe('probeModels, a busy provider', () => {
   });
 });
 
+describe('a hosted provider with no model list (#456)', () => {
+  it.each([404, 405])('says noList for a %i from a hosted provider, so the model can be typed', async (status) => {
+    get.mockResolvedValue(answer(status, {}));
+    const result = await loadModels({ kind: 'groq', apiKey: 'k-1234' });
+    expect(result).toMatchObject({ ok: false, noList: true });
+    expect(await probeModels({ kind: 'groq', apiKey: 'k-1234' })).toMatchObject({ ok: false, noList: true, reason: 'other' });
+  });
+
+  it('still says a wrong key is a wrong key, and a busy provider is busy', async () => {
+    get.mockResolvedValue(answer(401, {}));
+    expect(await probeModels({ kind: 'groq', apiKey: 'k-1234' })).toMatchObject({ ok: false, reason: 'rejected' });
+    expect((await probeModels({ kind: 'groq', apiKey: 'k-1234' })).noList).toBeUndefined();
+    get.mockResolvedValue(answer(429, {}));
+    expect((await probeModels({ kind: 'groq', apiKey: 'k-1234' })).noList).toBeUndefined();
+  });
+
+  it('keeps the plain error for a server on your own computer or a typed NIM address: a 404 there is a wrong address', async () => {
+    get.mockResolvedValue(answer(404, {}));
+    expect(await loadModels({ kind: 'lmstudio', address: 'https://lm.example.com' })).toEqual({ ok: false, message: 'It answered with an error (404).' });
+    expect(await loadModels({ kind: 'nim', address: 'https://nim.example.com', apiKey: 'k-1234' })).toEqual({ ok: false, message: 'It answered with an error (404).' });
+  });
+});
+
 describe('probeChat', () => {
   it('asks one tiny chat reply of the saved model, at the chat address next to the model list, keyed', async () => {
     post.mockResolvedValue(answer(200, { choices: [] }));

@@ -567,7 +567,7 @@ function LendSheet({
 const SEARCH_FROM = 8;
 const SHOWN = 30;
 
-type ModelList = { status: 'loading' } | { status: 'ready'; models: string[]; facts: Record<string, { tools?: boolean; vision?: boolean }> } | { status: 'failed'; message: string };
+type ModelList = { status: 'loading' } | { status: 'ready'; models: string[]; facts: Record<string, { tools?: boolean; vision?: boolean }> } | { status: 'failed'; message: string } | { status: 'typed' };
 
 const NO_TOOLS = 'This model has no Tools. Bots on it can still chat.';
 
@@ -626,9 +626,10 @@ function EditKeySheet({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(newAddress ? { address: newAddress } : {}),
       });
-      const data = (await response.json().catch(() => ({}))) as { ok?: boolean; models?: string[]; facts?: Record<string, { tools?: boolean; vision?: boolean }>; message?: string };
+      const data = (await response.json().catch(() => ({}))) as { ok?: boolean; models?: string[]; facts?: Record<string, { tools?: boolean; vision?: boolean }>; message?: string; noList?: boolean };
       if (cancelled()) return;
       if (data.ok && Array.isArray(data.models)) setModels({ status: 'ready', models: data.models, facts: data.facts ?? {} });
+      else if (data.noList) setModels({ status: 'typed' });
       else setModels({ status: 'failed', message: data.message || 'Couldn’t load the models. Try again.' });
     } catch {
       if (!cancelled()) setModels({ status: 'failed', message: 'Couldn’t load the models. Try again.' });
@@ -649,7 +650,7 @@ function EditKeySheet({
       const response = await authenticatedFetch(`/api/me/ai-keys/${encodeURIComponent(target.key.id)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(target.what === 'address' ? (pickOnNew ? { address: address.trim(), model } : { address: address.trim() }) : { model }),
+        body: JSON.stringify(target.what === 'address' ? (pickOnNew ? { address: address.trim(), model: model?.trim() } : { address: address.trim() }) : { model: model?.trim() }),
       });
       if (!response.ok) {
         const body = await response.json().catch(() => null);
@@ -712,6 +713,24 @@ function EditKeySheet({
             <p role="alert" className="text-sm text-[#fca5a5]">
               {models.message}
             </p>
+          )}
+          {models.status === 'typed' && (
+            <div className="grid gap-1.5">
+              <Label htmlFor="ai-key-model-name">Model name</Label>
+              <Input
+                id="ai-key-model-name"
+                autoComplete="off"
+                autoCapitalize="none"
+                spellCheck={false}
+                maxLength={255}
+                value={model ?? ''}
+                onChange={(event) => setModel(event.target.value.trim() === '' ? null : event.target.value)}
+                className="h-11 rounded-xl"
+              />
+              <p className="text-[13px] text-muted-foreground">
+                {target?.key.name} comes from a provider that doesn’t share a list of its models. Now: {target?.key.model ?? 'no model'}. The new name is checked with one tiny reply.
+              </p>
+            </div>
           )}
           {models.status === 'ready' && (
             <>

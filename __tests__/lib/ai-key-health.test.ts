@@ -180,6 +180,16 @@ describe('judgeFailedReply', () => {
 });
 
 describe('checkKey and checkAndRecord', () => {
+  it('asks a key with no model list for a chat reply every time, and does not mark it Down for the missing list (#456)', async () => {
+    const groq: KeyRow = { ...hosted, settings: { kind: 'groq' }, model: 'llama-3.3-70b' } as KeyRow;
+    probe.mockResolvedValue({ ok: false, noList: true, reason: 'other', message: 'Groq doesn’t share a list of its models. Type the model name.' });
+    chat.mockResolvedValue({ ok: true });
+    expect(await checkKey(groq)).toEqual({ ok: true });
+    expect(chat).toHaveBeenCalledTimes(1);
+    chat.mockResolvedValue({ ok: false, reason: 'rejected', message: 'Groq didn’t accept this key.' });
+    expect(await checkKey(groq)).toMatchObject({ ok: false, reason: 'rejected' });
+  });
+
   it('asks the provider with the saved key and the type it was added as', async () => {
     probe.mockResolvedValue({ ok: true, models: ['m'] });
     expect(await checkKey(hosted)).toEqual({ ok: true });

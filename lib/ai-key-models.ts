@@ -70,7 +70,8 @@ async function keyInfoRejectsKey(base: string, paths: string[], apiKey: string):
   return false;
 }
 
-export type LoadModelsResult = { ok: true; models: string[]; facts: ModelFactsById } | { ok: false; message: string };
+/** `noList`: a hosted provider answered 404/405 to its model list, so it has none. The model is typed and the chat reply proves it. */
+export type LoadModelsResult = { ok: true; models: string[]; facts: ModelFactsById } | { ok: false; message: string; noList?: true };
 
 /**
  * Why a check failed, for deciding what to do about it: nobody answered, the provider said no, it was too busy to say
@@ -86,7 +87,7 @@ export type ModelFacts = {
   context?: number;
 };
 export type ModelFactsById = Record<string, ModelFacts>;
-export type ProbeModelsResult = { ok: true; models: string[]; facts: ModelFactsById } | { ok: false; message: string; reason: ProbeFailure };
+export type ProbeModelsResult = { ok: true; models: string[]; facts: ModelFactsById } | { ok: false; message: string; reason: ProbeFailure; noList?: true };
 
 /**
  * What a provider's 400 or 422 says when the problem is the model (it does not exist, or this key may not use it) and not the
@@ -234,6 +235,11 @@ export async function probeModels(input: KeyTargetInput & { apiKey?: unknown }):
   if (result.status === 429 || result.status === 529) {
     return { ok: false, reason: 'busy', message: `${info.label} is busy right now. Try again in a moment.` };
   }
+  // A hosted provider with no model list: not a wrong key (that is a 401/403 above), so the model is typed and a chat reply decides.
+  // A typed address that answers 404 is a wrong address, not a missing list, so only a fixed hosted base counts.
+  if ((result.status === 404 || result.status === 405) && info.group === 'hosted' && info.address === 'none') {
+    return { ok: false, noList: true, reason: 'other', message: `${info.label} doesn’t share a list of its models. Type the model name.` };
+  }
   if (result.status !== 200) return { ok: false, message: `It answered with an error (${result.status}).`, reason: result.status >= 500 ? 'unreachable' : 'other' };
   if (info.keyCheck.type === 'key-info' && apiKey && (await keyInfoRejectsKey(resolved.target.endpoint, info.keyCheck.paths, apiKey))) {
     return { ok: false, message: `${info.label} didn’t accept this key.`, reason: 'rejected' };
@@ -326,7 +332,7 @@ export async function probeChat(input: KeyTargetInput & { apiKey?: unknown; mode
 
 export async function loadModels(input: KeyTargetInput & { apiKey?: unknown }): Promise<LoadModelsResult> {
   const result = await probeModels(input);
-  return result.ok ? result : { ok: false, message: result.message };
+  return result.ok ? result : { ok: false, message: result.message, ...(result.noList ? { noList: true as const } : {}) };
 }
 
 const attempts = new Map<string, number[]>();
