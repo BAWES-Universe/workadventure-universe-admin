@@ -258,8 +258,9 @@ export function MemberPage() {
     const adminRole = isAdministrator(role.permissions);
     // Administrator can only be given in every world, so without that reach the row can't be turned on
     const everyWorldOnly = adminRole && !on && !allowed.all;
-    // Where you may give roles is only worlds they aren't in: nothing to start the role in (widening is a tap on "All worlds", never a tick)
-    const nowhere = !on && !startsAll && allowed.ids.length === 0;
+    // Where you may give roles is only worlds they aren't in: nothing to start the role in (widening is a tap on "All worlds", never a tick;
+    // Administrator is the exception, it is every world by definition and is judged by everyWorldOnly)
+    const nowhere = !on && !adminRole && !startsAll && allowed.ids.length === 0;
     const allowedRole = can.giveRoleIds.includes(role.id);
     const rowOff = !allowedRole || everyWorldOnly || nowhere;
     const inputId = `role-${role.id}`;

@@ -134,6 +134,13 @@ describe('Segmented', () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
+  it('does not explain a blocked segment that is already the picked one', () => {
+    const onBlocked = jest.fn();
+    render(<Segmented aria-label="Kind" value="a" onChange={jest.fn()} options={[{ value: 'a', label: 'A', disabled: true, onBlocked }, { value: 'b', label: 'B' }]} />);
+    fireEvent.click(screen.getByRole('radio', { name: 'A' }));
+    expect(onBlocked).not.toHaveBeenCalled();
+  });
+
   it('skips a disabled segment', () => {
     const onChange = jest.fn();
     render(

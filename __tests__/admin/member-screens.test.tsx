@@ -457,6 +457,44 @@ describe('a member’s page', () => {
       expect(calls.some((call) => call.method === 'PUT')).toBe(false);
     });
 
+    it('keeps Administrator tickable for someone who may widen, even when none of their worlds still exists', async () => {
+      const base = fetchMock.getMockImplementation()!;
+      fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
+        if (url.endsWith('/members/sara') && !init?.method) {
+          return ok({
+            member: { userId: 'sara', name: 'Sara Ali', email: 'sara@example.com', joinedAt: '2026-08-01T00:00:00Z', lastVisitedAt: null, isOwner: false, worlds: { allWorlds: false, worldIds: ['gone'] }, roles: [] },
+            can,
+          });
+        }
+        return base(url, init);
+      });
+      wrap(<MemberPage />);
+      const admin = await screen.findByRole('checkbox', { name: 'Admin' });
+      expect(admin.hasAttribute('disabled')).toBe(false);
+      fireEvent.click(admin);
+      await waitFor(() => expect(calls.find((call) => call.method === 'PUT')).toBeTruthy());
+      expect(calls.find((call) => call.method === 'PUT')!.body).toEqual({ allWorlds: true, worldIds: [] });
+    });
+
+    it('says nothing when the locked "All worlds" is already the choice', async () => {
+      const base = fetchMock.getMockImplementation()!;
+      fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
+        if (url.endsWith('/members/sara') && !init?.method) {
+          return ok({
+            member: { userId: 'sara', name: 'Sara Ali', email: 'sara@example.com', joinedAt: '2026-08-01T00:00:00Z', lastVisitedAt: null, isOwner: false, worlds: { allWorlds: false, worldIds: ['hq'] }, roles: [{ roleId: 'r-editor', ...everywhere }] },
+            can: { ...can, widen: false },
+          });
+        }
+        return base(url, init);
+      });
+      wrap(<MemberPage />);
+      await screen.findByRole('checkbox', { name: 'Editor' });
+      const all = screen.getByRole('radio', { name: 'All worlds' });
+      expect(all.getAttribute('aria-checked')).toBe('true');
+      fireEvent.click(all);
+      expect(screen.queryByRole('status')).toBeNull();
+    });
+
     it('never offers "All worlds" on a role that is not yours to give: the whole row is off', async () => {
       limitedSara({ giveRoleIds: ['r-acct'] });
       wrap(<MemberPage />);

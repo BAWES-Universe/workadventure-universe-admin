@@ -114,7 +114,7 @@ type SegmentedProps<T extends string> = {
   onChange: (value: T) => void
   /**
    * An option you may not pick can carry `onBlocked`: it stays focusable, looks disabled, and a press calls it
-   * (to say why) instead of doing nothing.
+   * (to say why) instead of doing nothing. One that is already picked has nothing to explain.
    */
   options: { value: T; label: React.ReactNode; disabled?: boolean; onBlocked?: () => void }[]
   "aria-label"?: string
@@ -175,7 +175,7 @@ export function Segmented<T extends string>({ value, onChange, options, classNam
             disabled={option.disabled && !blocked}
             aria-disabled={blocked || undefined}
             tabIndex={index === tabbable || blocked ? 0 : -1}
-            onClick={() => (blocked ? option.onBlocked?.() : pick(option.value))}
+            onClick={() => (blocked ? !picked && option.onBlocked?.() : pick(option.value))}
             onKeyDown={(event) => onKeyDown(event, index)}
             className={cn(
               "inline-flex h-11 items-center justify-center rounded-full px-3 text-[13px] font-semibold text-foreground/[.62] transition-[color,background-color,box-shadow] disabled:cursor-not-allowed disabled:opacity-50 aria-disabled:cursor-not-allowed aria-disabled:opacity-50",
