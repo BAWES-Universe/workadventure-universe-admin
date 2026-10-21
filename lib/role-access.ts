@@ -1,6 +1,7 @@
 /**
  * Who may do what with a universe's roles and people (#314), the Discord way:
- * - The owner of the universe, and super admins, may do everything.
+ * - The owner of the universe may do everything. Super admins are not above that: people handle their own
+ *   universes, so a super admin acts here through the universe they own or the roles they hold, like anyone else.
  * - Everyone else ranks by their highest role, and only acts on roles below it: give or take them, edit, rank, delete.
  * - A permission from a role limited to some worlds only works in those worlds. Changing the Roles list itself
  *   (Manage roles) needs the permission in every world: from Everyone, or a role that works in every world.
@@ -16,7 +17,7 @@ const ZERO = BigInt(0);
 
 export interface Access {
   universeId: string;
-  /** The owner, or a super admin: everything, above every role. */
+  /** The owner: everything, above every role. */
   full: boolean;
   isOwner: boolean;
   /** They joined the universe. */
@@ -140,7 +141,7 @@ export function isAdministratorRole(role: { permissions: bigint | number | strin
 export async function accessFor(
   db: Db,
   universeId: string,
-  user: { id: string; isSuperAdmin?: boolean },
+  user: { id: string },
 ): Promise<Access | null> {
   const universe = await db.universe.findUnique({
     where: { id: universeId },
@@ -159,7 +160,7 @@ export async function accessFor(
   return computeAccess({
     universeId,
     worldIds: universe.worlds.map((world) => world.id),
-    full: isOwner || !!user.isSuperAdmin,
+    full: isOwner,
     isOwner,
     everyone: permissionsOf(EVERYONE_KEY),
     member: permissionsOf(MEMBER_KEY),
@@ -182,7 +183,7 @@ export async function accessFor(
 export async function accessForMany(
   db: Db,
   universeIds: string[],
-  user: { id: string; isSuperAdmin?: boolean },
+  user: { id: string },
 ): Promise<Map<string, Access>> {
   const result = new Map<string, Access>();
   if (universeIds.length === 0) return result;
@@ -207,7 +208,7 @@ export async function accessForMany(
       computeAccess({
         universeId: universe.id,
         worldIds: universe.worlds.map((world) => world.id),
-        full: isOwner || !!user.isSuperAdmin,
+        full: isOwner,
         isOwner,
         everyone: permissionsOf(EVERYONE_KEY),
         member: permissionsOf(MEMBER_KEY),

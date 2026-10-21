@@ -80,12 +80,12 @@ export async function GET(
 }
 
 
-async function invitableUniverses(viewer: { id: string; isSuperAdmin: boolean }, personId: string, hidden: string | null) {
+async function invitableUniverses(viewer: { id: string }, personId: string, hidden: string | null) {
   if (viewer.id === personId) return { universes: [], taken: [], friend: false };
   const candidates = await prisma.universe.findMany({
     where: {
       ...(hidden ? { ownerId: { not: hidden } } : {}),
-      ...(viewer.isSuperAdmin ? {} : { OR: [{ ownerId: viewer.id }, { members: { some: { userId: viewer.id } } }] }),
+      OR: [{ ownerId: viewer.id }, { members: { some: { userId: viewer.id } } }],
     },
     select: {
       id: true,
