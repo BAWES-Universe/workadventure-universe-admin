@@ -19,8 +19,10 @@ import { PERMISSIONS, PERMISSION_GROUPS, flag, withUniverse, type PermissionInfo
 import {
   PERMISSION_TOTAL,
   countOn,
+  inheritedBits,
   permissionLockReason,
   roleLockReason,
+  type InheritedFrom,
   type RoleRow,
   type Viewer,
 } from '@/lib/role-ui';
@@ -32,18 +34,30 @@ function offersAdministrator(role: Pick<RoleRow, 'key' | 'builtIn'>): boolean {
   return !(role.builtIn && (role.key === 'admin' || role.key === 'everyone' || role.key === 'member'));
 }
 
+/** What the intro says about the permissions a role inherits, after "N of 17 on". */
+function inheritedNote(on: number, fromEveryone: number, fromMember: number): string {
+  const inherited = fromEveryone + fromMember;
+  if (inherited === 0) return '. Everything Everyone can do is included.';
+  if (fromMember === 0) return on === inherited ? ', all from Everyone.' : `. ${inherited} come from Everyone.`;
+  if (fromEveryone === 0) return on === inherited ? ', all from Member.' : `. ${inherited} come from Member.`;
+  return `. ${fromEveryone} come from Everyone, ${fromMember} from Member.`;
+}
+
 /** Every permission with a switch, in groups. A switch the viewer cannot move is dimmed with a lock, and says why. */
 export function PermissionsTab({
   role,
   viewer,
   universeName,
   draft,
+  inherited,
   onChange,
 }: {
   role: RoleRow;
   viewer: Viewer;
   universeName: string;
   draft: bigint;
+  /** What the role gets from Everyone and Member without having it itself: shown on and locked. */
+  inherited: ReadonlyMap<PermissionKey, InheritedFrom>;
   onChange: (next: bigint) => void;
 }) {
   const [query, setQuery] = useState('');
@@ -62,12 +76,14 @@ export function PermissionsTab({
     onChange(on ? draft | bit : draft & ~bit);
   }
 
-  const on = countOn(draft);
+  const on = countOn(draft | inheritedBits(inherited));
+  const fromEveryone = [...inherited.values()].filter((from) => from === 'Everyone').length;
+  const fromMember = inherited.size - fromEveryone;
   const intro = isAdmin
     ? `${on} of ${PERMISSION_TOTAL} on. Admin always has every permission, so these can’t be switched off. To give fewer, make your own role.`
     : isEveryone
       ? `${on} of ${PERMISSION_TOTAL} on. Chat, DM and Summon bots start on, so bots work as they always have. The rest are usually off: rooms and map areas can still open to everyone on their own.`
-      : `${on} of ${PERMISSION_TOTAL} on. Everything Everyone can do is included. Which rooms and areas this role opens is set on each room and area: see Used in.`;
+      : `${on} of ${PERMISSION_TOTAL} on${inheritedNote(on, fromEveryone, fromMember)} Which rooms and areas this role opens is set on each room and area: see Used in.`;
 
   return (
     <div className="grid gap-5">
@@ -106,8 +122,10 @@ export function PermissionsTab({
               const reason = permissionLockReason(role, viewer, draft, info.key, universeName);
               // The reason for the whole role is said once above; a row says its own
               const rowReason = reason && reason !== wholeReason && !isAdmin ? reason : null;
-              const locked = reason !== null;
-              const checked = (draft & flag(info.key)) !== ZERO || (info.key !== 'ADMINISTRATOR' && (draft & flag('ADMINISTRATOR')) !== ZERO);
+              const from = inherited.get(info.key);
+              const locked = reason !== null || !!from;
+              const checked =
+                !!from || (draft & flag(info.key)) !== ZERO || (info.key !== 'ADMINISTRATOR' && (draft & flag('ADMINISTRATOR')) !== ZERO);
               const owner = info.key === 'ADMINISTRATOR';
               const id = `perm-${info.key}`;
               return (
@@ -130,6 +148,7 @@ export function PermissionsTab({
                       {withUniverse(info.description, universeName)}
                       {owner && !locked && ' Asks you to confirm.'}
                     </span>
+                    {from && <span className="mt-1 block text-xs font-semibold text-muted-foreground">From {from}</span>}
                     {rowReason && (
                       <span className="mt-1 block text-xs font-medium text-muted-foreground">
                         {rowReason}
