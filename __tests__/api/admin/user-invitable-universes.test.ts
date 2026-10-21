@@ -121,10 +121,33 @@ it('says who sent a waiting invitation, when, and what it would give, whether it
 
 it('lists a waiting invitation only where you may invite (to take it back); giving roles alone does not', async () => {
   db.universe.findMany.mockResolvedValue([universe('u1', 'BAWES', { invited: true }), universe('u2', 'Cup', { invited: true })]);
-  youHold({ u1: holding(['hq']), u2: holding('give-roles') });
+  youHold({ u1: holding('owner'), u2: holding('give-roles') });
   const { universes, taken } = await (await call()).json();
   expect(universes).toEqual([]);
   expect(taken.map((row: { id: string }) => row.id)).toEqual(['u1']);
+});
+
+describe('a waiting invitation and the worlds you may invite in', () => {
+  /** A universe whose waiting invitation names the worlds given, or every world. */
+  const invitedTo = (id: string, worlds: string[] | 'all') => ({
+    ...universe(id, id),
+    membershipInvitations: [{ ...waiting(), allWorlds: worlds === 'all', worldIds: worlds === 'all' ? [] : worlds }],
+  });
+
+  it('is listed when you may invite in every world it names', async () => {
+    db.universe.findMany.mockResolvedValue([invitedTo('u1', ['hq'])]);
+    youHold({ u1: holding(['hq']) });
+    const { taken } = await (await call()).json();
+    expect(taken.map((row: { id: string }) => row.id)).toEqual(['u1']);
+  });
+
+  it('is left out when it also names a world you may not invite in, so no Cancel invite that answers 403', async () => {
+    db.universe.findMany.mockResolvedValue([invitedTo('u1', ['hq', 'campus']), invitedTo('u2', 'all')]);
+    youHold({ u1: holding(['hq']), u2: holding(['hq']) });
+    const { universes, taken } = await (await call()).json();
+    expect(taken).toEqual([]);
+    expect(universes).toEqual([]);
+  });
 });
 
 it('offers a person who is not in a universe only where you may invite, never where you only give roles', async () => {
