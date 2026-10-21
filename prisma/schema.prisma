@@ -188,6 +188,7 @@ model RoomAccess {
   universe        Universe @relation(fields: [universeId], references: [id], onDelete: Cascade)
   world           World    @relation(fields: [worldId], references: [id], onDelete: Cascade)
   room            Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  relinks         RoomAccessRelink[]
 
   @@index([universeId, accessedAt])
   @@index([worldId, accessedAt])
@@ -197,6 +198,26 @@ model RoomAccess {
   @@index([ipAddress, accessedAt])
   @@index([accessedAt])
   @@map("room_accesses")
+}
+
+// Visitors (#531): each visit scripts/unverified-visits-relink.sql moved back onto an account, with what it held before,
+// so scripts/unverified-visits-undo.sql can put it back. Nothing in the app reads it.
+model RoomAccessRelink {
+  id           String    @id @default(uuid())
+  roomAccessId String    @map("room_access_id")
+  userId       String    @map("user_id") // the account the visit was moved onto
+  oldUserUuid  String?   @map("old_user_uuid")
+  oldUserId    String?   @map("old_user_id")
+  oldUserName  String?   @map("old_user_name")
+  oldUserEmail String?   @map("old_user_email")
+  oldIsGuest   Boolean   @map("old_is_guest")
+  relinkedAt   DateTime  @default(now()) @map("relinked_at")
+  undoneAt     DateTime? @map("undone_at")
+
+  roomAccess RoomAccess @relation(fields: [roomAccessId], references: [id], onDelete: Cascade)
+
+  @@index([roomAccessId])
+  @@map("room_access_relinks")
 }
 
 // World Memberships
