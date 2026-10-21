@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { Lock, Trash2 } from 'lucide-react';
+import { Crown, Lock, Trash2 } from 'lucide-react';
 import { authenticatedFetch } from '@/lib/client-auth';
 import { timeAgo } from '@/lib/time-ago';
 import { cn } from '@/lib/utils';
@@ -11,7 +11,7 @@ import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { PickChip, Segmented } from '@/components/ui/choice';
 import { useToast } from '@/components/ui/toast';
-import { EmptyCard, InContext, LoadError, LoadingRows } from '../../../../components/ds';
+import { InContext, LoadError, LoadingRows } from '../../../../components/ds';
 import { WokaAvatar } from '../../../../components/profile-card';
 import { FormSheet } from '../../../../components/form-sheet';
 import { useUniverseBasics, useUniverseRoles, useWorldNames, type UniverseRole } from '../../../../components/universe-people';
@@ -336,7 +336,33 @@ export function MemberPage() {
       </header>
 
       {member.isOwner ? (
-        <EmptyCard kind="universe" title={`${isYou ? 'You own' : 'Owns'} ${universe.name}`} text="The owner has every permission in every world, so there is nothing to give." />
+        <section className="grid gap-3" aria-labelledby="member-roles" data-testid="owner-roles">
+          <h2 id="member-roles" className="orbit-display text-lg font-bold">Roles</h2>
+          <div className="grid gap-2">
+            <div className="flex min-h-12 items-center gap-3 rounded-2xl border border-foreground/[.08] bg-foreground/[.04] px-3.5 py-2">
+              <Crown aria-hidden="true" className="h-4 w-4 shrink-0 text-[#FACC15]" />
+              <span className="text-[15px] font-semibold">Owner</span>
+              <span className="ml-auto text-right text-[13px] text-muted-foreground">{isYou ? 'You created' : 'Created'} {universe.name}</span>
+            </div>
+            {member.roles.filter((given) => roles.value.byId.has(given.roleId)).map((given) => {
+              const info = roles.value.byId.get(given.roleId)!;
+              return (
+                <div key={given.roleId} className="flex min-h-12 items-center gap-3 rounded-2xl border border-foreground/[.08] bg-foreground/[.04] px-3.5 py-2">
+                  <i aria-hidden="true" className="h-2 w-2 shrink-0 rounded-full" style={{ background: info.color }} />
+                  <span className="text-[15px] font-medium">{info.name}</span>
+                  <span className="ml-auto text-right text-[13px] text-muted-foreground">{worldsLabel(given, worldNames) ?? 'All worlds'}</span>
+                </div>
+              );
+            })}
+            <div className="flex min-h-12 items-center gap-3 rounded-2xl border border-foreground/[.08] bg-foreground/[.04] px-3.5 py-2 text-muted-foreground">
+              <Lock aria-hidden="true" className="h-4 w-4 shrink-0" />
+              <i aria-hidden="true" className="h-2 w-2 shrink-0 rounded-full" style={{ background: roles.value.list.find((role) => role.key === 'member')?.color ?? '#A78BFA' }} />
+              <span className="text-[15px] font-medium">Member</span>
+              <span className="ml-auto text-right text-[13px]">Everyone who joined</span>
+            </div>
+          </div>
+          <p className="text-sm text-muted-foreground">The owner has every permission in every world, so roles add nothing here.</p>
+        </section>
       ) : (
         <section className="grid gap-3" aria-labelledby="member-roles">
           <h2 id="member-roles" className="orbit-display text-lg font-bold">Roles</h2>
