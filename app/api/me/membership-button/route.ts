@@ -2,7 +2,7 @@ import { NextRequest } from 'next/server';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { meOriginAllowed, meRespond } from '@/lib/me-route';
-import { accessFor, worldsAllowing } from '@/lib/role-access';
+import { accessFor, allows, invitationReach, worldsAllowing } from '@/lib/role-access';
 import { canSeeUniverse } from '@/lib/room-visibility';
 import { memberCan } from '@/lib/member-can';
 import { membershipButton } from '@/lib/membership-button';
@@ -62,11 +62,15 @@ export async function GET(request: NextRequest) {
       // An invitation sent the old way to one of its worlds counts too
       prisma.membershipInvitation.findFirst({
         where: { invitedUserId: person.id, status: 'pending', OR: [{ universeId: universe.id }, { world: { universeId: universe.id } }] },
-        select: { id: true },
+        select: { id: true, universeId: true, allWorlds: true, worldIds: true, worldId: true },
       }),
     ]);
 
-    if (!member) return respond(request, { button: membershipButton({ status: pending ? 'invited' : 'none', mayInvite, mayGiveRoles: false, mayRemove: false }) });
+    if (!member) {
+      // A waiting invitation is for someone who could take it back: Invite and remove in every world it names
+      const mayTakeBack = !!pending && mayInvite && allows(access, 'INVITE_AND_REMOVE', invitationReach(pending));
+      return respond(request, { button: membershipButton({ status: pending ? 'invited' : 'none', mayInvite: pending ? mayTakeBack : mayInvite, mayGiveRoles: false, mayRemove: false }) });
+    }
 
     const roles = await prisma.role.findMany({
       where: { universeId: universe.id, key: { notIn: ['member', 'everyone'] } },

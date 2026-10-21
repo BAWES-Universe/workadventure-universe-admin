@@ -160,6 +160,38 @@ describe('who may ask', () => {
   });
 });
 
+describe('a waiting invitation and the worlds you may invite in', () => {
+  const inviteIn = (worldIds: string[]) =>
+    (accessFor as jest.Mock).mockResolvedValue(
+      computeAccess({
+        universeId: 'u1', worldIds: ['hq', 'campus'], full: false, isOwner: false, everyone: BigInt(0), member: BigInt(0),
+        membership: { allWorlds: true, worldIds: [] },
+        roles: [{ key: 'greeter', position: 10, permissions: fromKeys(['INVITE_AND_REMOVE']), allWorlds: false, worldIds }],
+      }),
+    );
+  const sent = (reach: { allWorlds: boolean; worldIds: string[] }) =>
+    db.membershipInvitation.findFirst.mockResolvedValue({ id: 'i1', universeId: 'u1', worldId: 'hq', ...reach });
+
+  it('is Pending invite when you may invite in every world it names', async () => {
+    inviteIn(['hq']);
+    sent({ allWorlds: false, worldIds: ['hq'] });
+    expect(await answer()).toEqual({ kind: 'pending', label: 'Pending invite' });
+  });
+
+  it('has no button when it names a world, or every world, where you may not invite', async () => {
+    inviteIn(['hq']);
+    sent({ allWorlds: false, worldIds: ['hq', 'campus'] });
+    expect(await answer()).toBeNull();
+    sent({ allWorlds: true, worldIds: [] });
+    expect(await answer()).toBeNull();
+  });
+
+  it('still offers Give membership to someone with no invitation', async () => {
+    inviteIn(['hq']);
+    expect(await answer()).toEqual({ kind: 'membership', label: 'Give membership' });
+  });
+});
+
 describe('a private universe', () => {
   const privateUniverse = () => db.universe.findUnique.mockResolvedValue({ id: 'u1', ownerId: 'owner', isPublic: false });
   const outsider = () => (accessFor as jest.Mock).mockResolvedValue({ ...holding('invite'), inUniverse: false });

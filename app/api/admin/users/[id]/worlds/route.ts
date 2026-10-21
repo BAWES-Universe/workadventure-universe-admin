@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { hiddenSystemOwnerId, notSystemWorld } from '@/lib/system-user';
-import { accessForMany, worldsAllowing } from '@/lib/role-access';
+import { accessForMany, allows, invitationReach, worldsAllowing } from '@/lib/role-access';
 import { memberCan } from '@/lib/member-can';
 import { orderedPair } from '@/lib/friends';
 
@@ -145,9 +145,10 @@ async function invitableUniverses(viewer: { id: string }, personId: string, hidd
   const invitable = yours.filter((universe) => !status(universe) && mayInvite(universe)).map((universe) => ({ id: universe.id, name: universe.name }));
   const taken = yours.flatMap((universe) => {
     const value = status(universe);
-    if (value === 'invited' && !mayInvite(universe)) return [];
-    if (value === 'member' && !mayChange(universe)) return [];
     const sent = value === 'invited' ? invitation(universe) : null;
+    // A waiting invitation is shown to someone who could take it back: Invite and remove in every world it names
+    if (sent && (!mayInvite(universe) || !allows(accesses.get(universe.id)!, 'INVITE_AND_REMOVE', invitationReach(sent)))) return [];
+    if (value === 'member' && !mayChange(universe)) return [];
     return value
       ? [{
           id: universe.id,
