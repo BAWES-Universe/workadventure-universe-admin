@@ -157,6 +157,142 @@ run('universe roles and people routes (real database)', () => {
     expect(ownRank.status).toBe(403);
   });
 
+  describe('"All worlds" on someone limited to some worlds', () => {
+    const all = { allWorlds: true, worldIds: [] as string[] };
+    const memberOf = async (who: string) => prisma.universeMember.findUniqueOrThrow({ where: { universeId_userId: { universeId, userId: people[who] } } });
+    const worldsOf = async (who: string) => (await prisma.worldMember.findMany({ where: { userId: people[who], world: { universeId } } })).map((row) => row.worldId).sort();
+    let privateWorld = '';
+
+    beforeAll(async () => {
+      // A private world, which only its members see
+      privateWorld = (await prisma.world.create({ data: { universeId, slug: 'secret', name: 'Secret', isPublic: false } })).id;
+      role.extra = (await prisma.role.create({ data: { universeId, key: 'extra', name: 'Extra', position: 12 } })).id;
+      role.boss = (await prisma.role.create({ data: { universeId, key: 'boss', name: 'Boss', position: 13, permissions: flag('ADMINISTRATOR') } })).id;
+      // Gives roles in every world, but invites and removes people nowhere
+      role.giver = (await prisma.role.create({ data: { universeId, key: 'giver', name: 'Giver', position: 15, permissions: fromKeys(['GIVE_ROLES']) } })).id;
+      const giver = await prisma.user.create({ data: { uuid: `giver-${tag}`, email: `giver-${tag}@example.test`, name: 'giver' } });
+      people.giver = giver.id;
+      await joinUniverse(prisma, { universeId, userId: people.giver, worlds: all, roles: [{ roleId: role.giver, scope: all }] });
+      for (const who of ['sam', 'pat']) {
+        const user = await prisma.user.create({ data: { uuid: `${who}-${tag}`, email: `${who}-${tag}@example.test`, name: who } });
+        people[who] = user.id;
+      }
+    });
+
+    afterAll(async () => {
+      await prisma.world.deleteMany({ where: { id: privateWorld } });
+    });
+
+    beforeEach(async () => {
+      for (const who of ['sam', 'pat']) {
+        await prisma.universeMember.deleteMany({ where: { universeId, userId: people[who] } });
+        await joinUniverse(prisma, { universeId, userId: people[who], worlds: { allWorlds: false, worldIds: [worldA] }, roles: [{ roleId: role.helper, scope: { allWorlds: false, worldIds: [worldA] } }] });
+      }
+    });
+
+    it('makes them a member of every world, private ones too, when someone who manages every world taps it', async () => {
+      expect(await worldsOf('sam')).toEqual([worldA]);
+      const detail = await as('admin', memberRoute.GET, { userId: people.sam });
+      expect(detail.body.can.widen).toBe(true);
+      expect(detail.body.can.giveWorlds).toBe('all');
+      const put = await as('admin', givenRoute.PUT, { userId: people.sam, roleId: role.helper }, all);
+      expect(put.status).toBe(200);
+      const member = await memberOf('sam');
+      expect(member.allWorlds).toBe(true);
+      expect(member.worldIds).toEqual([]);
+      expect(await worldsOf('sam')).toEqual([worldA, worldB, privateWorld].sort());
+      expect(await tagsOf('sam', privateWorld)).toEqual(['helper', 'member']);
+      // The owner may too
+      expect((await as('owner', givenRoute.PUT, { userId: people.pat, roleId: role.helper }, all)).status).toBe(200);
+      expect((await memberOf('pat')).allWorlds).toBe(true);
+    });
+
+    it('refuses someone who gives roles everywhere but may not add people everywhere, and changes nothing', async () => {
+      const before = await as('giver', memberRoute.GET, { userId: people.sam });
+      expect(before.body.can.giveWorlds).toBe('all');
+      expect(before.body.can.widen).toBe(false);
+      const put = await as('giver', givenRoute.PUT, { userId: people.sam, roleId: role.helper }, all);
+      expect(put.status).toBe(403);
+      expect(put.body.error).toBe('Needs Invite and remove people in every world');
+      expect((await memberOf('sam')).allWorlds).toBe(false);
+      expect(await worldsOf('sam')).toEqual([worldA]);
+    });
+
+    it('refuses someone who gives roles and invites in some worlds only', async () => {
+      // The Moderator works in world A only
+      const detail = await as('mod', memberRoute.GET, { userId: people.sam });
+      expect(detail.body.can.widen).toBe(false);
+      expect((await as('mod', givenRoute.PUT, { userId: people.sam, roleId: role.helper }, all)).status).toBe(403);
+      expect((await memberOf('sam')).allWorlds).toBe(false);
+      expect(await worldsOf('sam')).toEqual([worldA]);
+    });
+
+    it('still rejects naming a world they are not in, and only widens with "All worlds"', async () => {
+      const bad = await as('admin', givenRoute.PUT, { userId: people.sam, roleId: role.helper }, { allWorlds: false, worldIds: [worldB] });
+      expect(bad.status).toBe(400);
+      expect(bad.body.error).toBe('They are not a member of every world picked');
+      expect((await memberOf('sam')).allWorlds).toBe(false);
+      expect(await worldsOf('sam')).toEqual([worldA]);
+    });
+
+    it('never widens when the role itself is refused: a rank above theirs, or one not yours to give', async () => {
+      // Nobody gives a role at or above their own, or changes someone above them, and none of that widens anyone
+      expect((await as('mod', givenRoute.PUT, { userId: people.admin, roleId: role.helper }, all)).status).toBe(403);
+      expect((await as('mod', givenRoute.PUT, { userId: people.sam, roleId: role.moderator }, all)).status).toBe(403);
+      expect((await as('giver', givenRoute.PUT, { userId: people.sam, roleId: role.boss }, all)).status).toBe(403);
+      expect((await as('owner', givenRoute.PUT, { userId: people.sam, roleId: role.boss }, { allWorlds: false, worldIds: [worldA] })).status).toBe(400);
+      expect((await memberOf('sam')).allWorlds).toBe(false);
+    });
+
+    it('keeps their other roles as they were, and tapping back to some worlds limits only the role', async () => {
+      await prisma.universeMemberRole.create({
+        data: { member: { connect: { universeId_userId: { universeId, userId: people.sam } } }, role: { connect: { id: role.extra } }, allWorlds: false, worldIds: [worldA] },
+      });
+      expect((await as('admin', givenRoute.PUT, { userId: people.sam, roleId: role.helper }, all)).status).toBe(200);
+      const host = await prisma.universeMemberRole.findFirstOrThrow({ where: { roleId: role.extra, member: { userId: people.sam } } });
+      expect(host.allWorlds).toBe(false);
+      expect(host.worldIds).toEqual([worldA]);
+      // Back to some worlds: the role is limited, they stay in every world
+      expect((await as('admin', givenRoute.PUT, { userId: people.sam, roleId: role.helper }, { allWorlds: false, worldIds: [worldB] })).status).toBe(200);
+      expect((await memberOf('sam')).allWorlds).toBe(true);
+      expect(await worldsOf('sam')).toEqual([worldA, worldB, privateWorld].sort());
+      expect(await tagsOf('sam', worldB)).toEqual(['helper', 'member']);
+      expect(await tagsOf('sam', worldA)).toEqual(['extra', 'member']);
+    });
+
+    it('gives a role with Administrator, which is every world, only to someone who may widen', async () => {
+      expect((await as('mod', givenRoute.PUT, { userId: people.sam, roleId: role.boss }, all)).status).toBe(403);
+      expect((await memberOf('sam')).allWorlds).toBe(false);
+      const given = await as('owner', givenRoute.PUT, { userId: people.sam, roleId: role.boss }, all);
+      expect(given.status).toBe(200);
+      expect((await memberOf('sam')).allWorlds).toBe(true);
+    });
+
+    it('is harmless when they are in every world already, and when an invitation they had is accepted later', async () => {
+      await joinUniverse(prisma, { universeId, userId: people.sam, worlds: all, roles: [] });
+      expect((await as('admin', givenRoute.PUT, { userId: people.sam, roleId: role.helper }, all)).status).toBe(200);
+      expect((await memberOf('sam')).allWorlds).toBe(true);
+      // An invitation sent while they were limited, accepted after widening, takes nothing away
+      const invitation = await prisma.membershipInvitation.create({
+        data: { worldId: worldB, universeId, allWorlds: false, worldIds: [worldB], invitedUserId: people.sam, invitedByUserId: people.admin, status: 'pending', tags: [], roleIds: [] },
+      });
+      session.mockResolvedValue({ id: people.sam, uuid: 'sam', email: `sam-${tag}@example.test`, name: 'sam', tags: [], isSuperAdmin: false });
+      const accepted = await accept(new NextRequest('http://localhost/api', { method: 'POST' }), { params: Promise.resolve({ id: invitation.id }) });
+      expect(accepted.status).toBe(200);
+      const member = await memberOf('sam');
+      expect(member.allWorlds).toBe(true);
+      expect(await worldsOf('sam')).toEqual([worldA, worldB, privateWorld].sort());
+    });
+
+    it('does not touch guests: they are not members, so there is no page and no role to widen', async () => {
+      const guest = await prisma.user.create({ data: { uuid: `guest-${tag}`, email: `guest-${tag}@example.test`, name: 'guest', isGuest: true } });
+      const put = await as('admin', givenRoute.PUT, { userId: guest.id, roleId: role.helper }, all);
+      expect(put.status).toBe(404);
+      expect(await prisma.universeMember.count({ where: { universeId, userId: guest.id } })).toBe(0);
+      await prisma.user.delete({ where: { id: guest.id } });
+    });
+  });
+
   it('takes a role away, in the worlds the taker controls', async () => {
     const taken = await as('mod', givenRoute.DELETE, { userId: people.plain, roleId: role.helper });
     expect(taken.status).toBe(200);

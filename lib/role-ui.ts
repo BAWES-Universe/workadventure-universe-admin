@@ -176,6 +176,40 @@ export function permissionLockReason(
   return null;
 }
 
+/**
+ * The permissions a role gets without having them itself, and where they come from. Every role adds to Everyone, and
+ * Editor and custom roles add to Member as well (everyone who joined is a Member), so the Permissions tab shows these as
+ * on and locked. Everyone and Admin inherit nothing. Administrator is never inherited: Everyone and Member can't hold it.
+ */
+export type InheritedFrom = 'Everyone' | 'Member';
+
+export function inheritedPermissions(
+  role: Pick<RoleRow, 'key' | 'builtIn'>,
+  roles: readonly Pick<RoleRow, 'key' | 'builtIn' | 'permissions'>[],
+): Map<PermissionKey, InheritedFrom> {
+  const result = new Map<PermissionKey, InheritedFrom>();
+  if (role.builtIn && (role.key === 'everyone' || role.key === 'admin')) return result;
+  const bits = (key: string) => {
+    const row = roles.find((candidate) => candidate.builtIn && candidate.key === key);
+    return row ? permissionsOf(row) : ZERO;
+  };
+  const everyone = bits('everyone');
+  const member = role.builtIn && role.key === 'member' ? ZERO : bits('member');
+  for (const info of PERMISSIONS) {
+    if (info.key === 'ADMINISTRATOR') continue;
+    if ((everyone & flag(info.key)) !== ZERO) result.set(info.key, 'Everyone');
+    else if ((member & flag(info.key)) !== ZERO) result.set(info.key, 'Member');
+  }
+  return result;
+}
+
+/** The permissions in a map of inherited ones, as one number. */
+export function inheritedBits(inherited: ReadonlyMap<PermissionKey, InheritedFrom>): bigint {
+  let bits = ZERO;
+  for (const key of inherited.keys()) bits |= flag(key);
+  return bits;
+}
+
 /** How many of the everyday permissions a number allows (Administrator allows all of them). */
 export function countOn(permissions: bigint): number {
   return PERMISSIONS.filter((info) => info.key !== 'ADMINISTRATOR' && has(permissions, info.key)).length;

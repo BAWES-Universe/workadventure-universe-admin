@@ -78,6 +78,11 @@ describe('buildLiveView', () => {
     expect(view.people.map((person) => person.name)).toEqual(['Sara']);
   });
 
+  it('carries each person\'s account id, so their row can open their profile card', async () => {
+    const view = await buildLiveView(snapshot(), viewer);
+    expect(view.people.map((person) => person.userId)).toEqual(['u-sara']);
+  });
+
   it('counts guests and bots, but not someone who hides where they are', async () => {
     const [lobby] = (await buildLiveView(snapshot(), viewer)).places;
     // Me, Sara, 2 guests and a bot; the hidden person is in neither the faces nor the count.
