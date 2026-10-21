@@ -438,6 +438,25 @@ describe('a member’s page', () => {
       expect(calls.some((call) => call.method === 'PUT')).toBe(false);
     });
 
+    it('does not widen them when a role is ticked and none of their worlds is one you can start it in', async () => {
+      // Their only world is one that no longer exists; you may widen, but a tick is never the way
+      const base = fetchMock.getMockImplementation()!;
+      fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
+        if (url.endsWith('/members/sara') && !init?.method) {
+          return ok({
+            member: { userId: 'sara', name: 'Sara Ali', email: 'sara@example.com', joinedAt: '2026-08-01T00:00:00Z', lastVisitedAt: null, isOwner: false, worlds: { allWorlds: false, worldIds: ['gone'] }, roles: [] },
+            can,
+          });
+        }
+        return base(url, init);
+      });
+      wrap(<MemberPage />);
+      const box = await screen.findByRole('checkbox', { name: 'Accountant' });
+      expect(box.hasAttribute('disabled')).toBe(true);
+      fireEvent.click(box);
+      expect(calls.some((call) => call.method === 'PUT')).toBe(false);
+    });
+
     it('never offers "All worlds" on a role that is not yours to give: the whole row is off', async () => {
       limitedSara({ giveRoleIds: ['r-acct'] });
       wrap(<MemberPage />);

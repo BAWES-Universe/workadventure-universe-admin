@@ -179,7 +179,7 @@ export function MemberPage() {
     if (!on) return void save(role, null);
     // Administrator always works in every world, so it is only sent that way (the row is off when you can't give it there).
     // Any other role starts in every world when they are in every world, else in the worlds they are in that you may give it in.
-    void save(role, isAdministrator(role.permissions) || startsAll || allowed.ids.length === 0 ? { allWorlds: true, worldIds: [] } : { allWorlds: false, worldIds: allowed.ids });
+    void save(role, isAdministrator(role.permissions) || startsAll ? { allWorlds: true, worldIds: [] } : { allWorlds: false, worldIds: allowed.ids });
   }
 
   function setWhere(role: UniverseRole, where: 'all' | 'some') {
@@ -258,8 +258,8 @@ export function MemberPage() {
     const adminRole = isAdministrator(role.permissions);
     // Administrator can only be given in every world, so without that reach the row can't be turned on
     const everyWorldOnly = adminRole && !on && !allowed.all;
-    // Where you may give roles is only worlds they aren't in: nothing to put the role in
-    const nowhere = !on && !allowed.all && allowed.ids.length === 0;
+    // Where you may give roles is only worlds they aren't in: nothing to start the role in (widening is a tap on "All worlds", never a tick)
+    const nowhere = !on && !startsAll && allowed.ids.length === 0;
     const allowedRole = can.giveRoleIds.includes(role.id);
     const rowOff = !allowedRole || everyWorldOnly || nowhere;
     const inputId = `role-${role.id}`;
