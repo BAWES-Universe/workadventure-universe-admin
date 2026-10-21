@@ -68,6 +68,14 @@ describe('Give role sheet', () => {
     expect(document.activeElement).not.toBe(search);
   });
 
+  it('puts focus on the sheet itself, so keyboard focus stays inside it', async () => {
+    render(<MembersTab role={ROLE} universeId="u1" worlds={[]} me={ME} onChanged={jest.fn()} />);
+    fireEvent.click(await screen.findByRole('button', { name: /Give to someone/ }));
+
+    const sheet = await screen.findByTestId('give-role-sheet');
+    await waitFor(() => expect(document.activeElement).toBe(sheet));
+  });
+
   it('still lets the search box take focus when it is tapped', async () => {
     render(<MembersTab role={ROLE} universeId="u1" worlds={[]} me={ME} onChanged={jest.fn()} />);
     fireEvent.click(await screen.findByRole('button', { name: /Give to someone/ }));
