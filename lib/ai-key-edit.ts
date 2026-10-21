@@ -102,7 +102,7 @@ export async function editSavedKey(ownerId: string, id: string, input: KeyEditIn
   if (probed.ok && typedModel !== null && !models.models.includes(model)) {
     return { ok: false, status: 400, message: 'That model isn’t on the list. Load models again and pick one.' };
   }
-  const chat = await probeChat({ kind: info.kind, address, apiKey, model });
+  const chat = await probeChat({ kind: info.kind, address, apiKey, model, ...(probed.ok ? {} : { noList: true }) });
   if (!chat.ok) {
     // The new address can't give the saved model (not on its list, or it says it has none): the person picks one it has
     // in the same step, instead of being stuck with a model that was only on the old address.

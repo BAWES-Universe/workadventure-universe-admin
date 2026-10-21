@@ -150,7 +150,7 @@ export async function checkKey(key: KeyRow): Promise<KeyCheck> {
   // A provider with no model list (typed model) is asked for a chat reply every time: nothing else proves the key
   // A kind whose model list is public proves nothing about the key, so only a chat reply does
   if (key.model && (!models.ok || info.keyCheck.type === 'chat' || key.downSince || !models.models.includes(cleanModelId(key.model, info.kind)))) {
-    const chat = await probeChat({ kind: info.kind, address, apiKey, model: key.model });
+    const chat = await probeChat({ kind: info.kind, address, apiKey, model: key.model, ...(models.ok ? {} : { noList: true }) });
     // The provider took the key and the model but refused this tiny request (a reasoning model that wants a bigger cap, say):
     // that is the request's problem, not the key's, and a real reply's 400 is not counted against a key either
     if (!chat.ok && chat.reason !== 'request') return failed(chat);

@@ -74,7 +74,7 @@ export async function POST(request: NextRequest) {
     }
     // What the provider said about this model, from the list it just gave (never from the request)
     const caps = checked.ok ? modelCaps(checked.facts, model) : {};
-    const chat = await probeChat({ kind: info.kind, address: input.address, region, apiKey, model });
+    const chat = await probeChat({ kind: info.kind, address: input.address, region, apiKey, model, ...(noList ? { noList } : {}) });
     // The model is on the list, so a 400 here is the provider refusing this tiny request (a reasoning model that wants a bigger
     // cap, say), not a wrong key or model: it is saved, the same as the health check lets it pass. A typed model has no list
     // behind it, so only a real reply saves it.

@@ -286,7 +286,8 @@ export async function probeModels(input: KeyTargetInput & { apiKey?: unknown }):
  * Asks the key's provider for one tiny reply from the saved model. A model list can answer while chat does not (the model
  * was removed, chat credit ran out), so this is what proves a key that went Down on failed replies works again.
  */
-export async function probeChat(input: KeyTargetInput & { apiKey?: unknown; model: string }): Promise<{ ok: true } | { ok: false; message: string; reason: ProbeFailure }> {
+/** `noList`: the provider has no model list, so its words must not say it lists its models. */
+export async function probeChat(input: KeyTargetInput & { apiKey?: unknown; model: string; noList?: boolean }): Promise<{ ok: true } | { ok: false; message: string; reason: ProbeFailure }> {
   const resolved = keyTarget(input);
   if (!resolved.ok) return { ...resolved, reason: 'other' };
   const { info, modelsUrl } = resolved.target;
@@ -326,7 +327,7 @@ export async function probeChat(input: KeyTargetInput & { apiKey?: unknown; mode
   return {
     ok: false,
     reason: result.status >= 500 ? 'unreachable' : [400, 413, 422].includes(result.status) ? 'request' : 'other',
-    message: `${info.label} lists its models, but a chat call to ${input.model} failed (${result.status}). Check the model.`,
+    message: `${info.label} ${input.noList ? 'answered' : 'lists its models'}, but a chat call to ${input.model} failed (${result.status}). Check the model.`,
   };
 }
 

@@ -165,15 +165,26 @@ describe('a hosted provider with no model list (#456)', () => {
   it('still says a wrong key is a wrong key, and a busy provider is busy', async () => {
     get.mockResolvedValue(answer(401, {}));
     expect(await probeModels({ kind: 'groq', apiKey: 'k-1234' })).toMatchObject({ ok: false, reason: 'rejected' });
-    expect((await probeModels({ kind: 'groq', apiKey: 'k-1234' })).noList).toBeUndefined();
+    expect(await probeModels({ kind: 'groq', apiKey: 'k-1234' })).not.toHaveProperty('noList');
     get.mockResolvedValue(answer(429, {}));
-    expect((await probeModels({ kind: 'groq', apiKey: 'k-1234' })).noList).toBeUndefined();
+    expect(await probeModels({ kind: 'groq', apiKey: 'k-1234' })).not.toHaveProperty('noList');
   });
 
   it('keeps the plain error for a server on your own computer or a typed NIM address: a 404 there is a wrong address', async () => {
     get.mockResolvedValue(answer(404, {}));
     expect(await loadModels({ kind: 'lmstudio', address: 'https://lm.example.com' })).toEqual({ ok: false, message: 'It answered with an error (404).' });
     expect(await loadModels({ kind: 'nim', address: 'https://nim.example.com', apiKey: 'k-1234' })).toEqual({ ok: false, message: 'It answered with an error (404).' });
+  });
+});
+
+describe('probeChat for a typed model (#456)', () => {
+  it('does not say the provider lists its models when it has no list', async () => {
+    post.mockResolvedValue(answer(400, { error: { message: 'bad request' } }));
+    expect(await probeChat({ kind: 'groq', apiKey: 'k-1234', model: 'm', noList: true })).toMatchObject({
+      ok: false,
+      reason: 'request',
+      message: 'Groq answered, but a chat call to m failed (400). Check the model.',
+    });
   });
 });
 
