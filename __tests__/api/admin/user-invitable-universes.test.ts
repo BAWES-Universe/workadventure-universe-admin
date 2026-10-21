@@ -102,10 +102,10 @@ it('offers nothing on your own profile', async () => {
   expect(db.universe.findMany).not.toHaveBeenCalled();
 });
 
-it('offers every universe to a super admin, who may invite everywhere', async () => {
+it('offers a super admin only the universes they own or joined and may invite to: people handle their own universes', async () => {
   (getSessionUser as jest.Mock).mockResolvedValue({ id: 'root', uuid: 'uuid-root', email: null, name: 'Root', tags: [], isSuperAdmin: true });
   await call();
-  expect(db.universe.findMany.mock.calls[0][0].where.OR).toBeUndefined();
+  expect(db.universe.findMany.mock.calls[0][0].where.OR).toEqual([{ ownerId: 'root' }, { members: { some: { userId: 'root' } } }]);
 });
 
 it('says whether they are your friend and when and where they last came into each universe, for the line under their name', async () => {
