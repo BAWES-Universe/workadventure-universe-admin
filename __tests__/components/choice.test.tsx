@@ -108,6 +108,32 @@ describe('Segmented', () => {
     expect(onChange).toHaveBeenCalledWith('b');
   });
 
+  it('lets a blocked segment explain itself: it stays focusable, never picks, and a press calls onBlocked', () => {
+    const onChange = jest.fn();
+    const onBlocked = jest.fn();
+    render(
+      <Segmented
+        aria-label="Kind"
+        value="b"
+        onChange={onChange}
+        options={[
+          { value: 'a', label: 'A', disabled: true, onBlocked },
+          { value: 'b', label: 'B' },
+        ]}
+      />,
+    );
+    const blocked = screen.getByRole('radio', { name: 'A' });
+    expect(blocked.hasAttribute('disabled')).toBe(false);
+    expect(blocked.getAttribute('aria-disabled')).toBe('true');
+    expect(blocked.tabIndex).toBe(0);
+    fireEvent.click(blocked);
+    expect(onBlocked).toHaveBeenCalledTimes(1);
+    expect(onChange).not.toHaveBeenCalled();
+    // The arrow keys skip it, like any disabled segment
+    fireEvent.keyDown(screen.getByRole('radio', { name: 'B' }), { key: 'ArrowLeft' });
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
   it('skips a disabled segment', () => {
     const onChange = jest.fn();
     render(
