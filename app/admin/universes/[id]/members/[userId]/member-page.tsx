@@ -6,7 +6,7 @@ import { Lock, Trash2 } from 'lucide-react';
 import { authenticatedFetch } from '@/lib/client-auth';
 import { timeAgo } from '@/lib/time-ago';
 import { cn } from '@/lib/utils';
-import { dayWord, isAdministrator, pickableWorlds, worldsLabel, type AllowedWorlds, type Worlds } from '@/lib/member-roles';
+import { dayWord, isAdministrator, pickableWorlds, rolePickableWorlds, worldsLabel, type AllowedWorlds, type Worlds } from '@/lib/member-roles';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { PickChip, Segmented } from '@/components/ui/choice';
@@ -29,7 +29,7 @@ interface MemberAnswer {
     worlds: Worlds;
     roles: { roleId: string; allWorlds: boolean; worldIds: string[] }[];
   };
-  can: { giveRoleIds: string[]; giveWorlds: AllowedWorlds; remove: boolean };
+  can: { giveRoleIds: string[]; giveWorlds: AllowedWorlds; widen: boolean; remove: boolean };
 }
 
 const PICKED = 'border-[rgba(167,139,250,.7)] bg-[rgba(134,41,252,.14)] shadow-[0_0_0_1px_rgba(167,139,250,.35),0_0_24px_-8px_rgba(134,41,252,.6)]';
@@ -101,7 +101,13 @@ export function MemberPage() {
   // Where this person is a member: only there can a role work, and only where you may give roles may you change it.
   const memberWorlds: AllowedWorlds = answer ? (answer.member.worlds.allWorlds ? 'all' : answer.member.worlds.worldIds) : [];
   const allowed = useMemo(
-    () => pickableWorlds(universeWorldIds, memberWorlds, answer?.can.giveWorlds ?? []),
+    () => rolePickableWorlds(universeWorldIds, memberWorlds, answer?.can.giveWorlds ?? [], answer?.can.widen ?? false),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [universeWorldIds, answer],
+  );
+  // A role you tick starts in every world only where they already are in every world; widening someone is a tap on "All worlds"
+  const startsAll = useMemo(
+    () => pickableWorlds(universeWorldIds, memberWorlds, answer?.can.giveWorlds ?? []).all,
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [universeWorldIds, answer],
   );
@@ -138,6 +144,10 @@ export function MemberPage() {
         }
         if (next) confirmed.current.set(role.id, next);
         else confirmed.current.delete(role.id);
+        // Saved in every world for someone limited to some: the server made them a member of every world, and the Member line follows
+        if (next?.allWorlds) {
+          setAnswer((current) => (current && !current.member.worlds.allWorlds ? { ...current, member: { ...current.member, worlds: { allWorlds: true, worldIds: [] } } } : current));
+        }
       } catch (cause) {
         // Only the newest change goes back (to what the server last accepted); an older one is overtaken by it
         if (latest()) {
@@ -168,8 +178,8 @@ export function MemberPage() {
   function toggle(role: UniverseRole, on: boolean) {
     if (!on) return void save(role, null);
     // Administrator always works in every world, so it is only sent that way (the row is off when you can't give it there).
-    // Any other role starts in every world when that is allowed, else in the worlds you may give it in.
-    void save(role, isAdministrator(role.permissions) || allowed.all ? { allWorlds: true, worldIds: [] } : { allWorlds: false, worldIds: allowed.ids });
+    // Any other role starts in every world when they are in every world, else in the worlds they are in that you may give it in.
+    void save(role, isAdministrator(role.permissions) || startsAll ? { allWorlds: true, worldIds: [] } : { allWorlds: false, worldIds: allowed.ids });
   }
 
   function setWhere(role: UniverseRole, where: 'all' | 'some') {
@@ -248,8 +258,9 @@ export function MemberPage() {
     const adminRole = isAdministrator(role.permissions);
     // Administrator can only be given in every world, so without that reach the row can't be turned on
     const everyWorldOnly = adminRole && !on && !allowed.all;
-    // Where you may give roles is only worlds they aren't in: nothing to put the role in
-    const nowhere = !on && !allowed.all && allowed.ids.length === 0;
+    // Where you may give roles is only worlds they aren't in: nothing to start the role in (widening is a tap on "All worlds", never a tick;
+    // Administrator is the exception, it is every world by definition and is judged by everyWorldOnly)
+    const nowhere = !on && !adminRole && !startsAll && allowed.ids.length === 0;
     const allowedRole = can.giveRoleIds.includes(role.id);
     const rowOff = !allowedRole || everyWorldOnly || nowhere;
     const inputId = `role-${role.id}`;
@@ -273,7 +284,13 @@ export function MemberPage() {
               value={scope.allWorlds ? 'all' : 'some'}
               onChange={(value) => setWhere(role, value)}
               options={[
-                { value: 'all', label: 'All worlds', disabled: !allowedRole || !allowed.all },
+                // Yours to give but not in every world: locked, and a tap says why (a role that isn't yours to give is off as a whole row)
+                {
+                  value: 'all',
+                  label: allowedRole && !allowed.all ? <><Lock aria-hidden="true" className="mr-1.5 h-3.5 w-3.5" />All worlds</> : 'All worlds',
+                  disabled: !allowedRole || !allowed.all,
+                  onBlocked: allowedRole ? () => addToast({ description: can.giveWorlds === 'all' ? 'You can add people to some worlds only' : 'You can give roles in some worlds only' }) : undefined,
+                },
                 { value: 'some', label: 'Some worlds', disabled: !allowedRole || adminRole },
               ]}
               className="justify-self-start"

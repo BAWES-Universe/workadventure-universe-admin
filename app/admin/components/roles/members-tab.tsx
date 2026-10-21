@@ -276,7 +276,16 @@ function GiveSheet({
 
   return (
     <Dialog open={open} onOpenChange={(next) => !busy && onOpenChange(next)}>
-      <DialogContent className={SHEET_CLASS} data-testid="give-role-sheet">
+      {/* The list shows first: focusing the search box on open would raise the phone keyboard over the people.
+          Focus goes to the sheet itself instead, so it is still trapped and announced. */}
+      <DialogContent
+        className={SHEET_CLASS}
+        data-testid="give-role-sheet"
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+          (event.currentTarget as HTMLElement).focus();
+        }}
+      >
         <DialogTitle className="orbit-display text-2xl font-bold">Give {role.name}</DialogTitle>
         <DialogDescription className="sr-only">Pick someone who joined, then where the role works for them.</DialogDescription>
         <div className="grid gap-5">

@@ -1,4 +1,4 @@
-import { dayWord, isAdministrator, pickableWorlds, summariseRoles, worldsLabel, type RoleInfo } from '@/lib/member-roles';
+import { dayWord, isAdministrator, pickableWorlds, rolePickableWorlds, summariseRoles, worldsLabel, type RoleInfo } from '@/lib/member-roles';
 
 const role = (id: string, key: string, name: string, color = '#ffffff'): RoleInfo => ({ id, key, name, color });
 const ROLES = new Map<string, RoleInfo>([
@@ -75,5 +75,21 @@ describe('dayWord', () => {
     expect(dayWord(new Date(2026, 9, 10, 12, 0), now)).toBe('10 Oct');
     expect(dayWord(new Date(2026, 9, 3, 12, 0), now)).toBe('3 Oct');
     expect(dayWord(new Date(2025, 11, 25, 12, 0), now)).toBe('25 Dec 2025');
+  });
+});
+
+describe('rolePickableWorlds', () => {
+  const all = ['hq', 'campus', 'lab'];
+  it('lets "All worlds" widen someone limited to some worlds only for whoever gives roles everywhere and may add people everywhere', () => {
+    expect(rolePickableWorlds(all, ['hq'], 'all', true)).toEqual({ all: true, ids: ['hq'] });
+    expect(rolePickableWorlds(all, ['hq'], 'all', false)).toEqual({ all: false, ids: ['hq'] });
+    expect(rolePickableWorlds(all, ['hq'], ['hq'], true)).toEqual({ all: false, ids: ['hq'] });
+  });
+  it('needs nothing extra when they are in every world already', () => {
+    expect(rolePickableWorlds(all, 'all', 'all', false)).toEqual({ all: true, ids: all });
+    expect(rolePickableWorlds(all, 'all', ['hq', 'lab'], true)).toEqual({ all: false, ids: ['hq', 'lab'] });
+  });
+  it('still lists only the worlds they are in that you may give roles in', () => {
+    expect(rolePickableWorlds(all, ['hq', 'campus'], ['campus', 'lab'], true).ids).toEqual(['campus']);
   });
 });

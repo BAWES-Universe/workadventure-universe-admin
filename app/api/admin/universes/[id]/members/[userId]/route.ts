@@ -87,6 +87,8 @@ export async function GET(request: NextRequest, { params }: Params) {
           ? roles.filter((role) => ranksAbove(access, role)).map((role) => role.id)
           : [],
         giveWorlds: givable,
+        // "All worlds" on someone limited to some worlds adds them to every world: for whoever may add people everywhere
+        widen: allows(access, 'INVITE_AND_REMOVE', { allWorlds: true }),
         // Taking someone out: never the owner, only below you, and only where you may remove people. Leaving is yours.
         remove:
           userId === user.id
