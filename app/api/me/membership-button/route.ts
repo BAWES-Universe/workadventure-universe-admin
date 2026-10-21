@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { meOriginAllowed, meRespond } from '@/lib/me-route';
 import { accessFor, worldsAllowing } from '@/lib/role-access';
+import { canSeeUniverse } from '@/lib/room-visibility';
 import { memberCan } from '@/lib/member-can';
 import { membershipButton } from '@/lib/membership-button';
 import { memberInclude } from '@/lib/universe-route';
@@ -23,7 +24,7 @@ const some = (worlds: 'all' | string[]) => worlds === 'all' || worlds.length > 0
  * GET /api/me/membership-button?roomId=<play address>&userUuid=<their game id> - what the membership button on their
  * card in the game says for you, in the universe of that room: Give membership, Pending invite, Roles or Membership.
  * `button` is null when you may do none of them (no rights, your own card, the owner, someone above your rank, a
- * guest), and for anything Orbit doesn't know, so the card shows no button.
+ * guest, a universe you cannot see), and for anything Orbit doesn't know, so the card shows no button.
  */
 export async function GET(request: NextRequest) {
   if (!meOriginAllowed(request)) return respond(request, { error: 'Origin not allowed' }, 403);
@@ -43,14 +44,15 @@ export async function GET(request: NextRequest) {
       return none();
     }
     const [universe, person] = await Promise.all([
-      prisma.universe.findUnique({ where: { slug: universeSlug }, select: { id: true, ownerId: true } }),
+      prisma.universe.findUnique({ where: { slug: universeSlug }, select: { id: true, ownerId: true, isPublic: true } }),
       prisma.user.findUnique({ where: { uuid: userUuid }, select: { id: true, isGuest: true, email: true } }),
     ]);
     if (!universe || !person || person.isGuest || person.email === SYSTEM_USER_EMAIL) return none();
     if (person.id === viewer.id || person.id === universe.ownerId) return none();
 
     const access = await accessFor(prisma, universe.id, viewer);
-    if (!access) return none();
+    // The same rule as every universe route: someone who cannot see the universe gets nothing, not even a hint of it
+    if (!access || !canSeeUniverse(universe, viewer, access.inUniverse)) return none();
     const mayInvite = some(worldsAllowing(access, 'INVITE_AND_REMOVE'));
     const mayGiveSomewhere = some(worldsAllowing(access, 'GIVE_ROLES'));
     if (!mayInvite && !mayGiveSomewhere) return none();

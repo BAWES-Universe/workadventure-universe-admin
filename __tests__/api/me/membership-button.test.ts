@@ -46,7 +46,7 @@ const memberRow = (position?: number) => ({
 beforeEach(() => {
   jest.clearAllMocks();
   (getSessionUser as jest.Mock).mockResolvedValue({ id: 'me', uuid: 'uuid-me', email: null, name: 'Me', tags: [], isSuperAdmin: false });
-  db.universe.findUnique.mockResolvedValue({ id: 'u1', ownerId: 'owner' });
+  db.universe.findUnique.mockResolvedValue({ id: 'u1', ownerId: 'owner', isPublic: true });
   db.user.findUnique.mockResolvedValue({ id: 'ali', isGuest: false, email: 'ali@example.test' });
   db.universeMember.findUnique.mockResolvedValue(null);
   db.membershipInvitation.findFirst.mockResolvedValue(null);
@@ -57,7 +57,7 @@ beforeEach(() => {
 describe('the label', () => {
   it('is Give membership for someone not in the universe when you may invite', async () => {
     expect(await answer()).toEqual({ kind: 'membership', label: 'Give membership' });
-    expect(db.universe.findUnique).toHaveBeenCalledWith({ where: { slug: 'bawes' }, select: { id: true, ownerId: true } });
+    expect(db.universe.findUnique).toHaveBeenCalledWith({ where: { slug: 'bawes' }, select: { id: true, ownerId: true, isPublic: true } });
     expect(db.user.findUnique).toHaveBeenCalledWith({ where: { uuid: 'uuid-ali' }, select: { id: true, isGuest: true, email: true } });
   });
 
@@ -110,7 +110,7 @@ describe('no button', () => {
     }],
     ['they are a guest', () => db.user.findUnique.mockResolvedValue({ id: 'ali', isGuest: true, email: null })],
     ['it is your own card', () => db.user.findUnique.mockResolvedValue({ id: 'me', isGuest: false, email: 'me@example.test' })],
-    ['they own the universe', () => db.universe.findUnique.mockResolvedValue({ id: 'u1', ownerId: 'ali' })],
+    ['they own the universe', () => db.universe.findUnique.mockResolvedValue({ id: 'u1', ownerId: 'ali', isPublic: true })],
     ['the universe is not known', () => db.universe.findUnique.mockResolvedValue(null)],
     ['the player is not known', () => db.user.findUnique.mockResolvedValue(null)],
   ])('when %s', async (_name, arrange) => {
@@ -157,6 +157,35 @@ describe('who may ask', () => {
 
   it('is never cached', async () => {
     expect((await call()).headers.get('Cache-Control')).toBe('no-store');
+  });
+});
+
+describe('a private universe', () => {
+  const privateUniverse = () => db.universe.findUnique.mockResolvedValue({ id: 'u1', ownerId: 'owner', isPublic: false });
+  const outsider = () => (accessFor as jest.Mock).mockResolvedValue({ ...holding('invite'), inUniverse: false });
+
+  it('has no button for someone who cannot see it, even when Everyone may invite', async () => {
+    privateUniverse();
+    outsider();
+    expect(await answer()).toBeNull();
+    expect(db.membershipInvitation.findFirst).not.toHaveBeenCalled();
+  });
+
+  it('keeps the button for a member of it', async () => {
+    privateUniverse();
+    expect(await answer()).toEqual({ kind: 'membership', label: 'Give membership' });
+  });
+
+  it('keeps the button for a super admin who may invite there', async () => {
+    privateUniverse();
+    outsider();
+    (getSessionUser as jest.Mock).mockResolvedValue({ id: 'root', uuid: 'uuid-root', email: null, name: 'Root', tags: [], isSuperAdmin: true });
+    expect(await answer()).toEqual({ kind: 'membership', label: 'Give membership' });
+  });
+
+  it('shows the button in a public universe to someone who has not joined', async () => {
+    outsider();
+    expect(await answer()).toEqual({ kind: 'membership', label: 'Give membership' });
   });
 });
 
