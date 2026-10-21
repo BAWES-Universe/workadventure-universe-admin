@@ -23,6 +23,8 @@ export interface FetchMemberDataByUuidSuccessResponse {
   canEdit?: boolean | null;
   // Their role permissions in this world (#314), a decimal string of the bits in lib/permissions.ts
   permissions?: string;
+  // What each role key is called, highest first, for the badge next to people (lib/room-role-labels.ts)
+  roles?: { key: string; name: string; color: string; visibleOnOthers: boolean }[];
   world: string;
   chatID?: string;
 }
