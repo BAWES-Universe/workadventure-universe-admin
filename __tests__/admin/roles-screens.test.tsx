@@ -346,7 +346,35 @@ describe('a role page', () => {
     expect(screen.getAllByRole('switch')).toHaveLength(18);
     // The universe's name is filled in
     expect(screen.getByText('Reach all of BAWES')).toBeTruthy();
-    expect(screen.getByText('0 of 17 on', { exact: false })).toBeTruthy();
+    // Everyone's three bot permissions are on, so they count
+    expect(screen.getByText('3 of 17 on, all from Everyone.', { exact: false })).toBeTruthy();
+  });
+
+  it('shows what Member and Editor inherit on and locked, and saves none of it', async () => {
+    serve((url, init) => (url.endsWith('/roles/editor') && init?.method === 'PATCH' ? json({ role: {} }) : undefined));
+    open('member');
+    await screen.findByRole('heading', { name: 'People' });
+    for (const label of ['Chat with bots nearby', 'DM bots', 'Summon bots']) {
+      const toggle = screen.getByRole('switch', { name: label }) as HTMLButtonElement;
+      expect(toggle.getAttribute('aria-checked')).toBe('true');
+      expect(toggle.disabled).toBe(true);
+      expect(within(screen.getByTestId(`permission-${label === 'DM bots' ? 'DM_BOTS' : label === 'Summon bots' ? 'SUMMON_BOTS' : 'CHAT_BOTS_NEARBY'}`)).getByText('From Everyone')).toBeTruthy();
+    }
+    // What the role has to add itself stays a normal switch
+    expect(screen.getByRole('switch', { name: 'Manage bots' }).getAttribute('aria-checked')).toBe('false');
+    expect((screen.getByRole('switch', { name: 'Manage bots' }) as HTMLButtonElement).disabled).toBe(false);
+    cleanup();
+
+    open('editor');
+    await screen.findByRole('heading', { name: 'People' });
+    expect(screen.getByText('4 of 17 on. 3 come from Everyone.', { exact: false })).toBeTruthy();
+    expect(screen.getByRole('switch', { name: 'Summon bots' }).getAttribute('aria-checked')).toBe('true');
+    fireEvent.click(screen.getByRole('switch', { name: 'Go live' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => {
+      const patch = fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH');
+      expect(JSON.parse(patch![1].body)).toEqual({ permissions: toWire(fromKeys(['EDIT_MAPS', 'GO_LIVE'])) });
+    });
   });
 
   it('shows Save only after a change, saves just what changed, and Undo puts it back', async () => {
