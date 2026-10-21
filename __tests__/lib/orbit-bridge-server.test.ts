@@ -53,6 +53,21 @@ describe('resolveNavigateIntent', () => {
     expect(canManage).not.toHaveBeenCalled();
   });
 
+  it('opens their profile with the membership sheet when the card asked for it, and only for someone else', async () => {
+    findUser.mockResolvedValue({ id: 'user-2', isGuest: false });
+    await expect(resolveNavigateIntent(member, 'user-profile', { userUuid: 'ada@example.com', sheet: 'membership' })).resolves.toBe('/admin/users/user-2?sheet=membership');
+    // Your own card is You, and any other sheet name is ignored
+    findUser.mockResolvedValue({ id: 'user-1', isGuest: false });
+    await expect(resolveNavigateIntent(member, 'user-profile', { userUuid: 'me@example.com', sheet: 'membership' })).resolves.toBe('/admin/you');
+    findUser.mockResolvedValue({ id: 'user-2', isGuest: false });
+    await expect(resolveNavigateIntent(member, 'user-profile', { userUuid: 'ada@example.com', sheet: 'anything' })).resolves.toBe('/admin');
+  });
+
+  it('sends a guest asked for with the membership sheet home', async () => {
+    findUser.mockResolvedValue({ id: 'guest-1', isGuest: true });
+    await expect(resolveNavigateIntent(member, 'user-profile', { userUuid: 'g', sheet: 'membership' })).resolves.toBe('/admin');
+  });
+
   it("opens someone's profile page from their game id", async () => {
     findUser.mockResolvedValue({ id: 'user-2', isGuest: false });
     await expect(resolveNavigateIntent(member, 'user-profile', { userUuid: 'ada@example.com' })).resolves.toBe('/admin/users/user-2');
