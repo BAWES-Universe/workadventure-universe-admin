@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { hiddenSystemOwnerId, notSystemWorld } from '@/lib/system-user';
 import { accessForMany, worldsAllowing } from '@/lib/role-access';
+import { memberCan } from '@/lib/member-can';
 import { orderedPair } from '@/lib/friends';
 
 // GET /api/admin/users/[id]/worlds - Get list of worlds current user can invite this user to, and the universes they can
@@ -81,7 +82,7 @@ export async function GET(
 
 
 // What the sheet says about an invitation still waiting: who sent it, when, and what it would give.
-const waiting = { id: true, invitedAt: true, roleIds: true, allWorlds: true, worldIds: true, invitedBy: { select: { id: true, name: true } } } as const;
+const waiting = { id: true, universeId: true, worldId: true, invitedAt: true, roleIds: true, allWorlds: true, worldIds: true, invitedBy: { select: { id: true, name: true } } } as const;
 
 async function invitableUniverses(viewer: { id: string }, personId: string, hidden: string | null) {
   if (viewer.id === personId) return { universes: [], taken: [], friend: false };
@@ -95,7 +96,12 @@ async function invitableUniverses(viewer: { id: string }, personId: string, hidd
       id: true,
       name: true,
       ownerId: true,
-      members: { where: { userId: personId }, select: { id: true } },
+      members: {
+        where: { userId: personId },
+        select: { id: true, allWorlds: true, worldIds: true, roles: { select: { allWorlds: true, worldIds: true, role: { select: { position: true } } } } },
+      },
+      // The roles that can be given (Member and Everyone come with joining)
+      roles: { where: { key: { notIn: ['member', 'everyone'] } }, select: { id: true, position: true } },
       membershipInvitations: { where: { invitedUserId: personId, status: 'pending' }, select: waiting },
       // A pending invitation counts whether it names the universe or was sent the old way to one of its worlds
       worlds: {
@@ -128,11 +134,19 @@ async function invitableUniverses(viewer: { id: string }, personId: string, hidd
   const invitation = (universe: (typeof yours)[number]) => universe.membershipInvitations[0] ?? universe.worlds[0]?.membershipInvitations[0] ?? null;
   const status = (universe: (typeof yours)[number]) =>
     universe.ownerId === personId || universe.members.length > 0 ? 'member' : invitation(universe) ? 'invited' : null;
-  // Not in it, or waiting: you need to be able to invite. A member: inviting or giving roles is enough to look further.
+  // What you may change about them where they are a member: only those universes are worth opening
+  const mayChange = (universe: (typeof yours)[number]) => {
+    const member = universe.members[0];
+    if (!member) return false; // the owner who never joined has everything already
+    const can = memberCan({ access: accesses.get(universe.id)!, viewerId: viewer.id, userId: personId, ownerId: universe.ownerId, member, roles: universe.roles });
+    return can.giveRoleIds.length > 0 || can.remove;
+  };
+  // Not in it, or waiting: you need to be able to invite. A member: something you may change about them.
   const invitable = yours.filter((universe) => !status(universe) && mayInvite(universe)).map((universe) => ({ id: universe.id, name: universe.name }));
   const taken = yours.flatMap((universe) => {
     const value = status(universe);
     if (value === 'invited' && !mayInvite(universe)) return [];
+    if (value === 'member' && !mayChange(universe)) return [];
     const sent = value === 'invited' ? invitation(universe) : null;
     return value
       ? [{
@@ -140,7 +154,14 @@ async function invitableUniverses(viewer: { id: string }, personId: string, hidd
           name: universe.name,
           status: value,
           invitation: sent
-            ? { id: sent.id, at: sent.invitedAt.toISOString(), by: { name: sent.invitedBy.name, you: sent.invitedBy.id === viewer.id }, roleIds: sent.roleIds, worlds: { allWorlds: sent.allWorlds, worldIds: sent.worldIds } }
+            ? {
+                id: sent.id,
+                at: sent.invitedAt.toISOString(),
+                by: { name: sent.invitedBy.name, you: sent.invitedBy.id === viewer.id },
+                roleIds: sent.roleIds,
+                // Sent the old way, to one world: that world is what it gives
+                worlds: sent.universeId ? { allWorlds: sent.allWorlds, worldIds: sent.worldIds } : { allWorlds: false, worldIds: [sent.worldId] },
+              }
             : null,
         }]
       : [];

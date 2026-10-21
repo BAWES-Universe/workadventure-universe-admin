@@ -1040,7 +1040,7 @@ export default function UserDetailPage() {
 
       {canInvite && (
         <InviteSheet
-          key={[currentUniverseId ?? '', ...[...invitableUniverses, ...takenUniverses].map((universe) => universe.id)].join(',')}
+          key={[...invitableUniverses, ...takenUniverses].map((universe) => universe.id).join(',')}
           open={inviteDialogOpen}
           onOpenChange={setInviteDialogOpen}
           universeId={firstUniverse(universeChoices, currentUniverseId)}

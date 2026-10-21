@@ -37,17 +37,24 @@ const holding = (kind: 'owner' | 'none' | 'give-roles' | string[]) => {
 
 /** An invitation still waiting, as the route selects it. */
 const waiting = (by = { id: 'me', name: 'Me' }) => ({
-  id: 'inv1', invitedAt: new Date('2026-10-20T08:00:00Z'), roleIds: ['r1'], allWorlds: true, worldIds: [] as string[], invitedBy: by,
+  id: 'inv1', universeId: 'u', worldId: 'hq', invitedAt: new Date('2026-10-20T08:00:00Z'), roleIds: ['r1'], allWorlds: true, worldIds: [] as string[], invitedBy: by,
 });
+/** An invitation sent before roles: no universe, one world, no roles. */
+const legacyWaiting = () => ({ ...waiting({ id: 'other', name: 'Sara' }), universeId: null, roleIds: [] as string[], allWorlds: false, worldIds: [] as string[] });
 
 /** A universe row as the route selects it: whether the person owns it, is in it, or has an invitation to it or to one of its worlds. */
-const universe = (id: string, name: string, person: { owner?: boolean; member?: boolean; invited?: boolean | { id: string; name: string }; invitedToWorld?: boolean } = {}) => ({
+const universe = (id: string, name: string, person: { owner?: boolean; member?: boolean | number; invited?: boolean | { id: string; name: string }; invitedToWorld?: boolean } = {}) => ({
   id,
   name,
   ownerId: person.owner ? 'person' : 'someone',
-  members: person.member ? [{ id: 'm' }] : [],
+  // A member of the world hq, with no roles or with a role at the position given
+  members: person.member
+    ? [{ id: 'm', allWorlds: false, worldIds: ['hq'], roles: typeof person.member === 'number' ? [{ allWorlds: false, worldIds: ['hq'], role: { position: person.member } }] : [] }]
+    : [],
+  // The roles you could give here: one below the greeter and moderator
+  roles: [{ id: 'low', position: 5 }],
   membershipInvitations: person.invited ? [waiting(typeof person.invited === 'object' ? person.invited : undefined)] : [],
-  worlds: person.invitedToWorld ? [{ membershipInvitations: [waiting({ id: 'other', name: 'Sara' })] }] : [],
+  worlds: person.invitedToWorld ? [{ membershipInvitations: [legacyWaiting()] }] : [],
 });
 
 /** What you hold in each universe, by id. */
@@ -73,14 +80,14 @@ it('offers the universes where you may invite people, and only to people not in 
   const { where, select } = db.universe.findMany.mock.calls[0][0];
   // Yours, or ones you joined; whether the person is in each, or has an invitation waiting, comes with it
   expect(where.OR).toEqual([{ ownerId: 'me' }, { members: { some: { userId: 'me' } } }]);
-  expect(select.members).toEqual({ where: { userId: 'person' }, select: { id: true } });
+  expect(select.members.where).toEqual({ userId: 'person' });
   expect(select.membershipInvitations.where).toEqual({ invitedUserId: 'person', status: 'pending' });
   // An invitation sent the old way to one of its worlds counts too
   expect(select.worlds.where).toEqual({ membershipInvitations: { some: { invitedUserId: 'person', status: 'pending' } } });
   expect(select.worlds.take).toBe(1);
 });
 
-it('lists your universes the person already owns, is in or is invited to (to the universe or one of its worlds) as taken, never as offered', async () => {
+it('lists your universes the person is in or is invited to (to the universe or one of its worlds) as taken, never as offered', async () => {
   db.universe.findMany.mockResolvedValue([
     universe('u1', 'BAWES', { member: true }),
     universe('u2', 'Sandbox'),
@@ -93,7 +100,6 @@ it('lists your universes the person already owns, is in or is invited to (to the
   expect(body.taken.map(({ id, name, status }: { id: string; name: string; status: string }) => ({ id, name, status }))).toEqual([
     { id: 'u1', name: 'BAWES', status: 'member' },
     { id: 'u3', name: 'Cup', status: 'invited' },
-    { id: 'u4', name: 'Theirs', status: 'member' },
     { id: 'u5', name: 'Club', status: 'invited' },
   ]);
 });
@@ -108,7 +114,8 @@ it('says who sent a waiting invitation, when, and what it would give, whether it
   const at = '2026-10-20T08:00:00.000Z';
   const worlds = { allWorlds: true, worldIds: [] };
   expect(taken[0].invitation).toEqual({ id: 'inv1', at, by: { name: 'Me', you: true }, roleIds: ['r1'], worlds });
-  expect(taken[1].invitation).toEqual({ id: 'inv1', at, by: { name: 'Sara', you: false }, roleIds: ['r1'], worlds });
+  // Sent before roles, to one world: that world is what it gives
+  expect(taken[1].invitation).toEqual({ id: 'inv1', at, by: { name: 'Sara', you: false }, roleIds: [], worlds: { allWorlds: false, worldIds: ['hq'] } });
   expect(taken[2].invitation.by).toEqual({ name: 'Sara', you: false });
 });
 
@@ -133,6 +140,14 @@ it('lists a member where you may invite or give roles, so the card can say Roles
   youHold({ u1: holding('give-roles'), u2: holding(['hq']) });
   const { taken } = await (await call()).json();
   expect(taken.map((row: { id: string; status: string }) => [row.id, row.status])).toEqual([['u1', 'member'], ['u2', 'member']]);
+});
+
+it('lists a member only where there is something you may change about them: not where they outrank you', async () => {
+  db.universe.findMany.mockResolvedValue([universe('u1', 'A', { member: 20 }), universe('u2', 'B', { member: 3 }), universe('u3', 'C', { owner: true })]);
+  youHold({ u1: holding(['hq']), u2: holding(['hq']), u3: holding(['hq']) });
+  const { taken } = await (await call()).json();
+  // In A they are above your role; in B below it; in C they own it
+  expect(taken.map((row: { id: string }) => row.id)).toEqual(['u2']);
 });
 
 it('never lists a universe you can’t invite people to, even when the person is in it', async () => {
