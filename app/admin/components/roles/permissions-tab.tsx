@@ -35,12 +35,13 @@ function offersAdministrator(role: Pick<RoleRow, 'key' | 'builtIn'>): boolean {
 }
 
 /** What the intro says about the permissions a role inherits, after "N of 17 on". */
-function inheritedNote(on: number, fromEveryone: number, fromMember: number): string {
+export function inheritedNote(on: number, fromEveryone: number, fromMember: number): string {
   const inherited = fromEveryone + fromMember;
+  const come = (n: number) => `${n} ${n === 1 ? 'comes' : 'come'}`;
   if (inherited === 0) return '. Everything Everyone can do is included.';
-  if (fromMember === 0) return on === inherited ? ', all from Everyone.' : `. ${inherited} come from Everyone.`;
-  if (fromEveryone === 0) return on === inherited ? ', all from Member.' : `. ${inherited} come from Member.`;
-  return `. ${fromEveryone} come from Everyone, ${fromMember} from Member.`;
+  if (fromMember === 0) return on === inherited ? ', all from Everyone.' : `. ${come(inherited)} from Everyone.`;
+  if (fromEveryone === 0) return on === inherited ? ', all from Member.' : `. ${come(inherited)} from Member.`;
+  return `. ${come(fromEveryone)} from Everyone, ${fromMember} from Member.`;
 }
 
 /** Every permission with a switch, in groups. A switch the viewer cannot move is dimmed with a lock, and says why. */

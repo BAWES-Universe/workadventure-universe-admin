@@ -5,6 +5,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { fromKeys, toWire } from '@/lib/permissions';
 import { RolesListPage } from '@/app/admin/components/roles/roles-list';
 import { RoleEditPage } from '@/app/admin/components/roles/role-editor';
+import { inheritedNote } from '@/app/admin/components/roles/permissions-tab';
 import type { MeResponse, RoleRow } from '@/lib/role-ui';
 
 jest.mock('next/link', () => ({
@@ -636,5 +637,18 @@ describe('a role page', () => {
   it('says only that maps could not be read when nothing was skipped', async () => {
     await openUsedIn({ mapAreas: { status: 'partial', areas: [], unread: 1, skipped: 0, read: 4 } });
     expect(screen.getAllByTestId('map-areas-note').map((note) => note.textContent)).toEqual(['1 map could not be read.']);
+  });
+});
+
+describe('the line about inherited permissions', () => {
+  it('says "comes" for one and "come" for more, in every form', () => {
+    expect(inheritedNote(3, 1, 0)).toBe('. 1 comes from Everyone.');
+    expect(inheritedNote(3, 2, 0)).toBe('. 2 come from Everyone.');
+    expect(inheritedNote(3, 0, 1)).toBe('. 1 comes from Member.');
+    expect(inheritedNote(3, 0, 2)).toBe('. 2 come from Member.');
+    expect(inheritedNote(5, 1, 2)).toBe('. 1 comes from Everyone, 2 from Member.');
+    expect(inheritedNote(5, 2, 1)).toBe('. 2 come from Everyone, 1 from Member.');
+    expect(inheritedNote(1, 1, 0)).toBe(', all from Everyone.');
+    expect(inheritedNote(2, 0, 0)).toBe('. Everything Everyone can do is included.');
   });
 });
