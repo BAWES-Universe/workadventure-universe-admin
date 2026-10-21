@@ -4,8 +4,10 @@ import { useContext, useEffect, useState } from 'react';
 import { authenticatedFetch } from '@/lib/client-auth';
 import { WorkAdventureContext } from '../workadventure-context';
 
-/** How long the game gets to say which room you are in before the answer is "none" (outside the game it never does). */
-const LOOKUP_MS = 3000;
+/** How long the game gets to say which room you are in, once it is connected, before the answer is "none". */
+const LOOKUP_MS = 5000;
+/** Outside the game it never connects: the answer is "none" this long after the page opens. */
+const NO_GAME_MS = 12000;
 
 /**
  * The universe of the room you are standing in, inside the game. Undefined while it is being looked up; null outside
@@ -16,10 +18,12 @@ export function useCurrentUniverseId(): string | null | undefined {
   const wa = context?.isReady ? context.wa : null;
   const [found, setFound] = useState<string | null | undefined>(undefined);
 
+  // The wait starts when the game is connected, so a slow connection is not read as "no room"
+  const connected = !!wa;
   useEffect(() => {
-    const timer = setTimeout(() => setFound((current) => (current === undefined ? null : current)), LOOKUP_MS);
+    const timer = setTimeout(() => setFound((current) => (current === undefined ? null : current)), connected ? LOOKUP_MS : NO_GAME_MS);
     return () => clearTimeout(timer);
-  }, []);
+  }, [connected]);
 
   useEffect(() => {
     if (!wa) return;

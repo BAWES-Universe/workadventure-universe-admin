@@ -13,10 +13,11 @@ let mockCurrent: string | null | undefined = null;
 let mockCan: Record<string, { giveRoleIds: string[]; remove: boolean }> = {};
 const mockInvite = jest.fn();
 const mockMessage = jest.fn();
+const mockReplace = jest.fn();
 
 jest.mock('next/navigation', () => ({
   useParams: () => ({ id: mockId }),
-  useRouter: () => ({ push: jest.fn() }),
+  useRouter: () => ({ push: jest.fn(), replace: mockReplace }),
   useSearchParams: () => mockSearch,
 }));
 jest.mock('@/app/admin/hooks/use-current-universe', () => ({ useCurrentUniverseId: () => mockCurrent }));
@@ -32,12 +33,15 @@ jest.mock('@/app/admin/components/passport', () => ({ PassportSection: () => nul
 jest.mock('@/app/admin/components/invite-sheet', () => ({
   __esModule: true,
   firstUniverse: jest.requireActual('@/app/admin/components/invite-sheet').firstUniverse,
-  default: ({ open, person, universeId, universes, giving }: { open: boolean; person: { userId: string; name: string; notes?: Record<string, string | null> }; universeId: string; universes: { id: string; status?: string }[]; giving?: boolean }) =>
+  default: ({ open, onOpenChange, person, universeId, universes, giving }: { open: boolean; onOpenChange: (open: boolean) => void; person: { userId: string; name: string; notes?: Record<string, string | null> }; universeId: string; universes: { id: string; status?: string }[]; giving?: boolean }) =>
     open ? (
-      <div role="dialog">
+      <>
+        <button onClick={() => onOpenChange(false)}>Close sheet</button>
+        <div role="dialog">
         {giving ? 'Give' : 'Invite'} {person.name} ({person.userId}) to {universeId} of {universes.map((universe) => universe.id + (universe.status ? `:${universe.status}` : '')).join(',')}
         {person.notes ? ` · ${person.notes[universeId] ?? 'no line'}` : ''}
-      </div>
+        </div>
+      </>
     ) : null,
   personNote: ({ friend, visit }: { friend?: boolean; visit?: { room?: { name: string }; world?: { name: string } } | null }) =>
     !friend && !visit ? null : [friend ? 'Your friend' : null, visit ? `in ${visit.world?.name} ${visit.room?.name}` : null].filter(Boolean).join(' · '),
@@ -191,6 +195,22 @@ describe('Someone’s profile buttons', () => {
     serve({ connect: { available: true, relationship: 'none', chatId: null }, universes: [{ id: 'bawes', name: 'BAWES', visit: null }] });
     await open();
     expect((await screen.findByRole('dialog')).textContent).toContain('Give Ali (u-ali) to bawes');
+  });
+
+  it('clears the link from the game when the sheet closes, so the next request from the game opens it again', async () => {
+    mockSearch = new URLSearchParams('sheet=membership');
+    serve({ connect: { available: true, relationship: 'none', chatId: null }, universes: [{ id: 'bawes', name: 'BAWES', visit: null }] });
+    const { rerender } = render(<UserDetailPage />);
+    await screen.findByRole('dialog');
+    fireEvent.click(screen.getByRole('button', { name: 'Close sheet' }));
+    expect(mockReplace).toHaveBeenCalledWith('/admin/users/u-ali');
+    // The page follows the cleared link, then the game asks again
+    mockSearch = new URLSearchParams();
+    rerender(<UserDetailPage />);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    mockSearch = new URLSearchParams('sheet=membership');
+    rerender(<UserDetailPage />);
+    expect(await screen.findByRole('dialog')).toBeTruthy();
   });
 
   it('waits for the universe you are in to be known before opening the sheet', async () => {

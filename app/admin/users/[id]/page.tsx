@@ -276,6 +276,8 @@ export default function UserDetailPage() {
   // From the card in the game: the sheet opens once, as soon as it is known which universe it opens on
   const sheetOpened = useRef(false);
   useEffect(() => {
+    // Asked for again later (the sheet closed and the link was cleared): it opens again
+    if (!sheetWanted) sheetOpened.current = false;
     if (!sheetWanted || sheetOpened.current || !button || lookedUpUniverseId === undefined) return;
     sheetOpened.current = true;
     setInviteDialogOpen(true);
@@ -1042,7 +1044,11 @@ export default function UserDetailPage() {
         <InviteSheet
           key={[...invitableUniverses, ...takenUniverses].map((universe) => universe.id).join(',')}
           open={inviteDialogOpen}
-          onOpenChange={setInviteDialogOpen}
+          onOpenChange={(next) => {
+            setInviteDialogOpen(next);
+            // The link from the game is spent once the sheet closes, so the next one from the game opens it again
+            if (!next && sheetWanted) router.replace(`/admin/users/${id}`);
+          }}
           universeId={firstUniverse(universeChoices, currentUniverseId)}
           universes={universeChoices}
           giving
