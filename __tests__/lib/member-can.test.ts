@@ -19,7 +19,7 @@ const can = (access: ReturnType<typeof computeAccess>, who: ReturnType<typeof me
 
 describe('memberCan', () => {
   it('lets someone who gives roles give the roles below their own to someone below them', () => {
-    expect(can(as(20, ['GIVE_ROLES']), member())).toEqual({ giveRoleIds: ['low', 'mid'], giveWorlds: 'all', remove: false });
+    expect(can(as(20, ['GIVE_ROLES']), member())).toEqual({ giveRoleIds: ['low', 'mid'], giveWorlds: 'all', widen: false, remove: false });
   });
 
   it('gives nothing to someone at or above your rank', () => {
@@ -50,7 +50,7 @@ describe('memberCan', () => {
 
   it('gives a super admin who is no part of the universe nothing', () => {
     const nobody = computeAccess({ ...base, membership: null });
-    expect(can(nobody, member())).toEqual({ giveRoleIds: [], giveWorlds: [], remove: false });
+    expect(can(nobody, member())).toEqual({ giveRoleIds: [], giveWorlds: [], widen: false, remove: false });
   });
 });
 
