@@ -148,7 +148,11 @@ export function PermissionsTab({
                       {withUniverse(info.description, universeName)}
                       {owner && !locked && ' Asks you to confirm.'}
                     </span>
-                    {from && <span className="mt-1 block text-xs font-semibold text-muted-foreground">From {from}</span>}
+                    {from && (
+                      <span id={`${id}-from`} className="mt-1 block text-xs font-semibold text-muted-foreground">
+                        From {from}
+                      </span>
+                    )}
                     {rowReason && (
                       <span className="mt-1 block text-xs font-medium text-muted-foreground">
                         {rowReason}
@@ -161,7 +165,7 @@ export function PermissionsTab({
                     checked={checked}
                     locked={locked}
                     aria-labelledby={`${id}-label`}
-                    aria-describedby={`${id}-hint`}
+                    aria-describedby={from ? `${id}-hint ${id}-from` : `${id}-hint`}
                     onCheckedChange={(next) => (owner && next ? setConfirming(true) : set(info.key, next))}
                   />
                 </label>

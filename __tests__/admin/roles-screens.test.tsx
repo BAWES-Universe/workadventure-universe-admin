@@ -358,11 +358,13 @@ describe('a role page', () => {
       const toggle = screen.getByRole('switch', { name: label }) as HTMLButtonElement;
       expect(toggle.getAttribute('aria-checked')).toBe('true');
       expect(toggle.disabled).toBe(true);
+      expect(toggle.getAttribute('aria-describedby')).toMatch(/-hint perm-\w+-from$/);
       expect(within(screen.getByTestId(`permission-${label === 'DM bots' ? 'DM_BOTS' : label === 'Summon bots' ? 'SUMMON_BOTS' : 'CHAT_BOTS_NEARBY'}`)).getByText('From Everyone')).toBeTruthy();
     }
     // What the role has to add itself stays a normal switch
     expect(screen.getByRole('switch', { name: 'Manage bots' }).getAttribute('aria-checked')).toBe('false');
     expect((screen.getByRole('switch', { name: 'Manage bots' }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByRole('switch', { name: 'Manage bots' }).getAttribute('aria-describedby')).toBe('perm-MANAGE_BOTS-hint');
     cleanup();
 
     open('editor');
