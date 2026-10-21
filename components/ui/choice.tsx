@@ -195,12 +195,12 @@ export function RolePill({ name, color, className }: { name: React.ReactNode; co
   return (
     <span
       className={cn(
-        "inline-flex h-6 items-center gap-1.5 whitespace-nowrap rounded-full border border-foreground/[.16] px-2.5 text-xs font-semibold",
+        "inline-flex h-6 min-w-0 max-w-full items-center gap-1.5 whitespace-nowrap rounded-full border border-foreground/[.16] px-2.5 text-xs font-semibold",
         className
       )}
     >
       {color && <i aria-hidden="true" className="h-2 w-2 shrink-0 rounded-full" style={{ background: color }} />}
-      {name}
+      <span className="min-w-0 truncate">{name}</span>
     </span>
   )
 }

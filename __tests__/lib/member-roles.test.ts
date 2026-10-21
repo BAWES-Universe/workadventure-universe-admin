@@ -35,8 +35,28 @@ describe('summariseRoles', () => {
     expect(summary).toMatchObject({ name: 'Admin', color: '#F87171', where: 'HQ only', more: 1 });
   });
 
-  it('puts the owner first, whatever roles they hold', () => {
-    expect(summariseRoles({ isOwner: true, worlds: everywhere, roles: [] }, ROLES, WORLDS)).toMatchObject({ name: 'Owner', more: 0 });
+  it('says Owner for an owner who was given no role', () => {
+    expect(summariseRoles({ isOwner: true, worlds: everywhere, roles: [] }, ROLES, WORLDS)).toMatchObject({ name: 'Owner', more: 0, owner: true });
+  });
+
+  it('does not count Owner as a role: an owner shows their highest given role and +N for the others', () => {
+    const one = summariseRoles({ isOwner: true, worlds: everywhere, roles: [{ roleId: 'admin', ...everywhere }] }, ROLES, WORLDS);
+    expect(one).toMatchObject({ name: 'Admin', more: 0, owner: true });
+    const two = summariseRoles(
+      { isOwner: true, worlds: everywhere, roles: [{ roleId: 'admin', ...everywhere }, { roleId: 'acct', ...everywhere }] },
+      ROLES,
+      WORLDS,
+    );
+    expect(two).toMatchObject({ name: 'Admin', more: 1, owner: true });
+  });
+
+  it('never says where an owner’s role works: the owner has every permission everywhere', () => {
+    const summary = summariseRoles({ isOwner: true, worlds: everywhere, roles: [{ roleId: 'admin', allWorlds: false, worldIds: ['hq'] }] }, ROLES, WORLDS);
+    expect(summary.where).toBeNull();
+  });
+
+  it('marks nobody else as the owner', () => {
+    expect(summariseRoles({ isOwner: false, worlds: everywhere, roles: [] }, ROLES, WORLDS).owner).toBe(false);
   });
 
   it('says where a Member works when they are in some worlds only', () => {
