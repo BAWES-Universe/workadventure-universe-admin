@@ -5,6 +5,7 @@ import { usePathname, useRouter } from 'next/navigation';
 import { authenticatedFetch, getClientSessionId } from '@/lib/client-auth';
 import { isInsideFrame } from '@/lib/orbit-frame';
 import type { OrbitView } from '@/lib/orbit-bridge';
+import { rememberResumePath } from '@/lib/resume-path';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import OrbitBridge from './components/orbit-bridge';
@@ -164,6 +165,11 @@ function ShellChrome({
   const [menuOpen, setMenuOpen] = useState(false);
   const inFrame = useMemo(() => isInsideFrame(), []);
   const route = useMemo(() => resolveRoute(pathname), [pathname]);
+
+  // Where Orbit is, for the game to bring Orbit back to after a reconnect (see lib/resume-path.ts).
+  useEffect(() => {
+    if (inFrame) rememberResumePath(`${pathname}${window.location.search}`);
+  }, [inFrame, pathname]);
 
   // Orbit's own history this visit: the pages behind (Back) and ahead (Forward), as addresses, each with the section
   // it was lit under. A popstate is read by comparing the new address with both ends, so Back and Forward (the

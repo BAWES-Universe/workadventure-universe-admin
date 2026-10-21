@@ -137,6 +137,21 @@ describe('AdminShell', () => {
     expect(mockAuthenticatedFetch.mock.calls[1][0]).toBe('/api/auth/me');
   });
 
+  it('remembers the page it is on, for Orbit to come back to after a reconnect', async () => {
+    window.sessionStorage.clear();
+    const view = await renderShell('/admin/bots');
+    expect(window.sessionStorage.getItem('orbit_resume_path')).toBe('/admin/bots');
+    act(() => {
+      mockPathname = '/admin/rooms';
+      view.rerender(
+        <AdminShell>
+          <div>rooms page</div>
+        </AdminShell>,
+      );
+    });
+    expect(window.sessionStorage.getItem('orbit_resume_path')).toBe('/admin/rooms');
+  });
+
   it('aborts the previous request when navigation changes', async () => {
     const view = await renderShell('/admin');
     act(() => {
