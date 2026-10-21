@@ -80,11 +80,15 @@ export async function GET(
 }
 
 
+// What the sheet says about an invitation still waiting: who sent it, when, and what it would give.
+const waiting = { id: true, invitedAt: true, roleIds: true, allWorlds: true, worldIds: true, invitedBy: { select: { id: true, name: true } } } as const;
+
 async function invitableUniverses(viewer: { id: string }, personId: string, hidden: string | null) {
   if (viewer.id === personId) return { universes: [], taken: [], friend: false };
   const candidates = await prisma.universe.findMany({
     where: {
       ...(hidden ? { ownerId: { not: hidden } } : {}),
+      // Yours only: a Super admin gets no universe of someone else's here, just for being one.
       OR: [{ ownerId: viewer.id }, { members: { some: { userId: viewer.id } } }],
     },
     select: {
@@ -92,9 +96,13 @@ async function invitableUniverses(viewer: { id: string }, personId: string, hidd
       name: true,
       ownerId: true,
       members: { where: { userId: personId }, select: { id: true } },
-      membershipInvitations: { where: { invitedUserId: personId, status: 'pending' }, select: { id: true } },
+      membershipInvitations: { where: { invitedUserId: personId, status: 'pending' }, select: waiting },
       // A pending invitation counts whether it names the universe or was sent the old way to one of its worlds
-      worlds: { where: { membershipInvitations: { some: { invitedUserId: personId, status: 'pending' } } }, select: { id: true }, take: 1 },
+      worlds: {
+        where: { membershipInvitations: { some: { invitedUserId: personId, status: 'pending' } } },
+        select: { membershipInvitations: { where: { invitedUserId: personId, status: 'pending' }, select: waiting, take: 1 } },
+        take: 1,
+      },
     },
     orderBy: { name: 'asc' },
   });
@@ -102,21 +110,40 @@ async function invitableUniverses(viewer: { id: string }, personId: string, hidd
   // into this universe and where. Access to every candidate comes in one go, and so do the visits of the ones that pass.
   const [friendship, accesses] = await Promise.all([
     prisma.friendship.findUnique({ where: { user1Id_user2Id: orderedPair(viewer.id, personId) }, select: { status: true } }),
-    accessForMany(prisma, candidates.map((universe) => universe.id), viewer),
+    // Your own roles, never the Super admin's reach into every universe
+    accessForMany(prisma, candidates.map((universe) => universe.id), { id: viewer.id }),
   ]);
   const yours = candidates.filter((universe) => {
     const access = accesses.get(universe.id);
     if (!access) return false;
-    const worlds = worldsAllowing(access, 'INVITE_AND_REMOVE');
-    return worlds === 'all' || worlds.length > 0;
+    // Inviting is what Give membership and Pending invite need; giving roles is what Roles needs
+    const some = (worlds: ReturnType<typeof worldsAllowing>) => worlds === 'all' || worlds.length > 0;
+    return some(worldsAllowing(access, 'INVITE_AND_REMOVE')) || some(worldsAllowing(access, 'GIVE_ROLES'));
   });
-  // The sheet shows the ones they already belong to or are invited to, so it is clear why they can't be picked.
+  const mayInvite = (universe: (typeof yours)[number]) => {
+    const worlds = worldsAllowing(accesses.get(universe.id)!, 'INVITE_AND_REMOVE');
+    return worlds === 'all' || worlds.length > 0;
+  };
+  // The sheet shows the ones they already belong to or are invited to, so it is clear where they stand.
+  const invitation = (universe: (typeof yours)[number]) => universe.membershipInvitations[0] ?? universe.worlds[0]?.membershipInvitations[0] ?? null;
   const status = (universe: (typeof yours)[number]) =>
-    universe.ownerId === personId || universe.members.length > 0 ? 'member' : universe.membershipInvitations.length > 0 || universe.worlds.length > 0 ? 'invited' : null;
-  const invitable = yours.filter((universe) => !status(universe)).map(({ id, name }) => ({ id, name }));
+    universe.ownerId === personId || universe.members.length > 0 ? 'member' : invitation(universe) ? 'invited' : null;
+  // Not in it, or waiting: you need to be able to invite. A member: inviting or giving roles is enough to look further.
+  const invitable = yours.filter((universe) => !status(universe) && mayInvite(universe)).map((universe) => ({ id: universe.id, name: universe.name }));
   const taken = yours.flatMap((universe) => {
     const value = status(universe);
-    return value ? [{ id: universe.id, name: universe.name, status: value }] : [];
+    if (value === 'invited' && !mayInvite(universe)) return [];
+    const sent = value === 'invited' ? invitation(universe) : null;
+    return value
+      ? [{
+          id: universe.id,
+          name: universe.name,
+          status: value,
+          invitation: sent
+            ? { id: sent.id, at: sent.invitedAt.toISOString(), by: { name: sent.invitedBy.name, you: sent.invitedBy.id === viewer.id }, roleIds: sent.roleIds, worlds: { allWorlds: sent.allWorlds, worldIds: sent.worldIds } }
+            : null,
+        }]
+      : [];
   });
   // Their latest visit in each of these universes: the newest row of each
   const visits = invitable.length

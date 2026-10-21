@@ -7,13 +7,19 @@ const mockFetch = jest.fn();
 let mockPeople: { uuid: string }[] = [];
 let mockCapabilities: string[] = [];
 let mockId = 'u-ali';
+let mockSearch = new URLSearchParams();
+let mockCurrent: string | null | undefined = null;
+// What you may do about Ali in each universe where he is a member, as the member route answers
+let mockCan: Record<string, { giveRoleIds: string[]; remove: boolean }> = {};
 const mockInvite = jest.fn();
 const mockMessage = jest.fn();
 
 jest.mock('next/navigation', () => ({
   useParams: () => ({ id: mockId }),
   useRouter: () => ({ push: jest.fn() }),
+  useSearchParams: () => mockSearch,
 }));
+jest.mock('@/app/admin/hooks/use-current-universe', () => ({ useCurrentUniverseId: () => mockCurrent }));
 jest.mock('next/link', () => ({ __esModule: true, default: ({ children, href }: { children: React.ReactNode; href: string }) => <a href={href}>{children}</a> }));
 jest.mock('@/lib/client-auth', () => ({ authenticatedFetch: (url: string, options?: RequestInit) => mockFetch(url, options) }));
 jest.mock('@/app/admin/hooks/use-live', () => ({ useLive: () => ({ available: true, people: mockPeople, places: [] }) }));
@@ -25,6 +31,7 @@ jest.mock('@/app/admin/components/orbit-bridge', () => ({
 jest.mock('@/app/admin/components/passport', () => ({ PassportSection: () => null }));
 jest.mock('@/app/admin/components/invite-sheet', () => ({
   __esModule: true,
+  firstUniverse: jest.requireActual('@/app/admin/components/invite-sheet').firstUniverse,
   default: ({ open, person, universeId, universes, giving }: { open: boolean; person: { userId: string; name: string; notes?: Record<string, string | null> }; universeId: string; universes: { id: string; status?: string }[]; giving?: boolean }) =>
     open ? (
       <div role="dialog">
@@ -64,6 +71,8 @@ function serve({ me = 'u-sara', connect, universes = [], taken = [], friend = fa
       return json(connect ?? { available: false });
     }
     if (url === '/api/admin/users/u-ali/worlds') return json({ worlds: [], universes, taken, friend });
+    const member = url.match(/^\/api\/admin\/universes\/([^/]+)\/members\/u-ali$/);
+    if (member) return json({ can: { ...{ giveRoleIds: [], remove: false }, ...mockCan[member[1]] } });
     if (url.startsWith('/api/admin/analytics/users/')) return json({ total: 0, page: 1, limit: 10, totalPages: 0, firstAccess: null, lastAccess: null, accesses: [] });
     return json({ rooms: [] });
   });
@@ -86,6 +95,9 @@ describe('Someone’s profile buttons', () => {
     mockPeople = [];
     mockCapabilities = [];
     mockId = 'u-ali';
+    mockSearch = new URLSearchParams();
+    mockCurrent = null;
+    mockCan = {};
   });
 
   it('shows Invite over, Message, Add friend and Give membership in that order, while they are online in a game that can take them', async () => {
@@ -120,17 +132,82 @@ describe('Someone’s profile buttons', () => {
     serve({
       connect: { available: true, relationship: 'none', chatId: null },
       universes: [{ id: 'sandbox', name: 'Sandbox', visit: null }],
-      taken: [{ id: 'bawes', name: 'BAWES', status: 'member' }, { id: 'cup', name: 'Cup', status: 'invited' }],
+      taken: [{ id: 'bawes', name: 'BAWES', status: 'member', invitation: null }, { id: 'cup', name: 'Cup', status: 'invited', invitation: null }],
     });
     await open();
     fireEvent.click(await screen.findByRole('button', { name: 'Give membership' }));
-    expect((await screen.findByRole('dialog')).textContent).toBe('Give Ali (u-ali) to sandbox of sandbox,bawes:member,cup:invited · no line');
+    expect((await screen.findByRole('dialog')).textContent).toBe('Give Ali (u-ali) to sandbox of sandbox,cup:invited,bawes:member · no line');
   });
 
-  it('has no Give membership when they are already in every universe you could offer', async () => {
-    serve({ connect: { available: true, relationship: 'none', chatId: null }, taken: [{ id: 'bawes', name: 'BAWES', status: 'member' }] });
+  it('has no button when they are a member and you may neither give roles nor remove them', async () => {
+    serve({ connect: { available: true, relationship: 'none', chatId: null }, taken: [{ id: 'bawes', name: 'BAWES', status: 'member', invitation: null }] });
     await open();
+    await waitFor(() => expect(mockFetch).toHaveBeenCalledWith('/api/admin/universes/bawes/members/u-ali', undefined));
     await waitFor(() => expect(names()).toEqual(['Add friend']));
+  });
+
+  it('says Roles for a member you may give roles to, and Membership when you may only remove them', async () => {
+    serve({ connect: { available: true, relationship: 'none', chatId: null }, taken: [{ id: 'bawes', name: 'BAWES', status: 'member', invitation: null }] });
+    mockCan = { bawes: { giveRoleIds: ['r1'], remove: true } };
+    await open();
+    await waitFor(() => expect(names()).toEqual(['Add friend', 'Roles']));
+    expect(isMain('Roles')).toBe(false);
+  });
+
+  it('says Membership for a member you may only remove', async () => {
+    serve({ connect: { available: true, relationship: 'none', chatId: null }, taken: [{ id: 'bawes', name: 'BAWES', status: 'member', invitation: null }] });
+    mockCan = { bawes: { giveRoleIds: [], remove: true } };
+    await open();
+    await waitFor(() => expect(names()).toEqual(['Add friend', 'Membership']));
+  });
+
+  it('says Pending invite when you invited them and are waiting, and lists the invitation under Memberships', async () => {
+    serve({
+      connect: { available: true, relationship: 'none', chatId: null },
+      taken: [{ id: 'bawes', name: 'BAWES', status: 'invited', invitation: { id: 'i1', at: new Date().toISOString(), by: { name: 'Sara', you: true }, roleIds: [], worlds: { allWorlds: true, worldIds: [] } } }],
+    });
+    await open();
+    await waitFor(() => expect(names()).toEqual(['Add friend', 'Pending invite']));
+    expect(within(await screen.findByTestId('waiting-invitations')).getByText('BAWES')).toBeTruthy();
+    expect(screen.getByTestId('waiting-invitations').textContent).toContain('Invited, waiting');
+    expect(screen.getByTestId('waiting-invitations').textContent).toContain('by you');
+  });
+
+  it('names the button for the universe you are standing in, and opens the sheet on it', async () => {
+    mockCurrent = 'other';
+    serve({
+      connect: { available: true, relationship: 'none', chatId: null },
+      universes: [{ id: 'bawes', name: 'BAWES', visit: null }],
+      taken: [{ id: 'other', name: 'Other', status: 'member', invitation: null }],
+    });
+    mockCan = { other: { giveRoleIds: ['r1'], remove: false } };
+    await open();
+    fireEvent.click(await screen.findByRole('button', { name: 'Roles' }));
+    expect((await screen.findByRole('dialog')).textContent).toContain('to other of other:member,bawes');
+  });
+
+  it('opens the sheet by itself when the game asked for it (sheet=membership), once', async () => {
+    mockSearch = new URLSearchParams('sheet=membership');
+    serve({ connect: { available: true, relationship: 'none', chatId: null }, universes: [{ id: 'bawes', name: 'BAWES', visit: null }] });
+    await open();
+    expect((await screen.findByRole('dialog')).textContent).toContain('Give Ali (u-ali) to bawes');
+  });
+
+  it('waits for the universe you are in to be known before opening the sheet', async () => {
+    mockSearch = new URLSearchParams('sheet=membership');
+    mockCurrent = undefined;
+    serve({ connect: { available: true, relationship: 'none', chatId: null }, universes: [{ id: 'bawes', name: 'BAWES', visit: null }] });
+    await open();
+    await screen.findByRole('button', { name: 'Give membership' });
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('does not open the sheet from sheet=membership when there is no button to match', async () => {
+    mockSearch = new URLSearchParams('sheet=membership');
+    serve({ connect: { available: true, relationship: 'none', chatId: null }, taken: [{ id: 'bawes', name: 'BAWES', status: 'member', invitation: null }] });
+    await open();
+    await waitFor(() => expect(mockFetch).toHaveBeenCalledWith('/api/admin/universes/bawes/members/u-ali', undefined));
+    expect(screen.queryByRole('dialog')).toBeNull();
   });
 
   it('has no Give membership for a guest, who could not accept it', async () => {
