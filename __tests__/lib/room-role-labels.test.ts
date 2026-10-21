@@ -59,7 +59,8 @@ describe('roleLabelsForViewer', () => {
   it('asks only for roles other than Member and Everyone', async () => {
     const mock = db(ROLES)
     await roleLabelsForViewer(mock, 'u1', { user: null, tags: [] })
-    expect((mock as any).role.findMany).toHaveBeenCalledWith(
+    const findMany = (mock as unknown as { role: { findMany: jest.Mock } }).role.findMany
+    expect(findMany).toHaveBeenCalledWith(
       expect.objectContaining({ where: { universeId: 'u1', key: { notIn: ['member', 'everyone'] } } }),
     )
   })
