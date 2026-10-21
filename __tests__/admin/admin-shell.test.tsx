@@ -7,6 +7,7 @@ import { WorkAdventureContext } from '@/app/admin/workadventure-context';
 import { useReplacePage } from '@/app/admin/orbit-frame-context';
 
 let mockPathname = '/admin';
+let mockSearch = '';
 const mockRouter = { back: jest.fn(), replace: jest.fn(), push: jest.fn(), refresh: jest.fn() };
 const mockGetClientSessionId = jest.fn(() => `orb_sess_v2_${'a'.repeat(64)}`);
 const closeModal = jest.fn();
@@ -33,7 +34,7 @@ function answerLast(body: unknown = bootstrap, status = 200) {
 jest.mock('next/navigation', () => ({
   usePathname: () => mockPathname,
   useRouter: () => mockRouter,
-  useSearchParams: () => new URLSearchParams(),
+  useSearchParams: () => new URLSearchParams(mockSearch),
 }));
 jest.mock('next/link', () => ({
   __esModule: true,
@@ -150,6 +151,25 @@ describe('AdminShell', () => {
       );
     });
     expect(window.sessionStorage.getItem('orbit_resume_path')).toBe('/admin/rooms');
+  });
+
+  it('keeps the remembered page up to date when only the query changes', async () => {
+    window.sessionStorage.clear();
+    window.history.replaceState(null, '', '/admin/bots?q=sage');
+    mockSearch = 'q=sage';
+    const view = await renderShell('/admin/bots');
+    expect(window.sessionStorage.getItem('orbit_resume_path')).toBe('/admin/bots?q=sage');
+    act(() => {
+      window.history.replaceState(null, '', '/admin/bots');
+      mockSearch = '';
+      view.rerender(
+        <AdminShell>
+          <div>bots page</div>
+        </AdminShell>,
+      );
+    });
+    expect(window.sessionStorage.getItem('orbit_resume_path')).toBe('/admin/bots');
+    window.history.replaceState(null, '', '/');
   });
 
   it('aborts the previous request when navigation changes', async () => {
