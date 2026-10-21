@@ -87,6 +87,21 @@ export function pickableWorlds(universeWorldIds: readonly string[], ...limits: A
   return { all, ids };
 }
 
+/**
+ * Where one role may be put on someone: the worlds they are a member of that you may give roles in (`ids`), and whether
+ * "All worlds" may be picked. "All worlds" also adds them to the worlds they are not in yet, so beside your Give roles
+ * reach it needs the right to add people to every world (`mayWiden`), unless they are in every world already.
+ */
+export function rolePickableWorlds(
+  universeWorldIds: readonly string[],
+  memberWorlds: AllowedWorlds,
+  giveWorlds: AllowedWorlds,
+  mayWiden: boolean,
+): { all: boolean; ids: string[] } {
+  const { ids } = pickableWorlds(universeWorldIds, memberWorlds, giveWorlds);
+  return { all: giveWorlds === 'all' && (memberWorlds === 'all' || mayWiden), ids };
+}
+
 /** The permission number of a role carries Administrator, which works in every world and can't be limited. */
 export function isAdministrator(permissions: string | undefined): boolean {
   if (!permissions) return false;
