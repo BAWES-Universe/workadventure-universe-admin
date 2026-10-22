@@ -86,7 +86,11 @@ export async function usableVisionKey(
   if (key.downSince) {
     // A key used only for images is never asked for as a bot's main key, so nothing else would check it again: ask here (the
     // 5-minute rule is the same). The answer does not wait for the check; the next request sees what it found.
-    if (options.recheck) void recheckIfDue({ ...key, ifDown: 'universe-ai' });
+    if (options.recheck) {
+      recheckIfDue({ ...key, ifDown: 'universe-ai' }).catch((error) => {
+        console.error('[AiKeys] Recheck of a vision key failed:', error instanceof Error ? error.message : 'unknown');
+      });
+    }
     return { ok: false, problem: 'down', key };
   }
   return { ok: true, key };

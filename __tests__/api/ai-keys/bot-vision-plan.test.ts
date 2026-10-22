@@ -152,6 +152,23 @@ describe('the owner picked', () => {
     expect(recheckIfDue).toHaveBeenCalledWith(expect.objectContaining({ providerId: 'key-1', ifDown: 'universe-ai' }));
   });
 
+  it('a recheck that fails never escapes as an unhandled rejection, and the reply still comes', async () => {
+    const pick = { vision: { choice: 'another', keyId: 'key-1', model: 'deepseek-v4-flash-vision-exp' } };
+    const down = { ...deepseekKey, downSince: new Date(), ifDown: 'stop' };
+    setRows(universeAiProvider, down, lmStudioKey);
+    bot.findUnique.mockResolvedValue(botOn('key-2', pick));
+    const failing = Promise.reject(new Error('database is down'));
+    const caught = jest.spyOn(failing, 'catch');
+    // only the images-only key's check fails; the bot's main key is asked first and answers as usual
+    (recheckIfDue as jest.Mock).mockImplementationOnce(async (key: unknown) => key).mockReturnValueOnce(failing);
+    const logged = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    expect((await ask()).vision).toEqual({ choice: 'this', problem: 'key' });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(caught).toHaveBeenCalled();
+    expect(logged).toHaveBeenCalledWith('[AiKeys] Recheck of a vision key failed:', 'database is down');
+    logged.mockRestore();
+  });
+
   it('does not ask a working key to check itself', async () => {
     const pick = { vision: { choice: 'another', keyId: 'key-1', model: 'deepseek-v4-flash-vision-exp' } };
     bot.findUnique.mockResolvedValue(botOn('key-2', pick));
