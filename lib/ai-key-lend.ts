@@ -83,15 +83,15 @@ export async function moveBotsOffKey(
   });
   if (bots.length === 0) return { count: 0, universes: [] };
 
-  // Only rows still on the key move, so a second request that ran at the same time finds nothing left to move and tells nobody
-  const moved = await prisma.bot.updateMany({
-    where: { id: { in: bots.map((bot) => bot.id) }, aiProviderRef: providerId },
-    data: { aiProviderRef: UNIVERSE_AI_REF },
-  });
-  if (moved.count === 0) return { count: 0, universes: [] };
+  // Only rows still on the key move, one by one, so a second request that ran at the same time can't be told about or counted twice
+  const results = await Promise.all(
+    bots.map((bot) => prisma.bot.updateMany({ where: { id: bot.id, aiProviderRef: providerId }, data: { aiProviderRef: UNIVERSE_AI_REF } })),
+  );
+  const movedBots = bots.filter((_, index) => results[index].count > 0);
+  if (movedBots.length === 0) return { count: 0, universes: [] };
 
   const byUniverse = new Map<string, MovedBots['universes'][number]>();
-  for (const bot of bots) {
+  for (const bot of movedBots) {
     const universe = bot.room.world.universe;
     const entry = byUniverse.get(universe.id) ?? { id: universe.id, name: universe.name, ownerId: universe.ownerId, botNames: [] };
     entry.botNames.push(bot.name);
@@ -125,5 +125,5 @@ export async function moveBotsOffKey(
       console.error('[AiKeys] Could not tell the universe owner:', error instanceof Error ? error.message : 'unknown');
     }
   }
-  return { count: bots.length, universes };
+  return { count: movedBots.length, universes };
 }
