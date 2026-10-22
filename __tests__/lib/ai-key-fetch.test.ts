@@ -71,6 +71,19 @@ describe('checkPublicHttpsUrl', () => {
     expect(lookupMock).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps every public address the name gave, in order', async () => {
+    lookupMock.mockResolvedValue([
+      { address: '2606:4700::6810:84e5', family: 6 },
+      { address: '93.184.216.34', family: 4 },
+    ]);
+    const checked = await checkPublicHttpsUrl('https://lm.example.com/v1/models');
+    expect(checked.addresses).toEqual([
+      { address: '2606:4700::6810:84e5', family: 6 },
+      { address: '93.184.216.34', family: 4 },
+    ]);
+    expect(checked.address).toBe('2606:4700::6810:84e5');
+  });
+
   it('refuses a name that resolves to a private address', async () => {
     lookupMock.mockResolvedValue([{ address: '192.168.1.20', family: 4 }]);
     expect(await problem(() => checkPublicHttpsUrl('https://nas.example.com'))).toBe('private');
@@ -122,7 +135,12 @@ describe('safeGet', () => {
     }) as never);
   }
 
-  const checked = { url: new URL('https://lm.example.com/v1/models'), address: '93.184.216.34', family: 4 as const };
+  const checked = {
+    url: new URL('https://lm.example.com/v1/models'),
+    address: '93.184.216.34',
+    family: 4 as const,
+    addresses: [{ address: '93.184.216.34', family: 4 as const }],
+  };
   afterEach(() => requestSpy?.mockRestore());
 
   it('answers "unreachable" instead of throwing when Node refuses the request (a header it cannot send)', async () => {
@@ -164,6 +182,28 @@ describe('safeGet', () => {
     await safeGet(checked);
     expect((requestSpy.mock.calls[0][0] as { method: string }).method).toBe('GET');
     expect(sent).toBeUndefined();
+  });
+
+  it('offers every checked address, so a server without an IPv6 route can fall back to IPv4', async () => {
+    fakeRequest((res) => res.emit('end'));
+    await safeGet({
+      ...checked,
+      address: '2606:4700::6810:84e5',
+      family: 6,
+      addresses: [
+        { address: '2606:4700::6810:84e5', family: 6 },
+        { address: '93.184.216.34', family: 4 },
+      ],
+    });
+    const all = jest.fn();
+    seen!.lookup('lm.example.com', { all: true }, all);
+    expect(all).toHaveBeenCalledWith(null, [
+      { address: '2606:4700::6810:84e5', family: 6 },
+      { address: '93.184.216.34', family: 4 },
+    ]);
+    const single = jest.fn();
+    seen!.lookup('lm.example.com', {}, single);
+    expect(single).toHaveBeenCalledWith(null, '2606:4700::6810:84e5', 6);
   });
 
   it('hands a redirect back as it is and follows nothing', async () => {

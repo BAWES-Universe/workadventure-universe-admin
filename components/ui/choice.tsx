@@ -112,7 +112,11 @@ PickChip.displayName = "PickChip"
 type SegmentedProps<T extends string> = {
   value: T
   onChange: (value: T) => void
-  options: { value: T; label: React.ReactNode; disabled?: boolean }[]
+  /**
+   * An option you may not pick can carry `onBlocked`: it stays focusable, looks disabled, and a press calls it
+   * (to say why) instead of doing nothing. One that is already picked has nothing to explain.
+   */
+  options: { value: T; label: React.ReactNode; disabled?: boolean; onBlocked?: () => void }[]
   "aria-label"?: string
   "aria-labelledby"?: string
   className?: string
@@ -158,6 +162,7 @@ export function Segmented<T extends string>({ value, onChange, options, classNam
     >
       {options.map((option, index) => {
         const picked = option.value === value
+        const blocked = !!option.disabled && !!option.onBlocked
         return (
           <button
             key={option.value}
@@ -167,12 +172,13 @@ export function Segmented<T extends string>({ value, onChange, options, classNam
             type="button"
             role="radio"
             aria-checked={picked}
-            disabled={option.disabled}
-            tabIndex={index === tabbable ? 0 : -1}
-            onClick={() => pick(option.value)}
+            disabled={option.disabled && !blocked}
+            aria-disabled={blocked || undefined}
+            tabIndex={index === tabbable || blocked ? 0 : -1}
+            onClick={() => (blocked ? !picked && option.onBlocked?.() : pick(option.value))}
             onKeyDown={(event) => onKeyDown(event, index)}
             className={cn(
-              "inline-flex h-11 items-center justify-center rounded-full px-3 text-[13px] font-semibold text-foreground/[.62] transition-[color,background-color,box-shadow] disabled:cursor-not-allowed disabled:opacity-50",
+              "inline-flex h-11 items-center justify-center rounded-full px-3 text-[13px] font-semibold text-foreground/[.62] transition-[color,background-color,box-shadow] disabled:cursor-not-allowed disabled:opacity-50 aria-disabled:cursor-not-allowed aria-disabled:opacity-50",
               FOCUS,
               picked
                 ? "bg-[rgba(134,41,252,.16)] font-bold text-foreground shadow-[inset_0_0_0_1px_rgba(167,139,250,.7)]"
@@ -195,12 +201,12 @@ export function RolePill({ name, color, className }: { name: React.ReactNode; co
   return (
     <span
       className={cn(
-        "inline-flex h-6 items-center gap-1.5 whitespace-nowrap rounded-full border border-foreground/[.16] px-2.5 text-xs font-semibold",
+        "inline-flex h-6 min-w-0 max-w-full items-center gap-1.5 whitespace-nowrap rounded-full border border-foreground/[.16] px-2.5 text-xs font-semibold",
         className
       )}
     >
       {color && <i aria-hidden="true" className="h-2 w-2 shrink-0 rounded-full" style={{ background: color }} />}
-      {name}
+      <span className="min-w-0 truncate">{name}</span>
     </span>
   )
 }

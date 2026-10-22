@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
+import { deleteWithHiddenBotData } from '@/lib/bot-privacy';
 import { z } from 'zod';
 import { FEATURED_FORBIDDEN, refusesFeaturedChange } from '@/lib/featured';
 import { wokaLayersFor } from '@/lib/woka-avatar';
@@ -16,6 +17,8 @@ const updateUniverseSchema = z.object({
   isPublic: z.boolean().optional(),
   featured: z.boolean().optional(),
   thumbnailUrl: z.string().url().nullable().optional(),
+  // Hide bot conversations (#435). Like the rest of this route, only the owner and super admins can change it.
+  hideBotConversations: z.boolean().optional(),
 });
 
 // GET /api/admin/universes/[id] - Get a single universe
@@ -266,6 +269,7 @@ export async function PATCH(
     if (data.ownerId !== undefined) updateData.ownerId = data.ownerId;
     if (data.isPublic !== undefined) updateData.isPublic = data.isPublic;
     if (data.featured !== undefined) updateData.featured = data.featured;
+    if (data.hideBotConversations !== undefined) updateData.hideBotConversations = data.hideBotConversations;
     if (data.thumbnailUrl !== undefined) {
       updateData.thumbnailUrl = data.thumbnailUrl || null;
     }
@@ -358,9 +362,7 @@ export async function DELETE(
       );
     }
     
-    await prisma.universe.delete({
-      where: { id },
-    });
+    await deleteWithHiddenBotData({ room: { world: { universeId: id } } }, () => prisma.universe.delete({ where: { id } }));
     
     return NextResponse.json({ success: true });
   } catch (error) {
