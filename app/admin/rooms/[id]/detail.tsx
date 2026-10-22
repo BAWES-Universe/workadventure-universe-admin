@@ -531,7 +531,6 @@ export function RoomDetailPage({ view = 'details' }: { view?: 'details' | 'visit
         <PageHeader
           kind="people"
           title="Visitors"
-          plainIcon
           context={
             <InContext
               parts={[

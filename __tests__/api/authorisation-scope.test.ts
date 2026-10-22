@@ -431,6 +431,11 @@ describe('reading one bot\'s data', () => {
     db.bot.findUnique.mockImplementation(async (args: MockArgs) =>
       ({ 'bot-mine': { roomId: 'room-mine' }, 'bot-other': { roomId: 'room-other' } } as Record<string, { roomId: string }>)[args.where.id] ?? null,
     );
+    // a bot found for the privacy check (#435) also brings its universe; neither hides conversations here
+    db.bot.findUnique.mockImplementation(async (args: MockArgs) => {
+      const roomId = ({ 'bot-mine': 'room-mine', 'bot-other': 'room-other' } as Record<string, string>)[args.where.id];
+      return roomId ? { roomId, hideConversations: null, room: { world: { universe: { hideBotConversations: false } } } } : null;
+    });
     (canManageBots as jest.Mock).mockImplementation(async (userId: string, roomId: string) =>
       userId === 'u-alice' && roomId === 'room-mine',
     );
@@ -445,21 +450,23 @@ describe('reading one bot\'s data', () => {
     expect(db.botsConversation.findMany).not.toHaveBeenCalled();
   });
 
-  it('a bot manager can read their own bot\'s conversations', async () => {
+  it('a bot manager cannot read their own bot\'s conversations: only a super admin reads what people said (#503)', async () => {
     const res = await readBotConversations(req('/api/bots/bot-mine/conversations', 'alice'), params('bot-mine'));
-    expect(res.status).toBe(200);
-    expect(db.botsConversation.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: expect.objectContaining({ botId: 'bot-mine' }) }),
-    );
+    expect(res.status).toBe(403);
+    expect(db.botsConversation.findMany).not.toHaveBeenCalled();
   });
 
-  it('a bot manager does not get a player\'s email back through the player id; a super admin does', async () => {
+  it('a bot manager cannot read their own bot\'s memory either', async () => {
+    const res = await readBotMemory(req('/api/bots/memory/bot-mine', 'alice'), params('bot-mine'));
+    expect(res.status).toBe(403);
+    expect(db.botsMemory.findMany).not.toHaveBeenCalled();
+  });
+
+  it('a super admin gets a player\'s email back through the player id', async () => {
     db.botsConversation.findMany.mockResolvedValue([
       { id: 'c1', userUuid: 'bob@example.test', user: { id: 'u-bob', uuid: 'uuid-bob', name: 'Bob' } },
       { id: 'c2', userUuid: 'guest-uuid-1', user: null },
     ]);
-    const manager = await (await readBotConversations(req('/api/bots/bot-mine/conversations', 'alice'), params('bot-mine'))).json();
-    expect(manager.conversations.map((c: { userUuid: string | null }) => c.userUuid)).toEqual(['uuid-bob', 'guest-uuid-1']);
     const root = await (await readBotConversations(req('/api/bots/bot-mine/conversations', 'root'), params('bot-mine'))).json();
     expect(root.conversations.map((c: { userUuid: string | null }) => c.userUuid)).toEqual(['bob@example.test', 'guest-uuid-1']);
   });

@@ -27,11 +27,11 @@ describe('the seven kinds, exactly as they were', () => {
     expect(row(kind)).toMatchObject(expected);
   });
 
-  it('gives every kind but Claude the OpenAI chat format, a Bearer key, and the default key check, apart from OpenRouter, Vercel and Hugging Face', () => {
+  it('gives every kind but Claude the OpenAI chat format, a Bearer key, and the default key check, apart from OpenRouter, Vercel, Hugging Face and the More providers', () => {
     for (const info of AI_KEY_KINDS.filter((entry) => entry.kind !== 'claude')) {
       expect(info.protocol).toBe('openai');
       expect(info.auth).toBe('bearer');
-      const expected = info.kind === 'openrouter' ? { type: 'key-info', paths: ['/key', '/auth/key'] } : info.kind === 'vercel' || info.kind === 'huggingface' ? { type: 'chat' } : { type: 'models' };
+      const expected = info.kind === 'openrouter' ? { type: 'key-info', paths: ['/key', '/auth/key'] } : info.kind === 'vercel' || info.kind === 'huggingface' || info.tier === 'more' ? { type: 'chat' } : { type: 'models' };
       expect(info.keyCheck).toEqual(expected);
     }
   });
@@ -63,6 +63,13 @@ describe('helpers', () => {
   it('sends a key as a Bearer header, and nothing when there is none', () => {
     expect(authHeaders(kindInfo('openai')!, 'sk-1')).toEqual({ Authorization: 'Bearer sk-1' });
     expect(authHeaders(kindInfo('lmstudio')!, '')).toEqual({});
+  });
+
+  it('trims trailing slashes in linear time, even for a long run of them in the middle of an address', () => {
+    const nim = kindInfo('nim')!;
+    const started = Date.now();
+    expect(isTypedEndpoint(nim, `https://mine.example.com${'/'.repeat(200_000)}x`)).toBe(true);
+    expect(Date.now() - started).toBeLessThan(1000);
   });
 
   it('knows a typed address from the provider’s own', () => {
@@ -113,6 +120,7 @@ describe('the providers added after the seven', () => {
 
   it('finds a saved key’s region from its endpoint, and never guesses one', () => {
     expect(hostedBase(kindInfo('qwen')!, { address: 'https://dashscope.aliyuncs.com/compatible-mode/v1/' })).toMatchObject({ ok: true, region: 'china' });
+    expect(hostedBase(kindInfo('qwen')!, { address: 'https://dashscope.aliyuncs.com/compatible-mode/v1///' })).toMatchObject({ ok: true, region: 'china' });
     expect(hostedBase(kindInfo('qwen')!, {})).toEqual({ ok: false, message: 'Pick a region first.' });
     expect(hostedBase(kindInfo('qwen')!, { region: 'mars' })).toMatchObject({ ok: false });
     expect(hostedBase(kindInfo('groq')!, { region: 'china' })).toMatchObject({ ok: true, base: 'https://api.groq.com/openai/v1', region: null });
@@ -149,6 +157,10 @@ describe('More providers, from the snapshot', () => {
       expect(info.regions).toBeUndefined();
       expect(info.steps.length).toBeGreaterThan(0);
     }
+  });
+
+  it('proves a key with a chat reply, since none of them has been tried for a public model list', () => {
+    for (const info of more) expect(info.keyCheck).toEqual({ type: 'chat' });
   });
 
   it('never repeats a provider the page names by hand', () => {

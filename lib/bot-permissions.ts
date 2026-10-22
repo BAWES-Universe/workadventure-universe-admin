@@ -42,11 +42,25 @@ export interface ManagedBot {
 }
 
 /**
+ * Whether someone still belongs to the universe. Rules are kept when a person leaves (and a rule for Everyone reaches
+ * people who never joined), so a Yes on Manage this bot only counts while they are a member: a world membership row
+ * (written some other way, read as before) or a universe membership.
+ */
+async function stillInUniverse(userId: string, universeId: string, inAWorld: boolean): Promise<boolean> {
+  if (inAWorld) return true;
+  const membership = await prisma.universeMember.findUnique({
+    where: { universeId_userId: { universeId, userId } },
+    select: { id: true },
+  });
+  return membership !== null;
+}
+
+/**
  * Whether someone manages this one bot (#427): what canManageBots says for its room, then the bot's own "Manage this
  * bot" rules. A rule of theirs says Yes or No (their own row first, then their roles' rows, a Yes from any role beating
- * a No from another); with none, the room answer stands. The bot's creator (when `creatorPasses`), the owner of the
- * universe, super admins and Admin always manage it, whatever a rule says. A bot with no rules answers exactly as
- * canManageBots does.
+ * a No from another); with none, the room answer stands. A Yes only counts for someone still in the universe. The bot's
+ * creator (when `creatorPasses`), the owner of the universe, super admins and Admin always manage it, whatever a rule
+ * says. A bot with no rules answers exactly as canManageBots does.
  */
 export async function canManageThisBot(
   userId: string,
@@ -91,7 +105,7 @@ export async function canManageThisBot(
     rules.find((rule) => rule.userId === userId) ?? null,
     rules.filter((rule) => rule.roleId && roleIds.has(rule.roleId)),
   );
-  if (verdict === 'yes') return true;
+  if (verdict === 'yes') return stillInUniverse(userId, room.world.universeId, member !== null);
   if (verdict === 'no') return false;
   return canManageBots(userId, bot.roomId);
 }

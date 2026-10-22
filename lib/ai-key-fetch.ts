@@ -55,9 +55,11 @@ export const ADDRESS_PROBLEM_TEXT: Record<AddressProblem, string> = {
 
 export interface CheckedAddress {
   url: URL;
-  /** The one address the connection will go to. */
+  /** The first checked address, kept for callers that want one. */
   address: string;
   family: 4 | 6;
+  /** Every address the name gave, all checked public. The connection may use any of them, so a missing IPv6 route falls back to IPv4. */
+  addresses: { address: string; family: 4 | 6 }[];
 }
 
 /** Everything about the address that can be checked without a lookup; throws an AddressError. */
@@ -89,8 +91,8 @@ export async function checkPublicHttpsUrl(raw: string): Promise<CheckedAddress> 
   }
   if (addresses.length === 0) throw new AddressError('unresolved');
   if (addresses.some((entry) => !isPublicAddress(entry.address))) throw new AddressError('private');
-  const first = addresses[0];
-  return { url, address: first.address, family: first.family === 6 ? 6 : 4 };
+  const checked = addresses.map((entry) => ({ address: entry.address, family: entry.family === 6 ? (6 as const) : (4 as const) }));
+  return { url, address: checked[0].address, family: checked[0].family, addresses: checked };
 }
 
 export interface SafeGetOptions {
@@ -116,12 +118,13 @@ export function safeGet(checked: CheckedAddress, options: SafeGetOptions = {}): 
 
 /**
  * Call a checked address (GET, or POST with a JSON body). Redirects are returned as they are (the caller treats any 3xx
- * as a failure) and never followed. The socket connects only to `checked.address`, with the name still used for the certificate.
+ * as a failure) and never followed. The socket connects only to the checked addresses (any of them, so a missing IPv6
+ * route falls back to IPv4), with the name still used for the certificate.
  */
 export function safeRequest(checked: CheckedAddress, options: SafeRequestOptions = {}): Promise<SafeGetResult> {
   const { timeoutMs = 10_000, maxBytes = 1_000_000, headers = {}, method = 'GET', body } = options;
   const payload = body === undefined ? null : Buffer.from(JSON.stringify(body));
-  const { url, address, family } = checked;
+  const { url, addresses } = checked;
   return new Promise<SafeGetResult>((resolve) => {
     let settled = false;
     const finish = (result: SafeGetResult) => {
@@ -138,10 +141,11 @@ export function safeRequest(checked: CheckedAddress, options: SafeRequestOptions
         port: url.port || 443,
         path: `${url.pathname}${url.search}`,
         headers: { Accept: 'application/json', ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': String(payload.length) } : {}), ...headers },
-        // The name is never looked up again: the socket gets the address that was checked.
+        // The name is never looked up again: the socket gets the addresses that were checked, and Node tries the next
+        // one when the first has no route (a server without IPv6; automatic from Node 20).
         lookup: ((_host: string, lookupOptions: { all?: boolean }, callback: (...args: unknown[]) => void) => {
-          if (lookupOptions && lookupOptions.all) callback(null, [{ address, family }]);
-          else callback(null, address, family);
+          if (lookupOptions && lookupOptions.all) callback(null, addresses);
+          else callback(null, addresses[0].address, addresses[0].family);
         }) as never,
       },
       (response) => {

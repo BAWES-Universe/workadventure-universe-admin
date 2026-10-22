@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { withWokas } from '@/lib/woka-avatar';
-import { allows, ranksAbove, worldsAllowing, type Reach } from '@/lib/role-access';
+import { allows } from '@/lib/role-access';
+import { memberCan, reachOfMember } from '@/lib/member-can';
 import { leaveUniverse } from '@/lib/universe-members';
 import { failed, managesPeople, memberForJson, memberInclude, needs, seesHiddenRoles, universeContext } from '@/lib/universe-route';
 
@@ -39,12 +40,6 @@ async function ownerWithoutMembership(universeId: string, userId: string) {
   };
 }
 
-/** Every world someone is in: through their membership or any role. */
-function reachOfMember(member: { allWorlds: boolean; worldIds: string[]; roles: { allWorlds: boolean; worldIds: string[] }[] }): Reach {
-  if (member.allWorlds || member.roles.some((given) => given.allWorlds)) return { allWorlds: true };
-  return { allWorlds: false, worldIds: [...new Set([...member.worldIds, ...member.roles.flatMap((given) => given.worldIds)])] };
-}
-
 // GET /api/admin/universes/[id]/members/[userId] - One member, and what you may change about them
 export async function GET(request: NextRequest, { params }: Params) {
   try {
@@ -60,17 +55,12 @@ export async function GET(request: NextRequest, { params }: Params) {
     const joined = member ?? (await ownerWithoutMembership(id, userId));
     if (!joined) return NextResponse.json({ error: 'Member not found' }, { status: 404 });
 
-    // The owner is above every role
-    const theirHighest = isOwner ? Infinity : Math.max(1, ...joined.roles.map((given) => given.role.position));
     // Member and Everyone come with joining, so they are never given or taken
     const roles = await prisma.role.findMany({
       where: { universeId: id, key: { notIn: ['member', 'everyone'] } },
       select: { id: true, position: true },
     });
-    const givable = worldsAllowing(access, 'GIVE_ROLES');
-    // Someone else's roles are changed only from above them
-    // The owner has every permission already: nothing to give
-    const canGiveAnywhere = !isOwner && (givable === 'all' || givable.length > 0) && (access.full || userId === user.id || theirHighest < access.highest);
+    const can = memberCan({ access, viewerId: user.id, userId, ownerId: universe.ownerId, member: joined, roles });
 
     // Who came when is visitor detail: only for people who manage members, and for yourself
     const seesVisits = managesPeople(access) || userId === user.id;
@@ -81,20 +71,7 @@ export async function GET(request: NextRequest, { params }: Params) {
     return NextResponse.json({
       // When they last came into any room of this universe, from the room visits; left out when you may not see it
       member: seesVisits ? { ...withWoka, lastVisitedAt } : withWoka,
-      can: {
-        // The roles you may give or take away (below your own), and the worlds where you may
-        giveRoleIds: canGiveAnywhere
-          ? roles.filter((role) => ranksAbove(access, role)).map((role) => role.id)
-          : [],
-        giveWorlds: givable,
-        // Taking someone out: never the owner, only below you, and only where you may remove people. Leaving is yours.
-        remove:
-          userId === user.id
-            ? !isOwner
-            : !isOwner &&
-              (access.full || theirHighest < access.highest) &&
-              allows(access, 'INVITE_AND_REMOVE', reachOfMember(joined)),
-      },
+      can,
     });
   } catch (error) {
     return failed(error, 'read member');

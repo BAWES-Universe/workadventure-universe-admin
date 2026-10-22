@@ -5,9 +5,9 @@ import { accessFor, worldsAllowing } from '@/lib/role-access';
 
 export const dynamic = 'force-dynamic';
 
-async function mayInvite(user: { id: string; isSuperAdmin?: boolean }, universeId: string, worldId: string): Promise<boolean> {
-  // A super admin has everything, as in the invitation route, so who they are goes along with their id
-  const access = await accessFor(prisma, universeId, { id: user.id, isSuperAdmin: user.isSuperAdmin });
+async function mayInvite(user: { id: string }, universeId: string, worldId: string): Promise<boolean> {
+  // As in the invitation route: the owner, or a role that invites in this world. Being a super admin adds nothing.
+  const access = await accessFor(prisma, universeId, { id: user.id });
   if (!access) return false;
   const worlds = worldsAllowing(access, 'INVITE_AND_REMOVE');
   return worlds === 'all' || worlds.includes(worldId);
