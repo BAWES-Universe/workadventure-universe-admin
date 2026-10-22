@@ -1,4 +1,4 @@
-import { ADDRESS_PROBLEM_TEXT, AddressError, checkPublicHttpsUrl, safeGet } from '@/lib/ai-key-fetch';
+import { ADDRESS_PROBLEM_TEXT, AddressError, checkPublicHttpsUrl, safeGet, safeRequest } from '@/lib/ai-key-fetch';
 import { kindInfo, type AiKeyKind, type AiKeyKindInfo } from '@/lib/ai-key-kinds';
 
 /**
@@ -69,6 +69,13 @@ async function openRouterRejectsKey(base: string, apiKey: string): Promise<boole
 
 export type LoadModelsResult = { ok: true; models: string[] } | { ok: false; message: string };
 
+/**
+ * Why a check failed, for deciding what to do about it: nobody answered, the provider said no, it was too busy to say
+ * (a 429: it answered, so the key is neither proven good nor bad), or something else.
+ */
+export type ProbeFailure = 'unreachable' | 'rejected' | 'busy' | 'other';
+export type ProbeModelsResult = { ok: true; models: string[] } | { ok: false; message: string; reason: ProbeFailure };
+
 const NOT_CHAT = /embed|whisper|tts|dall-e|moderation|rerank|transcribe|image|audio|realtime|guard|safety/i;
 
 /** Tidy a provider's list: plain ids, no duplicates, chat models first by name. */
@@ -82,28 +89,30 @@ export function cleanModelIds(ids: string[], kind: AiKeyKind): string[] {
   return [...seen].sort((a, b) => a.localeCompare(b));
 }
 
-export async function loadModels(input: KeyTargetInput & { apiKey?: unknown }): Promise<LoadModelsResult> {
+/** Like loadModels, and also says why it failed (the key health check needs that; a person only needs the sentence). */
+export async function probeModels(input: KeyTargetInput & { apiKey?: unknown }): Promise<ProbeModelsResult> {
   const resolved = keyTarget(input);
-  if (!resolved.ok) return resolved;
+  if (!resolved.ok) return { ...resolved, reason: 'other' };
   const { info, modelsUrl } = resolved.target;
   const apiKey = typeof input.apiKey === 'string' ? input.apiKey.trim() : '';
-  if (info.apiKey === 'required' && !apiKey) return { ok: false, message: 'Paste your API key first.' };
+  if (info.apiKey === 'required' && !apiKey) return { ok: false, message: 'Paste your API key first.', reason: 'other' };
   // A header can only carry plain visible characters: a pasted smart quote or zero-width space would make Node throw
-  if (apiKey && !KEY_CHARACTERS.test(apiKey)) return { ok: false, message: KEY_LOOKS_WRONG };
+  if (apiKey && !KEY_CHARACTERS.test(apiKey)) return { ok: false, message: KEY_LOOKS_WRONG, reason: 'other' };
 
   let checked;
   try {
     checked = await checkPublicHttpsUrl(modelsUrl);
   } catch (error) {
-    if (error instanceof AddressError) return { ok: false, message: ADDRESS_PROBLEM_TEXT[error.problem] };
-    return { ok: false, message: 'That address can’t be used.' };
+    if (error instanceof AddressError) return { ok: false, message: ADDRESS_PROBLEM_TEXT[error.problem], reason: error.problem === 'unresolved' ? 'unreachable' : 'other' };
+    return { ok: false, message: 'That address can’t be used.', reason: 'other' };
   }
 
   const result = await safeGet(checked, { headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {}, maxBytes: MODEL_LIST_MAX_BYTES });
   if (!result.ok) {
-    if (result.reason === 'too-large') return { ok: false, message: 'It answered, but not like an AI server.' };
+    if (result.reason === 'too-large') return { ok: false, message: 'It answered, but not like an AI server.', reason: 'other' };
     return {
       ok: false,
+      reason: 'unreachable',
       message:
         info.group === 'own-computer'
           ? 'It didn’t answer. Is the server running and the tunnel up?'
@@ -113,15 +122,19 @@ export async function loadModels(input: KeyTargetInput & { apiKey?: unknown }): 
   if (result.status === 401 || result.status === 403) {
     return {
       ok: false,
+      reason: 'rejected',
       message:
         info.group === 'own-computer'
           ? 'The server asked for a key, or didn’t accept the one you gave.'
           : `${info.label} didn’t accept this key.`,
     };
   }
-  if (result.status !== 200) return { ok: false, message: `It answered with an error (${result.status}).` };
+  if (result.status === 429) {
+    return { ok: false, reason: 'busy', message: `${info.label} is busy right now. Try again in a moment.` };
+  }
+  if (result.status !== 200) return { ok: false, message: `It answered with an error (${result.status}).`, reason: result.status >= 500 ? 'unreachable' : 'other' };
   if (info.kind === 'openrouter' && apiKey && (await openRouterRejectsKey(info.base!, apiKey))) {
-    return { ok: false, message: `${info.label} didn’t accept this key.` };
+    return { ok: false, message: `${info.label} didn’t accept this key.`, reason: 'rejected' };
   }
 
   let ids: string[] = [];
@@ -131,16 +144,57 @@ export async function loadModels(input: KeyTargetInput & { apiKey?: unknown }): 
     if (!Array.isArray(list)) throw new Error('shape');
     ids = list.map((entry) => (typeof entry === 'object' && entry !== null ? (entry as { id?: unknown }).id : null)).filter((id): id is string => typeof id === 'string');
   } catch {
-    return { ok: false, message: 'It answered, but not like an AI server.' };
+    return { ok: false, message: 'It answered, but not like an AI server.', reason: 'other' };
   }
   const models = cleanModelIds(ids, info.kind);
   if (models.length === 0) {
     return {
       ok: false,
+      reason: 'other',
       message: info.group === 'own-computer' ? 'It answered, but no model is loaded. Load one in your server first.' : `${info.label} has no models for this key.`,
     };
   }
   return { ok: true, models };
+}
+
+/**
+ * Asks the key's provider for one tiny reply from the saved model. A model list can answer while chat does not (the model
+ * was removed, chat credit ran out), so this is what proves a key that went Down on failed replies works again.
+ */
+export async function probeChat(input: KeyTargetInput & { apiKey?: unknown; model: string }): Promise<{ ok: true } | { ok: false; message: string; reason: ProbeFailure }> {
+  const resolved = keyTarget(input);
+  if (!resolved.ok) return { ...resolved, reason: 'other' };
+  const { info, modelsUrl } = resolved.target;
+  const apiKey = typeof input.apiKey === 'string' ? input.apiKey.trim() : '';
+  if (apiKey && !KEY_CHARACTERS.test(apiKey)) return { ok: false, message: KEY_LOOKS_WRONG, reason: 'other' };
+  let checked;
+  try {
+    checked = await checkPublicHttpsUrl(modelsUrl.replace(/\/models$/, '/chat/completions'));
+  } catch (error) {
+    if (error instanceof AddressError) return { ok: false, message: ADDRESS_PROBLEM_TEXT[error.problem], reason: error.problem === 'unresolved' ? 'unreachable' : 'other' };
+    return { ok: false, message: 'That address can’t be used.', reason: 'other' };
+  }
+  const result = await safeRequest(checked, {
+    method: 'POST',
+    headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+    body: { model: input.model, messages: [{ role: 'user', content: 'Say ok.' }], stream: false, [info.tokenLimitField ?? 'max_tokens']: 16 },
+    timeoutMs: 30_000,
+    maxBytes: 200_000,
+  });
+  if (!result.ok) return { ok: false, reason: 'unreachable', message: `${info.label} didn’t answer. Try again in a moment.` };
+  if (result.status >= 200 && result.status < 300) return { ok: true };
+  if (result.status === 401 || result.status === 403) return { ok: false, reason: 'rejected', message: `${info.label} didn’t accept this key.` };
+  if (result.status === 429) return { ok: false, reason: 'busy', message: `${info.label} is busy right now. Try again in a moment.` };
+  return {
+    ok: false,
+    reason: result.status >= 500 ? 'unreachable' : 'other',
+    message: `${info.label} lists its models, but a chat call to ${input.model} failed (${result.status}). Check the model.`,
+  };
+}
+
+export async function loadModels(input: KeyTargetInput & { apiKey?: unknown }): Promise<LoadModelsResult> {
+  const result = await probeModels(input);
+  return result.ok ? result : { ok: false, message: result.message };
 }
 
 const attempts = new Map<string, number[]>();

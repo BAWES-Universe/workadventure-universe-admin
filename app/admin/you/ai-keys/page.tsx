@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { Bot, KeyRound, Plus, Trash2, X } from 'lucide-react';
+import { Bot, KeyRound, Plus, RefreshCw, Trash2, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/components/ui/toast';
 import { authenticatedFetch } from '@/lib/client-auth';
@@ -10,7 +10,7 @@ import type { AiKeySummary } from '@/lib/ai-keys';
 import { LoadError, LoadingRows, PageHeader, count } from '../../components/ds';
 import { FormSheet } from '../../components/form-sheet';
 import { Planet } from '../../components/ds/planet-icon';
-import { PickCard, Radio } from '@/components/ui/choice';
+import { PickCard, Radio, Segmented } from '@/components/ui/choice';
 import { useAiKeys } from '../../hooks/use-ai-keys';
 
 /** 880000 -> "880k", 1200000 -> "1.2M": a token count that fits a phone. */
@@ -59,6 +59,54 @@ function dangerLine(key: AiKeySummary): string {
   return `Deletes it everywhere. ${bots === 1 ? 'Its bot moves' : `Its ${bots} bots move`} to Universe AI${told ? ' and each universe owner is told' : ''}.`;
 }
 
+/** Working or Down, as a small pill (green dot, or amber for Down). */
+function StatusPill({ down }: { down: boolean }) {
+  return down ? (
+    <span className="inline-flex h-[22px] items-center gap-1.5 whitespace-nowrap rounded-full border border-[rgb(245_196_81/0.55)] px-2.5 text-[11px] font-semibold text-[#F5C451]" data-testid="ai-key-status">
+      <i aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-[#F5C451]" />
+      Down
+    </span>
+  ) : (
+    <span className="inline-flex h-[22px] items-center gap-1.5 whitespace-nowrap rounded-full border border-foreground/[.16] px-2.5 text-[11px] font-semibold" data-testid="ai-key-status">
+      <i aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-[#4ade80]" />
+      Working
+    </span>
+  );
+}
+
+const DOWN_PHRASE = { stopped: 'stopped answering', rejected: 'didn’t accept the key', errors: 'kept failing' } as const;
+
+/** "2:14 PM", or "Oct 18, 2:14 PM" when it was not today. */
+function sinceText(iso: string, now = new Date()): string {
+  const at = new Date(iso);
+  const time = at.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  return at.toDateString() === now.toDateString() ? time : `${at.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${time}`;
+}
+
+/** The sentence under a Down key, in the mock's words: since when, why, what its bots do meanwhile, and the 5-minute recheck. */
+function downText(key: AiKeySummary): string {
+  const subject = key.address ?? key.kindLabel;
+  const phrase = DOWN_PHRASE[key.downReason ?? 'stopped'];
+  const bots = key.lentTo.flatMap((lent) => lent.bots.map((bot) => bot.name));
+  const one = bots.length === 1;
+  const own = key.address !== null;
+  const meanwhile =
+    bots.length === 0
+      ? ''
+      : key.ifDown === 'stop'
+        ? ` ${names(bots)} ${one ? 'rests' : 'rest'} until it’s back.`
+        : ` ${names(bots)} ${one ? 'replies' : 'reply'} on Universe AI until it’s back${own ? `, so ${one ? 'its' : 'their'} conversations leave your computer meanwhile` : ''}.`;
+  return `Down since ${sinceText(key.downSince ?? new Date().toISOString())}: ${subject} ${phrase}.${meanwhile} Universe checks every 5 minutes and switches back by itself.`;
+}
+
+/** The line under "If this is down", for the choice that is picked. */
+function ifDownHelp(key: AiKeySummary): string {
+  if (key.ifDown === 'stop') return 'Bots rest until it’s back. Visitors see one line saying so, and nothing goes to another AI.';
+  return key.address !== null
+    ? 'Bots keep replying on Universe AI until it’s back, so their conversations leave your computer meanwhile. Pick Stop replying to keep them only on yours.'
+    : 'Bots keep replying on Universe AI until it’s back.';
+}
+
 /**
  * AI keys (#374): the keys you added so your own bots can run on your own AI, hosted or on your own computer. The key
  * itself is never shown, only its last four characters.
@@ -71,6 +119,8 @@ export default function AiKeysPage() {
   const [failure, setFailure] = useState<string | null>(null);
   const [lending, setLending] = useState<AiKeySummary | null>(null);
   const [pulling, setPulling] = useState<{ key: AiKeySummary; lent: Lent } | null>(null);
+  const [checking, setChecking] = useState<string | null>(null);
+  const [saving, setSaving] = useState<string | null>(null);
 
   async function revoke(key: AiKeySummary) {
     setBusy(true);
@@ -106,6 +156,44 @@ export default function AiKeysPage() {
     }
   }
 
+  async function checkNow(key: AiKeySummary) {
+    setChecking(key.id);
+    try {
+      const response = await authenticatedFetch(`/api/me/ai-keys/${encodeURIComponent(key.id)}/check`, { method: 'POST' });
+      const body = (await response.json().catch(() => null)) as { status?: string; message?: string; error?: string } | null;
+      if (!response.ok) throw new Error(body?.error || 'That didn’t work. Try again.');
+      retry();
+      addToast(
+        body?.status === 'working'
+          ? { description: `${key.name} is working again`, variant: 'success', duration: 2500 }
+          : { description: body?.message || `${key.name} is still down`, variant: 'error', duration: 4000 },
+      );
+    } catch (error) {
+      addToast({ description: error instanceof Error ? error.message : 'That didn’t work. Try again.', variant: 'error', duration: 4000 });
+    } finally {
+      setChecking(null);
+    }
+  }
+
+  async function chooseIfDown(key: AiKeySummary, ifDown: AiKeySummary['ifDown']) {
+    setSaving(key.id);
+    const before = key.ifDown;
+    update((list) => list.map((entry) => (entry.id === key.id ? { ...entry, ifDown } : entry)));
+    try {
+      const response = await authenticatedFetch(`/api/me/ai-keys/${encodeURIComponent(key.id)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ifDown }),
+      });
+      if (!response.ok) throw new Error('That didn’t save. Try again.');
+    } catch (error) {
+      update((list) => list.map((entry) => (entry.id === key.id ? { ...entry, ifDown: before } : entry)));
+      addToast({ description: error instanceof Error ? error.message : 'That didn’t save. Try again.', variant: 'error', duration: 4000 });
+    } finally {
+      setSaving(null);
+    }
+  }
+
   const keys = result.status === 'ready' ? result.items : [];
 
   return (
@@ -132,11 +220,23 @@ export default function AiKeysPage() {
       )}
 
       {keys.map((key) => (
-        <article key={key.id} className="grid gap-4 rounded-2xl border border-foreground/10 bg-foreground/[.03] p-4" data-testid="ai-key">
+        <article
+          key={key.id}
+          className={`grid gap-4 rounded-2xl border bg-foreground/[.03] p-4 ${key.status === 'down' ? 'border-[rgb(245_196_81/0.55)]' : 'border-foreground/10'}`}
+          data-testid="ai-key"
+        >
           <header className="grid gap-1">
-            <h2 className="orbit-display text-lg font-bold">{key.name}</h2>
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <h2 className="orbit-display text-lg font-bold [overflow-wrap:anywhere]">{key.name}</h2>
+              <StatusPill down={key.status === 'down'} />
+            </div>
             <p className="text-sm text-muted-foreground [overflow-wrap:anywhere]">{describe(key)}</p>
           </header>
+          {key.status === 'down' && (
+            <p className="text-[15px] leading-snug text-muted-foreground" data-testid="ai-key-down-text">
+              {downText(key)}
+            </p>
+          )}
           <div className="grid gap-1">
             <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">This month</h3>
             <p className="text-[15px]">
@@ -174,6 +274,27 @@ export default function AiKeysPage() {
                 </button>
               </div>
             ))}
+          </div>
+          <div className="grid gap-2">
+            <h3 id={`if-down-${key.id}`} className="text-xs font-bold uppercase tracking-wider text-muted-foreground">If this is down</h3>
+            <Segmented
+              aria-labelledby={`if-down-${key.id}`}
+              value={key.ifDown}
+              onChange={(value) => void chooseIfDown(key, value)}
+              options={[
+                { value: 'stop', label: 'Stop replying', disabled: saving === key.id },
+                { value: 'universe-ai', label: 'Use Universe AI', disabled: saving === key.id },
+              ]}
+            />
+            <p className="text-sm text-muted-foreground" data-testid="ai-key-if-down-help">{ifDownHelp(key)}</p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {key.status === 'down' && (
+              <Button variant="outline" className="h-11 w-fit px-5" disabled={checking === key.id} onClick={() => void checkNow(key)}>
+                <RefreshCw aria-hidden="true" className={checking === key.id ? 'animate-spin' : undefined} />
+                {checking === key.id ? 'Checking…' : 'Check now'}
+              </Button>
+            )}
             <Button variant="outline" className="h-11 w-fit px-5" onClick={() => setLending(key)}>
               <Plus aria-hidden="true" />
               Lend to a universe

@@ -1,12 +1,14 @@
 import { prisma } from '@/lib/db';
 import { canManageBots, canManageThisBot } from '@/lib/bot-permissions';
 import { kindInfo } from '@/lib/ai-key-kinds';
+import { isIfDown } from '@/lib/ai-key-health';
 import { resolveUniverseAiProvider, UNIVERSE_AI_REF } from '@/lib/universe-ai';
 
 /**
  * What the game's bot page offers under "Runs on" for one bot (#374). Nobody is shown the server's provider list: the
  * choices are Universe AI, and the viewer's own keys lent to this bot's universe (only when the viewer made the bot).
  * Someone else's key is never offered; if the bot is on one, it is shown as it is and only Universe AI can replace it.
+ * Each key says if it is Working or Down and what its bots do then, so the picker can say that Universe AI answers until it's back.
  * A super admin also gets the server's providers, to pin a bot to one as before.
  */
 export interface BotAiOptions {
@@ -17,9 +19,9 @@ export interface BotAiOptions {
   maker: { id: string; name: string | null } | null;
   viewerIsMaker: boolean;
   /** The viewer's own keys lent to this bot's universe; empty unless the viewer made the bot. */
-  keys: { id: string; name: string; kind: string | null; kindLabel: string; group: 'own-computer' | 'hosted' | null; universeName: string }[];
+  keys: { id: string; name: string; kind: string | null; kindLabel: string; group: 'own-computer' | 'hosted' | null; universeName: string; status: 'working' | 'down'; ifDown: 'universe-ai' | 'stop' }[];
   /** The key the bot is on now, when it is a personal key: whose it is and what it is called. */
-  currentKey: { id: string; name: string; ownerName: string | null; mine: boolean } | null;
+  currentKey: { id: string; name: string; ownerName: string | null; mine: boolean; status: 'working' | 'down'; ifDown: 'universe-ai' | 'stop' } | null;
   /** Only for a super admin: the server's own providers, to pin a bot to one. */
   providers: { id: string; name: string; type: string; model: string | null; enabled: boolean }[] | null;
 }
@@ -67,11 +69,11 @@ export async function botAiOptions(input: {
       ? prisma.botsAiProvider.findMany({
           where: { ownerId: input.viewer.id, lends: { some: { universeId: universe.id } } },
           orderBy: { createdAt: 'asc' },
-          select: { providerId: true, name: true, settings: true },
+          select: { providerId: true, name: true, settings: true, downSince: true, ifDown: true },
         })
       : Promise.resolve([]),
     bot?.aiProviderRef && bot.aiProviderRef !== UNIVERSE_AI_REF
-      ? prisma.botsAiProvider.findUnique({ where: { providerId: bot.aiProviderRef }, select: { providerId: true, name: true, ownerId: true } })
+      ? prisma.botsAiProvider.findUnique({ where: { providerId: bot.aiProviderRef }, select: { providerId: true, name: true, ownerId: true, downSince: true, ifDown: true } })
       : Promise.resolve(null),
     input.viewer.isSuperAdmin
       ? prisma.botsAiProvider.findMany({
@@ -91,11 +93,11 @@ export async function botAiOptions(input: {
       viewerIsMaker,
       keys: ownKeys.map((key) => {
         const info = kindInfo((key.settings as { kind?: unknown } | null)?.kind);
-        return { id: key.providerId, name: key.name, kind: info?.kind ?? null, kindLabel: info?.label ?? 'AI', group: info?.group ?? null, universeName: universe.name };
+        return { id: key.providerId, name: key.name, kind: info?.kind ?? null, kindLabel: info?.label ?? 'AI', group: info?.group ?? null, universeName: universe.name, status: key.downSince ? 'down' : 'working', ifDown: isIfDown(key.ifDown) ? key.ifDown : 'universe-ai' };
       }),
       currentKey:
         current && current.ownerId
-          ? { id: current.providerId, name: current.name, ownerName: maker?.id === current.ownerId ? maker.name : null, mine: current.ownerId === input.viewer.id }
+          ? { id: current.providerId, name: current.name, ownerName: maker?.id === current.ownerId ? maker.name : null, mine: current.ownerId === input.viewer.id, status: current.downSince ? 'down' : 'working', ifDown: isIfDown(current.ifDown) ? current.ifDown : 'universe-ai' }
           : null,
       providers: providers ? providers.map((provider) => ({ id: provider.providerId, name: provider.name, type: provider.type, model: provider.model, enabled: provider.enabled })) : null,
     },

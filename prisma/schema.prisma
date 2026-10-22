@@ -708,6 +708,13 @@ model BotsAiProvider {
   // The provider Universe AI runs on (#374). At most one server provider has it (set in one transaction); a bot on
   // Universe AI follows it. Personal keys never have it.
   isDefault         Boolean  @default(false) @map("is_default")
+  // Health of a personal key (#374). downSince is set while the key is Down (null = Working). failedReplies counts
+  // replies that failed in a row; two mark it Down. ifDown is what the bot does meanwhile: "universe-ai" or "stop".
+  downSince         DateTime? @map("down_since")
+  downReason        String?  @map("down_reason") @db.VarChar(20)
+  failedReplies     Int      @default(0) @map("failed_replies")
+  healthCheckedAt   DateTime? @map("health_checked_at")
+  ifDown            String   @default("universe-ai") @map("if_down") @db.VarChar(20)
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")
 

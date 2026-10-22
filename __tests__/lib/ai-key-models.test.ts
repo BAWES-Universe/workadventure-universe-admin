@@ -1,13 +1,15 @@
-import { AddressError, checkPublicHttpsUrl, safeGet } from '@/lib/ai-key-fetch';
-import { allowKeyAttempt, cleanModelIds, keyTarget, loadModels } from '@/lib/ai-key-models';
+import { AddressError, checkPublicHttpsUrl, safeGet, safeRequest } from '@/lib/ai-key-fetch';
+import { allowKeyAttempt, cleanModelIds, keyTarget, loadModels, probeChat, probeModels } from '@/lib/ai-key-models';
 
 jest.mock('@/lib/ai-key-fetch', () => ({
   ...jest.requireActual('@/lib/ai-key-fetch'),
   checkPublicHttpsUrl: jest.fn(),
   safeGet: jest.fn(),
+  safeRequest: jest.fn(),
 }));
 const check = checkPublicHttpsUrl as jest.Mock;
 const get = safeGet as jest.Mock;
+const post = safeRequest as jest.Mock;
 
 const answer = (status: number, body: unknown) => ({ ok: true, status, body: typeof body === 'string' ? body : JSON.stringify(body) });
 const checkedOk = { url: new URL('https://x.example.com'), address: '93.184.216.34', family: 4, addresses: [{ address: '93.184.216.34', family: 4 }] };
@@ -133,6 +135,7 @@ describe('loadModels', () => {
     [answer(403, {}), 'lmstudio', 'The server asked for a key, or didn’t accept the one you gave.'],
     [answer(302, ''), 'lmstudio', 'It answered with an error (302).'],
     [answer(500, {}), 'openai', 'It answered with an error (500).'],
+    [answer(429, {}), 'openai', 'OpenAI is busy right now. Try again in a moment.'],
     [answer(200, '<html>not json</html>'), 'lmstudio', 'It answered, but not like an AI server.'],
     [answer(200, { nope: true }), 'lmstudio', 'It answered, but not like an AI server.'],
     [answer(200, { data: [] }), 'lmstudio', 'It answered, but no model is loaded. Load one in your server first.'],
@@ -141,6 +144,59 @@ describe('loadModels', () => {
     get.mockResolvedValue(reply);
     const result = await loadModels({ kind, address: 'https://lm.example.com', apiKey: 'k-1234' });
     expect(result).toEqual({ ok: false, message });
+  });
+});
+
+describe('probeModels, a busy provider', () => {
+  it('says "busy" for a 429, so a health check can tell it from a key that stopped working', async () => {
+    get.mockResolvedValue(answer(429, {}));
+    expect(await probeModels({ kind: 'deepseek', apiKey: 'k-1234' })).toMatchObject({ ok: false, reason: 'busy' });
+  });
+});
+
+describe('probeChat', () => {
+  it('asks one tiny chat reply of the saved model, at the chat address next to the model list, keyed', async () => {
+    post.mockResolvedValue(answer(200, { choices: [] }));
+    expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'deepseek-v4-flash' })).toEqual({ ok: true });
+    expect(check).toHaveBeenCalledWith('https://api.deepseek.com/chat/completions');
+    expect(post.mock.calls[0][1]).toMatchObject({
+      method: 'POST',
+      headers: { Authorization: 'Bearer k-1234' },
+      body: { model: 'deepseek-v4-flash', stream: false, max_tokens: 16 },
+    });
+  });
+
+  it('finds an own-computer server’s chat address under /v1, with no key header when there is no key', async () => {
+    post.mockResolvedValue(answer(200, {}));
+    await probeChat({ kind: 'lmstudio', address: 'https://lm.example.com/v1', model: 'llama' });
+    expect(check).toHaveBeenCalledWith('https://lm.example.com/v1/chat/completions');
+    expect(post.mock.calls[0][1].headers).toEqual({});
+  });
+
+  it('uses the limit field the kind’s catalog entry names', async () => {
+    post.mockResolvedValue(answer(200, {}));
+    await probeChat({ kind: 'openai', apiKey: 'k-1234', model: 'gpt-x' });
+    expect(post.mock.calls[0][1].body).toMatchObject({ max_completion_tokens: 16 });
+    expect(post.mock.calls[0][1].body).not.toHaveProperty('max_tokens');
+  });
+
+  it.each([
+    [answer(401, {}), 'rejected'],
+    [answer(429, {}), 'busy'],
+    [answer(404, {}), 'other'],
+    [answer(400, {}), 'other'],
+    [answer(503, {}), 'unreachable'],
+    [{ ok: false, reason: 'timeout' }, 'unreachable'],
+  ])('says why a chat call failed for %j', async (reply, reason) => {
+    post.mockResolvedValue(reply);
+    expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'gone' })).toMatchObject({ ok: false, reason });
+  });
+
+  it('names the model when the list works but chat does not', async () => {
+    post.mockResolvedValue(answer(404, {}));
+    expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'gone' })).toMatchObject({
+      message: 'DeepSeek lists its models, but a chat call to gone failed (404). Check the model.',
+    });
   });
 });
 

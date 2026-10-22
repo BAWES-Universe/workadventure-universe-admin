@@ -101,17 +101,29 @@ export interface SafeGetOptions {
   maxBytes?: number;
 }
 
+export interface SafeRequestOptions extends SafeGetOptions {
+  method?: 'GET' | 'POST';
+  /** A JSON body for a POST. */
+  body?: unknown;
+}
+
 export type SafeGetResult =
   | { ok: true; status: number; body: string }
   | { ok: false; reason: 'timeout' | 'unreachable' | 'too-large' };
 
-/**
- * GET a checked address. Redirects are returned as they are (the caller treats any 3xx as a failure) and never followed.
- * The socket connects only to the checked addresses (any of them, so a missing IPv6 route falls back to IPv4), with the
- * name still used for the certificate.
- */
+/** GET a checked address (see `safeRequest`). */
 export function safeGet(checked: CheckedAddress, options: SafeGetOptions = {}): Promise<SafeGetResult> {
-  const { timeoutMs = 10_000, maxBytes = 1_000_000, headers = {} } = options;
+  return safeRequest(checked, options);
+}
+
+/**
+ * Call a checked address (GET, or POST with a JSON body). Redirects are returned as they are (the caller treats any 3xx
+ * as a failure) and never followed. The socket connects only to the checked addresses (any of them, so a missing IPv6
+ * route falls back to IPv4), with the name still used for the certificate.
+ */
+export function safeRequest(checked: CheckedAddress, options: SafeRequestOptions = {}): Promise<SafeGetResult> {
+  const { timeoutMs = 10_000, maxBytes = 1_000_000, headers = {}, method = 'GET', body } = options;
+  const payload = body === undefined ? null : Buffer.from(JSON.stringify(body));
   const { url, addresses } = checked;
   return new Promise<SafeGetResult>((resolve) => {
     let settled = false;
@@ -123,12 +135,12 @@ export function safeGet(checked: CheckedAddress, options: SafeGetOptions = {}): 
     };
     const request = https.request(
       {
-        method: 'GET',
+        method,
         hostname: url.hostname,
         servername: url.hostname,
         port: url.port || 443,
         path: `${url.pathname}${url.search}`,
-        headers: { Accept: 'application/json', ...headers },
+        headers: { Accept: 'application/json', ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': String(payload.length) } : {}), ...headers },
         // The name is never looked up again: the socket gets the addresses that were checked, and Node tries the next
         // one when the first has no route (a server without IPv6; automatic from Node 20).
         lookup: ((_host: string, lookupOptions: { all?: boolean }, callback: (...args: unknown[]) => void) => {
@@ -157,6 +169,6 @@ export function safeGet(checked: CheckedAddress, options: SafeGetOptions = {}): 
       request.destroy();
     }, timeoutMs);
     request.on('error', () => finish({ ok: false, reason: 'unreachable' }));
-    request.end();
+    request.end(payload ?? undefined);
   }).catch(() => ({ ok: false as const, reason: 'unreachable' as const }));
 }

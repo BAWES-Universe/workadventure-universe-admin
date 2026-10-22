@@ -4,6 +4,7 @@ import { DELETE } from '@/app/api/me/ai-keys/[id]/route';
 import { getSessionUser } from '@/lib/auth-session';
 import { prisma } from '@/lib/db';
 import { moveBotsOffKey } from '@/lib/ai-key-lend';
+import { clearDownNotice } from '@/lib/ai-key-health';
 
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
 jest.mock('@/lib/db', () => ({
@@ -15,6 +16,7 @@ jest.mock('@/lib/db', () => ({
   },
 }));
 jest.mock('@/lib/ai-key-lend', () => ({ moveBotsOffKey: jest.fn(async () => ({ count: 0, universes: [] })) }));
+jest.mock('@/lib/ai-key-health', () => ({ ...jest.requireActual('@/lib/ai-key-health'), clearDownNotice: jest.fn(async () => undefined) }));
 
 const provider = prisma.botsAiProvider as unknown as Record<'findMany' | 'findFirst' | 'deleteMany', jest.Mock>;
 const usage = prisma.botsAiUsage as unknown as { groupBy: jest.Mock };
@@ -54,6 +56,7 @@ describe('GET /api/me/ai-keys', () => {
     expect(body.keys).toEqual([{
       id: 'key-1', name: 'My DeepSeek', kind: 'deepseek', kindLabel: 'DeepSeek', model: 'deepseek-v4-flash', address: null,
       last4: '4f2a', month: { replies: 12, tokens: 3400 }, lentTo: [], createdAt: '2026-10-19T00:00:00.000Z',
+      status: 'working', downSince: null, downReason: null, ifDown: 'universe-ai',
     }]);
     expect(JSON.stringify(body)).not.toContain('secret');
   });
@@ -140,6 +143,19 @@ describe('DELETE /api/me/ai-keys/:id', () => {
     expect(await response.json()).toEqual({ status: 'revoked', moved: 2 });
     expect(order).toEqual(['moved', 'deleted']);
     expect(moveBotsOffKey).toHaveBeenCalledWith('key-1', { actor: { id: 'user-a', name: 'A' }, why: 'revoked' });
+  });
+
+  it('dismisses the key’s "is down" notice when the key is revoked, and still revokes if that fails', async () => {
+    provider.findFirst.mockResolvedValue({ providerId: 'key-1' });
+    provider.deleteMany.mockResolvedValue({ count: 1 });
+    expect((await revoke('key-1')).status).toBe(200);
+    expect(clearDownNotice).toHaveBeenCalledWith('user-a', 'key-1');
+    (clearDownNotice as jest.Mock).mockRejectedValueOnce(new Error('db down'));
+    const quiet = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    const response = await revoke('key-1');
+    quiet.mockRestore();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: 'revoked', moved: 0 });
   });
 
   it('gives the same "not found" for someone else’s key and for a server provider, and moves nothing', async () => {

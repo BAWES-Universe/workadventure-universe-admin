@@ -58,7 +58,7 @@ describe('GET /api/me/bot-ai', () => {
       universeAi: { available: true },
       maker: { id: 'mishari', name: 'Mishari' },
       viewerIsMaker: true,
-      keys: [{ id: 'key-1', name: 'My DeepSeek', kind: 'deepseek', kindLabel: 'DeepSeek', group: 'hosted', universeName: 'Sandbox Universe' }],
+      keys: [{ id: 'key-1', name: 'My DeepSeek', kind: 'deepseek', kindLabel: 'DeepSeek', group: 'hosted', universeName: 'Sandbox Universe', status: 'working', ifDown: 'universe-ai' }],
       currentKey: null,
       providers: null,
     });
@@ -94,8 +94,17 @@ describe('GET /api/me/bot-ai', () => {
     db.botsAiProvider.findUnique.mockResolvedValue({ providerId: 'key-1', name: 'My DeepSeek', ownerId: 'mishari' });
     db.botsAiProvider.findMany.mockResolvedValueOnce([myKey]);
     const body = await (await get('botId=guide')).json();
-    expect(body.currentKey).toEqual({ id: 'key-1', name: 'My DeepSeek', ownerName: 'Mishari', mine: true });
+    expect(body.currentKey).toEqual({ id: 'key-1', name: 'My DeepSeek', ownerName: 'Mishari', mine: true, status: 'working', ifDown: 'universe-ai' });
     expect(body.viewerIsMaker).toBe(true);
+  });
+
+  it('says when the key is down and what its bots do meanwhile, so the picker can say Universe AI answers', async () => {
+    db.bot.findUnique.mockResolvedValue({ id: 'guide', roomId: 'room-1', aiProviderRef: 'key-1', createdBy: { id: 'mishari', name: 'Mishari' } });
+    db.botsAiProvider.findUnique.mockResolvedValue({ providerId: 'key-1', name: 'My DeepSeek', ownerId: 'mishari', downSince: new Date(), ifDown: 'stop' });
+    db.botsAiProvider.findMany.mockResolvedValueOnce([{ ...myKey, downSince: new Date(), ifDown: 'universe-ai' }]);
+    const body = await (await get('botId=guide')).json();
+    expect(body.currentKey).toMatchObject({ status: 'down', ifDown: 'stop' });
+    expect(body.keys[0]).toMatchObject({ status: 'down', ifDown: 'universe-ai' });
   });
 
   it('keeps the server’s providers to super admins, who may still pin a bot to one', async () => {
