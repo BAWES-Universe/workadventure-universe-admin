@@ -1,5 +1,5 @@
 import { ADDRESS_PROBLEM_TEXT, AddressError, checkPublicHttpsUrl, safeGet, safeRequest } from '@/lib/ai-key-fetch';
-import { authHeaders, hostedBase, kindInfo, typedEndpoint, writeModelId, type AiKeyKind, type AiKeyKindInfo } from '@/lib/ai-key-kinds';
+import { authHeaders, chatPath, chatProbeBody, hostedBase, kindInfo, typedEndpoint, writeModelId, type AiKeyKind, type AiKeyKindInfo } from '@/lib/ai-key-kinds';
 
 /**
  * Asks a key's provider which models it has. This is also the check that it answers: Add key stays off until the list
@@ -138,21 +138,58 @@ const asBoolean = (value: unknown) => (typeof value === 'boolean' ? value : unde
 /**
  * What one entry of a provider's model list says about the model. A fact the provider leaves out is unknown, never "no":
  * OpenRouter names the parameters and input kinds a model takes, Mistral lists `capabilities`, Together `context_length`,
- * Groq `context_window`. A list that names parameters but not `tools` is saying the model cannot call tools.
+ * Groq `context_window`, Claude `capabilities.image_input` and `max_input_tokens`. A list that names parameters but not `tools` is saying the model cannot call tools.
  */
 export function factsOf(entry: unknown): ModelFacts {
   if (!isRecord(entry)) return {};
   const capabilities = isRecord(entry.capabilities) ? entry.capabilities : {};
   const architecture = isRecord(entry.architecture) ? entry.architecture : {};
   const tools = nonEmptyList(entry.supported_parameters) ? entry.supported_parameters.includes('tools') : asBoolean(capabilities.function_calling);
-  const vision = nonEmptyList(architecture.input_modalities) ? architecture.input_modalities.includes('image') : asBoolean(capabilities.vision);
-  const rawContext = entry.context_length ?? entry.max_context_length ?? entry.context_window;
+  // Claude: capabilities.image_input.supported
+  const imageInput = isRecord(capabilities.image_input) ? asBoolean(capabilities.image_input.supported) : undefined;
+  const vision = nonEmptyList(architecture.input_modalities) ? architecture.input_modalities.includes('image') : (asBoolean(capabilities.vision) ?? imageInput);
+  const rawContext = entry.context_length ?? entry.max_context_length ?? entry.context_window ?? entry.max_input_tokens;
   const context = typeof rawContext === 'number' && Number.isFinite(rawContext) && rawContext > 0 ? Math.round(rawContext) : undefined;
   const facts: ModelFacts = {};
   if (tools !== undefined) facts.tools = tools;
   if (vision !== undefined) facts.vision = vision;
   if (context !== undefined) facts.context = context;
   return facts;
+}
+
+/** Claude's list is paged, and a page may hold up to 1000 models. */
+const ANTHROPIC_PAGE = 1000;
+const ANTHROPIC_MAX_PAGES = 5;
+
+/**
+ * Claude's model list says `has_more` and a `last_id` to ask the next page from. The first page already proved the key;
+ * a later page that fails just ends the list, so the models already read still show.
+ */
+async function morePages(modelsUrl: string, apiKey: string, info: AiKeyKindInfo, first: unknown[], firstBody: string): Promise<unknown[]> {
+  const entries = [...first];
+  let body = firstBody;
+  for (let page = 1; page < ANTHROPIC_MAX_PAGES; page++) {
+    let next: { has_more?: unknown; last_id?: unknown };
+    try {
+      next = JSON.parse(body);
+    } catch {
+      break;
+    }
+    if (next.has_more !== true || typeof next.last_id !== 'string') break;
+    try {
+      const checked = await checkPublicHttpsUrl(`${modelsUrl}?limit=${ANTHROPIC_PAGE}&after_id=${encodeURIComponent(next.last_id)}`);
+      const result = await safeGet(checked, { headers: authHeaders(info, apiKey), maxBytes: MODEL_LIST_MAX_BYTES });
+      if (!result.ok || result.status !== 200) break;
+      const more: unknown = JSON.parse(result.body);
+      const list = typeof more === 'object' && more !== null ? (more as { data?: unknown }).data : null;
+      if (!Array.isArray(list) || list.length === 0) break;
+      entries.push(...list);
+      body = result.body;
+    } catch {
+      break;
+    }
+  }
+  return entries;
 }
 
 /** Like loadModels, and also says why it failed (the key health check needs that; a person only needs the sentence). */
@@ -167,7 +204,7 @@ export async function probeModels(input: KeyTargetInput & { apiKey?: unknown }):
 
   let checked;
   try {
-    checked = await checkPublicHttpsUrl(modelsUrl);
+    checked = await checkPublicHttpsUrl(info.protocol === 'anthropic' ? `${modelsUrl}?limit=${ANTHROPIC_PAGE}` : modelsUrl);
   } catch (error) {
     if (error instanceof AddressError) return { ok: false, message: ADDRESS_PROBLEM_TEXT[error.problem], reason: error.problem === 'unresolved' ? 'unreachable' : 'other' };
     return { ok: false, message: 'That address can’t be used.', reason: 'other' };
@@ -195,7 +232,7 @@ export async function probeModels(input: KeyTargetInput & { apiKey?: unknown }):
           : `${info.label} didn’t accept this key.`,
     };
   }
-  if (result.status === 429) {
+  if (result.status === 429 || result.status === 529) {
     return { ok: false, reason: 'busy', message: `${info.label} is busy right now. Try again in a moment.` };
   }
   if (result.status !== 200) return { ok: false, message: `It answered with an error (${result.status}).`, reason: result.status >= 500 ? 'unreachable' : 'other' };
@@ -210,6 +247,7 @@ export async function probeModels(input: KeyTargetInput & { apiKey?: unknown }):
     const list = Array.isArray(data) ? data : typeof data === 'object' && data !== null ? (data as { data?: unknown }).data : null;
     if (!Array.isArray(list)) throw new Error('shape');
     entries = list;
+    if (info.protocol === 'anthropic') entries = await morePages(modelsUrl, apiKey, info, entries, result.body);
   } catch {
     return { ok: false, message: 'It answered, but not like an AI server.', reason: 'other' };
   }
@@ -251,7 +289,7 @@ export async function probeChat(input: KeyTargetInput & { apiKey?: unknown; mode
   if (apiKey && !KEY_CHARACTERS.test(apiKey)) return { ok: false, message: KEY_LOOKS_WRONG, reason: 'other' };
   let checked;
   try {
-    checked = await checkPublicHttpsUrl(modelsUrl.replace(/\/models$/, '/chat/completions'));
+    checked = await checkPublicHttpsUrl(`${modelsUrl.replace(/\/models$/, '')}${chatPath(info)}`);
   } catch (error) {
     if (error instanceof AddressError) return { ok: false, message: ADDRESS_PROBLEM_TEXT[error.problem], reason: error.problem === 'unresolved' ? 'unreachable' : 'other' };
     return { ok: false, message: 'That address can’t be used.', reason: 'other' };
@@ -260,7 +298,7 @@ export async function probeChat(input: KeyTargetInput & { apiKey?: unknown; mode
     safeRequest(checked, {
       method: 'POST',
       headers: authHeaders(info, apiKey),
-      body: { model: input.model, messages: [{ role: 'user', content: 'Say ok.' }], stream: false, [info.tokenLimitField ?? 'max_tokens']: 16, ...extra },
+      body: { ...chatProbeBody(info, input.model), ...extra },
       // A server on your own computer may load its model on the first call, which can take well over 30 seconds
       timeoutMs: info.group === 'own-computer' ? 120_000 : 30_000,
       maxBytes: 200_000,
@@ -272,8 +310,9 @@ export async function probeChat(input: KeyTargetInput & { apiKey?: unknown; mode
   if (!result.ok) return { ok: false, reason: 'unreachable', message: `${info.label} didn’t answer. Try again in a moment.` };
   if (result.status >= 200 && result.status < 300) return { ok: true };
   if (result.status === 401 || result.status === 403) return { ok: false, reason: 'rejected', message: `${info.label} didn’t accept this key.` };
-  if (result.status === 429) return { ok: false, reason: 'busy', message: `${info.label} is busy right now. Try again in a moment.` };
-  if (result.status === 402) return { ok: false, reason: 'credit', message: `${info.label} says this key is out of credit.` };
+  if (result.status === 429 || result.status === 529) return { ok: false, reason: 'busy', message: `${info.label} is busy right now. Try again in a moment.` };
+  // Claude says "out of credit" and "spend limit reached" as a plain 400; other providers' 400s are about the request
+  if (result.status === 402 || (info.protocol === 'anthropic' && result.status === 400 && /credit balance|usage limits|billing/i.test(result.body))) return { ok: false, reason: 'credit', message: `${info.label} says this key is out of credit.` };
   if (result.status === 404) return { ok: false, reason: 'gone', message: `${info.label} no longer has the model ${input.model}.` };
   // Some providers answer a model they do not have, or one this key may not use, with a 400 or 422 instead of a 404
   if ((result.status === 400 || result.status === 422) && MODEL_REFUSED.test(errorWords(result.body))) {

@@ -344,3 +344,95 @@ describe('model facts', () => {
     expect(result.ok && result.facts).toEqual({ 'gemini-2.5-flash': { context: 1048576 } });
   });
 });
+
+describe('Claude (#975)', () => {
+  const models = (ids: string[], extra: Record<string, unknown> = {}) => ({
+    data: ids.map((id) => ({ type: 'model', id, display_name: id, capabilities: { image_input: { supported: true } }, max_input_tokens: 200000 })),
+    has_more: false,
+    ...extra,
+  });
+
+  it('lists the models with x-api-key and the API version, asking for a big page', async () => {
+    get.mockResolvedValue(answer(200, models(['claude-sonnet-4-5', 'claude-haiku-4-5'])));
+    const result = await probeModels({ kind: 'claude', apiKey: 'sk-ant-1' });
+    expect(check).toHaveBeenCalledWith('https://api.anthropic.com/v1/models?limit=1000');
+    expect(get).toHaveBeenCalledWith(checkedOk, { headers: { 'x-api-key': 'sk-ant-1', 'anthropic-version': '2023-06-01' }, maxBytes: 5_000_000 });
+    expect(result).toMatchObject({ ok: true, models: ['claude-haiku-4-5', 'claude-sonnet-4-5'] });
+  });
+
+  it('reads vision and context from the list, and says nothing about tools it does not report', async () => {
+    get.mockResolvedValue(answer(200, models(['claude-opus-5-5'])));
+    const result = await probeModels({ kind: 'claude', apiKey: 'sk-ant-1' });
+    expect(result.ok && result.facts).toEqual({ 'claude-opus-5-5': { vision: true, context: 200000 } });
+  });
+
+  it('reads a model that cannot take pictures as exactly that, and one that does not say as unknown', () => {
+    expect(factsOf({ id: 'a', capabilities: { image_input: { supported: false } } })).toEqual({ vision: false });
+    expect(factsOf({ id: 'b', capabilities: { image_input: {} }, max_input_tokens: null })).toEqual({});
+  });
+
+  it('follows the pages when the list says there are more', async () => {
+    get
+      .mockResolvedValueOnce(answer(200, models(['claude-a'], { has_more: true, last_id: 'claude-a' })))
+      .mockResolvedValueOnce(answer(200, models(['claude-b'], { has_more: false, last_id: 'claude-b' })));
+    const result = await probeModels({ kind: 'claude', apiKey: 'sk-ant-1' });
+    expect(check).toHaveBeenNthCalledWith(2, 'https://api.anthropic.com/v1/models?limit=1000&after_id=claude-a');
+    expect(result).toMatchObject({ ok: true, models: ['claude-a', 'claude-b'] });
+  });
+
+  it('keeps the models already read when a later page fails, and stops after five pages', async () => {
+    get
+      .mockResolvedValueOnce(answer(200, models(['claude-a'], { has_more: true, last_id: 'claude-a' })))
+      .mockResolvedValueOnce(answer(500, {}));
+    expect(await probeModels({ kind: 'claude', apiKey: 'sk-ant-1' })).toMatchObject({ ok: true, models: ['claude-a'] });
+    get.mockReset();
+    get.mockImplementation(async () => answer(200, models([`claude-${get.mock.calls.length}`], { has_more: true, last_id: 'x' })));
+    await probeModels({ kind: 'claude', apiKey: 'sk-ant-1' });
+    expect(get).toHaveBeenCalledTimes(5);
+  });
+
+  it('says so in words for a wrong key, and "busy" for an overloaded Anthropic', async () => {
+    get.mockResolvedValue(answer(401, { type: 'error', error: { type: 'authentication_error', message: 'invalid x-api-key' } }));
+    expect(await probeModels({ kind: 'claude', apiKey: 'sk-ant-bad' })).toEqual({ ok: false, reason: 'rejected', message: 'Claude didn’t accept this key.' });
+    get.mockResolvedValue(answer(529, {}));
+    expect(await probeModels({ kind: 'claude', apiKey: 'sk-ant-1' })).toMatchObject({ ok: false, reason: 'busy' });
+  });
+
+  it('asks the chat call at /messages in Claude’s format, keyed with x-api-key', async () => {
+    post.mockResolvedValue(answer(200, { content: [] }));
+    expect(await probeChat({ kind: 'claude', apiKey: 'sk-ant-1', model: 'claude-haiku-4-5' })).toEqual({ ok: true });
+    expect(check).toHaveBeenCalledWith('https://api.anthropic.com/v1/messages');
+    expect(post.mock.calls[0][1]).toMatchObject({
+      method: 'POST',
+      headers: { 'x-api-key': 'sk-ant-1', 'anthropic-version': '2023-06-01' },
+      body: { model: 'claude-haiku-4-5', max_tokens: 32, messages: [{ role: 'user', content: 'Say ok.' }] },
+    });
+    expect(post.mock.calls[0][1].body).not.toHaveProperty('stream');
+  });
+
+  it.each([
+    [answer(401, {}), 'rejected'],
+    [answer(403, {}), 'rejected'],
+    [answer(404, {}), 'gone'],
+    [answer(429, {}), 'busy'],
+    [answer(529, {}), 'busy'],
+    [answer(402, {}), 'credit'],
+    [answer(400, { type: 'error', error: { type: 'invalid_request_error', message: 'Your credit balance is too low to access the Anthropic API.' } }), 'credit'],
+    [answer(400, { type: 'error', error: { type: 'invalid_request_error', message: 'You have reached your specified API usage limits.' } }), 'credit'],
+    [answer(400, { type: 'error', error: { type: 'invalid_request_error', message: 'model: bad id' } }), 'request'],
+    [answer(500, {}), 'unreachable'],
+  ])('says why a Claude chat call failed for %j', async (reply, reason) => {
+    post.mockResolvedValue(reply);
+    expect(await probeChat({ kind: 'claude', apiKey: 'sk-ant-1', model: 'm' })).toMatchObject({ ok: false, reason });
+  });
+
+  it('reads an ordinary 400 as an ordinary 400 for the other providers too (the credit wording is Claude’s)', async () => {
+    // A Gemini 400 that merely mentions billing (a project without it enabled) is not an empty balance.
+    post.mockResolvedValue(answer(400, 'API key not valid. Enable billing on the project'));
+    expect(await probeChat({ kind: 'gemini', apiKey: 'k-1234', model: 'm' })).toMatchObject({ ok: false, reason: 'request' });
+    expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'm' })).toMatchObject({ ok: false, reason: 'request' });
+    // A 402 is still out of credit for any of them.
+    post.mockResolvedValue(answer(402, {}));
+    expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'm' })).toMatchObject({ ok: false, reason: 'credit' });
+  });
+});

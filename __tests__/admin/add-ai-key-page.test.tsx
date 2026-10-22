@@ -281,3 +281,30 @@ describe('Add a key: DeepSeek shows which model has Vision', () => {
     expect((addButton() as HTMLButtonElement).disabled).toBe(true);
   });
 });
+
+describe('Add a key: Claude', () => {
+  it('is one of the hosted types, with its steps, a key box and no address', () => {
+    render(<AddAiKeyPage />);
+    fireEvent.click(screen.getByRole('radio', { name: /^Claude/ }));
+    expect(screen.getByText('On console.anthropic.com, open API keys and create a key.')).toBeTruthy();
+    expect(screen.getByText('Add some credit to the account first: a key with no credit can’t reply.')).toBeTruthy();
+    expect(screen.queryByLabelText('Address')).toBeNull();
+    expect(screen.getByLabelText('API key')).toBeTruthy();
+  });
+
+  it('loads Claude’s models, sending the kind and key, and adds the one picked', async () => {
+    fetchMock.mockImplementation((url: string) =>
+      url.endsWith('/models') ? json({ ok: true, models: ['claude-haiku-4-5', 'claude-opus-5-5'], facts: {} }) : json({ id: 'key-new' }),
+    );
+    render(<AddAiKeyPage />);
+    fireEvent.click(screen.getByRole('radio', { name: /^Claude/ }));
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'sk-ant-api03-abcd' } });
+    fireEvent.click(screen.getByRole('button', { name: /Load models/ }));
+    await screen.findByText(/It answered. Claude has 2 models./);
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({ kind: 'claude', apiKey: 'sk-ant-api03-abcd' });
+    fireEvent.click(screen.getByRole('radio', { name: 'claude-haiku-4-5' }));
+    fireEvent.click(addButton());
+    await waitFor(() => expect(push).toHaveBeenCalled());
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toMatchObject({ kind: 'claude', model: 'claude-haiku-4-5' });
+  });
+});
