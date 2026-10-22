@@ -47,12 +47,16 @@ export interface OwnKeyFacts {
 }
 
 /** Why a bot was moved off a key when nobody asked, for the universe owner's notice. */
-const MOVED_BECAUSE: Record<Exclude<KeyForBot, { ok: true }>['reason'], string> = {
+const MOVED_BECAUSE: Record<Exclude<KeyForBot, { ok: true }>['reason'] | 'gone', string> = {
   'not-maker': 'The key it ran on isn’t its maker’s.',
   'not-lent': 'The key it ran on is no longer lent to this universe.',
   'no-access': 'Its maker can no longer manage bots here, so it can’t run on their key.',
   'no-room': 'Its room could not be found.',
+  gone: 'The key it ran on was removed.',
 };
+
+/** Every personal key's id starts with this (app/api/me/ai-keys/route.ts); a server provider's never does. */
+const OWN_KEY_PREFIX = 'key-';
 
 type BotForCredentials = NonNullable<Awaited<ReturnType<typeof loadBot>>>;
 
@@ -123,6 +127,9 @@ async function mainCredentials(bot: BotForCredentials): Promise<BotAiCredentials
   if (ref === UNIVERSE_AI_REF) return universeAi();
 
   const provider = await prisma.botsAiProvider.findUnique({ where: { providerId: ref } });
+  // A personal key that is gone (revoked while a save put the bot back on it, or its owner's account removed): the bot moves
+  // to Universe AI like any bot its key may no longer run, instead of going quiet with nobody told
+  if (!provider && ref.startsWith(OWN_KEY_PREFIX)) return moveToUniverseAi(bot, ref, 'gone');
   if (!provider) return { status: 404, error: 'Provider not found' };
 
   if (!provider.ownerId) {
@@ -153,9 +160,19 @@ async function mainCredentials(bot: BotForCredentials): Promise<BotAiCredentials
     };
   }
 
-  // The key may no longer run this bot: the bot moves to Universe AI now, and the universe's owner is told once. Only the
-  // request that really moved it tells (a second, racing one finds nothing to move), so every move gets its own notice
-  // even if the owner dismissed an earlier one for the same bot and key.
+  return moveToUniverseAi(bot, ref, verdict.reason);
+}
+
+/**
+ * The key may no longer run this bot: the bot moves to Universe AI now, and the universe's owner is told once. Only the
+ * request that really moved it tells (a second, racing one finds nothing to move), so every move gets its own notice
+ * even if the owner dismissed an earlier one for the same bot and key.
+ */
+async function moveToUniverseAi(
+  bot: { id: string; name: string; room: { world: { universe: { id: string; ownerId: string } } } },
+  ref: string,
+  reason: keyof typeof MOVED_BECAUSE,
+): Promise<BotAiCredentials> {
   const moved = await prisma.bot.updateMany({ where: { id: bot.id, aiProviderRef: ref }, data: { aiProviderRef: UNIVERSE_AI_REF } });
   if (moved.count > 0) {
     const universe = bot.room.world.universe;
@@ -165,7 +182,7 @@ async function mainCredentials(bot: BotForCredentials): Promise<BotAiCredentials
         kind: 'ai-key-moved',
         dedupeKey: `moved:${ref}:${bot.id}:${new Date().toISOString()}`,
         title: `${bot.name} moved to Universe AI`,
-        body: `${MOVED_BECAUSE[verdict.reason]} It now replies on Universe AI.`,
+        body: `${MOVED_BECAUSE[reason]} It now replies on Universe AI.`,
         href: `/admin/universes/${universe.id}`,
       });
     } catch (error) {
