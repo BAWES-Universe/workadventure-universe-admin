@@ -4,6 +4,7 @@ import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { encryptApiKey } from '@/lib/encryption';
 import { isVisionEligible } from '@/lib/vision-models';
+import { UNIVERSE_AI_REF, resolveUniverseAiProvider } from '@/lib/universe-ai';
 
 /**
  * GET /api/admin/ai-providers/:id
@@ -116,6 +117,30 @@ export async function PATCH(
       );
     }
 
+    // Universe AI (#374): the Default can't be turned off (bots on Universe AI would have nothing to run on), and only an
+    // enabled provider can become the Default.
+    if (body.isDefault !== undefined && typeof body.isDefault !== 'boolean') {
+      return NextResponse.json({ error: 'isDefault must be a boolean' }, { status: 400 });
+    }
+    if (body.isDefault === false) {
+      return NextResponse.json(
+        { error: 'Make another provider the default instead. Universe AI always has one.' },
+        { status: 400 }
+      );
+    }
+    if (body.isDefault === true && !(body.enabled ?? existing.enabled)) {
+      return NextResponse.json({ error: 'Enable this provider before making it the default.' }, { status: 400 });
+    }
+    if (body.enabled === false && existing.enabled && body.isDefault !== true) {
+      const current = await resolveUniverseAiProvider();
+      if (current?.providerId === id) {
+        return NextResponse.json(
+          { error: 'This is the Universe AI default and can’t be disabled. Make another provider the default first.' },
+          { status: 400 }
+        );
+      }
+    }
+
     // Prepare update data
     const updateData: any = {};
 
@@ -203,6 +228,15 @@ export async function PATCH(
       }
     }
 
+    if (body.isDefault === true) {
+      // One default at a time: the others are cleared in the same transaction
+      const [, provider] = await prisma.$transaction([
+        prisma.botsAiProvider.updateMany({ where: { ownerId: null, isDefault: true, NOT: { providerId: id } }, data: { isDefault: false } }),
+        prisma.botsAiProvider.update({ where: { providerId: id }, data: { ...updateData, isDefault: true } }),
+      ]);
+      return NextResponse.json(provider);
+    }
+
     const provider = await prisma.botsAiProvider.update({
       where: { providerId: id },
       data: updateData,
@@ -254,6 +288,15 @@ export async function DELETE(
       return NextResponse.json(
         { error: 'Provider not found' },
         { status: 404 }
+      );
+    }
+
+    // Universe AI (#374): the Default is not deleted from under the bots that run on it
+    const current = await resolveUniverseAiProvider();
+    if (current?.providerId === id && (await prisma.bot.count({ where: { aiProviderRef: UNIVERSE_AI_REF } })) > 0) {
+      return NextResponse.json(
+        { error: 'Bots run on Universe AI through this provider. Make another provider the default first.' },
+        { status: 400 }
       );
     }
 

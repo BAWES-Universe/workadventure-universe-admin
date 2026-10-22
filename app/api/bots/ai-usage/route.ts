@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { requireServiceToken } from '@/lib/service-tokens';
+import { UNIVERSE_AI_REF, resolveUniverseAiProvider } from '@/lib/universe-ai';
 
 /**
  * POST /api/bots/ai-usage
@@ -17,7 +18,7 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const {
       botId,
-      providerId,
+      providerId: sentProviderId,
       tokensUsed = 0,
       apiCalls = 1,
       durationSeconds = null,
@@ -26,6 +27,12 @@ export async function POST(request: NextRequest) {
       error = false,
       timestamp = new Date(),
     } = body;
+
+    // A bot on Universe AI is paid for by the provider that is the Default, so that is the row the usage belongs to
+    let providerId = sentProviderId;
+    if (providerId === UNIVERSE_AI_REF) {
+      providerId = (await resolveUniverseAiProvider())?.providerId;
+    }
 
     // Validate required fields
     if (!botId || !providerId) {

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { requireServiceToken } from '@/lib/service-tokens';
+import { UNIVERSE_AI_MISSING, UNIVERSE_AI_REF, resolveUniverseAiProvider } from '@/lib/universe-ai';
 
 /**
  * GET /api/bots/ai-providers/:providerId/credentials
@@ -9,6 +10,9 @@ import { requireServiceToken } from '@/lib/service-tokens';
  * Auth: Service token only
  * Returns: Full provider config with encrypted credentials (apiKeyEncrypted field)
  * Note: Credentials remain encrypted - bot server will decrypt using ENCRYPTION_KEY
+ *
+ * "universe-ai" is answered with the provider that is the Default right now, under that provider's own providerId, so a bot
+ * on Universe AI follows the Default at its next reply (#374).
  */
 export async function GET(
   request: NextRequest,
@@ -20,9 +24,16 @@ export async function GET(
 
     const { providerId } = await params;
 
-    const provider = await prisma.botsAiProvider.findUnique({
-      where: { providerId },
-    });
+    const provider =
+      providerId === UNIVERSE_AI_REF
+        ? await resolveUniverseAiProvider()
+        : await prisma.botsAiProvider.findUnique({
+            where: { providerId },
+          });
+
+    if (providerId === UNIVERSE_AI_REF && !provider) {
+      return NextResponse.json({ error: UNIVERSE_AI_MISSING }, { status: 503 });
+    }
 
     // A personal key (#374) is never served by provider id alone: no bot may use one yet, so it does not exist here.
     if (!provider || provider.ownerId) {

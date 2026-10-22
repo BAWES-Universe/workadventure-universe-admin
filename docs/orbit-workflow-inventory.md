@@ -55,7 +55,7 @@ routes each page calls.
 | Users | `/admin/users` | everyone signed in | both | Menu → Discover → Users | `__tests__/api/authorisation-scope.test.ts` (#208) | fixed in 0A (#208) |
 | Avatar Sets | `/admin/avatars` | super admin | full-screen view | Menu → Admin → Avatar Sets | none — needs one | preserve |
 | Bots | `/admin/bots` | super admin | full-screen view | Menu → Admin → Bots | none — needs one | preserve |
-| AI Providers | `/admin/ai-providers` | super admin | full-screen view | Menu → Admin → AI Providers | `__tests__/api/admin/ai-providers.test.ts` (validation only; always mocked as super admin) → **none — needs one** for the 403 | preserve |
+| AI Providers | `/admin/ai-providers` | super admin | full-screen view | Menu → Admin → Universe AI | `__tests__/api/admin/ai-providers.test.ts` (validation only; always mocked as super admin) → **none — needs one** for the 403 | preserve |
 | AI Usage | `/admin/ai-providers/usage` | super admin | full-screen view | Menu → Admin → AI Usage | none — needs one | preserve |
 | Bot Database | `/admin/bots/database` | super admin | full-screen view | Menu → Admin → Bot Database | `__tests__/api/authorisation-scope.test.ts` (#208) | fixed in 0A (#208) |
 | MCP Servers | `/admin/bots/mcp-servers` | super admin | full-screen view | Menu → Admin → MCP Servers | none — needs one (`/api/admin/mcp-servers`) | preserve |
@@ -132,7 +132,7 @@ The menu only hides entries; every API route enforces its own check.
 | Bot data cleanup (preview, delete, deleteAll) and database stats | `/admin/bots/database` | `/api/bots/*/cleanup[/preview]`, `/api/bots/database/stats`, `/api/bots/memory/:id` | full-screen view | Menu → Admin → Bot Database | `authorisation-scope.test.ts` (#208) | fixed in 0A (#208) |
 | Bot configuration (create, update, delete) | in-game bot tools | `/api/bots`, `/api/bots/:id`, `/api/bots/configuration[/:id]` | n/a | n/a | `__tests__/api/bots/configuration.test.ts` | preserve |
 | Bot MCP servers: list, add, edit, delete, test, OAuth connect | `/admin/bots/[id]/mcp-servers`, `/admin/bots/mcp-servers` | `/api/bots/:id/mcp-servers[/:serverId][/test,/oauth/start]`, `/api/admin/mcp-servers` | full-screen view | Bots → bot → MCP servers; Menu → Admin → MCP Servers | `__tests__/api/bots/mcp-servers.test.ts` | preserve |
-| AI providers: list, create, edit, delete, test | `/admin/ai-providers/*` | `/api/admin/ai-providers[/:id][/test]` | full-screen view | Menu → Admin → AI Providers | none — needs one (existing test never exercises a non-super-admin) | preserve |
+| Universe AI (the AI providers page): list, make default, create, edit, delete, test | `/admin/ai-providers/*` | `/api/admin/ai-providers[/:id][/test]` | full-screen view | Menu → Admin → Universe AI | none — needs one (existing test never exercises a non-super-admin) | preserve |
 | AI usage report | `/admin/ai-providers/usage` | `/api/admin/ai-providers/usage` | full-screen view | Menu → Admin → AI Usage | none — needs one | preserve |
 
 ## Service-to-service routes (no Orbit UI)
