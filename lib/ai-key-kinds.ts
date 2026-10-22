@@ -255,11 +255,6 @@ const NAMED_KINDS: AiKeyKindInfo[] = [
 ];
 
 /**
- * More providers, from lib/ai-key-snapshot.json (built by scripts/build-ai-key-snapshot.mjs from the models.dev project).
- * They only differ from each other by name and address, so each is a default entry; the ones listed by hand above win
- * if an id is ever the same.
- */
-/**
  * The line under a provider in More providers, from the models.dev numbers in the snapshot: how many models it serves, whether they
  * are open or its own, and how many are free. It says nothing we do not know.
  */
@@ -267,19 +262,25 @@ export function moreBenefit(provider: { models?: number; open?: number; free?: n
   const { models = 0, open = 0, free = 0 } = provider;
   if (models === 0) return 'Serves models over the OpenAI format.';
   const count = `${models} ${models === 1 ? 'model' : 'models'}`;
-  const gateway = models >= 40 && open > 0 && open < models;
-  const sentence = gateway
-    ? `One key for ${count} from many makers, open and closed.`
-    : open === models
-      ? `${count[0].toUpperCase()}${count.slice(1)}, all open.`
+  const first = `${count[0].toUpperCase()}${count.slice(1)}`;
+  const sentence =
+    open === models
+      ? `${first}, all open.`
       : open === 0
         ? `${models === 1 ? 'Its own model' : `Its own ${count}`}.`
         : open * 5 >= models * 3
-          ? `${count[0].toUpperCase()}${count.slice(1)}, mostly open.`
-          : `${count[0].toUpperCase()}${count.slice(1)}, open and closed.`;
+          ? `${first}, mostly open.`
+          : models >= 40
+            ? `One key for ${count} from many makers, open and closed.`
+            : `${first}, open and closed.`;
   return free > 0 ? `${sentence} ${free} free.` : sentence;
 }
 
+/**
+ * More providers, from lib/ai-key-snapshot.json (built by scripts/build-ai-key-snapshot.mjs from the models.dev project).
+ * They only differ from each other by name and address, so each is a default entry; the ones listed by hand above win
+ * if an id is ever the same.
+ */
 const NAMED_IDS = new Set(NAMED_KINDS.map((entry) => entry.kind));
 const MORE_KINDS: AiKeyKindInfo[] = snapshot.providers
   .filter((provider) => !NAMED_IDS.has(provider.id))

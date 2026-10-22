@@ -51,6 +51,10 @@ describe('the line under a provider in More providers', () => {
     [{ models: 1, open: 0, free: 0 }, 'Its own model.'],
     [{ models: 9, open: 7, free: 0 }, '9 models, mostly open.'],
     [{ models: 6, open: 2, free: 0 }, '6 models, open and closed.'],
+    [{ models: 57, open: 56, free: 0 }, '57 models, mostly open.'],
+    [{ models: 86, open: 80, free: 1 }, '86 models, mostly open. 1 free.'],
+    [{ models: 630, open: 362, free: 2 }, 'One key for 630 models from many makers, open and closed. 2 free.'],
+    [{ models: 105, open: 54, free: 2 }, 'One key for 105 models from many makers, open and closed. 2 free.'],
     [{ models: 0 }, 'Serves models over the OpenAI format.'],
   ])('%j reads "%s"', (facts, line) => {
     expect(moreBenefit(facts)).toBe(line);
