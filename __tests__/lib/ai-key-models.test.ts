@@ -12,7 +12,7 @@ const get = safeGet as jest.Mock;
 const post = safeRequest as jest.Mock;
 
 const answer = (status: number, body: unknown) => ({ ok: true, status, body: typeof body === 'string' ? body : JSON.stringify(body) });
-const checkedOk = { url: new URL('https://x.example.com'), address: '93.184.216.34', family: 4 };
+const checkedOk = { url: new URL('https://x.example.com'), address: '93.184.216.34', family: 4, addresses: [{ address: '93.184.216.34', family: 4 }] };
 
 beforeEach(() => {
   jest.resetAllMocks();

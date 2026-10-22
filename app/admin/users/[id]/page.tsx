@@ -1,9 +1,9 @@
 'use client';
 
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import Link from 'next/link';
-import { useParams, useRouter } from 'next/navigation';
-import { Check, ChevronLeft, ChevronRight, UserMinus, UserPlus, X } from 'lucide-react';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
+import { Check, ChevronLeft, ChevronRight, Clock, UserCog, UserMinus, UserPlus, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   AlertDialog,
@@ -35,7 +35,9 @@ import { ProfileActions, ProfileFrame, ProfileLinks, WokaAvatar } from '../../co
 import { inviteInGame, messageInGame, useGameCapability } from '../../components/orbit-bridge';
 import { PassportSection } from '../../components/passport';
 import { Planet } from '../../components/ds/planet-icon';
-import InviteSheet, { personNote } from '../../components/invite-sheet';
+import InviteSheet, { firstUniverse, personNote, type UniverseChoice, type SentInvitation } from '../../components/invite-sheet';
+import { useCurrentUniverseId } from '../../hooks/use-current-universe';
+import { membershipButton } from '@/lib/membership-button';
 
 interface WorldMembership {
   id: string;
@@ -209,6 +211,29 @@ function MessageIcon() {
 
 const linkClass = 'underline-offset-2 hover:underline [overflow-wrap:anywhere]';
 
+/**
+ * The universes you can do something about for this person: the one you are in first, then where you can give
+ * membership, then where an invitation is waiting, then where they are a member; by name within each.
+ */
+function universeOrder(
+  invitable: { id: string; name: string }[],
+  taken: { id: string; name: string; status: 'member' | 'invited'; invitation: SentInvitation | null }[],
+  currentId: string | null,
+): UniverseChoice[] {
+  const rank = (choice: UniverseChoice) => (choice.status === 'member' ? 2 : choice.status === 'invited' ? 1 : 0);
+  return [...invitable.map(({ id, name }): UniverseChoice => ({ id, name })), ...taken].sort(
+    (a, b) => Number(b.id === currentId) - Number(a.id === currentId) || rank(a) - rank(b) || a.name.localeCompare(b.name),
+  );
+}
+
+function pickOpening(
+  invitable: { id: string; name: string }[],
+  taken: { id: string; name: string; status: 'member' | 'invited'; invitation: SentInvitation | null }[],
+  currentId: string | null,
+): UniverseChoice | undefined {
+  return universeOrder(invitable, taken, currentId)[0];
+}
+
 export default function UserDetailPage() {
   const router = useRouter();
   const params = useParams();
@@ -227,7 +252,36 @@ export default function UserDetailPage() {
   const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
   const [invitableUniverses, setInvitableUniverses] = useState<{ id: string; name: string; note: string | null }[]>([]);
   // Your universes they already belong to or have an invitation for: shown in the sheet, not pickable.
-  const [takenUniverses, setTakenUniverses] = useState<{ id: string; name: string; status: 'member' | 'invited' }[]>([]);
+  const [takenUniverses, setTakenUniverses] = useState<{ id: string; name: string; status: 'member' | 'invited'; invitation: SentInvitation | null }[]>([]);
+  const lookedUpUniverseId = useCurrentUniverseId();
+  const currentUniverseId = lookedUpUniverseId ?? null;
+  const searchParams = useSearchParams();
+  const sheetWanted = searchParams.get('sheet') === 'membership';
+  // The universe the sheet opens on, and what you may do about this person there: it decides the button
+  const openingUniverse = pickOpening(invitableUniverses, takenUniverses, currentUniverseId);
+  const [memberCan, setMemberCan] = useState<{ forUniverse: string; give: boolean; remove: boolean } | null>(null);
+  // One button, named for what it does here: Give membership, Pending invite, Roles or Membership; none when none applies
+  const here = memberCan && memberCan.forUniverse === openingUniverse?.id ? memberCan : null;
+  const mayAct = !!currentUser && !!user && currentUser.id !== user.id && !user.isGuest && invitableUniverses.length + takenUniverses.length > 0;
+  const button =
+    !mayAct || !openingUniverse
+      ? null
+      : membershipButton({
+          status: openingUniverse.status === 'member' ? 'member' : openingUniverse.status === 'invited' ? 'invited' : 'none',
+          // Not in it, or waiting, are only listed for universes where you may invite
+          mayInvite: openingUniverse.status !== 'member',
+          mayGiveRoles: !!here?.give,
+          mayRemove: !!here?.remove,
+        });
+  // From the card in the game: the sheet opens once, as soon as it is known which universe it opens on
+  const sheetOpened = useRef(false);
+  useEffect(() => {
+    // Asked for again later (the sheet closed and the link was cleared): it opens again
+    if (!sheetWanted) sheetOpened.current = false;
+    if (!sheetWanted || sheetOpened.current || !button || lookedUpUniverseId === undefined) return;
+    sheetOpened.current = true;
+    setInviteDialogOpen(true);
+  }, [sheetWanted, button, lookedUpUniverseId]);
   const [, setWorldsLoading] = useState(false);
   const [universeAnalytics, setUniverseAnalytics] = useState<Record<string, Analytics>>({});
   const [worldAnalytics, setWorldAnalytics] = useState<Record<string, Analytics>>({});
@@ -243,6 +297,26 @@ export default function UserDetailPage() {
   const gameCanInvite = useGameCapability('invite');
   const gameCanMessage = useGameCapability('message');
   const live = useLive();
+
+  useEffect(() => {
+    if (openingUniverse?.status !== 'member') return;
+    const universeId = openingUniverse.id;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { authenticatedFetch } = await import('@/lib/client-auth');
+        const response = await authenticatedFetch(`/api/admin/universes/${universeId}/members/${id}`);
+        if (!response.ok) return;
+        const body = await response.json();
+        if (!cancelled) setMemberCan({ forUniverse: universeId, give: (body.can?.giveRoleIds ?? []).length > 0, remove: !!body.can?.remove });
+      } catch {
+        // No button without an answer
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [openingUniverse?.id, openingUniverse?.status, id]);
 
   useEffect(() => {
     checkAuth();
@@ -551,7 +625,9 @@ export default function UserDetailPage() {
   const name = user.name || user.email || 'Someone';
   const isSelf = currentUser?.id === user.id;
   // Guests can't accept: they have no Orbit sign-in, and signing in makes a different account.
-  const canInvite = Boolean(currentUser && !isSelf && !user.isGuest && invitableUniverses.length > 0);
+  const canInvite = Boolean(currentUser && !isSelf && !user.isGuest && invitableUniverses.length + takenUniverses.length > 0);
+  const universeChoices = universeOrder(invitableUniverses, takenUniverses, currentUniverseId);
+  const waitingFor = takenUniverses.filter((universe) => universe.status === 'invited');
   const showPrivate = isSuperAdmin || isSelf;
   const bio = user.visitCard?.bio?.trim();
   const links = user.visitCard?.links ?? [];
@@ -598,11 +674,12 @@ export default function UserDetailPage() {
       </Button>,
     );
   }
-  if (canInvite) {
+  const membershipAction = button && { label: button.label, Icon: button.kind === 'roles' ? UserCog : button.kind === 'pending' ? Clock : Planet };
+  if (membershipAction) {
     pills.push(
       <Button key="member" variant={pillVariant(false)} className={pillClass} data-wide="" onClick={() => setInviteDialogOpen(true)}>
-        <Planet aria-hidden="true" />
-        <span className="truncate">Give membership</span>
+        <membershipAction.Icon aria-hidden="true" />
+        <span className="truncate">{membershipAction.label}</span>
       </Button>,
     );
   }
@@ -689,6 +766,30 @@ export default function UserDetailPage() {
 
       <section className="grid min-w-0 gap-2" aria-labelledby="person-memberships">
         <SectionHeader id="person-memberships" title="Memberships" count={user.worldMemberships.length} />
+        {waitingFor.length > 0 && (
+          <div className="grid min-w-0 gap-0.5" data-testid="waiting-invitations">
+            {waitingFor.map((universe) => (
+              <EntityRow
+                key={universe.id}
+                href={`/admin/universes/${universe.id}/members`}
+                chevron
+                tone="waiting"
+                kind="universe"
+                universeId={universe.id}
+                title={universe.name}
+                context={
+                  <StatLine
+                    items={[
+                      'Invited, waiting',
+                      universe.invitation ? `by ${universe.invitation.by.you ? 'you' : universe.invitation.by.name || 'someone'}` : null,
+                      universe.invitation ? timeAgo(new Date(universe.invitation.at)) : null,
+                    ]}
+                  />
+                }
+              />
+            ))}
+          </div>
+        )}
         {user.worldMemberships.length === 0 ? (
           <EmptyCard kind="world" title="No memberships yet." text={isSelf ? 'You’re not a member of any world yet.' : `${name} isn’t a member of any world yet.`} />
         ) : (
@@ -939,13 +1040,17 @@ export default function UserDetailPage() {
         </AlertDialogContent>
       </AlertDialog>
 
-      {invitableUniverses.length > 0 && (
+      {canInvite && (
         <InviteSheet
-          key={invitableUniverses.map((universe) => universe.id).join(',')}
+          key={[...invitableUniverses, ...takenUniverses].map((universe) => universe.id).join(',')}
           open={inviteDialogOpen}
-          onOpenChange={setInviteDialogOpen}
-          universeId={invitableUniverses[0].id}
-          universes={[...invitableUniverses, ...takenUniverses]}
+          onOpenChange={(next) => {
+            setInviteDialogOpen(next);
+            // The link from the game is spent once the sheet closes, so the next one from the game opens it again
+            if (!next && sheetWanted) router.replace(`/admin/users/${id}`);
+          }}
+          universeId={firstUniverse(universeChoices, currentUniverseId)}
+          universes={universeChoices}
           giving
           person={{ userId: id, name, woka: user.woka, notes: Object.fromEntries(invitableUniverses.map((universe) => [universe.id, universe.note])) }}
           onSent={() => {
