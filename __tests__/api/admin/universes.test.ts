@@ -22,6 +22,8 @@ jest.mock('@/lib/db', () => ({
   },
 }));
 
+jest.mock('@/lib/roles', () => ({ ensureBuiltInRoles: jest.fn() }));
+
 // Mock auth
 jest.mock('@/lib/auth', () => ({
   requireAuth: jest.fn(),
@@ -132,6 +134,24 @@ describe('/api/admin/universes', () => {
         expect(data.error).toBeDefined();
         // This is acceptable - the validation is working
       }
+    });
+
+    it('stores whether bot chat telemetry is off, on by default', async () => {
+      (prisma.user.findUnique as jest.Mock).mockResolvedValue({ id: '1', uuid: 'user-1', email: 'test@example.com', name: 'Test User' });
+      (prisma.universe.findUnique as jest.Mock).mockResolvedValue(null);
+      (prisma.universe.create as jest.Mock).mockResolvedValue({ id: '1', slug: 'quiet', name: 'Quiet', ownerId: '1', owner: { id: '1' } });
+      const create = (extra: Record<string, unknown>) =>
+        POST(
+          new NextRequest('http://localhost:3333/api/admin/universes', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${process.env.ADMIN_API_TOKEN}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ slug: 'quiet', name: 'Quiet', ownerId: '11111111-1111-4111-8111-111111111111', ...extra }),
+          }),
+        );
+      expect((await create({})).status).toBe(201);
+      expect((prisma.universe.create as jest.Mock).mock.calls.at(-1)?.[0].data.hideBotConversations).toBe(false);
+      await create({ hideBotConversations: true });
+      expect((prisma.universe.create as jest.Mock).mock.calls.at(-1)?.[0].data.hideBotConversations).toBe(true);
     });
 
     it('should return 409 if slug already exists', async () => {

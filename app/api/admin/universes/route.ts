@@ -13,6 +13,8 @@ const createUniverseSchema = z.object({
   ownerId: z.string().uuid(),
   isPublic: z.boolean().default(true),
   featured: z.boolean().default(false),
+  // Bot chat telemetry is off when true (#435). Only the owner or a super admin creates a universe, so it is theirs to set.
+  hideBotConversations: z.boolean().default(false),
   thumbnailUrl: z.string().url().nullable().optional(),
 });
 
@@ -409,6 +411,7 @@ export async function POST(request: NextRequest) {
         ownerId: data.ownerId,
         isPublic: data.isPublic,
         featured: data.featured,
+        hideBotConversations: data.hideBotConversations,
         thumbnailUrl: data.thumbnailUrl || null,
       },
       include: {

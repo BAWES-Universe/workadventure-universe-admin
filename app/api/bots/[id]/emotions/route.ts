@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
-import { botReadDenied, getViewer, isPrivileged } from '@/lib/access-scope';
+import { botContentReadDenied, getViewer, isPrivileged } from '@/lib/access-scope';
 import { corsHeaders } from '@/lib/cors';
 import { visibleUserUuid } from '@/lib/visible-identity';
+import { isBotHidden } from '@/lib/bot-privacy';
 
 export const runtime = 'nodejs';
 
@@ -26,8 +27,10 @@ export async function GET(
 ) {
   try {
     const { id: botId } = await params;
-    const denied = await botReadDenied(request, botId, corsHeaders());
+    const denied = await botContentReadDenied(request, corsHeaders());
     if (denied) return denied;
+    // Hide bot conversations (#435): what the bot remembers about people, emotions included, is for the bot alone.
+    if (await isBotHidden(botId)) return NextResponse.json([], { headers: corsHeaders() });
     // Visitors' emails are only for super admins, as in access logs; room managers see names
     const showEmails = isPrivileged(await getViewer(request));
 
