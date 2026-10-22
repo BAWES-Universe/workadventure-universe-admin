@@ -3,7 +3,7 @@ import { providerPayload } from '@/lib/ai-provider-payload';
 import { checkKeyForBot, type KeyForBot } from '@/lib/ai-key-pay';
 import { addNotice } from '@/lib/notices';
 import { UNIVERSE_AI_MISSING, UNIVERSE_AI_REF, resolveUniverseAiProvider } from '@/lib/universe-ai';
-import { kindInfo } from '@/lib/ai-key-kinds';
+import { isTypedEndpoint, kindInfo } from '@/lib/ai-key-kinds';
 import { RESTING_LINE, recheckIfDue } from '@/lib/ai-key-health';
 
 /**
@@ -85,7 +85,7 @@ export async function credentialsForBot(botId: string): Promise<BotAiCredentials
         keyKind: info?.kind ?? null,
         keyGroup: info?.group ?? null,
         // A hosted kind sits at its provider's fixed base; anything else is an address the person typed
-        keyAddressTyped: !info || info.group === 'own-computer' || provider.endpoint !== info.base,
+        keyAddressTyped: isTypedEndpoint(info, provider.endpoint),
       },
     };
   }
