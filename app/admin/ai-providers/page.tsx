@@ -200,7 +200,7 @@ export default function AiProvidersPage() {
                     providerTypeLabel(provider.type),
                     provider.model,
                     botsLine(provider),
-                    provider.defaultVision && 'Describes pictures',
+                    provider.defaultVision && 'Describes images',
                     provider.tested && provider.testedAt && `tested ${new Date(provider.testedAt).toLocaleDateString()}`,
                   ]}
                 />

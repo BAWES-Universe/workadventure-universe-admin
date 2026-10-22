@@ -185,3 +185,53 @@ describe('Add a key: more providers, regions and search', () => {
     expect(screen.queryByRole('radiogroup', { name: 'Region' })).toBeNull();
   });
 });
+
+describe('Add a key: a model that cannot use bot tools', () => {
+  it('warns once such a model is picked, and not for one the provider said nothing about', async () => {
+    fetchMock.mockImplementation(() => json({ ok: true, models: ['big-model', 'tiny-chat'], facts: { 'tiny-chat': { tools: false } } }));
+    render(<AddAiKeyPage />);
+    fireEvent.click(screen.getByRole('radio', { name: /^LM Studio/ }));
+    fireEvent.change(screen.getByLabelText('Address'), { target: { value: 'https://lm.example.com' } });
+    fireEvent.click(screen.getByRole('button', { name: /Load models/ }));
+    await screen.findByText(/It answered/);
+    fireEvent.click(screen.getByRole('radio', { name: 'big-model' }));
+    expect(screen.queryByTestId('no-tools-warning')).toBeNull();
+    fireEvent.click(screen.getByRole('radio', { name: 'tiny-chat' }));
+    expect(screen.getByTestId('no-tools-warning').textContent).toBe('This model has no Tools. Bots on it can still chat.');
+    // The warning does not stop Add key
+    expect((addButton() as HTMLButtonElement).disabled).toBe(false);
+  });
+});
+
+describe('Add a key: DeepSeek shows which model has Vision', () => {
+  it('starts on deepseek-v4-flash, shows Vision only next to the image model, and adds the key on it', async () => {
+    fetchMock.mockImplementation((url: string) =>
+      url.endsWith('/models')
+        ? json({ ok: true, models: ['deepseek-v4-flash', 'deepseek-v4-flash-vision-exp', 'deepseek-v4-pro'], facts: { 'deepseek-v4-flash': { vision: false }, 'deepseek-v4-flash-vision-exp': { vision: true }, 'deepseek-v4-pro': { vision: false } } })
+        : json({ id: 'key-new' }),
+    );
+    render(<AddAiKeyPage />);
+    fireEvent.click(screen.getByRole('radio', { name: /^DeepSeek/ }));
+    fireEvent.change(screen.getByLabelText(/API key/), { target: { value: 'sk-test' } });
+    fireEvent.click(screen.getByRole('button', { name: /Load models/ }));
+    await screen.findByText(/It answered/);
+    expect((screen.getByRole('radio', { name: 'deepseek-v4-flash' }) as HTMLElement).getAttribute('aria-checked')).toBe('true');
+    expect(screen.getByRole('radio', { name: /^deepseek-v4-flash-vision-exp/ }).textContent).toContain('Vision');
+    expect(screen.getByRole('radio', { name: 'deepseek-v4-flash' }).textContent).not.toContain('Vision');
+    expect(screen.getByRole('radio', { name: /^deepseek-v4-pro/ }).textContent).not.toContain('Vision');
+    fireEvent.click(addButton());
+    await waitFor(() => expect(push).toHaveBeenCalled());
+    const add = fetchMock.mock.calls.find((call) => !String(call[0]).endsWith('/models'))!;
+    expect(JSON.parse(add[1].body)).toMatchObject({ kind: 'deepseek', model: 'deepseek-v4-flash' });
+  });
+
+  it('picks nothing when the list does not hold the suggested model', async () => {
+    fetchMock.mockImplementation(() => json({ ok: true, models: ['deepseek-v4-pro', 'deepseek-chat'] }));
+    render(<AddAiKeyPage />);
+    fireEvent.click(screen.getByRole('radio', { name: /^DeepSeek/ }));
+    fireEvent.change(screen.getByLabelText(/API key/), { target: { value: 'sk-test' } });
+    fireEvent.click(screen.getByRole('button', { name: /Load models/ }));
+    await screen.findByText(/It answered/);
+    expect((addButton() as HTMLButtonElement).disabled).toBe(true);
+  });
+});

@@ -439,3 +439,35 @@ describe('Change address and Change model', () => {
     expect((await within(await screen.findByRole('dialog')).findByRole('alert')).textContent).toMatch(/tunnel up/);
   });
 });
+
+describe('Models that cannot use bot tools', () => {
+  it('says so on the key, only when the provider said so', async () => {
+    answer([{ ...lmStudio, caps: { tools: false } }, { ...deepseek, caps: { tools: true, context: 64000 } }]);
+    render(<AiKeysPage />);
+    await screen.findByText('My DeepSeek', { selector: 'h2' });
+    const warnings = screen.getAllByTestId('ai-key-no-tools');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0].textContent).toBe('This model has no Tools. Bots on it can still chat.');
+  });
+
+  it('says nothing for a key saved before this was known', async () => {
+    answer([lmStudio]);
+    render(<AiKeysPage />);
+    await screen.findByText('My LM Studio', { selector: 'h2' });
+    expect(screen.queryByTestId('ai-key-no-tools')).toBeNull();
+  });
+
+  it('warns when the model picked in Change model is one the provider said cannot use tools', async () => {
+    fetchMock.mockImplementation((url: string) => {
+      if (url.endsWith('/models')) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, models: ['qwen3-8b', 'tiny-chat'], facts: { 'tiny-chat': { tools: false } } }) });
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ keys: [lmStudio] }) });
+    });
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Change model' }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(await within(dialog).findByRole('radio', { name: 'qwen3-8b' }));
+    expect(within(dialog).queryByTestId('no-tools-warning')).toBeNull();
+    fireEvent.click(within(dialog).getByRole('radio', { name: 'tiny-chat' }));
+    expect(within(dialog).getByTestId('no-tools-warning').textContent).toMatch(/has no Tools/);
+  });
+});

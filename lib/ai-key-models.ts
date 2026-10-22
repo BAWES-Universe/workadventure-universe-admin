@@ -70,7 +70,7 @@ async function keyInfoRejectsKey(base: string, paths: string[], apiKey: string):
   return false;
 }
 
-export type LoadModelsResult = { ok: true; models: string[] } | { ok: false; message: string };
+export type LoadModelsResult = { ok: true; models: string[]; facts: ModelFactsById } | { ok: false; message: string };
 
 /**
  * Why a check failed, for deciding what to do about it: nobody answered, the provider said no, it was too busy to say
@@ -79,7 +79,14 @@ export type LoadModelsResult = { ok: true; models: string[] } | { ok: false; mes
  * the key, the way a reply's 400 is not counted against it), or something else.
  */
 export type ProbeFailure = 'unreachable' | 'rejected' | 'busy' | 'credit' | 'gone' | 'request' | 'other';
-export type ProbeModelsResult = { ok: true; models: string[] } | { ok: false; message: string; reason: ProbeFailure };
+/** What a provider says about one model in its list, when it says: can it call tools, take images, how much can it read. */
+export type ModelFacts = {
+  tools?: boolean;
+  vision?: boolean;
+  context?: number;
+};
+export type ModelFactsById = Record<string, ModelFacts>;
+export type ProbeModelsResult = { ok: true; models: string[]; facts: ModelFactsById } | { ok: false; message: string; reason: ProbeFailure };
 
 /**
  * What a provider's 400 or 422 says when the problem is the model (it does not exist, or this key may not use it) and not the
@@ -117,6 +124,35 @@ export function cleanModelIds(ids: string[], kind: AiKeyKind): string[] {
     if (id && id.length <= 255 && !NOT_CHAT.test(id)) seen.add(id);
   }
   return [...seen].sort((a, b) => a.localeCompare(b));
+}
+
+/** What is saved on a key about its model: only the facts the provider gave. */
+export function modelCaps(facts: ModelFactsById, model: string): ModelFacts {
+  return facts[model] ?? {};
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+const nonEmptyList = (value: unknown): value is unknown[] => Array.isArray(value) && value.length > 0;
+const asBoolean = (value: unknown) => (typeof value === 'boolean' ? value : undefined);
+
+/**
+ * What one entry of a provider's model list says about the model. A fact the provider leaves out is unknown, never "no":
+ * OpenRouter names the parameters and input kinds a model takes, Mistral lists `capabilities`, Together `context_length`,
+ * Groq `context_window`. A list that names parameters but not `tools` is saying the model cannot call tools.
+ */
+export function factsOf(entry: unknown): ModelFacts {
+  if (!isRecord(entry)) return {};
+  const capabilities = isRecord(entry.capabilities) ? entry.capabilities : {};
+  const architecture = isRecord(entry.architecture) ? entry.architecture : {};
+  const tools = nonEmptyList(entry.supported_parameters) ? entry.supported_parameters.includes('tools') : asBoolean(capabilities.function_calling);
+  const vision = nonEmptyList(architecture.input_modalities) ? architecture.input_modalities.includes('image') : asBoolean(capabilities.vision);
+  const rawContext = entry.context_length ?? entry.max_context_length ?? entry.context_window;
+  const context = typeof rawContext === 'number' && Number.isFinite(rawContext) && rawContext > 0 ? Math.round(rawContext) : undefined;
+  const facts: ModelFacts = {};
+  if (tools !== undefined) facts.tools = tools;
+  if (vision !== undefined) facts.vision = vision;
+  if (context !== undefined) facts.context = context;
+  return facts;
 }
 
 /** Like loadModels, and also says why it failed (the key health check needs that; a person only needs the sentence). */
@@ -167,17 +203,18 @@ export async function probeModels(input: KeyTargetInput & { apiKey?: unknown }):
     return { ok: false, message: `${info.label} didn’t accept this key.`, reason: 'rejected' };
   }
 
-  let ids: string[] = [];
+  let entries: unknown[] = [];
   try {
     const data: unknown = JSON.parse(result.body);
     // Most providers answer { data: [...] }; some (Together) answer the bare array
     const list = Array.isArray(data) ? data : typeof data === 'object' && data !== null ? (data as { data?: unknown }).data : null;
     if (!Array.isArray(list)) throw new Error('shape');
-    ids = list.map((entry) => (typeof entry === 'object' && entry !== null ? (entry as { id?: unknown }).id : null)).filter((id): id is string => typeof id === 'string');
+    entries = list;
   } catch {
     return { ok: false, message: 'It answered, but not like an AI server.', reason: 'other' };
   }
-  const models = cleanModelIds(ids, info.kind);
+  const idOf = (entry: unknown): string | null => (isRecord(entry) && typeof entry.id === 'string' ? entry.id : null);
+  const models = cleanModelIds(entries.map(idOf).filter((id): id is string => id !== null), info.kind);
   if (models.length === 0) {
     return {
       ok: false,
@@ -185,7 +222,21 @@ export async function probeModels(input: KeyTargetInput & { apiKey?: unknown }):
       message: info.group === 'own-computer' ? 'It answered, but no model is loaded. Load one in your server first.' : `${info.label} has no models for this key.`,
     };
   }
-  return { ok: true, models };
+  const facts: ModelFactsById = {};
+  // A set, not models.includes: a list can be thousands of entries long, and each one is looked up
+  const listed = new Set(models);
+  for (const entry of entries) {
+    const id = idOf(entry);
+    if (id === null) continue;
+    const clean = cleanModelId(id, info.kind);
+    const known = factsOf(entry);
+    if (listed.has(clean) && Object.keys(known).length > 0) facts[clean] = known;
+  }
+  // What the provider's docs say about a model its list says nothing about; the list's own word wins
+  for (const [id, documented] of Object.entries(info.knownFacts ?? {})) {
+    if (listed.has(id)) facts[id] = { ...documented, ...facts[id] };
+  }
+  return { ok: true, models, facts };
 }
 
 /**

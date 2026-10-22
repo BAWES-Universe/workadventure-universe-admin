@@ -23,7 +23,7 @@ beforeEach(() => {
   (getSessionUser as jest.Mock).mockResolvedValue(alice);
   provider.count.mockResolvedValue(0);
   provider.create.mockResolvedValue({ providerId: 'key-new' });
-  models.mockResolvedValue({ ok: true, models: ['qwen3-8b', 'gemma-3-12b'] });
+  models.mockResolvedValue({ ok: true, models: ['qwen3-8b', 'gemma-3-12b'], facts: {} });
   chat.mockResolvedValue({ ok: true });
 });
 
@@ -172,5 +172,27 @@ describe('POST /api/me/ai-keys: the key must really answer, and regions', () => 
     const response = await post({ kind: 'custom', address: 'https://llm.example.com/v1', model: 'qwen3-8b' });
     expect(response.status).toBe(201);
     expect(provider.create.mock.calls[0][0].data).toMatchObject({ type: 'lmstudio', endpoint: 'https://llm.example.com', apiKeyEncrypted: null, settings: { kind: 'custom' } });
+  });
+});
+
+describe('POST /api/me/ai-keys: what the provider said about the model is saved on the key', () => {
+  it('saves the facts of the model picked, and the provider’s word on images', async () => {
+    models.mockResolvedValue({ ok: true, models: ['qwen3-8b', 'gemma-3-12b'], facts: { 'qwen3-8b': { tools: false, vision: true, context: 32768 }, 'gemma-3-12b': { tools: true } } });
+    await post({ kind: 'lmstudio', address: 'https://lm.example.com', model: 'qwen3-8b' });
+    expect(provider.create.mock.calls[0][0].data).toMatchObject({ supportsVision: true, settings: { kind: 'lmstudio', caps: { tools: false, vision: true, context: 32768 } } });
+  });
+
+  it('says false on images when the provider said the model takes none, and null when it said nothing', async () => {
+    models.mockResolvedValue({ ok: true, models: ['qwen3-8b', 'gemma-3-12b'], facts: { 'qwen3-8b': { vision: false } } });
+    await post({ kind: 'lmstudio', address: 'https://lm.example.com', model: 'qwen3-8b' });
+    expect(provider.create.mock.calls[0][0].data.supportsVision).toBe(false);
+    await post({ kind: 'lmstudio', address: 'https://lm.example.com', model: 'gemma-3-12b' });
+    expect(provider.create.mock.calls[1][0].data).toMatchObject({ supportsVision: null });
+    expect(provider.create.mock.calls[1][0].data.settings.caps).toBeUndefined();
+  });
+
+  it('takes the facts from the provider’s list, never from the request', async () => {
+    await post({ kind: 'lmstudio', address: 'https://lm.example.com', model: 'qwen3-8b', caps: { tools: true }, facts: { 'qwen3-8b': { tools: true } } });
+    expect(provider.create.mock.calls[0][0].data.settings.caps).toBeUndefined();
   });
 });

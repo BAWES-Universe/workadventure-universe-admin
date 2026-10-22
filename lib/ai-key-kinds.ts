@@ -70,6 +70,10 @@ export interface AiKeyKindInfo {
   keyCheck: KeyCheck;
   modelId: ModelIdRule;
   tier: KeyTier;
+  /** The model the Add a key page picks first, when the provider lists it (the one that gets a person started fastest). */
+  suggestedModel?: string;
+  /** What the provider's docs say about a model when its list says nothing (DeepSeek's list holds ids only). A fact the list does give wins. */
+  knownFacts?: Record<string, { tools?: boolean; vision?: boolean; context?: number }>;
 }
 
 type Defaulted = 'protocol' | 'auth' | 'typedEndpointSuffix' | 'keyCheck' | 'modelId' | 'tier';
@@ -132,6 +136,10 @@ export const AI_KEY_KINDS: AiKeyKindInfo[] = [
   define({
     kind: 'deepseek', label: 'DeepSeek', group: 'hosted', providerType: 'openai', address: 'none', apiKey: 'required',
     benefit: 'Low prices.', base: 'https://api.deepseek.com',
+    // Plain V4 Flash and V4 Pro take text only; the image model is the separate deepseek-v4-flash-vision-exp (experimental).
+    // A new key starts on the stable text model, and the image one shows Vision so it can be picked on purpose.
+    suggestedModel: 'deepseek-v4-flash',
+    knownFacts: { 'deepseek-v4-flash': { vision: false }, 'deepseek-v4-flash-vision-exp': { vision: true }, 'deepseek-v4-pro': { vision: false } },
     steps: [{ text: 'On platform.deepseek.com, open API keys.' }],
   }),
   define({

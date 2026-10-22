@@ -12,7 +12,10 @@ import { authenticatedFetch } from '@/lib/client-auth';
 import { AI_KEY_KINDS, kindInfo, type AiKeyKind, type AiKeyKindInfo } from '@/lib/ai-key-kinds';
 import { PageHeader } from '../../../components/ds';
 
-type Models = { status: 'none' } | { status: 'loading' } | { status: 'ready'; models: string[] } | { status: 'failed'; message: string };
+type Models = { status: 'none' } | { status: 'loading' } | { status: 'ready'; models: string[]; facts: Record<string, { tools?: boolean; vision?: boolean }> } | { status: 'failed'; message: string };
+
+/** Said when a provider's own list says the model cannot call tools (it does not say, for most models, and then nothing is said). */
+const NO_TOOLS = 'This model has no Tools. Bots on it can still chat.';
 
 const FIELD_HINT = 'text-[13px] text-muted-foreground';
 /** More models than this and a search box appears; only this many are shown at once. */
@@ -97,11 +100,12 @@ export default function AddAiKeyPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ kind: info.kind, address, ...(region ? { region } : {}), apiKey }),
       });
-      const data: { ok?: boolean; models?: string[]; message?: string } = await response.json().catch(() => ({}));
+      const data: { ok?: boolean; models?: string[]; facts?: Record<string, { tools?: boolean; vision?: boolean }>; message?: string } = await response.json().catch(() => ({}));
       if (data.ok && Array.isArray(data.models)) {
-        setModels({ status: 'ready', models: data.models });
-        // The one model there is, is the one picked.
+        setModels({ status: 'ready', models: data.models, facts: data.facts ?? {} });
+        // The one model there is, is the one picked; otherwise the one this provider suggests, when it lists it.
         if (data.models.length === 1) setModel(data.models[0]);
+        else if (info.suggestedModel && data.models.includes(info.suggestedModel)) setModel(info.suggestedModel);
       } else {
         setModels({ status: 'failed', message: data.message ?? 'That didn’t work. Try again.' });
       }
@@ -273,10 +277,15 @@ export default function AddAiKeyPage() {
                 )}
                 <div role="radiogroup" aria-label="Model" className="grid gap-2">
                   {visible.map((id) => (
-                    <PickCard key={id} role="radio" picked={model === id} onClick={() => setModel(id)} indicator={<Radio checked={model === id} />} title={id} className="[&_span.block]:break-all" />
+                    <PickCard key={id} role="radio" picked={model === id} onClick={() => setModel(id)} indicator={<Radio checked={model === id} />} title={id} description={models.facts[id]?.vision ? 'Vision' : undefined} className="[&_span.block]:break-all" />
                   ))}
                   {visible.length === 0 && <p className={FIELD_HINT}>No model matches that.</p>}
                 </div>
+                {model && models.facts[model]?.tools === false && (
+                  <p className="text-sm text-[#F5C451]" data-testid="no-tools-warning">
+                    {NO_TOOLS}
+                  </p>
+                )}
               </>
             )}
           </div>
