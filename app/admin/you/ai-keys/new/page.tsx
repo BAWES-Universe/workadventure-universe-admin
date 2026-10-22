@@ -11,6 +11,7 @@ import { useToast } from '@/components/ui/toast';
 import { authenticatedFetch } from '@/lib/client-auth';
 import { AI_KEY_KINDS, kindInfo, type AiKeyKind, type AiKeyKindInfo } from '@/lib/ai-key-kinds';
 import { PageHeader } from '../../../components/ds';
+import { AiKeyFailure, aiKeyError, aiKeyFailureText } from '../../../hooks/use-ai-keys';
 
 type Models = { status: 'none' } | { status: 'loading' } | { status: 'ready'; models: string[]; facts: Record<string, { tools?: boolean; vision?: boolean }> } | { status: 'failed'; message: string };
 
@@ -138,12 +139,12 @@ export default function AddAiKeyPage() {
       });
       if (!response.ok) {
         const data: { error?: string } = await response.json().catch(() => ({}));
-        throw new Error(data.error ?? 'That didn’t work. Try again.');
+        throw new AiKeyFailure(aiKeyError(response.status, data.error));
       }
       addToast({ description: `${name} added`, variant: 'success', duration: 2500 });
       router.push('/admin/you/ai-keys');
     } catch (error) {
-      setFailure(error instanceof Error ? error.message : 'That didn’t work. Try again.');
+      setFailure(aiKeyFailureText(error));
       setSaving(false);
     }
   }

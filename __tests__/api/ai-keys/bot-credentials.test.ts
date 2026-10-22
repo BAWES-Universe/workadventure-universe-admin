@@ -178,6 +178,19 @@ describe('GET /api/bots/:id/ai-credentials', () => {
     spy.mockRestore();
   });
 
+  it('moves a bot whose personal key is gone to Universe AI and tells the universe owner, instead of leaving it quiet', async () => {
+    bot.findUnique.mockResolvedValue(botOn('key-1'));
+    provider.findUnique.mockResolvedValue(null);
+    provider.findFirst.mockResolvedValue(deepseek);
+    bot.updateMany.mockResolvedValue({ count: 1 });
+    const body = await (await ask()).json();
+    expect(bot.updateMany).toHaveBeenCalledWith({ where: { id: 'b1', aiProviderRef: 'key-1' }, data: { aiProviderRef: 'universe-ai' } });
+    expect(addNotice).toHaveBeenCalledTimes(1);
+    expect((addNotice as jest.Mock).mock.calls[0][0]).toMatchObject({ userId: 'universe-owner', title: 'Sam moved to Universe AI', body: expect.stringMatching(/was removed/) });
+    expect(body).toMatchObject({ providerId: 'deepseek-flash', source: 'universe-ai', movedFromKey: 'key-1' });
+    expect(verdict).not.toHaveBeenCalled();
+  });
+
   it('says plainly when there is no bot, no provider on it, or the provider is gone', async () => {
     bot.findUnique.mockResolvedValue(null);
     expect((await ask()).status).toBe(404);
