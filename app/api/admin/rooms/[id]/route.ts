@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
+import { deleteWithHiddenBotData } from '@/lib/bot-privacy';
 import { z } from 'zod';
 import { safeWamExists, getWamUrl, getWamPath, createWamFile } from '@/lib/map-storage';
 import { getViewer, memberWorldIdsOf } from '@/lib/access-scope';
@@ -691,9 +692,7 @@ export async function DELETE(
       }
     }
     
-    await prisma.room.delete({
-      where: { id },
-    });
+    await deleteWithHiddenBotData({ roomId: id }, () => prisma.room.delete({ where: { id } }));
     
     return NextResponse.json({ success: true });
   } catch (error) {

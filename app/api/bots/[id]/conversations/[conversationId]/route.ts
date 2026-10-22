@@ -37,6 +37,7 @@ export async function PUT(
     requireServiceToken(request);
 
     const { id: botId, conversationId } = await params;
+
     const body = await request.json();
 
     const {

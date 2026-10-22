@@ -2,14 +2,15 @@
 
 import Link from 'next/link';
 import { useMemo, useState } from 'react';
-import { Shield, UserPlus } from 'lucide-react';
+import { Crown, Shield, UserPlus } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { summariseRoles, type Worlds } from '@/lib/member-roles';
+import { summariseRoles, worldsLabel, type Worlds } from '@/lib/member-roles';
 import { Button } from '@/components/ui/button';
 import { RolePill } from '@/components/ui/choice';
+import { FormSheet } from './form-sheet';
 import { WokaAvatar } from './profile-card';
 import InviteSheet from './invite-sheet';
-import { RoleChip, useJson, useUniverseBasics, useUniverseRoles, useWorldNames } from './universe-people';
+import { OwnerCrown, RoleChip, useJson, useUniverseBasics, useUniverseRoles, useWorldNames } from './universe-people';
 import styles from './recent-visitors.module.css';
 
 const SHOWN = 8;
@@ -36,6 +37,7 @@ interface Answer {
  */
 export default function UniverseMembersRow({ universeId, className }: { universeId: string; className?: string }) {
   const [inviting, setInviting] = useState(false);
+  const [listing, setListing] = useState<Face | null>(null);
   const [answer] = useJson<Answer>(`/api/admin/universes/${universeId}/members?order=roles`, (body) => ({
     members: body.members ?? [],
     total: body.total ?? 0,
@@ -92,20 +94,82 @@ export default function UniverseMembersRow({ universeId, className }: { universe
           const name = face.name || face.email || 'Someone';
           const summary = summariseRoles(face, roles.value.byId, worldNames);
           return (
-            <li key={face.userId} className="w-[100px] flex-none">
-              <Link href={`${all}/${face.userId}`} className={styles.face} aria-label={`${name}, ${summary.name}${summary.more ? ` and ${summary.more} more` : ''}`}>
+            <li key={face.userId} className="flex w-[128px] flex-none flex-col items-center gap-0.5">
+              <Link href={`${all}/${face.userId}`} className={styles.face} aria-label={face.isOwner ? `${name}, owner` : name}>
                 <WokaAvatar layers={face.woka ?? []} name={name} size={44} tinted round />
-                <strong>{name}</strong>
-                <span className="-mt-0.5 inline-flex items-center gap-1">
-                  <span className="scale-90"><RoleChip name={summary.name} color={summary.color} /></span>
-                  {summary.more > 0 && <span className="scale-90"><RolePill name={`+${summary.more}`} /></span>}
-                </span>
+                <strong>
+                  {face.isOwner && <OwnerCrown className="mr-1 inline h-3 w-3 -translate-y-px" />}
+                  {name}
+                </strong>
               </Link>
+              <button
+                type="button"
+                onClick={() => setListing(face)}
+                aria-label={`${name}’s roles: ${summary.name}${summary.more ? ` and ${summary.more} more` : ''}`}
+                className="-mt-1 inline-flex min-h-11 max-w-full min-w-0 items-center gap-0.5 rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <span className="flex min-w-0 scale-90 items-center"><RoleChip name={summary.name} color={summary.color} /></span>
+                {summary.more > 0 && <span className="-ml-1.5 scale-90"><RolePill name={`+${summary.more}`} className="px-2" /></span>}
+              </button>
             </li>
           );
         })}
       </ul>
+      {listing && (
+        <RolesSheet
+          face={listing}
+          name={listing.name || listing.email || 'Someone'}
+          roles={roles.value.byId}
+          worldNames={worldNames}
+          universeName={basics.status === 'ready' ? basics.value.name : 'this universe'}
+          onClose={() => setListing(null)}
+        />
+      )}
       <InviteSheet open={inviting} onOpenChange={setInviting} universeId={universeId} />
     </section>
+  );
+}
+
+/** Everything behind a "+N": the owner mark, then every role they were given, in full. */
+function RolesSheet({ face, name, roles, worldNames, universeName, onClose }: {
+  face: Face;
+  name: string;
+  roles: ReadonlyMap<string, { id: string; name: string; color: string }>;
+  worldNames: ReadonlyMap<string, string>;
+  universeName: string;
+  onClose: () => void;
+}) {
+  const given = face.roles.filter((role) => roles.has(role.roleId));
+  return (
+    <FormSheet open onOpenChange={(open) => !open && onClose()} title={`${name}’s roles`}>
+      <ul className="m-0 grid list-none p-0" data-testid="roles-sheet">
+        {face.isOwner && (
+          <li className="flex min-h-12 items-center gap-3 border-b border-foreground/10 py-1 text-[15px] font-semibold">
+            <Crown aria-hidden="true" className="h-4 w-4 shrink-0 text-[#FACC15]" />
+            <span className="min-w-0">
+              Owner
+              <span className="block text-[13px] font-normal text-muted-foreground">Created {universeName}</span>
+            </span>
+          </li>
+        )}
+        {given.map((role) => {
+          const info = roles.get(role.roleId)!;
+          const where = worldsLabel(role, worldNames);
+          return (
+            <li key={role.roleId} className="flex min-h-12 items-center gap-3 border-b border-foreground/10 py-1 text-[15px] font-semibold last:border-b-0">
+              <i aria-hidden="true" className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: info.color }} />
+              <span className="min-w-0 [overflow-wrap:anywhere]">
+                {info.name}
+                {where && <span className="block text-[13px] font-normal text-muted-foreground">{where}</span>}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+      <p className="m-0 text-sm text-muted-foreground">Everyone who joined is also a Member.</p>
+      <Button type="button" variant="outline" className="h-11" onClick={onClose}>
+        Close
+      </Button>
+    </FormSheet>
   );
 }

@@ -43,14 +43,19 @@ export async function PUT(request: NextRequest, { params }: Params) {
     const scope = scopeSchema.parse(await request.json());
     const invalid = checkScope(scope, access.worldIds);
     if (invalid) return badRequest(invalid);
-    // A role works only where they are a member: adding a world is an invitation, which they accept
-    if (!member.allWorlds && (scope.allWorlds || scope.worldIds.some((worldId) => !member.worldIds.includes(worldId)))) {
+    // A role works only where they are a member. "All worlds" on someone limited to some worlds makes them a member of
+    // every world, private ones too: like a Slack org admin adding someone, that is for whoever may add people everywhere.
+    const widening = !member.allWorlds && scope.allWorlds;
+    if (widening && !allows(access, 'INVITE_AND_REMOVE', { allWorlds: true })) return needs('Invite and remove people in every world');
+    if (!member.allWorlds && !scope.allWorlds && scope.worldIds.some((worldId) => !member.worldIds.includes(worldId))) {
       return badRequest('They are not a member of every world picked');
     }
     if (isAdministratorRole(role) && !scope.allWorlds) return badRequest('Administrator works in every world');
     if (!allows(access, 'GIVE_ROLES', scopeChange(given, scope))) return needs('Give roles in every world this changes');
 
+    // The widening and the role go in together, or neither does. Tapping back to some worlds later limits only the role.
     await prisma.$transaction(async (tx) => {
+      if (widening) await tx.universeMember.update({ where: { id: member.id }, data: { allWorlds: true, worldIds: [] } });
       await tx.universeMemberRole.upsert({
         where: { memberId_roleId: { memberId: member.id, roleId } },
         create: { memberId: member.id, roleId, ...scope },

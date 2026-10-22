@@ -177,6 +177,28 @@ describe('New universe on the way to a world', () => {
     expect(replace).toHaveBeenCalledWith('/admin/universes/new-id');
     expect(posted('/api/admin/universes')).toMatchObject({ name: 'Mine', slug: 'mine', ownerId: 'me' });
   });
+
+  it('has bot chat telemetry on unless it is switched off under Advanced settings', async () => {
+    route({});
+    render(<NewUniversePage />);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/auth/me'));
+    expect(screen.queryByRole('switch', { name: 'Bot chat telemetry' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Advanced settings' }));
+    const toggle = screen.getByRole('switch', { name: 'Bot chat telemetry' });
+    expect(toggle).toBeChecked();
+    fireEvent.click(toggle);
+    expect(toggle).not.toBeChecked();
+    fireEvent.change(screen.getByLabelText(/Name/), { target: { value: 'Mine' } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    fireEvent.click(screen.getByRole('button', { name: 'Create universe' }));
+    await waitFor(() => expect(replace).toHaveBeenCalled());
+    expect(posted('/api/admin/universes')).toMatchObject({ name: 'Mine', hideBotConversations: true });
+  });
+
+  it('sends it on (not hidden) when nobody touched it', async () => {
+    await create();
+    expect(posted('/api/admin/universes')).toMatchObject({ hideBotConversations: false });
+  });
 });
 
 describe('New room without a world in the address', () => {
