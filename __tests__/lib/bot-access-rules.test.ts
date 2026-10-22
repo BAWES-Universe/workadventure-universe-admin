@@ -163,7 +163,7 @@ describe('row 12: Private bot', () => {
 
   it('shuts out guests, who get the line for each action', async () => {
     expect(await ask('chat', GUEST)).toMatchObject({ allowed: false, code: 'not_allowed' });
-    expect(await ask('summon', GUEST)).toMatchObject({ allowed: false, reason: "Nora's owner limits who can call it over." });
+    expect(await ask('summon', GUEST)).toMatchObject({ allowed: false, reason: "Nora's owner limits who can summon it." });
     expect((await ask('dm', GUEST))!.code).toBe('sign_in_required');
   });
 
@@ -338,7 +338,7 @@ describe('the line refused people hear', () => {
 
   it('is only for chatting nearby: summon and DM refusals keep their own lines', async () => {
     join(USERS.sara);
-    expect(await ask('summon', signedIn(USERS.sara))).toEqual({ allowed: false, code: 'not_allowed', reason: "Nora's owner limits who can call it over." });
+    expect(await ask('summon', signedIn(USERS.sara))).toEqual({ allowed: false, code: 'not_allowed', reason: "Nora's owner limits who can summon it." });
     expect(await ask('dm', signedIn(USERS.sara))).toEqual({ allowed: false, code: 'not_allowed', reason: "You can't message Nora now." });
   });
 

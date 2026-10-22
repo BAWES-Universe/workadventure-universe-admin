@@ -8,7 +8,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useToast } from '@/components/ui/toast';
 import { useReplacePage } from '@/app/admin/orbit-frame-context';
 import { toWire } from '@/lib/permissions';
-import { changedCount, firstMissing, permissionsOf, roleLockReason, viewerFrom } from '@/lib/role-ui';
+import { changedCount, firstMissing, inheritedPermissions, permissionsOf, roleLockReason, viewerFrom } from '@/lib/role-ui';
 import { EmptyCard, InContext, LoadError, LoadingRows, PageHeader } from '../ds';
 import { DisplayTab, type DisplayDraft } from './display-tab';
 import { MembersTab } from './members-tab';
@@ -234,7 +234,14 @@ export function RoleEditPage() {
           </TabsContent>
         )}
         <TabsContent value="permissions" className="mt-0">
-          <PermissionsTab role={role} viewer={viewer} universeName={universe.name} draft={permissions} onChange={setPermissions} />
+          <PermissionsTab
+            role={role}
+            viewer={viewer}
+            universeName={universe.name}
+            draft={permissions}
+            inherited={inheritedPermissions(role, roles.roles)}
+            onChange={setPermissions}
+          />
         </TabsContent>
         {!isEveryone && (
           <TabsContent value="members" className="mt-0">

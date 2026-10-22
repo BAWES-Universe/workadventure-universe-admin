@@ -3,7 +3,7 @@ import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { meOriginAllowed, meRespond } from '@/lib/me-route';
 import { moveBotsOffKey } from '@/lib/ai-key-lend';
-import { isIfDown } from '@/lib/ai-key-health';
+import { clearDownNotice, isIfDown } from '@/lib/ai-key-health';
 import { allowKeyAttempt } from '@/lib/ai-key-models';
 import { editSavedKey } from '@/lib/ai-key-edit';
 
@@ -71,6 +71,11 @@ export async function DELETE(request: NextRequest, { params }: { params: Promise
     if (!key) return respond(request, { error: 'Key not found' }, 404);
     const moved = await moveBotsOffKey(id, { actor: { id: user.id, name: user.name }, why: 'revoked' });
     await prisma.botsAiProvider.deleteMany({ where: { providerId: id, ownerId: user.id } });
+    try {
+      await clearDownNotice(user.id, id);
+    } catch (error) {
+      console.error('[AiKeys] Could not clear the notice of the revoked key:', error instanceof Error ? error.message : 'unknown');
+    }
     return respond(request, { status: 'revoked', moved: moved.count });
   } catch (error) {
     console.error('[AiKeys] Revoke failed:', error);

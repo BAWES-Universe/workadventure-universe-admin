@@ -18,7 +18,7 @@ import { resolveVisionSupport } from '@/lib/vision-models';
  * `source` says which of the three it was, so the bot server knows when it is talking through someone's own key.
  * When a personal key is Down, its owner's choice decides: "Use Universe AI" serves Universe AI (`standingInFor` names the
  * key), "Stop replying" serves `source: "resting"` with the one fixed line and no provider at all, so nothing goes to
- * another AI. A Down key is checked again every 5 minutes, here, and is served again as soon as it answers.
+ * another AI. A Down key is checked again here, when a bot needs it, at most every 5 minutes, and is served again as soon as it answers.
  *
  * A bot served from Universe AI or a person's own key also carries `vision` when its images are not left to its own model
  * (see lib/bot-vision.ts): "this" (its own model, or only the link when that can't see), "universe-ai", or "another" with the

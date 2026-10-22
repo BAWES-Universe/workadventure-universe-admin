@@ -4,14 +4,15 @@ import { useEffect, useMemo, useState } from 'react';
 import { ChevronRight, Search } from 'lucide-react';
 import { authenticatedFetch } from '@/lib/client-auth';
 import { timeAgo } from '@/lib/time-ago';
-import { dayWord, isAdministrator, pickableWorlds, type AllowedWorlds } from '@/lib/member-roles';
+import Link from 'next/link';
+import { dayWord, isAdministrator, pickableWorlds, summariseRoles, type AllowedWorlds, type Worlds } from '@/lib/member-roles';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { PickChip, Segmented } from '@/components/ui/choice';
 import { useToast } from '@/components/ui/toast';
 import { FormSheet } from './form-sheet';
 import { WokaAvatar } from './profile-card';
-import { useUniverseBasics, useUniverseRoles, useJson } from './universe-people';
+import { RoleSummaryPills, useUniverseBasics, useUniverseRoles, useWorldNames, useJson } from './universe-people';
 
 /** Someone the invite is for: picked from the lists, or handed in by the page that opened the sheet. */
 export interface InvitePerson {
@@ -22,6 +23,28 @@ export interface InvitePerson {
   note?: string | null;
   /** The line for each universe, when it differs by universe (a visit is in one universe). */
   notes?: Record<string, string | null>;
+}
+
+/** An invitation still waiting for an answer: who sent it, when, and what it would give. */
+export interface SentInvitation {
+  id: string;
+  at: string;
+  by: { name: string | null; you: boolean };
+  roleIds: string[];
+  worlds: Worlds;
+}
+
+/** A universe the person could be given membership in, and where they stand in it. */
+export interface UniverseChoice {
+  id: string;
+  name: string;
+  status?: 'member' | 'invited';
+  invitation?: SentInvitation | null;
+}
+
+/** The universe the sheet opens on: the one you are in, else the first of the list (already in the order the sheet shows). */
+export function firstUniverse(choices: UniverseChoice[], currentId: string | null): string {
+  return (choices.find((choice) => choice.id === currentId) ?? choices[0]).id;
 }
 
 interface Candidate extends InvitePerson {
@@ -85,7 +108,7 @@ export default function InviteSheet({ open, onOpenChange, universeId, universes,
   onOpenChange: (open: boolean) => void;
   universeId: string;
   /** More than one universe the person could be invited to: step two offers them. */
-  universes?: { id: string; name: string; status?: 'member' | 'invited' }[];
+  universes?: UniverseChoice[];
   /** Skips step one. */
   person?: InvitePerson | null;
   /** A world to start with in "Some worlds" (a visitor's room's world). */
@@ -105,6 +128,7 @@ export default function InviteSheet({ open, onOpenChange, universeId, universes,
   const [message, setMessage] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState(false);
 
   // Each open starts clean: a cancelled invite doesn't come back.
   useEffect(() => {
@@ -119,6 +143,7 @@ export default function InviteSheet({ open, onOpenChange, universeId, universes,
     setMessage('');
     setError(null);
     setSending(false);
+    setCancelling(false);
     // Only an opening starts over; the same page re-rendering must not wipe what was typed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
@@ -139,6 +164,14 @@ export default function InviteSheet({ open, onOpenChange, universeId, universes,
   const [people, retryPeople] = useJson<{ visitors: Candidate[]; friends: Candidate[]; results: Candidate[] }>(
     open && !picked ? `${base}/invite-candidates?q=${encodeURIComponent(searched)}` : null,
     (body) => ({ visitors: body.visitors ?? [], friends: body.friends ?? [], results: body.results ?? [] }),
+  );
+
+  const chosen = universes?.find((universe) => universe.id === chosenUniverse);
+  const chosenStatus = chosen?.status;
+  const worldNames = useWorldNames(basics);
+  const [membership] = useJson<{ joinedAt: string; isOwner: boolean; worlds: Worlds; roles: { roleId: string; allWorlds: boolean; worldIds: string[] }[]; canGive: boolean; canRemove: boolean }>(
+    open && picked && chosenStatus === 'member' ? `${base}/members/${encodeURIComponent(picked.userId)}` : null,
+    (body) => ({ joinedAt: body.member.joinedAt, isOwner: !!body.member.isOwner, worlds: body.member.worlds, roles: body.member.roles ?? [], canGive: (body.can?.giveRoleIds ?? []).length > 0, canRemove: !!body.can?.remove }),
   );
 
   const universeName = basics.status === 'ready' ? basics.value.name : 'this universe';
@@ -206,7 +239,24 @@ export default function InviteSheet({ open, onOpenChange, universeId, universes,
   }
 
   const first = picked?.name.trim().split(/\s+/)[0] ?? '';
-  const title = picked ? (giving ? `Give ${first} membership` : `Invite ${first} to ${universeName}`) : `Invite to ${universeName}`;
+  // What the sheet is about follows where they stand: the button on the card said the same
+  const givingTitle = chosenStatus === 'invited' ? `${first}’s invitation` : chosenStatus === 'member' ? (membership.status === 'ready' && !membership.value.canGive ? `${first}’s membership` : `${first}’s roles`) : `Give ${first} membership`;
+  const title = picked ? (giving ? givingTitle : `Invite ${first} to ${universeName}`) : `Invite to ${universeName}`;
+
+  async function cancelInvite(invitation: SentInvitation) {
+    setCancelling(true);
+    setError(null);
+    try {
+      const response = await authenticatedFetch(`${base}/invitations/${invitation.id}`, { method: 'DELETE' });
+      if (!response.ok) throw new Error();
+      addToast({ description: `Invitation to ${picked?.name ?? 'them'} cancelled.`, variant: 'success' });
+      onOpenChange(false);
+      onSent?.();
+    } catch {
+      setError('Couldn’t cancel the invitation. Try again.');
+      setCancelling(false);
+    }
+  }
   const toggleRole = (id: string) => {
     setRoleIds((current) => (current.includes(id) ? current.filter((value) => value !== id) : [...current, id]));
     if (adminIds.includes(id)) setAll(null);
@@ -300,17 +350,77 @@ export default function InviteSheet({ open, onOpenChange, universeId, universes,
             )}
           </div>
 
-          {universes && universes.length > 1 && (
-            <div role="group" aria-label="Invite to" className="flex flex-wrap gap-2">
-              {universes.map((universe) => (
-                <PickChip key={universe.id} picked={chosenUniverse === universe.id} disabled={!!universe.status} onClick={() => { setChosenUniverse(universe.id); setRoleIds([]); setAll(null); setWorldIds([]); }}>
-                  {universe.name}
-                  {universe.status && <span className="font-normal text-muted-foreground">{universe.status === 'member' ? 'Member' : 'Invited'}</span>}
-                </PickChip>
-              ))}
+          {universes && universes.length > 0 && (
+            <div className="grid gap-2" role="group" aria-label="Universe">
+              <span className="text-[13px] font-semibold text-muted-foreground">Universe</span>
+              <div className="flex flex-wrap gap-2">
+                {universes.map((universe) => (
+                  <PickChip key={universe.id} picked={chosenUniverse === universe.id} onClick={() => { setChosenUniverse(universe.id); setRoleIds([]); setAll(null); setWorldIds([]); setError(null); }}>
+                    {universe.name}
+                    {universe.status && <span className="font-normal text-muted-foreground">{universe.status === 'member' ? 'Member' : 'Invited'}</span>}
+                  </PickChip>
+                ))}
+              </div>
             </div>
           )}
 
+          {chosenStatus === 'invited' && chosen && (
+            <section className="grid gap-3 rounded-2xl border border-foreground/[.12] p-4" aria-label="Invitation" data-testid="sheet-invited">
+              <div className="grid gap-1">
+                <strong className="text-[15px] font-bold">Invited, waiting for {first}</strong>
+                <span className="text-sm text-muted-foreground">
+                  {chosen.invitation
+                    ? `Sent by ${chosen.invitation.by.you ? 'you' : chosen.invitation.by.name || 'someone'} ${timeAgo(new Date(chosen.invitation.at))}. They join ${universeName} once they accept.`
+                    : `They join ${universeName} once they accept.`}
+                </span>
+              </div>
+              {chosen.invitation && roles.status === 'ready' && (
+                <RoleSummaryPills
+                  summary={summariseRoles(
+                    { isOwner: false, worlds: chosen.invitation.worlds, roles: chosen.invitation.roleIds.filter((roleId) => roles.value.byId.has(roleId)).map((roleId) => ({ roleId, ...chosen.invitation!.worlds })) },
+                    roles.value.byId,
+                    worldNames,
+                  )}
+                />
+              )}
+              {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" className="h-11 px-5" onClick={() => onOpenChange(false)}>
+                  Close
+                </Button>
+                {chosen.invitation && (
+                  <Button variant="outline" className="h-11 px-5" disabled={cancelling} onClick={() => void cancelInvite(chosen.invitation!)}>
+                    {cancelling ? 'Cancelling…' : 'Cancel invite'}
+                  </Button>
+                )}
+              </div>
+            </section>
+          )}
+
+          {chosenStatus === 'member' && (
+            <section className="grid gap-3 rounded-2xl border border-foreground/[.12] p-4" aria-label="Membership" data-testid="sheet-member">
+              <div className="grid gap-1">
+                <strong className="text-[15px] font-bold">{first} is a member of {universeName}</strong>
+                {membership.status === 'ready' && <span className="text-sm text-muted-foreground">Joined {dayWord(new Date(membership.value.joinedAt))}</span>}
+              </div>
+              {membership.status === 'ready' && roles.status === 'ready' && (
+                <RoleSummaryPills summary={summariseRoles(membership.value, roles.value.byId, worldNames)} />
+              )}
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" className="h-11 px-5" onClick={() => onOpenChange(false)}>
+                  Close
+                </Button>
+                {membership.status === 'ready' && (membership.value.canGive || membership.value.canRemove) && (
+                  <Button asChild variant={membership.value.canGive ? 'default' : 'outline'} className="h-11 px-5">
+                    <Link href={`/admin/universes/${encodeURIComponent(chosenUniverse)}/members/${encodeURIComponent(picked.userId)}`}>{membership.value.canGive ? 'Change roles' : 'Remove from universe'}</Link>
+                  </Button>
+                )}
+              </div>
+            </section>
+          )}
+
+          {!chosenStatus && (
+            <>
           <section className="grid gap-2" aria-labelledby="invite-roles">
             <h3 id="invite-roles" className="text-[15px] font-bold">Roles</h3>
             <p className="text-sm text-muted-foreground">
@@ -390,6 +500,8 @@ export default function InviteSheet({ open, onOpenChange, universeId, universes,
               {sending ? 'Sending…' : 'Send invite'}
             </Button>
           </div>
+            </>
+          )}
         </>
       )}
     </FormSheet>
