@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { getSessionUser } from '@/lib/auth-session';
 import { prisma } from '@/lib/db';
+import { deleteWithHiddenBotData } from '@/lib/bot-privacy';
 import { canManageThisBot } from '@/lib/bot-permissions';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { validateAccessToken } from '@/lib/oidc';
@@ -263,9 +264,7 @@ export async function DELETE(
     }
 
     // Delete bot
-    await prisma.bot.delete({
-      where: { id: botId },
-    });
+    await deleteWithHiddenBotData({ id: botId }, () => prisma.bot.delete({ where: { id: botId } }));
 
     // Return 204 No Content
     const response = new NextResponse(null, { status: 204 });

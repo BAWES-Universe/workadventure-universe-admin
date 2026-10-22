@@ -277,7 +277,7 @@ describe('Working, Down and "If this is down"', () => {
     const text = screen.getByTestId('ai-key-down-text').textContent ?? '';
     expect(text).toMatch(/^Down since .+: lm\.example\.com stopped answering\./);
     expect(text).toContain('Guide and Nora reply on Universe AI until it’s back, so their conversations leave your computer meanwhile.');
-    expect(text).toContain('While its bots are in use, Universe checks it every 5 minutes and switches back by itself.');
+    expect(text).toContain('Universe checks again, at most every 5 minutes, whenever a bot needs it, and switches back as soon as the key answers.');
     expect(screen.getByRole('button', { name: /Check now/ })).toBeTruthy();
   });
 

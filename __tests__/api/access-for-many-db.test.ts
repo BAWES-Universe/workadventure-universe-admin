@@ -52,7 +52,7 @@ run('accessForMany against a real database', () => {
   });
 
   it.each(['owner', 'greeter', 'plain', 'outsider'])('gives %s what accessFor gives, universe by universe', async (who) => {
-    const viewer = { id: people[who], isSuperAdmin: false };
+    const viewer = { id: people[who] };
     const many = await accessForMany(prisma, universes, viewer);
     expect(many.size).toBe(universes.length);
     for (const universeId of universes) {
@@ -60,10 +60,10 @@ run('accessForMany against a real database', () => {
     }
   });
 
-  it('gives a super admin full access everywhere, leaves out a universe that does not exist, and takes none without error', async () => {
-    const many = await accessForMany(prisma, [...universes, randomUUID()], { id: people.outsider, isSuperAdmin: true });
+  it('leaves out a universe that does not exist, gives a stranger no full access, and takes none without error', async () => {
+    const many = await accessForMany(prisma, [...universes, randomUUID()], { id: people.outsider });
     expect(many.size).toBe(universes.length);
-    expect([...many.values()].every((access) => access.full)).toBe(true);
+    expect([...many.values()].some((access) => access.full)).toBe(false);
     expect((await accessForMany(prisma, [], { id: people.outsider })).size).toBe(0);
   });
 });

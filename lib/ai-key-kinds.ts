@@ -266,6 +266,8 @@ const MORE_KINDS: AiKeyKindInfo[] = snapshot.providers
       providerType: 'openai',
       address: 'none',
       apiKey: 'required',
+      // We have not tried these, so we cannot tell whether a provider lists its models to anyone: only a chat reply proves the key.
+      keyCheck: { type: 'chat' },
       benefit: 'Listed by models.dev; we haven’t tried it ourselves.',
       base: provider.base,
       docs: 'docs' in provider ? provider.docs : undefined,
@@ -318,7 +320,12 @@ export function chatProbeBody(info: AiKeyKindInfo, model: string): Record<string
   return { model, messages: [{ role: 'user', content: 'Say ok.' }], stream: false, [info.tokenLimitField ?? 'max_tokens']: 16 };
 }
 
-const withoutSlash = (url: string) => url.replace(/\/+$/, '');
+const withoutSlash = (url: string) => {
+  // A loop, not a regex: a long run of slashes inside a typed address must not take quadratic time.
+  let end = url.length;
+  while (end > 0 && url[end - 1] === '/') end -= 1;
+  return url.slice(0, end);
+};
 
 /** Every address the provider itself serves from: its one base, or the base of each region. */
 export function providerBases(info: AiKeyKindInfo): string[] {
