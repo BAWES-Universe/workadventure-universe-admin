@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Check, Download, KeyRound } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -66,6 +66,8 @@ export default function AddAiKeyPage() {
   const [typedName, setTypedName] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
+  // Only the newest model load may answer: a slow one for a type, address or key since changed is dropped
+  const latestLoad = useRef(0);
 
   const info = kindInfo(kind);
   const name = typedName ?? (info ? `My ${info.label}` : '');
@@ -90,6 +92,7 @@ export default function AddAiKeyPage() {
   // Anything that decides what the provider would answer clears the loaded list: a model picked for another key
   // or address is never kept.
   function changed() {
+    latestLoad.current += 1;
     setModels({ status: 'none' });
     setModel(null);
     setSearch('');
@@ -104,6 +107,7 @@ export default function AddAiKeyPage() {
 
   async function loadModels() {
     if (!info) return;
+    const mine = ++latestLoad.current;
     setModels({ status: 'loading' });
     setModel(null);
     setFailure(null);
@@ -114,6 +118,7 @@ export default function AddAiKeyPage() {
         body: JSON.stringify({ kind: info.kind, address, ...(region ? { region } : {}), apiKey }),
       });
       const data: { ok?: boolean; models?: string[]; facts?: Record<string, { tools?: boolean; vision?: boolean }>; message?: string; noList?: boolean } = await response.json().catch(() => ({}));
+      if (mine !== latestLoad.current) return;
       if (data.ok && Array.isArray(data.models)) {
         setModels({ status: 'ready', models: data.models, facts: data.facts ?? {} });
         // The one model there is, is the one picked; otherwise the one this provider suggests, when it lists it.
@@ -126,6 +131,7 @@ export default function AddAiKeyPage() {
         setModels({ status: 'failed', message: data.message ?? 'That didn’t work. Try again.' });
       }
     } catch {
+      if (mine !== latestLoad.current) return;
       setModels({ status: 'failed', message: 'We couldn’t reach Universe. Check your connection and try again.' });
     }
   }

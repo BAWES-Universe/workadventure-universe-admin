@@ -85,6 +85,21 @@ describe('Add a key', () => {
     expect(JSON.parse(fetchMock.mock.calls.at(-1)![1].body)).toMatchObject({ kind: 'groq', apiKey: 'gsk-1234', model: 'llama-3.3-70b' });
   });
 
+  it('drops a slow answer for a provider that was switched away from', async () => {
+    let answerGroq: (value: unknown) => void = () => undefined;
+    fetchMock.mockImplementation((_url: string, init: { body: string }) =>
+      JSON.parse(init.body).kind === 'groq' ? new Promise((resolve) => { answerGroq = resolve; }) : json({ ok: true, models: ['a', 'b'] }),
+    );
+    render(<AddAiKeyPage />);
+    fireEvent.click(screen.getByRole('radio', { name: /Groq/ }));
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'gsk-1234' } });
+    fireEvent.click(screen.getByRole('button', { name: /Load models/ }));
+    fireEvent.click(screen.getByRole('radio', { name: /Gemini/ }));
+    answerGroq(await json({ ok: false, noList: true, message: 'x' }));
+    await waitFor(() => expect(screen.queryByLabelText('Model name')).toBeNull());
+    expect(screen.queryByText(/It answered/)).toBeNull();
+  });
+
   it('shows no model name field for a provider that has a list', async () => {
     fetchMock.mockImplementation(() => json({ ok: true, models: ['a', 'b'] }));
     render(<AddAiKeyPage />);
