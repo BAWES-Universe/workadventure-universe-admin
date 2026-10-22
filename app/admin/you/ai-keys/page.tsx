@@ -13,7 +13,7 @@ import { LoadError, LoadingRows, PageHeader, count } from '../../components/ds';
 import { FormSheet } from '../../components/form-sheet';
 import { Planet } from '../../components/ds/planet-icon';
 import { PickCard, Radio, Segmented } from '@/components/ui/choice';
-import { useAiKeys } from '../../hooks/use-ai-keys';
+import { AiKeyFailure, aiKeyError, aiKeyFailureText, useAiKeys } from '../../hooks/use-ai-keys';
 
 /** 880000 -> "880k", 1200000 -> "1.2M": a token count that fits a phone. */
 function compact(value: number): string {
@@ -137,12 +137,12 @@ export default function AiKeysPage() {
     try {
       const response = await authenticatedFetch(`/api/me/ai-keys/${encodeURIComponent(key.id)}`, { method: 'DELETE' });
       // Already gone (revoked on another device): the list is right to drop it.
-      if (!response.ok && response.status !== 404) throw new Error('That didn’t work. Try again.');
+      if (!response.ok && response.status !== 404) throw new AiKeyFailure('That didn’t work. Try again.');
       update((keys) => keys.filter((entry) => entry.id !== key.id));
       setRevoking(null);
       addToast({ description: `${key.name} revoked`, variant: 'success', duration: 2500 });
     } catch (error) {
-      setFailure(error instanceof Error ? error.message : 'That didn’t work. Try again.');
+      setFailure(aiKeyFailureText(error));
     } finally {
       setBusy(false);
     }
@@ -154,12 +154,15 @@ export default function AiKeysPage() {
     try {
       const response = await authenticatedFetch(`/api/me/ai-keys/${encodeURIComponent(key.id)}/lend/${encodeURIComponent(lent.universeId)}`, { method: 'DELETE' });
       // Already pulled (on another device): the list is right to drop it.
-      if (!response.ok && response.status !== 404) throw new Error('That didn’t work. Try again.');
+      if (!response.ok && response.status !== 404) throw new AiKeyFailure('That didn’t work. Try again.');
       retry();
       setPulling(null);
       addToast({ description: `${key.name} pulled from ${lent.universeName}`, variant: 'success', duration: 2500 });
     } catch (error) {
-      setFailure(error instanceof Error ? error.message : 'That didn’t work. Try again.');
+      const message = aiKeyFailureText(error);
+      // With no bots on it there is no sheet open to show the message in
+      if (lent.bots.length > 0) setFailure(message);
+      else addToast({ description: message, variant: 'error', duration: 4000 });
     } finally {
       setBusy(false);
     }
@@ -170,7 +173,7 @@ export default function AiKeysPage() {
     try {
       const response = await authenticatedFetch(`/api/me/ai-keys/${encodeURIComponent(key.id)}/check`, { method: 'POST' });
       const body = (await response.json().catch(() => null)) as { status?: string; message?: string; error?: string } | null;
-      if (!response.ok) throw new Error(body?.error || 'That didn’t work. Try again.');
+      if (!response.ok) throw new AiKeyFailure(aiKeyError(response.status, body?.error));
       retry();
       addToast(
         body?.status === 'working'
@@ -178,7 +181,7 @@ export default function AiKeysPage() {
           : { description: body?.message || `${key.name} is still down`, variant: 'error', duration: 4000 },
       );
     } catch (error) {
-      addToast({ description: error instanceof Error ? error.message : 'That didn’t work. Try again.', variant: 'error', duration: 4000 });
+      addToast({ description: aiKeyFailureText(error), variant: 'error', duration: 4000 });
     } finally {
       setChecking(null);
     }
@@ -194,10 +197,10 @@ export default function AiKeysPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ifDown }),
       });
-      if (!response.ok) throw new Error('That didn’t save. Try again.');
+      if (!response.ok) throw new AiKeyFailure('That didn’t save. Try again.');
     } catch (error) {
       update((list) => list.map((entry) => (entry.id === key.id ? { ...entry, ifDown: before } : entry)));
-      addToast({ description: error instanceof Error ? error.message : 'That didn’t save. Try again.', variant: 'error', duration: 4000 });
+      addToast({ description: aiKeyFailureText(error), variant: 'error', duration: 4000 });
     } finally {
       setSaving(null);
     }
@@ -277,6 +280,7 @@ export default function AiKeysPage() {
                 <button
                   type="button"
                   aria-label={`Pull ${key.name} from ${lent.universeName}`}
+                  disabled={busy}
                   onClick={() => {
                     setFailure(null);
                     if (lent.bots.length > 0) setPulling({ key, lent });
@@ -489,11 +493,11 @@ function LendSheet({
       });
       if (!response.ok) {
         const body = await response.json().catch(() => null);
-        throw new Error(body?.error || 'That didn’t work. Try again.');
+        throw new AiKeyFailure(aiKeyError(response.status, body?.error));
       }
       onLent(keyToLend, universes.find((universe) => universe.id === picked)?.name ?? 'the universe');
     } catch (error) {
-      setFailure(error instanceof Error ? error.message : 'That didn’t work. Try again.');
+      setFailure(aiKeyFailureText(error));
     } finally {
       setBusy(false);
     }
@@ -662,11 +666,11 @@ function EditKeySheet({
           void loadModels(target.key.id, address.trim());
           return;
         }
-        throw new Error(body?.error || 'That didn’t work. Try again.');
+        throw new AiKeyFailure(aiKeyError(response.status, body?.error));
       }
       onSaved(target.key, target.what);
     } catch (error) {
-      setFailure(error instanceof Error ? error.message : 'That didn’t work. Try again.');
+      setFailure(aiKeyFailureText(error));
     } finally {
       setBusy(false);
     }
