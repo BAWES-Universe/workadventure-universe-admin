@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { requireServiceToken, validateServiceToken } from '@/lib/service-tokens';
-import { botReadDenied } from '@/lib/access-scope';
+import { botContentReadDenied, getViewer } from '@/lib/access-scope';
 import { corsHeaders } from '@/lib/cors';
+import { dropForgottenFrom, forgetNotice, isBotHidden, memoryTally, takeForgets } from '@/lib/bot-privacy';
 
 export const runtime = 'nodejs';
 
@@ -34,8 +35,13 @@ export async function GET(
     const isServiceToken = validateServiceToken(request);
     const { id: botId } = await params;
     if (!isServiceToken) {
-      const denied = await botReadDenied(request, botId, corsHeaders());
+      const denied = await botContentReadDenied(request, corsHeaders());
       if (denied) return denied;
+      // Hide bot conversations (#435): a person gets the tally, never the contents. The bot server reads everything
+      // back as always, with its service token or, when it has none, the admin token it falls back to.
+      if ((await getViewer(request))?.kind === 'user' && (await isBotHidden(botId))) {
+        return NextResponse.json({ memories: [], private: true, ...(await memoryTally(botId)) }, { status: 200, headers: corsHeaders() });
+      }
     }
     const { searchParams } = new URL(request.url);
     const userUuidFilter = searchParams.get('userUuid');
@@ -152,10 +158,18 @@ export async function POST(
       );
     }
 
+    // People the owner asked the bot to forget (#435): their entries are not saved, and the bot server is told to drop
+    // them from what it keeps in memory. A bot that nobody asked to forget anything has no rows here, so this changes
+    // nothing for it. If the rows cannot be read, the save fails and the bot server tries again, rather than saving
+    // someone who should be forgotten.
+    const forgetting = await takeForgets(botId);
+    const forgets = (userUuid: unknown) => forgetting.everyone || (typeof userUuid === 'string' && forgetting.userUuids.has(userUuid));
+
     // Process each memory entry
-    const memoryEntries = Array.isArray(memories) ? memories : [];
+    const memoryEntries = (Array.isArray(memories) ? memories : []).filter((memory: { userUuid?: unknown }) => !forgets(memory.userUuid));
     
     // Process memories asynchronously (fire-and-forget pattern)
+    const written: string[] = [];
     (async () => {
       try {
         for (const memory of memoryEntries) {
@@ -270,12 +284,13 @@ export async function POST(
               lastEmotionUpdate: lastEmotionUpdate ? new Date(lastEmotionUpdate) : null,
             },
           });
+          written.push(userUuid);
         }
 
         // Handle immediate emotion updates (if emotions provided directly)
         // IMPORTANT: Always store full memory data when provided, regardless of saveType
         // saveType is just metadata for logging/analytics, not a signal to skip storing full memory
-        if (saveType === 'immediate' && body.emotions && body.userUuid) {
+        if (saveType === 'immediate' && body.emotions && body.userUuid && !forgets(body.userUuid)) {
           // Try to match userUuid to User table
           let finalUserId: string | null = body.userId || null;
           let finalIsGuest = true;
@@ -388,15 +403,31 @@ export async function POST(
               lastEmotionUpdate: new Date(),
             },
           });
+          written.push(body.userUuid);
         }
       } catch (err) {
         // Log error but don't block response (fire-and-forget)
         console.error('Error processing memory entries:', err);
       }
+
+      // A Forget pressed while this save was running (#495): the check above was made before the first person was
+      // written, so take out what was just written for anyone forgotten since. The save itself is already done, so a
+      // failure here is only logged.
+      try {
+        await dropForgottenFrom(botId, written);
+      } catch (err) {
+        console.error('Error checking for a Forget after a memory save:', err instanceof Error ? err.message : 'unknown');
+      }
     })();
 
+    // Only when someone asked the bot to forget: the people to drop from what it keeps in memory.
+    const forget = forgetNotice(forgetting);
     return NextResponse.json(
-      { status: 'saved', saveType },
+      {
+        status: 'saved',
+        saveType,
+        ...(forget ? { forget } : {}),
+      },
       { headers: corsHeaders() }
     );
   } catch (error: any) {

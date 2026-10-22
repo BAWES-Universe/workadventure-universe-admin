@@ -135,7 +135,7 @@ it('says under a name whether they are your friend and when they last came, and 
   expect(personNote({ friend: false, visit: null })).toBeNull();
 });
 
-it('says Give membership when opened from a profile, and shows universes they are already in or invited to as not pickable', async () => {
+it('says Give membership when opened from a profile, and lets you look at the universes they are already in or invited to', async () => {
   open({
     person: { userId: 'hanan', name: 'Hanan Aziz' },
     giving: true,
@@ -143,8 +143,76 @@ it('says Give membership when opened from a profile, and shows universes they ar
   });
   expect(await screen.findByRole('heading', { name: 'Give Hanan membership' })).toBeTruthy();
   expect((screen.getByRole('button', { name: 'BAWES' }) as HTMLButtonElement).disabled).toBe(false);
-  expect((screen.getByRole('button', { name: 'Sandbox Member' }) as HTMLButtonElement).disabled).toBe(true);
-  expect((screen.getByRole('button', { name: 'Cup Invited' }) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByRole('button', { name: 'Sandbox Member' }) as HTMLButtonElement).disabled).toBe(false);
+  expect((screen.getByRole('button', { name: 'Cup Invited' }) as HTMLButtonElement).disabled).toBe(false);
+  // Nothing to send for someone already in or waiting: the send form is only where they could be invited
+  expect(screen.getByRole('button', { name: 'Send invite' })).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Cup Invited' }));
+  expect(await screen.findByRole('heading', { name: 'Hanan’s invitation' })).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Send invite' })).toBeNull();
+});
+
+const WAITING = { id: 'inv-9', at: new Date().toISOString(), by: { name: 'Sara', you: false }, roleIds: ['r-acct'], worlds: { allWorlds: true, worldIds: [] } };
+
+it('opens a waiting invitation with who sent it, when and the roles it gives, and takes it back with Cancel invite', async () => {
+  const { onOpenChange, onSent } = open({
+    person: { userId: 'hanan', name: 'Hanan Aziz' },
+    giving: true,
+    universes: [{ id: 'u1', name: 'BAWES', status: 'invited', invitation: WAITING }],
+  });
+  expect(await screen.findByRole('heading', { name: 'Hanan’s invitation' })).toBeTruthy();
+  expect(screen.getByText('Invited, waiting for Hanan')).toBeTruthy();
+  expect(screen.getByText(/Sent by Sara .* They join BAWES once they accept\./)).toBeTruthy();
+  expect(await screen.findByText('Accountant')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel invite' }));
+  await waitFor(() => expect(onSent).toHaveBeenCalled());
+  expect(fetchMock).toHaveBeenCalledWith('/api/admin/universes/u1/invitations/inv-9', { method: 'DELETE' });
+  expect(onOpenChange).toHaveBeenCalledWith(false);
+});
+
+it('says who you sent a waiting invitation as “you”, and keeps the sheet open with a message when it cannot be taken back', async () => {
+  fetchMock.mockImplementation((url: string, init?: { method?: string }) => {
+    if (init?.method === 'DELETE') return Promise.resolve({ ok: false, status: 403, json: () => Promise.resolve({}) });
+    if (url.endsWith('/roles')) return ok({ roles: ROLES });
+    return ok({ id: 'u1', name: 'BAWES', ownerId: 'owner', worlds: [{ id: 'hq', name: 'HQ' }] });
+  });
+  const { onOpenChange } = open({
+    person: { userId: 'hanan', name: 'Hanan Aziz' },
+    giving: true,
+    universes: [{ id: 'u1', name: 'BAWES', status: 'invited', invitation: { ...WAITING, by: { name: 'Me', you: true } } }],
+  });
+  expect(await screen.findByText(/Sent by you /)).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel invite' }));
+  expect(await screen.findByRole('alert')).toBeTruthy();
+  expect(onOpenChange).not.toHaveBeenCalled();
+});
+
+describe('a member', () => {
+  const MEMBER = (can: { giveRoleIds: string[]; remove: boolean }) => (url: string) => {
+    if (url.endsWith('/roles')) return ok({ roles: ROLES });
+    if (url.includes('/members/hanan')) {
+      return ok({ member: { userId: 'hanan', joinedAt: '2026-09-01T00:00:00Z', isOwner: false, worlds: { allWorlds: true, worldIds: [] }, roles: [{ roleId: 'r-acct', allWorlds: true, worldIds: [] }] }, can });
+    }
+    return ok({ id: 'u1', name: 'BAWES', ownerId: 'owner', worlds: [{ id: 'hq', name: 'HQ' }] });
+  };
+  const sheet = () => open({ person: { userId: 'hanan', name: 'Hanan Aziz' }, giving: true, universes: [{ id: 'u1', name: 'BAWES', status: 'member' }] });
+
+  it('who you may give roles to opens as “roles” and links to the page where you change them', async () => {
+    fetchMock.mockImplementation(MEMBER({ giveRoleIds: ['r-acct'], remove: true }));
+    sheet();
+    expect(await screen.findByRole('heading', { name: 'Hanan’s roles' })).toBeTruthy();
+    expect(await screen.findByText('Hanan is a member of BAWES')).toBeTruthy();
+    expect(await screen.findByText('Accountant')).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Change roles' }).getAttribute('href')).toBe('/admin/universes/u1/members/hanan');
+  });
+
+  it('who you may only remove opens as “membership” and offers Remove from universe, not Change roles', async () => {
+    fetchMock.mockImplementation(MEMBER({ giveRoleIds: [], remove: true }));
+    sheet();
+    expect(await screen.findByRole('heading', { name: 'Hanan’s membership' })).toBeTruthy();
+    expect(await screen.findByRole('link', { name: 'Remove from universe' })).toBeTruthy();
+    expect(screen.queryByRole('link', { name: 'Change roles' })).toBeNull();
+  });
 });
 
 it('shows the line handed in for the chosen universe under the person’s name', async () => {
