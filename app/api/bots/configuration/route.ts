@@ -9,6 +9,7 @@ import { validateAccessToken } from '@/lib/oidc';
 import { resolveRoomIdFromPlayUri, transformBotToServerFormat } from '@/lib/bot-config-helpers';
 import { checkAiProviderRef } from '@/lib/ai-provider-ref';
 import { toolTimeoutSecondsSchema } from '@/lib/bot-tool-timeout';
+import { mustStayPrivateAfterMove } from '@/lib/bot-privacy';
 import { z } from 'zod';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Prisma
@@ -345,8 +346,18 @@ export async function POST(request: NextRequest) {
 
     // Check permissions (skip if admin token)
     if (!isAdminToken && userId) {
-      const hasPermission = await canManageBots(userId, roomId);
-      if (!hasPermission) {
+      const existingBot = validatedData.botId
+        ? await prisma.bot.findUnique({
+            where: { id: validatedData.botId },
+            select: { id: true, createdById: true, roomId: true },
+          })
+        : null;
+
+      // Changing a bot that stays in its room is decided by the bot's own check (the same as PUT /api/bots/:id), so a
+      // Yes on "Manage this bot" works here too. Creating a bot, or moving one to another room, needs Manage bots in
+      // the room it lands in.
+      const staysInItsRoom = existingBot !== null && existingBot.roomId === roomId;
+      if (!staysInItsRoom && !(await canManageBots(userId, roomId))) {
         const response = NextResponse.json(
           { error: 'You do not have permission to manage bots in this room' },
           { status: 403 }
@@ -358,15 +369,11 @@ export async function POST(request: NextRequest) {
       }
 
       // IDOR guard: when updating an existing bot, the botId must belong to a
-      // room the user can manage. The roomUrl permission check above covers the
-      // DESTINATION room — without this, a user who manages room A could submit
+      // room the user can manage. The check above covers the DESTINATION room
+      // when it differs — without this, a user who manages room A could submit
       // a botId from room B (CWE-639: authorization bypass via user-controlled
       // key).
       if (validatedData.botId) {
-        const existingBot = await prisma.bot.findUnique({
-          where: { id: validatedData.botId },
-          select: { id: true, createdById: true, roomId: true },
-        });
         if (!existingBot) {
           const response = NextResponse.json(
             { error: 'Bot not found' },
@@ -476,11 +483,14 @@ export async function POST(request: NextRequest) {
       // the stored JSON's embedded behaviorType stale (divergent from the
       // scalar column). Provided config still merges over the existing one;
       // assignedSpace is preserved unless the request explicitly supplies it.
+      let keepPrivate = false;
       {
         const existing = await prisma.bot.findUnique({
           where: { id: validatedData.botId },
-          select: { behaviorConfig: true },
+          select: { behaviorConfig: true, roomId: true },
         });
+        // Hide bot conversations (#435): a move out of a hiding universe keeps the bot Private
+        keepPrivate = !!existing?.roomId && existing.roomId !== roomId && (await mustStayPrivateAfterMove(validatedData.botId, roomId));
         const existingConfig = (existing?.behaviorConfig as Record<string, unknown> | null) || {};
         const provided = (validatedData.behaviorConfig || {}) as Record<string, unknown>;
         updateData.behaviorConfig = {
@@ -494,7 +504,7 @@ export async function POST(request: NextRequest) {
       }
       bot = await prisma.bot.update({
         where: { id: validatedData.botId },
-        data: updateData,
+        data: keepPrivate ? { ...updateData, hideConversations: true } : updateData,
         include: {
           room: {
             include: {
@@ -542,7 +552,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Transform to server format (include sensitive data for creator)
-    const hasPermission = isAdminToken || (userId !== null ? await canManageBots(userId, roomId) : false);
+    const hasPermission = isAdminToken || (userId !== null ? await canManageThisBot(userId, null, bot, { creatorPasses: false }) : false);
     const transformedBot = await transformBotToServerFormat(bot, true, hasPermission);
 
     const response = NextResponse.json(transformedBot, { status: statusCode });

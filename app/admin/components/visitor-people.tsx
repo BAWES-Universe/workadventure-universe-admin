@@ -68,7 +68,7 @@ export function VisitorPeople({ scope, id }: { scope: Scope; id: string }) {
 
   if (failed && people === null) return <LoadError label="visitors" retry={retry} />;
   if (people === null) return <LoadingRows label="visitors" rows={3} />;
-  if (people.length === 0) return <EmptyCard kind="people" plainIcon title="No visitors yet." text={`Visits to this ${scope} show up here.`} />;
+  if (people.length === 0) return <EmptyCard kind="people" title="No visitors yet." text={`Visits to this ${scope} show up here.`} />;
 
   const toggle = (key: string) =>
     setOpen((current) => {
@@ -151,7 +151,7 @@ function PersonCard({
   };
   const head = (
     <>
-      <PersonIcon woka={person.woka} name={person.name} face plain />
+      <PersonIcon woka={person.woka} name={person.name} face />
       <span className={styles.text}>
         <strong className={styles.name}>{person.name}</strong>
         <StatLine items={[person.roles.length > 0 ? null : latest.signedIn ? 'Signed in' : 'Guest', timeAgo(new Date(latest.at))]} />
