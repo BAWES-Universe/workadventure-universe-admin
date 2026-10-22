@@ -247,7 +247,12 @@ export function authHeaders(info: AiKeyKindInfo, apiKey: string): Record<string,
   return { Authorization: `Bearer ${apiKey}` };
 }
 
-const withoutSlash = (url: string) => url.replace(/\/+$/, '');
+const withoutSlash = (url: string) => {
+  // A loop, not a regex: a long run of slashes inside a typed address must not take quadratic time.
+  let end = url.length;
+  while (end > 0 && url[end - 1] === '/') end -= 1;
+  return url.slice(0, end);
+};
 
 /** Every address the provider itself serves from: its one base, or the base of each region. */
 export function providerBases(info: AiKeyKindInfo): string[] {

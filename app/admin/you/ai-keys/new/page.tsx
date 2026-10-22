@@ -189,7 +189,7 @@ export default function AddAiKeyPage() {
                   key={entry.id}
                   role="radio"
                   picked={region === entry.id}
-                  onClick={() => { setRegion(entry.id); changed(); }}
+                  onClick={() => { if (entry.id === region) return; setRegion(entry.id); changed(); }}
                   indicator={<Radio checked={region === entry.id} />}
                   title={entry.label}
                   description={new URL(entry.base).host}
