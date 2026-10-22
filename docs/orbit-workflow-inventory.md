@@ -49,7 +49,7 @@ routes each page calls.
 | My Memberships | `/admin/memberships` | `requiresAuth` | compact view | Menu → Personalize → My Memberships | none — needs one | preserve |
 | My Visit Card | `/admin/profile` | `requiresAuth` | compact view | Menu → Personalize → My Visit Card | none — needs one | preserve |
 | AI keys | `/admin/you/ai-keys` | `requiresAuth` | compact view | You → Settings → AI keys, or Menu → Personalize → AI keys | `__tests__/api/ai-keys/me-routes.test.ts` (own keys only) | preserve (added in #374) |
-| AI keys: lend to a universe, pull from it (bots there move to Universe AI), revoke (same) | `/admin/you/ai-keys` | `POST /api/me/ai-keys/:id/lend`, `DELETE /api/me/ai-keys/:id/lend/:universeId`, `GET /api/me/ai-keys/universes` | key owner; Manage bots (or owner) in the universe to lend | compact view | AI keys page | `__tests__/api/ai-keys/lend-routes.test.ts` | new (#374) |
+| AI keys: lend to a universe (`POST /api/me/ai-keys/:id/lend`, `GET /api/me/ai-keys/universes`), pull from it (`DELETE /api/me/ai-keys/:id/lend/:universeId`; bots there move to Universe AI), revoke (same) | `/admin/you/ai-keys` | key owner; Manage bots (or owner) in the universe to lend | compact view | AI keys page | `__tests__/api/ai-keys/lend-routes.test.ts` | new (#374) |
 | Discover Universes | `/admin/discover/universes` | everyone signed in | both | Menu → Discover → Universes | none — needs one | preserve |
 | Discover Worlds | `/admin/discover/worlds` | everyone signed in | both | Menu → Discover → Worlds | none — needs one | preserve |
 | Discover Rooms | `/admin/discover/rooms` | everyone signed in | both | Menu → Discover → Rooms | none — needs one | preserve |
@@ -70,7 +70,7 @@ The menu only hides entries; every API route enforces its own check.
 | Current location card | `/api/admin/rooms/from-play-uri`, `/api/admin/rooms/previous`, `/api/admin/analytics/rooms/:id` | signed in | compact view | Home (bottom bar) | analytics: `authorisation-scope.test.ts` (#208); the room lookups: none — needs one | analytics fixed in 0A (#208); rest preserve |
 | Recently visited | `/api/admin/rooms/recent` | signed in (own visits) | compact view | Home (bottom bar) | none — needs one | preserve |
 | Pending invitations alert | `/api/memberships/invitations` | signed in (own) | compact view | Home (bottom bar) | none — needs one | preserve |
-| Notices on Orbit home (a key is down, bots moved): list, dismiss | `/` (Orbit home) | `GET /api/me/notices`, `DELETE /api/me/notices/:id` | signed in (own) | compact view | Home (bottom bar) | `__tests__/admin/notices-alert.test.tsx`, `__tests__/api/me/notices.test.ts` | new |
+| Notices on Orbit home (a key is down, bots moved): list, dismiss | `GET /api/me/notices`, `DELETE /api/me/notices/:id` | signed in (own) | compact view | Home (bottom bar) | `__tests__/admin/notices-alert.test.tsx`, `__tests__/api/me/notices.test.ts` | new |
 | Stats + quick create links | bootstrap | signed in | compact view | Home (bottom bar) | none — needs one | preserve |
 
 ## Universes, worlds, rooms
