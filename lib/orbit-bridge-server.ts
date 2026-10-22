@@ -7,7 +7,8 @@ const worldMembersParams = z.object({ worldId: z.string().uuid() });
 // A person is named by the game's id for them (the user's uuid, which can be an email address) or, when the game
 // only knows them from a chat (a DM with someone who is away), by their exact Matrix id.
 const userProfileParams = z.union([
-  z.object({ userUuid: z.string().min(1).max(256) }),
+  // `sheet` opens the membership sheet on their page (from the card's membership button)
+  z.object({ userUuid: z.string().min(1).max(256), sheet: z.literal('membership').optional() }),
   z.object({ chatId: z.string().regex(/^@[^\s:]+:[^\s]+$/).max(256) }),
 ]);
 
@@ -55,7 +56,8 @@ export async function resolveNavigateIntent(
               select: { id: true, isGuest: true },
             });
       if (!user || user.isGuest) return ORBIT_HOME_PATH;
-      return user.id === viewerUserId(viewer) ? '/admin/you' : `/admin/users/${user.id}`;
+      if (user.id === viewerUserId(viewer)) return '/admin/you';
+      return 'sheet' in parsed.data && parsed.data.sheet ? `/admin/users/${user.id}?sheet=membership` : `/admin/users/${user.id}`;
     }
   }
 }

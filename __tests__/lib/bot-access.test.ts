@@ -159,7 +159,7 @@ describe('a permission turned off', () => {
   it('refuses each action with its own line, for guests and members alike', async () => {
     join(USERS.sara);
     expect(await ask('chat', GUEST)).toEqual({ allowed: false, code: 'not_allowed', reason: "Nora's owner limits who can chat with it." });
-    expect(await ask('summon', GUEST)).toEqual({ allowed: false, code: 'not_allowed', reason: "Nora's owner limits who can call it over." });
+    expect(await ask('summon', GUEST)).toEqual({ allowed: false, code: 'not_allowed', reason: "Nora's owner limits who can summon it." });
     expect(await ask('dm', signedIn(USERS.sara))).toEqual({ allowed: false, code: 'not_allowed', reason: "You can't message Nora now." });
     expect((await ask('chat', signedIn(USERS.sara)))!.allowed).toBe(false);
     expect((await ask('summon', signedIn(USERS.sara)))!.allowed).toBe(false);
@@ -267,7 +267,7 @@ describe('decideBotAccess', () => {
 
   it('names the bot in the line it returns', () => {
     expect(decideBotAccess(base).reason).toBe("Atlas's owner limits who can chat with it.");
-    expect(decideBotAccess({ ...base, action: 'summon' }).reason).toBe("Atlas's owner limits who can call it over.");
+    expect(decideBotAccess({ ...base, action: 'summon' }).reason).toBe("Atlas's owner limits who can summon it.");
     expect(decideBotAccess({ ...base, action: 'dm' }).reason).toBe("You can't message Atlas now.");
     expect(decideBotAccess({ ...base, action: 'dm', signedIn: false }).reason).toBe('Sign in to message Atlas.');
   });

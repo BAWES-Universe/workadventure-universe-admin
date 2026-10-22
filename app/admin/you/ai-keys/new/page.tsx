@@ -67,6 +67,8 @@ export default function AddAiKeyPage() {
   const hosted = shown.filter((entry) => entry.group === 'hosted');
 
   function pickKind(next: AiKeyKind) {
+    // Clicking the type that is already picked (or inside its open card) changes nothing.
+    if (next === kind) return;
     setKind(next);
     setRegion(null);
     changed();
@@ -191,7 +193,7 @@ export default function AddAiKeyPage() {
                   key={entry.id}
                   role="radio"
                   picked={region === entry.id}
-                  onClick={() => { setRegion(entry.id); changed(); }}
+                  onClick={() => { if (entry.id === region) return; setRegion(entry.id); changed(); }}
                   indicator={<Radio checked={region === entry.id} />}
                   title={entry.label}
                   description={new URL(entry.base).host}
