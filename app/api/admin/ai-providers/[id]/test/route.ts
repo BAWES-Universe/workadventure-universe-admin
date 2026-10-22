@@ -30,7 +30,8 @@ export async function POST(
       where: { providerId: id },
     });
 
-    if (!provider) {
+    // A person's personal key (#374) is checked by its owner, never from here.
+    if (!provider || provider.ownerId) {
       return NextResponse.json(
         { error: 'Provider not found' },
         { status: 404 }

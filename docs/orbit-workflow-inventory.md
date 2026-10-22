@@ -48,6 +48,7 @@ routes each page calls.
 | My Stars | `/admin/stars` | everyone signed in | compact view | Menu → Personalize → My Stars | none — needs one | preserve |
 | My Memberships | `/admin/memberships` | `requiresAuth` | compact view | Menu → Personalize → My Memberships | none — needs one | preserve |
 | My Visit Card | `/admin/profile` | `requiresAuth` | compact view | Menu → Personalize → My Visit Card | none — needs one | preserve |
+| AI keys | `/admin/you/ai-keys` | `requiresAuth` | compact view | You → Settings → AI keys, or Menu → Personalize → AI keys | `__tests__/api/ai-keys/me-routes.test.ts` (own keys only) | preserve (added in #374) |
 | Discover Universes | `/admin/discover/universes` | everyone signed in | both | Menu → Discover → Universes | none — needs one | preserve |
 | Discover Worlds | `/admin/discover/worlds` | everyone signed in | both | Menu → Discover → Worlds | none — needs one | preserve |
 | Discover Rooms | `/admin/discover/rooms` | everyone signed in | both | Menu → Discover → Rooms | none — needs one | preserve |

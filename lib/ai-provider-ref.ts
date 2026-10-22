@@ -22,7 +22,8 @@ export async function checkAiProviderRef(
   }
   const provider = await prisma.botsAiProvider.findUnique({
     where: { providerId: ref },
-    select: { providerId: true },
+    select: { providerId: true, ownerId: true },
   });
-  return provider ? null : `AI provider "${ref}" does not exist`;
+  // A personal key (#374) is not a provider a bot can be pointed at by its id: lending comes with its own check.
+  return provider && !provider.ownerId ? null : `AI provider "${ref}" does not exist`;
 }

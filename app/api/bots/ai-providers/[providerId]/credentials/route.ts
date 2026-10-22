@@ -24,7 +24,8 @@ export async function GET(
       where: { providerId },
     });
 
-    if (!provider) {
+    // A personal key (#374) is never served by provider id alone: no bot may use one yet, so it does not exist here.
+    if (!provider || provider.ownerId) {
       return NextResponse.json(
         { error: 'Provider not found' },
         { status: 404 }

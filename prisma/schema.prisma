@@ -31,6 +31,7 @@ model User {
   reportsMade       Report[]          @relation("Reporter")
   reportsHandled    Report[]          @relation("ReportHandledBy")
   avatars           UserAvatar[]
+  aiKeys            BotsAiProvider[]  @relation("AiKeyOwner")
   outfits           UserOutfit[]
   favorites         Favorite[]
   followers         Follow[]          @relation("Follower")
@@ -674,13 +675,20 @@ model BotsAiProvider {
   settings          Json?    @default("{}")
   tested            Boolean  @default(false)
   testedAt          DateTime? @map("tested_at")
+  // Whose key this is (#374). Null = a provider the super admin runs for the whole server, which is every row there was
+  // before personal keys. Anything that lists or reads providers for the server must keep only ownerId = null.
+  ownerId           String?  @map("owner_id")
+  // The last four characters of the key, kept so the owner can recognise it. The key itself is never sent to a browser.
+  apiKeyLast4       String?  @map("api_key_last4") @db.VarChar(4)
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")
 
+  owner             User?    @relation("AiKeyOwner", fields: [ownerId], references: [id], onDelete: Cascade)
   usage             BotsAiUsage[]
 
   @@index([enabled])
   @@index([type])
+  @@index([ownerId])
   @@map("bots_ai_providers")
 }
 

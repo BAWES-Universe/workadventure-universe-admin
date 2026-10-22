@@ -20,7 +20,9 @@ export async function GET(request: NextRequest) {
       );
     }
 
+    // Only the server's own providers: people's personal keys (#374) are never listed here, not even for a super admin.
     const providers = await prisma.botsAiProvider.findMany({
+      where: { ownerId: null },
       orderBy: {
         name: 'asc',
       },
