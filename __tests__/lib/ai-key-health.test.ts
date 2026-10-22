@@ -1,7 +1,7 @@
 import { prisma } from '@/lib/db';
 import { addNotice, clearNotices } from '@/lib/notices';
 import { probeChat, probeModels } from '@/lib/ai-key-models';
-import { checkAndRecord, checkKey, judgeFailedReply, markDown, markWorking, recheckIfDue, recordReply, RECHECK_MS, type KeyRow } from '@/lib/ai-key-health';
+import { checkAndRecord, checkKey, judgeFailedReply, markDown, markWorking, recheckIfDue, recordReply, CHECK_WAIT_MS, RECHECK_MS, type KeyRow } from '@/lib/ai-key-health';
 
 jest.mock('@/lib/db', () => ({ prisma: { botsAiProvider: { findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn(), updateMany: jest.fn() } } }));
 jest.mock('@/lib/notices', () => ({ addNotice: jest.fn(), clearNotices: jest.fn() }));
@@ -316,6 +316,22 @@ describe('recheckIfDue', () => {
     const after = await recheckIfDue(key, now);
     expect(after.downSince).toBeNull();
     expect(probe).toHaveBeenCalledTimes(1);
+  });
+
+  it('with Stop replying it does not wait longer than the deadline for a provider that hangs, and the check carries on', async () => {
+    jest.useFakeTimers();
+    try {
+      let finish: (value: unknown) => void = () => {};
+      probe.mockReturnValue(new Promise((resolve) => (finish = resolve)));
+      const key = downNow(own, { ifDown: 'stop', healthCheckedAt: minutesAgo(6) });
+      const pending = recheckIfDue(key, now);
+      await jest.advanceTimersByTimeAsync(CHECK_WAIT_MS);
+      expect(await pending).toBe(key);
+      expect(db.findUnique).not.toHaveBeenCalled();
+      finish({ ok: true, models: ['m'] });
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('with Universe AI answering it does not make the reply wait for the check', async () => {

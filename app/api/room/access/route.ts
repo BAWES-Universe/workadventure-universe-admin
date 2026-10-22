@@ -15,6 +15,7 @@ import { isSuperAdmin } from '@/lib/super-admin';
 import { bansCoveringWorld } from '@/lib/moderation';
 import { permissionsForWorld, permissionsFromTags } from '@/lib/roles';
 import { has, toWire } from '@/lib/permissions';
+import { roleLabelsForViewer, type RoleLabel } from '@/lib/room-role-labels';
 import type { FetchMemberDataByUuidSuccessResponse, ErrorApiData, ErrorApiRetryData, CompanionDetail } from '@/types/workadventure';
 
 export async function GET(request: NextRequest) {
@@ -549,6 +550,17 @@ export async function GET(request: NextRequest) {
         permissions = permissionsFromTags(verifiedTags);
       }
 
+      // What the game calls each role, for the badge next to people. Badges are a nicety: entering never fails over them.
+      let roleLabels: RoleLabel[] = [];
+      try {
+        roleLabels = await roleLabelsForViewer(prisma, worldData.universeId, {
+          user: verifiedUserId && user ? { id: verifiedUserId, isSuperAdmin: isSuperAdmin(user.email) } : null,
+          tags: verifiedTags,
+        });
+      } catch (error) {
+        Sentry.captureException(error);
+      }
+
       // Build response
       const response: FetchMemberDataByUuidSuccessResponse = {
         status: "ok",
@@ -568,6 +580,7 @@ export async function GET(request: NextRequest) {
         applications: [],
         canEdit: has(permissions, 'EDIT_MAPS'),
         permissions: toWire(permissions),
+        roles: roleLabels,
         world: world,
         chatID: chatID || account?.matrixChatId || undefined,
       };

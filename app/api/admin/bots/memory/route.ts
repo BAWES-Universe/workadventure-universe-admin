@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
+import { hiddenBotIds } from '@/lib/bot-privacy';
 
 /**
  * GET /api/admin/bots/memory
@@ -54,6 +55,14 @@ export async function GET(request: NextRequest) {
       }
     }
 
+    // Hide bot conversations (#435): bots that hide theirs are left out for everyone, super admins included, and the
+    // page is told how many it left out.
+    const hidden = await hiddenBotIds();
+    const hiddenCount = hidden.length > 0 ? await prisma.botsMemory.count({ where: { ...where, AND: [{ botId: { in: hidden } }] } }) : 0;
+    if (hidden.length > 0) {
+      where.AND = [{ botId: { notIn: hidden } }];
+    }
+
     // Fetch memory entries with pagination and user relation
     const [memory, total] = await Promise.all([
       prisma.botsMemory.findMany({
@@ -79,6 +88,7 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({
       memory,
+      hiddenCount,
       pagination: {
         page,
         limit,
