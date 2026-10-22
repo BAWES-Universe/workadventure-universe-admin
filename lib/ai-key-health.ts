@@ -11,6 +11,8 @@ import { addNotice, clearNotices } from '@/lib/notices';
  * gets one notice per outage. Server providers are never touched: they have no owner and no health.
  */
 export const RECHECK_MS = 5 * 60_000;
+/** How long a bot's request waits for a check of its Down key (Stop replying) before it rests; the check carries on. */
+export const CHECK_WAIT_MS = 8_000;
 export const FAILED_REPLIES_TO_DOWN = 2;
 
 export type IfDown = 'universe-ai' | 'stop';
@@ -216,6 +218,16 @@ export async function recheckIfDue(key: KeyRow, now = new Date()): Promise<KeyRo
     void running;
     return key;
   }
-  await running;
+  // A provider that hangs must not hold the bot's request for the whole probe time: past the wait the key stays as it is
+  // (so the bot rests) and the check goes on in the background and records its result.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const finished = await Promise.race([
+    running.then(() => true),
+    new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), CHECK_WAIT_MS);
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+  if (!finished) return key;
   return (await prisma.botsAiProvider.findUnique({ where: { providerId: key.providerId }, select: KEY_SELECT })) ?? key;
 }
