@@ -79,24 +79,20 @@ export function KindIcon({
   size = 'md',
   universeId,
   className,
-  plain = false,
 }: {
   kind: Kind;
   size?: 'sm' | 'md' | 'lg';
-  /** The glyph alone in its kind's colour, no box (a people icon on a page of people). */
-  plain?: boolean;
   /** Kept for callers; a chip is always its kind's colour (a universe's own colour is on its planet). */
   universeId?: string | null;
   className?: string;
 }) {
   const Icon = KIND_ICON[kind];
-  // Universe, world, room and star: the glyph alone in its kind's colour, as on a place's page (no box).
-  const glyph = CLEAN.has(kind) || plain ? (size === 'sm' ? 18 : size === 'lg' ? 28 : 22) : size === 'sm' ? 14 : size === 'lg' ? 22 : 18;
+  // Every kind is the glyph alone in its colour, as on a place's page (no box).
+  const glyph = size === 'sm' ? 18 : size === 'lg' ? 28 : 22;
   return (
     <span
       className={cn('orbit-kind', styles[`kind-${size}`], className)}
       data-kind={kind}
-      data-plain={plain || undefined}
       aria-hidden="true"
     >
       <Icon size={glyph} />
@@ -370,12 +366,10 @@ export function PageHeader({
   stats,
   actions,
   children,
-  plainIcon,
 }: {
   kind?: Kind;
-  /** A plain glyph in place of the kind's chip. */
+  /** A glyph of your own in place of the kind's. */
   icon?: ReactNode;
-  plainIcon?: boolean;
   universeId?: string | null;
   title: string;
   /** Where it is, e.g. "In BAWES › Office", with links. */
@@ -388,7 +382,7 @@ export function PageHeader({
   return (
     <header className={styles.pageHeader} data-testid="page-header">
       <div className={styles.pageTitleRow}>
-        {icon ?? (kind && <KindIcon kind={kind} universeId={universeId} size="lg" plain={plainIcon} />)}
+        {icon ?? (kind && <KindIcon kind={kind} universeId={universeId} size="lg" />)}
         <div className={styles.pageTitle}>
           <h1 className="orbit-display">{title}</h1>
           {(context || status) && (
@@ -461,10 +455,8 @@ export function EmptyCard({
   href,
   action,
   testId,
-  plainIcon,
 }: {
   kind: Kind;
-  plainIcon?: boolean;
   title: string;
   text: string;
   href?: string;
@@ -473,7 +465,7 @@ export function EmptyCard({
 }) {
   const body = (
     <>
-      <KindIcon kind={kind} plain={plainIcon} />
+      <KindIcon kind={kind} />
       <span className={styles.emptyText}>
         <strong>{title}</strong>
         <span>{text}</span>

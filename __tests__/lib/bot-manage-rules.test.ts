@@ -128,6 +128,33 @@ describe('row 11: Manage this bot', () => {
     expect(await manage('plain')).toBe(true);
   });
 
+  it('a Yes stops counting when the person leaves the universe, and counts again if they come back (CodeRabbit finding on #458)', async () => {
+    member('plain', []);
+    rule({ userId: 'plain' }, { manage: 'yes' });
+    expect(await manage('plain')).toBe(true);
+    state.memberships.delete('plain');
+    state.worldMembers = [];
+    expect(await manage('plain')).toBe(false);
+    member('plain', []);
+    expect(await manage('plain')).toBe(true);
+  });
+
+  it('a Yes still counts for someone who is only a world member (a row written some other way)', async () => {
+    state.worldMembers.push({ worldId: 'hq', userId: 'old', tags: ['member'] });
+    rule({ userId: 'old' }, { manage: 'yes' });
+    expect(await manage('old')).toBe(true);
+  });
+
+  it('a Yes for Everyone does not reach people who never joined, and a No still takes it away from anyone', async () => {
+    rule({ roleId: 'r-everyone' }, { manage: 'yes' });
+    expect(await manage('stranger')).toBe(false);
+    state.rules = [];
+    rule({ roleId: 'r-everyone' }, { manage: 'no' });
+    member('ed', [everywhere(EDITOR)]);
+    expect(await manage('stranger')).toBe(false);
+    expect(await manage('ed')).toBe(false);
+  });
+
   it('a person set to No cannot manage it although their role has Manage bots', async () => {
     member('ed', [everywhere(EDITOR)]);
     rule({ userId: 'ed' }, { manage: 'no' });

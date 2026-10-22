@@ -10,6 +10,7 @@ import { OrbitLoader } from '../components/shell/orbit-loader';
 import { OrbitMark } from '../components/shell/orbit-mark';
 import { adoptHandshakeSession, getRememberedPlayUri, isOpaqueSessionId, purgeAccountState, rememberPlayUri } from '@/lib/client-auth';
 import { PLAY_ORIGIN, PLAY_URL, isInsideFrame } from '@/lib/play-origin';
+import { loginDestination, readResumePath } from '@/lib/resume-path';
 
 const ENABLE_MANUAL_LOGIN = process.env.NODE_ENV !== 'production' && process.env.NEXT_PUBLIC_ENABLE_MANUAL_LOGIN === 'true';
 const LOGOUT_SUPPRESSION_KEY = 'orbit_auth_suppressed';
@@ -31,12 +32,7 @@ async function fetchSessionUserUuid(sessionId: string): Promise<string | null> {
 type AuthMessage = { type: 'orbit-auth-token-v2'; version: 2; nonce: string; accessToken: string };
 
 function getSafeRedirect(): string {
-  const requested = new URL(window.location.href).searchParams.get('redirect');
-  if (!requested) return '/admin';
-  const target = new URL(requested, window.location.origin);
-  if (target.origin !== window.location.origin ||
-      (target.pathname !== '/admin' && !target.pathname.startsWith('/admin/'))) return '/admin';
-  return `${target.pathname}${target.search}${target.hash}`;
+  return loginDestination(window.location.href, readResumePath());
 }
 
 export default function LoginPage() {

@@ -17,6 +17,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { AlertCircle, Loader2 } from 'lucide-react';
 import { useReplacePage } from '@/app/admin/orbit-frame-context';
+import { UniverseAdvanced } from '@/components/bot-telemetry';
 
 interface User {
   id: string;
@@ -60,6 +61,8 @@ function NewUniversePageContent() {
     featured: false,
     thumbnailUrl: '',
     addressEdited: false,
+    // Bot chat telemetry is on unless the owner switches it off (not kept in the draft).
+    hideBotConversations: false,
   });
 
   const draftFields = useMemo(
@@ -272,6 +275,12 @@ function NewUniversePageContent() {
                 />
               )}
             </Settings>
+
+            <UniverseAdvanced
+              universeName={formData.name || 'this universe'}
+              telemetryOn={!formData.hideBotConversations}
+              onChange={(on) => setFormData({ ...formData, hideBotConversations: !on })}
+            />
 
             <div className="flex flex-col-reverse gap-3 pt-2 sm:flex-row sm:justify-end">
               <Button type="button" variant="outline" className="h-11" asChild>
