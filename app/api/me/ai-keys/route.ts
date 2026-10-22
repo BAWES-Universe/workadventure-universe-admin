@@ -69,16 +69,19 @@ export async function POST(request: NextRequest) {
       return respond(request, { error: `You can have up to ${MAX_AI_KEYS} keys. Revoke one you don’t use.` }, 400);
     }
     const checked = await loadModels(input);
-    if (!checked.ok) return respond(request, { error: checked.message }, 400);
-    if (!checked.models.includes(model)) {
+    // A provider with no model list: the person typed the model, so nothing says it exists but the chat reply below
+    const noList = !checked.ok && checked.noList === true;
+    if (!checked.ok && !noList) return respond(request, { error: checked.message }, 400);
+    if (checked.ok && !checked.models.includes(model)) {
       return respond(request, { error: 'That model isn’t on the list. Load models again and pick one.' }, 400);
     }
     // What the provider said about this model, from the list it just gave (never from the request)
-    const caps = modelCaps(checked.facts, model);
-    const chat = await probeChat({ kind: info.kind, address: input.address, region, apiKey, model });
+    const caps = checked.ok ? modelCaps(checked.facts, model) : {};
+    const chat = await probeChat({ kind: info.kind, address: input.address, region, apiKey, model, ...(noList ? { noList } : {}) });
     // The model is on the list, so a 400 here is the provider refusing this tiny request (a reasoning model that wants a bigger
-    // cap, say), not a wrong key or model: it is saved, the same as the health check lets it pass
-    if (!chat.ok && chat.reason !== 'request') return respond(request, { error: chat.message }, 400);
+    // cap, say), not a wrong key or model: it is saved, the same as the health check lets it pass. A typed model has no list
+    // behind it, so only a real reply saves it.
+    if (!chat.ok && (noList || chat.reason !== 'request')) return respond(request, { error: chat.message }, 400);
     const row = await prisma.botsAiProvider.create({
       data: {
         providerId: `key-${randomUUID()}`,

@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Check, Download, KeyRound } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -13,7 +13,7 @@ import { AI_KEY_KINDS, kindInfo, type AiKeyKind, type AiKeyKindInfo } from '@/li
 import { PageHeader } from '../../../components/ds';
 import { AiKeyFailure, aiKeyError, aiKeyFailureText } from '../../../hooks/use-ai-keys';
 
-type Models = { status: 'none' } | { status: 'loading' } | { status: 'ready'; models: string[]; facts: Record<string, { tools?: boolean; vision?: boolean }> } | { status: 'failed'; message: string };
+type Models = { status: 'none' } | { status: 'loading' } | { status: 'ready'; models: string[]; facts: Record<string, { tools?: boolean; vision?: boolean }> } | { status: 'failed'; message: string } | { status: 'typed' };
 
 /** Said when a provider's own list says the model cannot call tools (it does not say, for most models, and then nothing is said). */
 const NO_TOOLS = 'This model has no Tools. Bots on it can still chat.';
@@ -66,6 +66,8 @@ export default function AddAiKeyPage() {
   const [typedName, setTypedName] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
+  // Only the newest model load may answer: a slow one for a type, address or key since changed is dropped
+  const latestLoad = useRef(0);
 
   const info = kindInfo(kind);
   const name = typedName ?? (info ? `My ${info.label}` : '');
@@ -90,6 +92,7 @@ export default function AddAiKeyPage() {
   // Anything that decides what the provider would answer clears the loaded list: a model picked for another key
   // or address is never kept.
   function changed() {
+    latestLoad.current += 1;
     setModels({ status: 'none' });
     setModel(null);
     setSearch('');
@@ -104,6 +107,7 @@ export default function AddAiKeyPage() {
 
   async function loadModels() {
     if (!info) return;
+    const mine = ++latestLoad.current;
     setModels({ status: 'loading' });
     setModel(null);
     setFailure(null);
@@ -113,16 +117,21 @@ export default function AddAiKeyPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ kind: info.kind, address, ...(region ? { region } : {}), apiKey }),
       });
-      const data: { ok?: boolean; models?: string[]; facts?: Record<string, { tools?: boolean; vision?: boolean }>; message?: string } = await response.json().catch(() => ({}));
+      const data: { ok?: boolean; models?: string[]; facts?: Record<string, { tools?: boolean; vision?: boolean }>; message?: string; noList?: boolean } = await response.json().catch(() => ({}));
+      if (mine !== latestLoad.current) return;
       if (data.ok && Array.isArray(data.models)) {
         setModels({ status: 'ready', models: data.models, facts: data.facts ?? {} });
         // The one model there is, is the one picked; otherwise the one this provider suggests, when it lists it.
         if (data.models.length === 1) setModel(data.models[0]);
         else if (info.suggestedModel && data.models.includes(info.suggestedModel)) setModel(info.suggestedModel);
+      } else if (data.noList) {
+        // This provider has no model list: the model is typed, and Add key proves it with one tiny reply
+        setModels({ status: 'typed' });
       } else {
         setModels({ status: 'failed', message: data.message ?? 'That didn’t work. Try again.' });
       }
     } catch {
+      if (mine !== latestLoad.current) return;
       setModels({ status: 'failed', message: 'We couldn’t reach Universe. Check your connection and try again.' });
     }
   }
@@ -135,7 +144,7 @@ export default function AddAiKeyPage() {
       const response = await authenticatedFetch('/api/me/ai-keys', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ kind: info.kind, address, ...(region ? { region } : {}), apiKey, model, name }),
+        body: JSON.stringify({ kind: info.kind, address, ...(region ? { region } : {}), apiKey, model: model.trim(), name }),
       });
       if (!response.ok) {
         const data: { error?: string } = await response.json().catch(() => ({}));
@@ -278,6 +287,24 @@ export default function AddAiKeyPage() {
               </Button>
             </div>
             {models.status === 'none' && <p className={FIELD_HINT}>Load models to check that it answers, then pick one.</p>}
+            {models.status === 'typed' && (
+              <div className="grid gap-1.5">
+                <Label htmlFor="ai-key-model-name">Model name</Label>
+                <Input
+                  id="ai-key-model-name"
+                  autoComplete="off"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  maxLength={255}
+                  value={model ?? ''}
+                  onChange={(event) => setModel(event.target.value.trim() === '' ? null : event.target.value)}
+                  className="h-11 rounded-xl"
+                />
+                <p className={FIELD_HINT}>
+                  {info.label} doesn’t share a list of its models. Type the name as {info.label} writes it. Add key checks it with one tiny reply.
+                </p>
+              </div>
+            )}
             {models.status === 'failed' && (
               <p role="alert" className="text-sm text-[#fca5a5]">
                 {models.message}
@@ -330,7 +357,7 @@ export default function AddAiKeyPage() {
         )}
 
         <div className="grid gap-2">
-          <Button type="submit" className="h-11" disabled={!info || !model || name.trim() === '' || saving}>
+          <Button type="submit" className="h-11" disabled={!info || !model || model.trim() === '' || name.trim() === '' || saving}>
             {saving ? 'Adding…' : 'Add key'}
           </Button>
           <Button type="button" variant="outline" className="h-11" disabled={saving} onClick={() => router.back()}>

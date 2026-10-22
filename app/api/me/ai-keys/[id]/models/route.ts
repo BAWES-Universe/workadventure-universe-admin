@@ -29,7 +29,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const result = await listModelsForSavedKey(user.id, id, { address });
     if (result.ok) return respond(request, { ok: true, models: result.models, facts: result.facts });
     if (result.status === 404) return respond(request, { error: result.message }, 404);
-    return respond(request, { ok: false, message: result.message });
+    return respond(request, { ok: false, message: result.message, ...(result.noList ? { noList: true } : {}) });
   } catch (error) {
     console.error('[AiKeys] Load models for a saved key failed:', error instanceof Error ? error.message : 'unknown');
     return respond(request, { ok: false, message: 'Something went wrong on our side. Try again.' }, 500);

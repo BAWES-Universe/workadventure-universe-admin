@@ -63,7 +63,7 @@ export async function listModelsForSavedKey(
   ownerId: string,
   id: string,
   input: { address?: unknown },
-): Promise<{ ok: true; models: string[]; facts: ModelFactsById } | { ok: false; status: 400 | 404 | 500; message: string }> {
+): Promise<{ ok: true; models: string[]; facts: ModelFactsById } | { ok: false; status: 400 | 404 | 500; message: string; noList?: true }> {
   const key = await loadOwnKey(ownerId, id);
   if (!key) return { ok: false, status: 404, message: 'Key not found' };
   const info = kindInfo((key.settings as { kind?: unknown } | null)?.kind);
@@ -72,7 +72,7 @@ export async function listModelsForSavedKey(
     return { ok: false, status: 400, message: `${info.label} can’t be moved to another address.` };
   }
   const result = await probeModels({ kind: info.kind, address: addressToTry(input.address, key.endpoint), apiKey: savedApiKey(key) });
-  return result.ok ? { ok: true, models: result.models, facts: result.facts } : { ok: false, status: 400, message: result.message };
+  return result.ok ? { ok: true, models: result.models, facts: result.facts } : { ok: false, status: 400, message: result.message, ...(result.noList ? { noList: true as const } : {}) };
 }
 
 export async function editSavedKey(ownerId: string, id: string, input: KeyEditInput): Promise<KeyEditResult> {
@@ -92,22 +92,25 @@ export async function editSavedKey(ownerId: string, id: string, input: KeyEditIn
   if (!target.ok) return { ok: false, status: 400, message: target.message };
   const apiKey = savedApiKey(key);
 
-  const models = await probeModels({ kind: info.kind, address, apiKey });
-  if (!models.ok) return { ok: false, status: 400, message: models.message };
+  const probed = await probeModels({ kind: info.kind, address, apiKey });
+  if (!probed.ok && !probed.noList) return { ok: false, status: 400, message: probed.message };
+  // A provider with no model list: nothing is on a list, so the chat reply below is the only check
+  const models = probed.ok ? probed : { models: [] as string[], facts: {} as ModelFactsById };
   const model = typedModel === null ? key.model : cleanModelId(typedModel, info.kind);
   if (!model) return { ok: false, status: 400, message: 'Pick a model first.' };
   // A model just picked must be on the list. The saved one may be an alias the list misses; the chat reply below decides.
-  if (typedModel !== null && !models.models.includes(model)) {
+  if (probed.ok && typedModel !== null && !models.models.includes(model)) {
     return { ok: false, status: 400, message: 'That model isn’t on the list. Load models again and pick one.' };
   }
-  const chat = await probeChat({ kind: info.kind, address, apiKey, model });
+  const chat = await probeChat({ kind: info.kind, address, apiKey, model, ...(probed.ok ? {} : { noList: true }) });
   if (!chat.ok) {
     // The new address can't give the saved model (not on its list, or it says it has none): the person picks one it has
     // in the same step, instead of being stuck with a model that was only on the old address.
     const missing = typedAddress && typedModel === null && (chat.reason === 'gone' || ((chat.reason === 'other' || chat.reason === 'request') && !models.models.includes(model)));
     // The model is there and the provider only refused this tiny request (a reasoning model that wants a bigger cap, say):
     // nothing is wrong with the key or the model, so the change is saved, the same as the health check lets it pass
-    if (chat.reason !== 'request' || missing) {
+    // A model with no list behind it (the provider has none) is saved only on a real reply
+    if (chat.reason !== 'request' || missing || !probed.ok) {
       return { ok: false, status: 400, message: missing ? `That address doesn’t have ${model}. Pick a model it has.` : chat.message, ...(missing ? { code: 'model-missing' as const } : {}) };
     }
   }
