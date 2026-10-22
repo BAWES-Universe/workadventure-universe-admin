@@ -40,6 +40,8 @@ type PickCardProps = Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, "title"
   description?: React.ReactNode
   /** Drawn before the text: a Radio, a tick box, an icon. */
   indicator?: React.ReactNode
+  /** Drawn after the text, at the end of the row: a Radio when a logo or icon comes first. */
+  trailing?: React.ReactNode
 }
 
 /**
@@ -47,7 +49,7 @@ type PickCardProps = Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, "title"
  * with `role="radio"` or `role="checkbox"` it carries `aria-checked` instead. Extra content goes below the text.
  */
 export const PickCard = React.forwardRef<HTMLButtonElement, PickCardProps>(
-  ({ picked, title, description, indicator, className, children, role, type = "button", ...props }, ref) => {
+  ({ picked, title, description, indicator, trailing, className, children, role, type = "button", ...props }, ref) => {
     const choice = role === "radio" || role === "checkbox" || role === "switch"
     return (
       <button
@@ -73,6 +75,7 @@ export const PickCard = React.forwardRef<HTMLButtonElement, PickCardProps>(
           {description && <span className="mt-0.5 block text-xs text-muted-foreground">{description}</span>}
           {children}
         </span>
+        {trailing}
       </button>
     )
   }

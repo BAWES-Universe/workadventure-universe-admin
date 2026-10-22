@@ -132,6 +132,28 @@ describe('Add a key: more providers, regions and search', () => {
     expect(screen.queryByRole('radio', { name: /^Cerebras/ })).toBeNull();
   });
 
+  it('puts a logo or icon slot before every provider, with the radio at the end of the row', () => {
+    render(<AddAiKeyPage />);
+    for (const radio of screen.getAllByRole('radio')) {
+      expect(within(radio).getAllByTestId('provider-logo')).toHaveLength(1);
+      expect(radio.firstElementChild?.getAttribute('data-testid')).toBe('provider-logo');
+    }
+  });
+
+  it('says the provider is untried only on the picked More provider, with the line from the models.dev numbers under its name', () => {
+    render(<AddAiKeyPage />);
+    fireEvent.change(screen.getByLabelText('Search providers'), { target: { value: 'baseten' } });
+    const card = screen.getByRole('radio', { name: /^Baseten/ });
+    expect(within(card).getByText('26 models, all open.')).toBeTruthy();
+    expect(screen.queryByText(/haven’t tried/)).toBeNull();
+    fireEvent.click(card);
+    expect(screen.getByText('We haven’t tried Baseten ourselves. Adding the key checks that it answers.')).toBeTruthy();
+    fireEvent.click(screen.getByRole('radio', { name: /^Baseten/ }));
+    fireEvent.change(screen.getByLabelText('Search providers'), { target: { value: '' } });
+    fireEvent.click(screen.getByRole('radio', { name: /^Groq/ }));
+    expect(screen.queryByText(/haven’t tried/)).toBeNull();
+  });
+
   it('says so, and points to Any OpenAI-compatible, when nothing matches', () => {
     render(<AddAiKeyPage />);
     fireEvent.change(screen.getByLabelText('Search providers'), { target: { value: 'zzz' } });

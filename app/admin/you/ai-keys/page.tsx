@@ -12,6 +12,8 @@ import type { AiKeySummary } from '@/lib/ai-keys';
 import { LoadError, LoadingRows, PageHeader, count } from '../../components/ds';
 import { FormSheet } from '../../components/form-sheet';
 import { Planet } from '../../components/ds/planet-icon';
+import { ProviderLogo } from '../../components/ds/provider-logo';
+import { kindInfo } from '@/lib/ai-key-kinds';
 import { PickCard, Radio, Segmented } from '@/components/ui/choice';
 import { useAiKeys } from '../../hooks/use-ai-keys';
 
@@ -236,6 +238,7 @@ export default function AiKeysPage() {
         >
           <header className="grid gap-1">
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <ProviderLogo info={key.kind ? kindInfo(key.kind) : undefined} />
               <h2 className="orbit-display text-lg font-bold [overflow-wrap:anywhere]">{key.name}</h2>
               <StatusPill down={key.status === 'down'} />
             </div>
