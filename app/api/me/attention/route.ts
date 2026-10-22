@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { meOriginAllowed, meRespond } from '@/lib/me-route';
+import { countOpenNotices } from '@/lib/notices';
 import { INVITATIONS_DISMISSED_KEY } from '@/lib/user-preferences';
 
 export const runtime = 'nodejs';
@@ -14,8 +15,8 @@ export async function OPTIONS(request: NextRequest) {
 
 /**
  * GET /api/me/attention - how many things wait for the caller's answer, for the count on Orbit's Orbit tab and the game's
- * Orbit button. Invitations for now: pending ones, less those dismissed on Orbit home. It only goes down when an
- * item is answered or dismissed, never just for being seen.
+ * Orbit button: pending invitations (less those dismissed on Orbit home) plus notices not yet dismissed (#374). It only
+ * goes down when an item is answered or dismissed, never just for being seen.
  */
 export async function GET(request: NextRequest) {
   if (!meOriginAllowed(request)) return respond(request, { error: 'Origin not allowed' }, 403);
@@ -23,7 +24,7 @@ export async function GET(request: NextRequest) {
   if (!user) return respond(request, { error: 'Unauthorized' }, 401);
 
   try {
-    const [pending, dismissed] = await Promise.all([
+    const [pending, dismissed, notices] = await Promise.all([
       prisma.membershipInvitation.findMany({
         where: { invitedUserId: user.id, status: 'pending' },
         select: { id: true },
@@ -32,10 +33,11 @@ export async function GET(request: NextRequest) {
         where: { userId_key: { userId: user.id, key: INVITATIONS_DISMISSED_KEY } },
         select: { value: true },
       }),
+      countOpenNotices(user.id),
     ]);
     const dismissedIds = new Set(dismissedInvitationIds(dismissed?.value));
     const invitations = pending.filter((invitation) => !dismissedIds.has(invitation.id)).length;
-    return respond(request, { count: invitations, invitations });
+    return respond(request, { count: invitations + notices, invitations });
   } catch (error) {
     console.error('[Attention] Count failed:', error);
     return respond(request, { error: 'Internal server error' }, 500);

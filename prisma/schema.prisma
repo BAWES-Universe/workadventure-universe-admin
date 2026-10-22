@@ -52,6 +52,7 @@ model User {
   avatarSetAuditLogs AvatarSetAuditLog[]
   preferences      UserPreference[]
   universeMemberships UniverseMember[]
+  notices          UserNotice[]
 
   @@map("users")
 }
@@ -70,6 +71,29 @@ model UserPreference {
 
   @@unique([userId, key])
   @@map("user_preferences")
+}
+
+// Something Orbit tells one person once, on Orbit home and in the attention count, until they dismiss it (#374: a key
+// is down, a bot moved to Universe AI). `dedupeKey` makes "once": the same thing for the same person is never added twice.
+model UserNotice {
+  id          String    @id @default(uuid())
+  userId      String    @map("user_id")
+  kind        String    @db.VarChar(40)
+  dedupeKey   String    @map("dedupe_key") @db.VarChar(200)
+  title       String    @db.VarChar(200)
+  body        String    @db.VarChar(1000)
+  // A short state pill beside the title ("Down"); null for none
+  badge       String?   @db.VarChar(20)
+  // An Orbit page the notice leads to
+  href        String?   @db.VarChar(300)
+  createdAt   DateTime  @default(now()) @map("created_at")
+  dismissedAt DateTime? @map("dismissed_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, dedupeKey])
+  @@index([userId, dismissedAt])
+  @@map("user_notices")
 }
 
 // Universes
