@@ -445,7 +445,11 @@ export async function PUT(
 
     // The provider ref must name an existing provider (an unchanged ref is let through)
     if (validatedData.aiProviderRef) {
-      const providerError = await checkAiProviderRef(validatedData.aiProviderRef, existingBot.aiProviderRef);
+      const providerError = await checkAiProviderRef(validatedData.aiProviderRef, existingBot.aiProviderRef, {
+        actorId: userId ?? null,
+        makerId: existingBot.createdById ?? null,
+        roomId: resolvedRoomId ?? existingBot.roomId,
+      });
       if (providerError) {
       const response = NextResponse.json(
         { error: providerError },

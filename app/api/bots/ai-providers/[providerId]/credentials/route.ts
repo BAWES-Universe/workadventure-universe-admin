@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { requireServiceToken } from '@/lib/service-tokens';
+import { providerPayload } from '@/lib/ai-provider-payload';
 import { UNIVERSE_AI_MISSING, UNIVERSE_AI_REF, resolveUniverseAiProvider } from '@/lib/universe-ai';
 
 /**
@@ -35,7 +36,8 @@ export async function GET(
       return NextResponse.json({ error: UNIVERSE_AI_MISSING }, { status: 503 });
     }
 
-    // A personal key (#374) is never served by provider id alone: no bot may use one yet, so it does not exist here.
+    // A personal key (#374) is never served by provider id alone: it is served by bot id (/api/bots/:id/ai-credentials), after
+    // checking whose bot it is and where the key is lent. Here it does not exist.
     if (!provider || provider.ownerId) {
       return NextResponse.json(
         { error: 'Provider not found' },
@@ -53,22 +55,7 @@ export async function GET(
     // Return provider config with encrypted credentials
     // apiKeyEncrypted is already encrypted (or null if not needed)
     // Bot server will decrypt using ENCRYPTION_KEY
-    return NextResponse.json({
-      providerId: provider.providerId,
-      name: provider.name,
-      type: provider.type,
-      enabled: provider.enabled,
-      endpoint: provider.endpoint,
-      apiKeyEncrypted: provider.apiKeyEncrypted, // Encrypted string or null
-      model: provider.model,
-      temperature: provider.temperature ? Number(provider.temperature) : null,
-      maxTokens: provider.maxTokens,
-      supportsStreaming: provider.supportsStreaming,
-      supportsVision: provider.supportsVision, // null=auto, true=force vision, false=force text-only
-      visionModel: provider.visionModel,
-      defaultVision: provider.defaultVision,
-      settings: provider.settings || {},
-    });
+    return NextResponse.json(providerPayload(provider));
   } catch (error: any) {
     if (error.message === 'Unauthorized: Invalid service token') {
       return NextResponse.json(

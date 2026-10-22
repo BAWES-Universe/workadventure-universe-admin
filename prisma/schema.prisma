@@ -749,6 +749,10 @@ model BotsAiUsage {
   latency         Int?
   error           Boolean  @default(false)
   timestamp       DateTime @default(now())
+  // Who talked to the bot (#374): the person's id as the bot server knows it; null when it was not told or for older rows
+  talkedUserId    String?  @map("talked_user_id") @db.VarChar(255)
+  // Whose key paid, when it was a personal key; null for the server's own providers. Set by Orbit, never taken from a request.
+  keyOwnerId      String?  @map("key_owner_id")
 
   provider        BotsAiProvider @relation(fields: [providerId], references: [providerId], onDelete: Cascade)
 
