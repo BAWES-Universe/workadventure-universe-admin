@@ -27,11 +27,11 @@ describe('the seven kinds, exactly as they were', () => {
     expect(row(kind)).toMatchObject(expected);
   });
 
-  it('gives every kind the OpenAI chat format, a Bearer key, and the default key check, apart from OpenRouter, Vercel and Hugging Face', () => {
+  it('gives every kind the OpenAI chat format, a Bearer key, and the default key check, apart from OpenRouter, Vercel, Hugging Face and the More providers', () => {
     for (const info of AI_KEY_KINDS) {
       expect(info.protocol).toBe('openai');
       expect(info.auth).toBe('bearer');
-      const expected = info.kind === 'openrouter' ? { type: 'key-info', paths: ['/key', '/auth/key'] } : info.kind === 'vercel' || info.kind === 'huggingface' ? { type: 'chat' } : { type: 'models' };
+      const expected = info.kind === 'openrouter' ? { type: 'key-info', paths: ['/key', '/auth/key'] } : info.kind === 'vercel' || info.kind === 'huggingface' || info.tier === 'more' ? { type: 'chat' } : { type: 'models' };
       expect(info.keyCheck).toEqual(expected);
     }
   });
@@ -83,7 +83,7 @@ describe('helpers', () => {
 });
 
 describe('the providers added after the seven', () => {
-  const added = AI_KEY_KINDS.slice(7);
+  const added = AI_KEY_KINDS.slice(7, 21);
 
   it('adds the named list and the two own-computer entries', () => {
     expect(added.map((entry) => entry.kind)).toEqual([
@@ -136,5 +136,41 @@ describe('the providers added after the seven', () => {
     expect(keyTarget({ kind: 'qwen', region: 'global' })).toMatchObject({ ok: true, target: { modelsUrl: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models', region: 'global' } });
     expect(keyTarget({ kind: 'qwen' })).toEqual({ ok: false, message: 'Pick a region first.' });
     expect(keyTarget({ kind: 'custom', address: 'https://x.example.com/anything' })).toMatchObject({ ok: true, target: { endpoint: 'https://x.example.com', modelsUrl: 'https://x.example.com/v1/models' } });
+  });
+});
+
+describe('More providers, from the snapshot', () => {
+  const more = AI_KEY_KINDS.filter((entry) => entry.tier === 'more');
+  const named = AI_KEY_KINDS.filter((entry) => entry.tier === 'named');
+
+  it('follows the 21 named kinds, which keep their order', () => {
+    expect(AI_KEY_KINDS.slice(0, 21).every((entry) => entry.tier === 'named')).toBe(true);
+    expect(named).toHaveLength(21);
+    expect(more.length).toBeGreaterThanOrEqual(20);
+  });
+
+  it('is hosted with a key, on the OpenAI type, at one https address, and never takes a typed address', () => {
+    for (const info of more) {
+      expect(info).toMatchObject({ group: 'hosted', providerType: 'openai', address: 'none', apiKey: 'required', protocol: 'openai' });
+      expect(info.base).toMatch(/^https:\/\/[^\s$]+[^/]$/);
+      expect(info.regions).toBeUndefined();
+      expect(info.steps.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('proves a key with a chat reply, since none of them has been tried for a public model list', () => {
+    for (const info of more) expect(info.keyCheck).toEqual({ type: 'chat' });
+  });
+
+  it('never repeats a provider the page names by hand', () => {
+    const labels = new Set(named.map((entry) => entry.label.toLowerCase()));
+    for (const info of more) expect(labels.has(info.label.toLowerCase())).toBe(false);
+  });
+
+  it('is found by its id like any other kind, and keeps the address guard off (it is the provider’s own address)', () => {
+    const info = more[0];
+    expect(kindInfo(info.kind)).toBe(info);
+    expect(isTypedEndpoint(info, info.base!)).toBe(false);
+    expect(keyTarget({ kind: info.kind })).toMatchObject({ ok: true, target: { endpoint: info.base, modelsUrl: `${info.base}/models` } });
   });
 });

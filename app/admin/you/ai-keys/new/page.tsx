@@ -24,18 +24,25 @@ const SHOWN = 30;
 
 function KindCard({ info, picked, onPick }: { info: AiKeyKindInfo; picked: boolean; onPick: () => void }) {
   return (
-    <PickCard role="radio" picked={picked} onClick={onPick} indicator={<Radio checked={picked} />} title={info.label} description={info.benefit} className="items-start">
-      {picked && (
-        <ol className="mt-3 grid list-decimal gap-2 border-t border-foreground/10 pt-3 pl-5 text-[13px] font-normal">
-          {info.steps.map((step) => (
-            <li key={step.text}>
-              {step.text}
-              {step.code && <code className="mt-1.5 block overflow-x-auto rounded-xl bg-foreground/[.08] px-3 py-2 text-xs">{step.code}</code>}
-            </li>
-          ))}
-        </ol>
+    <div className="grid gap-1.5">
+      <PickCard role="radio" picked={picked} onClick={onPick} indicator={<Radio checked={picked} />} title={info.label} description={info.benefit} className="items-start">
+        {picked && (
+          <ol className="mt-3 grid list-decimal gap-2 border-t border-foreground/10 pt-3 pl-5 text-[13px] font-normal">
+            {info.steps.map((step) => (
+              <li key={step.text}>
+                {step.text}
+                {step.code && <code className="mt-1.5 block overflow-x-auto rounded-xl bg-foreground/[.08] px-3 py-2 text-xs">{step.code}</code>}
+              </li>
+            ))}
+          </ol>
+        )}
+      </PickCard>
+      {picked && info.docs && (
+        <a href={info.docs} target="_blank" rel="noreferrer noopener" className="flex min-h-11 items-center px-3.5 text-[13px] underline underline-offset-2">
+          Read about {info.label}
+        </a>
       )}
-    </PickCard>
+    </div>
   );
 }
 
@@ -49,6 +56,7 @@ export default function AddAiKeyPage() {
   const [kind, setKind] = useState<AiKeyKind | null>(null);
   const [region, setRegion] = useState<string | null>(null);
   const [find, setFind] = useState('');
+  const [showMore, setShowMore] = useState(false);
   const [address, setAddress] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [models, setModels] = useState<Models>({ status: 'none' });
@@ -62,9 +70,13 @@ export default function AddAiKeyPage() {
   const name = typedName ?? (info ? `My ${info.label}` : '');
   // The picked type stays on screen whatever is typed in the search
   const needle = find.trim().toLowerCase();
-  const shown = AI_KEY_KINDS.filter((entry) => entry.kind === kind || !needle || `${entry.label} ${entry.benefit}`.toLowerCase().includes(needle));
+  // The listed-by-models.dev line is the same on every one of the "more" providers, so only their name is searched
+  const matches = (entry: AiKeyKindInfo) => entry.kind === kind || !needle || (entry.tier === 'more' ? entry.label : `${entry.label} ${entry.benefit}`).toLowerCase().includes(needle);
+  const shown = AI_KEY_KINDS.filter((entry) => entry.tier !== 'hidden' && (entry.tier === 'named' ? matches(entry) : entry.kind === kind || (needle !== '' ? matches(entry) : showMore)));
   const ownComputer = shown.filter((entry) => entry.group === 'own-computer');
-  const hosted = shown.filter((entry) => entry.group === 'hosted');
+  const hosted = shown.filter((entry) => entry.group === 'hosted' && entry.tier === 'named');
+  const more = shown.filter((entry) => entry.tier === 'more');
+  const moreCount = AI_KEY_KINDS.filter((entry) => entry.tier === 'more').length;
 
   function pickKind(next: AiKeyKind) {
     // Clicking the type that is already picked (or inside its open card) changes nothing.
@@ -181,6 +193,17 @@ export default function AddAiKeyPage() {
                 <KindCard key={entry.kind} info={entry} picked={kind === entry.kind} onPick={() => pickKind(entry.kind)} />
               ))}
             </div>}
+            {more.length > 0 && <div className="grid gap-2">
+              <h2 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">More providers</h2>
+              {more.map((entry) => (
+                <KindCard key={entry.kind} info={entry} picked={kind === entry.kind} onPick={() => pickKind(entry.kind)} />
+              ))}
+            </div>}
+            {needle === '' && (
+              <Button type="button" variant="outline" className="h-11 w-fit px-5" aria-expanded={showMore} onClick={() => setShowMore((open) => !open)}>
+                {showMore ? 'Show fewer providers' : `More providers (${moreCount})`}
+              </Button>
+            )}
           </div>
         </fieldset>
 
