@@ -121,6 +121,7 @@ model Universe {
   roles      Role[]
   members    UniverseMember[]
   membershipInvitations MembershipInvitation[]
+  aiKeyLends AiKeyLend[]
 
   @@map("universes")
 }
@@ -712,11 +713,28 @@ model BotsAiProvider {
 
   owner             User?    @relation("AiKeyOwner", fields: [ownerId], references: [id], onDelete: Cascade)
   usage             BotsAiUsage[]
+  lends             AiKeyLend[]
 
   @@index([enabled])
   @@index([type])
   @@index([ownerId])
   @@map("bots_ai_providers")
+}
+
+// A person's AI key lent to a universe (#374): bots made there by the key's owner may run on it, and nobody else's may.
+// Lending moves no bot; each bot is pointed at the key by its maker on the bot page.
+model AiKeyLend {
+  id         String   @id @default(uuid())
+  providerId String   @map("provider_id") @db.VarChar(50)
+  universeId String   @map("universe_id")
+  lentAt     DateTime @default(now()) @map("lent_at")
+
+  provider BotsAiProvider @relation(fields: [providerId], references: [providerId], onDelete: Cascade)
+  universe Universe       @relation(fields: [universeId], references: [id], onDelete: Cascade)
+
+  @@unique([providerId, universeId])
+  @@index([universeId])
+  @@map("ai_key_lends")
 }
 
 // AI Usage Tracking

@@ -3,17 +3,23 @@ import { GET } from '@/app/api/me/ai-keys/route';
 import { DELETE } from '@/app/api/me/ai-keys/[id]/route';
 import { getSessionUser } from '@/lib/auth-session';
 import { prisma } from '@/lib/db';
+import { moveBotsOffKey } from '@/lib/ai-key-lend';
 
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
 jest.mock('@/lib/db', () => ({
   prisma: {
-    botsAiProvider: { findMany: jest.fn(), deleteMany: jest.fn() },
+    botsAiProvider: { findMany: jest.fn(), findFirst: jest.fn(), deleteMany: jest.fn() },
     botsAiUsage: { groupBy: jest.fn() },
+    aiKeyLend: { findMany: jest.fn(async () => []) },
+    bot: { findMany: jest.fn(async () => []) },
   },
 }));
+jest.mock('@/lib/ai-key-lend', () => ({ moveBotsOffKey: jest.fn(async () => ({ count: 0, universes: [] })) }));
 
-const provider = prisma.botsAiProvider as unknown as Record<'findMany' | 'deleteMany', jest.Mock>;
+const provider = prisma.botsAiProvider as unknown as Record<'findMany' | 'findFirst' | 'deleteMany', jest.Mock>;
 const usage = prisma.botsAiUsage as unknown as { groupBy: jest.Mock };
+const lendRows = (prisma as unknown as { aiKeyLend: { findMany: jest.Mock } }).aiKeyLend;
+const botRows = (prisma as unknown as { bot: { findMany: jest.Mock } }).bot;
 const alice = { id: 'user-a', uuid: 'uuid-a', email: 'a@example.com', name: 'A', tags: [], isSuperAdmin: false };
 
 const row = {
@@ -47,9 +53,36 @@ describe('GET /api/me/ai-keys', () => {
     const body = await response.json();
     expect(body.keys).toEqual([{
       id: 'key-1', name: 'My DeepSeek', kind: 'deepseek', kindLabel: 'DeepSeek', model: 'deepseek-v4-flash', address: null,
-      last4: '4f2a', month: { replies: 12, tokens: 3400 }, createdAt: '2026-10-19T00:00:00.000Z',
+      last4: '4f2a', month: { replies: 12, tokens: 3400 }, lentTo: [], createdAt: '2026-10-19T00:00:00.000Z',
     }]);
     expect(JSON.stringify(body)).not.toContain('secret');
+  });
+
+  it('says where a key is lent and which bots run on it there, with their replies this month', async () => {
+    provider.findMany.mockResolvedValue([row]);
+    usage.groupBy.mockImplementation(async ({ by }: { by: string[] }) =>
+      by.includes('botId')
+        ? [{ providerId: 'key-1', botId: 'b1', _sum: { apiCalls: 1240 } }]
+        : [{ providerId: 'key-1', _sum: { apiCalls: 1240, tokensUsed: 412000 } }]);
+    lendRows.findMany.mockResolvedValue([
+      { providerId: 'key-1', universe: { id: 'bawes', name: 'BAWES Universe', ownerId: 'someone-else' } },
+      { providerId: 'key-1', universe: { id: 'sandbox', name: 'Sandbox Universe', ownerId: 'user-a' } },
+    ]);
+    botRows.findMany.mockResolvedValue([
+      { id: 'b1', name: 'Sam', aiProviderRef: 'key-1', room: { world: { universeId: 'bawes' } } },
+      { id: 'b2', name: 'Elsewhere', aiProviderRef: 'key-1', room: { world: { universeId: 'not-lent-here' } } },
+    ]);
+    const [key] = (await (await list()).json()).keys;
+    expect(key.lentTo).toEqual([
+      { universeId: 'bawes', universeName: 'BAWES Universe', ownedByYou: false, bots: [{ id: 'b1', name: 'Sam', replies: 1240 }] },
+      { universeId: 'sandbox', universeName: 'Sandbox Universe', ownedByYou: true, bots: [] },
+    ]);
+    // Only this key's lends and bots are read
+    expect(lendRows.findMany.mock.calls[0][0].where).toEqual({ providerId: { in: ['key-1'] } });
+    expect(botRows.findMany.mock.calls[0][0].where).toEqual({ aiProviderRef: { in: ['key-1'] } });
+    lendRows.findMany.mockResolvedValue([]);
+    botRows.findMany.mockResolvedValue([]);
+    usage.groupBy.mockReset();
   });
 
   it('shows only the host of an own-computer key, never its path or query', async () => {
@@ -82,14 +115,38 @@ describe('DELETE /api/me/ai-keys/:id', () => {
   });
 
   it('revokes the caller’s own key, matching on owner so no one else’s can go', async () => {
+    provider.findFirst.mockResolvedValue({ providerId: 'key-1' });
     provider.deleteMany.mockResolvedValue({ count: 1 });
-    expect((await revoke('key-1')).status).toBe(200);
+    const response = await revoke('key-1');
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: 'revoked', moved: 0 });
+    expect(provider.findFirst).toHaveBeenCalledWith({ where: { providerId: 'key-1', ownerId: 'user-a' }, select: { providerId: true } });
     expect(provider.deleteMany).toHaveBeenCalledWith({ where: { providerId: 'key-1', ownerId: 'user-a' } });
   });
 
-  it('gives the same "not found" for someone else’s key and for a server provider', async () => {
-    provider.deleteMany.mockResolvedValue({ count: 0 });
+  it('moves the bots on the key to Universe AI before it is deleted, and says how many', async () => {
+    provider.findFirst.mockResolvedValue({ providerId: 'key-1' });
+    provider.deleteMany.mockResolvedValue({ count: 1 });
+    const order: string[] = [];
+    (moveBotsOffKey as jest.Mock).mockImplementationOnce(async () => {
+      order.push('moved');
+      return { count: 2, universes: [] };
+    });
+    provider.deleteMany.mockImplementationOnce(async () => {
+      order.push('deleted');
+      return { count: 1 };
+    });
+    const response = await revoke('key-1');
+    expect(await response.json()).toEqual({ status: 'revoked', moved: 2 });
+    expect(order).toEqual(['moved', 'deleted']);
+    expect(moveBotsOffKey).toHaveBeenCalledWith('key-1', { actor: { id: 'user-a', name: 'A' }, why: 'revoked' });
+  });
+
+  it('gives the same "not found" for someone else’s key and for a server provider, and moves nothing', async () => {
+    provider.findFirst.mockResolvedValue(null);
     expect((await revoke('key-of-bob')).status).toBe(404);
     expect((await revoke('deepseek-flash')).status).toBe(404);
+    expect(moveBotsOffKey).not.toHaveBeenCalled();
+    expect(provider.deleteMany).not.toHaveBeenCalled();
   });
 });

@@ -21,6 +21,8 @@ export interface AiKeySummary {
   /** The last four characters of a hosted key. */
   last4: string | null;
   month: { replies: number; tokens: number };
+  /** The universes it is lent to, and the bots running on it there with their replies this month. */
+  lentTo: { universeId: string; universeName: string; /** The key's owner owns that universe. */ ownedByYou: boolean; bots: { id: string; name: string; replies: number }[] }[];
   createdAt: string;
 }
 
@@ -51,6 +53,27 @@ export async function listAiKeys(ownerId: string): Promise<AiKeySummary[]> {
     _sum: { apiCalls: true, tokensUsed: true },
   });
   const spent = new Map(usage.map((entry) => [entry.providerId, entry._sum]));
+
+  // Where each key is lent, and which bots run on it there (a bot is on a key when its ref is the key's id)
+  const ids = rows.map((row) => row.providerId);
+  const [lends, bots, perBot] = await Promise.all([
+    prisma.aiKeyLend.findMany({
+      where: { providerId: { in: ids } },
+      orderBy: { lentAt: 'asc' },
+      select: { providerId: true, universe: { select: { id: true, name: true, ownerId: true } } },
+    }),
+    prisma.bot.findMany({
+      where: { aiProviderRef: { in: ids } },
+      orderBy: { name: 'asc' },
+      select: { id: true, name: true, aiProviderRef: true, room: { select: { world: { select: { universeId: true } } } } },
+    }),
+    prisma.botsAiUsage.groupBy({
+      by: ['providerId', 'botId'],
+      where: { providerId: { in: ids }, error: false, timestamp: { gte: startOfMonth() } },
+      _sum: { apiCalls: true },
+    }),
+  ]);
+  const repliesOf = new Map(perBot.map((entry) => [`${entry.providerId}:${entry.botId}`, Number(entry._sum.apiCalls ?? 0)]));
   return rows.map((row) => {
     const settings = (row.settings ?? {}) as { kind?: unknown };
     const info = kindInfo(settings.kind);
@@ -64,6 +87,16 @@ export async function listAiKeys(ownerId: string): Promise<AiKeySummary[]> {
       address: info?.group === 'own-computer' ? hostOf(row.endpoint) : null,
       last4: row.apiKeyLast4,
       month: { replies: Number(sum?.apiCalls ?? 0), tokens: Number(sum?.tokensUsed ?? 0) },
+      lentTo: lends
+        .filter((lend) => lend.providerId === row.providerId)
+        .map((lend) => ({
+          universeId: lend.universe.id,
+          universeName: lend.universe.name,
+          ownedByYou: lend.universe.ownerId === ownerId,
+          bots: bots
+            .filter((bot) => bot.aiProviderRef === row.providerId && bot.room.world.universeId === lend.universe.id)
+            .map((bot) => ({ id: bot.id, name: bot.name, replies: repliesOf.get(`${row.providerId}:${bot.id}`) ?? 0 })),
+        })),
       createdAt: row.createdAt.toISOString(),
     };
   });
