@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { addNotice, clearNotices } from '@/lib/notices';
 import { probeChat, probeModels } from '@/lib/ai-key-models';
@@ -97,6 +98,19 @@ describe('recordReply', () => {
     await recordReply('key-1', { ok: false });
     expect(db.update).toHaveBeenCalledWith(expect.objectContaining({ data: { failedReplies: { increment: 1 } } }));
     expect(notice).not.toHaveBeenCalled();
+  });
+
+  it('does nothing more when the key is revoked between the read and the count', async () => {
+    db.findFirst.mockResolvedValue(row({ failedReplies: 1 }));
+    db.update.mockRejectedValue(new Prisma.PrismaClientKnownRequestError('Record not found', { code: 'P2025', clientVersion: 'test' }));
+    await expect(recordReply('key-1', { ok: false })).resolves.toBeUndefined();
+    expect(notice).not.toHaveBeenCalled();
+  });
+
+  it('still fails loudly on any other database error while counting', async () => {
+    db.findFirst.mockResolvedValue(row());
+    db.update.mockRejectedValue(new Error('connection lost'));
+    await expect(recordReply('key-1', { ok: false })).rejects.toThrow('connection lost');
   });
 
   it('marks it Down after two in a row', async () => {
