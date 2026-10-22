@@ -11,6 +11,7 @@ import { useToast } from '@/components/ui/toast';
 import { authenticatedFetch } from '@/lib/client-auth';
 import { AI_KEY_KINDS, kindInfo, type AiKeyKind, type AiKeyKindInfo } from '@/lib/ai-key-kinds';
 import { PageHeader } from '../../../components/ds';
+import { AiKeyFailure, aiKeyError, aiKeyFailureText } from '../../../hooks/use-ai-keys';
 
 type Models = { status: 'none' } | { status: 'loading' } | { status: 'ready'; models: string[]; facts: Record<string, { tools?: boolean; vision?: boolean }> } | { status: 'failed'; message: string } | { status: 'typed' };
 
@@ -79,6 +80,8 @@ export default function AddAiKeyPage() {
   const moreCount = AI_KEY_KINDS.filter((entry) => entry.tier === 'more').length;
 
   function pickKind(next: AiKeyKind) {
+    // Clicking the type that is already picked (or inside its open card) changes nothing.
+    if (next === kind) return;
     setKind(next);
     setRegion(null);
     changed();
@@ -139,12 +142,12 @@ export default function AddAiKeyPage() {
       });
       if (!response.ok) {
         const data: { error?: string } = await response.json().catch(() => ({}));
-        throw new Error(data.error ?? 'That didn’t work. Try again.');
+        throw new AiKeyFailure(aiKeyError(response.status, data.error));
       }
       addToast({ description: `${name} added`, variant: 'success', duration: 2500 });
       router.push('/admin/you/ai-keys');
     } catch (error) {
-      setFailure(error instanceof Error ? error.message : 'That didn’t work. Try again.');
+      setFailure(aiKeyFailureText(error));
       setSaving(false);
     }
   }
@@ -217,7 +220,7 @@ export default function AddAiKeyPage() {
                   key={entry.id}
                   role="radio"
                   picked={region === entry.id}
-                  onClick={() => { setRegion(entry.id); changed(); }}
+                  onClick={() => { if (entry.id === region) return; setRegion(entry.id); changed(); }}
                   indicator={<Radio checked={region === entry.id} />}
                   title={entry.label}
                   description={new URL(entry.base).host}
@@ -337,7 +340,7 @@ export default function AddAiKeyPage() {
           <div className="grid gap-1.5">
             <Label htmlFor="ai-key-name">Name</Label>
             <Input id="ai-key-name" maxLength={60} value={name} onChange={(event) => setTypedName(event.target.value)} className="h-11 rounded-xl" />
-            <p className={FIELD_HINT}>Only you see it, on this page and in Runs on.</p>
+            <p className={FIELD_HINT}>Shown here, and in Runs on for the bots that use it.</p>
           </div>
         )}
 

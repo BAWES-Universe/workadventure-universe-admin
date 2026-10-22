@@ -92,7 +92,7 @@ const TUNNEL = 'Make it reachable from the web. Run:';
 const NAMED_KINDS: AiKeyKindInfo[] = [
   define({
     kind: 'lmstudio', label: 'LM Studio', group: 'own-computer', providerType: 'lmstudio', address: 'required', apiKey: 'optional',
-    benefit: 'Free. Runs on your computer, so conversations go only there.',
+    benefit: 'Free. Runs on your computer, so conversations stay there while it’s on.',
     steps: [
       { text: 'In LM Studio, load a model and start the server (Developer tab).' },
       { text: TUNNEL, code: 'cloudflared tunnel --url http://localhost:1234' },
@@ -266,6 +266,8 @@ const MORE_KINDS: AiKeyKindInfo[] = snapshot.providers
       providerType: 'openai',
       address: 'none',
       apiKey: 'required',
+      // We have not tried these, so we cannot tell whether a provider lists its models to anyone: only a chat reply proves the key.
+      keyCheck: { type: 'chat' },
       benefit: 'Listed by models.dev; we haven’t tried it ourselves.',
       base: provider.base,
       docs: 'docs' in provider ? provider.docs : undefined,
@@ -318,7 +320,12 @@ export function chatProbeBody(info: AiKeyKindInfo, model: string): Record<string
   return { model, messages: [{ role: 'user', content: 'Say ok.' }], stream: false, [info.tokenLimitField ?? 'max_tokens']: 16 };
 }
 
-const withoutSlash = (url: string) => url.replace(/\/+$/, '');
+const withoutSlash = (url: string) => {
+  // A loop, not a regex: a long run of slashes inside a typed address must not take quadratic time.
+  let end = url.length;
+  while (end > 0 && url[end - 1] === '/') end -= 1;
+  return url.slice(0, end);
+};
 
 /** Every address the provider itself serves from: its one base, or the base of each region. */
 export function providerBases(info: AiKeyKindInfo): string[] {

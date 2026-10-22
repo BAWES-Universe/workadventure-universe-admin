@@ -8,7 +8,7 @@ import { isSuperAdmin } from '@/lib/super-admin';
 
 /**
  * Can this person do this with this bot? (#426) What people do with a bot: chat in its bubble on the map, message it
- * privately, or call it over. The bot server and the game ask this with the service token before they let it happen,
+ * privately, or summon it. The bot server and the game ask this with the service token before they let it happen,
  * and show `reason` when the answer is no.
  *
  * The answer comes from the role permissions in the bot's world (the same number the game gets, see permissionsForWorld),
@@ -54,7 +54,7 @@ function refusal(
   fixedReply?: string | null,
 ): BotAccessAnswer {
   if (code === 'sign_in_required') return { allowed: false, code, reason: `Sign in to message ${botName}.` };
-  if (action === 'summon') return { allowed: false, code, reason: `${botName}'s owner limits who can call it over.` };
+  if (action === 'summon') return { allowed: false, code, reason: `${botName}'s owner limits who can summon it.` };
   if (action === 'chat') {
     const reason = `${botName}'s owner limits who can chat with it.`;
     return fixedReply ? { allowed: false, code, reason, reply: fixedReply } : { allowed: false, code, reason };

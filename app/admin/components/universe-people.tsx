@@ -1,6 +1,8 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Crown } from 'lucide-react';
+import { cn } from '@/lib/utils';
 import { authenticatedFetch } from '@/lib/client-auth';
 import { RolePill } from '@/components/ui/choice';
 import type { RoleInfo, RoleSummary } from '@/lib/member-roles';
@@ -75,6 +77,11 @@ export function useWorldNames(basics: Loaded<UniverseBasics>): Map<string, strin
   );
 }
 
+/** Created the universe: a small gold crown, not a role. */
+export function OwnerCrown({ className }: { className?: string }) {
+  return <Crown role="img" aria-label="Owner" className={cn('h-3.5 w-3.5 shrink-0 text-[#FACC15]', className)} />;
+}
+
 /** A role as a neutral pill with its colour dot. */
 export function RoleChip({ name, color }: { name: string; color: string }) {
   return <RolePill name={name} color={color} />;
@@ -84,6 +91,7 @@ export function RoleChip({ name, color }: { name: string; color: string }) {
 export function RoleSummaryPills({ summary, showWhere = true }: { summary: RoleSummary; showWhere?: boolean }) {
   return (
     <span className="inline-flex flex-wrap items-center gap-1.5">
+      {summary.owner && <OwnerCrown />}
       <RoleChip name={summary.name} color={summary.color} />
       {showWhere && summary.where && <span className="text-xs text-muted-foreground">{summary.where}</span>}
       {summary.more > 0 && <RolePill name={`+${summary.more}`} />}

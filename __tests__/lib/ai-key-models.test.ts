@@ -12,7 +12,7 @@ const get = safeGet as jest.Mock;
 const post = safeRequest as jest.Mock;
 
 const answer = (status: number, body: unknown) => ({ ok: true, status, body: typeof body === 'string' ? body : JSON.stringify(body) });
-const checkedOk = { url: new URL('https://x.example.com'), address: '93.184.216.34', family: 4 };
+const checkedOk = { url: new URL('https://x.example.com'), address: '93.184.216.34', family: 4, addresses: [{ address: '93.184.216.34', family: 4 }] };
 
 beforeEach(() => {
   jest.resetAllMocks();
@@ -244,6 +244,9 @@ describe('probeChat', () => {
     ['Model Not Exist'],
     ['unknown model: foo'],
     ['{"error":{"code":"model_not_found"}}'],
+    ['{"error":{"code":"model_not_supported"}}'],
+    ['The model Qwen/Qwen2.5-7B-Instruct does not exist'],
+    ['The model llama-3.1-8b is not supported by this key.'],
   ])('reads a 400 that says the model is the problem (%s) as a model the key cannot use', async (message) => {
     post.mockResolvedValue(answer(400, { error: { message } }));
     expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'm' })).toMatchObject({ ok: false, reason: 'gone' });
@@ -263,6 +266,7 @@ describe('probeChat', () => {
     ['max_tokens is too small for this model, use at least 1024'],
     ['invalid value for parameter temperature'],
     ['unknown parameter: enable_thinking'],
+    ['max_tokens is too large for this model. The value 1.5 is not supported'],
   ])('keeps a 400 about the request itself (%s) as the request’s problem', async (message) => {
     post.mockResolvedValue(answer(400, { error: { message } }));
     expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'm' })).toMatchObject({ ok: false, reason: 'request' });

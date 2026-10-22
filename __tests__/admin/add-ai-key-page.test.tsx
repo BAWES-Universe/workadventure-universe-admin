@@ -187,6 +187,26 @@ describe('Add a key: more providers, regions and search', () => {
     expect(screen.getByRole('radio', { name: /^Global/ }).getAttribute('aria-checked')).toBe('false');
   });
 
+  it('keeps the region when the picked type is clicked again', () => {
+    render(<AddAiKeyPage />);
+    fireEvent.click(screen.getByRole('radio', { name: /^Qwen/ }));
+    fireEvent.click(screen.getByRole('radio', { name: /^Global/ }));
+    fireEvent.click(screen.getByRole('radio', { name: /^Qwen/ }));
+    expect(screen.getByRole('radio', { name: /^Global/ }).getAttribute('aria-checked')).toBe('true');
+  });
+
+  it('keeps the loaded models when the picked region is clicked again', async () => {
+    fetchMock.mockImplementation(() => json({ ok: true, models: ['qwen-plus', 'qwen-max'] }));
+    render(<AddAiKeyPage />);
+    fireEvent.click(screen.getByRole('radio', { name: /^Qwen/ }));
+    fireEvent.click(screen.getByRole('radio', { name: /^Global/ }));
+    fireEvent.change(screen.getByLabelText(/API key/), { target: { value: 'sk-1' } });
+    fireEvent.click(screen.getByRole('button', { name: /Load models/ }));
+    await screen.findByText(/It answered/);
+    fireEvent.click(screen.getByRole('radio', { name: /^Global/ }));
+    expect(screen.getByText(/It answered/)).toBeTruthy();
+  });
+
   it('shows no region for a provider that has one address', () => {
     render(<AddAiKeyPage />);
     fireEvent.click(screen.getByRole('radio', { name: /^Mistral/ }));
