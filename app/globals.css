@@ -420,7 +420,7 @@ a[href] {
 .orbit-menu-sections ul { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 12px; }
 .orbit-menu-sections a { display: flex; align-items: center; gap: 10px; min-height: 49px; border-radius: 10px; padding: 5px; font-size: 12px; }
 .orbit-menu-sections a:hover, .orbit-menu-sections a[aria-current] { background: hsl(var(--accent)); color: hsl(var(--accent-foreground)); }
-.orbit-tool-icon { flex-shrink: 0; display: grid; place-items: center; width: 32px; height: 32px; border: 1px solid hsl(var(--border)); border-radius: 50%; color: hsl(var(--muted-foreground)); }
+.orbit-tool-icon { flex-shrink: 0; display: grid; place-items: center; width: 32px; height: 32px; color: hsl(var(--muted-foreground)); }
 .orbit-tool-arrow { margin-left: auto; flex-shrink: 0; opacity: .5; }
 .orbit-menu-account { max-width: 420px; border-top: 1px solid hsl(var(--border)); padding-top: 16px; }
 .orbit-menu-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; border-top: 1px solid hsl(var(--border)); padding-top: 14px; }
@@ -500,18 +500,14 @@ a[href] {
 /* Headings everywhere in Orbit: the display face, bold, tight (the legacy pages included). */
 #orbit-main :is(h1, h2, h3) { font-family: var(--font-display); letter-spacing: -0.02em; }
 
-/* Kinds of place: a coloured chip, and a wash of the same colour on hover. */
-.orbit-kind { display: inline-grid; place-items: center; flex: none; width: 2.25rem; height: 2.25rem; border-radius: 0.75rem; color: #fff; }
+/* Kinds of place: a plain glyph in the kind's colour, no box, and a wash of the same colour on hover. */
+.orbit-kind { display: inline-grid; place-items: center; flex: none; width: 2.25rem; height: 2.25rem; color: hsl(var(--foreground)); }
 .orbit-kind[data-kind='universe'] { color: var(--kind-universe-solid); }
 .orbit-kind[data-kind='world'] { color: var(--kind-world-solid); }
 .orbit-kind[data-kind='room'] { color: var(--kind-room-solid); }
 .orbit-kind[data-kind='star'] { color: var(--kind-star-solid); }
-.orbit-kind[data-kind='role'],
-.orbit-kind[data-kind='everyone'] { color: hsl(var(--foreground)); }
-.orbit-kind[data-kind='people'] { background-image: var(--kind-people); }
-.orbit-kind[data-kind='people'][data-plain] { background-image: none; color: var(--kind-people-solid); }
-/* Admin tools: neutral, so a template or a bot never looks like a room or a person. */
-.orbit-kind:is([data-kind='template'], [data-kind='category'], [data-kind='map'], [data-kind='bot'], [data-kind='provider'], [data-kind='avatar']) { background: hsl(var(--foreground) / 0.1); color: hsl(var(--foreground)); box-shadow: inset 0 0 0 1px hsl(var(--foreground) / 0.12); }
+.orbit-kind[data-kind='people'] { color: var(--kind-people-solid); }
+/* Admin tools (template, category, map, bot, provider, avatar) keep the neutral foreground, so one never looks like a room or a person. */
 .orbit-kind-wash { position: relative; isolation: isolate; }
 .orbit-kind-wash::before { content: ''; position: absolute; inset: 0; z-index: -1; border-radius: inherit; opacity: 0; transition: opacity 200ms; pointer-events: none; }
 .orbit-kind-wash[data-kind='universe']::before { background: linear-gradient(135deg, rgb(134 41 252 / .16), transparent 55%, rgb(65 86 246 / .2)); }

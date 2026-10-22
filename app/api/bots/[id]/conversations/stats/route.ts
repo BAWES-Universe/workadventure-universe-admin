@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { botReadDenied } from '@/lib/access-scope';
 import { corsHeaders } from '@/lib/cors';
+import { isBotHidden } from '@/lib/bot-privacy';
 
 export const runtime = 'nodejs';
 
@@ -27,6 +28,11 @@ export async function GET(
     const { id: botId } = await params;
     const denied = await botReadDenied(request, botId, corsHeaders());
     if (denied) return denied;
+
+    // Hide bot conversations (#435): the saved transcripts are hidden, counts and dates included.
+    if (await isBotHidden(botId)) {
+      return NextResponse.json({ botId, private: true }, { headers: corsHeaders() });
+    }
 
     // Get stats
     const [totalConversations, oldest, newest] = await Promise.all([

@@ -25,6 +25,7 @@ const BAWES = { id: 'un-bawes', name: 'BAWES' };
 const FUN = { id: 'un-fun', name: 'Fun Zone' };
 const person = (name: string, extra: Partial<LivePlace['people'][number]> = {}) => ({
   uuid: name,
+  userId: `u-${name}`,
   name,
   status: 'online' as const,
   woka: [],
@@ -79,6 +80,35 @@ describe('Live now', () => {
     expect(within(rows[0]).getByText('Here')).toBeTruthy();
     expect(within(rows[1]).getByText('Busy')).toBeTruthy();
     expect(within(rows[1]).getByRole('link', { name: 'Go: Arcade' }).getAttribute('href')).toBe('/admin/rooms/arcade');
+  });
+
+  it('opens their profile card when a person is tapped, and keeps Go as its own button', async () => {
+    fetchMock.mockResolvedValue({ ok: true, json: async () => ({}) });
+    render(<LiveNowView view={view} layout="space" />);
+    const rows = screen.getAllByTestId('live-person');
+    // Go is a separate link, not swallowed by the row.
+    expect(within(rows[1]).getByRole('link', { name: 'Go: Arcade' })).toBeTruthy();
+    fireEvent.click(within(rows[1]).getByRole('button', { name: /Omar/ }));
+    const sheet = await screen.findByTestId('live-person-sheet');
+    expect(within(sheet).getByText('Omar')).toBeTruthy();
+    expect(within(sheet).getByText('Busy · In Arcade')).toBeTruthy();
+    expect(within(sheet).getByRole('link', { name: 'Full profile' }).getAttribute('href')).toBe('/admin/users/u-Omar');
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/admin/users/u-Omar'));
+  });
+
+  it('keeps an open profile card through a refresh that empties People online, and it stays closed once closed', async () => {
+    fetchMock.mockResolvedValue({ ok: true, json: async () => ({}) });
+    const { rerender } = render(<LiveNowView view={view} layout="space" />);
+    fireEvent.click(within(screen.getAllByTestId('live-person')[1]).getByRole('button', { name: /Omar/ }));
+    await screen.findByTestId('live-person-sheet');
+    const emptied: LiveView = { available: true, generatedAt: 2, places: [], people: [] };
+    rerender(<LiveNowView view={emptied} layout="space" />);
+    expect(screen.queryByTestId('people-online')).toBeNull();
+    expect(screen.getByTestId('live-person-sheet')).toBeTruthy();
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByTestId('live-person-sheet')).toBeNull());
+    rerender(<LiveNowView view={view} layout="space" />);
+    expect(screen.queryByTestId('live-person-sheet')).toBeNull();
   });
 
   it('filters by universe', () => {
