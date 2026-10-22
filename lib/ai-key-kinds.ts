@@ -252,6 +252,8 @@ const MORE_KINDS: AiKeyKindInfo[] = snapshot.providers
       providerType: 'openai',
       address: 'none',
       apiKey: 'required',
+      // We have not tried these, so we cannot tell whether a provider lists its models to anyone: only a chat reply proves the key.
+      keyCheck: { type: 'chat' },
       benefit: 'Listed by models.dev; we haven’t tried it ourselves.',
       base: provider.base,
       docs: 'docs' in provider ? provider.docs : undefined,

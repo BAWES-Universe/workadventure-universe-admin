@@ -27,11 +27,11 @@ describe('the seven kinds, exactly as they were', () => {
     expect(row(kind)).toMatchObject(expected);
   });
 
-  it('gives every kind the OpenAI chat format, a Bearer key, and the default key check, apart from OpenRouter, Vercel and Hugging Face', () => {
+  it('gives every kind the OpenAI chat format, a Bearer key, and the default key check, apart from OpenRouter, Vercel, Hugging Face and the More providers', () => {
     for (const info of AI_KEY_KINDS) {
       expect(info.protocol).toBe('openai');
       expect(info.auth).toBe('bearer');
-      const expected = info.kind === 'openrouter' ? { type: 'key-info', paths: ['/key', '/auth/key'] } : info.kind === 'vercel' || info.kind === 'huggingface' ? { type: 'chat' } : { type: 'models' };
+      const expected = info.kind === 'openrouter' ? { type: 'key-info', paths: ['/key', '/auth/key'] } : info.kind === 'vercel' || info.kind === 'huggingface' || info.tier === 'more' ? { type: 'chat' } : { type: 'models' };
       expect(info.keyCheck).toEqual(expected);
     }
   });
@@ -156,6 +156,10 @@ describe('More providers, from the snapshot', () => {
       expect(info.regions).toBeUndefined();
       expect(info.steps.length).toBeGreaterThan(0);
     }
+  });
+
+  it('proves a key with a chat reply, since none of them has been tried for a public model list', () => {
+    for (const info of more) expect(info.keyCheck).toEqual({ type: 'chat' });
   });
 
   it('never repeats a provider the page names by hand', () => {
