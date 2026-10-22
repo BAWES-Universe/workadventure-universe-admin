@@ -52,6 +52,12 @@ describe('AI keys page', () => {
     expect(screen.getByText('1 reply · 1.2M tokens')).toBeTruthy();
   });
 
+  it('has an Add a key button that opens the form', async () => {
+    answer([]);
+    render(<AiKeysPage />);
+    expect((await screen.findByRole('link', { name: /Add a key/ })).getAttribute('href')).toBe('/admin/you/ai-keys/new');
+  });
+
   it('says so, plainly, when there are no keys', async () => {
     answer([]);
     render(<AiKeysPage />);
