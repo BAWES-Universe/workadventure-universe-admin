@@ -3,7 +3,7 @@ import { render, screen } from '@testing-library/react';
 import { Context, EntityCard, EntityRow, InContext, Place, StatLine, countPlace } from '@/app/admin/components/ds';
 
 describe('Universe, world and room icons', () => {
-  it('draws a clean icon next to the name of a universe, world, room or star, and keeps tool tiles boxed', () => {
+  it('draws a clean icon next to the name of a universe, world, room or star, and a plain glyph, never a box, for the tools', () => {
     const { container } = render(
       <div>
         <EntityRow href="/w" kind="world" title="BAWES World" />
@@ -13,7 +13,7 @@ describe('Universe, world and room icons', () => {
     );
     expect(container.querySelectorAll('svg[data-kind="world"]').length).toBe(1);
     expect(container.querySelectorAll('svg[data-kind="universe"]').length).toBe(1);
-    // A bot keeps its neutral tile and gets no icon on the name's line.
+    // A bot is a plain neutral glyph in the leading slot and gets no icon on the name's line.
     expect(container.querySelectorAll('.orbit-kind[data-kind="bot"]').length).toBe(1);
     expect(container.querySelectorAll('.orbit-kind[data-kind="world"]').length).toBe(0);
     expect(container.querySelectorAll('.orbit-kind[data-kind="universe"]').length).toBe(0);
