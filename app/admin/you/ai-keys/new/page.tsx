@@ -319,7 +319,7 @@ export default function AddAiKeyPage() {
           <div className="grid gap-1.5">
             <Label htmlFor="ai-key-name">Name</Label>
             <Input id="ai-key-name" maxLength={60} value={name} onChange={(event) => setTypedName(event.target.value)} className="h-11 rounded-xl" />
-            <p className={FIELD_HINT}>Only you see it, on this page and in Runs on.</p>
+            <p className={FIELD_HINT}>Shown here, and in Runs on for the bots that use it.</p>
           </div>
         )}
 
