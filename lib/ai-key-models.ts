@@ -1,5 +1,5 @@
 import { ADDRESS_PROBLEM_TEXT, AddressError, checkPublicHttpsUrl, safeGet, safeRequest } from '@/lib/ai-key-fetch';
-import { authHeaders, kindInfo, typedEndpoint, writeModelId, type AiKeyKind, type AiKeyKindInfo } from '@/lib/ai-key-kinds';
+import { authHeaders, hostedBase, kindInfo, typedEndpoint, writeModelId, type AiKeyKind, type AiKeyKindInfo } from '@/lib/ai-key-kinds';
 
 /**
  * Asks a key's provider which models it has. This is also the check that it answers: Add key stays off until the list
@@ -12,11 +12,15 @@ export interface KeyTarget {
   endpoint: string;
   /** The model list address. */
   modelsUrl: string;
+  /** The region picked, for a kind that has them. */
+  region: string | null;
 }
 
 export interface KeyTargetInput {
   kind?: unknown;
   address?: unknown;
+  /** The region id, for a kind that has regions. */
+  region?: unknown;
 }
 
 /** Works out where a key's provider lives, or says in plain words what is wrong with the address. */
@@ -25,7 +29,9 @@ export function keyTarget(input: KeyTargetInput): { ok: true; target: KeyTarget 
   if (!info) return { ok: false, message: 'Pick a type first.' };
   const typed = typeof input.address === 'string' ? input.address.trim() : '';
   if (info.address === 'none' || (info.address === 'optional' && !typed)) {
-    return { ok: true, target: { info, endpoint: info.base!, modelsUrl: `${info.base}/models` } };
+    const hosted = hostedBase(info, { region: input.region, address: input.address });
+    if (!hosted.ok) return hosted;
+    return { ok: true, target: { info, endpoint: hosted.base, modelsUrl: `${hosted.base}/models`, region: hosted.region } };
   }
   if (!typed) return { ok: false, message: 'Paste the https address of your server.' };
   let origin: string;
@@ -35,7 +41,7 @@ export function keyTarget(input: KeyTargetInput): { ok: true; target: KeyTarget 
   } catch {
     return { ok: false, message: ADDRESS_PROBLEM_TEXT['not-https'] };
   }
-  return { ok: true, target: { info, endpoint: typedEndpoint(info, origin), modelsUrl: `${origin}/v1/models` } };
+  return { ok: true, target: { info, endpoint: typedEndpoint(info, origin), modelsUrl: `${origin}/v1/models`, region: null } };
 }
 
 /** What a key may be made of (visible ASCII, no spaces): anything else cannot go in an Authorization header. */
@@ -74,6 +80,27 @@ export type LoadModelsResult = { ok: true; models: string[] } | { ok: false; mes
  */
 export type ProbeFailure = 'unreachable' | 'rejected' | 'busy' | 'credit' | 'gone' | 'request' | 'other';
 export type ProbeModelsResult = { ok: true; models: string[] } | { ok: false; message: string; reason: ProbeFailure };
+
+/**
+ * What a provider's 400 or 422 says when the problem is the model (it does not exist, or this key may not use it) and not the
+ * request. Only these words count: a bare "invalid" does not, because a refused token limit says "invalid" too. A dot inside a
+ * model id ("Qwen2.5-7B") does not end the sentence; a dot before a space or the end does.
+ */
+const MODEL_REFUSED =
+  /model_not_(?:found|supported)|(unknown|unsupported|nonexistent|no such|invalid)\s+model|model(?:[^.\n]|\.(?=\S)){0,60}(does not exist|doesn't exist|not exist|not found|not supported|unsupported|not available|unavailable|no access|not have access|don't have access|do not have access|not allowed|permission|deprecated|decommissioned|retired)|(does not exist|not found|no access)(?:[^.\n]|\.(?=\S)){0,40}model/i;
+
+/** The words of an error answer, one per line (message, code, type), so the pattern above never reads across fields of the JSON. */
+function errorWords(body: string): string {
+  try {
+    const data = JSON.parse(body) as Record<string, unknown>;
+    const error = typeof data.error === 'object' && data.error !== null ? (data.error as Record<string, unknown>) : data;
+    const parts = [error.message, error.code, error.type, data.message, data.detail].filter((part): part is string => typeof part === 'string');
+    if (parts.length > 0) return parts.join('\n');
+  } catch {
+    // Not JSON: the plain text is what it said
+  }
+  return body;
+}
 
 const NOT_CHAT = /embed|whisper|tts|dall-e|moderation|rerank|transcribe|image|audio|realtime|guard|safety/i;
 
@@ -136,14 +163,15 @@ export async function probeModels(input: KeyTargetInput & { apiKey?: unknown }):
     return { ok: false, reason: 'busy', message: `${info.label} is busy right now. Try again in a moment.` };
   }
   if (result.status !== 200) return { ok: false, message: `It answered with an error (${result.status}).`, reason: result.status >= 500 ? 'unreachable' : 'other' };
-  if (info.keyCheck.type === 'key-info' && info.base && apiKey && (await keyInfoRejectsKey(info.base, info.keyCheck.paths, apiKey))) {
+  if (info.keyCheck.type === 'key-info' && apiKey && (await keyInfoRejectsKey(resolved.target.endpoint, info.keyCheck.paths, apiKey))) {
     return { ok: false, message: `${info.label} didn’t accept this key.`, reason: 'rejected' };
   }
 
   let ids: string[] = [];
   try {
     const data: unknown = JSON.parse(result.body);
-    const list = typeof data === 'object' && data !== null ? (data as { data?: unknown }).data : null;
+    // Most providers answer { data: [...] }; some (Together) answer the bare array
+    const list = Array.isArray(data) ? data : typeof data === 'object' && data !== null ? (data as { data?: unknown }).data : null;
     if (!Array.isArray(list)) throw new Error('shape');
     ids = list.map((entry) => (typeof entry === 'object' && entry !== null ? (entry as { id?: unknown }).id : null)).filter((id): id is string => typeof id === 'string');
   } catch {
@@ -177,19 +205,29 @@ export async function probeChat(input: KeyTargetInput & { apiKey?: unknown; mode
     if (error instanceof AddressError) return { ok: false, message: ADDRESS_PROBLEM_TEXT[error.problem], reason: error.problem === 'unresolved' ? 'unreachable' : 'other' };
     return { ok: false, message: 'That address can’t be used.', reason: 'other' };
   }
-  const result = await safeRequest(checked, {
-    method: 'POST',
-    headers: authHeaders(info, apiKey),
-    body: { model: input.model, messages: [{ role: 'user', content: 'Say ok.' }], stream: false, [info.tokenLimitField ?? 'max_tokens']: 16 },
-    timeoutMs: 30_000,
-    maxBytes: 200_000,
-  });
+  const ask = (extra: Record<string, unknown>) =>
+    safeRequest(checked, {
+      method: 'POST',
+      headers: authHeaders(info, apiKey),
+      body: { model: input.model, messages: [{ role: 'user', content: 'Say ok.' }], stream: false, [info.tokenLimitField ?? 'max_tokens']: 16, ...extra },
+      // A server on your own computer may load its model on the first call, which can take well over 30 seconds
+      timeoutMs: info.group === 'own-computer' ? 120_000 : 30_000,
+      maxBytes: 200_000,
+    });
+  let result = await ask({});
+  // Alibaba's thinking models (open-source Qwen3 among them) refuse a non-streaming reply unless thinking is off. The bot server
+  // handles that the same way when it asks for one-shot replies; the check must not call such a model broken.
+  if (result.ok && result.status === 400 && /enable_thinking/i.test(result.body)) result = await ask({ enable_thinking: false });
   if (!result.ok) return { ok: false, reason: 'unreachable', message: `${info.label} didn’t answer. Try again in a moment.` };
   if (result.status >= 200 && result.status < 300) return { ok: true };
   if (result.status === 401 || result.status === 403) return { ok: false, reason: 'rejected', message: `${info.label} didn’t accept this key.` };
   if (result.status === 429) return { ok: false, reason: 'busy', message: `${info.label} is busy right now. Try again in a moment.` };
   if (result.status === 402) return { ok: false, reason: 'credit', message: `${info.label} says this key is out of credit.` };
   if (result.status === 404) return { ok: false, reason: 'gone', message: `${info.label} no longer has the model ${input.model}.` };
+  // Some providers answer a model they do not have, or one this key may not use, with a 400 or 422 instead of a 404
+  if ((result.status === 400 || result.status === 422) && MODEL_REFUSED.test(errorWords(result.body))) {
+    return { ok: false, reason: 'gone', message: `${info.label} won’t give this key the model ${input.model}.` };
+  }
   return {
     ok: false,
     reason: result.status >= 500 ? 'unreachable' : [400, 413, 422].includes(result.status) ? 'request' : 'other',

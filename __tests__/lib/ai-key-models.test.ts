@@ -166,6 +166,15 @@ describe('probeChat', () => {
     });
   });
 
+  it('gives a server on your own computer two minutes (its model may load on the first call), and a hosted provider thirty seconds', async () => {
+    post.mockResolvedValue(answer(200, {}));
+    await probeChat({ kind: 'lmstudio', address: 'https://lm.example.com', model: 'qwen' });
+    expect(post.mock.calls[0][1]).toMatchObject({ timeoutMs: 120_000 });
+    post.mockClear();
+    await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'deepseek-v4-flash' });
+    expect(post.mock.calls[0][1]).toMatchObject({ timeoutMs: 30_000 });
+  });
+
   it('finds an own-computer server’s chat address under /v1, with no key header when there is no key', async () => {
     post.mockResolvedValue(answer(200, {}));
     await probeChat({ kind: 'lmstudio', address: 'https://lm.example.com/v1', model: 'llama' });
@@ -178,6 +187,55 @@ describe('probeChat', () => {
     await probeChat({ kind: 'openai', apiKey: 'k-1234', model: 'gpt-x' });
     expect(post.mock.calls[0][1].body).toMatchObject({ max_completion_tokens: 16 });
     expect(post.mock.calls[0][1].body).not.toHaveProperty('max_tokens');
+  });
+
+  it('asks again with thinking off when the model refuses a non-streaming reply otherwise (open-source Qwen3)', async () => {
+    post
+      .mockResolvedValueOnce(answer(400, { error: { message: 'parameter.enable_thinking only support stream call' } }))
+      .mockResolvedValueOnce(answer(200, { choices: [] }));
+    expect(await probeChat({ kind: 'qwen', region: 'global', apiKey: 'sk-1', model: 'qwen3-32b' })).toEqual({ ok: true });
+    expect(post).toHaveBeenCalledTimes(2);
+    expect(post.mock.calls[0][1].body).not.toHaveProperty('enable_thinking');
+    expect(post.mock.calls[1][1].body).toMatchObject({ model: 'qwen3-32b', enable_thinking: false });
+  });
+
+  it('does not ask again for any other 400', async () => {
+    post.mockResolvedValue(answer(400, { error: { message: 'bad request' } }));
+    expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'm' })).toMatchObject({ ok: false, reason: 'request' });
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['The model `gpt-9` does not exist or you do not have access to it.'],
+    ['Model Not Exist'],
+    ['unknown model: foo'],
+    ['{"error":{"code":"model_not_found"}}'],
+    ['{"error":{"code":"model_not_supported"}}'],
+    ['The model Qwen/Qwen2.5-7B-Instruct does not exist'],
+    ['The model llama-3.1-8b is not supported by this key.'],
+  ])('reads a 400 that says the model is the problem (%s) as a model the key cannot use', async (message) => {
+    post.mockResolvedValue(answer(400, { error: { message } }));
+    expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'm' })).toMatchObject({ ok: false, reason: 'gone' });
+  });
+
+  it('does not read across the fields of the answer: a request problem next to a code that says unsupported stays a request problem', async () => {
+    post.mockResolvedValue(answer(400, '{"error":{"message":"Bad value for this model","code":"unsupported_parameter"}}'));
+    expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'm' })).toMatchObject({ ok: false, reason: 'request' });
+  });
+
+  it('reads a plain-text 400 that says the model does not exist', async () => {
+    post.mockResolvedValue(answer(400, 'Model Not Exist'));
+    expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'm' })).toMatchObject({ ok: false, reason: 'gone' });
+  });
+
+  it.each([
+    ['max_tokens is too small for this model, use at least 1024'],
+    ['invalid value for parameter temperature'],
+    ['unknown parameter: enable_thinking'],
+    ['max_tokens is too large for this model. The value 1.5 is not supported'],
+  ])('keeps a 400 about the request itself (%s) as the request’s problem', async (message) => {
+    post.mockResolvedValue(answer(400, { error: { message } }));
+    expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'm' })).toMatchObject({ ok: false, reason: 'request' });
   });
 
   it.each([
@@ -213,5 +271,32 @@ describe('allowKeyAttempt', () => {
     expect(allowKeyAttempt('p', start + 21)).toBe(false);
     expect(allowKeyAttempt('someone-else', start + 21)).toBe(true);
     expect(allowKeyAttempt('p', start + 61_000)).toBe(true);
+  });
+});
+
+describe('providers added to the catalog', () => {
+  it('reads a model list that is a bare array (Together AI), as well as { data: [...] }', async () => {
+    get.mockResolvedValue(answer(200, [{ id: 'meta-llama/Llama-3.3-70B-Instruct-Turbo', type: 'chat' }, { id: 'Qwen/Qwen3-235B' }]));
+    expect(await loadModels({ kind: 'together', apiKey: 'sk-1' })).toEqual({ ok: true, models: ['meta-llama/Llama-3.3-70B-Instruct-Turbo', 'Qwen/Qwen3-235B'] });
+    expect(check).toHaveBeenCalledWith('https://api.together.xyz/v1/models');
+  });
+
+  it('asks the region that was picked, and a saved key finds its region from its endpoint', async () => {
+    get.mockResolvedValue(answer(200, { data: [{ id: 'qwen3-max' }] }));
+    await loadModels({ kind: 'qwen', region: 'china', apiKey: 'sk-1' });
+    expect(check).toHaveBeenLastCalledWith('https://dashscope.aliyuncs.com/compatible-mode/v1/models');
+    await loadModels({ kind: 'qwen', address: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1', apiKey: 'sk-1' });
+    expect(check).toHaveBeenLastCalledWith('https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models');
+  });
+
+  it('asks a region kind for its region before calling anyone', async () => {
+    expect(await loadModels({ kind: 'glm', apiKey: 'sk-1' })).toEqual({ ok: false, message: 'Pick a region first.' });
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  it('sends a chat call to the region’s own address', async () => {
+    post.mockResolvedValue(answer(200, {}));
+    expect(await probeChat({ kind: 'kimi', region: 'global', apiKey: 'sk-1', model: 'kimi-k2' })).toEqual({ ok: true });
+    expect(check).toHaveBeenLastCalledWith('https://api.moonshot.ai/v1/chat/completions');
   });
 });

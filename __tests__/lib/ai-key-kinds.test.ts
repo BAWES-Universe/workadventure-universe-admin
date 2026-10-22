@@ -2,7 +2,7 @@
  * The catalog of AI key kinds (#374): the seven that exist keep behaving exactly as before, now as data. These rows are
  * the no-regression list for the move from if-statements to catalog fields.
  */
-import { AI_KEY_KINDS, authHeaders, isTypedEndpoint, kindInfo, typedEndpoint, writeModelId } from '@/lib/ai-key-kinds';
+import { AI_KEY_KINDS, authHeaders, hostedBase, isTypedEndpoint, kindInfo, providerBases, typedEndpoint, writeModelId } from '@/lib/ai-key-kinds';
 import { cleanModelIds, keyTarget } from '@/lib/ai-key-models';
 
 describe('the seven kinds, exactly as they were', () => {
@@ -11,8 +11,8 @@ describe('the seven kinds, exactly as they were', () => {
     return { providerType: info.providerType, group: info.group, address: info.address, apiKey: info.apiKey, base: info.base, tokenLimitField: info.tokenLimitField };
   };
 
-  it('keeps the same ids, in the same order', () => {
-    expect(AI_KEY_KINDS.map((entry) => entry.kind)).toEqual(['lmstudio', 'ollama', 'openrouter', 'gemini', 'nim', 'openai', 'deepseek']);
+  it('keeps the same ids, in the same order, ahead of the providers added after them', () => {
+    expect(AI_KEY_KINDS.slice(0, 7).map((entry) => entry.kind)).toEqual(['lmstudio', 'ollama', 'openrouter', 'gemini', 'nim', 'openai', 'deepseek']);
   });
 
   it.each([
@@ -27,11 +27,12 @@ describe('the seven kinds, exactly as they were', () => {
     expect(row(kind)).toMatchObject(expected);
   });
 
-  it('gives every kind the OpenAI chat format, a Bearer key, and the default key check, apart from OpenRouter', () => {
+  it('gives every kind the OpenAI chat format, a Bearer key, and the default key check, apart from OpenRouter, Vercel and Hugging Face', () => {
     for (const info of AI_KEY_KINDS) {
       expect(info.protocol).toBe('openai');
       expect(info.auth).toBe('bearer');
-      expect(info.keyCheck).toEqual(info.kind === 'openrouter' ? { type: 'key-info', paths: ['/key', '/auth/key'] } : { type: 'models' });
+      const expected = info.kind === 'openrouter' ? { type: 'key-info', paths: ['/key', '/auth/key'] } : info.kind === 'vercel' || info.kind === 'huggingface' ? { type: 'chat' } : { type: 'models' };
+      expect(info.keyCheck).toEqual(expected);
     }
   });
 });
@@ -64,6 +65,13 @@ describe('helpers', () => {
     expect(authHeaders(kindInfo('lmstudio')!, '')).toEqual({});
   });
 
+  it('trims trailing slashes in linear time, even for a long run of them in the middle of an address', () => {
+    const nim = kindInfo('nim')!;
+    const started = Date.now();
+    expect(isTypedEndpoint(nim, `https://mine.example.com${'/'.repeat(200_000)}x`)).toBe(true);
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
   it('knows a typed address from the provider’s own', () => {
     const nim = kindInfo('nim')!;
     expect(isTypedEndpoint(nim, 'https://integrate.api.nvidia.com/v1')).toBe(false);
@@ -71,5 +79,62 @@ describe('helpers', () => {
     expect(isTypedEndpoint(kindInfo('deepseek')!, 'https://api.deepseek.com')).toBe(false);
     expect(isTypedEndpoint(kindInfo('lmstudio')!, 'https://api.deepseek.com')).toBe(true);
     expect(isTypedEndpoint(null, null)).toBe(true);
+  });
+});
+
+describe('the providers added after the seven', () => {
+  const added = AI_KEY_KINDS.slice(7);
+
+  it('adds the named list and the two own-computer entries', () => {
+    expect(added.map((entry) => entry.kind)).toEqual([
+      'vllm', 'custom', 'qwen', 'kimi', 'glm', 'xai', 'mistral', 'groq', 'together', 'fireworks', 'deepinfra', 'cerebras', 'huggingface', 'vercel',
+    ]);
+  });
+
+  it('has unique ids, and an https address for every hosted one', () => {
+    expect(new Set(AI_KEY_KINDS.map((entry) => entry.kind)).size).toBe(AI_KEY_KINDS.length);
+    for (const info of AI_KEY_KINDS.filter((entry) => entry.group === 'hosted')) {
+      for (const base of providerBases(info)) expect(base).toMatch(/^https:\/\/[^/]+/);
+      expect(info.address === 'none' ? providerBases(info).length : 1).toBeGreaterThan(0);
+      expect(info.apiKey).toBe('required');
+      expect(info.providerType).toBe('openai');
+    }
+  });
+
+  it('runs vLLM and Any OpenAI-compatible on the local type, so a key is sent only if the server asks for one', () => {
+    for (const kind of ['vllm', 'custom']) {
+      expect(kindInfo(kind)).toMatchObject({ providerType: 'lmstudio', group: 'own-computer', address: 'required', apiKey: 'optional' });
+    }
+  });
+
+  it('gives Qwen, Kimi and GLM a Global and a China region, each with its own address', () => {
+    for (const kind of ['qwen', 'kimi', 'glm']) {
+      const info = kindInfo(kind)!;
+      expect(info.regions!.map((region) => region.id)).toEqual(['global', 'china']);
+      expect(info.base).toBeUndefined();
+    }
+    expect(hostedBase(kindInfo('kimi')!, { region: 'china' })).toEqual({ ok: true, base: 'https://api.moonshot.cn/v1', region: 'china' });
+    expect(hostedBase(kindInfo('glm')!, { region: 'global' })).toMatchObject({ base: 'https://api.z.ai/api/paas/v4' });
+  });
+
+  it('finds a saved key’s region from its endpoint, and never guesses one', () => {
+    expect(hostedBase(kindInfo('qwen')!, { address: 'https://dashscope.aliyuncs.com/compatible-mode/v1/' })).toMatchObject({ ok: true, region: 'china' });
+    expect(hostedBase(kindInfo('qwen')!, { address: 'https://dashscope.aliyuncs.com/compatible-mode/v1///' })).toMatchObject({ ok: true, region: 'china' });
+    expect(hostedBase(kindInfo('qwen')!, {})).toEqual({ ok: false, message: 'Pick a region first.' });
+    expect(hostedBase(kindInfo('qwen')!, { region: 'mars' })).toMatchObject({ ok: false });
+    expect(hostedBase(kindInfo('groq')!, { region: 'china' })).toMatchObject({ ok: true, base: 'https://api.groq.com/openai/v1', region: null });
+  });
+
+  it('treats a region’s own address as the provider’s, and any other as typed', () => {
+    const qwen = kindInfo('qwen')!;
+    expect(isTypedEndpoint(qwen, 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1')).toBe(false);
+    expect(isTypedEndpoint(qwen, 'https://mine.example.com')).toBe(true);
+  });
+
+  it('resolves each hosted kind’s model list address from its base', () => {
+    expect(keyTarget({ kind: 'together' })).toMatchObject({ ok: true, target: { endpoint: 'https://api.together.xyz/v1', modelsUrl: 'https://api.together.xyz/v1/models', region: null } });
+    expect(keyTarget({ kind: 'qwen', region: 'global' })).toMatchObject({ ok: true, target: { modelsUrl: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models', region: 'global' } });
+    expect(keyTarget({ kind: 'qwen' })).toEqual({ ok: false, message: 'Pick a region first.' });
+    expect(keyTarget({ kind: 'custom', address: 'https://x.example.com/anything' })).toMatchObject({ ok: true, target: { endpoint: 'https://x.example.com', modelsUrl: 'https://x.example.com/v1/models' } });
   });
 });

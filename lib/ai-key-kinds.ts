@@ -9,7 +9,8 @@
  * quirks are fields here, never `if (kind === ...)` in the checks, so adding a provider is adding an entry.
  */
 
-export type AiKeyKind = 'lmstudio' | 'ollama' | 'openrouter' | 'gemini' | 'nim' | 'openai' | 'deepseek';
+/** A catalog id, kept in a key's `settings.kind`. */
+export type AiKeyKind = string;
 
 export interface SetupStep {
   text: string;
@@ -24,13 +25,21 @@ export type KeyAuth = 'bearer';
 /**
  * How a key is proven good when the model list can't. `models`: the model list needs the key, so a list that answers
  * proves it. `key-info`: the list is public (OpenRouter), so the provider's key-info addresses are asked too, and only a
- * clear 401/403 from one counts.
+ * clear 401/403 from one counts. `chat`: the list is public and has no key-info address (Vercel AI Gateway), so only a tiny chat
+ * reply proves the key: every health check asks for one.
  */
-export type KeyCheck = { type: 'models' } | { type: 'key-info'; paths: string[] };
+export type KeyCheck = { type: 'models' } | { type: 'key-info'; paths: string[] } | { type: 'chat' };
 /** How a model id is written for a chat call: as listed, or without the `models/` the list puts in front (Gemini). */
 export type ModelIdRule = 'as-is' | 'strip-models-prefix';
 /** Where the Add a key page shows it: by name, under More providers, or not at all. */
 export type KeyTier = 'named' | 'more' | 'hidden';
+
+/** One place a provider is served from (Qwen, Kimi and GLM have a Global and a China one, with keys that only work in their own). */
+export interface KeyRegion {
+  id: string;
+  label: string;
+  base: string;
+}
 
 export interface AiKeyKindInfo {
   kind: AiKeyKind;
@@ -48,6 +57,10 @@ export interface AiKeyKindInfo {
   apiKey: 'required' | 'optional';
   /** Hosted kinds: where the bot server sends chat calls, and the list of models is read from `{base}/models`. */
   base?: string;
+  /** Hosted kinds served from more than one place: the person picks one, and its base is used instead of `base`. */
+  regions?: KeyRegion[];
+  /** Where to read about the provider and get a key. */
+  docs?: string;
   /** What this provider calls the reply-length limit on a chat call (OpenAI's newer models refuse `max_tokens`). Default `max_tokens`. */
   tokenLimitField?: 'max_tokens' | 'max_completion_tokens';
   protocol: KeyProtocol;
@@ -121,6 +134,96 @@ export const AI_KEY_KINDS: AiKeyKindInfo[] = [
     benefit: 'Low prices.', base: 'https://api.deepseek.com',
     steps: [{ text: 'On platform.deepseek.com, open API keys.' }],
   }),
+  define({
+    kind: 'vllm', label: 'vLLM', group: 'own-computer', providerType: 'lmstudio', address: 'required', apiKey: 'optional',
+    benefit: 'Your own GPU server, fast for many chats at once.', docs: 'https://docs.vllm.ai',
+    steps: [
+      { text: 'Start the server with a model (it listens on port 8000).', code: 'vllm serve <model>' },
+      { text: TUNNEL, code: 'cloudflared tunnel --url http://localhost:8000' },
+      { text: 'Paste the https address it prints below.' },
+    ],
+  }),
+  define({
+    kind: 'custom', label: 'Any OpenAI-compatible server', group: 'own-computer', providerType: 'lmstudio', address: 'required', apiKey: 'optional',
+    benefit: 'LiteLLM, text-generation-webui, KoboldCpp, your own gateway: anything that answers /v1/chat/completions.',
+    steps: [
+      { text: 'Start the server. It must answer /v1/models and /v1/chat/completions.' },
+      { text: 'Make it reachable from the web, with an https address (a tunnel, or your own domain).' },
+      { text: 'Paste the https address below, and a key if the server asks for one.' },
+    ],
+  }),
+  define({
+    kind: 'qwen', label: 'Qwen', group: 'hosted', providerType: 'openai', address: 'none', apiKey: 'required',
+    benefit: 'Alibaba’s Qwen models.', docs: 'https://www.alibabacloud.com/help/en/model-studio/models',
+    regions: [
+      { id: 'global', label: 'Global', base: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1' },
+      { id: 'china', label: 'China', base: 'https://dashscope.aliyuncs.com/compatible-mode/v1' },
+    ],
+    steps: [{ text: 'In Alibaba Cloud Model Studio, open API keys and create a key. Pick the region you made it in: a key only works in its own.' }],
+  }),
+  define({
+    kind: 'kimi', label: 'Kimi', group: 'hosted', providerType: 'openai', address: 'none', apiKey: 'required',
+    benefit: 'Moonshot’s Kimi models.', docs: 'https://platform.moonshot.ai/docs/api/chat',
+    regions: [
+      { id: 'global', label: 'Global', base: 'https://api.moonshot.ai/v1' },
+      { id: 'china', label: 'China', base: 'https://api.moonshot.cn/v1' },
+    ],
+    steps: [{ text: 'On platform.moonshot.ai (platform.moonshot.cn in China), open API Keys and create one. A key only works in the region it was made in.' }],
+  }),
+  define({
+    kind: 'glm', label: 'GLM (Z.ai)', group: 'hosted', providerType: 'openai', address: 'none', apiKey: 'required',
+    benefit: 'Zhipu’s GLM models.', docs: 'https://docs.z.ai/guides/overview/pricing',
+    regions: [
+      { id: 'global', label: 'Global', base: 'https://api.z.ai/api/paas/v4' },
+      { id: 'china', label: 'China', base: 'https://open.bigmodel.cn/api/paas/v4' },
+    ],
+    steps: [{ text: 'On z.ai (bigmodel.cn in China), open API keys and create one. A key only works in the region it was made in.' }],
+  }),
+  define({
+    kind: 'xai', label: 'xAI', group: 'hosted', providerType: 'openai', address: 'none', apiKey: 'required',
+    benefit: 'The Grok models.', base: 'https://api.x.ai/v1', docs: 'https://docs.x.ai/docs/models',
+    steps: [{ text: 'On console.x.ai, open API Keys and create one.' }],
+  }),
+  define({
+    kind: 'mistral', label: 'Mistral', group: 'hosted', providerType: 'openai', address: 'none', apiKey: 'required',
+    benefit: 'Mistral’s own models, hosted in Europe.', base: 'https://api.mistral.ai/v1', docs: 'https://docs.mistral.ai/getting-started/models/',
+    steps: [{ text: 'On console.mistral.ai, open API keys and create one.' }],
+  }),
+  define({
+    kind: 'groq', label: 'Groq', group: 'hosted', providerType: 'openai', address: 'none', apiKey: 'required',
+    benefit: 'Very fast replies, with a free tier.', base: 'https://api.groq.com/openai/v1', docs: 'https://console.groq.com/docs/models',
+    steps: [{ text: 'On console.groq.com, open API Keys and create one.' }],
+  }),
+  define({
+    kind: 'together', label: 'Together AI', group: 'hosted', providerType: 'openai', address: 'none', apiKey: 'required',
+    benefit: 'Many open models, priced per use.', base: 'https://api.together.xyz/v1', docs: 'https://docs.together.ai/docs/serverless-models',
+    steps: [{ text: 'On api.together.ai, open Settings, then API keys.' }],
+  }),
+  define({
+    kind: 'fireworks', label: 'Fireworks AI', group: 'hosted', providerType: 'openai', address: 'none', apiKey: 'required',
+    benefit: 'Fast open models, priced per use.', base: 'https://api.fireworks.ai/inference/v1', docs: 'https://fireworks.ai/docs/',
+    steps: [{ text: 'On fireworks.ai, open your account’s API Keys and create one.' }],
+  }),
+  define({
+    kind: 'deepinfra', label: 'DeepInfra', group: 'hosted', providerType: 'openai', address: 'none', apiKey: 'required',
+    benefit: 'Many open models at low prices.', base: 'https://api.deepinfra.com/v1/openai', docs: 'https://deepinfra.com/models',
+    steps: [{ text: 'On deepinfra.com, open Dashboard, then API keys.' }],
+  }),
+  define({
+    kind: 'cerebras', label: 'Cerebras', group: 'hosted', providerType: 'openai', address: 'none', apiKey: 'required',
+    benefit: 'Extremely fast replies, with a free tier.', base: 'https://api.cerebras.ai/v1', docs: 'https://inference-docs.cerebras.ai/models/overview',
+    steps: [{ text: 'On cloud.cerebras.ai, open API Keys and create one.' }],
+  }),
+  define({
+    kind: 'huggingface', label: 'Hugging Face', group: 'hosted', providerType: 'openai', address: 'none', apiKey: 'required', keyCheck: { type: 'chat' },
+    benefit: 'Thousands of open models through one token.', base: 'https://router.huggingface.co/v1', docs: 'https://huggingface.co/docs/inference-providers',
+    steps: [{ text: 'On huggingface.co, open Settings, then Access Tokens, and create a token that can make inference calls.' }],
+  }),
+  define({
+    kind: 'vercel', label: 'Vercel AI Gateway', group: 'hosted', providerType: 'openai', address: 'none', apiKey: 'required', keyCheck: { type: 'chat' },
+    benefit: 'Models from many providers behind one key.', base: 'https://ai-gateway.vercel.sh/v1', docs: 'https://vercel.com/docs/ai-gateway',
+    steps: [{ text: 'In your Vercel dashboard, open AI Gateway, then API Keys, and create one.' }],
+  }),
 ];
 
 export function kindInfo(kind: unknown): AiKeyKindInfo | null {
@@ -144,9 +247,33 @@ export function authHeaders(info: AiKeyKindInfo, apiKey: string): Record<string,
   return { Authorization: `Bearer ${apiKey}` };
 }
 
+const withoutSlash = (url: string) => {
+  // A loop, not a regex: a long run of slashes inside a typed address must not take quadratic time.
+  let end = url.length;
+  while (end > 0 && url[end - 1] === '/') end -= 1;
+  return url.slice(0, end);
+};
+
+/** Every address the provider itself serves from: its one base, or the base of each region. */
+export function providerBases(info: AiKeyKindInfo): string[] {
+  return [...(info.base ? [info.base] : []), ...(info.regions ?? []).map((region) => region.base)];
+}
+
 /** Whether a saved endpoint is an address a person typed (so the address guard applies), not the provider's own. */
 export function isTypedEndpoint(info: AiKeyKindInfo | null, endpoint: string | null): boolean {
-  return !info || info.group === 'own-computer' || endpoint !== info.base;
+  if (!info || info.group === 'own-computer' || !endpoint) return true;
+  return !providerBases(info).map(withoutSlash).includes(withoutSlash(endpoint));
+}
+
+/**
+ * Where a hosted kind is served from: its one base, or the region picked. A region is named by its id, or by the base it
+ * was saved with (a saved key remembers only its endpoint). A kind with regions and no region is not guessed.
+ */
+export function hostedBase(info: AiKeyKindInfo, pick: { region?: unknown; address?: unknown }): { ok: true; base: string; region: string | null } | { ok: false; message: string } {
+  if (!info.regions) return info.base ? { ok: true, base: info.base, region: null } : { ok: false, message: 'This provider has no address.' };
+  const saved = typeof pick.address === 'string' ? withoutSlash(pick.address.trim()) : '';
+  const found = info.regions.find((region) => region.id === pick.region) ?? (saved ? info.regions.find((region) => withoutSlash(region.base) === saved) : undefined);
+  return found ? { ok: true, base: found.base, region: found.id } : { ok: false, message: 'Pick a region first.' };
 }
 
 /** The most keys one person can hold. */
