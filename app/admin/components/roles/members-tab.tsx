@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
-import { Loader2, Plus, Search } from 'lucide-react';
+import { Loader2, Lock, Plus, Search } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
@@ -13,6 +13,7 @@ import { LoadError, LoadingRows } from '../ds';
 import { PersonIcon } from '../profile-card';
 import { Panel } from './role-bits';
 import { SHEET_CLASS } from './create-role-sheet';
+import { rolePickableWorlds } from '@/lib/member-roles';
 import { canGiveRole, permissionsOf, scopeLabel, seesHiddenRoles, type MeResponse, type RoleRow, type WorldRef } from '@/lib/role-ui';
 
 interface MemberRow {
@@ -174,6 +175,7 @@ export function MembersTab({
         universeId={universeId}
         worlds={worlds}
         giveWorlds={me.giveWorlds}
+        inviteWorlds={me.inviteWorlds}
         onGiven={() => {
           setGiving(false);
           void load();
@@ -192,6 +194,7 @@ function GiveSheet({
   universeId,
   worlds,
   giveWorlds,
+  inviteWorlds,
   onGiven,
 }: {
   open: boolean;
@@ -200,6 +203,7 @@ function GiveSheet({
   universeId: string;
   worlds: WorldRef[];
   giveWorlds: 'all' | string[];
+  inviteWorlds: 'all' | string[];
   onGiven: () => void;
 }) {
   const { addToast } = useToast();
@@ -244,7 +248,8 @@ function GiveSheet({
   // A role works only where the person is a member, and only where you may give roles
   const theirWorlds = person ? (person.worlds.allWorlds ? worlds.map((world) => world.id) : person.worlds.worldIds) : [];
   const available = worlds.filter((world) => theirWorlds.includes(world.id) && (giveWorlds === 'all' || giveWorlds.includes(world.id)));
-  const allowAll = !!person && person.worlds.allWorlds && giveWorlds === 'all';
+  // "All worlds" also adds them to the worlds they have not joined, so it needs the right to add people everywhere too
+  const allowAll = !!person && rolePickableWorlds(worlds.map((world) => world.id), person.worlds.allWorlds ? 'all' : person.worlds.worldIds, giveWorlds, inviteWorlds === 'all').all;
   const allowSome = !administrator && available.length > 0;
   const ready = !!person && (scope === 'all' ? allowAll : allowSome && picked.length > 0);
 
@@ -276,7 +281,16 @@ function GiveSheet({
 
   return (
     <Dialog open={open} onOpenChange={(next) => !busy && onOpenChange(next)}>
-      <DialogContent className={SHEET_CLASS} data-testid="give-role-sheet">
+      {/* The list shows first: focusing the search box on open would raise the phone keyboard over the people.
+          Focus goes to the sheet itself instead, so it is still trapped and announced. */}
+      <DialogContent
+        className={SHEET_CLASS}
+        data-testid="give-role-sheet"
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+          (event.currentTarget as HTMLElement).focus();
+        }}
+      >
         <DialogTitle className="orbit-display text-2xl font-bold">Give {role.name}</DialogTitle>
         <DialogDescription className="sr-only">Pick someone who joined, then where the role works for them.</DialogDescription>
         <div className="grid gap-5">
@@ -329,7 +343,13 @@ function GiveSheet({
                   setPicked([]);
                 }}
                 options={[
-                  { value: 'all', label: 'All worlds', disabled: !allowAll },
+                  {
+                    value: 'all',
+                    // Yours to give but not in every world: locked, and a tap says why
+                    label: !allowAll ? <><Lock aria-hidden="true" className="mr-1.5 h-3.5 w-3.5" />All worlds</> : 'All worlds',
+                    disabled: !allowAll,
+                    onBlocked: () => addToast({ description: giveWorlds === 'all' ? 'You can add people to some worlds only' : 'You can give roles in some worlds only' }),
+                  },
                   { value: 'some', label: 'Some worlds', disabled: !allowSome },
                 ]}
               />
@@ -348,11 +368,11 @@ function GiveSheet({
               )}
               {!allowAll && (
                 <p className="text-xs text-muted-foreground">
-                  {administrator
-                    ? 'Administrator works in every world, and they have not joined every world.'
-                    : giveWorlds !== 'all'
-                      ? 'Needs Give roles in every world to give it everywhere.'
-                      : 'They have not joined every world, so it can work only in the ones they have.'}
+                  {giveWorlds !== 'all'
+                    ? 'Needs Give roles in every world to give it everywhere.'
+                    : administrator
+                      ? 'Administrator works in every world, and you can add people to some worlds only.'
+                      : 'You can add people to some worlds only, so it can work only in the ones they have.'}
                 </p>
               )}
             </div>

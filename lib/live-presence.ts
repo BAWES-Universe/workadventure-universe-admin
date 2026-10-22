@@ -33,6 +33,8 @@ export type PresenceSnapshot = z.infer<typeof snapshotSchema>;
 
 export interface LivePerson {
   uuid: string;
+  /** Their account id, what their profile card opens with. */
+  userId: string;
   name: string;
   status: LiveStatus;
   woka: string[];
@@ -238,6 +240,7 @@ export async function buildLiveView(snapshot: PresenceSnapshot, viewer: SessionU
     if (!live) continue;
     shown.set(person.uuid, {
       uuid: person.uuid,
+      userId: person.id,
       name: person.name?.trim() || 'Someone',
       status: live.status,
       woka: wokaLayers(live.woka, base),

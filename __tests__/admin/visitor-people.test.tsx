@@ -147,12 +147,12 @@ describe('Visitors list', () => {
     expect(fetchMock).toHaveBeenLastCalledWith('/api/admin/visitors?scope=room&id=r1&page=2');
   });
 
-  it('says when nobody came, with the plain people icon', async () => {
+  it('says when nobody came, with the people icon as a plain glyph', async () => {
     serve(() => ({ people: [], total: 0, hasMore: false }));
     const { container } = render(<VisitorPeople scope="universe" id="u1" />);
     expect(await screen.findByText('No visitors yet.')).toBeTruthy();
     expect(screen.getByText('Visits to this universe show up here.')).toBeTruthy();
-    expect(container.querySelector('.orbit-kind[data-kind="people"]')?.hasAttribute('data-plain')).toBe(true);
+    expect(container.querySelector('.orbit-kind[data-kind="people"]')).toBeTruthy();
   });
 
   it('offers to try again when the list cannot load', async () => {

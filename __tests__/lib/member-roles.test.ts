@@ -1,4 +1,4 @@
-import { dayWord, isAdministrator, pickableWorlds, summariseRoles, worldsLabel, type RoleInfo } from '@/lib/member-roles';
+import { dayWord, isAdministrator, pickableWorlds, rolePickableWorlds, summariseRoles, worldsLabel, type RoleInfo } from '@/lib/member-roles';
 
 const role = (id: string, key: string, name: string, color = '#ffffff'): RoleInfo => ({ id, key, name, color });
 const ROLES = new Map<string, RoleInfo>([
@@ -35,8 +35,28 @@ describe('summariseRoles', () => {
     expect(summary).toMatchObject({ name: 'Admin', color: '#F87171', where: 'HQ only', more: 1 });
   });
 
-  it('puts the owner first, whatever roles they hold', () => {
-    expect(summariseRoles({ isOwner: true, worlds: everywhere, roles: [] }, ROLES, WORLDS)).toMatchObject({ name: 'Owner', more: 0 });
+  it('says Owner for an owner who was given no role', () => {
+    expect(summariseRoles({ isOwner: true, worlds: everywhere, roles: [] }, ROLES, WORLDS)).toMatchObject({ name: 'Owner', more: 0, owner: true });
+  });
+
+  it('does not count Owner as a role: an owner shows their highest given role and +N for the others', () => {
+    const one = summariseRoles({ isOwner: true, worlds: everywhere, roles: [{ roleId: 'admin', ...everywhere }] }, ROLES, WORLDS);
+    expect(one).toMatchObject({ name: 'Admin', more: 0, owner: true });
+    const two = summariseRoles(
+      { isOwner: true, worlds: everywhere, roles: [{ roleId: 'admin', ...everywhere }, { roleId: 'acct', ...everywhere }] },
+      ROLES,
+      WORLDS,
+    );
+    expect(two).toMatchObject({ name: 'Admin', more: 1, owner: true });
+  });
+
+  it('never says where an owner’s role works: the owner has every permission everywhere', () => {
+    const summary = summariseRoles({ isOwner: true, worlds: everywhere, roles: [{ roleId: 'admin', allWorlds: false, worldIds: ['hq'] }] }, ROLES, WORLDS);
+    expect(summary.where).toBeNull();
+  });
+
+  it('marks nobody else as the owner', () => {
+    expect(summariseRoles({ isOwner: false, worlds: everywhere, roles: [] }, ROLES, WORLDS).owner).toBe(false);
   });
 
   it('says where a Member works when they are in some worlds only', () => {
@@ -75,5 +95,21 @@ describe('dayWord', () => {
     expect(dayWord(new Date(2026, 9, 10, 12, 0), now)).toBe('10 Oct');
     expect(dayWord(new Date(2026, 9, 3, 12, 0), now)).toBe('3 Oct');
     expect(dayWord(new Date(2025, 11, 25, 12, 0), now)).toBe('25 Dec 2025');
+  });
+});
+
+describe('rolePickableWorlds', () => {
+  const all = ['hq', 'campus', 'lab'];
+  it('lets "All worlds" widen someone limited to some worlds only for whoever gives roles everywhere and may add people everywhere', () => {
+    expect(rolePickableWorlds(all, ['hq'], 'all', true)).toEqual({ all: true, ids: ['hq'] });
+    expect(rolePickableWorlds(all, ['hq'], 'all', false)).toEqual({ all: false, ids: ['hq'] });
+    expect(rolePickableWorlds(all, ['hq'], ['hq'], true)).toEqual({ all: false, ids: ['hq'] });
+  });
+  it('needs nothing extra when they are in every world already', () => {
+    expect(rolePickableWorlds(all, 'all', 'all', false)).toEqual({ all: true, ids: all });
+    expect(rolePickableWorlds(all, 'all', ['hq', 'lab'], true)).toEqual({ all: false, ids: ['hq', 'lab'] });
+  });
+  it('still lists only the worlds they are in that you may give roles in', () => {
+    expect(rolePickableWorlds(all, ['hq', 'campus'], ['campus', 'lab'], true).ids).toEqual(['campus']);
   });
 });

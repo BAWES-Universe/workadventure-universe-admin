@@ -42,6 +42,8 @@ export default function MemoryBrowsePage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [pagination, setPagination] = useState<PageInfo | null>(null);
+  // Bot chat telemetry (#435): how many were left out because it is off for their bots.
+  const [hiddenCount, setHiddenCount] = useState(0);
   const [filters, setFilters] = useState({
     botId: '',
     userUuid: '',
@@ -114,6 +116,7 @@ export default function MemoryBrowsePage() {
       const data = await response.json();
       setMemory(data.memory || []);
       setPagination(data.pagination || null);
+      setHiddenCount(typeof data.hiddenCount === 'number' ? data.hiddenCount : 0);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'An error occurred');
@@ -172,6 +175,12 @@ export default function MemoryBrowsePage() {
       </FilterRow>
 
       {error && <LoadError label="memory" retry={fetchMemory} />}
+
+      {hiddenCount > 0 && (
+        <p className="text-sm text-muted-foreground" role="status">
+          {hiddenCount.toLocaleString()} {hiddenCount === 1 ? 'memory entry' : 'memory entries'} not shown: bot chat telemetry is off for {hiddenCount === 1 ? 'the bot' : 'their bots'}.
+        </p>
+      )}
 
       {loading && memory.length === 0 ? (
         <LoadingRows label="memory entries" rows={5} />
