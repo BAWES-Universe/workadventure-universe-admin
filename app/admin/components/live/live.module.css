@@ -13,7 +13,7 @@
   .placesScroll[data-wide-grid] { grid-auto-flow: row; grid-template-columns: repeat(2, minmax(0, 1fr)); overflow: visible; }
 }
 .placesGrid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr)); }
-.place { position: relative; display: grid; gap: 10px; min-width: 0; padding: 14px; border: 1px solid hsl(var(--border)); border-radius: 18px; background: hsl(var(--card)); transition: border-color 160ms, transform 160ms; }
+.place { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; min-width: 0; padding: 14px; border: 1px solid hsl(var(--border)); border-radius: 18px; background: hsl(var(--card)); transition: border-color 160ms, transform 160ms; }
 .place:hover { border-color: hsl(var(--foreground) / .22); transform: translateY(-1px); }
 .place[data-here]:hover { border-color: rgb(134 41 252 / .8); }
 /* The room's name is the card's link: its box covers the card, and the Visit button sits above it. */
@@ -28,11 +28,14 @@
 .name { display: flex; align-items: center; gap: 8px; font-family: var(--font-display); font-weight: 700; font-size: 16px; letter-spacing: -.01em; line-height: 1.2; }
 .name > a { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ctx { font-size: 12px; color: hsl(var(--muted-foreground)); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The universe › world line is a block of its own, so it ends in … itself when it runs out of room. */
+.ctx > * { overflow: hidden; text-overflow: ellipsis; }
 .count { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; white-space: nowrap; }
 .dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: #22c55e; box-shadow: 0 0 0 3px rgb(34 197 94 / .2); }
 .dot[data-status='busy'] { background: #f87171; box-shadow: 0 0 0 3px rgb(248 113 113 / .2); }
 .dot[data-status='away'] { background: #fbbf24; box-shadow: 0 0 0 3px rgb(251 191 36 / .2); }
-.placeBottom { display: flex; align-items: center; gap: 10px; min-height: 36px; }
+/* On a narrow card, You're here or Visit moves to its own line rather than past the card's edge. */
+.placeBottom { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; min-height: 36px; }
 .stack { display: flex; align-items: center; min-width: 0; }
 .stack > * { margin-left: -8px; box-shadow: 0 0 0 2px hsl(var(--card)); border-radius: 12px; }
 .stack > *:first-child { margin-left: 0; }
@@ -43,11 +46,17 @@
 .youHere { margin-left: auto; font-size: 12px; font-weight: 700; color: #6d28d9; white-space: nowrap; }
 :global(.dark) .youHere { color: #c4b5fd; }
 .people { display: grid; gap: 6px; }
-.person { display: flex; align-items: center; gap: 12px; min-width: 0; padding: 10px 12px; border-radius: 16px; border: 1px solid hsl(var(--border)); background: hsl(var(--card)); }
-.who { min-width: 0; flex: 1; }
+.person { position: relative; display: flex; align-items: center; gap: 12px; min-width: 0; padding: 10px 12px; border-radius: 16px; border: 1px solid hsl(var(--border)); background: hsl(var(--card)); transition: border-color 160ms; }
+.person:hover { border-color: hsl(var(--foreground) / .22); }
+/* The row's button: its box covers the row, and Go sits above it. */
+.personOpen { display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1; text-align: left; color: inherit; outline: none; }
+.personOpen::after { content: ''; position: absolute; inset: 0; z-index: 1; border-radius: inherit; }
+.personOpen:focus-visible::after { box-shadow: 0 0 0 2px hsl(var(--ring)); }
+.person .go { position: relative; z-index: 2; }
+.who { display: block; min-width: 0; flex: 1; }
 .who strong { display: flex; align-items: center; gap: 7px; font-size: 14px; min-width: 0; }
 .who strong > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.where { font-size: 12px; color: hsl(var(--muted-foreground)); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.where { display: block; font-size: 12px; color: hsl(var(--muted-foreground)); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .go { flex: none; height: 34px; padding: 0 12px; border-radius: 999px; border: 1px solid hsl(var(--foreground) / 0.18); font-size: 12px; font-weight: 700; display: inline-flex; align-items: center; gap: 5px; transition: border-color 120ms ease, background-color 120ms ease; }
 .go:hover { border-color: hsl(var(--foreground) / 0.35); background: hsl(var(--foreground) / 0.05); }
 .sameRoom { flex: none; font-size: 12px; font-weight: 600; color: hsl(var(--muted-foreground)); padding: 0 6px; }

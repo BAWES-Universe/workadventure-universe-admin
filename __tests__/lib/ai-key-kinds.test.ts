@@ -65,6 +65,13 @@ describe('helpers', () => {
     expect(authHeaders(kindInfo('lmstudio')!, '')).toEqual({});
   });
 
+  it('trims trailing slashes in linear time, even for a long run of them in the middle of an address', () => {
+    const nim = kindInfo('nim')!;
+    const started = Date.now();
+    expect(isTypedEndpoint(nim, `https://mine.example.com${'/'.repeat(200_000)}x`)).toBe(true);
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
   it('knows a typed address from the provider’s own', () => {
     const nim = kindInfo('nim')!;
     expect(isTypedEndpoint(nim, 'https://integrate.api.nvidia.com/v1')).toBe(false);
@@ -112,6 +119,7 @@ describe('the providers added after the seven', () => {
 
   it('finds a saved key’s region from its endpoint, and never guesses one', () => {
     expect(hostedBase(kindInfo('qwen')!, { address: 'https://dashscope.aliyuncs.com/compatible-mode/v1/' })).toMatchObject({ ok: true, region: 'china' });
+    expect(hostedBase(kindInfo('qwen')!, { address: 'https://dashscope.aliyuncs.com/compatible-mode/v1///' })).toMatchObject({ ok: true, region: 'china' });
     expect(hostedBase(kindInfo('qwen')!, {})).toEqual({ ok: false, message: 'Pick a region first.' });
     expect(hostedBase(kindInfo('qwen')!, { region: 'mars' })).toMatchObject({ ok: false });
     expect(hostedBase(kindInfo('groq')!, { region: 'china' })).toMatchObject({ ok: true, base: 'https://api.groq.com/openai/v1', region: null });
