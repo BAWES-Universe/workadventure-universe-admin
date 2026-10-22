@@ -83,8 +83,8 @@ export async function moveBotsOffKey(
   });
   if (bots.length === 0) return { count: 0, universes: [] };
 
-  // Only rows still on the key move, one by one, so a second request that ran at the same time can't be told about or counted twice
-  const results = await Promise.all(
+  // Only rows still on the key move, one by one in a single transaction, so a second request that ran at the same time can't be told about or counted twice
+  const results = await prisma.$transaction(
     bots.map((bot) => prisma.bot.updateMany({ where: { id: bot.id, aiProviderRef: providerId }, data: { aiProviderRef: UNIVERSE_AI_REF } })),
   );
   const movedBots = bots.filter((_, index) => results[index].count > 0);

@@ -11,6 +11,7 @@ jest.mock('@/lib/db', () => ({
     worldMember: { findMany: jest.fn() },
     universeMember: { findMany: jest.fn() },
     bot: { findMany: jest.fn(), updateMany: jest.fn() },
+    $transaction: jest.fn(),
   },
 }));
 jest.mock('@/lib/roles', () => ({ permissionsForWorld: jest.fn() }));
@@ -22,6 +23,7 @@ const db = prisma as unknown as {
   worldMember: Record<'findMany', jest.Mock>;
   universeMember: Record<'findMany', jest.Mock>;
   bot: Record<'findMany' | 'updateMany', jest.Mock>;
+  $transaction: jest.Mock;
 };
 const permissions = permissionsForWorld as jest.Mock;
 const notice = addNotice as jest.Mock;
@@ -33,6 +35,7 @@ beforeEach(() => {
   db.universeMember.findMany.mockResolvedValue([]);
   db.universe.findMany.mockResolvedValue([]);
   db.bot.updateMany.mockResolvedValue({ count: 1 });
+  db.$transaction.mockImplementation((operations: Promise<unknown>[]) => Promise.all(operations));
 });
 
 describe('lendAccess', () => {
@@ -142,6 +145,13 @@ describe('moveBotsOffKey', () => {
     expect(result.count).toBe(2);
     expect(result.universes.map((universe) => universe.botNames)).toEqual([['Sam'], ['Nora']]);
     expect(notice.mock.calls[0][0].title).toBe('Sam moved to Universe AI');
+  });
+
+  it('moves the bots in one transaction, so a failure moves none and tells nobody', async () => {
+    db.bot.findMany.mockResolvedValue([bot('b1', 'Sam', bawes), bot('b2', 'Guide', sandbox)]);
+    db.$transaction.mockRejectedValue(new Error('db down'));
+    await expect(moveBotsOffKey('key-1', { actor, why: 'revoked' })).rejects.toThrow('db down');
+    expect(notice).not.toHaveBeenCalled();
   });
 
   it('changes nothing when no bot is on the key', async () => {
