@@ -34,7 +34,7 @@ describe('markDown', () => {
     expect(db.updateMany).toHaveBeenCalledWith({ where: { providerId: 'key-1', ownerId: { not: null }, downSince: null }, data: expect.objectContaining({ downSince: at, downReason: 'stopped' }) });
     expect(notice).toHaveBeenCalledTimes(1);
     expect(notice.mock.calls[0][0]).toMatchObject({ userId: 'owner', kind: 'ai-key-down', dedupeKey: `down:key-1:${at.toISOString()}`, title: 'My DeepSeek is down', badge: 'Down', href: '/admin/you/ai-keys' });
-    expect(notice.mock.calls[0][0].body).toBe('DeepSeek stopped answering. Bots on it reply on Universe AI until it’s back. Universe checks every 5 minutes and switches back by itself.');
+    expect(notice.mock.calls[0][0].body).toBe('DeepSeek stopped answering. Bots on it reply on Universe AI until it’s back. Universe checks again, at most every 5 minutes, whenever a bot needs it, and switches back as soon as the key answers.');
   });
 
   it('uses the own-computer wording that says conversations leave the computer', async () => {

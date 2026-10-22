@@ -6,8 +6,8 @@ import { addNotice, clearNotices } from '@/lib/notices';
 
 /**
  * Is a personal key working, and what do its bots do while it isn't (#374). A key is Down after two replies in a row
- * fail, or one failed check, and a key the provider rejects counts at once. Universe checks a Down key again every
- * 5 minutes (the next time one of its bots needs it after that) and the key switches back by itself. The key's owner
+ * fail, or one failed check, and a key the provider rejects counts at once. A Down key is checked again at most every
+ * 5 minutes, and only when one of its bots needs it (there is no timer); it switches back once it answers. The key's owner
  * gets one notice per outage. Server providers are never touched: they have no owner and no health.
  */
 export const RECHECK_MS = 5 * 60_000;
@@ -93,7 +93,7 @@ async function tellOwner(key: KeyRow, since: Date, reason: DownReason) {
       dedupeKey: `${noticePrefix(key.providerId)}${since.toISOString()}`,
       title: `${key.name} is down`,
       badge: 'Down',
-      body: `${what} ${meanwhile} Universe checks every 5 minutes and switches back by itself.`,
+      body: `${what} ${meanwhile} Universe checks again, at most every 5 minutes, whenever a bot needs it, and switches back as soon as the key answers.`,
       href: '/admin/you/ai-keys',
     });
   } catch (error) {
