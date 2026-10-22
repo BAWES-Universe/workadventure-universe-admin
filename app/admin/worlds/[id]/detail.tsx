@@ -307,7 +307,6 @@ function WorldDetail({ view }: { view: WorldView }) {
       {view !== 'details' ? (
         <PageHeader
           kind={view === 'safety' ? 'world' : 'people'}
-          plainIcon={view === 'visitors'}
           title={VIEW_TITLE[view]}
           context={
             <InContext

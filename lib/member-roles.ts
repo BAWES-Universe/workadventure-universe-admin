@@ -45,11 +45,14 @@ export interface RoleSummary {
   where: string | null;
   /** How many more roles they hold, shown as "+N". */
   more: number;
+  /** Created the universe: shown as a crown by the name, never counted in "+N". */
+  owner: boolean;
 }
 
 /**
- * The one role a row shows: the owner's, else their highest custom or built-in role, else Member. The Member pill
- * appears only for someone with no other role.
+ * The one role a row shows: their highest given role, else Member (the owner's pill says Owner when they were given
+ * none). Owner is not a role: it is who created the universe, shown as a crown (`owner`) and never counted in "+N".
+ * The Member pill appears only for someone with no other role.
  */
 export function summariseRoles(
   member: MemberRoles,
@@ -57,8 +60,8 @@ export function summariseRoles(
   worldNames: ReadonlyMap<string, string>,
 ): RoleSummary {
   const held = member.roles.filter((given) => roles.has(given.roleId));
-  if (member.isOwner) {
-    return { ...OWNER_PILL, where: null, more: held.length };
+  if (held.length === 0 && member.isOwner) {
+    return { ...OWNER_PILL, where: null, more: 0, owner: true };
   }
   if (held.length === 0) {
     const base = [...roles.values()].find((role) => role.key === 'member');
@@ -67,11 +70,12 @@ export function summariseRoles(
       color: base?.color ?? '#A78BFA',
       where: worldsLabel(member.worlds, worldNames),
       more: 0,
+      owner: false,
     };
   }
   const top = held[0];
   const role = roles.get(top.roleId) as RoleInfo;
-  return { name: role.name, color: role.color, where: worldsLabel(top, worldNames), more: held.length - 1 };
+  return { name: role.name, color: role.color, where: member.isOwner ? null : worldsLabel(top, worldNames), more: held.length - 1, owner: member.isOwner };
 }
 
 /** What a list of allowed worlds says: every world, or only these. */
@@ -85,6 +89,21 @@ export function pickableWorlds(universeWorldIds: readonly string[], ...limits: A
   const all = limits.every((limit) => limit === 'all');
   const ids = universeWorldIds.filter((id) => limits.every((limit) => limit === 'all' || limit.includes(id)));
   return { all, ids };
+}
+
+/**
+ * Where one role may be put on someone: the worlds they are a member of that you may give roles in (`ids`), and whether
+ * "All worlds" may be picked. "All worlds" also adds them to the worlds they are not in yet, so beside your Give roles
+ * reach it needs the right to add people to every world (`mayWiden`), unless they are in every world already.
+ */
+export function rolePickableWorlds(
+  universeWorldIds: readonly string[],
+  memberWorlds: AllowedWorlds,
+  giveWorlds: AllowedWorlds,
+  mayWiden: boolean,
+): { all: boolean; ids: string[] } {
+  const { ids } = pickableWorlds(universeWorldIds, memberWorlds, giveWorlds);
+  return { all: giveWorlds === 'all' && (memberWorlds === 'all' || mayWiden), ids };
 }
 
 /** The permission number of a role carries Administrator, which works in every world and can't be limited. */
