@@ -79,6 +79,11 @@ export async function markDown(key: KeyRow, reason: DownReason, now = new Date()
   return true;
 }
 
+/** Dismisses the "is down" notice of a key that is being removed, so it doesn't point at a key that no longer exists. */
+export async function clearDownNotice(ownerId: string, providerId: string): Promise<void> {
+  await clearNotices(ownerId, KIND_NOTICE, noticePrefix(providerId));
+}
+
 /** Marks a Down key Working and clears its notice. Returns true if it flipped. */
 export async function markWorking(key: Pick<KeyRow, 'providerId' | 'ownerId'>, now = new Date()): Promise<boolean> {
   const flipped = await prisma.botsAiProvider.updateMany({
