@@ -64,6 +64,8 @@ export default function AddAiKeyPage() {
   const hosted = shown.filter((entry) => entry.group === 'hosted');
 
   function pickKind(next: AiKeyKind) {
+    // Clicking the type that is already picked (or inside its open card) changes nothing.
+    if (next === kind) return;
     setKind(next);
     setRegion(null);
     changed();

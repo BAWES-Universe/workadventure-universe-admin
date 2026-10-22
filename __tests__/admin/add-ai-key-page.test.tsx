@@ -159,6 +159,14 @@ describe('Add a key: more providers, regions and search', () => {
     expect(screen.getByRole('radio', { name: /^Global/ }).getAttribute('aria-checked')).toBe('false');
   });
 
+  it('keeps the region when the picked type is clicked again', () => {
+    render(<AddAiKeyPage />);
+    fireEvent.click(screen.getByRole('radio', { name: /^Qwen/ }));
+    fireEvent.click(screen.getByRole('radio', { name: /^Global/ }));
+    fireEvent.click(screen.getByRole('radio', { name: /^Qwen/ }));
+    expect(screen.getByRole('radio', { name: /^Global/ }).getAttribute('aria-checked')).toBe('true');
+  });
+
   it('shows no region for a provider that has one address', () => {
     render(<AddAiKeyPage />);
     fireEvent.click(screen.getByRole('radio', { name: /^Mistral/ }));
