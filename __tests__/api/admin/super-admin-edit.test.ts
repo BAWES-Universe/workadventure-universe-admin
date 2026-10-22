@@ -9,6 +9,7 @@ jest.mock('@/lib/db', () => ({
     universe: { findUnique: jest.fn(), update: jest.fn(), delete: jest.fn() },
     world: { findUnique: jest.fn(), update: jest.fn(), delete: jest.fn() },
     room: { findUnique: jest.fn(), update: jest.fn(), delete: jest.fn() },
+    bot: { findMany: jest.fn().mockResolvedValue([]) }, // Hide bot conversations (#435): no bot hides, so a delete is just the delete
     user: { findUnique: jest.fn() },
     worldMember: { findMany: jest.fn(), findFirst: jest.fn() },
     favorite: { groupBy: jest.fn(), findMany: jest.fn(), count: jest.fn().mockResolvedValue(0), findFirst: jest.fn() },
