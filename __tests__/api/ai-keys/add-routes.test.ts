@@ -54,6 +54,13 @@ describe('POST /api/me/ai-keys', () => {
     expect(JSON.stringify(await response.json())).not.toContain('sk-abcdef');
   });
 
+  it('keeps no plain-text last four for a short key, which would be most of it', async () => {
+    const response = await post({ kind: 'lmstudio', address: 'https://lm.example.com', apiKey: 'abc12', model: 'qwen3-8b' });
+    expect(response.status).toBe(201);
+    const data = provider.create.mock.calls[0][0].data;
+    expect(data).toMatchObject({ apiKeyEncrypted: 'enc(abc12)', apiKeyLast4: null });
+  });
+
   it('refuses a key with a smart quote, a zero-width space or a space as a plain 400, saving nothing', async () => {
     for (const apiKey of ['sk-abc\u201Cdef', 'sk-\u200Babc', 'sk-a b', 'sk-é']) {
       const response = await post({ kind: 'deepseek', apiKey, model: 'm' });

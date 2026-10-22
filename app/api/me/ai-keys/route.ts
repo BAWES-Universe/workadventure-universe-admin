@@ -10,6 +10,9 @@ import { meOriginAllowed, meRespond } from '@/lib/me-route';
 
 export const runtime = 'nodejs';
 
+/** The shortest key whose last four characters are kept to recognise it by. */
+const MIN_KEY_FOR_LAST4 = 12;
+
 const respond = (request: NextRequest, body: unknown, status = 200) => meRespond(request, body, status, 'GET, POST, OPTIONS');
 
 export async function OPTIONS(request: NextRequest) {
@@ -84,7 +87,8 @@ export async function POST(request: NextRequest) {
         enabled: true,
         endpoint,
         apiKeyEncrypted: apiKey ? encryptApiKey(apiKey) : null,
-        apiKeyLast4: apiKey ? apiKey.slice(-4) : null,
+        // Only a long key keeps its last four in plain text: for a short one (an own server's "1234"), four is most of the key
+        apiKeyLast4: apiKey.length >= MIN_KEY_FOR_LAST4 ? apiKey.slice(-4) : null,
         model,
         temperature: 0.7,
         maxTokens: 500,
