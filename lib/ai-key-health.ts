@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { decryptApiKey } from '@/lib/encryption';
 import { kindInfo } from '@/lib/ai-key-kinds';
@@ -228,8 +229,14 @@ export async function recordReply(providerId: string, outcome: { ok: true } | { 
     await markDown(key, verdict.down);
     return;
   }
-  const bumped = await prisma.botsAiProvider.update({ where: { providerId }, data: { failedReplies: { increment: 1 } }, select: { failedReplies: true } });
-  if (bumped.failedReplies >= FAILED_REPLIES_TO_DOWN) await markDown(key, 'errors');
+  // The key can be revoked between the read above and this count: then there is nothing left to count and the report is done
+  const bumped = await prisma.botsAiProvider
+    .update({ where: { providerId }, data: { failedReplies: { increment: 1 } }, select: { failedReplies: true } })
+    .catch((error: unknown) => {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2025') return null;
+      throw error;
+    });
+  if (bumped && bumped.failedReplies >= FAILED_REPLIES_TO_DOWN) await markDown(key, 'errors');
 }
 
 /**

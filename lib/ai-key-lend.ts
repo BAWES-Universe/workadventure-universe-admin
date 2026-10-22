@@ -51,11 +51,10 @@ export async function lendableUniverses(userId: string): Promise<LendableUnivers
   for (const entry of worldMemberships) candidates.set(entry.world.universe.id, entry.world.universe.name);
   for (const entry of universeMemberships) candidates.set(entry.universe.id, entry.universe.name);
 
+  // Each universe is asked at the same time, so the list takes as long as the slowest one, not all of them one after another
+  const checked = await Promise.all([...candidates].map(async ([id, name]) => ({ id, name, access: await lendAccess(userId, id) })));
   const result: LendableUniverse[] = [];
-  for (const [id, name] of candidates) {
-    const access = await lendAccess(userId, id);
-    if (access) result.push({ id, name, access });
-  }
+  for (const { id, name, access } of checked) if (access) result.push({ id, name, access });
   return result.sort((a, b) => a.name.localeCompare(b.name));
 }
 
