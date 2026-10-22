@@ -396,6 +396,20 @@ describe('recheckIfDue', () => {
     expect(probe).not.toHaveBeenCalled();
   });
 
+  it('keeps the key as it is when the database fails while claiming the check', async () => {
+    db.updateMany.mockRejectedValue(new Error('connection lost'));
+    const key = downNow(own, { ifDown: 'stop', healthCheckedAt: minutesAgo(6) });
+    expect(await recheckIfDue(key, now)).toBe(key);
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  it('keeps the key as it is when the database fails reading it after the check', async () => {
+    probe.mockResolvedValue({ ok: true, models: ['m'] });
+    db.findUnique.mockRejectedValue(new Error('connection lost'));
+    const key = downNow(own, { ifDown: 'stop', healthCheckedAt: minutesAgo(6) });
+    expect(await recheckIfDue(key, now)).toBe(key);
+  });
+
   it('with Stop replying it waits for the check and returns the key as it is after', async () => {
     probe.mockResolvedValue({ ok: true, models: ['m'] });
     const key = downNow(own, { ifDown: 'stop', healthCheckedAt: minutesAgo(6) });
