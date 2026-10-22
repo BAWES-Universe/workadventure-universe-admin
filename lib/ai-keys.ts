@@ -27,13 +27,13 @@ export interface AiKeySummary {
   /** "working", or "down" with when it went down (ISO) and why. */
   status: 'working' | 'down';
   downSince: string | null;
-  downReason: 'stopped' | 'rejected' | 'errors' | null;
+  downReason: DownReason | null;
   /** What its bots do while it is down. */
   ifDown: 'universe-ai' | 'stop';
   createdAt: string;
 }
 
-const asDownReason = (value: string | null): DownReason => (value === 'rejected' || value === 'errors' ? value : 'stopped');
+const asDownReason = (value: string | null): DownReason => (value === 'rejected' || value === 'errors' || value === 'credit' || value === 'model' ? value : 'stopped');
 
 function hostOf(endpoint: string | null): string | null {
   if (!endpoint) return null;

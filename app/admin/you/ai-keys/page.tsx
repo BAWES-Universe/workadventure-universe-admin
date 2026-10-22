@@ -74,7 +74,13 @@ function StatusPill({ down }: { down: boolean }) {
   );
 }
 
-const DOWN_PHRASE = { stopped: 'stopped answering', rejected: 'didn’t accept the key', errors: 'kept failing' } as const;
+const DOWN_PHRASE = {
+  stopped: 'stopped answering',
+  rejected: 'didn’t accept the key',
+  errors: 'kept failing',
+  credit: 'is out of credit',
+  model: 'no longer has the model',
+} as const;
 
 /** "2:14 PM", or "Oct 18, 2:14 PM" when it was not today. */
 function sinceText(iso: string, now = new Date()): string {

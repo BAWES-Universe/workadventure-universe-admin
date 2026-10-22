@@ -1,7 +1,7 @@
 import { prisma } from '@/lib/db';
 import { addNotice, clearNotices } from '@/lib/notices';
 import { probeChat, probeModels } from '@/lib/ai-key-models';
-import { checkAndRecord, checkKey, markDown, markWorking, recheckIfDue, recordReply, CHECK_WAIT_MS, RECHECK_MS, type KeyRow } from '@/lib/ai-key-health';
+import { checkAndRecord, checkKey, judgeFailedReply, markDown, markWorking, recheckIfDue, recordReply, CHECK_WAIT_MS, RECHECK_MS, type KeyRow } from '@/lib/ai-key-health';
 
 jest.mock('@/lib/db', () => ({ prisma: { botsAiProvider: { findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn(), updateMany: jest.fn() } } }));
 jest.mock('@/lib/notices', () => ({ addNotice: jest.fn(), clearNotices: jest.fn() }));
@@ -51,6 +51,15 @@ describe('markDown', () => {
   it('says a rejected key was rejected', async () => {
     await markDown(hosted, 'rejected');
     expect(notice.mock.calls[0][0].body).toMatch(/^DeepSeek stopped accepting this key\./);
+  });
+
+  it('says plainly when the key is out of credit, or the provider no longer has its model', async () => {
+    await markDown(hosted, 'credit');
+    expect(notice.mock.calls[0][0].body).toMatch(/^DeepSeek says this key is out of credit\./);
+    notice.mockClear();
+    db.updateMany.mockResolvedValue({ count: 1 });
+    await markDown(hosted, 'model');
+    expect(notice.mock.calls[0][0].body).toMatch(/^DeepSeek no longer has the model this key uses\. Pick another model on the AI keys page\./);
   });
 
   it('does nothing, and tells nobody, when another request already marked it Down', async () => {
@@ -105,6 +114,35 @@ describe('recordReply', () => {
     expect(db.update).not.toHaveBeenCalled();
   });
 
+  it.each([
+    [401, 'rejected'],
+    [403, 'rejected'],
+    [402, 'credit'],
+    [404, 'model'],
+  ])('a %s from the provider marks the key Down at once, as "%s"', async (status, reason) => {
+    db.findFirst.mockResolvedValue(row());
+    await recordReply('key-1', { ok: false, status });
+    expect(db.updateMany.mock.calls[0][0].data).toMatchObject({ downReason: reason });
+    expect(db.update).not.toHaveBeenCalled();
+  });
+
+  it.each([400, 413, 422, 409])('a %s says this one message was the problem, so nothing is counted against the key', async (status) => {
+    db.findFirst.mockResolvedValue(row({ failedReplies: 1 }));
+    await recordReply('key-1', { ok: false, status });
+    expect(db.update).not.toHaveBeenCalled();
+    expect(db.updateMany).not.toHaveBeenCalled();
+  });
+
+  it.each([429, 408, 500, 503, undefined])('a %s counts, and two in a row mark the key Down', async (status) => {
+    db.findFirst.mockResolvedValue(row());
+    db.update.mockResolvedValueOnce({ failedReplies: 1 });
+    await recordReply('key-1', { ok: false, status });
+    expect(db.updateMany).not.toHaveBeenCalled();
+    db.update.mockResolvedValueOnce({ failedReplies: 2 });
+    await recordReply('key-1', { ok: false, status });
+    expect(db.updateMany.mock.calls[0][0].data).toMatchObject({ downReason: 'errors' });
+  });
+
   it('a good reply resets the run of failures', async () => {
     db.findFirst.mockResolvedValue(row({ failedReplies: 1 }));
     await recordReply('key-1', { ok: true });
@@ -131,6 +169,13 @@ describe('recordReply', () => {
     await recordReply('deepseek-flash', { ok: false, rejected: true });
     expect(db.findFirst.mock.calls[0][0].where).toEqual({ providerId: 'deepseek-flash', ownerId: { not: null } });
     expect(db.updateMany).not.toHaveBeenCalled();
+  });
+});
+
+describe('judgeFailedReply', () => {
+  it('keeps the old report working: a flag of "rejected" with no status is a rejection', () => {
+    expect(judgeFailedReply(undefined, true)).toEqual({ counts: true, down: 'rejected' });
+    expect(judgeFailedReply(undefined)).toEqual({ counts: true });
   });
 });
 
