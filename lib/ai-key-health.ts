@@ -248,32 +248,38 @@ export async function recheckIfDue(key: KeyRow, now = new Date()): Promise<KeyRo
   if (!key.downSince) return key;
   const due = !key.healthCheckedAt || now.getTime() - key.healthCheckedAt.getTime() >= RECHECK_MS;
   if (!due) return key;
-  const claimed = await prisma.botsAiProvider.updateMany({
-    where: {
-      providerId: key.providerId,
-      downSince: { not: null },
-      OR: [{ healthCheckedAt: null }, { healthCheckedAt: { lt: new Date(now.getTime() - RECHECK_MS) } }],
-    },
-    data: { healthCheckedAt: now },
-  });
-  if (claimed.count === 0) return key;
-  const running = checkAndRecord(key).catch((error) => {
+  // A database error here must not fail the bot's request: the key stays as it is, so the owner's choice still applies
+  try {
+    const claimed = await prisma.botsAiProvider.updateMany({
+      where: {
+        providerId: key.providerId,
+        downSince: { not: null },
+        OR: [{ healthCheckedAt: null }, { healthCheckedAt: { lt: new Date(now.getTime() - RECHECK_MS) } }],
+      },
+      data: { healthCheckedAt: now },
+    });
+    if (claimed.count === 0) return key;
+    const running = checkAndRecord(key).catch((error) => {
+      console.error('[AiKeys] Recheck failed:', error instanceof Error ? error.message : 'unknown');
+    });
+    if (key.ifDown !== 'stop') {
+      void running;
+      return key;
+    }
+    // A provider that hangs must not hold the bot's request for the whole probe time: past the wait the key stays as it is
+    // (so the bot rests) and the check goes on in the background and records its result.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finished = await Promise.race([
+      running.then(() => true),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), CHECK_WAIT_MS);
+      }),
+    ]);
+    if (timer) clearTimeout(timer);
+    if (!finished) return key;
+    return (await prisma.botsAiProvider.findUnique({ where: { providerId: key.providerId }, select: KEY_SELECT })) ?? key;
+  } catch (error) {
     console.error('[AiKeys] Recheck failed:', error instanceof Error ? error.message : 'unknown');
-  });
-  if (key.ifDown !== 'stop') {
-    void running;
     return key;
   }
-  // A provider that hangs must not hold the bot's request for the whole probe time: past the wait the key stays as it is
-  // (so the bot rests) and the check goes on in the background and records its result.
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const finished = await Promise.race([
-    running.then(() => true),
-    new Promise<boolean>((resolve) => {
-      timer = setTimeout(() => resolve(false), CHECK_WAIT_MS);
-    }),
-  ]);
-  if (timer) clearTimeout(timer);
-  if (!finished) return key;
-  return (await prisma.botsAiProvider.findUnique({ where: { providerId: key.providerId }, select: KEY_SELECT })) ?? key;
 }
