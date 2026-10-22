@@ -83,10 +83,11 @@ export type ProbeModelsResult = { ok: true; models: string[] } | { ok: false; me
 
 /**
  * What a provider's 400 or 422 says when the problem is the model (it does not exist, or this key may not use it) and not the
- * request. Only these words count: a bare "invalid" does not, because a refused token limit says "invalid" too.
+ * request. Only these words count: a bare "invalid" does not, because a refused token limit says "invalid" too. A dot inside a
+ * model id ("Qwen2.5-7B") does not end the sentence; a dot before a space or the end does.
  */
 const MODEL_REFUSED =
-  /model_not_found|(unknown|unsupported|nonexistent|no such|invalid)\s+model|model[^.\n]{0,60}(does not exist|doesn't exist|not exist|not found|not supported|unsupported|not available|unavailable|no access|not have access|don't have access|do not have access|not allowed|permission|deprecated|decommissioned|retired)|(does not exist|not found|no access)[^.\n]{0,40}model/i;
+  /model_not_(?:found|supported)|(unknown|unsupported|nonexistent|no such|invalid)\s+model|model(?:[^.\n]|\.(?=\S)){0,60}(does not exist|doesn't exist|not exist|not found|not supported|unsupported|not available|unavailable|no access|not have access|don't have access|do not have access|not allowed|permission|deprecated|decommissioned|retired)|(does not exist|not found|no access)(?:[^.\n]|\.(?=\S)){0,40}model/i;
 
 /** The words of an error answer, one per line (message, code, type), so the pattern above never reads across fields of the JSON. */
 function errorWords(body: string): string {
