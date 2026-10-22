@@ -432,9 +432,9 @@ export interface ReportsSummary {
 const REPORT_CARD =
   'orbit-rise relative min-w-0 rounded-[18px] bg-card bg-[linear-gradient(160deg,rgb(134_41_252/0.10),transparent_55%)] p-4 shadow-[inset_0_0_0_1px_rgb(167_139_250/0.28),0_18px_40px_-24px_rgb(134_41_252/0.55)]';
 
-function FlagTile() {
+function FlagGlyph() {
   return (
-    <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[image:var(--brand-gradient)] text-white shadow-[0_8px_20px_-8px_rgb(134_41_252/0.8)]">
+    <span className="flex h-10 w-10 shrink-0 items-center justify-center text-foreground">
       <Flag className="h-5 w-5" aria-hidden="true" />
     </span>
   );
@@ -478,7 +478,7 @@ export function ReportsAlert() {
   if (latest) {
     return (
       <div className={cn(REPORT_CARD, 'flex gap-3')} data-testid="reports-alert">
-        <FlagTile />
+        <FlagGlyph />
         <div className="min-w-0 flex-1 space-y-2">
           <div>
             <p className="text-[15px] font-semibold">
@@ -507,7 +507,7 @@ export function ReportsAlert() {
   return (
     <div className={cn(REPORT_CARD, 'space-y-3')} data-testid="reports-alert">
       <div className="flex items-center gap-3">
-        <FlagTile />
+        <FlagGlyph />
         <p className="text-[15px] font-semibold">{title}</p>
       </div>
       <div className="space-y-2">

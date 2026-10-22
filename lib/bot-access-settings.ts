@@ -1,7 +1,8 @@
 import { z } from 'zod';
+import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { has, parsePermissions } from '@/lib/permissions';
-import { ADMIN_KEY } from '@/lib/roles';
+import { ADMIN_KEY, EVERYONE_KEY } from '@/lib/roles';
 import {
   RULE_ACTIONS,
   RULE_PERMISSION,
@@ -11,8 +12,7 @@ import {
   type RuleAction,
   type RuleValue,
 } from '@/lib/bot-rules';
-import { isSuperAdmin } from '@/lib/super-admin';
-import { findUserByIdentifier } from '@/lib/user-identifier';
+import { PEOPLE_PREFERENCE_KEYS } from '@/lib/people-settings';
 
 /**
  * What an owner can set on one bot (#427): who may use it (rules for roles and people, and Private bot), the line
@@ -198,6 +198,37 @@ function isUniqueViolation(error: unknown): boolean {
   return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 'P2002';
 }
 
+/**
+ * Who a manager of this bot may name in a rule: people in this universe (and its owner and the bot's creator), and
+ * anyone who can be found by name, which is every signed-in person who has not switched it off, and people already on
+ * this bot's list (the manager can see them, so they must stay editable). Nobody else, so adding
+ * a person by uuid or email can never tell a manager whether some other account exists, or what its name is.
+ */
+function nameableInRules(place: BotPlace): Prisma.UserWhereInput {
+  return {
+    OR: [
+      { id: place.universeOwnerId },
+      // someone already on this bot's list stays editable, whatever they changed since
+      { botAccessRules: { some: { botId: place.id } } },
+      ...(place.createdById ? [{ id: place.createdById }] : []),
+      { universeMemberships: { some: { universeId: place.universeId } } },
+      { worldMemberships: { some: { world: { universeId: place.universeId } } } },
+      {
+        isGuest: false,
+        NOT: { preferences: { some: { key: PEOPLE_PREFERENCE_KEYS.findableByName, value: { equals: false } } } },
+      },
+    ],
+  };
+}
+
+/** The person a rule names, or null for "no such account" and "not someone you may name", which look the same. */
+function findPersonForRule(place: BotPlace, body: z.infer<typeof ruleSchema>) {
+  const named: Prisma.UserWhereInput = body.userId
+    ? { id: body.userId }
+    : { OR: [{ uuid: body.identifier as string }, { email: body.identifier as string }] };
+  return prisma.user.findFirst({ where: { AND: [named, nameableInRules(place)] } });
+}
+
 /** Which role or person a row is for, checked: it exists, is in this bot's universe, and could actually be limited. */
 async function resolveSubject(
   place: BotPlace,
@@ -207,20 +238,24 @@ async function resolveSubject(
     const role = await prisma.role.findUnique({ where: { id: body.roleId }, select: { id: true, key: true, universeId: true } });
     if (!role || role.universeId !== place.universeId) throw new BotSettingsError(404, 'That role is not in this universe');
     if (role.key === ADMIN_KEY) throw new BotSettingsError(400, "Admin always passes, so a rule for it would do nothing");
+    // Everyone includes people who never joined, so a Yes there would hand the bot to anyone with an account
+    if (role.key === EVERYONE_KEY && body.manage === 'yes') {
+      throw new BotSettingsError(400, 'Everyone cannot be given "Manage this bot". Give it to a role or to a person');
+    }
     return { roleId: role.id };
   }
 
-  const user = body.userId
-    ? await prisma.user.findUnique({ where: { id: body.userId } })
-    : await findUserByIdentifier(body.identifier as string);
+  const user = await findPersonForRule(place, body);
   if (!user) throw new BotSettingsError(404, 'That person was not found');
-  if (user.id === place.universeOwnerId || isSuperAdmin(user.email)) {
+  // Only the owner, who is already known to every manager. A super admin is saved like anyone else (their rule changes
+  // nothing, as they always pass), so refusing them would tell a manager who is one
+  if (user.id === place.universeOwnerId) {
     throw new BotSettingsError(400, "The bot's owner always passes, so a rule for them would do nothing");
   }
   // The creator always chats with, messages and calls over their own bot, but manages it only while they hold Manage
   // bots, so Manage this bot is the one thing a rule can still change for them
   if (user.id === place.createdById && ['chat', 'dm', 'summon'].some((action) => body[action as RuleAction] && body[action as RuleAction] !== 'default')) {
-    throw new BotSettingsError(400, 'The bot\'s creator always chats with it, messages it and calls it over. Only "Manage this bot" can be set for them');
+    throw new BotSettingsError(400, 'The bot\'s creator always chats with it, messages it and summons it. Only "Manage this bot" can be set for them');
   }
   return { userId: user.id };
 }

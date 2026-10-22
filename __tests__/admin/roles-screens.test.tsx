@@ -5,6 +5,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { fromKeys, toWire } from '@/lib/permissions';
 import { RolesListPage } from '@/app/admin/components/roles/roles-list';
 import { RoleEditPage } from '@/app/admin/components/roles/role-editor';
+import { inheritedNote } from '@/app/admin/components/roles/permissions-tab';
 import type { MeResponse, RoleRow } from '@/lib/role-ui';
 
 jest.mock('next/link', () => ({
@@ -346,7 +347,37 @@ describe('a role page', () => {
     expect(screen.getAllByRole('switch')).toHaveLength(18);
     // The universe's name is filled in
     expect(screen.getByText('Reach all of BAWES')).toBeTruthy();
-    expect(screen.getByText('0 of 17 on', { exact: false })).toBeTruthy();
+    // Everyone's three bot permissions are on, so they count
+    expect(screen.getByText('3 of 17 on, all from Everyone.', { exact: false })).toBeTruthy();
+  });
+
+  it('shows what Member and Editor inherit on and locked, and saves none of it', async () => {
+    serve((url, init) => (url.endsWith('/roles/editor') && init?.method === 'PATCH' ? json({ role: {} }) : undefined));
+    open('member');
+    await screen.findByRole('heading', { name: 'People' });
+    for (const label of ['Chat with bots nearby', 'DM bots', 'Summon bots']) {
+      const toggle = screen.getByRole('switch', { name: label }) as HTMLButtonElement;
+      expect(toggle.getAttribute('aria-checked')).toBe('true');
+      expect(toggle.disabled).toBe(true);
+      expect(toggle.getAttribute('aria-describedby')).toMatch(/-hint perm-\w+-from$/);
+      expect(within(screen.getByTestId(`permission-${label === 'DM bots' ? 'DM_BOTS' : label === 'Summon bots' ? 'SUMMON_BOTS' : 'CHAT_BOTS_NEARBY'}`)).getByText('From Everyone')).toBeTruthy();
+    }
+    // What the role has to add itself stays a normal switch
+    expect(screen.getByRole('switch', { name: 'Manage bots' }).getAttribute('aria-checked')).toBe('false');
+    expect((screen.getByRole('switch', { name: 'Manage bots' }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByRole('switch', { name: 'Manage bots' }).getAttribute('aria-describedby')).toBe('perm-MANAGE_BOTS-hint');
+    cleanup();
+
+    open('editor');
+    await screen.findByRole('heading', { name: 'People' });
+    expect(screen.getByText('4 of 17 on. 3 come from Everyone.', { exact: false })).toBeTruthy();
+    expect(screen.getByRole('switch', { name: 'Summon bots' }).getAttribute('aria-checked')).toBe('true');
+    fireEvent.click(screen.getByRole('switch', { name: 'Go live' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => {
+      const patch = fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH');
+      expect(JSON.parse(patch![1].body)).toEqual({ permissions: toWire(fromKeys(['EDIT_MAPS', 'GO_LIVE'])) });
+    });
   });
 
   it('shows Save only after a change, saves just what changed, and Undo puts it back', async () => {
@@ -516,11 +547,11 @@ describe('a role page', () => {
     const rows = within(bots).getAllByRole('switch').map((toggle) => toggle.id);
     expect(rows).toEqual(['perm-MANAGE_BOTS', 'perm-CHAT_BOTS_NEARBY', 'perm-DM_BOTS', 'perm-SUMMON_BOTS']);
     expect(within(bots).getByText('Chat with bots nearby')).toBeTruthy();
-    expect(within(bots).getByText('Walk up to a bot on the map and chat in its bubble. Everyone in the bubble sees it.')).toBeTruthy();
+    expect(within(bots).getByText('Lets people walk up to a bot on the map and chat in its bubble. Everyone in the bubble sees it.')).toBeTruthy();
     expect(within(bots).getByText('DM bots')).toBeTruthy();
-    expect(within(bots).getByText('Private one-to-one chat with a bot, from anywhere. Only they and the bot see it. Needs sign-in.')).toBeTruthy();
+    expect(within(bots).getByText("Lets signed-in people who can see the bot's room chat privately with it, one to one, from anywhere. Only they and the bot see it.")).toBeTruthy();
     expect(within(bots).getByText('Summon bots')).toBeTruthy();
-    expect(within(bots).getByText('Call a bot over in its own room. Guests too.')).toBeTruthy();
+    expect(within(bots).getByText('Lets people, including guests, summon a bot to them in its own room.')).toBeTruthy();
   });
 
   it('shows the three bot switches on for Everyone, so bots work as they always have', async () => {
@@ -606,5 +637,18 @@ describe('a role page', () => {
   it('says only that maps could not be read when nothing was skipped', async () => {
     await openUsedIn({ mapAreas: { status: 'partial', areas: [], unread: 1, skipped: 0, read: 4 } });
     expect(screen.getAllByTestId('map-areas-note').map((note) => note.textContent)).toEqual(['1 map could not be read.']);
+  });
+});
+
+describe('the line about inherited permissions', () => {
+  it('says "comes" for one and "come" for more, in every form', () => {
+    expect(inheritedNote(3, 1, 0)).toBe('. 1 comes from Everyone.');
+    expect(inheritedNote(3, 2, 0)).toBe('. 2 come from Everyone.');
+    expect(inheritedNote(3, 0, 1)).toBe('. 1 comes from Member.');
+    expect(inheritedNote(3, 0, 2)).toBe('. 2 come from Member.');
+    expect(inheritedNote(5, 1, 2)).toBe('. 1 comes from Everyone, 2 from Member.');
+    expect(inheritedNote(5, 2, 1)).toBe('. 2 come from Everyone, 1 from Member.');
+    expect(inheritedNote(1, 1, 0)).toBe(', all from Everyone.');
+    expect(inheritedNote(2, 0, 0)).toBe('. Everything Everyone can do is included.');
   });
 });

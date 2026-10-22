@@ -7,6 +7,7 @@ import {
   countOn,
   firstMissing,
   freshColour,
+  inheritedPermissions,
   movableRoles,
   seesHiddenRoles,
   permissionLockReason,
@@ -174,5 +175,34 @@ describe('who sees the holders of a role whose badge is off', () => {
   });
   it('is not anyone else', () => {
     expect(seesHiddenRoles(base)).toBe(false);
+  });
+});
+
+describe('what a role inherits', () => {
+  const everyone = role({ key: 'everyone', builtIn: true, permissions: toWire(fromKeys(['CHAT_BOTS_NEARBY', 'DM_BOTS'])) });
+  const member = role({ key: 'member', builtIn: true, permissions: toWire(fromKeys(['DM_BOTS', 'SUMMON_BOTS'])) });
+  const all = [everyone, member];
+
+  it('gives Member only what Everyone has', () => {
+    expect([...inheritedPermissions(member, all)]).toEqual([
+      ['CHAT_BOTS_NEARBY', 'Everyone'],
+      ['DM_BOTS', 'Everyone'],
+    ]);
+  });
+
+  it('gives Editor and custom roles Everyone first, then Member', () => {
+    const expected = [
+      ['CHAT_BOTS_NEARBY', 'Everyone'],
+      ['DM_BOTS', 'Everyone'],
+      ['SUMMON_BOTS', 'Member'],
+    ];
+    expect([...inheritedPermissions(role({ key: 'editor', builtIn: true }), all)]).toEqual(expected);
+    expect([...inheritedPermissions(role({ key: 'mod' }), all)]).toEqual(expected);
+  });
+
+  it('gives Everyone and Admin nothing, and a custom role named like a built-in key is still custom', () => {
+    expect(inheritedPermissions(everyone, all).size).toBe(0);
+    expect(inheritedPermissions(role({ key: 'admin', builtIn: true }), all).size).toBe(0);
+    expect(inheritedPermissions(role({ key: 'x' }), [role({ key: 'everyone', builtIn: false, permissions: '65536' })]).size).toBe(0);
   });
 });
