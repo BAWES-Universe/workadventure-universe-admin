@@ -1,7 +1,7 @@
 /** @jest-environment jsdom */
 
 import React from 'react';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 
 /** The AI keys page (#374): your keys, what each spent this month, and Revoke with its confirm. */
 
@@ -304,5 +304,138 @@ describe('Working, Down and "If this is down"', () => {
     render(<AiKeysPage />);
     fireEvent.click(await screen.findByRole('button', { name: /Check now/ }));
     await waitFor(() => expect(fetchMock.mock.calls.some(([url, init]) => url === '/api/me/ai-keys/key-1/check' && init?.method === 'POST')).toBe(true));
+  });
+});
+
+describe('Change address and Change model', () => {
+  function serveEdit(keys: unknown[], over: { models?: unknown; patch?: unknown; patchStatus?: number } = {}) {
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url.endsWith('/models')) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(over.models ?? { ok: true, models: ['qwen3-8b', 'llama-3.1-8b'] }) });
+      if (init?.method === 'PATCH') return Promise.resolve({ ok: (over.patchStatus ?? 200) < 400, status: over.patchStatus ?? 200, json: () => Promise.resolve(over.patch ?? { status: 'saved' }) });
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ keys }) });
+    });
+  }
+
+  it('offers Change address only on a key with an address of its own, and Change model on every key', async () => {
+    serveEdit([lmStudio, deepseek]);
+    render(<AiKeysPage />);
+    await screen.findByText('My DeepSeek', { selector: 'h2' });
+    expect(screen.getAllByRole('button', { name: 'Change address' })).toHaveLength(1);
+    expect(screen.getAllByRole('button', { name: 'Change model' })).toHaveLength(2);
+  });
+
+  it('saves a new address with a PATCH, shows the key’s current address, and closes', async () => {
+    serveEdit([lmStudio]);
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Change address' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText(/Now: lm\.example\.com/)).toBeTruthy();
+    expect((within(dialog).getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(within(dialog).getByLabelText('New address'), { target: { value: 'https://new.trycloudflare.com' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(calls('PATCH')).toHaveLength(1));
+    const [url, init] = calls('PATCH')[0];
+    expect(url).toBe('/api/me/ai-keys/key-1');
+    expect(JSON.parse(init.body)).toEqual({ address: 'https://new.trycloudflare.com' });
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  });
+
+  it('offers the models the new address has when it does not have the saved one, and saves both together', async () => {
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url.endsWith('/models')) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, models: ['mistral-7b', 'llama-3.1-8b'] }) });
+      if (init?.method === 'PATCH') {
+        const body = JSON.parse(String(init.body));
+        return body.model
+          ? Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: 'saved' }) })
+          : Promise.resolve({ ok: false, status: 400, json: () => Promise.resolve({ error: 'That address doesn’t have qwen3-8b. Pick a model it has.', code: 'model-missing' }) });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ keys: [lmStudio] }) });
+    });
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Change address' }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText('New address'), { target: { value: 'https://new.trycloudflare.com' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+    expect((await within(dialog).findByRole('alert')).textContent).toMatch(/doesn’t have qwen3-8b/);
+    fireEvent.click(await within(dialog).findByRole('radio', { name: 'mistral-7b' }));
+    // The models were asked of the NEW address
+    expect(fetchMock.mock.calls.some(([url, init]) => String(url).endsWith('/models') && init?.body === JSON.stringify({ address: 'https://new.trycloudflare.com' }))).toBe(true);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(calls('PATCH')).toHaveLength(2));
+    expect(JSON.parse(calls('PATCH')[1][1].body)).toEqual({ address: 'https://new.trycloudflare.com', model: 'mistral-7b' });
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  });
+
+  it('drops a slow model list for a sheet that was closed, so it never lands in the next one', async () => {
+    let releaseSlow: (value: unknown) => void = () => {};
+    let modelCalls = 0;
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url.endsWith('/models')) {
+        modelCalls += 1;
+        if (modelCalls === 1) return new Promise((resolve) => (releaseSlow = resolve));
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, models: ['qwen3-8b', 'llama-3.1-8b'] }) });
+      }
+      if (init?.method === 'PATCH') {
+        return Promise.resolve({ ok: false, status: 400, json: () => Promise.resolve({ error: 'That address doesn’t have qwen3-8b. Pick a model it has.', code: 'model-missing' }) });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ keys: [lmStudio] }) });
+    });
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Change address' }));
+    let dialog = await screen.findByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText('New address'), { target: { value: 'https://new.trycloudflare.com' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+    await within(dialog).findByRole('alert');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    fireEvent.click(await screen.findByRole('button', { name: 'Change model' }));
+    dialog = await screen.findByRole('dialog');
+    await within(dialog).findByRole('radio', { name: 'llama-3.1-8b' });
+    // The first, slow answer now arrives
+    await act(async () => {
+      releaseSlow({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, models: ['stale-model'] }) });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(within(dialog).queryByRole('radio', { name: 'stale-model' })).toBeNull();
+    expect(within(dialog).getByRole('radio', { name: 'llama-3.1-8b' })).toBeTruthy();
+  });
+
+  it('keeps the sheet open and shows the reason when the new address does not answer', async () => {
+    serveEdit([lmStudio], { patchStatus: 400, patch: { error: 'It didn’t answer. Is the server running and the tunnel up?' } });
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Change address' }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText('New address'), { target: { value: 'https://dead.trycloudflare.com' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+    expect((await within(dialog).findByRole('alert')).textContent).toMatch(/tunnel up/);
+    expect(screen.getByRole('dialog')).toBeTruthy();
+  });
+
+  it('loads the models with no key sent, and saves the one picked', async () => {
+    serveEdit([lmStudio]);
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Change model' }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(await within(dialog).findByRole('radio', { name: 'llama-3.1-8b' }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(calls('PATCH')).toHaveLength(1));
+    expect(JSON.parse(calls('PATCH')[0][1].body)).toEqual({ model: 'llama-3.1-8b' });
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  });
+
+  it('will not save until a different model is picked', async () => {
+    serveEdit([lmStudio]);
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Change model' }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(await within(dialog).findByRole('radio', { name: 'qwen3-8b' }));
+    expect((within(dialog).getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('says why when the models could not be loaded', async () => {
+    serveEdit([lmStudio], { models: { ok: false, message: 'It didn’t answer. Is the server running and the tunnel up?' } });
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Change model' }));
+    expect((await within(await screen.findByRole('dialog')).findByRole('alert')).textContent).toMatch(/tunnel up/);
   });
 });

@@ -1,9 +1,11 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
-import { Bot, KeyRound, Plus, RefreshCw, Trash2, X } from 'lucide-react';
+import { Bot, Globe, KeyRound, Pencil, Plus, RefreshCw, Trash2, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 import { useToast } from '@/components/ui/toast';
 import { authenticatedFetch } from '@/lib/client-auth';
 import type { AiKeySummary } from '@/lib/ai-keys';
@@ -124,6 +126,7 @@ export default function AiKeysPage() {
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
   const [lending, setLending] = useState<AiKeySummary | null>(null);
+  const [editing, setEditing] = useState<{ key: AiKeySummary; what: 'address' | 'model' } | null>(null);
   const [pulling, setPulling] = useState<{ key: AiKeySummary; lent: Lent } | null>(null);
   const [checking, setChecking] = useState<string | null>(null);
   const [saving, setSaving] = useState<string | null>(null);
@@ -305,6 +308,16 @@ export default function AiKeysPage() {
               <Plus aria-hidden="true" />
               Lend to a universe
             </Button>
+            {key.address !== null && (
+              <Button variant="outline" className="h-11 w-fit px-5" onClick={() => setEditing({ key, what: 'address' })}>
+                <Globe aria-hidden="true" />
+                Change address
+              </Button>
+            )}
+            <Button variant="outline" className="h-11 w-fit px-5" onClick={() => setEditing({ key, what: 'model' })}>
+              <Pencil aria-hidden="true" />
+              Change model
+            </Button>
           </div>
         </article>
       ))}
@@ -386,6 +399,16 @@ export default function AiKeysPage() {
           </Button>
         </div>
       </FormSheet>
+
+      <EditKeySheet
+        target={editing}
+        onClose={() => setEditing(null)}
+        onSaved={(key, what) => {
+          setEditing(null);
+          retry();
+          addToast({ description: `${key.name} now uses the new ${what}`, variant: 'success', duration: 2500 });
+        }}
+      />
 
       <LendSheet
         keyToLend={lending}
@@ -529,6 +552,194 @@ function LendSheet({
         </Button>
         <Button className="h-11 px-5" disabled={busy || !picked} onClick={() => void lend()}>
           {busy ? 'Lending…' : 'Lend'}
+        </Button>
+      </div>
+    </FormSheet>
+  );
+}
+
+/** More models than this and a search box appears; only this many are shown at once. */
+const SEARCH_FROM = 8;
+const SHOWN = 30;
+
+type ModelList = { status: 'loading' } | { status: 'ready'; models: string[] } | { status: 'failed'; message: string };
+
+/**
+ * Change a saved key's address or model (#374). The key stays the same key, so it stays lent and its bots stay on it:
+ * a free tunnel gets a new address each time it restarts. Nothing is saved until the new address answers and the model
+ * gives one tiny reply. The key itself is never shown or asked for again.
+ */
+function EditKeySheet({
+  target,
+  onClose,
+  onSaved,
+}: {
+  target: { key: AiKeySummary; what: 'address' | 'model' } | null;
+  onClose: () => void;
+  onSaved: (key: AiKeySummary, what: 'address' | 'model') => void;
+}) {
+  const [address, setAddress] = useState('');
+  const [models, setModels] = useState<ModelList>({ status: 'loading' });
+  const [model, setModel] = useState<string | null>(null);
+  const [search, setSearch] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+  // The new address answered but doesn't have the saved model: the models it does have are shown to pick from
+  const [pickOnNew, setPickOnNew] = useState(false);
+  // Only the newest model load may answer: a slow one for a sheet that was closed, reopened or retried is dropped
+  const latestLoad = useRef(0);
+  const open = target !== null;
+  const what = target?.what;
+  const keyId = target?.key.id;
+
+  useEffect(() => {
+    setAddress('');
+    setPickOnNew(false);
+    setModel(null);
+    setSearch('');
+    setFailure(null);
+    setModels({ status: 'loading' });
+    // Closing or switching the sheet drops any load still on its way, including one started by save()
+    const dropLoads = () => {
+      latestLoad.current += 1;
+    };
+    if (!keyId || what !== 'model') return dropLoads;
+    void loadModels(keyId, undefined);
+    return dropLoads;
+  }, [keyId, what]);
+
+  /** The models the key's provider lists, at its saved address or a new one being tried */
+  async function loadModels(id: string, newAddress: string | undefined) {
+    const mine = ++latestLoad.current;
+    const cancelled = () => mine !== latestLoad.current;
+    setModels({ status: 'loading' });
+    try {
+      const response = await authenticatedFetch(`/api/me/ai-keys/${encodeURIComponent(id)}/models`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newAddress ? { address: newAddress } : {}),
+      });
+      const data = (await response.json().catch(() => ({}))) as { ok?: boolean; models?: string[]; message?: string };
+      if (cancelled()) return;
+      if (data.ok && Array.isArray(data.models)) setModels({ status: 'ready', models: data.models });
+      else setModels({ status: 'failed', message: data.message || 'Couldn’t load the models. Try again.' });
+    } catch {
+      if (!cancelled()) setModels({ status: 'failed', message: 'Couldn’t load the models. Try again.' });
+    }
+  }
+
+  const visible = useMemo(() => {
+    if (models.status !== 'ready') return [];
+    const needle = search.trim().toLowerCase();
+    return models.models.filter((id) => !needle || id.toLowerCase().includes(needle)).slice(0, SHOWN);
+  }, [models, search]);
+
+  async function save() {
+    if (!target) return;
+    setBusy(true);
+    setFailure(null);
+    try {
+      const response = await authenticatedFetch(`/api/me/ai-keys/${encodeURIComponent(target.key.id)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(target.what === 'address' ? (pickOnNew ? { address: address.trim(), model } : { address: address.trim() }) : { model }),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => null);
+        if (target.what === 'address' && !pickOnNew && body?.code === 'model-missing') {
+          // Offer the models the new address does have, to pick one and save both together
+          setPickOnNew(true);
+          setModel(null);
+          setSearch('');
+          setFailure(body.error || null);
+          void loadModels(target.key.id, address.trim());
+          return;
+        }
+        throw new Error(body?.error || 'That didn’t work. Try again.');
+      }
+      onSaved(target.key, target.what);
+    } catch (error) {
+      setFailure(error instanceof Error ? error.message : 'That didn’t work. Try again.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const picking = target?.what === 'model' || pickOnNew;
+  const ready = picking ? model !== null && (pickOnNew || model !== target?.key.model) : address.trim() !== '';
+
+  return (
+    <FormSheet
+      open={open}
+      onOpenChange={(next) => {
+        if (!next && !busy) onClose();
+      }}
+      title={target ? `${target.what === 'address' ? 'Change address of' : 'Change model of'} ${target.key.name}` : 'Change key'}
+    >
+      <p className="text-sm text-muted-foreground">
+        {target?.what === 'address'
+          ? 'It is checked before it is saved. The key stays lent and its bots stay on it.'
+          : 'The new model is asked for one tiny reply before it is saved. The key stays lent and its bots stay on it.'}
+      </p>
+      {target?.what === 'address' && (
+        <div className="grid gap-1.5">
+          <Label htmlFor="ai-key-new-address">New address</Label>
+          <Input
+            id="ai-key-new-address"
+            type="url"
+            inputMode="url"
+            autoComplete="off"
+            placeholder="https://lm.example.com"
+            value={address}
+            onChange={(event) => setAddress(event.target.value)}
+            disabled={pickOnNew}
+            className="h-11 rounded-xl"
+          />
+          <p className="text-[13px] text-muted-foreground">Now: {target.key.address}. Must start with https:// and be reachable from the internet.</p>
+        </div>
+      )}
+      {picking && (
+        <div className="grid gap-3" aria-live="polite">
+          {models.status === 'loading' && <p className="text-sm text-muted-foreground">Loading the models…</p>}
+          {models.status === 'failed' && (
+            <p role="alert" className="text-sm text-[#fca5a5]">
+              {models.message}
+            </p>
+          )}
+          {models.status === 'ready' && (
+            <>
+              {!pickOnNew && <p className="text-sm text-muted-foreground">Now: {target?.key.model ?? 'no model'}</p>}
+              {models.models.length > SEARCH_FROM && (
+                <Input
+                  type="search"
+                  aria-label="Search models"
+                  placeholder="Search models"
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                  className="h-11 rounded-xl"
+                />
+              )}
+              <div role="radiogroup" aria-label="Model" className="grid gap-2">
+                {visible.map((id) => (
+                  <PickCard key={id} role="radio" picked={model === id} onClick={() => setModel(id)} indicator={<Radio checked={model === id} />} title={id} className="[&_span.block]:break-all" />
+                ))}
+                {visible.length === 0 && <p className="text-[13px] text-muted-foreground">No model matches that.</p>}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+      {failure && (
+        <p role="alert" className="text-sm text-[#fca5a5]">
+          {failure}
+        </p>
+      )}
+      <div className="flex justify-end gap-2">
+        <Button variant="outline" className="h-11 px-5" disabled={busy} onClick={onClose}>
+          Cancel
+        </Button>
+        <Button className="h-11 px-5" disabled={busy || !ready} onClick={() => void save()}>
+          {busy ? 'Checking…' : 'Save'}
         </Button>
       </div>
     </FormSheet>

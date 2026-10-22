@@ -4,6 +4,8 @@ import { getSessionUser } from '@/lib/auth-session';
 import { meOriginAllowed, meRespond } from '@/lib/me-route';
 import { moveBotsOffKey } from '@/lib/ai-key-lend';
 import { clearDownNotice, isIfDown } from '@/lib/ai-key-health';
+import { allowKeyAttempt } from '@/lib/ai-key-models';
+import { editSavedKey } from '@/lib/ai-key-edit';
 
 export const runtime = 'nodejs';
 
@@ -14,8 +16,12 @@ export async function OPTIONS(request: NextRequest) {
 }
 
 /**
- * PATCH /api/me/ai-keys/:id { ifDown: "universe-ai" | "stop" } - what the bots on this key do while it is down (#374).
- * Only its owner can; anyone else, and a server provider, gets "not found". Nothing else about a key can be changed.
+ * PATCH /api/me/ai-keys/:id { ifDown?, address?, model? } - change a key you own (#374).
+ *   - `ifDown` ("universe-ai" | "stop"): what the bots on this key do while it is down.
+ *   - `address` / `model`: where an own-computer key points, or which model it uses. The new address and model are
+ *     checked first (model list, then one tiny chat reply), and nothing is saved unless they answer. The key keeps its
+ *     id, so it stays lent and its bots stay on it. A key that was Down and answers is Working again.
+ * Only its owner can; anyone else, and a server provider, gets "not found".
  */
 export async function PATCH(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   if (!meOriginAllowed(request)) return respond(request, { error: 'Origin not allowed' }, 403);
@@ -28,12 +34,22 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
   } catch {
     return respond(request, { error: 'Invalid JSON body' }, 400);
   }
-  const ifDown = typeof body === 'object' && body !== null ? (body as { ifDown?: unknown }).ifDown : undefined;
-  if (!isIfDown(ifDown)) return respond(request, { error: 'ifDown must be "universe-ai" or "stop"' }, 400);
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return respond(request, { error: 'Expected an object' }, 400);
+  const input = body as { ifDown?: unknown; address?: unknown; model?: unknown };
+  const changesWhere = input.address !== undefined || input.model !== undefined;
+  if (input.ifDown !== undefined && !isIfDown(input.ifDown)) return respond(request, { error: 'ifDown must be "universe-ai" or "stop"' }, 400);
+  if (input.ifDown === undefined && !changesWhere) return respond(request, { error: 'ifDown must be "universe-ai" or "stop"' }, 400);
   try {
-    const result = await prisma.botsAiProvider.updateMany({ where: { providerId: id, ownerId: user.id }, data: { ifDown } });
-    if (result.count === 0) return respond(request, { error: 'Key not found' }, 404);
-    return respond(request, { status: 'saved', ifDown });
+    if (changesWhere) {
+      if (!allowKeyAttempt(user.id)) return respond(request, { error: 'Too many tries. Wait a minute and try again.' }, 429);
+      const edited = await editSavedKey(user.id, id, input);
+      if (!edited.ok) return respond(request, { error: edited.message, ...(edited.code ? { code: edited.code } : {}) }, edited.status);
+    }
+    if (isIfDown(input.ifDown)) {
+      const result = await prisma.botsAiProvider.updateMany({ where: { providerId: id, ownerId: user.id }, data: { ifDown: input.ifDown } });
+      if (result.count === 0) return respond(request, { error: 'Key not found' }, 404);
+    }
+    return respond(request, { status: 'saved', ...(isIfDown(input.ifDown) ? { ifDown: input.ifDown } : {}) });
   } catch (error) {
     console.error('[AiKeys] Save failed:', error instanceof Error ? error.message : 'unknown');
     return respond(request, { error: 'Internal server error' }, 500);
