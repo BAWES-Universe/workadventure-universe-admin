@@ -35,7 +35,7 @@ const OWNER = { userId: 'owner', name: 'Khalid', email: null, woka: [], joinedAt
 
 let calls: { url: string; method: string; body?: Record<string, unknown> }[] = [];
 let memberRoles: { roleId: string; allWorlds: boolean; worldIds: string[] }[] = [];
-let can = { giveRoleIds: ['r-admin', 'r-editor', 'r-acct'], giveWorlds: 'all' as 'all' | string[], remove: true };
+let can = { giveRoleIds: ['r-admin', 'r-editor', 'r-acct'], giveWorlds: 'all' as 'all' | string[], widen: true, remove: true };
 let failNextRole = false;
 let failBasics = false;
 let staleList: ((value: unknown) => void) | null = null;
@@ -50,7 +50,7 @@ beforeEach(() => {
   params = { id: 'u1', userId: 'sara' };
   search = new URLSearchParams();
   memberRoles = [{ roleId: 'r-editor', ...everywhere }];
-  can = { giveRoleIds: ['r-admin', 'r-editor', 'r-acct'], giveWorlds: 'all', remove: true };
+  can = { giveRoleIds: ['r-admin', 'r-editor', 'r-acct'], giveWorlds: 'all', widen: true, remove: true };
   fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
     const method = init?.method ?? 'GET';
     calls.push({ url, method, body: init?.body ? JSON.parse(init.body) : undefined });
@@ -337,7 +337,7 @@ describe('a member’s page', () => {
       if (url.endsWith('/members/sara') && !init?.method) {
         return ok({
           member: { userId: 'sara', name: 'Sara Ali', email: 'sara@example.com', joinedAt: '2026-08-01T00:00:00Z', lastVisitedAt: null, isOwner: false, worlds: { allWorlds: false, worldIds: ['hq'] }, roles: [] },
-          can: { giveRoleIds: ['r-admin', 'r-editor', 'r-acct'], giveWorlds: ['campus'], remove: true },
+          can: { giveRoleIds: ['r-admin', 'r-editor', 'r-acct'], giveWorlds: ['campus'], widen: false, remove: true },
         });
       }
       return base(url, init);
@@ -348,6 +348,163 @@ describe('a member’s page', () => {
     expect(screen.getAllByText('You can give roles only in worlds they’re not in').length).toBeGreaterThan(0);
     fireEvent.click(box);
     expect(calls.some((call) => call.method === 'PUT')).toBe(false);
+  });
+
+  describe('someone limited to some worlds', () => {
+    // Sara is a member of HQ only, with Editor working in HQ: the universe has HQ and Campus
+    function limitedSara(giver: Partial<typeof can>) {
+      const base = fetchMock.getMockImplementation()!;
+      fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
+        if (url.endsWith('/members/sara') && !init?.method) {
+          return ok({
+            member: { userId: 'sara', name: 'Sara Ali', email: 'sara@example.com', joinedAt: '2026-08-01T00:00:00Z', lastVisitedAt: null, isOwner: false, worlds: { allWorlds: false, worldIds: ['hq'] }, roles: [{ roleId: 'r-editor', allWorlds: false, worldIds: ['hq'] }] },
+            can: { ...can, ...giver },
+          });
+        }
+        return base(url, init);
+      });
+    }
+
+    it('widens them to every world on one tap on "All worlds", and the Member line follows', async () => {
+      limitedSara({});
+      wrap(<MemberPage />);
+      await screen.findByRole('checkbox', { name: 'Editor' });
+      expect(within(screen.getByTestId('member-base')).getByText('Everyone who joined · HQ only')).toBeTruthy();
+      const all = screen.getByRole('radio', { name: 'All worlds' });
+      expect(all.hasAttribute('disabled')).toBe(false);
+      expect(all.hasAttribute('aria-disabled')).toBe(false);
+      fireEvent.click(all);
+      await waitFor(() => expect(calls.find((call) => call.method === 'PUT')).toBeTruthy());
+      expect(calls.find((call) => call.method === 'PUT')!.body).toEqual({ allWorlds: true, worldIds: [] });
+      expect(await within(screen.getByTestId('member-base')).findByText('Everyone who joined · All worlds')).toBeTruthy();
+      // Tapping back limits the role only: they stay in every world and every world can be picked
+      fireEvent.click(screen.getByRole('radio', { name: 'Some worlds' }));
+      await waitFor(() => expect(calls.filter((call) => call.method === 'PUT')).toHaveLength(2));
+      expect(within(screen.getByTestId('member-base')).getByText('Everyone who joined · All worlds')).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Campus' })).toBeTruthy();
+    });
+
+    it('leaves the Member line and the choice as they were when the save is refused', async () => {
+      limitedSara({});
+      failNextRole = true;
+      wrap(<MemberPage />);
+      await screen.findByRole('checkbox', { name: 'Editor' });
+      fireEvent.click(screen.getByRole('radio', { name: 'All worlds' }));
+      expect((await screen.findByRole('alert')).textContent).toBe('Needs Give roles');
+      expect(within(screen.getByTestId('member-base')).getByText('Everyone who joined · HQ only')).toBeTruthy();
+      expect(screen.getByRole('radio', { name: 'Some worlds' }).getAttribute('aria-checked')).toBe('true');
+    });
+
+    it('does not widen them when a role is only ticked: it starts in the worlds they are in', async () => {
+      limitedSara({});
+      wrap(<MemberPage />);
+      fireEvent.click(await screen.findByRole('checkbox', { name: 'Accountant' }));
+      await waitFor(() => expect(calls.find((call) => call.method === 'PUT')).toBeTruthy());
+      expect(calls.find((call) => call.method === 'PUT')!.body).toEqual({ allWorlds: false, worldIds: ['hq'] });
+      expect(within(screen.getByTestId('member-base')).getByText('Everyone who joined · HQ only')).toBeTruthy();
+    });
+
+    it('gives Administrator, which is every world, to someone who may widen', async () => {
+      limitedSara({});
+      wrap(<MemberPage />);
+      const admin = await screen.findByRole('checkbox', { name: 'Admin' });
+      expect(admin.hasAttribute('disabled')).toBe(false);
+      fireEvent.click(admin);
+      await waitFor(() => expect(calls.find((call) => call.method === 'PUT')).toBeTruthy());
+      expect(calls.find((call) => call.method === 'PUT')!.body).toEqual({ allWorlds: true, worldIds: [] });
+    });
+
+    it('locks "All worlds" with the reason, and sends nothing, for someone who may not add people to every world', async () => {
+      limitedSara({ widen: false });
+      wrap(<MemberPage />);
+      await screen.findByRole('checkbox', { name: 'Editor' });
+      const all = screen.getByRole('radio', { name: 'All worlds' });
+      expect(all.getAttribute('aria-disabled')).toBe('true');
+      fireEvent.click(all);
+      expect((await screen.findByRole('status')).textContent).toBe('You can add people to some worlds only');
+      expect(calls.some((call) => call.method === 'PUT')).toBe(false);
+      expect(screen.getByRole('radio', { name: 'Some worlds' }).getAttribute('aria-checked')).toBe('true');
+      // Administrator stays off for them, with its reason
+      expect(screen.getByRole('checkbox', { name: 'Admin' }).hasAttribute('disabled')).toBe(true);
+      expect(screen.getByText('Administrator works in every world')).toBeTruthy();
+    });
+
+    it('says it is the roles they may give that are limited, for someone who gives roles in some worlds only', async () => {
+      limitedSara({ giveWorlds: ['hq'], widen: true });
+      wrap(<MemberPage />);
+      await screen.findByRole('checkbox', { name: 'Editor' });
+      fireEvent.click(screen.getByRole('radio', { name: 'All worlds' }));
+      expect((await screen.findByRole('status')).textContent).toBe('You can give roles in some worlds only');
+      expect(calls.some((call) => call.method === 'PUT')).toBe(false);
+    });
+
+    it('does not widen them when a role is ticked and none of their worlds is one you can start it in', async () => {
+      // Their only world is one that no longer exists; you may widen, but a tick is never the way
+      const base = fetchMock.getMockImplementation()!;
+      fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
+        if (url.endsWith('/members/sara') && !init?.method) {
+          return ok({
+            member: { userId: 'sara', name: 'Sara Ali', email: 'sara@example.com', joinedAt: '2026-08-01T00:00:00Z', lastVisitedAt: null, isOwner: false, worlds: { allWorlds: false, worldIds: ['gone'] }, roles: [] },
+            can,
+          });
+        }
+        return base(url, init);
+      });
+      wrap(<MemberPage />);
+      const box = await screen.findByRole('checkbox', { name: 'Accountant' });
+      expect(box.hasAttribute('disabled')).toBe(true);
+      fireEvent.click(box);
+      expect(calls.some((call) => call.method === 'PUT')).toBe(false);
+    });
+
+    it('keeps Administrator tickable for someone who may widen, even when none of their worlds still exists', async () => {
+      const base = fetchMock.getMockImplementation()!;
+      fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
+        if (url.endsWith('/members/sara') && !init?.method) {
+          return ok({
+            member: { userId: 'sara', name: 'Sara Ali', email: 'sara@example.com', joinedAt: '2026-08-01T00:00:00Z', lastVisitedAt: null, isOwner: false, worlds: { allWorlds: false, worldIds: ['gone'] }, roles: [] },
+            can,
+          });
+        }
+        return base(url, init);
+      });
+      wrap(<MemberPage />);
+      const admin = await screen.findByRole('checkbox', { name: 'Admin' });
+      expect(admin.hasAttribute('disabled')).toBe(false);
+      fireEvent.click(admin);
+      await waitFor(() => expect(calls.find((call) => call.method === 'PUT')).toBeTruthy());
+      expect(calls.find((call) => call.method === 'PUT')!.body).toEqual({ allWorlds: true, worldIds: [] });
+    });
+
+    it('says nothing when the locked "All worlds" is already the choice', async () => {
+      const base = fetchMock.getMockImplementation()!;
+      fetchMock.mockImplementation((url: string, init?: { method?: string; body?: string }) => {
+        if (url.endsWith('/members/sara') && !init?.method) {
+          return ok({
+            member: { userId: 'sara', name: 'Sara Ali', email: 'sara@example.com', joinedAt: '2026-08-01T00:00:00Z', lastVisitedAt: null, isOwner: false, worlds: { allWorlds: false, worldIds: ['hq'] }, roles: [{ roleId: 'r-editor', ...everywhere }] },
+            can: { ...can, widen: false },
+          });
+        }
+        return base(url, init);
+      });
+      wrap(<MemberPage />);
+      await screen.findByRole('checkbox', { name: 'Editor' });
+      const all = screen.getByRole('radio', { name: 'All worlds' });
+      expect(all.getAttribute('aria-checked')).toBe('true');
+      fireEvent.click(all);
+      expect(screen.queryByRole('status')).toBeNull();
+    });
+
+    it('never offers "All worlds" on a role that is not yours to give: the whole row is off', async () => {
+      limitedSara({ giveRoleIds: ['r-acct'] });
+      wrap(<MemberPage />);
+      await screen.findByRole('checkbox', { name: 'Editor' });
+      const all = screen.getByRole('radio', { name: 'All worlds' });
+      expect(all.hasAttribute('disabled')).toBe(true);
+      fireEvent.click(all);
+      expect(screen.queryByRole('status')).toBeNull();
+      expect(calls.some((call) => call.method === 'PUT')).toBe(false);
+    });
   });
 
   it('hides the Danger zone from someone who cannot remove people', async () => {

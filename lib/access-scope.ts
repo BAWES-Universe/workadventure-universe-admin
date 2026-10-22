@@ -202,8 +202,8 @@ export function forbiddenResponse(headers?: HeadersInit) {
 }
 
 /**
- * Guard for routes that read one bot's data (conversations, memory, metrics,
- * emotions). Returns an error response when the viewer may not read it, or
+ * Guard for routes that read the counts of one bot's data (conversation figures, metrics). What people said and what
+ * the bot remembers use botContentReadDenied. Returns an error response when the viewer may not read it, or
  * null when they may: privileged viewers and managers of the bot's room.
  * A bot that does not exist is reported as forbidden so the response does
  * not reveal whether it exists.
@@ -218,6 +218,20 @@ export async function botReadDenied(
   if (isPrivileged(viewer)) return null;
   if (viewer.kind === 'user' && (await canManageBot(viewer.user.id, botId))) return null;
   return forbiddenResponse(headers);
+}
+
+/**
+ * Guard for routes that return what people said to a bot or what the bot remembers about them (transcripts, memory,
+ * emotions): super admins and the admin token only. Managers of the bot's room read counts through botReadDenied, never
+ * the words. Same answers as botReadDenied: 401 signed out, 403 otherwise.
+ */
+export async function botContentReadDenied(
+  request: NextRequest,
+  headers?: HeadersInit,
+): Promise<NextResponse | null> {
+  const viewer = await getViewer(request);
+  if (!viewer) return unauthorizedResponse(headers);
+  return isPrivileged(viewer) ? null : forbiddenResponse(headers);
 }
 
 /** The worlds this person is a member of, optionally limited to the given worlds. */

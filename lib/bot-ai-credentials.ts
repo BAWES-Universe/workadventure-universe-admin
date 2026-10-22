@@ -16,7 +16,7 @@ import { RESTING_LINE, recheckIfDue } from '@/lib/ai-key-health';
  * `source` says which of the three it was, so the bot server knows when it is talking through someone's own key.
  * When a personal key is Down, its owner's choice decides: "Use Universe AI" serves Universe AI (`standingInFor` names the
  * key), "Stop replying" serves `source: "resting"` with the one fixed line and no provider at all, so nothing goes to
- * another AI. A Down key is checked again every 5 minutes, here, and is served again as soon as it answers.
+ * another AI. A Down key is checked again here, when a bot needs it, at most every 5 minutes, and is served again as soon as it answers.
  */
 export type BotAiCredentials =
   | { status: 200; body: ReturnType<typeof providerPayload> & { source: 'provider' | 'universe-ai' | 'own-key'; movedFromKey?: string; standingInFor?: string } & Partial<OwnKeyFacts> }
