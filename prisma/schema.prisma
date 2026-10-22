@@ -31,6 +31,7 @@ model User {
   reportsMade       Report[]          @relation("Reporter")
   reportsHandled    Report[]          @relation("ReportHandledBy")
   avatars           UserAvatar[]
+  aiKeys            BotsAiProvider[]  @relation("AiKeyOwner")
   outfits           UserOutfit[]
   favorites         Favorite[]
   followers         Follow[]          @relation("Follower")
@@ -51,6 +52,7 @@ model User {
   avatarSetAuditLogs AvatarSetAuditLog[]
   preferences      UserPreference[]
   universeMemberships UniverseMember[]
+  notices          UserNotice[]
 
   @@map("users")
 }
@@ -69,6 +71,29 @@ model UserPreference {
 
   @@unique([userId, key])
   @@map("user_preferences")
+}
+
+// Something Orbit tells one person once, on Orbit home and in the attention count, until they dismiss it (#374: a key
+// is down, a bot moved to Universe AI). `dedupeKey` makes "once": the same thing for the same person is never added twice.
+model UserNotice {
+  id          String    @id @default(uuid())
+  userId      String    @map("user_id")
+  kind        String    @db.VarChar(40)
+  dedupeKey   String    @map("dedupe_key") @db.VarChar(200)
+  title       String    @db.VarChar(200)
+  body        String    @db.VarChar(1000)
+  // A short state pill beside the title ("Down"); null for none
+  badge       String?   @db.VarChar(20)
+  // An Orbit page the notice leads to
+  href        String?   @db.VarChar(300)
+  createdAt   DateTime  @default(now()) @map("created_at")
+  dismissedAt DateTime? @map("dismissed_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, dedupeKey])
+  @@index([userId, dismissedAt])
+  @@map("user_notices")
 }
 
 // Universes
@@ -96,6 +121,7 @@ model Universe {
   roles      Role[]
   members    UniverseMember[]
   membershipInvitations MembershipInvitation[]
+  aiKeyLends AiKeyLend[]
 
   @@map("universes")
 }
@@ -674,14 +700,48 @@ model BotsAiProvider {
   settings          Json?    @default("{}")
   tested            Boolean  @default(false)
   testedAt          DateTime? @map("tested_at")
+  // Whose key this is (#374). Null = a provider the super admin runs for the whole server, which is every row there was
+  // before personal keys. Anything that lists or reads providers for the server must keep only ownerId = null.
+  ownerId           String?  @map("owner_id")
+  // The last four characters of the key, kept so the owner can recognise it. The key itself is never sent to a browser.
+  apiKeyLast4       String?  @map("api_key_last4") @db.VarChar(4)
+  // The provider Universe AI runs on (#374). At most one server provider has it (set in one transaction); a bot on
+  // Universe AI follows it. Personal keys never have it.
+  isDefault         Boolean  @default(false) @map("is_default")
+  // Health of a personal key (#374). downSince is set while the key is Down (null = Working). failedReplies counts
+  // replies that failed in a row; two mark it Down. ifDown is what the bot does meanwhile: "universe-ai" or "stop".
+  downSince         DateTime? @map("down_since")
+  downReason        String?  @map("down_reason") @db.VarChar(20)
+  failedReplies     Int      @default(0) @map("failed_replies")
+  healthCheckedAt   DateTime? @map("health_checked_at")
+  ifDown            String   @default("universe-ai") @map("if_down") @db.VarChar(20)
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")
 
+  owner             User?    @relation("AiKeyOwner", fields: [ownerId], references: [id], onDelete: Cascade)
   usage             BotsAiUsage[]
+  lends             AiKeyLend[]
 
   @@index([enabled])
   @@index([type])
+  @@index([ownerId])
   @@map("bots_ai_providers")
+}
+
+// A person's AI key lent to a universe (#374): bots made there by the key's owner may run on it, and nobody else's may.
+// Lending moves no bot; each bot is pointed at the key by its maker on the bot page.
+model AiKeyLend {
+  id         String   @id @default(uuid())
+  providerId String   @map("provider_id") @db.VarChar(50)
+  universeId String   @map("universe_id")
+  lentAt     DateTime @default(now()) @map("lent_at")
+
+  provider BotsAiProvider @relation(fields: [providerId], references: [providerId], onDelete: Cascade)
+  universe Universe       @relation(fields: [universeId], references: [id], onDelete: Cascade)
+
+  @@unique([providerId, universeId])
+  @@index([universeId])
+  @@map("ai_key_lends")
 }
 
 // AI Usage Tracking
@@ -696,6 +756,10 @@ model BotsAiUsage {
   latency         Int?
   error           Boolean  @default(false)
   timestamp       DateTime @default(now())
+  // Who talked to the bot (#374): the person's id as the bot server knows it; null when it was not told or for older rows
+  talkedUserId    String?  @map("talked_user_id") @db.VarChar(255)
+  // Whose key paid, when it was a personal key; null for the server's own providers. Set by Orbit, never taken from a request.
+  keyOwnerId      String?  @map("key_owner_id")
 
   provider        BotsAiProvider @relation(fields: [providerId], references: [providerId], onDelete: Cascade)
 

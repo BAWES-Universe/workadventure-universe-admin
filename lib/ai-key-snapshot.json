@@ -1,0 +1,198 @@
+{
+  "source": "models.dev",
+  "generatedAt": "2026-10-19",
+  "providers": [
+    {
+      "id": "302ai",
+      "label": "302.AI",
+      "base": "https://api.302.ai/v1",
+      "docs": "https://doc.302.ai"
+    },
+    {
+      "id": "baseten",
+      "label": "Baseten",
+      "base": "https://inference.baseten.co/v1",
+      "docs": "https://docs.baseten.co/inference/model-apis/overview"
+    },
+    {
+      "id": "berget",
+      "label": "Berget.AI",
+      "base": "https://api.berget.ai/v1",
+      "docs": "https://api.berget.ai"
+    },
+    {
+      "id": "chutes",
+      "label": "Chutes",
+      "base": "https://llm.chutes.ai/v1",
+      "docs": "https://llm.chutes.ai/v1/models"
+    },
+    {
+      "id": "wandb",
+      "label": "CoreWeave",
+      "base": "https://api.inference.wandb.ai/v1",
+      "docs": "https://docs.wandb.ai/inference"
+    },
+    {
+      "id": "cortecs",
+      "label": "Cortecs",
+      "base": "https://api.cortecs.ai/v1",
+      "docs": "https://api.cortecs.ai/v1/models"
+    },
+    {
+      "id": "llmgateway",
+      "label": "DevPass (LLM Gateway)",
+      "base": "https://api.llmgateway.io/v1",
+      "docs": "https://llmgateway.io/docs"
+    },
+    {
+      "id": "fastrouter",
+      "label": "FastRouter",
+      "base": "https://go.fastrouter.ai/api/v1",
+      "docs": "https://fastrouter.ai/models"
+    },
+    {
+      "id": "helicone",
+      "label": "Helicone",
+      "base": "https://ai-gateway.helicone.ai/v1",
+      "docs": "https://helicone.ai/models"
+    },
+    {
+      "id": "inference",
+      "label": "Inference",
+      "base": "https://inference.net/v1",
+      "docs": "https://inference.net/models"
+    },
+    {
+      "id": "io-net",
+      "label": "IO.NET",
+      "base": "https://api.intelligence.io.solutions/api/v1",
+      "docs": "https://io.net/docs/guides/intelligence/io-intelligence"
+    },
+    {
+      "id": "llama",
+      "label": "Llama",
+      "base": "https://api.llama.com/compat/v1",
+      "docs": "https://llama.developer.meta.com/docs/models"
+    },
+    {
+      "id": "lucidquery",
+      "label": "LucidQuery",
+      "base": "https://api.lucidquery.com/v1",
+      "docs": "https://lucidquery.com/docs"
+    },
+    {
+      "id": "modelscope",
+      "label": "ModelScope",
+      "base": "https://api-inference.modelscope.cn/v1",
+      "docs": "https://modelscope.cn/docs/model-service/API-Inference/intro"
+    },
+    {
+      "id": "morph",
+      "label": "Morph",
+      "base": "https://api.morphllm.com/v1",
+      "docs": "https://docs.morphllm.com/api-reference/introduction"
+    },
+    {
+      "id": "nano-gpt",
+      "label": "NanoGPT",
+      "base": "https://nano-gpt.com/api/v1",
+      "docs": "https://docs.nano-gpt.com"
+    },
+    {
+      "id": "nebius",
+      "label": "Nebius Token Factory",
+      "base": "https://api.tokenfactory.nebius.com/v1",
+      "docs": "https://docs.tokenfactory.nebius.com/"
+    },
+    {
+      "id": "novita-ai",
+      "label": "Novita AI",
+      "base": "https://api.novita.ai/openai",
+      "docs": "https://novita.ai/docs/guides/introduction"
+    },
+    {
+      "id": "ollama-cloud",
+      "label": "Ollama Cloud",
+      "base": "https://ollama.com/v1",
+      "docs": "https://docs.ollama.com/cloud"
+    },
+    {
+      "id": "opencode",
+      "label": "OpenCode",
+      "base": "https://opencode.ai/inference/openai/v1",
+      "docs": "https://opencode.ai/v2/docs/console/models/"
+    },
+    {
+      "id": "ovhcloud",
+      "label": "OVHcloud AI Endpoints",
+      "base": "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1",
+      "docs": "https://www.ovhcloud.com/en/public-cloud/ai-endpoints/catalog//"
+    },
+    {
+      "id": "requesty",
+      "label": "Requesty",
+      "base": "https://router.requesty.ai/v1",
+      "docs": "https://requesty.ai/solution/llm-routing/models"
+    },
+    {
+      "id": "sambanova",
+      "label": "SambaNova",
+      "base": "https://api.sambanova.ai/v1",
+      "docs": "https://docs.sambanova.ai/cloud/docs/get-started/supported-models"
+    },
+    {
+      "id": "scaleway",
+      "label": "Scaleway",
+      "base": "https://api.scaleway.ai/v1",
+      "docs": "https://www.scaleway.com/en/docs/generative-apis/"
+    },
+    {
+      "id": "siliconflow",
+      "label": "SiliconFlow",
+      "base": "https://api.siliconflow.com/v1",
+      "docs": "https://cloud.siliconflow.com/models"
+    },
+    {
+      "id": "siliconflow-cn",
+      "label": "SiliconFlow (China)",
+      "base": "https://api.siliconflow.cn/v1",
+      "docs": "https://cloud.siliconflow.com/models"
+    },
+    {
+      "id": "stackit",
+      "label": "STACKIT",
+      "base": "https://api.openai-compat.model-serving.eu01.onstackit.cloud/v1",
+      "docs": "https://docs.stackit.cloud/products/data-and-ai/ai-model-serving/basics/available-shared-models"
+    },
+    {
+      "id": "synthetic",
+      "label": "Synthetic",
+      "base": "https://api.synthetic.new/openai/v1",
+      "docs": "https://synthetic.new/pricing"
+    },
+    {
+      "id": "upstage",
+      "label": "Upstage",
+      "base": "https://api.upstage.ai/v1/solar",
+      "docs": "https://developers.upstage.ai/docs/apis/chat"
+    },
+    {
+      "id": "vultr",
+      "label": "Vultr",
+      "base": "https://api.vultrinference.com/v1",
+      "docs": "https://api.vultrinference.com/"
+    },
+    {
+      "id": "xiaomi",
+      "label": "Xiaomi",
+      "base": "https://api.xiaomimimo.com/v1",
+      "docs": "https://platform.xiaomimimo.com/#/docs"
+    },
+    {
+      "id": "zenmux",
+      "label": "ZenMux",
+      "base": "https://zenmux.ai/api/v1",
+      "docs": "https://docs.zenmux.ai"
+    }
+  ]
+}

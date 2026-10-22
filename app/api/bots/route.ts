@@ -9,6 +9,7 @@ import { z } from 'zod';
 import { checkAiProviderRef } from '@/lib/ai-provider-ref';
 import { toolTimeoutSecondsSchema } from '@/lib/bot-tool-timeout';
 import { mayReadRoomBots } from '@/lib/bot-room-access';
+import { checkConfigVision } from '@/lib/bot-vision';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Prisma
 export const runtime = 'nodejs';
@@ -475,10 +476,23 @@ export async function POST(request: NextRequest) {
     }
 
     // The provider ref must name an existing provider
-    const providerError = await checkAiProviderRef(validatedData.aiProviderRef);
+    const providerError = await checkAiProviderRef(validatedData.aiProviderRef, undefined, { actorId: userId ?? null, makerId: userId ?? null, roomId });
     if (providerError) {
       const response = NextResponse.json(
         { error: providerError },
+        { status: 400 }
+      );
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
+    }
+
+    // Where the bot's images go (the Vision row) is checked like its provider
+    const visionError = await checkConfigVision(validatedData.behaviorConfig, { storedConfig: null, actorId: userId ?? null, makerId: userId ?? null, roomId });
+    if (visionError) {
+      const response = NextResponse.json(
+        { error: visionError },
         { status: 400 }
       );
       Object.entries(corsHeaders()).forEach(([key, value]) => {

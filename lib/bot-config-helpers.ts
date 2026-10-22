@@ -188,3 +188,17 @@ export function keepToolCallSetting(
     stored && typeof stored === 'object' ? (stored as Record<string, unknown>).showToolCalls : undefined;
   return typeof storedValue === 'boolean' ? { ...incoming, showToolCalls: storedValue } : incoming;
 }
+
+/**
+ * The same for where a bot's images go (the Vision row): a save that replaces the whole behavior config without a `vision`
+ * key must not drop what the owner picked. An explicit value, or null (back to nothing picked), from the caller wins.
+ */
+export function keepVisionPick(
+  stored: unknown,
+  incoming: Record<string, unknown>
+): Record<string, unknown> {
+  if ('vision' in incoming) return incoming;
+  const storedValue =
+    stored && typeof stored === 'object' ? (stored as Record<string, unknown>).vision : undefined;
+  return storedValue && typeof storedValue === 'object' ? { ...incoming, vision: storedValue } : incoming;
+}

@@ -43,6 +43,9 @@ export async function GET(request: NextRequest) {
       }
     }
 
+    // The server's own providers only: what people spend on their own keys (#374) costs Universe nothing.
+    where.provider = { ownerId: null };
+
     if (providerId) {
       where.providerId = providerId;
     }

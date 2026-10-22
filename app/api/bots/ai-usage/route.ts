@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { requireServiceToken } from '@/lib/service-tokens';
+import { UNIVERSE_AI_REF, resolveUniverseAiProvider } from '@/lib/universe-ai';
 
 /**
  * POST /api/bots/ai-usage
@@ -17,7 +18,8 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const {
       botId,
-      providerId,
+      userId: talkedUserId = null,
+      providerId: sentProviderId,
       tokensUsed = 0,
       apiCalls = 1,
       durationSeconds = null,
@@ -26,6 +28,12 @@ export async function POST(request: NextRequest) {
       error = false,
       timestamp = new Date(),
     } = body;
+
+    // A bot on Universe AI is paid for by the provider that is the Default, so that is the row the usage belongs to
+    let providerId = sentProviderId;
+    if (providerId === UNIVERSE_AI_REF) {
+      providerId = (await resolveUniverseAiProvider())?.providerId;
+    }
 
     // Validate required fields
     if (!botId || !providerId) {
@@ -61,6 +69,9 @@ export async function POST(request: NextRequest) {
           latency,
           error,
           timestamp: timestamp ? new Date(timestamp) : new Date(),
+          // Who talked (as the bot server knows them) and whose key paid; the key's owner comes from the provider row, never from the request
+          talkedUserId: typeof talkedUserId === 'string' && talkedUserId ? talkedUserId.slice(0, 255) : null,
+          keyOwnerId: provider.ownerId ?? null,
         },
       })
       .catch((err) => {

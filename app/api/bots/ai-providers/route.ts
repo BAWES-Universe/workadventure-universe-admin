@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { validateServiceToken } from '@/lib/service-tokens';
 import { getSessionUser } from '@/lib/auth-session';
@@ -37,7 +38,8 @@ export async function GET(request: NextRequest) {
     const typeParam = searchParams.get('type');
 
     // Build where clause
-    const where: any = {};
+    // Only the server's own providers: nobody's personal key (#374) is offered as a provider to pick or to see with.
+    const where: Prisma.BotsAiProviderWhereInput = { ownerId: null };
     if (enabledParam !== null) {
       where.enabled = enabledParam === 'true';
     }

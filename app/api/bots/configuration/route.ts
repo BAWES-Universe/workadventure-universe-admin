@@ -8,6 +8,7 @@ import { parsePlayUri } from '@/lib/utils';
 import { validateAccessToken } from '@/lib/oidc';
 import { resolveRoomIdFromPlayUri, transformBotToServerFormat } from '@/lib/bot-config-helpers';
 import { checkAiProviderRef } from '@/lib/ai-provider-ref';
+import { checkConfigVision } from '@/lib/bot-vision';
 import { toolTimeoutSecondsSchema } from '@/lib/bot-tool-timeout';
 import { mustStayPrivateAfterMove } from '@/lib/bot-privacy';
 import { z } from 'zod';
@@ -403,12 +404,14 @@ export async function POST(request: NextRequest) {
       const currentProvider = validatedData.botId
         ? await prisma.bot.findUnique({
             where: { id: validatedData.botId },
-            select: { aiProviderRef: true },
+            select: { aiProviderRef: true, createdById: true },
           })
         : null;
       const providerError = await checkAiProviderRef(
         validatedData.aiProviderRef,
-        currentProvider?.aiProviderRef
+        currentProvider?.aiProviderRef,
+        // A bot's maker is whoever created it; a new bot's maker is the person saving it
+        { actorId: userId ?? null, makerId: validatedData.botId ? currentProvider?.createdById ?? null : userId ?? null, roomId }
       );
       if (providerError) {
       const response = NextResponse.json(
@@ -419,6 +422,26 @@ export async function POST(request: NextRequest) {
         response.headers.set(key, value);
       });
       return response;
+      }
+    }
+
+    // Where the bot's images go (the Vision row) is checked like its provider: only the person who made the bot may pick a key
+    if (validatedData.behaviorConfig && 'vision' in validatedData.behaviorConfig) {
+      const stored = validatedData.botId
+        ? await prisma.bot.findUnique({ where: { id: validatedData.botId }, select: { behaviorConfig: true, createdById: true } })
+        : null;
+      const visionError = await checkConfigVision(validatedData.behaviorConfig, {
+        storedConfig: stored?.behaviorConfig ?? null,
+        actorId: userId ?? null,
+        makerId: validatedData.botId ? stored?.createdById ?? null : userId ?? null,
+        roomId,
+      });
+      if (visionError) {
+        const response = NextResponse.json({ error: visionError }, { status: 400 });
+        Object.entries(corsHeaders()).forEach(([key, value]) => {
+          response.headers.set(key, value);
+        });
+        return response;
       }
     }
 
