@@ -5,6 +5,8 @@ import { addNotice } from '@/lib/notices';
 import { UNIVERSE_AI_MISSING, UNIVERSE_AI_REF, resolveUniverseAiProvider } from '@/lib/universe-ai';
 import { isTypedEndpoint, kindInfo } from '@/lib/ai-key-kinds';
 import { RESTING_LINE, recheckIfDue } from '@/lib/ai-key-health';
+import { autoVision, keyVisionModels, readVisionPick, usableVisionKey, type VisionPick } from '@/lib/bot-vision';
+import { resolveVisionSupport } from '@/lib/vision-models';
 
 /**
  * What the bot server gets when it asks how a bot talks to its AI, by bot id (#374). The bot's own `aiProviderRef` decides:
@@ -17,9 +19,20 @@ import { RESTING_LINE, recheckIfDue } from '@/lib/ai-key-health';
  * When a personal key is Down, its owner's choice decides: "Use Universe AI" serves Universe AI (`standingInFor` names the
  * key), "Stop replying" serves `source: "resting"` with the one fixed line and no provider at all, so nothing goes to
  * another AI. A Down key is checked again here, when a bot needs it, at most every 5 minutes, and is served again as soon as it answers.
+ *
+ * A bot served from Universe AI or a person's own key also carries `vision` when its images are not left to its own model
+ * (see lib/bot-vision.ts): "this" (its own model, or only the link when that can't see), "universe-ai", or "another" with the
+ * credentials of the Vision model on the maker's key to describe them. No `vision` means: as it always was.
  */
+export type VisionPlan =
+  | { choice: 'this'; problem?: 'key' }
+  | { choice: 'universe-ai' }
+  | { choice: 'another'; credentials: ReturnType<typeof providerPayload> & OwnKeyFacts };
+
+type ServedProvider = ReturnType<typeof providerPayload> & { source: 'provider' | 'universe-ai' | 'own-key'; movedFromKey?: string; standingInFor?: string; vision?: VisionPlan } & Partial<OwnKeyFacts>;
+
 export type BotAiCredentials =
-  | { status: 200; body: ReturnType<typeof providerPayload> & { source: 'provider' | 'universe-ai' | 'own-key'; movedFromKey?: string; standingInFor?: string } & Partial<OwnKeyFacts> }
+  | { status: 200; body: ServedProvider }
   | { status: 200; body: { source: 'resting'; keyOwnerId: string; restingLine: string } }
   | { status: 400 | 404 | 503; error: string };
 
@@ -45,19 +58,69 @@ const MOVED_BECAUSE: Record<Exclude<KeyForBot, { ok: true }>['reason'] | 'gone',
 /** Every personal key's id starts with this (app/api/me/ai-keys/route.ts); a server provider's never does. */
 const OWN_KEY_PREFIX = 'key-';
 
-export async function credentialsForBot(botId: string): Promise<BotAiCredentials> {
-  const bot = await prisma.bot.findUnique({
+type BotForCredentials = NonNullable<Awaited<ReturnType<typeof loadBot>>>;
+
+const loadBot = (botId: string) =>
+  prisma.bot.findUnique({
     where: { id: botId },
     select: {
       id: true,
       name: true,
       aiProviderRef: true,
+      behaviorConfig: true,
       createdById: true,
       roomId: true,
       room: { select: { world: { select: { universe: { select: { id: true, name: true, ownerId: true } } } } } },
     },
   });
+
+export async function credentialsForBot(botId: string): Promise<BotAiCredentials> {
+  const bot = await loadBot(botId);
   if (!bot) return { status: 404, error: 'Bot not found' };
+  const answer = await mainCredentials(bot);
+  // Only a bot on Universe AI or a person's own key has its images decided here; a pinned server provider stays as it was
+  if (answer.status !== 200 || answer.body.source === 'resting' || answer.body.source === 'provider') return answer;
+  const vision = await visionPlan(bot, answer.body);
+  return vision ? { status: 200, body: { ...answer.body, vision } } : answer;
+}
+
+/**
+ * Where this bot's images go. What the owner picked, or, when nothing is picked, the default (`autoVision`): none of the
+ * three says anything new for a bot whose own model sees, or for Universe AI, so those return nothing and behave as before.
+ * A key picked for images that can't be used now (taken away, unlent, Down, or its model changed) never falls back to Universe
+ * AI on its own: the images are then left to the bot's own model, and `problem: 'key'` says so.
+ */
+async function visionPlan(bot: BotForCredentials, main: ServedProvider): Promise<VisionPlan | undefined> {
+  const picked = readVisionPick(bot.behaviorConfig);
+  const own = main.source === 'own-key';
+  const mainSees = resolveVisionSupport(main.model ?? '', main.supportsVision);
+  const choice: VisionPick | null =
+    picked ??
+    (own
+      ? autoVision({
+          ownKeyId: main.providerId,
+          sees: mainSees,
+          sameKeyModel: keyVisionModels({ model: main.model, supportsVision: main.supportsVision, settings: main.settings }).find((model) => model !== main.model) ?? null,
+        })
+      : null);
+  if (!choice || (!picked && choice.choice === 'this')) return undefined;
+  if (choice.choice !== 'another') return choice;
+  const usable = await usableVisionKey(choice, { createdById: bot.createdById, roomId: bot.roomId }, { recheck: true });
+  if (!usable.ok) return { choice: 'this', problem: 'key' };
+  const info = kindInfo((usable.key.settings as { kind?: unknown } | null)?.kind);
+  return {
+    choice: 'another',
+    credentials: {
+      ...providerPayload({ ...usable.key, model: choice.model, supportsVision: true, visionModel: null }),
+      keyOwnerId: usable.key.ownerId!,
+      keyKind: info?.kind ?? null,
+      keyGroup: info?.group ?? null,
+      keyAddressTyped: isTypedEndpoint(info, usable.key.endpoint),
+    },
+  };
+}
+
+async function mainCredentials(bot: BotForCredentials): Promise<BotAiCredentials> {
   const ref = bot.aiProviderRef;
   if (!ref) return { status: 404, error: 'This bot has no AI provider' };
 
