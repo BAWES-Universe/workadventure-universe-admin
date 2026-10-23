@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button';
 import { PickCard, Radio } from '@/components/ui/choice';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { ProviderLogo } from '../../../components/ds/provider-logo';
 import { useToast } from '@/components/ui/toast';
 import { authenticatedFetch } from '@/lib/client-auth';
 import { AI_KEY_KINDS, kindInfo, type AiKeyKind, type AiKeyKindInfo } from '@/lib/ai-key-kinds';
@@ -26,7 +27,10 @@ const SHOWN = 30;
 function KindCard({ info, picked, onPick }: { info: AiKeyKindInfo; picked: boolean; onPick: () => void }) {
   return (
     <div className="grid gap-1.5">
-      <PickCard role="radio" picked={picked} onClick={onPick} indicator={<Radio checked={picked} />} title={info.label} description={info.benefit} className="items-start">
+      <PickCard role="radio" picked={picked} onClick={onPick} indicator={<ProviderLogo info={info} />} trailing={<Radio checked={picked} className="mt-0.5 self-start" />} title={info.label} description={info.benefit} className="items-start">
+        {picked && info.tier === 'more' && (
+          <span className="mt-3 block text-[13px] font-normal text-muted-foreground">We haven’t tried {info.label} ourselves. Adding the key checks that it answers.</span>
+        )}
         {picked && (
           <ol className="mt-3 grid list-decimal gap-2 border-t border-foreground/10 pt-3 pl-5 text-[13px] font-normal">
             {info.steps.map((step) => (
@@ -73,8 +77,7 @@ export default function AddAiKeyPage() {
   const name = typedName ?? (info ? `My ${info.label}` : '');
   // The picked type stays on screen whatever is typed in the search
   const needle = find.trim().toLowerCase();
-  // The listed-by-models.dev line is the same on every one of the "more" providers, so only their name is searched
-  const matches = (entry: AiKeyKindInfo) => entry.kind === kind || !needle || (entry.tier === 'more' ? entry.label : `${entry.label} ${entry.benefit}`).toLowerCase().includes(needle);
+  const matches = (entry: AiKeyKindInfo) => entry.kind === kind || !needle || `${entry.label} ${entry.benefit}`.toLowerCase().includes(needle);
   const shown = AI_KEY_KINDS.filter((entry) => entry.tier !== 'hidden' && (entry.tier === 'named' ? matches(entry) : entry.kind === kind || (needle !== '' ? matches(entry) : showMore)));
   const ownComputer = shown.filter((entry) => entry.group === 'own-computer');
   const hosted = shown.filter((entry) => entry.group === 'hosted' && entry.tier === 'named');

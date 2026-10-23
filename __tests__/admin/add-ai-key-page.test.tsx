@@ -175,6 +175,28 @@ describe('Add a key: more providers, regions and search', () => {
     expect(screen.queryByRole('radio', { name: /^Cerebras/ })).toBeNull();
   });
 
+  it('puts a logo or icon slot before every provider, with the radio at the end of the row', () => {
+    render(<AddAiKeyPage />);
+    for (const radio of screen.getAllByRole('radio')) {
+      expect(within(radio).getAllByTestId('provider-logo')).toHaveLength(1);
+      expect(radio.firstElementChild?.getAttribute('data-testid')).toBe('provider-logo');
+    }
+  });
+
+  it('says the provider is untried only on the picked More provider, with the line from the models.dev numbers under its name', () => {
+    render(<AddAiKeyPage />);
+    fireEvent.change(screen.getByLabelText('Search providers'), { target: { value: 'baseten' } });
+    const card = screen.getByRole('radio', { name: /^Baseten/ });
+    expect(within(card).getByText('26 models, all open.')).toBeTruthy();
+    expect(screen.queryByText(/haven’t tried/)).toBeNull();
+    fireEvent.click(card);
+    expect(screen.getByText('We haven’t tried Baseten ourselves. Adding the key checks that it answers.')).toBeTruthy();
+    fireEvent.click(screen.getByRole('radio', { name: /^Baseten/ }));
+    fireEvent.change(screen.getByLabelText('Search providers'), { target: { value: '' } });
+    fireEvent.click(screen.getByRole('radio', { name: /^Groq/ }));
+    expect(screen.queryByText(/haven’t tried/)).toBeNull();
+  });
+
   it('says so, and points to Any OpenAI-compatible, when nothing matches', () => {
     render(<AddAiKeyPage />);
     fireEvent.change(screen.getByLabelText('Search providers'), { target: { value: 'zzz' } });
@@ -271,11 +293,11 @@ describe('Add a key: More providers', () => {
     expect(screen.getByRole('radio', { name: /^Nebius/ }).contains(docs)).toBe(false);
   });
 
-  it('searches the name of the long-tail providers only, not the line they all share', () => {
+  it('searches the line under a long-tail provider as well as its name', () => {
     render(<AddAiKeyPage />);
-    fireEvent.change(screen.getByLabelText('Search providers'), { target: { value: 'models.dev' } });
+    fireEvent.change(screen.getByLabelText('Search providers'), { target: { value: 'its own' } });
+    expect(screen.getByRole('radio', { name: /^Morph/ })).toBeTruthy();
     expect(screen.queryByRole('radio', { name: /^Nebius/ })).toBeNull();
-    expect(screen.queryByText('More providers', { selector: 'h2' })).toBeNull();
   });
 
   it('adds one of them like any other: same request, its own kind', async () => {

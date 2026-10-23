@@ -63,6 +63,13 @@ describe('AI keys page', () => {
     expect(screen.getByText('1 reply · 1.2M tokens')).toBeTruthy();
   });
 
+  it('draws a logo slot before each key name', async () => {
+    answer([lmStudio, deepseek]);
+    render(<AiKeysPage />);
+    await screen.findByText('LM Studio · qwen3-8b · lm.example.com');
+    expect(screen.getAllByTestId('provider-logo')).toHaveLength(2);
+  });
+
   it('has an Add a key button that opens the form', async () => {
     answer([]);
     render(<AiKeysPage />);
