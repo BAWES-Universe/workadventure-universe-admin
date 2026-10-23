@@ -57,9 +57,14 @@ async function decide(key: KeyForModels & { ownerId: string | null; name: string
   // One 404 is not the last word: the model is asked once more first. It answers now (a reply sent before the bot moved to
   // it, a passing hiccup) or no clear answer comes: nothing changes, and the next report asks again. A refused key: the
   // key is marked Down for what it said. Only a provider that says, again, that it has no such model moves anything.
-  const again = await askAbout(key, gone);
-  if (again === 'rejected' || again === 'credit') return again;
-  if (again !== 'gone') return true;
+  // A bot's reply always offers tools (sending an image, a file), and OpenRouter answers a model with none that calls them
+  // with a 404: the tiny reply, which offers none, would still get an answer, so a model the provider says calls no tools
+  // is not asked, its 404 is real for bots.
+  if (modelFactsOf(key, gone).tools !== false) {
+    const again = await askAbout(key, gone);
+    if (again === 'rejected' || again === 'credit') return again;
+    if (again !== 'gone') return true;
+  }
   const list = await keyModels(key, { fresh: true });
   if (!list.ok || !list.listed) return false;
   // A model the provider still lists but that won't answer is that model's failure only, the key's check model too: the
@@ -69,14 +74,16 @@ async function decide(key: KeyForModels & { ownerId: string | null; name: string
   const info = kindInfo((key.settings as { kind?: unknown } | null)?.kind);
   const label = info?.label ?? 'The provider';
   const pick = answeringPicker(key, info, list.facts);
-  const others = list.models.filter((model) => model !== gone);
+  // Bots with no model of their own reply with the check model, so it too is one that calls tools when the provider says
+  const others = list.models.filter((model) => model !== gone && list.facts[model]?.tools !== false);
   if (gone === key.model && others.length > 0) {
     // Only a model that answered becomes the check model: else the next health check finds one, as it does for a gone one
     const check = await pick(others);
     if (check.answered) await replaceCheckModel(key, check.model);
   }
 
-  const allowed = allowedModels(list.models, lend).filter((model) => model !== gone);
+  // A bot is never moved to a model the provider says calls no tools: its replies there would fail the same way
+  const allowed = allowedModels(list.models, lend).filter((model) => model !== gone && list.facts[model]?.tools !== false);
   const found = allowed.length > 0 ? await pick(allowed) : null;
   // Every other model allowed here was asked and the provider says it has none of them to answer with: as good as none left
   const noneAnswer = found !== null && !found.answered && found.why === 'gone' && allowed.length <= ANSWER_TRIES;

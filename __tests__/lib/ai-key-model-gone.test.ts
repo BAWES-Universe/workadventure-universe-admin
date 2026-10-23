@@ -250,6 +250,20 @@ describe('moveBotOffGoneModel', () => {
     expect(moveBotsOffKey).not.toHaveBeenCalled();
   });
 
+  it('takes a 404 on a model the provider says calls no tools as real, without asking, and moves the bot to one that does', async () => {
+    const toolless = { ...key, settings: { kind: 'openrouter', modelFacts: { 'meta-llama/llama-4-maverick': { tools: false } } } };
+    list.mockResolvedValue({
+      ok: true,
+      models: ['meta-llama/llama-4-maverick', 'mistralai/mistral-7b', 'openai/gpt-5-mini'],
+      facts: { 'meta-llama/llama-4-maverick': { tools: false }, 'mistralai/mistral-7b': { tools: false }, 'openai/gpt-5-mini': { tools: true } },
+      listed: true,
+    });
+    chat.mockReset().mockResolvedValue({ ok: true });
+    expect(await moveBotOffGoneModel(toolless, guide.id)).toBe(true);
+    expect(chat.mock.calls.map((call) => call[0].model)).toEqual(['openai/gpt-5-mini']);
+    expect(db.bot.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: { aiModel: 'openai/gpt-5-mini' } }));
+  });
+
   it('asks the provider once for replies in flight at once that report the same 404', async () => {
     list.mockResolvedValue({ ok: true, models: ['anthropic/claude-haiku-5-5', 'openai/gpt-5-mini'], facts: {}, listed: true });
     const answers = await Promise.all([moveBotOffGoneModel(key, guide.id), moveBotOffGoneModel(key, guide.id), moveBotOffGoneModel(key, guide.id)]);
