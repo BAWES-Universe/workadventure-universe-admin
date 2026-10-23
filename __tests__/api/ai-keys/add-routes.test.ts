@@ -219,6 +219,17 @@ describe('POST /api/me/ai-keys with no model picked (#575)', () => {
     expect(provider.create).not.toHaveBeenCalled();
   });
 
+  it('saves nothing, and says try again, when the other models were busy after one refused just the tiny request', async () => {
+    models.mockResolvedValue({ ok: true, models: ['a', 'b'], facts: {} });
+    chat
+      .mockResolvedValueOnce({ ok: false, reason: 'request', message: 'a chat call to a failed (400).' })
+      .mockResolvedValueOnce({ ok: false, reason: 'busy', status: 429, message: 'DeepSeek is busy right now. Try again in a moment.' });
+    const response = await post({ kind: 'deepseek', apiKey: 'sk-abcdef4f2a' });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: 'DeepSeek is busy right now. Try again in a moment.' });
+    expect(provider.create).not.toHaveBeenCalled();
+  });
+
   it('saves nothing, and says out of credit, when the only other model refused just the tiny request', async () => {
     models.mockResolvedValue({ ok: true, models: ['a', 'b'], facts: {} });
     chat
