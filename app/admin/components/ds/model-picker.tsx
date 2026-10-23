@@ -104,10 +104,11 @@ export function ModelPicker({
   const groups = useMemo(() => {
     const byMaker = new Map<string, { maker: Maker; ids: string[] }>();
     for (const id of models) {
-      if (needle && !id.toLowerCase().includes(needle)) continue;
+      const maker = makerOf(id);
+      // A maker's name finds its models too, also ones whose id doesn't carry it (OpenAI's gpt-5, Meta's llama)
+      if (needle && ![id, ...(maker.key ? [maker.label, maker.key] : [])].some((text) => text.toLowerCase().includes(needle))) continue;
       if (tools && facts[id]?.tools !== true) continue;
       if (vision && facts[id]?.vision !== true) continue;
-      const maker = makerOf(id);
       const group = byMaker.get(maker.key) ?? { maker, ids: [] };
       group.ids.push(id);
       byMaker.set(maker.key, group);

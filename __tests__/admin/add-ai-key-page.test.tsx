@@ -187,6 +187,23 @@ describe('Add a key', () => {
     expect(screen.getByText('10 models')).toBeTruthy();
   });
 
+  it('finds a maker’s models by its name, also ones whose id doesn’t carry it', async () => {
+    const fillers = Array.from({ length: 30 }, (_, index) => `acme/model-${index}`);
+    fetchMock.mockImplementation(() => json({ ok: true, models: ['gpt-5-mini', 'o4-mini', 'llama-3.3-70b', 'nousresearch/hermes-4-70b', 'mystery-7b', ...fillers] }));
+    render(<AddAiKeyPage />);
+    fireEvent.click(screen.getByRole('radio', { name: /OpenRouter/ }));
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'sk-or-123' } });
+    fireEvent.click(screen.getByRole('button', { name: /Load models/ }));
+    const search = await screen.findByLabelText('Search OpenRouter models');
+    fireEvent.change(search, { target: { value: 'meta' } });
+    expect(screen.getAllByTestId('model-row').map((row) => row.textContent)).toEqual(['llama-3.3-70b']);
+    fireEvent.change(search, { target: { value: 'nous research' } });
+    expect(screen.getAllByTestId('model-row').map((row) => row.textContent)).toEqual(['hermes-4-70b']);
+    // A model with no known maker isn't found by "other"
+    fireEvent.change(search, { target: { value: 'other' } });
+    expect(screen.queryAllByTestId('model-row')).toHaveLength(0);
+  });
+
   it('groups a list from many makers, folded, with the biggest makers first and the rest behind Show all', async () => {
     const makers = ['openai', 'google', 'meta-llama', 'mistralai', 'qwen', 'deepseek', 'moonshotai', 'x-ai', 'z-ai', 'nvidia'];
     const many = makers.flatMap((maker, index) => Array.from({ length: makers.length - index }, (_, n) => `${maker}/model-${n}`));
