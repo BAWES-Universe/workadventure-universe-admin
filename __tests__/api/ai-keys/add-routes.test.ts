@@ -193,6 +193,9 @@ describe('POST /api/me/ai-keys with no model picked (#575)', () => {
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: 'That model isn’t there.' });
     expect(chat).toHaveBeenCalledTimes(2);
+    // The first model gets the provider's whole wait; the next only what is left of the time budget
+    expect(chat.mock.calls[0][0]).not.toHaveProperty('timeoutMs');
+    expect(chat.mock.calls[1][0].timeoutMs).toBe(15_000);
   });
 
   it('prefers a model that really replies over one that only refused the tiny request, and keeps that one when none replies', async () => {

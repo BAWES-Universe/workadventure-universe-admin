@@ -106,8 +106,11 @@ export async function POST(request: NextRequest) {
     let refusedRequest: string | null = null;
     const started = Date.now();
     for (const [index, candidate] of candidates.entries()) {
-      if (index > 0 && Date.now() - started > CHECK_BUDGET_MS) break;
-      const chat = await probeChat({ kind: info.kind, address: input.address, region, apiKey, model: candidate, ...(noList ? { noList } : {}) });
+      // The first model gets the provider's whole wait (a server on your own computer may be loading it); the rest share
+      // what is left of the time budget, so the page always gets an answer
+      const left = CHECK_BUDGET_MS - (Date.now() - started);
+      if (index > 0 && left <= 0) break;
+      const chat = await probeChat({ kind: info.kind, address: input.address, region, apiKey, model: candidate, ...(noList ? { noList } : {}), ...(index > 0 ? { timeoutMs: left } : {}) });
       if (chat.ok) {
         model = candidate;
         break;
