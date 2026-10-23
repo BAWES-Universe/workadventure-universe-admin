@@ -13,7 +13,7 @@
  * it can take the page's ink). A logo that models.dev lacks can be added to that folder by hand and is picked up here.
  * Set MODELS_DEV_API to a local file to read the provider data from there instead of the web.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { isPlainSvg } from './plain-svg.mjs';
 
@@ -46,7 +46,10 @@ async function keepLogo(id) {
     if (!response.ok) return false;
     const svg = await response.text();
     if (!isPlainSvg(svg) || !svg.includes('currentColor')) return false;
-    writeFileSync(file, svg);
+    // Written aside and renamed, so an interrupted run never leaves a half-written logo that the next run would trust.
+    const partial = `${file}.partial`;
+    writeFileSync(partial, svg);
+    renameSync(partial, file);
   }
   return true;
 }
