@@ -203,6 +203,17 @@ describe('POST /api/me/ai-keys with no model picked (#575)', () => {
     expect(provider.create).not.toHaveBeenCalled();
   });
 
+  it('saves nothing, and says out of credit, when the only other model refused just the tiny request', async () => {
+    models.mockResolvedValue({ ok: true, models: ['a', 'b'], facts: {} });
+    chat
+      .mockResolvedValueOnce({ ok: false, reason: 'request', message: 'a chat call to a failed (400).' })
+      .mockResolvedValueOnce({ ok: false, reason: 'credit', message: 'OpenRouter says this key is out of credit.' });
+    const response = await post({ kind: 'deepseek', apiKey: 'sk-abcdef4f2a' });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: 'OpenRouter says this key is out of credit.' });
+    expect(provider.create).not.toHaveBeenCalled();
+  });
+
   it('moves past a model with no credit to a free one the list has, and keeps that', async () => {
     models.mockResolvedValue({ ok: true, models: ['a', 'b', 'c', 'd', 'e', 'f-free:free'], facts: {} });
     chat

@@ -95,7 +95,8 @@ export async function POST(request: NextRequest) {
     // A listed model that refuses only this tiny request (a reasoning model that wants a bigger cap, say) is not a wrong key
     // or model, the same as the health check lets it pass. A typed model has no list behind it, so only a real reply keeps it.
     // A model picked from the list is kept only when none of the others gives a real reply: a model that doesn't chat at all
-    // (an embedding model whose name says nothing) can answer the same way.
+    // (an embedding model whose name says nothing) can answer the same way. On a key out of credit for another model it
+    // proves nothing, so the person is told about the credit instead.
     let refusedRequest: string | null = null;
     for (const candidate of candidates) {
       const chat = await probeChat({ kind: info.kind, address: input.address, region, apiKey, model: candidate, ...(noList ? { noList } : {}) });
@@ -120,7 +121,7 @@ export async function POST(request: NextRequest) {
         break;
       }
     }
-    model ??= refusedRequest;
+    if (!refusedForCredit) model ??= refusedRequest;
     if (!model) return respond(request, { error: refused ?? 'That didn’t work. Try again.' }, 400);
     // What the provider said about the check model, from the list it just gave (never from the request)
     const caps = checked.ok ? modelCaps(checked.facts, model) : {};
