@@ -316,6 +316,29 @@ describe('Lend sheet', () => {
     expect(within(dialog).queryByTestId('lend-models')).toBeNull();
   });
 
+  it('saves All models when Only these was picked while the list was loading and the provider turns out to list none', async () => {
+    let answerModels: (value: unknown) => void = () => undefined;
+    const limited = { ...lmStudio, lentTo: [{ universeId: 'bawes', universeName: 'BAWES Universe', ownedByYou: true, models: null, bots: [] }] };
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === '/api/me/ai-keys/universes') return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ universes }) });
+      if (url.endsWith('/models')) return new Promise((resolve) => { answerModels = resolve; });
+      if (init?.method) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: 'ok' }) });
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ keys: [limited] }) });
+    });
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Change the models bots in BAWES Universe may use' }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('radio', { name: 'Only these' }));
+    await act(async () => answerModels({ ok: true, status: 200, json: () => Promise.resolve({ ok: false, noList: true, message: 'No list' }) }));
+    await within(dialog).findByTestId('lend-one-model');
+    const save = within(dialog).getByRole('button', { name: 'Save' }) as HTMLButtonElement;
+    expect(save.disabled).toBe(false);
+    fireEvent.click(save);
+    await waitFor(() => expect(calls('POST').filter(([url]) => String(url).endsWith('/lend'))).toHaveLength(1));
+    const [, init] = calls('POST').find(([url]) => String(url).endsWith('/lend'))!;
+    expect(JSON.parse(init.body)).toEqual({ universeId: 'bawes', models: null });
+  });
+
   it('says so, and offers nothing to lend to, when you can’t manage bots anywhere', async () => {
     serve([deepseek], []);
     render(<AiKeysPage />);

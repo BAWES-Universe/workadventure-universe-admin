@@ -530,6 +530,11 @@ function LendSheet({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [keyToLend?.id, editing]);
 
+  // A provider that doesn't list its models has only the key's one model: nothing to limit, whatever was picked while its
+  // list was still loading
+  const canLimit = models.status !== 'typed';
+  const limited = canLimit && limit === 'only';
+
   async function lend() {
     if (!keyToLend || !picked || (!editing && !universes)) return;
     setBusy(true);
@@ -539,7 +544,7 @@ function LendSheet({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         // A new lend with All models sends none: all is what a new lend gets. A change of an existing lend always says which.
-        body: JSON.stringify({ universeId: picked, ...(limit === 'only' ? { models: only } : editing ? { models: null } : {}) }),
+        body: JSON.stringify({ universeId: picked, ...(limited ? { models: only } : editing ? { models: null } : {}) }),
       });
       if (!response.ok) {
         const body = await response.json().catch(() => null);
@@ -557,10 +562,8 @@ function LendSheet({
   // doesn't say calls no tools (a bot's replies always offer them), the same pick the save makes
   const kept = models.status === 'ready' ? models.models.filter((id) => only.includes(id)) : [];
   const firstKept = models.status === 'ready' ? (kept.find((id) => models.facts[id]?.tools !== false) ?? kept[0]) : undefined;
-  const moving = limit === 'only' && firstKept && lent ? lent.bots.filter((bot) => bot.model !== null && !only.includes(bot.model)) : [];
+  const moving = limited && firstKept && lent ? lent.bots.filter((bot) => bot.model !== null && !only.includes(bot.model)) : [];
   const provider = keyToLend?.kindLabel ?? 'the provider';
-  // A provider that doesn't list its models has only the key's one model: nothing to limit
-  const canLimit = models.status !== 'typed';
 
   return (
     <FormSheet
@@ -661,7 +664,7 @@ function LendSheet({
         <Button variant="outline" className="h-11 px-5" disabled={busy} onClick={onClose}>
           Cancel
         </Button>
-        <Button className="h-11 px-5" disabled={busy || !picked || (canLimit && limit === 'only' && only.length === 0)} onClick={() => void lend()}>
+        <Button className="h-11 px-5" disabled={busy || !picked || (limited && only.length === 0)} onClick={() => void lend()}>
           {busy ? 'Saving…' : editing ? 'Save' : 'Lend'}
         </Button>
       </div>
