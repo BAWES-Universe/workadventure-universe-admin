@@ -117,6 +117,9 @@ export async function POST(request: NextRequest) {
         model = candidate;
         break;
       }
+      // A later try that ran out of the time budget was cut off here, not refused by the provider: it says nothing about
+      // the key, so the search just ends there, keeping a model that only refused the tiny request and the reason given before
+      if (index > 0 && chat.reason === 'unreachable' && Date.now() - started >= CHECK_BUDGET_MS) break;
       if (!noList && chat.reason === 'request') {
         if (typedModel) {
           model = candidate;

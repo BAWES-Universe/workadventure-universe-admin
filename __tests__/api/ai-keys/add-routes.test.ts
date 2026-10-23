@@ -205,6 +205,26 @@ describe('POST /api/me/ai-keys with no model picked (#575)', () => {
     expect(chat.mock.calls[1][0].timeoutMs).toBe(15_000);
   });
 
+  it('keeps a model that only refused the tiny request when a later try is cut off by the time budget', async () => {
+    models.mockResolvedValue({ ok: true, models: ['a', 'b', 'c'], facts: {} });
+    let now = 1_000_000;
+    const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    chat
+      .mockImplementationOnce(async () => {
+        now += 10_000;
+        return { ok: false, reason: 'request', message: 'a chat call to a failed (400).' };
+      })
+      .mockImplementationOnce(async () => {
+        now += 35_000;
+        return { ok: false, reason: 'unreachable', message: 'LM Studio didn’t answer in time.' };
+      });
+    const response = await post({ kind: 'lmstudio', address: 'https://lm.example.com' });
+    clock.mockRestore();
+    expect(response.status).toBe(201);
+    expect(chat).toHaveBeenCalledTimes(2);
+    expect(provider.create.mock.calls[0][0].data.model).toBe('a');
+  });
+
   it('prefers a model that really replies over one that only refused the tiny request, and keeps that one when none replies', async () => {
     models.mockResolvedValue({ ok: true, models: ['a-embed', 'b-chat', 'c'], facts: {} });
     chat.mockResolvedValueOnce({ ok: false, reason: 'request', message: 'a chat call to a-embed failed (400).' }).mockResolvedValueOnce({ ok: true });
