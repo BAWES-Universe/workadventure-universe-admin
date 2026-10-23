@@ -290,6 +290,16 @@ describe('moveBotOffGoneModel', () => {
     for (const [asked] of chat.mock.calls) expect(asked.withTool).toBe(true);
   });
 
+  it('never moves a bot to a model that refuses the call with a tool in it, since its replies always offer one', async () => {
+    list.mockResolvedValue({ ok: true, models: ['anthropic/claude-haiku-5-5', 'openai/gpt-5-mini'], facts: {}, listed: true });
+    chat.mockReset()
+      .mockResolvedValueOnce(gone404)
+      .mockResolvedValue({ ok: false, reason: 'request', message: 'Tools are not supported for this model.' });
+    expect(await moveBotOffGoneModel(key, guide.id)).toBe(false);
+    expect(db.bot.updateMany).not.toHaveBeenCalled();
+    expect(moveBotsOffKey).not.toHaveBeenCalled();
+  });
+
   it('shares what each model answered between bots on the key reporting at once, so no model is asked twice', async () => {
     list.mockResolvedValue({ ok: true, models: ['anthropic/claude-haiku-5-5', 'openai/gpt-5-mini'], facts: {}, listed: true });
     db.bot.findUnique.mockImplementation(({ where }: { where: { id: string } }) => Promise.resolve({ ...guide, id: where.id }));
