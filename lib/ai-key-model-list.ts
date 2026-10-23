@@ -15,6 +15,8 @@ import { probeModels, type ModelFacts, type ModelFactsById } from '@/lib/ai-key-
  */
 
 export const MODEL_LIST_TTL_MS = 10 * 60_000;
+/** A list that couldn't be loaded is not asked for again this soon, so a provider that doesn't answer holds up no page. */
+export const MODEL_LIST_FAILED_TTL_MS = 60_000;
 
 export interface KeyForModels {
   providerId: string;
@@ -27,7 +29,7 @@ export interface KeyForModels {
 /** `listed` is false for a provider with no model list: then the key's one model is all there is. */
 export type KeyModelList = { ok: true; models: string[]; facts: ModelFactsById; listed: boolean } | { ok: false; message: string };
 
-const cache = new Map<string, { at: number; list: Extract<KeyModelList, { ok: true }> }>();
+const cache = new Map<string, { at: number; list: KeyModelList }>();
 const asking = new Map<string, Promise<KeyModelList>>();
 
 /** The same key at the same address with the same check model; a moved address is asked again. */
@@ -54,18 +56,16 @@ async function sharedModels(key: KeyForModels, options: { fresh?: boolean; now?:
   const id = cacheKey(key);
   const now = options.now ?? Date.now();
   const kept = cache.get(id);
-  if (!options.fresh && kept && now - kept.at < MODEL_LIST_TTL_MS) return kept.list;
+  if (!options.fresh && kept && now - kept.at < (kept.list.ok ? MODEL_LIST_TTL_MS : MODEL_LIST_FAILED_TTL_MS)) return kept.list;
   const running = asking.get(id);
   if (running) return running;
   const asked = askProvider(key)
     .then(async (list) => {
-      if (list.ok) {
-        const at = Date.now();
-        // Lists past their time are dropped as new ones come in, so keys nobody asks about any more don't stay in memory
-        for (const [entry, value] of cache) if (at - value.at >= MODEL_LIST_TTL_MS) cache.delete(entry);
-        cache.set(id, { at, list });
-        if (list.listed) await rememberFacts(key, list.facts);
-      }
+      const at = Date.now();
+      // Lists past their time are dropped as new ones come in, so keys nobody asks about any more don't stay in memory
+      for (const [entry, value] of cache) if (at - value.at >= MODEL_LIST_TTL_MS) cache.delete(entry);
+      cache.set(id, { at, list });
+      if (list.ok && list.listed) await rememberFacts(key, list.facts);
       return list;
     })
     .finally(() => asking.delete(id));
