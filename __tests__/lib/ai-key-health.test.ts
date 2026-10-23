@@ -368,6 +368,14 @@ describe('checkKey and checkAndRecord', () => {
       expect(chat).toHaveBeenCalledTimes(4);
     });
 
+    it('a key refused after one model only refused the tiny request is not kept Working on that model', async () => {
+      probe.mockResolvedValue({ ok: true, models: ['a', 'b', 'c'], facts: {} });
+      chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'gone' });
+      chat.mockResolvedValueOnce({ ok: false, reason: 'request', message: 'a chat call to a failed (400).' });
+      chat.mockResolvedValueOnce({ ok: false, reason: 'rejected', message: 'DeepSeek didn’t accept this key.' });
+      expect(await checkKey(withModel(hosted))).toMatchObject({ ok: false, reason: 'rejected' });
+    });
+
     it('Gemini’s "models/" prefix does not make a listed model look missing', async () => {
       const gemini: KeyRow = { ...hosted, settings: { kind: 'gemini' }, endpoint: 'https://generativelanguage.googleapis.com/v1beta/openai', model: 'gemini-flash-latest' };
       probe.mockResolvedValue({ ok: true, models: ['gemini-flash-latest'] });
