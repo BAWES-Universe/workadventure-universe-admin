@@ -23,7 +23,15 @@ const LOGOS = fileURLToPath(new URL('../public/ai-providers/', import.meta.url))
 /** models.dev's api.json: every provider with its models (a local file when MODELS_DEV_API is set). */
 async function readApi() {
   const where = process.env.MODELS_DEV_API;
-  const text = where ? readFileSync(where, 'utf8') : await (await fetch('https://models.dev/api.json')).text();
+  let text;
+  if (where) {
+    text = readFileSync(where, 'utf8');
+  } else {
+    const response = await fetch('https://models.dev/api.json');
+    // A refused or rate-limited answer must stop the run, not be read as a catalogue with no models.
+    if (!response.ok) throw new Error(`models.dev answered ${response.status}`);
+    text = await response.text();
+  }
   const api = JSON.parse(text);
   return api.providers ?? api;
 }

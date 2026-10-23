@@ -17,7 +17,8 @@ const PLAIN_STYLE = /^\s*[a-z-]+\s*:\s*[a-z0-9.% -]+(?:;\s*[a-z-]+\s*:\s*[a-z0-9
 const UNSAFE_VALUE = /url\s*\(|javascript:|data:|@import|expression\s*\(|[<>&\\]/i;
 
 export function isPlainSvg(svg) {
-  const body = svg.replace(/^\s*<\?xml[^>]*\?>/, '').trim();
+  // Only the XML declaration itself is dropped. A processing instruction such as <?xml-stylesheet ... ?> is not one, so it stays and is refused below.
+  const body = svg.replace(/^\s*<\?xml\s[^>]*\?>/, '').trim();
   if (!body.startsWith('<svg')) return false;
   let stack = 0;
   let text = '';
