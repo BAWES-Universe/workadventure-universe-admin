@@ -11,7 +11,6 @@ import { checkAiProviderRef } from '@/lib/ai-provider-ref';
 import { checkConfigVision } from '@/lib/bot-vision';
 import { toolTimeoutSecondsSchema } from '@/lib/bot-tool-timeout';
 import { mustStayPrivateAfterMove } from '@/lib/bot-privacy';
-import { noteModelChanged } from '@/lib/ai-key-late-report';
 import { z } from 'zod';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Prisma
@@ -529,9 +528,6 @@ export async function POST(request: NextRequest) {
             existingConfig.assignedSpace ?? { center: { x: 0, y: 0 }, radius: 0 },
         };
       }
-      // A reply still on its way reports the model it had: it must not count against the key it is on now. A save that
-      // fails changes nothing, so then the note is taken back.
-      const undoNote = moveOffModel ? noteModelChanged(validatedData.botId) : undefined;
       bot = await prisma.bot.update({
         where: { id: validatedData.botId },
         data: { ...updateData, ...(keepPrivate ? { hideConversations: true } : {}), ...(moveOffModel ? { aiModel: null } : {}) },
@@ -552,9 +548,6 @@ export async function POST(request: NextRequest) {
             select: { id: true, name: true, email: true },
           },
         },
-      }).catch((error: unknown) => {
-        undoNote?.();
-        throw error;
       });
       statusCode = 200;
     } else {

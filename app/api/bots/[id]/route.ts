@@ -12,7 +12,6 @@ import { checkAiProviderRef, checkBotModel } from '@/lib/ai-provider-ref';
 import { toolTimeoutSecondsSchema } from '@/lib/bot-tool-timeout';
 import { keepToolCallSetting, keepVisionPick } from '@/lib/bot-config-helpers';
 import { checkConfigVision } from '@/lib/bot-vision';
-import { noteModelChanged } from '@/lib/ai-key-late-report';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Prisma
 export const runtime = 'nodejs';
@@ -531,10 +530,6 @@ export async function PUT(
       updateData.updatedById = userId;
     }
 
-    // A reply still on its way reports the model the bot had: it must not count against the key it is on now (#575)
-    const changed = (updateData.aiModel !== undefined && updateData.aiModel !== existingBot.aiModel) || nextRef !== existingBot.aiProviderRef;
-    const undoNote = changed ? noteModelChanged(id) : undefined;
-
     const bot = await prisma.bot.update({
       where: { id },
       data: updateData,
@@ -566,10 +561,6 @@ export async function PUT(
           },
         },
       },
-    }).catch((error: unknown) => {
-      // The save failed, so the model didn't change: a report about it counts again
-      undoNote?.();
-      throw error;
     });
 
     // Transform to camelCase

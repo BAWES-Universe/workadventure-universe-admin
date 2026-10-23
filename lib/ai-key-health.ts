@@ -6,7 +6,6 @@ import { cleanModelId, probeChat, probeModels, type ModelFacts, type ProbeFailur
 import { addNotice, clearNotices } from '@/lib/notices';
 import { moveBotOffGoneModel } from '@/lib/ai-key-model-gone';
 import { firstAnswering } from '@/lib/ai-key-answering';
-import { noteCheckModelChanged } from '@/lib/ai-key-late-report';
 import { cleanFacts, forgetKeyModels } from '@/lib/ai-key-model-list';
 
 /**
@@ -245,8 +244,6 @@ async function saveCheckModel(key: KeyRow, model: string, facts: ModelFacts): Pr
   // Someone changed the model meanwhile: theirs stands
   if (count === 0) return;
   forgetKeyModels(key.providerId);
-  // Bots that follow the check model now reply with this one: a report about the old one may still come in
-  noteCheckModelChanged(key.providerId);
 }
 
 /**
