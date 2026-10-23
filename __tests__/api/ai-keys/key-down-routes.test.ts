@@ -15,7 +15,7 @@ import { resolveUniverseAiProvider } from '@/lib/universe-ai';
 import { requireServiceToken } from '@/lib/service-tokens';
 
 jest.mock('@/lib/db', () => ({
-  prisma: { bot: { findUnique: jest.fn(), updateMany: jest.fn() }, botsAiProvider: { findUnique: jest.fn(), findFirst: jest.fn(), updateMany: jest.fn() } },
+  prisma: { bot: { findUnique: jest.fn(), updateMany: jest.fn() }, botsAiProvider: { findUnique: jest.fn(), findFirst: jest.fn(), updateMany: jest.fn() }, aiKeyLend: { findUnique: jest.fn(async () => null) } },
 }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
@@ -127,13 +127,14 @@ describe('POST /api/bots/:id/ai-health', () => {
   it('counts a failed reply against the key the bot runs on, never one named in the request', async () => {
     const response = await post({ ok: false, providerId: 'someone-elses-key' });
     expect(response.status).toBe(204);
-    expect(recordReply).toHaveBeenCalledWith('key-1', { ok: false, rejected: false, status: undefined });
+    // The bot's id goes along, so a missing model moves only that bot (#575)
+    expect(recordReply).toHaveBeenCalledWith('key-1', { ok: false, rejected: false, status: undefined }, 'b1');
   });
 
   it('passes a rejection and a good reply through', async () => {
     await post({ ok: false, rejected: true });
     await post({ ok: true });
-    expect((recordReply as jest.Mock).mock.calls).toEqual([['key-1', { ok: false, rejected: true, status: undefined }], ['key-1', { ok: true }]]);
+    expect((recordReply as jest.Mock).mock.calls).toEqual([['key-1', { ok: false, rejected: true, status: undefined }, 'b1'], ['key-1', { ok: true }, 'b1']]);
   });
 
   it('passes the provider’s HTTP status along when it is a real one, and drops anything else', async () => {

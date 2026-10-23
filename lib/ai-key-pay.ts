@@ -1,5 +1,6 @@
 import { prisma } from '@/lib/db';
 import { canManageBots } from '@/lib/bot-permissions';
+import { lendModels } from '@/lib/ai-key-model-list';
 
 /**
  * Who pays for a bot's AI (#374). A bot runs on its maker's own key, or on Universe AI. Never on the chatter's key, never
@@ -7,10 +8,11 @@ import { canManageBots } from '@/lib/bot-permissions';
  *   1. the key's owner is the bot's maker (the person who created the bot);
  *   2. the key is lent to the universe the bot stands in;
  *   3. the maker can still manage bots in the bot's room (they have not lost access to the universe or the room).
- * Orbit checks this when a bot is saved, and again every time the bot server asks for the key.
+ * Orbit checks this when a bot is saved, and again every time the bot server asks for the key. A key that may run the bot
+ * also says which of its models the lend allows there (#575): null for all of them.
  */
 export type KeyForBot =
-  | { ok: true }
+  | { ok: true; lendModels: string[] | null }
   | { ok: false; reason: 'not-maker' | 'not-lent' | 'no-access' | 'no-room' };
 
 export async function checkKeyForBot(input: { keyId: string; keyOwnerId: string | null; makerId: string | null; roomId: string }): Promise<KeyForBot> {
@@ -19,11 +21,11 @@ export async function checkKeyForBot(input: { keyId: string; keyOwnerId: string 
   if (!room) return { ok: false, reason: 'no-room' };
   const lent = await prisma.aiKeyLend.findUnique({
     where: { providerId_universeId: { providerId: input.keyId, universeId: room.world.universeId } },
-    select: { id: true },
+    select: { id: true, models: true },
   });
   if (!lent) return { ok: false, reason: 'not-lent' };
   if (!(await canManageBots(input.makerId, input.roomId))) return { ok: false, reason: 'no-access' };
-  return { ok: true };
+  return { ok: true, lendModels: lendModels(lent.models) };
 }
 
 /** What to tell the person saving a bot when its key can't run it, in plain words. */

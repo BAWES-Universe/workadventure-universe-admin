@@ -14,6 +14,7 @@ jest.mock('@/lib/db', () => ({
   prisma: {
     bot: { findUnique: jest.fn(), updateMany: jest.fn() },
     botsAiProvider: { findUnique: jest.fn(), findFirst: jest.fn() },
+    aiKeyLend: { findUnique: jest.fn(async () => null) },
   },
 }));
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));

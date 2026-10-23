@@ -19,6 +19,15 @@ export function providerPayload(provider: BotsAiProvider) {
     supportsVision: provider.supportsVision, // null=auto, true=force vision, false=force text-only
     visionModel: provider.visionModel,
     defaultVision: provider.defaultVision,
-    settings: provider.settings || {},
+    settings: withoutModelFacts(provider.settings),
   };
+}
+
+/** A key's facts about every model it has (#575) are Orbit's to read; the bot server is told about its own model only. */
+function withoutModelFacts(settings: BotsAiProvider['settings']) {
+  if (!settings || typeof settings !== 'object' || Array.isArray(settings)) return settings || {};
+  if (!('modelFacts' in settings)) return settings;
+  const rest: Record<string, unknown> = { ...(settings as Record<string, unknown>) };
+  delete rest.modelFacts;
+  return rest;
 }
