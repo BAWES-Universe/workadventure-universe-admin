@@ -24,22 +24,34 @@ const FIELD_HINT = 'text-[13px] text-muted-foreground';
 const SEARCH_FROM = 8;
 const SHOWN = 30;
 
+/** One setup step: its words, and the command to copy when it has one. */
+function SetupStep({ step }: { step: AiKeyKindInfo['steps'][number] }) {
+  return (
+    <>
+      {step.text}
+      {step.code && <code className="mt-1.5 block overflow-x-auto rounded-xl bg-foreground/[.08] px-3 py-2 text-xs">{step.code}</code>}
+    </>
+  );
+}
+
 function KindCard({ info, picked, onPick }: { info: AiKeyKindInfo; picked: boolean; onPick: () => void }) {
   return (
     <div className="grid gap-1.5">
       <PickCard role="radio" picked={picked} onClick={onPick} indicator={<ProviderLogo info={info} />} trailing={<Radio checked={picked} className="mt-0.5 self-start" />} title={info.label} description={info.benefit} className="items-start">
-        {picked && info.tier === 'more' && (
-          <span className="mt-3 block text-[13px] font-normal text-muted-foreground">We haven’t tried {info.label} ourselves. Adding the key checks that it answers.</span>
-        )}
         {picked && (
-          <ol className="mt-3 grid list-decimal gap-2 border-t border-foreground/10 pt-3 pl-5 text-[13px] font-normal">
-            {info.steps.map((step) => (
-              <li key={step.text}>
-                {step.text}
-                {step.code && <code className="mt-1.5 block overflow-x-auto rounded-xl bg-foreground/[.08] px-3 py-2 text-xs">{step.code}</code>}
-              </li>
-            ))}
-          </ol>
+          <div className="mt-3 border-t border-foreground/10 pt-3 text-[13px] font-normal">
+            {info.steps.length === 1 ? (
+              <SetupStep step={info.steps[0]} />
+            ) : (
+              <ol className="grid list-decimal gap-2 pl-5">
+                {info.steps.map((step) => (
+                  <li key={step.text}>
+                    <SetupStep step={step} />
+                  </li>
+                ))}
+              </ol>
+            )}
+          </div>
         )}
       </PickCard>
       {picked && info.docs && (

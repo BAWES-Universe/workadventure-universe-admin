@@ -277,6 +277,21 @@ export function moreBenefit(provider: { models?: number; open?: number; free?: n
 }
 
 /**
+ * Where "Read about" goes for the few More providers whose models.dev address leads nowhere useful: a 404 (Morph), their
+ * sign-in page (SiliconFlow), raw JSON (Chutes, Cortecs) or a bare API page (Berget, Vultr). Each goes to the provider's own
+ * landing page instead. Every other provider keeps the models.dev address.
+ */
+export const LANDING_PAGES: Record<string, string> = {
+  berget: 'https://berget.ai',
+  chutes: 'https://chutes.ai',
+  cortecs: 'https://cortecs.ai',
+  morph: 'https://www.morphllm.com',
+  siliconflow: 'https://www.siliconflow.com',
+  'siliconflow-cn': 'https://www.siliconflow.cn',
+  vultr: 'https://www.vultr.com/products/cloud-inference/',
+};
+
+/**
  * More providers, from lib/ai-key-snapshot.json (built by scripts/build-ai-key-snapshot.mjs from the models.dev project).
  * They only differ from each other by name and address, so each is a default entry; the ones listed by hand above win
  * if an id is ever the same.
@@ -297,8 +312,13 @@ const MORE_KINDS: AiKeyKindInfo[] = snapshot.providers
       benefit: moreBenefit(provider),
       ...('logo' in provider && provider.logo ? { logo: provider.id } : {}),
       base: provider.base,
-      docs: 'docs' in provider ? provider.docs : undefined,
-      steps: [{ text: `Create an API key in ${provider.label}’s dashboard.` }],
+      docs: LANDING_PAGES[provider.id] ?? ('docs' in provider ? provider.docs : undefined),
+      // We only know the provider's name, so the steps say what every provider's dashboard has in common
+      steps: [
+        { text: `Open ${provider.label}’s dashboard and sign in.` },
+        { text: 'Create an API key (often under API keys or Access tokens).' },
+        { text: 'Copy it and paste it below.' },
+      ],
       tier: 'more',
     }),
   );
