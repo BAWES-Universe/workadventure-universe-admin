@@ -267,9 +267,18 @@ jobs:
           end=$((SECONDS + 1200))
           while [ "$SECONDS" -lt "$end" ]; do
             sleep 10
-            # A failed read is not a failed deploy: keep waiting until the deadline.
-            status=$(curl -sf "${COOLIFY_BASE}/api/v1/deployments/${deployment}" \
-              -H "Authorization: Bearer ${COOLIFY_TOKEN}" | jq -r '.status // empty') || status=""
+            # A refused or missing read (401, 403, 404) will not get better: stop. Any other failed read
+            # (network blip, 5xx while Coolify restarts) is not a failed deploy: keep waiting.
+            code=$(curl -s -o "$RUNNER_TEMP/coolify-status.json" -w '%{http_code}' \
+              "${COOLIFY_BASE}/api/v1/deployments/${deployment}" \
+              -H "Authorization: Bearer ${COOLIFY_TOKEN}") || code=000
+            case "$code" in
+              401|403|404)
+                echo "::error::Coolify answered $code when reading deployment $deployment"
+                exit 1 ;;
+            esac
+            status=""
+            if [ "$code" = "200" ]; then status=$(jq -r '.status // empty' "$RUNNER_TEMP/coolify-status.json" || true); fi
             if [ -n "$status" ] && [ "$status" != "$last" ]; then
               echo "Coolify deployment: $status"
               last="$status"
