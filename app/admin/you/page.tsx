@@ -1,18 +1,21 @@
 'use client';
 
 import { Suspense, useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
+import { ChevronRight } from 'lucide-react';
 import { useAdminBootstrap } from '../admin-bootstrap-context';
 import { StatLine, count } from '../components/ds';
 import { ActivitySection, PassportSection } from '../components/passport';
 import { ProfileCard } from '../components/profile-card';
+import { useAiKeys } from '../hooks/use-ai-keys';
 import { useGuidanceDismissed } from '../hooks/use-guidance-dismissed';
 import Yours from '../components/yours';
 import styles from './you.module.css';
 
 /**
  * You: your profile as others see it (edited in place), then what's yours (universes, memberships, stars), then
- * a Settings row for bringing Get started back (Appearance, Sharing and Sign out live in the Orbit menu). Someone new gets first steps; finding new places is Space's job.
+ * Settings: AI keys, and a row for bringing Get started back (Appearance, Sharing and Sign out live in the Orbit menu). Someone new gets first steps; finding new places is Space's job.
  */
 export default function YouPage() {
   return (
@@ -38,6 +41,8 @@ function You() {
   const [getStartedHidden, hideGetStarted, showGetStarted] = useGuidanceDismissed('getStarted');
   const [stepsAllDone, setStepsAllDone] = useState<boolean | null>(null);
   const scrollToSteps = useRef(false);
+  const { result: aiKeys } = useAiKeys();
+  const aiKeyCount = aiKeys.status === 'ready' ? aiKeys.items.length : 0;
   useEffect(() => {
     if (!scrollToSteps.current || getStartedHidden !== false) return;
     scrollToSteps.current = false;
@@ -67,11 +72,20 @@ function You() {
         profileComplete={profileComplete}
         getStarted={{ hidden: getStartedHidden, hide: hideGetStarted, onAllDone: setStepsAllDone }}
       />
-      {getStartedHidden === true && stepsAllDone === false && (
-        <section className={styles.settings} aria-labelledby="settings-heading">
-          <h2 id="settings-heading" className="orbit-display">
-            Settings
-          </h2>
+      <section className={styles.settings} aria-labelledby="settings-heading">
+        <h2 id="settings-heading" className="orbit-display">
+          Settings
+        </h2>
+        <Link href="/admin/you/ai-keys" className={`orbit-press ${styles.settingRow} ${styles.settingLink}`} data-testid="ai-keys-row">
+          <span>
+            <strong>
+              AI keys {aiKeyCount > 0 && <span className={styles.settingCount}>{aiKeyCount}</span>}
+            </strong>
+            <span>{aiKeyCount > 0 ? 'Your own AI accounts for your bots.' : 'Use your own AI for bots you make.'}</span>
+          </span>
+          <ChevronRight size={20} aria-hidden="true" />
+        </Link>
+        {getStartedHidden === true && stepsAllDone === false && (
           <div className={styles.settingRow}>
             <span>
               <strong>Get started</strong>
@@ -88,8 +102,8 @@ function You() {
               Show
             </button>
           </div>
-        </section>
-      )}
+        )}
+      </section>
     </div>
   );
 }

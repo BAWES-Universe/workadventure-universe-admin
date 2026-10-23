@@ -141,7 +141,7 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
         {error ? (
           <LoadError label="this provider" retry={fetchProvider} />
         ) : (
-          <EmptyCard kind="provider" title="Provider not found." text="It may have been deleted." href="/admin/ai-providers" action="All AI providers" />
+          <EmptyCard kind="provider" title="Provider not found." text="It may have been deleted." href="/admin/ai-providers" action="Universe AI" />
         )}
       </div>
     );

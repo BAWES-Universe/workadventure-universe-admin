@@ -31,6 +31,7 @@ model User {
   reportsMade       Report[]          @relation("Reporter")
   reportsHandled    Report[]          @relation("ReportHandledBy")
   avatars           UserAvatar[]
+  aiKeys            BotsAiProvider[]  @relation("AiKeyOwner")
   outfits           UserOutfit[]
   favorites         Favorite[]
   followers         Follow[]          @relation("Follower")
@@ -51,6 +52,7 @@ model User {
   avatarSetAuditLogs AvatarSetAuditLog[]
   preferences      UserPreference[]
   universeMemberships UniverseMember[]
+  notices          UserNotice[]
 
   @@map("users")
 }
@@ -71,6 +73,29 @@ model UserPreference {
   @@map("user_preferences")
 }
 
+// Something Orbit tells one person once, on Orbit home and in the attention count, until they dismiss it (#374: a key
+// is down, a bot moved to Universe AI). `dedupeKey` makes "once": the same thing for the same person is never added twice.
+model UserNotice {
+  id          String    @id @default(uuid())
+  userId      String    @map("user_id")
+  kind        String    @db.VarChar(40)
+  dedupeKey   String    @map("dedupe_key") @db.VarChar(200)
+  title       String    @db.VarChar(200)
+  body        String    @db.VarChar(1000)
+  // A short state pill beside the title ("Down"); null for none
+  badge       String?   @db.VarChar(20)
+  // An Orbit page the notice leads to
+  href        String?   @db.VarChar(300)
+  createdAt   DateTime  @default(now()) @map("created_at")
+  dismissedAt DateTime? @map("dismissed_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, dedupeKey])
+  @@index([userId, dismissedAt])
+  @@map("user_notices")
+}
+
 // Universes
 model Universe {
   id          String   @id @default(uuid())
@@ -81,6 +106,9 @@ model Universe {
   isPublic    Boolean  @default(true) @map("is_public")
   featured    Boolean  @default(false) // For discovery
   thumbnailUrl String? @map("thumbnail_url")
+  // Hide bot conversations (#435): Orbit shows no transcript or bot memory text for any bot here, and the bot server
+  // sends none to PostHog or Sentry. Bots still remember people either way. Off by default.
+  hideBotConversations Boolean @default(false) @map("hide_bot_conversations")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
@@ -93,6 +121,7 @@ model Universe {
   roles      Role[]
   members    UniverseMember[]
   membershipInvitations MembershipInvitation[]
+  aiKeyLends AiKeyLend[]
 
   @@map("universes")
 }
@@ -185,6 +214,7 @@ model RoomAccess {
   universe        Universe @relation(fields: [universeId], references: [id], onDelete: Cascade)
   world           World    @relation(fields: [worldId], references: [id], onDelete: Cascade)
   room            Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  relinks         RoomAccessRelink[]
 
   @@index([universeId, accessedAt])
   @@index([worldId, accessedAt])
@@ -194,6 +224,26 @@ model RoomAccess {
   @@index([ipAddress, accessedAt])
   @@index([accessedAt])
   @@map("room_accesses")
+}
+
+// Visitors (#531): each visit scripts/unverified-visits-relink.sql moved back onto an account, with what it held before,
+// so scripts/unverified-visits-undo.sql can put it back. Nothing in the app reads it.
+model RoomAccessRelink {
+  id           String    @id @default(uuid())
+  roomAccessId String    @map("room_access_id")
+  userId       String    @map("user_id") // the account the visit was moved onto
+  oldUserUuid  String?   @map("old_user_uuid")
+  oldUserId    String?   @map("old_user_id")
+  oldUserName  String?   @map("old_user_name")
+  oldUserEmail String?   @map("old_user_email")
+  oldIsGuest   Boolean   @map("old_is_guest")
+  relinkedAt   DateTime  @default(now()) @map("relinked_at")
+  undoneAt     DateTime? @map("undone_at")
+
+  roomAccess RoomAccess @relation(fields: [roomAccessId], references: [id], onDelete: Cascade)
+
+  @@index([roomAccessId])
+  @@map("room_access_relinks")
 }
 
 // World Memberships
@@ -568,6 +618,9 @@ model Bot {
   refusalReply        String?  @map("refusal_reply") @db.VarChar(500)
   // Replies each person may get from this bot in a day; null = no limit. Stored here; nothing reads it yet (#1159).
   dailyReplyCap       Int?     @map("daily_reply_cap")
+  // Hide bot conversations (#435) for this bot alone. null = follow the universe (default), true = Private, false = Normal.
+  // A universe that hides them wins: a bot cannot be loosened below it.
+  hideConversations   Boolean? @map("hide_conversations")
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
   createdById         String?  @map("created_by_id")
@@ -647,14 +700,48 @@ model BotsAiProvider {
   settings          Json?    @default("{}")
   tested            Boolean  @default(false)
   testedAt          DateTime? @map("tested_at")
+  // Whose key this is (#374). Null = a provider the super admin runs for the whole server, which is every row there was
+  // before personal keys. Anything that lists or reads providers for the server must keep only ownerId = null.
+  ownerId           String?  @map("owner_id")
+  // The last four characters of the key, kept so the owner can recognise it. The key itself is never sent to a browser.
+  apiKeyLast4       String?  @map("api_key_last4") @db.VarChar(4)
+  // The provider Universe AI runs on (#374). At most one server provider has it (set in one transaction); a bot on
+  // Universe AI follows it. Personal keys never have it.
+  isDefault         Boolean  @default(false) @map("is_default")
+  // Health of a personal key (#374). downSince is set while the key is Down (null = Working). failedReplies counts
+  // replies that failed in a row; two mark it Down. ifDown is what the bot does meanwhile: "universe-ai" or "stop".
+  downSince         DateTime? @map("down_since")
+  downReason        String?  @map("down_reason") @db.VarChar(20)
+  failedReplies     Int      @default(0) @map("failed_replies")
+  healthCheckedAt   DateTime? @map("health_checked_at")
+  ifDown            String   @default("universe-ai") @map("if_down") @db.VarChar(20)
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")
 
+  owner             User?    @relation("AiKeyOwner", fields: [ownerId], references: [id], onDelete: Cascade)
   usage             BotsAiUsage[]
+  lends             AiKeyLend[]
 
   @@index([enabled])
   @@index([type])
+  @@index([ownerId])
   @@map("bots_ai_providers")
+}
+
+// A person's AI key lent to a universe (#374): bots made there by the key's owner may run on it, and nobody else's may.
+// Lending moves no bot; each bot is pointed at the key by its maker on the bot page.
+model AiKeyLend {
+  id         String   @id @default(uuid())
+  providerId String   @map("provider_id") @db.VarChar(50)
+  universeId String   @map("universe_id")
+  lentAt     DateTime @default(now()) @map("lent_at")
+
+  provider BotsAiProvider @relation(fields: [providerId], references: [providerId], onDelete: Cascade)
+  universe Universe       @relation(fields: [universeId], references: [id], onDelete: Cascade)
+
+  @@unique([providerId, universeId])
+  @@index([universeId])
+  @@map("ai_key_lends")
 }
 
 // AI Usage Tracking
@@ -669,6 +756,10 @@ model BotsAiUsage {
   latency         Int?
   error           Boolean  @default(false)
   timestamp       DateTime @default(now())
+  // Who talked to the bot (#374): the person's id as the bot server knows it; null when it was not told or for older rows
+  talkedUserId    String?  @map("talked_user_id") @db.VarChar(255)
+  // Whose key paid, when it was a personal key; null for the server's own providers. Set by Orbit, never taken from a request.
+  keyOwnerId      String?  @map("key_owner_id")
 
   provider        BotsAiProvider @relation(fields: [providerId], references: [providerId], onDelete: Cascade)
 
@@ -733,6 +824,21 @@ model BotsTestResult {
   @@index([testSuite])
   @@index([createdAt])
   @@map("bots_test_results")
+}
+
+// Someone the owner asked a bot to forget (#435). The bot server keeps what it remembers in memory and saves all of it
+// every few minutes, so deleting the saved rows is not enough: the next save would bring them back. This row makes the
+// save endpoint skip the person (userUuid null = everyone) and tell the bot server to drop them. It is kept a minute
+// after it was told, in case the answer was lost, then removed.
+model BotMemoryForget {
+  id         String    @id @default(uuid())
+  botId      String    @map("bot_id") @db.VarChar(255)
+  userUuid   String?   @map("user_uuid") @db.VarChar(255)
+  createdAt  DateTime  @default(now()) @map("created_at")
+  reportedAt DateTime? @map("reported_at")
+
+  @@index([botId])
+  @@map("bot_memory_forgets")
 }
 
 // Bot Memory

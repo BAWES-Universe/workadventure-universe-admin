@@ -6,6 +6,7 @@ import { prisma } from '@/lib/db';
 type Invitation = { id: string; invitedUserId: string; status: string };
 const invitations: Invitation[] = [];
 const preferences: { userId: string; key: string; value: unknown }[] = [];
+const notices: { userId: string; dismissedAt: Date | null }[] = [];
 
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
 jest.mock('@/lib/db', () => ({
@@ -14,6 +15,10 @@ jest.mock('@/lib/db', () => ({
       findMany: jest.fn(async ({ where }: { where: { invitedUserId: string; status: string } }) =>
         invitations.filter((row) => row.invitedUserId === where.invitedUserId && row.status === where.status)
           .map(({ id }) => ({ id }))),
+    },
+    userNotice: {
+      count: jest.fn(async ({ where }: { where: { userId: string; dismissedAt: null } }) =>
+        notices.filter((row) => row.userId === where.userId && row.dismissedAt === null).length),
     },
     userPreference: {
       findUnique: jest.fn(async ({ where }: { where: { userId_key: { userId: string; key: string } } }) => {
@@ -35,6 +40,7 @@ describe('/api/me/attention', () => {
   beforeEach(() => {
     invitations.length = 0;
     preferences.length = 0;
+    notices.length = 0;
     jest.clearAllMocks();
     (getSessionUser as jest.Mock).mockResolvedValue(alice);
   });
@@ -43,6 +49,17 @@ describe('/api/me/attention', () => {
     (getSessionUser as jest.Mock).mockResolvedValue(null);
     expect((await get()).status).toBe(401);
     expect(prisma.membershipInvitation.findMany).not.toHaveBeenCalled();
+  });
+
+  it('adds the notices the caller has not dismissed (a key is down, bots moved), and only theirs', async () => {
+    invitations.push({ id: 'i1', invitedUserId: 'user-a', status: 'pending' });
+    notices.push(
+      { userId: 'user-a', dismissedAt: null },
+      { userId: 'user-a', dismissedAt: new Date() },
+      { userId: 'user-b', dismissedAt: null },
+    );
+    // `invitations` stays what it was; `count` is what waits for an answer in total
+    expect(await (await get()).json()).toEqual({ count: 2, invitations: 1 });
   });
 
   it('counts only the caller’s pending invitations', async () => {

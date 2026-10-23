@@ -12,6 +12,9 @@ jest.mock('@/lib/db', () => ({
       update: jest.fn(),
       findUnique: jest.fn(),
     },
+    room: {
+      findUnique: jest.fn(), // Hide bot conversations (#435): looked up when an update moves the bot to another room
+    },
     user: {
       findFirst: jest.fn(),
       create: jest.fn(),
@@ -111,6 +114,45 @@ describe('/api/bots/configuration', () => {
 
       expect(response.status).toBe(400);
       expect(prisma.bot.update).not.toHaveBeenCalled();
+    });
+
+    it('refuses a personal AI key when no person is saving (the admin token), as if it did not exist', async () => {
+      (prisma.botsAiProvider.findUnique as jest.Mock).mockResolvedValueOnce({ providerId: 'key-abc', ownerId: 'user-a' });
+
+      const response = await POST(configRequest({ ...validBody, aiProviderRef: 'key-abc' }));
+
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toBe('AI provider "key-abc" does not exist');
+      expect(prisma.bot.create).not.toHaveBeenCalled();
+    });
+
+    it('refuses a Vision pick of a key when no person is saving (the admin token), and says nothing for the others', async () => {
+      const pick = { choice: 'another', keyId: 'key-abc', model: 'deepseek-v4-flash-vision-exp' };
+      (prisma.botsAiProvider.findUnique as jest.Mock).mockResolvedValueOnce({ ownerId: 'user-a' });
+
+      const refused = await POST(configRequest({ ...validBody, behaviorConfig: { vision: pick } }));
+      expect(refused.status).toBe(400);
+      expect((await refused.json()).error).toBe('That key isn’t there.');
+      expect(prisma.bot.create).not.toHaveBeenCalled();
+
+      const nonsense = await POST(configRequest({ ...validBody, behaviorConfig: { vision: { choice: 'sideways' } } }));
+      expect(nonsense.status).toBe(400);
+      expect((await nonsense.json()).error).toBe('Pick where images go: This model, Another model or Universe AI.');
+
+      const picked = await POST(configRequest({ ...validBody, behaviorConfig: { vision: { choice: 'this' } } }));
+      expect(picked.status).toBe(201);
+      const cleared = await POST(configRequest({ ...validBody, behaviorConfig: { vision: null } }));
+      expect(cleared.status).toBe(201);
+    });
+
+    it('lets a save carry the Vision pick the bot already has, whoever saves it', async () => {
+      const pick = { choice: 'another', keyId: 'key-abc', model: 'deepseek-v4-flash-vision-exp' };
+      (prisma.bot.findUnique as jest.Mock).mockResolvedValue({ aiProviderRef: null, createdById: 'maker', behaviorConfig: { vision: pick } });
+
+      const response = await POST(configRequest({ ...validBody, botId: '00000000-0000-4000-8000-000000000001', behaviorConfig: { vision: pick } }));
+
+      expect(response.status).toBe(200);
+      expect(prisma.botsAiProvider.findUnique).not.toHaveBeenCalled();
     });
 
     it('saves an existing bot whose unchanged provider was deleted', async () => {
@@ -251,6 +293,27 @@ describe('/api/bots/configuration', () => {
       expect(data.behaviorConfig.walkSpeed).toBe(2);
       expect(data.behaviorConfig.assignedSpace).toEqual({ center: { x: 9, y: 9 }, radius: 7 });
       expect(data.behaviorConfig.behaviorType).toBe('idle'); // synced to scalar
+    });
+
+    it('keeps a hidden bot Private when the update moves it to a room in a universe that does not hide (#435)', async () => {
+      (prisma.bot.findUnique as jest.Mock).mockImplementation(async (args: { select?: { hideConversations?: boolean } }) =>
+        args.select?.hideConversations
+          ? { hideConversations: null, room: { world: { universe: { hideBotConversations: true } } } }
+          : { id: 'bot-1', roomId: 'room-old', createdById: null, behaviorConfig: null },
+      );
+      (prisma.room.findUnique as jest.Mock).mockResolvedValue({ id: 'room-123', world: { universe: { hideBotConversations: false } } });
+      const response = await POST(configRequest({ ...validBody, botId: '00000000-0000-4000-8000-000000000001' }));
+
+      expect(response.status).toBe(200);
+      expect((prisma.bot.update as jest.Mock).mock.calls[0][0].data).toMatchObject({ roomId: 'room-123', hideConversations: true });
+    });
+
+    it('does not touch privacy when the update leaves the bot in its room', async () => {
+      (prisma.bot.findUnique as jest.Mock).mockImplementation(async () => ({ id: 'bot-1', roomId: 'room-123', createdById: null, behaviorConfig: null }));
+      const response = await POST(configRequest({ ...validBody, botId: '00000000-0000-4000-8000-000000000001' }));
+
+      expect(response.status).toBe(200);
+      expect((prisma.bot.update as jest.Mock).mock.calls[0][0].data).not.toHaveProperty('hideConversations');
     });
 
     it('syncs embedded behaviorConfig.behaviorType when behaviorType changes without behaviorConfig in the body', async () => {

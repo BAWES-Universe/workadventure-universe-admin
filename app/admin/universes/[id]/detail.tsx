@@ -31,6 +31,7 @@ import { useEntitySummaries } from '../../hooks/use-entity-summaries';
 import { useHere, useStarToggle, useUniverseRank, useWorldRooms } from '../../hooks/use-place-data';
 import { EmptyCard, EntityCard, EntityRow, Figure, Figures, InContext, KindIcon, LoadError, LoadingRows, PageHeader, SectionHeader, SettingSwitch, Settings, StatLine, StatusPill, VisitLine, count } from '../../components/ds';
 import { useReplacePage } from '@/app/admin/orbit-frame-context';
+import { UniverseAdvanced } from '@/components/bot-telemetry';
 
 interface Universe {
   id: string;
@@ -41,6 +42,8 @@ interface Universe {
   isPublic: boolean;
   featured: boolean;
   thumbnailUrl: string | null;
+  /** Bot chat telemetry is off (#435); stored as hide-conversations. */
+  hideBotConversations?: boolean;
   createdAt: string;
   canEdit?: boolean;
   /** Owns it (a super admin can edit and delete without owning it). */
@@ -109,6 +112,7 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
     isPublic: true,
     featured: false,
     thumbnailUrl: '',
+    hideBotConversations: false,
   });
 
   useEffect(() => {
@@ -156,6 +160,7 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
         isPublic: data.isPublic,
         featured: data.featured,
         thumbnailUrl: data.thumbnailUrl || '',
+        hideBotConversations: data.hideBotConversations === true,
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load universe');
@@ -206,6 +211,7 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
           thumbnailUrl: formData.thumbnailUrl || null,
           isPublic: formData.isPublic,
           featured: formData.featured,
+          hideBotConversations: formData.hideBotConversations,
           // ownerId is not included - it belongs to the owner and cannot be changed
         }),
       });
@@ -414,6 +420,13 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
                 />
               )}
             </Settings>
+
+            <UniverseAdvanced
+              universeName={universe.name}
+              telemetryOn={!formData.hideBotConversations}
+              onChange={(on) => setFormData({ ...formData, hideBotConversations: !on })}
+              confirmTurnOn={universe.hideBotConversations === true}
+            />
 
             <div className="flex flex-col-reverse sm:flex-row justify-end gap-3 pt-4">
               <Button
