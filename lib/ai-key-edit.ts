@@ -72,9 +72,9 @@ export async function listModelsForSavedKey(
   if (typeof input.address === 'string' && input.address.trim() && !canMoveAddress(info)) {
     return { ok: false, status: 400, message: `${info.label} can’t be moved to another address.` };
   }
-  // At the saved address the list kept for the key is used, which also keeps its model facts and count up to date (#575)
+  // At the saved address the key's list is asked again and kept, which also keeps its model facts and count up to date (#575)
   if (!(typeof input.address === 'string' && input.address.trim())) {
-    const kept = await keyModels(key);
+    const kept = await keyModels(key, { fresh: true });
     if (!kept.ok) return { ok: false, status: 400, message: kept.message };
     if (!kept.listed) return { ok: false, status: 400, message: `${info.label} doesn’t share a list of its models. Type the model name.`, noList: true };
     return { ok: true, models: kept.models, facts: kept.facts };
