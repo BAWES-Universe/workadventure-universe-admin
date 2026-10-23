@@ -277,6 +277,23 @@ export function moreBenefit(provider: { models?: number; open?: number; free?: n
 }
 
 /**
+ * The link to read about a More provider. Most models.dev addresses are pages to read. A few are the API itself
+ * (api.example.com, or /v1/models), which show raw data or nothing: those go to the provider's own landing page
+ * (its main domain) instead.
+ */
+export function docsPage(address: string | undefined): string | undefined {
+  if (!address) return undefined;
+  try {
+    const url = new URL(address);
+    if (url.protocol !== 'https:') return undefined;
+    if (!url.hostname.startsWith('api.') && !/^\/v\d+(\/|$)/.test(url.pathname)) return address;
+    return `https://${url.hostname.split('.').slice(-2).join('.')}`;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * More providers, from lib/ai-key-snapshot.json (built by scripts/build-ai-key-snapshot.mjs from the models.dev project).
  * They only differ from each other by name and address, so each is a default entry; the ones listed by hand above win
  * if an id is ever the same.
@@ -297,8 +314,13 @@ const MORE_KINDS: AiKeyKindInfo[] = snapshot.providers
       benefit: moreBenefit(provider),
       ...('logo' in provider && provider.logo ? { logo: provider.id } : {}),
       base: provider.base,
-      docs: 'docs' in provider ? provider.docs : undefined,
-      steps: [{ text: `Create an API key in ${provider.label}’s dashboard.` }],
+      docs: docsPage('docs' in provider ? provider.docs : undefined),
+      // We only know the provider's name, so the steps say what every provider's dashboard has in common
+      steps: [
+        { text: `Open ${provider.label}’s dashboard and sign in.` },
+        { text: 'Create an API key (often under API keys or Access tokens).' },
+        { text: 'Copy it and paste it below.' },
+      ],
       tier: 'more',
     }),
   );

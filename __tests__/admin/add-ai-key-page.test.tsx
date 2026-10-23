@@ -183,18 +183,25 @@ describe('Add a key: more providers, regions and search', () => {
     }
   });
 
-  it('says the provider is untried only on the picked More provider, with the line from the models.dev numbers under its name', () => {
+  it('shows the line from the models.dev numbers under a More provider and never says it is untried', () => {
     render(<AddAiKeyPage />);
     fireEvent.change(screen.getByLabelText('Search providers'), { target: { value: 'baseten' } });
     const card = screen.getByRole('radio', { name: /^Baseten/ });
     expect(within(card).getByText('26 models, all open.')).toBeTruthy();
-    expect(screen.queryByText(/haven’t tried/)).toBeNull();
     fireEvent.click(card);
-    expect(screen.getByText('We haven’t tried Baseten ourselves. Adding the key checks that it answers.')).toBeTruthy();
+    expect(screen.queryByText(/tried/)).toBeNull();
+  });
+
+  it('numbers the steps only when there are two or more', () => {
+    render(<AddAiKeyPage />);
+    fireEvent.click(screen.getByRole('radio', { name: /^Gemini/ }));
+    expect(screen.getByText('On aistudio.google.com, choose Get API key.')).toBeTruthy();
+    expect(screen.queryAllByRole('listitem')).toHaveLength(0);
+    fireEvent.click(screen.getByRole('radio', { name: /^Claude/ }));
+    expect(screen.getAllByRole('listitem')).toHaveLength(2);
+    fireEvent.change(screen.getByLabelText('Search providers'), { target: { value: 'baseten' } });
     fireEvent.click(screen.getByRole('radio', { name: /^Baseten/ }));
-    fireEvent.change(screen.getByLabelText('Search providers'), { target: { value: '' } });
-    fireEvent.click(screen.getByRole('radio', { name: /^Groq/ }));
-    expect(screen.queryByText(/haven’t tried/)).toBeNull();
+    expect(screen.getAllByRole('listitem')).toHaveLength(3);
   });
 
   it('says so, and points to Any OpenAI-compatible, when nothing matches', () => {
@@ -285,7 +292,7 @@ describe('Add a key: More providers', () => {
     render(<AddAiKeyPage />);
     fireEvent.change(screen.getByLabelText('Search providers'), { target: { value: 'nebius' } });
     fireEvent.click(screen.getByRole('radio', { name: /^Nebius/ }));
-    expect(screen.getByText(/Create an API key in Nebius/)).toBeTruthy();
+    expect(screen.getByText(/^Open Nebius.* dashboard and sign in\.$/)).toBeTruthy();
     const docs = screen.getByRole('link', { name: /Read about Nebius/ });
     expect(docs.getAttribute('href')).toMatch(/^https:\/\//);
     expect(docs.getAttribute('rel')).toContain('noreferrer');

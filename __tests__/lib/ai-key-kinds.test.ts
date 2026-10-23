@@ -2,7 +2,7 @@
  * The catalog of AI key kinds (#374): the seven that exist keep behaving exactly as before, now as data. These rows are
  * the no-regression list for the move from if-statements to catalog fields.
  */
-import { AI_KEY_KINDS, authHeaders, chatPath, chatProbeBody, hostedBase, isTypedEndpoint, kindInfo, providerBases, typedEndpoint, writeModelId } from '@/lib/ai-key-kinds';
+import { AI_KEY_KINDS, authHeaders, chatPath, chatProbeBody, docsPage, hostedBase, isTypedEndpoint, kindInfo, providerBases, typedEndpoint, writeModelId } from '@/lib/ai-key-kinds';
 import { cleanModelIds, keyTarget } from '@/lib/ai-key-models';
 
 describe('the seven kinds, exactly as they were', () => {
@@ -157,6 +157,21 @@ describe('More providers, from the snapshot', () => {
       expect(info.regions).toBeUndefined();
       expect(info.steps.length).toBeGreaterThan(0);
     }
+  });
+
+  it('links the page to read, and the provider’s own landing page when the address is the API itself', () => {
+    expect(docsPage('https://docs.baseten.co/inference/model-apis/overview')).toBe('https://docs.baseten.co/inference/model-apis/overview');
+    expect(docsPage('https://api.berget.ai')).toBe('https://berget.ai');
+    expect(docsPage('https://llm.chutes.ai/v1/models')).toBe('https://chutes.ai');
+    expect(docsPage('https://api.vultrinference.com/')).toBe('https://vultrinference.com');
+    expect(docsPage('http://docs.example.com')).toBeUndefined();
+    expect(docsPage('not a link')).toBeUndefined();
+    expect(docsPage(undefined)).toBeUndefined();
+    for (const info of more) expect(info.docs).toMatch(/^https:\/\/(?!api\.)[^/]+(\/(?!v\d+(\/|$)).*)?$/);
+  });
+
+  it('says what every provider’s dashboard has in common: open it, make a key, paste it', () => {
+    for (const info of more) expect(info.steps.map((step) => step.text)).toEqual([`Open ${info.label}’s dashboard and sign in.`, 'Create an API key (often under API keys or Access tokens).', 'Copy it and paste it below.']);
   });
 
   it('proves a key with a chat reply, since none of them has been tried for a public model list', () => {
