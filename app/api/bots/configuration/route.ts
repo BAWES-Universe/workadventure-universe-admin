@@ -11,7 +11,7 @@ import { checkAiProviderRef } from '@/lib/ai-provider-ref';
 import { checkConfigVision } from '@/lib/bot-vision';
 import { toolTimeoutSecondsSchema } from '@/lib/bot-tool-timeout';
 import { mustStayPrivateAfterMove } from '@/lib/bot-privacy';
-import { noteModelChanged } from '@/lib/ai-key-model-gone';
+import { noteModelChanged } from '@/lib/ai-key-late-report';
 import { z } from 'zod';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Prisma

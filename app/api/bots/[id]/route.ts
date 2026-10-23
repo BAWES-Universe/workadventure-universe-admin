@@ -12,7 +12,7 @@ import { checkAiProviderRef, checkBotModel } from '@/lib/ai-provider-ref';
 import { toolTimeoutSecondsSchema } from '@/lib/bot-tool-timeout';
 import { keepToolCallSetting, keepVisionPick } from '@/lib/bot-config-helpers';
 import { checkConfigVision } from '@/lib/bot-vision';
-import { noteModelChanged } from '@/lib/ai-key-model-gone';
+import { noteModelChanged } from '@/lib/ai-key-late-report';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Prisma
 export const runtime = 'nodejs';

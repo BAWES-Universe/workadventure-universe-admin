@@ -3,9 +3,12 @@ import { prisma } from '@/lib/db';
 import { kindInfo, type AiKeyKindInfo } from '@/lib/ai-key-kinds';
 import { decryptApiKey } from '@/lib/encryption';
 import { firstAnswering } from '@/lib/ai-key-answering';
+import { changedLately, noteModelChanged } from '@/lib/ai-key-late-report';
 import { addNotice } from '@/lib/notices';
 import { moveBotsOffKey } from '@/lib/ai-key-lend';
 import { allowedModels, forgetKeyModels, keyModels, lendModels, modelFactsOf, servedModel, type KeyForModels } from '@/lib/ai-key-model-list';
+
+export { LATE_REPORT_MS, noteModelChanged } from '@/lib/ai-key-late-report';
 
 /**
  * A provider stopped offering the model one bot replies with (#575). That says nothing about the key's other models, so the
@@ -21,18 +24,6 @@ import { allowedModels, forgetKeyModels, keyModels, lendModels, modelFactsOf, se
  * listed): then the reply's failure counts against the key as before. A report that comes in just after the bot was moved is
  * about the model it left (a reply already on its way, or the bot server still holding the old answer), so it is let go.
  */
-/** How long after a move a model-gone report for that bot is taken as late news about the model it left. */
-export const LATE_REPORT_MS = 10 * 60_000;
-const movedAt = new Map<string, number>();
-
-/**
- * A bot's model just changed (its maker picked another, or it moved key): a model-gone report in the next few minutes is
- * about the model it had, from a reply already on its way, so it is let go the same as after a move made here.
- */
-export function noteModelChanged(botId: string): void {
-  movedAt.set(botId, Date.now());
-}
-
 export async function moveBotOffGoneModel(key: KeyForModels & { ownerId: string | null; name: string }, botId: string): Promise<boolean> {
   if (!key.ownerId) return false;
   const bot = await prisma.bot.findUnique({
@@ -41,8 +32,7 @@ export async function moveBotOffGoneModel(key: KeyForModels & { ownerId: string 
   });
   if (!bot || bot.aiProviderRef !== key.providerId) return false;
   // Moved or changed in the last few minutes, on any key: late news about the model it left, so the provider isn't even asked
-  const at = movedAt.get(bot.id);
-  if (at !== undefined && Date.now() - at < LATE_REPORT_MS) return true;
+  if (changedLately(bot.id)) return true;
   const list = await keyModels(key, { fresh: true });
   if (!list.ok || !list.listed) return false;
   const universe = bot.room.world.universe;
