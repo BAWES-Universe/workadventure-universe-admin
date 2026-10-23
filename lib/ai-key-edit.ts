@@ -3,6 +3,7 @@ import { decryptApiKey } from '@/lib/encryption';
 import { kindInfo } from '@/lib/ai-key-kinds';
 import { cleanModelId, keyTarget, modelCaps, probeChat, probeModels, type ModelFactsById } from '@/lib/ai-key-models';
 import { markWorking } from '@/lib/ai-key-health';
+import { forgetKeyModels } from '@/lib/ai-key-model-list';
 
 /**
  * Changing where a saved key points, or which model it uses (#374). The row stays the same row, so its lends and the
@@ -136,6 +137,8 @@ export async function editSavedKey(ownerId: string, id: string, input: KeyEditIn
       ...(onList ? { settings, supportsVision: caps.vision ?? null } : {}),
     },
   });
+  // A new address can list other models: the list kept for the old one is asked again next time
+  forgetKeyModels(id);
   // It just answered a real chat call, so a key that was Down is Working again
   if (key.downSince) await markWorking({ providerId: key.providerId, ownerId });
   return { ok: true, model, endpoint: target.target.endpoint };

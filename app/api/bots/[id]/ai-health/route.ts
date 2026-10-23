@@ -25,7 +25,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const httpStatus = typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599 ? status : undefined;
     const bot = await prisma.bot.findUnique({ where: { id }, select: { aiProviderRef: true } });
     if (!bot?.aiProviderRef) return new NextResponse(null, { status: 204 });
-    await recordReply(bot.aiProviderRef, ok ? { ok: true } : { ok: false, rejected: rejected === true, status: httpStatus });
+    await recordReply(bot.aiProviderRef, ok ? { ok: true } : { ok: false, rejected: rejected === true, status: httpStatus }, id);
     return new NextResponse(null, { status: 204 });
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized: Invalid service token') {

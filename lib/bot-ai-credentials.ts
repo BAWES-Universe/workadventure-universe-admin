@@ -7,12 +7,14 @@ import { isTypedEndpoint, kindInfo } from '@/lib/ai-key-kinds';
 import { RESTING_LINE, recheckIfDue } from '@/lib/ai-key-health';
 import { autoVision, keyVisionModels, readVisionPick, usableVisionKey, type VisionPick } from '@/lib/bot-vision';
 import { resolveVisionSupport } from '@/lib/vision-models';
+import { lendModels, modelSupportsVision, servedModel } from '@/lib/ai-key-model-list';
 
 /**
  * What the bot server gets when it asks how a bot talks to its AI, by bot id (#374). The bot's own `aiProviderRef` decides:
  *   - a server provider's id: that provider, as always;
  *   - "universe-ai": whichever provider is the Default now;
- *   - a personal key: that key, but only while it may run this bot (see lib/ai-key-pay.ts). When it may not (the maker lost
+ *   - a personal key: that key with the bot's own model (#575: `aiModel`, else the key's check model, never one its lend
+ *     leaves out), but only while it may run this bot (see lib/ai-key-pay.ts). When it may not (the maker lost
  *     access, the key was unlent some other way), the bot is moved to Universe AI right here, the universe's owner is told
  *     once, and Universe AI's provider is what comes back. Nobody is ever served a key that may not run the bot.
  * `source` says which of the three it was, so the bot server knows when it is talking through someone's own key.
@@ -67,6 +69,7 @@ const loadBot = (botId: string) =>
       id: true,
       name: true,
       aiProviderRef: true,
+      aiModel: true,
       behaviorConfig: true,
       createdById: true,
       roomId: true,
@@ -93,6 +96,8 @@ export async function credentialsForBot(botId: string): Promise<BotAiCredentials
 async function visionPlan(bot: BotForCredentials, main: ServedProvider): Promise<VisionPlan | undefined> {
   const picked = readVisionPick(bot.behaviorConfig);
   const own = main.source === 'own-key';
+  // Another model on the same key only when the lend there allows it (#575)
+  const lend = own && !picked ? await lentModelsHere(main.providerId, bot.room.world.universe.id) : null;
   const mainSees = resolveVisionSupport(main.model ?? '', main.supportsVision);
   const choice: VisionPick | null =
     picked ??
@@ -100,7 +105,10 @@ async function visionPlan(bot: BotForCredentials, main: ServedProvider): Promise
       ? autoVision({
           ownKeyId: main.providerId,
           sees: mainSees,
-          sameKeyModel: keyVisionModels({ model: main.model, supportsVision: main.supportsVision, settings: main.settings }).find((model) => model !== main.model) ?? null,
+          sameKeyModel:
+            keyVisionModels({ model: main.model, supportsVision: main.supportsVision, settings: main.settings }).find(
+              (model) => model !== main.model && (!lend || lend.includes(model)),
+            ) ?? null,
         })
       : null);
   if (!choice || (!picked && choice.choice === 'this')) return undefined;
@@ -118,6 +126,12 @@ async function visionPlan(bot: BotForCredentials, main: ServedProvider): Promise
       keyAddressTyped: isTypedEndpoint(info, usable.key.endpoint),
     },
   };
+}
+
+/** The models a key's lend to this universe allows (null: all of them). */
+async function lentModelsHere(providerId: string, universeId: string): Promise<string[] | null> {
+  const lent = await prisma.aiKeyLend.findUnique({ where: { providerId_universeId: { providerId, universeId } }, select: { models: true } });
+  return lendModels(lent?.models);
 }
 
 async function mainCredentials(bot: BotForCredentials): Promise<BotAiCredentials> {
@@ -146,10 +160,12 @@ async function mainCredentials(bot: BotForCredentials): Promise<BotAiCredentials
       return answer.status === 200 && answer.body.source === 'universe-ai' ? { status: 200, body: { ...answer.body, standingInFor: ref } } : answer;
     }
     const info = kindInfo((provider.settings as { kind?: unknown } | null)?.kind);
+    // The bot's own model on this key; the bot server reads `model` and `supportsVision`, so it needs nothing new
+    const model = servedModel(bot, provider, verdict.lendModels) ?? provider.model;
     return {
       status: 200,
       body: {
-        ...providerPayload(provider),
+        ...providerPayload({ ...provider, model, supportsVision: model ? modelSupportsVision(provider, model) : provider.supportsVision }),
         source: 'own-key',
         keyOwnerId: provider.ownerId,
         keyKind: info?.kind ?? null,
@@ -173,7 +189,7 @@ async function moveToUniverseAi(
   ref: string,
   reason: keyof typeof MOVED_BECAUSE,
 ): Promise<BotAiCredentials> {
-  const moved = await prisma.bot.updateMany({ where: { id: bot.id, aiProviderRef: ref }, data: { aiProviderRef: UNIVERSE_AI_REF } });
+  const moved = await prisma.bot.updateMany({ where: { id: bot.id, aiProviderRef: ref }, data: { aiProviderRef: UNIVERSE_AI_REF, aiModel: null } });
   if (moved.count > 0) {
     const universe = bot.room.world.universe;
     try {

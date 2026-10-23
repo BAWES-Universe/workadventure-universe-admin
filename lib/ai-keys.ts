@@ -2,6 +2,7 @@ import { prisma } from '@/lib/db';
 import { kindInfo, type AiKeyKind } from '@/lib/ai-key-kinds';
 import { isIfDown, type DownReason } from '@/lib/ai-key-health';
 import type { ModelFacts } from '@/lib/ai-key-models';
+import { lendModels, servedModel } from '@/lib/ai-key-model-list';
 
 export type { AiKeyKind };
 
@@ -26,7 +27,16 @@ export interface AiKeySummary {
   last4: string | null;
   month: { replies: number; tokens: number };
   /** The universes it is lent to, and the bots running on it there with their replies this month. */
-  lentTo: { universeId: string; universeName: string; /** The key's owner owns that universe. */ ownedByYou: boolean; bots: { id: string; name: string; replies: number }[] }[];
+  lentTo: {
+    universeId: string;
+    universeName: string;
+    /** The key's owner owns that universe. */
+    ownedByYou: boolean;
+    /** Which of the key's models bots there may use (#575): null for all of them. */
+    models: string[] | null;
+    /** Each bot with the model it replies with (its own pick, else the key's check model, kept to what the lend allows). */
+    bots: { id: string; name: string; replies: number; model: string | null }[];
+  }[];
   /** "working", or "down" with when it went down (ISO) and why. */
   status: 'working' | 'down';
   downSince: string | null;
@@ -84,12 +94,12 @@ export async function listAiKeys(ownerId: string): Promise<AiKeySummary[]> {
     prisma.aiKeyLend.findMany({
       where: { providerId: { in: ids } },
       orderBy: { lentAt: 'asc' },
-      select: { providerId: true, universe: { select: { id: true, name: true, ownerId: true } } },
+      select: { providerId: true, models: true, universe: { select: { id: true, name: true, ownerId: true } } },
     }),
     prisma.bot.findMany({
       where: { aiProviderRef: { in: ids } },
       orderBy: { name: 'asc' },
-      select: { id: true, name: true, aiProviderRef: true, room: { select: { world: { select: { universeId: true } } } } },
+      select: { id: true, name: true, aiProviderRef: true, aiModel: true, room: { select: { world: { select: { universeId: true } } } } },
     }),
     prisma.botsAiUsage.groupBy({
       by: ['providerId', 'botId'],
@@ -114,14 +124,18 @@ export async function listAiKeys(ownerId: string): Promise<AiKeySummary[]> {
       month: { replies: Number(sum?.apiCalls ?? 0), tokens: Number(sum?.tokensUsed ?? 0) },
       lentTo: lends
         .filter((lend) => lend.providerId === row.providerId)
-        .map((lend) => ({
-          universeId: lend.universe.id,
-          universeName: lend.universe.name,
-          ownedByYou: lend.universe.ownerId === ownerId,
-          bots: bots
-            .filter((bot) => bot.aiProviderRef === row.providerId && bot.room.world.universeId === lend.universe.id)
-            .map((bot) => ({ id: bot.id, name: bot.name, replies: repliesOf.get(`${row.providerId}:${bot.id}`) ?? 0 })),
-        })),
+        .map((lend) => {
+          const models = lendModels(lend.models);
+          return {
+            universeId: lend.universe.id,
+            universeName: lend.universe.name,
+            ownedByYou: lend.universe.ownerId === ownerId,
+            models,
+            bots: bots
+              .filter((bot) => bot.aiProviderRef === row.providerId && bot.room.world.universeId === lend.universe.id)
+              .map((bot) => ({ id: bot.id, name: bot.name, replies: repliesOf.get(`${row.providerId}:${bot.id}`) ?? 0, model: servedModel(bot, row, models) })),
+          };
+        }),
       status: row.downSince ? 'down' : 'working',
       downSince: row.downSince ? row.downSince.toISOString() : null,
       downReason: row.downSince ? asDownReason(row.downReason) : null,
