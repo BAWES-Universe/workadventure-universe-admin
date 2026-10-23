@@ -2,7 +2,7 @@
  * A bot's model changed in the last few minutes (#575): moved off a gone model to one that answered, picked again by its
  * maker, or moved to another key. A lend that stops allowing a model moves bots off one that worked, so it opens no window: a
  * 404 just after is about the model the owner picked for them, and counts. A model-gone report then is about the model it had, from a reply already
- * on its way, so it is let go instead of counting against the key the bot is on now. Kept per bot, whatever key it is on.
+ * on its way, so it is let go instead of counting against the key the bot is on now, as long as the model it has now answers. Kept per bot, whatever key it is on.
  * A key's check model changing changes the model of every bot that follows it (no model of its own), so that is kept too.
  */
 

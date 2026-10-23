@@ -3,7 +3,7 @@ import { prisma } from '@/lib/db';
 import { kindInfo, type AiKeyKindInfo } from '@/lib/ai-key-kinds';
 import { decryptApiKey } from '@/lib/encryption';
 import { firstAnswering } from '@/lib/ai-key-answering';
-import type { ModelFactsById } from '@/lib/ai-key-models';
+import { probeChat, type ModelFactsById } from '@/lib/ai-key-models';
 import { changedLately, noteCheckModelChanged, noteModelChanged } from '@/lib/ai-key-late-report';
 import { addNotice } from '@/lib/notices';
 import { moveBotsOffKey } from '@/lib/ai-key-lend';
@@ -51,9 +51,10 @@ async function decide(key: KeyForModels & { ownerId: string | null; name: string
   // The model the reply was asked of: the bot's own, or the one its lend falls back to
   const gone = servedModel(bot, key, lend);
   if (!gone) return false;
-  // Moved or changed in the last few minutes: late news about the model it left, so the provider isn't even asked. A new
-  // check model only counts for a bot that really replies with it (a lend that leaves it out serves its own first model).
-  if (changedLately(bot, key.providerId, gone === key.model)) return true;
+  // Moved or changed in the last few minutes: late news about the model it left, as long as the one it has now answers. When
+  // the provider says it doesn't have that one either, the report is about it, and the bot moves off it as from any other.
+  // A new check model only counts for a bot that really replies with it (a lend that leaves it out serves its own first model).
+  if (changedLately(bot, key.providerId, gone === key.model) && !(await saysGone(key, gone))) return true;
   const list = await keyModels(key, { fresh: true });
   if (!list.ok || !list.listed) return false;
   // A model the provider still lists but that won't answer is that model's failure only, the key's check model too: the
@@ -123,6 +124,20 @@ async function decide(key: KeyForModels & { ownerId: string | null; name: string
     }
   }
   return true;
+}
+
+/** Whether the provider says, to one tiny reply, that it doesn't have this model. Anything else (an answer, busy, no answer) says no. */
+async function saysGone(key: KeyForModels, model: string): Promise<boolean> {
+  const info = kindInfo((key.settings as { kind?: unknown } | null)?.kind);
+  if (!info) return false;
+  let apiKey: string | undefined;
+  try {
+    apiKey = key.apiKeyEncrypted ? decryptApiKey(key.apiKeyEncrypted) : undefined;
+  } catch {
+    return false;
+  }
+  const reply = await probeChat({ kind: info.kind, address: key.endpoint ?? undefined, apiKey, model });
+  return !reply.ok && reply.reason === 'gone';
 }
 
 /**
