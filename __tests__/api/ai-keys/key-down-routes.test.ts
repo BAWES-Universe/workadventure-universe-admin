@@ -145,6 +145,19 @@ describe('POST /api/bots/:id/ai-health', () => {
     expect((recordReply as jest.Mock).mock.calls.map((call) => call[1].status)).toEqual([429, undefined, undefined, undefined]);
   });
 
+  it('answers at once, without waiting for the report to be recorded, and a failure there is only logged', async () => {
+    let finish: (() => void) | undefined;
+    (recordReply as jest.Mock).mockReturnValueOnce(new Promise<void>((resolve) => (finish = resolve)));
+    expect((await post({ ok: false, status: 404 })).status).toBe(204);
+    finish?.();
+    const log = jest.spyOn(console, 'error').mockImplementation(() => {});
+    (recordReply as jest.Mock).mockRejectedValueOnce(new Error('db down'));
+    expect((await post({ ok: false })).status).toBe(204);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(log).toHaveBeenCalledWith('[BotAi] Health report failed:', 'db down');
+    log.mockRestore();
+  });
+
   it('refuses a body without ok', async () => {
     expect((await post({ rejected: true })).status).toBe(400);
     expect(recordReply).not.toHaveBeenCalled();
