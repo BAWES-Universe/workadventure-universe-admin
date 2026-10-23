@@ -150,7 +150,7 @@ describe('moveBotOffGoneModel', () => {
   it('leaves it to the key’s own rules when the provider refuses the key while other models are asked', async () => {
     list.mockResolvedValue({ ok: true, models: ['anthropic/claude-haiku-5-5', 'openai/gpt-5-mini'], facts: {}, listed: true });
     chat.mockResolvedValue({ ok: false, reason: 'rejected', message: 'OpenRouter didn’t accept this key.' });
-    expect(await moveBotOffGoneModel(key, guide.id)).toBe(false);
+    expect(await moveBotOffGoneModel(key, guide.id)).toBe('rejected');
     expect(db.bot.updateMany).not.toHaveBeenCalled();
     expect(moveBotsOffKey).not.toHaveBeenCalled();
   });
@@ -244,7 +244,9 @@ describe('moveBotOffGoneModel', () => {
   it('leaves it to the key’s own rules when the key is refused as the bot’s model is asked again', async () => {
     db.aiKeyLend.findUnique.mockResolvedValue({ models: ['meta-llama/llama-4-maverick'] });
     chat.mockReset().mockResolvedValue({ ok: false, reason: 'rejected', message: 'OpenRouter didn’t accept this key.' });
-    expect(await moveBotOffGoneModel(key, guide.id)).toBe(false);
+    expect(await moveBotOffGoneModel(key, guide.id)).toBe('rejected');
+    chat.mockResolvedValue({ ok: false, reason: 'credit', message: 'OpenRouter says this key is out of credit.' });
+    expect(await moveBotOffGoneModel(key, guide.id)).toBe('credit');
     expect(moveBotsOffKey).not.toHaveBeenCalled();
   });
 

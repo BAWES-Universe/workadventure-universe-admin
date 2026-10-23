@@ -268,8 +268,10 @@ export async function recordReply(
   const verdict = judgeFailedReply(outcome.status, outcome.rejected === true);
   if (!verdict.counts) return;
   if (verdict.down) {
-    if (verdict.down === 'model' && botId && (await moveBotOffGoneModel(key, botId))) return;
-    await markDown(key, verdict.down);
+    const decided = verdict.down === 'model' && botId ? await moveBotOffGoneModel(key, botId) : false;
+    if (decided === true) return;
+    // Asking again can show the key itself was refused or ran out of credit: it is Down for that, not for a model
+    await markDown(key, decided || verdict.down);
     return;
   }
   // The key can be revoked between the read above and this count: then there is nothing left to count and the report is done
