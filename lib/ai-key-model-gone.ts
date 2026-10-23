@@ -101,6 +101,9 @@ async function decide(key: KeyForModels & { ownerId: string | null; name: string
     return true;
   }
   const { model: next, answered } = await pick(allowed);
+  // The bot's model is still listed and no other one answered either: moving it would only swap one model that won't answer
+  // for another, report after report, so it is not a model problem and the key's own rules apply (If this is down)
+  if (!answered && listed) return false;
   const moved = await prisma.bot.updateMany({ where: { id: bot.id, aiProviderRef: key.providerId, aiModel: bot.aiModel }, data: { aiModel: next } });
   if (moved.count > 0) {
     // A report just after the move is late news about the model it left, but only when the new one is known to answer:

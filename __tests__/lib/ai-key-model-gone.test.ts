@@ -194,6 +194,15 @@ describe('moveBotOffGoneModel', () => {
     expect(db.bot.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: { aiModel: 'deepseek/deepseek-v4-flash' } }));
   });
 
+  it('leaves it to the key’s own rules when its listed model won’t answer and no other one does either, so bots never cycle', async () => {
+    db.bot.findUnique.mockResolvedValue({ ...guide, id: 'b7' });
+    list.mockResolvedValue({ ok: true, models: ['meta-llama/llama-4-maverick', 'openai/gpt-5-mini'], facts: {}, listed: true });
+    chat.mockResolvedValue({ ok: false, reason: 'gone', message: 'OpenRouter doesn’t have that model.' });
+    expect(await moveBotOffGoneModel(key, 'b7')).toBe(false);
+    expect(db.bot.updateMany).not.toHaveBeenCalled();
+    expect(notice).not.toHaveBeenCalled();
+  });
+
   it('leaves it to the key’s own rules when the lend’s only model is still listed but won’t answer', async () => {
     db.bot.findUnique.mockResolvedValue({ ...guide, id: 'b4' });
     db.aiKeyLend.findUnique.mockResolvedValue({ models: ['meta-llama/llama-4-maverick'] });

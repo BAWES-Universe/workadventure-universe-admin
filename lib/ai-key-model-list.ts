@@ -60,7 +60,10 @@ async function sharedModels(key: KeyForModels, options: { fresh?: boolean; now?:
   const asked = askProvider(key)
     .then(async (list) => {
       if (list.ok) {
-        cache.set(id, { at: Date.now(), list });
+        const at = Date.now();
+        // Lists past their time are dropped as new ones come in, so keys nobody asks about any more don't stay in memory
+        for (const [entry, value] of cache) if (at - value.at >= MODEL_LIST_TTL_MS) cache.delete(entry);
+        cache.set(id, { at, list });
         if (list.listed) await rememberFacts(key, list.facts);
       }
       return list;

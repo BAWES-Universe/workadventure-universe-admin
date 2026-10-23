@@ -11,11 +11,16 @@ export const LATE_REPORT_MS = 10 * 60_000;
 const changedAt = new Map<string, number>();
 const checkModelChangedAt = new Map<string, number>();
 const recent = (at: number | undefined) => at !== undefined && Date.now() - at < LATE_REPORT_MS;
+/** Notes past the window say nothing any more: they are dropped as new ones come in, so the maps stay small. */
+const note = (map: Map<string, number>, id: string, at: number) => {
+  for (const [entry, value] of map) if (at - value >= LATE_REPORT_MS) map.delete(entry);
+  map.set(id, at);
+};
 
 /** Returns how to take the note back, for a save that then fails: the bot's model did not change after all. */
 export function noteModelChanged(botId: string): () => void {
   const before = changedAt.get(botId);
-  changedAt.set(botId, Date.now());
+  note(changedAt, botId, Date.now());
   return () => {
     if (before === undefined) changedAt.delete(botId);
     else changedAt.set(botId, before);
@@ -24,7 +29,7 @@ export function noteModelChanged(botId: string): () => void {
 
 /** The key got a new check model: every bot on it with no model of its own now replies with that one. */
 export function noteCheckModelChanged(providerId: string): void {
-  checkModelChangedAt.set(providerId, Date.now());
+  note(checkModelChangedAt, providerId, Date.now());
 }
 
 /**
