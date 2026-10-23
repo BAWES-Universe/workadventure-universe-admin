@@ -108,13 +108,17 @@ function answeringPicker(key: KeyForModels, info: AiKeyKindInfo | null) {
 /** The key's check model is gone: it moves to `model`, one the provider still lists. */
 async function replaceCheckModel(key: KeyForModels, model: string): Promise<void> {
   const caps = modelFactsOf(key, model);
-  const settings = { ...((key.settings as Record<string, unknown> | null) ?? {}) };
+  // Finding an answering model took a while: settings saved meanwhile are kept
+  const saved = await prisma.botsAiProvider.findUnique({ where: { providerId: key.providerId }, select: { settings: true } });
+  const settings = { ...(((saved ? saved.settings : key.settings) as Record<string, unknown> | null) ?? {}) };
   if (Object.keys(caps).length > 0) settings.caps = caps;
   else delete settings.caps;
-  await prisma.botsAiProvider.updateMany({
+  const { count } = await prisma.botsAiProvider.updateMany({
     where: { providerId: key.providerId, ownerId: { not: null }, model: key.model },
     data: { model, settings: settings as Prisma.InputJsonValue, supportsVision: caps.vision ?? null },
   });
+  // Someone changed the model meanwhile: theirs stands
+  if (count === 0) return;
   forgetKeyModels(key.providerId);
   noteCheckModelChanged(key.providerId);
 }
