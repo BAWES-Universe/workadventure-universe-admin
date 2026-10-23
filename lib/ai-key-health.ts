@@ -172,11 +172,14 @@ export async function checkKey(key: KeyRow): Promise<KeyCheck> {
     const chat = await probeChat({ kind: info.kind, address, apiKey, model: key.model, ...(models.ok ? {} : { noList: true }) });
     // The provider took the key and the model but refused this tiny request (a reasoning model that wants a bigger cap, say):
     // that is the request's problem, not the key's, and a real reply's 400 is not counted against a key either
-    if (!chat.ok && chat.reason === 'gone' && models.ok && models.models.length > 0 && !models.models.includes(cleanModelId(key.model, info.kind))) {
-      // The first of the others that really answers becomes the check model; none answering says why, as before
-      const found = await firstAnswering({ kind: info.kind, address, apiKey }, models.models, info.suggestedModel, undefined, models.facts);
+    // A 404 is about that one model, listed or not: the first of the others that really answers becomes the check model
+    const asked = cleanModelId(key.model, info.kind);
+    const others = models.ok ? models.models.filter((model) => model !== asked) : [];
+    if (!chat.ok && chat.reason === 'gone' && others.length > 0) {
+      // None answering says why, as before
+      const found = await firstAnswering({ kind: info.kind, address, apiKey }, others, info.suggestedModel, undefined, models.ok ? models.facts : {});
       if (!found.ok) return failed(found);
-      return { ok: true, checkModel: found.model, facts: models.facts[found.model] ?? {} };
+      return { ok: true, checkModel: found.model, facts: (models.ok ? models.facts[found.model] : undefined) ?? {} };
     }
     if (!chat.ok && chat.reason !== 'request') return failed(chat);
   }

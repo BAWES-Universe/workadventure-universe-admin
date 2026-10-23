@@ -137,6 +137,14 @@ describe('checkAndRecord: a new check model (#575)', () => {
     expect(db.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ settings: { kind: 'deepseek', caps: { tools: true, context: 128000 } } }) }));
   });
 
+  it('replaces a check model still listed that answers with a 404 too, and never asks it again', async () => {
+    probe.mockResolvedValue({ ok: true, models: ['deepseek-v4-flash', 'deepseek-chat'], facts: {} });
+    chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'gone' });
+    chat.mockResolvedValueOnce({ ok: true });
+    expect(await checkKey(downNow({ ...hosted, model: 'deepseek-v4-flash' }))).toMatchObject({ ok: true, checkModel: 'deepseek-chat' });
+    expect(chat).toHaveBeenCalledTimes(2);
+  });
+
   it('asks models the provider says call tools first, past a list that starts with ones that don’t chat', async () => {
     probe.mockResolvedValue({ ok: true, models: ['embed-a', 'embed-b', 'embed-c', 'embed-d', 'chat-x'], facts: { 'chat-x': { tools: true } } });
     chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'gone' });

@@ -105,18 +105,34 @@ describe('moveBotOffGoneModel', () => {
     expect(db.bot.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: { aiModel: 'deepseek-v4-flash' } }));
   });
 
-  it('can’t decide, and leaves it to the usual count, when the list fails, the provider has none, or the model is still listed', async () => {
+  it('can’t decide, and leaves it to the usual count, when the list fails or the provider has none', async () => {
     // A bot this file never moved, so no late report is in play
     db.bot.findUnique.mockResolvedValue({ ...guide, id: 'b9' });
     list.mockResolvedValueOnce({ ok: false, message: 'down' });
     expect(await moveBotOffGoneModel(key, 'b1')).toBe(false);
     list.mockResolvedValueOnce({ ok: true, models: ['openai/gpt-5-mini'], facts: {}, listed: false });
     expect(await moveBotOffGoneModel(key, 'b1')).toBe(false);
-    // The key's own check model, still listed, not answering: the key's failure, as before
-    db.bot.findUnique.mockResolvedValue({ ...guide, id: 'b9', aiModel: null });
-    list.mockResolvedValueOnce({ ok: true, models: ['openai/gpt-5-mini', 'qwen/qwen3-235b'], facts: {}, listed: true });
-    expect(await moveBotOffGoneModel(key, 'b1')).toBe(false);
     expect(db.bot.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('gives the key another check model when its own, still listed, won’t answer, and moves the bot off it', async () => {
+    db.bot.findUnique.mockResolvedValue({ ...guide, aiModel: null });
+    list.mockResolvedValue({ ok: true, models: ['openai/gpt-5-mini', 'qwen/qwen3-235b'], facts: {}, listed: true });
+    expect(await moveBotOffGoneModel(key, guide.id)).toBe(true);
+    // The failing model is never asked again
+    expect(chat).not.toHaveBeenCalledWith(expect.objectContaining({ model: 'openai/gpt-5-mini' }));
+    expect(db.botsAiProvider.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ model: 'qwen/qwen3-235b' }) }));
+    expect(db.bot.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: { aiModel: 'qwen/qwen3-235b' } }));
+  });
+
+  it('opens no late-report window after a move to a model that didn’t answer', async () => {
+    list.mockResolvedValue({ ok: true, models: ['anthropic/claude-haiku-5-5', 'openai/gpt-5-mini'], facts: {}, listed: true });
+    chat.mockResolvedValue({ ok: false, reason: 'busy', message: 'OpenRouter is busy right now.' });
+    expect(await moveBotOffGoneModel(key, guide.id)).toBe(true);
+    list.mockClear();
+    db.bot.findUnique.mockResolvedValue({ ...guide, aiModel: 'anthropic/claude-haiku-5-5' });
+    await moveBotOffGoneModel(key, guide.id);
+    expect(list).toHaveBeenCalled();
   });
 
   it('moves a bot off its own model when the provider still lists it but won’t answer with it, keeping the key Working', async () => {
