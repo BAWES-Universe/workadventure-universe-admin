@@ -1,8 +1,10 @@
 import { NextRequest } from 'next/server';
+import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { meOriginAllowed, meRespond } from '@/lib/me-route';
-import { lendAccess } from '@/lib/ai-key-lend';
+import { lendAccess, moveBotsToAllowedModel, parseLendModels } from '@/lib/ai-key-lend';
+import { allowedModels, keyModels, lendModels } from '@/lib/ai-key-model-list';
 
 export const runtime = 'nodejs';
 
@@ -13,9 +15,13 @@ export async function OPTIONS(request: NextRequest) {
 }
 
 /**
- * POST /api/me/ai-keys/:id/lend { universeId } - lend one of the caller's keys to a universe where they have Manage
- * bots (or own it). Lending moves no bot. Lending again is fine and changes nothing. Someone else's key, and a server
- * provider, are "not found".
+ * POST /api/me/ai-keys/:id/lend { universeId, models? } - lend one of the caller's keys to a universe where they have Manage
+ * bots (or own it). Lending moves no bot. Lending again is fine and changes nothing, except the model list when one is sent.
+ * Someone else's key, and a server provider, are "not found".
+ *
+ * `models` (#575) says which of the key's models bots there may use: null = all of them, a list = only these (each one must
+ * be on the key's list now), left out = as it is (all, for a new lend). Narrowing a lend moves the bots there on a model it
+ * took out to the first one kept, and the universe's owner is told when it is not the caller.
  */
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   if (!meOriginAllowed(request)) return respond(request, { error: 'Origin not allowed' }, 403);
@@ -28,21 +34,38 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   } catch {
     return respond(request, { error: 'Invalid JSON body' }, 400);
   }
-  const universeId = typeof body === 'object' && body !== null ? (body as { universeId?: unknown }).universeId : null;
+  const input = typeof body === 'object' && body !== null ? (body as { universeId?: unknown; models?: unknown }) : {};
+  const universeId = input.universeId;
   if (typeof universeId !== 'string' || !universeId) return respond(request, { error: 'Pick a universe first.' }, 400);
+  const parsed = parseLendModels(input.models);
+  if (!parsed.ok) return respond(request, { error: parsed.message }, 400);
 
   try {
-    const key = await prisma.botsAiProvider.findFirst({ where: { providerId: id, ownerId: user.id }, select: { providerId: true } });
+    const key = await prisma.botsAiProvider.findFirst({
+      where: { providerId: id, ownerId: user.id },
+      select: { providerId: true, endpoint: true, apiKeyEncrypted: true, settings: true, model: true },
+    });
     if (!key) return respond(request, { error: 'Key not found' }, 404);
     if (!(await lendAccess(user.id, universeId))) {
       return respond(request, { error: 'You need Manage bots in that universe to lend a key to it.' }, 403);
     }
-    await prisma.aiKeyLend.upsert({
+    // Only models the key has now can be allowed; they are kept in the provider's order
+    let models = parsed.models;
+    if (models) {
+      const list = await keyModels(key, { fresh: true });
+      if (!list.ok) return respond(request, { error: list.message }, 400);
+      const missing = models.find((model) => !list.models.includes(model));
+      if (missing) return respond(request, { error: `${missing} isn’t on this key’s list. Load its models again and pick from them.` }, 400);
+      models = allowedModels(list.models, models);
+    }
+    const saved = await prisma.aiKeyLend.upsert({
       where: { providerId_universeId: { providerId: id, universeId } },
-      create: { providerId: id, universeId },
-      update: {},
+      create: { providerId: id, universeId, models: models ?? Prisma.DbNull },
+      update: models === undefined ? {} : { models: models ?? Prisma.DbNull },
+      select: { models: true },
     });
-    return respond(request, { status: 'lent' }, 200);
+    const moved = models ? await moveBotsToAllowedModel(key, { universeId, allowed: models, firstAllowed: models[0], actor: { id: user.id, name: user.name } }) : { count: 0 };
+    return respond(request, { status: 'lent', models: lendModels(saved.models), moved: moved.count }, 200);
   } catch (error) {
     // The key was revoked, or the universe deleted, between the checks above and the save
     if ((error as { code?: unknown })?.code === 'P2003') return respond(request, { error: 'Key or universe not found' }, 404);

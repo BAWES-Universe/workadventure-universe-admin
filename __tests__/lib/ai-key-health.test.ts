@@ -2,11 +2,14 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { addNotice, clearNotices } from '@/lib/notices';
 import { probeChat, probeModels } from '@/lib/ai-key-models';
+import { moveBotOffGoneModel } from '@/lib/ai-key-model-gone';
+import { changedLately } from '@/lib/ai-key-late-report';
 import { checkAndRecord, checkKey, judgeFailedReply, markDown, markWorking, recheckIfDue, recordReply, CHECK_WAIT_MS, RECHECK_MS, type KeyRow } from '@/lib/ai-key-health';
 
 jest.mock('@/lib/db', () => ({ prisma: { botsAiProvider: { findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn(), updateMany: jest.fn() } } }));
 jest.mock('@/lib/notices', () => ({ addNotice: jest.fn(), clearNotices: jest.fn() }));
 jest.mock('@/lib/ai-key-models', () => ({ ...jest.requireActual('@/lib/ai-key-models'), probeModels: jest.fn(), probeChat: jest.fn() }));
+jest.mock('@/lib/ai-key-model-gone', () => ({ moveBotOffGoneModel: jest.fn() }));
 jest.mock('@/lib/encryption', () => ({ decryptApiKey: jest.fn((value: string) => value.replace('enc:', '')) }));
 
 const db = prisma.botsAiProvider as unknown as Record<'findFirst' | 'findUnique' | 'update' | 'updateMany', jest.Mock>;
@@ -60,7 +63,7 @@ describe('markDown', () => {
     notice.mockClear();
     db.updateMany.mockResolvedValue({ count: 1 });
     await markDown(hosted, 'model');
-    expect(notice.mock.calls[0][0].body).toMatch(/^DeepSeek no longer has the model this key uses\. Pick another model on the AI keys page\./);
+    expect(notice.mock.calls[0][0].body).toMatch(/^DeepSeek no longer has the model this key uses\./);
   });
 
   it('does nothing, and tells nobody, when another request already marked it Down', async () => {
@@ -86,6 +89,86 @@ describe('markWorking', () => {
     db.updateMany.mockResolvedValue({ count: 0 });
     expect(await markWorking(hosted)).toBe(false);
     expect(clear).not.toHaveBeenCalled();
+  });
+});
+
+describe('recordReply: a missing model is about one bot (#575)', () => {
+  beforeEach(() => (moveBotOffGoneModel as jest.Mock).mockReset());
+  it('moves that bot and leaves the key Working when the provider still lists other models', async () => {
+    db.findFirst.mockResolvedValue({ ...hosted, model: 'deepseek-v4-flash', failedReplies: 0 });
+    (moveBotOffGoneModel as jest.Mock).mockResolvedValue(true);
+    await recordReply('key-1', { ok: false, status: 404 }, 'b1');
+    expect(moveBotOffGoneModel).toHaveBeenCalledWith(expect.objectContaining({ providerId: 'key-1' }), 'b1');
+    expect(db.updateMany).not.toHaveBeenCalled();
+    expect(notice).not.toHaveBeenCalled();
+  });
+
+  it('marks the key Down for its model as before when that can’t be decided', async () => {
+    db.findFirst.mockResolvedValue({ ...hosted, model: 'deepseek-v4-flash', failedReplies: 0 });
+    (moveBotOffGoneModel as jest.Mock).mockResolvedValue(false);
+    await recordReply('key-1', { ok: false, status: 404 }, 'b1');
+    expect(db.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ downReason: 'model' }) }));
+  });
+
+  it('never asks about another failure', async () => {
+    db.findFirst.mockResolvedValue({ ...hosted, model: 'deepseek-v4-flash', failedReplies: 0 });
+    await recordReply('key-1', { ok: false, status: 401 }, 'b1');
+    expect(moveBotOffGoneModel).not.toHaveBeenCalled();
+  });
+});
+
+describe('checkAndRecord: a new check model (#575)', () => {
+  it('saves the model that answered in place of the gone one, with what the provider says about it', async () => {
+    probe.mockResolvedValue({ ok: true, models: ['deepseek-chat', 'deepseek-v4-pro'], facts: { 'deepseek-chat': { vision: false, tools: true } } });
+    chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'gone' });
+    chat.mockResolvedValueOnce({ ok: true });
+    await checkAndRecord({ ...hosted, model: 'deepseek-v4-flash' });
+    expect(db.updateMany).toHaveBeenCalledWith({
+      where: { providerId: 'key-1', ownerId: { not: null }, model: 'deepseek-v4-flash' },
+      data: { model: 'deepseek-chat', settings: { kind: 'deepseek', caps: { tools: true, vision: false } }, supportsVision: false },
+    });
+  });
+
+  it('keeps how much the new check model reads, as Add key does', async () => {
+    probe.mockResolvedValue({ ok: true, models: ['deepseek-chat'], facts: { 'deepseek-chat': { tools: true, context: 128000 } } });
+    chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'gone' });
+    chat.mockResolvedValueOnce({ ok: true });
+    await checkAndRecord({ ...hosted, model: 'deepseek-v4-flash' });
+    expect(db.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ settings: { kind: 'deepseek', caps: { tools: true, context: 128000 } } }) }));
+  });
+
+  it('replaces a check model still listed that answers with a 404 too, and never asks it again', async () => {
+    probe.mockResolvedValue({ ok: true, models: ['deepseek-v4-flash', 'deepseek-chat'], facts: {} });
+    chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'gone' });
+    chat.mockResolvedValueOnce({ ok: true });
+    expect(await checkKey(downNow({ ...hosted, model: 'deepseek-v4-flash' }))).toMatchObject({ ok: true, checkModel: 'deepseek-chat' });
+    expect(chat).toHaveBeenCalledTimes(2);
+  });
+
+  it('asks models the provider says call tools first, past a list that starts with ones that don’t chat', async () => {
+    probe.mockResolvedValue({ ok: true, models: ['embed-a', 'embed-b', 'embed-c', 'embed-d', 'chat-x'], facts: { 'chat-x': { tools: true } } });
+    chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'gone' });
+    chat.mockResolvedValueOnce({ ok: true });
+    expect(await checkKey({ ...hosted, model: 'deepseek-v4-flash' })).toMatchObject({ ok: true, checkModel: 'chat-x' });
+    expect(chat).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps settings saved while the check ran', async () => {
+    probe.mockResolvedValue({ ok: true, models: ['deepseek-chat'], facts: {} });
+    chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'gone' });
+    chat.mockResolvedValueOnce({ ok: true });
+    db.findUnique.mockResolvedValue({ settings: { kind: 'deepseek', label: 'Work' } });
+    await checkAndRecord({ ...hosted, model: 'deepseek-v4-flash' });
+    expect(db.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ model: 'deepseek-chat', settings: { kind: 'deepseek', label: 'Work' } }) }));
+  });
+
+  it('leaves the late-report window alone when someone changed the model meanwhile', async () => {
+    probe.mockResolvedValue({ ok: true, models: ['deepseek-chat'], facts: {} });
+    chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'gone' });
+    chat.mockResolvedValueOnce({ ok: true });
+    db.updateMany.mockImplementation(async (args: { data: { model?: string } }) => ({ count: args.data.model ? 0 : 1 }));
+    await checkAndRecord({ ...hosted, providerId: 'key-9', model: 'deepseek-v4-flash' });
+    expect(changedLately({ id: 'follower', aiModel: null }, 'key-9')).toBe(false);
   });
 });
 
@@ -292,11 +375,57 @@ describe('checkKey and checkAndRecord', () => {
     });
 
     it('a model that has dropped off the list is asked directly, and the answer decides', async () => {
-      probe.mockResolvedValue({ ok: true, models: ['something-else'] });
+      probe.mockResolvedValue({ ok: true, models: ['something-else'], facts: {} });
       chat.mockResolvedValueOnce({ ok: true });
       expect(await checkKey(withModel(hosted))).toEqual({ ok: true });
+      // Gone, but the provider lists another: that one is asked, and becomes the key's check model when it answers (#575)
       chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'DeepSeek no longer has the model deepseek-v4-flash.' });
+      chat.mockResolvedValueOnce({ ok: true });
+      expect(await checkKey(withModel(hosted))).toEqual({ ok: true, checkModel: 'something-else', facts: {} });
+      expect(chat).toHaveBeenLastCalledWith(expect.objectContaining({ model: 'something-else' }));
+      // Neither answers: the key is Down for its model, as before
+      chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'DeepSeek no longer has the model deepseek-v4-flash.' });
+      chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'DeepSeek no longer has the model something-else.' });
       expect(await checkKey(withModel(hosted))).toMatchObject({ ok: false, reason: 'model' });
+    });
+
+    it('a model that only refused the tiny request is never picked on a key out of credit', async () => {
+      probe.mockResolvedValue({ ok: true, models: ['all-minilm', 'deepseek-chat', 'qwen3-8b'], facts: {} });
+      chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'gone' });
+      chat.mockResolvedValueOnce({ ok: false, reason: 'request', message: 'a chat call to all-minilm failed (400).' });
+      chat.mockResolvedValueOnce({ ok: false, reason: 'credit', message: 'DeepSeek says this key is out of credit.' });
+      chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'gone' });
+      expect(await checkKey(withModel(hosted))).toMatchObject({ ok: false, reason: 'credit' });
+    });
+
+    it('a gone check model is replaced by the provider’s suggested model when it lists it', async () => {
+      probe.mockResolvedValue({ ok: true, models: ['deepseek-chat', 'deepseek-v4-flash'], facts: { 'deepseek-v4-flash': { vision: false } } });
+      chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'gone' });
+      chat.mockResolvedValueOnce({ ok: true });
+      expect(await checkKey({ ...withModel(hosted), model: 'deepseek-v3' })).toEqual({ ok: true, checkModel: 'deepseek-v4-flash', facts: { vision: false } });
+    });
+
+    it('a gone check model moves to the first listed model that really replies, past one that doesn’t chat', async () => {
+      probe.mockResolvedValue({ ok: true, models: ['all-minilm', 'nomic-text', 'qwen3-8b'], facts: {} });
+      chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'gone' });
+      chat.mockResolvedValueOnce({ ok: false, reason: 'other', message: 'not a chat model' });
+      chat.mockResolvedValueOnce({ ok: false, reason: 'request', message: 'a chat call to nomic-text failed (400).' });
+      chat.mockResolvedValueOnce({ ok: true });
+      expect(await checkKey(withModel(hosted))).toEqual({ ok: true, checkModel: 'qwen3-8b', facts: {} });
+      // Only a model that refused the tiny request: it is kept when nothing else really replies
+      chat.mockReset();
+      chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'gone' });
+      chat.mockResolvedValue({ ok: false, reason: 'request', message: 'a chat call failed (400).' });
+      expect(await checkKey(withModel(hosted))).toEqual({ ok: true, checkModel: 'all-minilm', facts: {} });
+      expect(chat).toHaveBeenCalledTimes(4);
+    });
+
+    it('a key refused after one model only refused the tiny request is not kept Working on that model', async () => {
+      probe.mockResolvedValue({ ok: true, models: ['a', 'b', 'c'], facts: {} });
+      chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'gone' });
+      chat.mockResolvedValueOnce({ ok: false, reason: 'request', message: 'a chat call to a failed (400).' });
+      chat.mockResolvedValueOnce({ ok: false, reason: 'rejected', message: 'DeepSeek didn’t accept this key.' });
+      expect(await checkKey(withModel(hosted))).toMatchObject({ ok: false, reason: 'rejected' });
     });
 
     it('Gemini’s "models/" prefix does not make a listed model look missing', async () => {

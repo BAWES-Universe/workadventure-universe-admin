@@ -110,7 +110,8 @@ function errorWords(body: string): string {
   return body;
 }
 
-const NOT_CHAT = /embed|whisper|tts|dall-e|moderation|rerank|transcribe|image|audio|realtime|guard|safety/i;
+// OpenAI's babbage-002, davinci-002 and gpt-3.5-turbo-instruct only do completions: a chat request to them fails
+const NOT_CHAT = /embed|whisper|tts|dall-e|moderation|rerank|transcribe|image|audio|realtime|guard|safety|babbage-|davinci-|turbo-instruct/i;
 
 /** One model id as the bot server will use it. Gemini lists "models/gemini-flash-latest" but takes "gemini-flash-latest". */
 export function cleanModelId(raw: string, kind: AiKeyKind): string {

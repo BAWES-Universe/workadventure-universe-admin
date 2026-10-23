@@ -15,7 +15,7 @@ import { resolveUniverseAiProvider } from '@/lib/universe-ai';
 import { requireServiceToken } from '@/lib/service-tokens';
 
 jest.mock('@/lib/db', () => ({
-  prisma: { bot: { findUnique: jest.fn(), updateMany: jest.fn() }, botsAiProvider: { findUnique: jest.fn(), findFirst: jest.fn(), updateMany: jest.fn() } },
+  prisma: { bot: { findUnique: jest.fn(), updateMany: jest.fn() }, botsAiProvider: { findUnique: jest.fn(), findFirst: jest.fn(), updateMany: jest.fn() }, aiKeyLend: { findUnique: jest.fn(async () => null) } },
 }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
@@ -96,6 +96,15 @@ describe('GET /api/bots/:id/ai-credentials with a key that may be down', () => {
     expect(body).toMatchObject({ source: 'own-key', providerId: 'key-1' });
   });
 
+  it('serves the key as the recheck left it, so a check model it just moved to is the one the bot gets (#575)', async () => {
+    db.botsAiProvider.findUnique
+      .mockResolvedValueOnce(down({ ifDown: 'stop', model: 'qwen3-8b' }))
+      .mockResolvedValueOnce({ ...ownKey, ifDown: 'stop', model: 'llama-3.1-8b', supportsVision: true, settings: { kind: 'lmstudio', caps: { vision: true } } });
+    (recheckIfDue as jest.Mock).mockResolvedValue({ ...down({ ifDown: 'stop' }), downSince: null, model: 'llama-3.1-8b' });
+    const body = await (await ask()).json();
+    expect(body).toMatchObject({ source: 'own-key', providerId: 'key-1', model: 'llama-3.1-8b', supportsVision: true });
+  });
+
   it('does not ask about a key that may not run the bot: that bot moves to Universe AI as before', async () => {
     db.botsAiProvider.findUnique.mockResolvedValue(down());
     (checkKeyForBot as jest.Mock).mockResolvedValue({ ok: false, reason: 'not-lent' });
@@ -127,13 +136,14 @@ describe('POST /api/bots/:id/ai-health', () => {
   it('counts a failed reply against the key the bot runs on, never one named in the request', async () => {
     const response = await post({ ok: false, providerId: 'someone-elses-key' });
     expect(response.status).toBe(204);
-    expect(recordReply).toHaveBeenCalledWith('key-1', { ok: false, rejected: false, status: undefined });
+    // The bot's id goes along, so a missing model moves only that bot (#575)
+    expect(recordReply).toHaveBeenCalledWith('key-1', { ok: false, rejected: false, status: undefined }, 'b1');
   });
 
   it('passes a rejection and a good reply through', async () => {
     await post({ ok: false, rejected: true });
     await post({ ok: true });
-    expect((recordReply as jest.Mock).mock.calls).toEqual([['key-1', { ok: false, rejected: true, status: undefined }], ['key-1', { ok: true }]]);
+    expect((recordReply as jest.Mock).mock.calls).toEqual([['key-1', { ok: false, rejected: true, status: undefined }, 'b1'], ['key-1', { ok: true }, 'b1']]);
   });
 
   it('passes the provider’s HTTP status along when it is a real one, and drops anything else', async () => {
@@ -142,6 +152,19 @@ describe('POST /api/bots/:id/ai-health', () => {
     await post({ ok: false, status: 99999 });
     await post({ ok: false, status: 4.5 });
     expect((recordReply as jest.Mock).mock.calls.map((call) => call[1].status)).toEqual([429, undefined, undefined, undefined]);
+  });
+
+  it('answers at once, without waiting for the report to be recorded, and a failure there is only logged', async () => {
+    let finish: (() => void) | undefined;
+    (recordReply as jest.Mock).mockReturnValueOnce(new Promise<void>((resolve) => (finish = resolve)));
+    expect((await post({ ok: false, status: 404 })).status).toBe(204);
+    finish?.();
+    const log = jest.spyOn(console, 'error').mockImplementation(() => {});
+    (recordReply as jest.Mock).mockRejectedValueOnce(new Error('db down'));
+    expect((await post({ ok: false })).status).toBe(204);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(log).toHaveBeenCalledWith('[BotAi] Health report failed:', 'db down');
+    log.mockRestore();
   });
 
   it('refuses a body without ok', async () => {

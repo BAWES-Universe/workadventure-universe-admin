@@ -17,6 +17,7 @@ jest.mock('@/lib/db', () => ({
   prisma: {
     bot: { findUnique: jest.fn(), updateMany: jest.fn() },
     botsAiProvider: { findUnique: jest.fn(), findFirst: jest.fn() },
+    aiKeyLend: { findUnique: jest.fn(async () => null) },
     botsAiUsage: { create: jest.fn(async () => ({})) },
   },
 }));
@@ -104,6 +105,33 @@ describe('GET /api/bots/:id/ai-credentials', () => {
     expect(bot.updateMany).not.toHaveBeenCalled();
   });
 
+  it('serves the bot’s own model on the key, with what the provider said about it, and only the bot sees it (#575)', async () => {
+    const claude = { ...ownKey, type: 'anthropic', model: 'claude-sonnet-5-5', supportsVision: true, settings: { kind: 'claude', caps: { vision: true }, modelFacts: { 'claude-haiku-5-5': { vision: true }, 'claude-text-1': { vision: false } } } };
+    provider.findUnique.mockResolvedValue(claude);
+    verdict.mockResolvedValue({ ok: true, lendModels: null });
+    bot.findUnique.mockResolvedValue(botOn('key-1', { aiModel: 'claude-text-1' }));
+    let body = await (await ask()).json();
+    expect(body).toMatchObject({ source: 'own-key', providerId: 'key-1', model: 'claude-text-1', supportsVision: false });
+    // The facts about every model stay in Orbit, and the bot is told its own model's, not the check model's
+    expect(body.settings).toEqual({ kind: 'claude', caps: { vision: false } });
+    // No model of its own: the key's check model, exactly as before
+    bot.findUnique.mockResolvedValue(botOn('key-1', { aiModel: null }));
+    body = await (await ask()).json();
+    expect(body).toMatchObject({ model: 'claude-sonnet-5-5', supportsVision: true });
+    expect(body.settings).toEqual({ kind: 'claude', caps: { vision: true } });
+    // A model the provider said nothing about: no facts, rather than the check model's
+    bot.findUnique.mockResolvedValue(botOn('key-1', { aiModel: 'claude-new-1' }));
+    body = await (await ask()).json();
+    expect(body.settings).toEqual({ kind: 'claude' });
+  });
+
+  it('never serves a model the lend leaves out: the first one it allows', async () => {
+    provider.findUnique.mockResolvedValue({ ...ownKey, model: 'qwen3-8b' });
+    verdict.mockResolvedValue({ ok: true, lendModels: ['gemma-3-12b-it'] });
+    bot.findUnique.mockResolvedValue(botOn('key-1', { aiModel: 'qwen3-8b' }));
+    expect(await (await ask()).json()).toMatchObject({ source: 'own-key', model: 'gemma-3-12b-it' });
+  });
+
   it('says a hosted key at its provider’s own base is not a typed address, and your own NIM address is', async () => {
     const hosted = { ...ownKey, providerId: 'key-2', type: 'openai', endpoint: 'https://api.deepseek.com', settings: { kind: 'deepseek' } };
     bot.findUnique.mockResolvedValue(botOn('key-2'));
@@ -125,7 +153,7 @@ describe('GET /api/bots/:id/ai-credentials', () => {
     verdict.mockResolvedValue({ ok: false, reason });
     bot.updateMany.mockResolvedValue({ count: 1 });
     const body = await (await ask()).json();
-    expect(bot.updateMany).toHaveBeenCalledWith({ where: { id: 'b1', aiProviderRef: 'key-1' }, data: { aiProviderRef: 'universe-ai' } });
+    expect(bot.updateMany).toHaveBeenCalledWith({ where: { id: 'b1', aiProviderRef: 'key-1' }, data: { aiProviderRef: 'universe-ai', aiModel: null } });
     expect(addNotice).toHaveBeenCalledTimes(1);
     const notice = (addNotice as jest.Mock).mock.calls[0][0];
     expect(notice).toMatchObject({ userId: 'universe-owner', kind: 'ai-key-moved', dedupeKey: expect.stringMatching(/^moved:key-1:b1:\d{4}-/), title: 'Sam moved to Universe AI', href: '/admin/universes/uni-1' });
@@ -184,7 +212,7 @@ describe('GET /api/bots/:id/ai-credentials', () => {
     provider.findFirst.mockResolvedValue(deepseek);
     bot.updateMany.mockResolvedValue({ count: 1 });
     const body = await (await ask()).json();
-    expect(bot.updateMany).toHaveBeenCalledWith({ where: { id: 'b1', aiProviderRef: 'key-1' }, data: { aiProviderRef: 'universe-ai' } });
+    expect(bot.updateMany).toHaveBeenCalledWith({ where: { id: 'b1', aiProviderRef: 'key-1' }, data: { aiProviderRef: 'universe-ai', aiModel: null } });
     expect(addNotice).toHaveBeenCalledTimes(1);
     expect((addNotice as jest.Mock).mock.calls[0][0]).toMatchObject({ userId: 'universe-owner', title: 'Sam moved to Universe AI', body: expect.stringMatching(/was removed/) });
     expect(body).toMatchObject({ providerId: 'deepseek-flash', source: 'universe-ai', movedFromKey: 'key-1' });

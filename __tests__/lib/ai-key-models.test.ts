@@ -49,6 +49,8 @@ describe('keyTarget', () => {
 describe('cleanModelIds', () => {
   it('drops duplicates and models that cannot chat, and sorts', () => {
     expect(cleanModelIds(['gpt-4o', 'text-embedding-3-small', 'whisper-1', 'gpt-4o', 'dall-e-3', 'a-model'], 'openai')).toEqual(['a-model', 'gpt-4o']);
+    // Completions-only models can't chat (Sentry on #577); an open model whose name ends in Instruct still can
+    expect(cleanModelIds(['babbage-002', 'davinci-002', 'gpt-3.5-turbo-instruct', 'gpt-3.5-turbo', 'meta-llama/llama-3.1-8b-instruct'], 'openai')).toEqual(['gpt-3.5-turbo', 'meta-llama/llama-3.1-8b-instruct']);
   });
   it('strips Gemini’s models/ prefix', () => {
     expect(cleanModelIds(['models/gemini-flash-latest'], 'gemini')).toEqual(['gemini-flash-latest']);

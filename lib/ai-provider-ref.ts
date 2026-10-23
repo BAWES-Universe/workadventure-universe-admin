@@ -1,5 +1,6 @@
 import { prisma } from '@/lib/db';
 import { KEY_FOR_BOT_TEXT, checkKeyForBot } from '@/lib/ai-key-pay';
+import { keyModels } from '@/lib/ai-key-model-list';
 import { UNIVERSE_AI_MISSING, UNIVERSE_AI_REF, resolveUniverseAiProvider } from '@/lib/universe-ai';
 
 export interface BotContext {
@@ -50,4 +51,35 @@ export async function checkAiProviderRef(
     return verdict.ok ? null : KEY_FOR_BOT_TEXT[verdict.reason];
   }
   return `AI provider "${ref}" does not exist`;
+}
+
+/**
+ * A bot's own model on a person's key (#575), checked when a bot is saved with `aiModel`. Leaving it out, null (the key's
+ * check model) and the model the bot already has on the same key are fine. Otherwise the bot must be on a person's key,
+ * the person saving must own that key and have made the bot (the same rule as putting the bot on the key), and the model
+ * must be one the key's provider lists and the lend to the bot's universe allows.
+ *
+ * Returns an error message for the caller to send as a 400, or null when the model is acceptable.
+ */
+export async function checkBotModel(
+  model: string | null | undefined,
+  context: BotContext & { ref: string | null; currentRef: string | null; currentModel: string | null }
+): Promise<string | null> {
+  if (model === undefined || model === null) return null;
+  if (context.ref === context.currentRef && model === context.currentModel) return null;
+  const key = context.ref
+    ? await prisma.botsAiProvider.findUnique({
+        where: { providerId: context.ref },
+        select: { providerId: true, ownerId: true, endpoint: true, apiKeyEncrypted: true, settings: true, model: true },
+      })
+    : null;
+  if (!key || !key.ownerId) return 'A model can be picked only for a bot on your own AI key.';
+  if (!context.actorId || key.ownerId !== context.actorId || context.actorId !== context.makerId) return KEY_FOR_BOT_TEXT['not-maker'];
+  const verdict = await checkKeyForBot({ keyId: key.providerId, keyOwnerId: key.ownerId, makerId: context.makerId, roomId: context.roomId });
+  if (!verdict.ok) return KEY_FOR_BOT_TEXT[verdict.reason];
+  if (verdict.lendModels && !verdict.lendModels.includes(model)) return 'That model isn’t allowed in this universe. Pick one the key allows here.';
+  const list = await keyModels(key);
+  if (!list.ok) return list.message;
+  if (!list.models.includes(model)) return 'That model isn’t on this key’s list. Pick one it has.';
+  return null;
 }
