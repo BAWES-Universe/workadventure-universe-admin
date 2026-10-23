@@ -84,7 +84,7 @@ describe('keyModels', () => {
     await keyModels(key);
     expect(db.updateMany).toHaveBeenCalledWith({
       where: { providerId: key.providerId, ownerId: { not: null } },
-      data: { settings: { kind: 'claude', caps: { vision: true }, modelFacts: { 'claude-haiku-5-5': { vision: true, tools: true } } } },
+      data: { settings: { kind: 'claude', caps: { vision: true }, modelFacts: { 'claude-haiku-5-5': { vision: true, tools: true } }, modelCount: LIST.models.length } },
     });
     db.updateMany.mockClear();
     await keyModels(key, { fresh: true });

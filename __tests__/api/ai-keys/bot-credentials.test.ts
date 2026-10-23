@@ -106,7 +106,7 @@ describe('GET /api/bots/:id/ai-credentials', () => {
   });
 
   it('serves the bot’s own model on the key, with what the provider said about it, and only the bot sees it (#575)', async () => {
-    const claude = { ...ownKey, type: 'anthropic', model: 'claude-sonnet-5-5', supportsVision: true, settings: { kind: 'claude', caps: { vision: true }, modelFacts: { 'claude-haiku-5-5': { vision: true }, 'claude-text-1': { vision: false } } } };
+    const claude = { ...ownKey, type: 'anthropic', model: 'claude-sonnet-5-5', supportsVision: true, settings: { kind: 'claude', caps: { vision: true }, modelFacts: { 'claude-haiku-5-5': { vision: true }, 'claude-text-1': { vision: false } }, modelCount: 2 } };
     provider.findUnique.mockResolvedValue(claude);
     verdict.mockResolvedValue({ ok: true, lendModels: null });
     bot.findUnique.mockResolvedValue(botOn('key-1', { aiModel: 'claude-text-1' }));

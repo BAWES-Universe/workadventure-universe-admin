@@ -18,6 +18,8 @@ const lmStudio = {
   kind: 'lmstudio',
   kindLabel: 'LM Studio',
   model: 'qwen3-8b',
+  // Saved before #575 counted a key's models: its check model is shown instead
+  modelCount: null,
   address: 'lm.example.com',
   last4: null,
   month: { replies: 2310, tokens: 880_000 },
@@ -34,6 +36,7 @@ const deepseek = {
   kind: 'deepseek',
   kindLabel: 'DeepSeek',
   model: 'deepseek-v4-flash',
+  modelCount: 2,
   address: null,
   last4: '4f2a',
   month: { replies: 1, tokens: 1_240_000 },
@@ -58,7 +61,7 @@ describe('AI keys page', () => {
     answer([lmStudio, deepseek]);
     render(<AiKeysPage />);
     expect(await screen.findByText('LM Studio · qwen3-8b · lm.example.com')).toBeTruthy();
-    expect(screen.getByText('DeepSeek · deepseek-v4-flash · ends in 4f2a')).toBeTruthy();
+    expect(screen.getByText('DeepSeek · 2 models · ends in 4f2a')).toBeTruthy();
     expect(screen.getByText('2,310 replies · 880k tokens')).toBeTruthy();
     expect(screen.getByText('1 reply · 1.2M tokens')).toBeTruthy();
   });
@@ -128,9 +131,10 @@ const lentKey = {
 };
 
 /** The server's side of the sheets: the universes to lend to, and lend / pull / revoke answers. */
-function serve(keys: unknown[], universes: unknown[] = []) {
+function serve(keys: unknown[], universes: unknown[] = [], models: unknown = { ok: true, models: ['deepseek-v4-flash', 'deepseek-v4-pro'], facts: {} }) {
   fetchMock.mockImplementation((url: string, init?: RequestInit) => {
     if (url === '/api/me/ai-keys/universes') return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ universes }) });
+    if (url.endsWith('/models')) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(models) });
     if (init?.method) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: 'ok' }) });
     return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ keys }) });
   });
@@ -145,6 +149,23 @@ describe('Lent to', () => {
     expect(screen.getByText('Sam · 1,240 replies')).toBeTruthy();
     expect(screen.getByText('Sandbox Universe')).toBeTruthy();
     expect(screen.queryByText('No universe yet. Only you can see this key.')).toBeNull();
+  });
+
+  it('says which models bots in each universe may use, and the model each bot replies with (#575)', async () => {
+    serve([
+      {
+        ...deepseek,
+        lentTo: [
+          { universeId: 'bawes', universeName: 'BAWES Universe', ownedByYou: false, models: ['deepseek-v4-flash'], bots: [{ ...sam, model: 'deepseek-v4-flash' }] },
+          { universeId: 'sandbox', universeName: 'Sandbox Universe', ownedByYou: true, models: null, bots: [] },
+        ],
+      },
+    ]);
+    render(<AiKeysPage />);
+    const lines = (await screen.findAllByTestId('lent-models')).map((line) => line.textContent);
+    expect(lines).toEqual(['ModelsOnly deepseek-v4-flash', 'ModelsAll models']);
+    expect(screen.getByText('Sam · deepseek-v4-flash · 1,240 replies')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Change the models bots in BAWES Universe may use' })).toBeTruthy();
   });
 
   it('says plainly when a key is lent nowhere, and offers Lend to a universe', async () => {
@@ -193,7 +214,7 @@ describe('Lend sheet', () => {
     expect(await within(dialog).findByText('You have Manage bots here')).toBeTruthy();
     expect(within(dialog).getAllByText('Already lent')).toHaveLength(2);
     expect(within(dialog).getByText(/Lending moves no bot/)).toBeTruthy();
-    const radios = within(dialog).getAllByRole('radio');
+    const radios = within(within(dialog).getByRole('radiogroup', { name: 'Universe' })).getAllByRole('radio');
     expect(radios.map((radio) => (radio as HTMLButtonElement).disabled)).toEqual([false, true, true]);
     // The first one still free is picked
     expect(radios[0].getAttribute('aria-checked')).toBe('true');
@@ -207,11 +228,60 @@ describe('Lend sheet', () => {
     await within(dialog).findByText('You own it');
     fireEvent.click(within(dialog).getByRole('radio', { name: /Sandbox Universe/ }));
     fireEvent.click(within(dialog).getByRole('button', { name: 'Lend' }));
-    await waitFor(() => expect(calls('POST')).toHaveLength(1));
-    const [url, init] = calls('POST')[0];
+    await waitFor(() => expect(calls('POST').filter(([url]) => String(url).endsWith('/lend'))).toHaveLength(1));
+    const [url, init] = calls('POST').find(([url]) => String(url).endsWith('/lend'))!;
     expect(url).toBe('/api/me/ai-keys/key-2/lend');
     expect(JSON.parse(init.body)).toEqual({ universeId: 'sandbox' });
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  });
+
+  it('lends with only the models ticked, and Lend waits for at least one (#575)', async () => {
+    serve([deepseek], universes);
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Lend to a universe' }));
+    const dialog = await screen.findByRole('dialog');
+    await within(dialog).findByText('You own it');
+    expect(within(dialog).getByText(/Every model DeepSeek has, including new ones it adds later/)).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole('radio', { name: 'Only these' }));
+    const lend = within(dialog).getByRole('button', { name: 'Lend' }) as HTMLButtonElement;
+    fireEvent.click(await within(dialog).findByRole('checkbox', { name: /deepseek-v4-pro/ }));
+    expect(lend.disabled).toBe(false);
+    fireEvent.click(lend);
+    await waitFor(() => expect(calls('POST').filter(([url]) => String(url).endsWith('/lend'))).toHaveLength(1));
+    const [, init] = calls('POST').find(([url]) => String(url).endsWith('/lend'))!;
+    expect(JSON.parse(init.body)).toEqual({ universeId: 'uniboz', models: ['deepseek-v4-pro'] });
+  });
+
+  it('changes the models of a lend from its Change, says which bots move, and saves All models as null', async () => {
+    const limited = {
+      ...deepseek,
+      lentTo: [{ universeId: 'bawes', universeName: 'BAWES Universe', ownedByYou: false, models: ['deepseek-v4-flash', 'deepseek-v4-pro'], bots: [{ ...sam, model: 'deepseek-v4-flash' }] }],
+    };
+    serve([limited], universes);
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Change the models bots in BAWES Universe may use' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText('Models for BAWES Universe')).toBeTruthy();
+    // No universe list: the sheet is about this one
+    expect(within(dialog).queryByRole('radiogroup', { name: 'Universe' })).toBeNull();
+    expect(within(dialog).getByRole('radio', { name: 'Only these' }).getAttribute('aria-checked')).toBe('true');
+    fireEvent.click(await within(dialog).findByRole('checkbox', { name: /deepseek-v4-flash/ }));
+    expect(within(dialog).getByTestId('lend-moving').textContent).toBe('Sam uses deepseek-v4-flash. It moves to deepseek-v4-pro, and the owner of BAWES Universe is told.');
+    fireEvent.click(within(dialog).getByRole('radio', { name: 'All models' }));
+    expect(within(dialog).queryByTestId('lend-moving')).toBeNull();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(calls('POST').filter(([url]) => String(url).endsWith('/lend'))).toHaveLength(1));
+    const [, init] = calls('POST').find(([url]) => String(url).endsWith('/lend'))!;
+    expect(JSON.parse(init.body)).toEqual({ universeId: 'bawes', models: null });
+  });
+
+  it('says there is nothing to limit on a key whose provider lists no models', async () => {
+    serve([{ ...lmStudio, lentTo: [{ universeId: 'bawes', universeName: 'BAWES Universe', ownedByYou: true, models: null, bots: [] }] }], universes, { ok: false, noList: true, message: 'No list' });
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Change the models bots in BAWES Universe may use' }));
+    const dialog = await screen.findByRole('dialog');
+    expect((await within(dialog).findByTestId('lend-one-model')).textContent).toMatch(/bots there use qwen3-8b/);
+    expect(within(dialog).queryByTestId('lend-models')).toBeNull();
   });
 
   it('says so, and offers nothing to lend to, when you can’t manage bots anywhere', async () => {
@@ -342,7 +412,7 @@ describe('Working, Down and "If this is down"', () => {
   });
 });
 
-describe('Change address and Change model', () => {
+describe('Change address', () => {
   function serveEdit(keys: unknown[], over: { models?: unknown; patch?: unknown; patchStatus?: number } = {}) {
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
       if (url.endsWith('/models')) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(over.models ?? { ok: true, models: ['qwen3-8b', 'llama-3.1-8b'] }) });
@@ -351,12 +421,12 @@ describe('Change address and Change model', () => {
     });
   }
 
-  it('offers Change address only on a key with an address of its own, and Change model on every key', async () => {
+  it('offers Change address only on a key with an address of its own, and no Change model: each bot picks its own (#575)', async () => {
     serveEdit([lmStudio, deepseek]);
     render(<AiKeysPage />);
     await screen.findByText('My DeepSeek', { selector: 'h2' });
     expect(screen.getAllByRole('button', { name: 'Change address' })).toHaveLength(1);
-    expect(screen.getAllByRole('button', { name: 'Change model' })).toHaveLength(2);
+    expect(screen.queryByRole('button', { name: /Change model/ })).toBeNull();
   });
 
   it('saves a new address with a PATCH, shows the key’s current address, and closes', async () => {
@@ -423,8 +493,10 @@ describe('Change address and Change model', () => {
     await within(dialog).findByRole('alert');
     fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-    fireEvent.click(await screen.findByRole('button', { name: 'Change model' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Change address' }));
     dialog = await screen.findByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText('New address'), { target: { value: 'https://new.trycloudflare.com' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
     await within(dialog).findByRole('radio', { name: 'llama-3.1-8b' });
     // The first, slow answer now arrives
     await act(async () => {
@@ -433,6 +505,20 @@ describe('Change address and Change model', () => {
     });
     expect(within(dialog).queryByRole('radio', { name: 'stale-model' })).toBeNull();
     expect(within(dialog).getByRole('radio', { name: 'llama-3.1-8b' })).toBeTruthy();
+  });
+
+  it('says why when the new address’s models could not be loaded', async () => {
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (url.endsWith('/models')) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: false, message: 'It didn’t answer. Is the server running and the tunnel up?' }) });
+      if (init?.method === 'PATCH') return Promise.resolve({ ok: false, status: 400, json: () => Promise.resolve({ error: 'That address doesn’t have qwen3-8b. Pick a model it has.', code: 'model-missing' }) });
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ keys: [lmStudio] }) });
+    });
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Change address' }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText('New address'), { target: { value: 'https://new.trycloudflare.com' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(within(dialog).getAllByRole('alert').some((alert) => /tunnel up/.test(alert.textContent ?? ''))).toBe(true));
   });
 
   it('keeps the sheet open and shows the reason when the new address does not answer', async () => {
@@ -446,33 +532,8 @@ describe('Change address and Change model', () => {
     expect(screen.getByRole('dialog')).toBeTruthy();
   });
 
-  it('loads the models with no key sent, and saves the one picked', async () => {
-    serveEdit([lmStudio]);
-    render(<AiKeysPage />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Change model' }));
-    const dialog = await screen.findByRole('dialog');
-    fireEvent.click(await within(dialog).findByRole('radio', { name: 'llama-3.1-8b' }));
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
-    await waitFor(() => expect(calls('PATCH')).toHaveLength(1));
-    expect(JSON.parse(calls('PATCH')[0][1].body)).toEqual({ model: 'llama-3.1-8b' });
-    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-  });
 
-  it('will not save until a different model is picked', async () => {
-    serveEdit([lmStudio]);
-    render(<AiKeysPage />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Change model' }));
-    const dialog = await screen.findByRole('dialog');
-    fireEvent.click(await within(dialog).findByRole('radio', { name: 'qwen3-8b' }));
-    expect((within(dialog).getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(true);
-  });
 
-  it('says why when the models could not be loaded', async () => {
-    serveEdit([lmStudio], { models: { ok: false, message: 'It didn’t answer. Is the server running and the tunnel up?' } });
-    render(<AiKeysPage />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Change model' }));
-    expect((await within(await screen.findByRole('dialog')).findByRole('alert')).textContent).toMatch(/tunnel up/);
-  });
 });
 
 describe('Models that cannot use bot tools', () => {
@@ -485,6 +546,13 @@ describe('Models that cannot use bot tools', () => {
     expect(warnings[0].textContent).toBe('This model has no Tools. Bots on it can still chat.');
   });
 
+  it('says nothing about the check model on a key with a list of models: each bot has its own (#575)', async () => {
+    answer([{ ...lmStudio, modelCount: 2, caps: { tools: false } }]);
+    render(<AiKeysPage />);
+    await screen.findByText('LM Studio · 2 models · lm.example.com');
+    expect(screen.queryByTestId('ai-key-no-tools')).toBeNull();
+  });
+
   it('says nothing for a key saved before this was known', async () => {
     answer([lmStudio]);
     render(<AiKeysPage />);
@@ -492,17 +560,20 @@ describe('Models that cannot use bot tools', () => {
     expect(screen.queryByTestId('ai-key-no-tools')).toBeNull();
   });
 
-  it('warns when the model picked in Change model is one the provider said cannot use tools', async () => {
-    fetchMock.mockImplementation((url: string) => {
+  it('warns when the model picked for a new address is one the provider said cannot use tools', async () => {
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
       if (url.endsWith('/models')) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, models: ['qwen3-8b', 'tiny-chat'], facts: { 'tiny-chat': { tools: false } } }) });
+      if (init?.method === 'PATCH') return Promise.resolve({ ok: false, status: 400, json: () => Promise.resolve({ error: 'That address doesn’t have qwen3-8b. Pick a model it has.', code: 'model-missing' }) });
       return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ keys: [lmStudio] }) });
     });
     render(<AiKeysPage />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Change model' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Change address' }));
     const dialog = await screen.findByRole('dialog');
-    fireEvent.click(await within(dialog).findByRole('radio', { name: 'qwen3-8b' }));
+    fireEvent.change(within(dialog).getByLabelText('New address'), { target: { value: 'https://new.trycloudflare.com' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+    fireEvent.click(await within(dialog).findByRole('radio', { name: /qwen3-8b/ }));
     expect(within(dialog).queryByTestId('no-tools-warning')).toBeNull();
-    fireEvent.click(within(dialog).getByRole('radio', { name: 'tiny-chat' }));
+    fireEvent.click(within(dialog).getByRole('radio', { name: /tiny-chat/ }));
     expect(within(dialog).getByTestId('no-tools-warning').textContent).toMatch(/has no Tools/);
   });
 });

@@ -55,6 +55,17 @@ describe('GET /api/me/ai-keys', () => {
     expect(body.keys.map((key: { caps: unknown }) => key.caps)).toEqual([{ tools: false, context: 64000 }, {}]);
   });
 
+  it('says how many models a key has when the provider last listed them, and nothing for a key not counted yet (#575)', async () => {
+    provider.findMany.mockResolvedValue([
+      { ...row, settings: { kind: 'deepseek', modelCount: 3 } },
+      { ...row, providerId: 'key-2', settings: { kind: 'deepseek', modelCount: 'many' } },
+      { ...row, providerId: 'key-3' },
+    ]);
+    usage.groupBy.mockResolvedValue([]);
+    const body = await (await list()).json();
+    expect(body.keys.map((key: { modelCount: unknown }) => key.modelCount)).toEqual([3, null, null]);
+  });
+
   it('lists only the caller’s keys, with this month’s use, and never a key', async () => {
     provider.findMany.mockResolvedValue([row]);
     usage.groupBy.mockResolvedValue([{ providerId: 'key-1', _sum: { apiCalls: 12, tokensUsed: 3400 } }]);
@@ -64,7 +75,7 @@ describe('GET /api/me/ai-keys', () => {
     expect(usage.groupBy.mock.calls[0][0].where).toMatchObject({ providerId: { in: ['key-1'] }, error: false });
     const body = await response.json();
     expect(body.keys).toEqual([{
-      id: 'key-1', name: 'My DeepSeek', kind: 'deepseek', kindLabel: 'DeepSeek', model: 'deepseek-v4-flash', caps: {}, address: null,
+      id: 'key-1', name: 'My DeepSeek', kind: 'deepseek', kindLabel: 'DeepSeek', model: 'deepseek-v4-flash', modelCount: null, caps: {}, address: null,
       last4: '4f2a', month: { replies: 12, tokens: 3400 }, lentTo: [], createdAt: '2026-10-19T00:00:00.000Z',
       status: 'working', downSince: null, downReason: null, ifDown: 'universe-ai',
     }]);

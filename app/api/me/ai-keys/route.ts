@@ -123,7 +123,8 @@ export async function POST(request: NextRequest) {
         supportsStreaming: true,
         // The provider's word on images when it gave one; otherwise left to the bot server's own guess from the name
         supportsVision: caps.vision ?? null,
-        settings: { kind: info.kind, ...(region ? { region } : {}), ...(Object.keys(caps).length > 0 ? { caps } : {}) },
+        // How many models it has is shown on the key card (#575); a provider with no list has only the typed one
+        settings: { kind: info.kind, ...(region ? { region } : {}), ...(Object.keys(caps).length > 0 ? { caps } : {}), ...(checked.ok ? { modelCount: checked.models.length } : {}) },
         tested: true,
         testedAt: new Date(),
         ownerId: user.id,

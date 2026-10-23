@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
-import { Bot, Globe, KeyRound, Pencil, Plus, RefreshCw, Trash2, X } from 'lucide-react';
+import { Bot, Globe, KeyRound, Plus, RefreshCw, Trash2, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -13,6 +13,8 @@ import { LoadError, LoadingRows, PageHeader, count } from '../../components/ds';
 import { FormSheet } from '../../components/form-sheet';
 import { Planet } from '../../components/ds/planet-icon';
 import { ProviderLogo } from '../../components/ds/provider-logo';
+import { ModelCaps, sharedCaps } from '../../components/ds/model-caps';
+import { ModelPicker } from '../../components/ds/model-picker';
 import { kindInfo } from '@/lib/ai-key-kinds';
 import { PickCard, Radio, Segmented } from '@/components/ui/choice';
 import { AiKeyFailure, aiKeyError, aiKeyFailureText, useAiKeys } from '../../hooks/use-ai-keys';
@@ -24,10 +26,14 @@ function compact(value: number): string {
   return `${(value / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
 }
 
-/** "LM Studio · qwen3-8b · lm.example.com", or "DeepSeek · deepseek-v4-flash · ends in 4f2a". */
+/**
+ * "Claude · 10 models · ends in 4f2a", or "LM Studio · qwen3-8b · lm.example.com" for a provider that doesn't list its
+ * models (#575): there the key's one model is the only one.
+ */
 function describe(key: AiKeySummary): string {
   const where = key.address ?? (key.last4 ? `ends in ${key.last4}` : null);
-  return [key.kindLabel, key.model, where].filter(Boolean).join(' · ');
+  const models = key.modelCount ? count(key.modelCount, 'model', 'models') : key.model;
+  return [key.kindLabel, models, where].filter(Boolean).join(' · ');
 }
 
 type Lent = AiKeySummary['lentTo'][number];
@@ -127,8 +133,8 @@ export default function AiKeysPage() {
   const [revoking, setRevoking] = useState<AiKeySummary | null>(null);
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
-  const [lending, setLending] = useState<AiKeySummary | null>(null);
-  const [editing, setEditing] = useState<{ key: AiKeySummary; what: 'address' | 'model' } | null>(null);
+  const [lending, setLending] = useState<{ key: AiKeySummary; universeId?: string } | null>(null);
+  const [editing, setEditing] = useState<AiKeySummary | null>(null);
   const [pulling, setPulling] = useState<{ key: AiKeySummary; lent: Lent } | null>(null);
   const [checking, setChecking] = useState<string | null>(null);
   const [saving, setSaving] = useState<string | null>(null);
@@ -247,7 +253,7 @@ export default function AiKeysPage() {
             </div>
             <p className="text-sm text-muted-foreground [overflow-wrap:anywhere]">{describe(key)}</p>
           </header>
-          {key.caps?.tools === false && (
+          {!key.modelCount && key.caps?.tools === false && (
             <p className="text-sm text-[#F5C451]" data-testid="ai-key-no-tools">
               {NO_TOOLS}
             </p>
@@ -267,32 +273,41 @@ export default function AiKeysPage() {
             <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Lent to</h3>
             {key.lentTo.length === 0 && <p className="text-[15px] text-muted-foreground">No universe yet. Only you can see this key.</p>}
             {key.lentTo.map((lent) => (
-              <div key={lent.universeId} className="flex items-center gap-3 rounded-2xl border border-foreground/10 bg-foreground/[.04] p-3" data-testid="ai-key-lent">
-                <div className="grid min-w-0 flex-1 gap-1">
-                  <strong className="flex items-center gap-2 text-[15px]">
+              <div key={lent.universeId} className="grid gap-2 rounded-2xl border border-foreground/10 bg-foreground/[.04] p-3" data-testid="ai-key-lent">
+                <div className="flex items-center gap-2">
+                  <strong className="flex min-w-0 flex-1 items-center gap-2 text-[15px]">
                     <Planet size={16} aria-hidden="true" className="shrink-0 text-[rgba(167,139,250,.9)]" />
                     <span className="min-w-0 [overflow-wrap:anywhere]">{lent.universeName}</span>
                   </strong>
-                  {lent.bots.map((bot) => (
-                    <span key={bot.id} className="flex items-center gap-2 text-[13px] text-muted-foreground">
-                      <Bot size={14} aria-hidden="true" className="shrink-0" />
-                      {bot.name} · {count(bot.replies, 'reply', 'replies')}
-                    </span>
-                  ))}
+                  <button
+                    type="button"
+                    aria-label={`Pull ${key.name} from ${lent.universeName}`}
+                    disabled={busy}
+                    onClick={() => {
+                      setFailure(null);
+                      if (lent.bots.length > 0) setPulling({ key, lent });
+                      else void pull(key, lent);
+                    }}
+                    className="orbit-press -my-1.5 flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-foreground hover:bg-foreground/[0.08]"
+                  >
+                    <X size={18} aria-hidden="true" />
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  aria-label={`Pull ${key.name} from ${lent.universeName}`}
-                  disabled={busy}
-                  onClick={() => {
-                    setFailure(null);
-                    if (lent.bots.length > 0) setPulling({ key, lent });
-                    else void pull(key, lent);
-                  }}
-                  className="orbit-press flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-foreground hover:bg-foreground/[0.08]"
-                >
-                  <X size={18} aria-hidden="true" />
-                </button>
+                <div className="flex items-center gap-2 rounded-xl bg-foreground/[.04] py-1 pl-3 pr-1">
+                  <span className="min-w-0 flex-1 text-[13px]" data-testid="lent-models">
+                    <span className="block text-[11px] font-bold uppercase tracking-wider text-muted-foreground">Models</span>
+                    <span className="block [overflow-wrap:anywhere]">{lent.models ? `Only ${lent.models.join(', ')}` : 'All models'}</span>
+                  </span>
+                  <Button variant="outline" className="h-11 shrink-0 px-4" onClick={() => setLending({ key, universeId: lent.universeId })} data-testid="lent-edit-models" aria-label={`Change the models bots in ${lent.universeName} may use`}>
+                    Change
+                  </Button>
+                </div>
+                {lent.bots.map((bot) => (
+                  <span key={bot.id} className="flex items-start gap-2 text-[13px] text-muted-foreground [overflow-wrap:anywhere]">
+                    <Bot size={14} aria-hidden="true" className="mt-0.5 shrink-0" />
+                    <span className="min-w-0">{[bot.name, bot.model, count(bot.replies, 'reply', 'replies')].filter(Boolean).join(' · ')}</span>
+                  </span>
+                ))}
               </div>
             ))}
           </div>
@@ -316,20 +331,16 @@ export default function AiKeysPage() {
                 {checking === key.id ? 'Checking…' : 'Check now'}
               </Button>
             )}
-            <Button variant="outline" className="h-11 w-fit px-5" onClick={() => setLending(key)}>
+            <Button variant="outline" className="h-11 w-fit px-5" onClick={() => setLending({ key })}>
               <Plus aria-hidden="true" />
               Lend to a universe
             </Button>
             {key.address !== null && (
-              <Button variant="outline" className="h-11 w-fit px-5" onClick={() => setEditing({ key, what: 'address' })}>
+              <Button variant="outline" className="h-11 w-fit px-5" onClick={() => setEditing(key)}>
                 <Globe aria-hidden="true" />
                 Change address
               </Button>
             )}
-            <Button variant="outline" className="h-11 w-fit px-5" onClick={() => setEditing({ key, what: 'model' })}>
-              <Pencil aria-hidden="true" />
-              Change model
-            </Button>
           </div>
         </article>
       ))}
@@ -415,20 +426,21 @@ export default function AiKeysPage() {
       <EditKeySheet
         target={editing}
         onClose={() => setEditing(null)}
-        onSaved={(key, what) => {
+        onSaved={(key) => {
           setEditing(null);
           retry();
-          addToast({ description: `${key.name} now uses the new ${what}`, variant: 'success', duration: 2500 });
+          addToast({ description: `${key.name} now uses the new address`, variant: 'success', duration: 2500 });
         }}
       />
 
       <LendSheet
-        keyToLend={lending}
+        keyToLend={lending?.key ?? null}
+        editing={lending?.universeId}
         onClose={() => setLending(null)}
         onLent={(key, universeName) => {
           setLending(null);
           retry();
-          addToast({ description: `${key.name} lent to ${universeName}`, variant: 'success', duration: 2500 });
+          addToast({ description: lending?.universeId ? `Models for ${universeName} saved` : `${key.name} lent to ${universeName}`, variant: 'success', duration: 2500 });
         }}
       />
     </div>
@@ -441,30 +453,43 @@ interface LendableUniverse {
   access: 'owner' | 'manage';
 }
 
-/** Lend a key (#374): the universes where you can manage bots. Lending moves no bot. */
+/**
+ * Lend a key (#374), or change what a lend allows: the universes where you can manage bots, then the models bots there
+ * may use (all of them, or only the ones ticked). Lending moves no bot.
+ */
 function LendSheet({
   keyToLend,
+  editing,
   onClose,
   onLent,
 }: {
   keyToLend: AiKeySummary | null;
+  /** The universe whose models are being changed; the universe list is left out. */
+  editing?: string;
   onClose: () => void;
   onLent: (key: AiKeySummary, universeName: string) => void;
 }) {
   const [universes, setUniverses] = useState<LendableUniverse[] | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
   const [picked, setPicked] = useState<string | null>(null);
+  const [limit, setLimit] = useState<'all' | 'only'>('all');
+  const [only, setOnly] = useState<string[]>([]);
+  const [models, setModels] = useState<ModelList>({ status: 'loading' });
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
   const open = keyToLend !== null;
   const lentIds = new Set(keyToLend?.lentTo.map((lent) => lent.universeId));
+  const lent = keyToLend?.lentTo.find((entry) => entry.universeId === editing);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open || !keyToLend) return;
     let cancelled = false;
     setUniverses(null);
+    setModels({ status: 'loading' });
     setLoadFailed(false);
     setFailure(null);
+    setLimit(lent?.models ? 'only' : 'all');
+    setOnly(lent?.models ?? []);
     authenticatedFetch('/api/me/ai-keys/universes')
       .then(async (response) => {
         if (!response.ok) throw new Error('failed');
@@ -472,17 +497,29 @@ function LendSheet({
         if (cancelled) return;
         const list = data.universes ?? [];
         setUniverses(list);
-        setPicked(list.find((universe) => !lentIds.has(universe.id))?.id ?? null);
+        setPicked(editing ?? list.find((universe) => !lentIds.has(universe.id))?.id ?? null);
       })
       .catch(() => {
         if (!cancelled) setLoadFailed(true);
       });
+    // The key's models, for "Only these"
+    authenticatedFetch(`/api/me/ai-keys/${encodeURIComponent(keyToLend.id)}/models`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+      .then(async (response) => {
+        const data = (await response.json().catch(() => ({}))) as { ok?: boolean; models?: string[]; facts?: Record<string, { tools?: boolean; vision?: boolean }>; message?: string; noList?: boolean };
+        if (cancelled) return;
+        if (data.ok && Array.isArray(data.models)) setModels({ status: 'ready', models: data.models, facts: data.facts ?? {} });
+        else if (data.noList) setModels({ status: 'typed' });
+        else setModels({ status: 'failed', message: data.message || 'Couldn’t load the models. Close this and try again.' });
+      })
+      .catch(() => {
+        if (!cancelled) setModels({ status: 'failed', message: 'Couldn’t load the models. Close this and try again.' });
+      });
     return () => {
       cancelled = true;
     };
-    // The list is read once each time the sheet opens
+    // The lists are read once each time the sheet opens
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [keyToLend?.id]);
+  }, [keyToLend?.id, editing]);
 
   async function lend() {
     if (!keyToLend || !picked || !universes) return;
@@ -492,7 +529,8 @@ function LendSheet({
       const response = await authenticatedFetch(`/api/me/ai-keys/${encodeURIComponent(keyToLend.id)}/lend`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ universeId: picked }),
+        // A new lend with All models sends none: all is what a new lend gets. A change of an existing lend always says which.
+        body: JSON.stringify({ universeId: picked, ...(limit === 'only' ? { models: only } : editing ? { models: null } : {}) }),
       });
       if (!response.ok) {
         const body = await response.json().catch(() => null);
@@ -506,52 +544,102 @@ function LendSheet({
     }
   }
 
+  // Bots there on a model that is no longer allowed move to the first allowed one, in the provider's order
+  const firstKept = models.status === 'ready' ? models.models.find((id) => only.includes(id)) : undefined;
+  const moving = limit === 'only' && firstKept && lent ? lent.bots.filter((bot) => bot.model !== null && !only.includes(bot.model)) : [];
+  const provider = keyToLend?.kindLabel ?? 'the provider';
+  // A provider that doesn't list its models has only the key's one model: nothing to limit
+  const canLimit = models.status !== 'typed';
+
   return (
     <FormSheet
       open={open}
       onOpenChange={(next) => {
         if (!next && !busy) onClose();
       }}
-      title={keyToLend ? `Lend ${keyToLend.name}` : 'Lend key'}
+      title={keyToLend ? (lent ? `Models for ${lent.universeName}` : `Lend ${keyToLend.name}`) : 'Lend key'}
     >
-      <p className="text-sm text-muted-foreground">
-        Universes where you can manage bots. Lending moves no bot: in a bot you made there, pick this key under Runs on.
-      </p>
-      {universes === null && !loadFailed && <p className="text-sm text-muted-foreground">Loading your universes…</p>}
-      {loadFailed && (
-        <p role="alert" className="text-sm text-[#fca5a5]">
-          Couldn’t load your universes. Close this and try again.
-        </p>
+      {!editing && (
+        <>
+          <p className="text-sm text-muted-foreground">
+            Universes where you can manage bots. Lending moves no bot: in a bot you made there, pick this key under Runs on.
+          </p>
+          {universes === null && !loadFailed && <p className="text-sm text-muted-foreground">Loading your universes…</p>}
+          {loadFailed && (
+            <p role="alert" className="text-sm text-[#fca5a5]">
+              Couldn’t load your universes. Close this and try again.
+            </p>
+          )}
+          {universes !== null && universes.length === 0 && (
+            <p className="text-sm text-muted-foreground" data-testid="lend-none">
+              You can’t manage bots in any universe yet.
+            </p>
+          )}
+          {universes !== null && universes.length > 0 && (
+            <div role="radiogroup" aria-label="Universe" className="grid gap-2">
+              {universes.map((universe) => {
+                const already = lentIds.has(universe.id);
+                return (
+                  <PickCard
+                    key={universe.id}
+                    role="radio"
+                    picked={picked === universe.id}
+                    disabled={already}
+                    onClick={() => setPicked(universe.id)}
+                    className="flex-row-reverse"
+                    indicator={<Radio checked={picked === universe.id} />}
+                    title={
+                      <span className="flex items-center gap-2">
+                        <Planet size={16} aria-hidden="true" className="shrink-0 text-[rgba(167,139,250,.9)]" />
+                        {universe.name}
+                      </span>
+                    }
+                    description={already ? 'Already lent' : universe.access === 'owner' ? 'You own it' : 'You have Manage bots here'}
+                  />
+                );
+              })}
+            </div>
+          )}
+        </>
       )}
-      {universes !== null && universes.length === 0 && (
-        <p className="text-sm text-muted-foreground" data-testid="lend-none">
-          You can’t manage bots in any universe yet.
-        </p>
+      {canLimit && (
+        <section className="grid gap-2" aria-labelledby="lend-models" data-testid="lend-models">
+          <h3 id="lend-models" className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Models bots there may use</h3>
+          <Segmented
+            aria-labelledby="lend-models"
+            value={limit}
+            onChange={setLimit}
+            options={[
+              { value: 'all', label: 'All models' },
+              { value: 'only', label: 'Only these' },
+            ]}
+          />
+          <p className="text-sm text-muted-foreground">
+            {limit === 'all'
+              ? `Every model ${provider} has, including new ones it adds later. Each bot picks one on its page.`
+              : `Bots there may only pick the models you tick. New ones ${provider} adds later are not added.`}
+          </p>
+          {limit === 'only' && models.status === 'ready' && (
+            <ModelPicker models={models.models} facts={models.facts} mode="many" picked={only} onChange={setOnly} label="Models bots there may use" />
+          )}
+          {limit === 'only' && models.status === 'loading' && <p className="text-sm text-muted-foreground">Loading the models…</p>}
+          {limit === 'only' && models.status === 'failed' && (
+            <p role="alert" className="text-sm text-[#fca5a5]">
+              {models.message}
+            </p>
+          )}
+          {moving.length > 0 && (
+            <p className="text-sm text-[#F5C451]" data-testid="lend-moving">
+              {moving.map((bot) => `${bot.name} uses ${bot.model}`).join('. ')}. {moving.length === 1 ? 'It moves' : 'They move'} to {firstKept}
+              {lent && !lent.ownedByYou ? `, and the owner of ${lent.universeName} is told` : ''}.
+            </p>
+          )}
+        </section>
       )}
-      {universes !== null && universes.length > 0 && (
-        <div role="radiogroup" aria-label="Universe" className="grid gap-2">
-          {universes.map((universe) => {
-            const already = lentIds.has(universe.id);
-            return (
-              <PickCard
-                key={universe.id}
-                role="radio"
-                picked={picked === universe.id}
-                disabled={already}
-                onClick={() => setPicked(universe.id)}
-                className="flex-row-reverse"
-                indicator={<Radio checked={picked === universe.id} />}
-                title={
-                  <span className="flex items-center gap-2">
-                    <Planet size={16} aria-hidden="true" className="shrink-0 text-[rgba(167,139,250,.9)]" />
-                    {universe.name}
-                  </span>
-                }
-                description={already ? 'Already lent' : universe.access === 'owner' ? 'You own it' : 'You have Manage bots here'}
-              />
-            );
-          })}
-        </div>
+      {!canLimit && editing && (
+        <p className="text-sm text-muted-foreground" data-testid="lend-one-model">
+          {keyToLend?.kindLabel} doesn’t share a list of its models, so bots there use {keyToLend?.model ?? 'its one model'}. There is nothing to limit.
+        </p>
       )}
       {failure && (
         <p role="alert" className="text-sm text-[#fca5a5]">
@@ -562,8 +650,8 @@ function LendSheet({
         <Button variant="outline" className="h-11 px-5" disabled={busy} onClick={onClose}>
           Cancel
         </Button>
-        <Button className="h-11 px-5" disabled={busy || !picked} onClick={() => void lend()}>
-          {busy ? 'Lending…' : 'Lend'}
+        <Button className="h-11 px-5" disabled={busy || !picked || (canLimit && limit === 'only' && only.length === 0)} onClick={() => void lend()}>
+          {busy ? 'Saving…' : editing ? 'Save' : 'Lend'}
         </Button>
       </div>
     </FormSheet>
@@ -579,18 +667,19 @@ type ModelList = { status: 'loading' } | { status: 'ready'; models: string[]; fa
 const NO_TOOLS = 'This model has no Tools. Bots on it can still chat.';
 
 /**
- * Change a saved key's address or model (#374). The key stays the same key, so it stays lent and its bots stay on it:
- * a free tunnel gets a new address each time it restarts. Nothing is saved until the new address answers and the model
- * gives one tiny reply. The key itself is never shown or asked for again.
+ * Change a saved key's address (#374). The key stays the same key, so it stays lent and its bots stay on it: a free
+ * tunnel gets a new address each time it restarts. Nothing is saved until the new address answers. When it doesn't have
+ * the model the key is checked with, the models it does have are shown to pick a new one. The key itself is never shown
+ * or asked for again. Each bot picks its own model (#575), so there is no key model to change.
  */
 function EditKeySheet({
   target,
   onClose,
   onSaved,
 }: {
-  target: { key: AiKeySummary; what: 'address' | 'model' } | null;
+  target: AiKeySummary | null;
   onClose: () => void;
-  onSaved: (key: AiKeySummary, what: 'address' | 'model') => void;
+  onSaved: (key: AiKeySummary) => void;
 }) {
   const [address, setAddress] = useState('');
   const [models, setModels] = useState<ModelList>({ status: 'loading' });
@@ -603,8 +692,7 @@ function EditKeySheet({
   // Only the newest model load may answer: a slow one for a sheet that was closed, reopened or retried is dropped
   const latestLoad = useRef(0);
   const open = target !== null;
-  const what = target?.what;
-  const keyId = target?.key.id;
+  const keyId = target?.id;
 
   useEffect(() => {
     setAddress('');
@@ -614,16 +702,13 @@ function EditKeySheet({
     setFailure(null);
     setModels({ status: 'loading' });
     // Closing or switching the sheet drops any load still on its way, including one started by save()
-    const dropLoads = () => {
+    return () => {
       latestLoad.current += 1;
     };
-    if (!keyId || what !== 'model') return dropLoads;
-    void loadModels(keyId, undefined);
-    return dropLoads;
-  }, [keyId, what]);
+  }, [keyId]);
 
   /** The models the key's provider lists, at its saved address or a new one being tried */
-  async function loadModels(id: string, newAddress: string | undefined) {
+  async function loadModels(id: string, newAddress: string) {
     const mine = ++latestLoad.current;
     const cancelled = () => mine !== latestLoad.current;
     setModels({ status: 'loading' });
@@ -631,7 +716,7 @@ function EditKeySheet({
       const response = await authenticatedFetch(`/api/me/ai-keys/${encodeURIComponent(id)}/models`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newAddress ? { address: newAddress } : {}),
+        body: JSON.stringify({ address: newAddress }),
       });
       const data = (await response.json().catch(() => ({}))) as { ok?: boolean; models?: string[]; facts?: Record<string, { tools?: boolean; vision?: boolean }>; message?: string; noList?: boolean };
       if (cancelled()) return;
@@ -654,25 +739,25 @@ function EditKeySheet({
     setBusy(true);
     setFailure(null);
     try {
-      const response = await authenticatedFetch(`/api/me/ai-keys/${encodeURIComponent(target.key.id)}`, {
+      const response = await authenticatedFetch(`/api/me/ai-keys/${encodeURIComponent(target.id)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(target.what === 'address' ? (pickOnNew ? { address: address.trim(), model: model?.trim() } : { address: address.trim() }) : { model: model?.trim() }),
+        body: JSON.stringify(pickOnNew ? { address: address.trim(), model: model?.trim() } : { address: address.trim() }),
       });
       if (!response.ok) {
         const body = await response.json().catch(() => null);
-        if (target.what === 'address' && !pickOnNew && body?.code === 'model-missing') {
+        if (!pickOnNew && body?.code === 'model-missing') {
           // Offer the models the new address does have, to pick one and save both together
           setPickOnNew(true);
           setModel(null);
           setSearch('');
           setFailure(body.error || null);
-          void loadModels(target.key.id, address.trim());
+          void loadModels(target.id, address.trim());
           return;
         }
         throw new AiKeyFailure(aiKeyError(response.status, body?.error));
       }
-      onSaved(target.key, target.what);
+      onSaved(target);
     } catch (error) {
       setFailure(aiKeyFailureText(error));
     } finally {
@@ -680,8 +765,8 @@ function EditKeySheet({
     }
   }
 
-  const picking = target?.what === 'model' || pickOnNew;
-  const ready = picking ? model !== null && (pickOnNew || model !== target?.key.model) : address.trim() !== '';
+  const ready = pickOnNew ? model !== null : address.trim() !== '';
+  const shared = models.status === 'ready' ? sharedCaps(models.models, models.facts) : { tools: false, vision: false };
 
   return (
     <FormSheet
@@ -689,14 +774,10 @@ function EditKeySheet({
       onOpenChange={(next) => {
         if (!next && !busy) onClose();
       }}
-      title={target ? `${target.what === 'address' ? 'Change address of' : 'Change model of'} ${target.key.name}` : 'Change key'}
+      title={target ? `Change address of ${target.name}` : 'Change address'}
     >
-      <p className="text-sm text-muted-foreground">
-        {target?.what === 'address'
-          ? 'It is checked before it is saved. The key stays lent and its bots stay on it.'
-          : 'The new model is asked for one tiny reply before it is saved. The key stays lent and its bots stay on it.'}
-      </p>
-      {target?.what === 'address' && (
+      <p className="text-sm text-muted-foreground">It is checked before it is saved. The key stays lent and its bots stay on it.</p>
+      {target && (
         <div className="grid gap-1.5">
           <Label htmlFor="ai-key-new-address">New address</Label>
           <Input
@@ -710,10 +791,10 @@ function EditKeySheet({
             disabled={pickOnNew}
             className="h-11 rounded-xl"
           />
-          <p className="text-[13px] text-muted-foreground">Now: {target.key.address}. Must start with https:// and be reachable from the internet.</p>
+          <p className="text-[13px] text-muted-foreground">Now: {target.address}. Must start with https:// and be reachable from the internet.</p>
         </div>
       )}
-      {picking && (
+      {pickOnNew && (
         <div className="grid gap-3" aria-live="polite">
           {models.status === 'loading' && <p className="text-sm text-muted-foreground">Loading the models…</p>}
           {models.status === 'failed' && (
@@ -735,13 +816,17 @@ function EditKeySheet({
                 className="h-11 rounded-xl"
               />
               <p className="text-[13px] text-muted-foreground">
-                {target?.key.name} comes from a provider that doesn’t share a list of its models. Now: {target?.key.model ?? 'no model'}. The new name is checked with one tiny reply.
+                {target?.name} comes from a provider that doesn’t share a list of its models. Now: {target?.model ?? 'no model'}. The new name is checked with one tiny reply.
               </p>
             </div>
           )}
           {models.status === 'ready' && (
             <>
-              {!pickOnNew && <p className="text-sm text-muted-foreground">Now: {target?.key.model ?? 'no model'}</p>}
+              {(shared.tools || shared.vision) && (
+                <p className="flex flex-wrap items-center gap-x-1.5 text-sm text-muted-foreground [&>span]:mt-0 [&>span]:text-sm">
+                  All {models.models.length} models have <ModelCaps facts={{ tools: shared.tools || undefined, vision: shared.vision || undefined }} />
+                </p>
+              )}
               {models.models.length > SEARCH_FROM && (
                 <Input
                   type="search"
@@ -754,7 +839,7 @@ function EditKeySheet({
               )}
               <div role="radiogroup" aria-label="Model" className="grid gap-2">
                 {visible.map((id) => (
-                  <PickCard key={id} role="radio" picked={model === id} onClick={() => setModel(id)} indicator={<Radio checked={model === id} />} title={id} description={models.facts[id]?.vision ? 'Vision' : undefined} className="[&_span.block]:break-all" />
+                  <PickCard key={id} role="radio" picked={model === id} onClick={() => setModel(id)} indicator={<Radio checked={model === id} />} title={id} description={<ModelCaps facts={models.facts[id]} skip={shared} />} className="[&_span.block]:break-all" />
                 ))}
                 {visible.length === 0 && <p className="text-[13px] text-muted-foreground">No model matches that.</p>}
               </div>

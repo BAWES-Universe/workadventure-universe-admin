@@ -52,7 +52,7 @@ export async function keyModels(key: KeyForModels, options: { fresh?: boolean; n
     .then(async (list) => {
       if (list.ok) {
         cache.set(id, { at: Date.now(), list });
-        if (list.listed) await rememberFacts(key, list.facts);
+        if (list.listed) await rememberFacts(key, list.facts, list.models.length);
       }
       return list;
     })
@@ -90,16 +90,19 @@ function slimFacts(facts: ModelFactsById): Record<string, ModelFacts> {
   return slim;
 }
 
-/** Saves what the provider says about each model on the key, only when it changed. A failed save only costs a later guess. */
-async function rememberFacts(key: KeyForModels, facts: ModelFactsById): Promise<void> {
+/**
+ * Saves what the provider says about each model on the key, and how many models it has (shown on the key card), only when
+ * that changed. A failed save only costs a later guess.
+ */
+async function rememberFacts(key: KeyForModels, facts: ModelFactsById, modelCount: number): Promise<void> {
   const slim = slimFacts(facts);
-  const saved = isRecord(key.settings) ? key.settings.modelFacts : undefined;
-  if (JSON.stringify(saved ?? {}) === JSON.stringify(slim)) return;
+  const saved = isRecord(key.settings) ? key.settings : {};
+  if (JSON.stringify(saved.modelFacts ?? {}) === JSON.stringify(slim) && saved.modelCount === modelCount) return;
   try {
     // Read again just before writing, so a change made meanwhile (a new address, a new check model) is never undone
     const row = await prisma.botsAiProvider.findUnique({ where: { providerId: key.providerId }, select: { settings: true } });
     if (!row) return;
-    const settings = { ...(isRecord(row.settings) ? row.settings : {}), modelFacts: slim };
+    const settings = { ...(isRecord(row.settings) ? row.settings : {}), modelFacts: slim, modelCount };
     await prisma.botsAiProvider.updateMany({ where: { providerId: key.providerId, ownerId: { not: null } }, data: { settings } });
     key.settings = settings;
   } catch (error) {
