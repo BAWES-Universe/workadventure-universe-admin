@@ -3,7 +3,7 @@ import { decryptApiKey } from '@/lib/encryption';
 import { kindInfo } from '@/lib/ai-key-kinds';
 import { cleanModelId, keyTarget, modelCaps, probeChat, probeModels, type ModelFactsById } from '@/lib/ai-key-models';
 import { markWorking } from '@/lib/ai-key-health';
-import { forgetKeyModels } from '@/lib/ai-key-model-list';
+import { forgetKeyModels, slimFacts } from '@/lib/ai-key-model-list';
 
 /**
  * Changing where a saved key points, or which model it uses (#374). The row stays the same row, so its lends and the
@@ -124,6 +124,8 @@ export async function editSavedKey(ownerId: string, id: string, input: KeyEditIn
     if (Object.keys(caps).length > 0) settings.caps = caps;
     else delete settings.caps;
   }
+  // The list just read is this address's: each model's facts are its own, not the old address's
+  if (probed.ok) settings.modelFacts = slimFacts(models.facts);
 
   // Same row, same id: lends and the bots running on it stay exactly as they are. The checks took a while: when only the
   // address changed, a check model swapped meanwhile (the old one went, #575) is never put back.
@@ -135,7 +137,8 @@ export async function editSavedKey(ownerId: string, id: string, input: KeyEditIn
       tested: true,
       testedAt: new Date(),
       healthCheckedAt: new Date(),
-      ...(onList ? { settings, supportsVision: caps.vision ?? null } : {}),
+      ...(probed.ok ? { settings } : {}),
+      ...(onList ? { supportsVision: caps.vision ?? null } : {}),
     },
   });
   if (count === 0) return { ok: false, status: 409, message: 'This key changed while it was checked. Open Edit again.' };
