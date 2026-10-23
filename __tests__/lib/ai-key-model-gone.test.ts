@@ -170,7 +170,7 @@ describe('moveBotOffGoneModel', () => {
     list.mockClear();
     // The bot is on its new model now; a reply already on its way reports the old one, and the new one answers
     db.bot.findUnique.mockResolvedValue({ ...guide, id: 'b7', aiModel: 'deepseek/deepseek-v4-flash' });
-    expect(await moveBotOffGoneModel(key, 'b7')).toBe(true);
+    expect(await moveBotOffGoneModel(key, 'b7')).toBe('count');
     expect(chat.mock.calls.at(-1)?.[0].model).toBe('deepseek/deepseek-v4-flash');
     expect(list).not.toHaveBeenCalled();
     expect(db.bot.updateMany).not.toHaveBeenCalled();
@@ -232,7 +232,7 @@ describe('moveBotOffGoneModel', () => {
     db.aiKeyLend.findUnique.mockResolvedValue({ models: ['meta-llama/llama-4-maverick'] });
     list.mockResolvedValue({ ok: true, models: ['meta-llama/llama-4-maverick', 'openai/gpt-5-mini'], facts: {}, listed: true });
     chat.mockReset().mockResolvedValue({ ok: true });
-    expect(await moveBotOffGoneModel(key, 'b4')).toBe(true);
+    expect(await moveBotOffGoneModel(key, 'b4')).toBe('count');
     chat.mockResolvedValue({ ok: false, reason: 'busy', message: 'OpenRouter is busy right now.' });
     expect(await moveBotOffGoneModel(key, 'b4')).toBe(true);
     // Any other error (a timeout, a conflict) says nothing sure about the model either
@@ -327,7 +327,7 @@ describe('moveBotOffGoneModel', () => {
     // ...then another bot on the same key, with no model of its own, reports the old check model a moment later
     list.mockClear();
     db.bot.findUnique.mockResolvedValue({ ...guide, id: 'follower', aiModel: null });
-    expect(await moveBotOffGoneModel({ ...key, model: 'deepseek/deepseek-v4-flash' }, 'follower')).toBe(true);
+    expect(await moveBotOffGoneModel({ ...key, model: 'deepseek/deepseek-v4-flash' }, 'follower')).toBe('count');
     expect(list).not.toHaveBeenCalled();
   });
 

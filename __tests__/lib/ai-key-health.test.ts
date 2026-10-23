@@ -116,6 +116,15 @@ describe('recordReply: a missing model is about one bot (#575)', () => {
     expect(db.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ downReason: 'credit' }) }));
   });
 
+  it('counts the failure as any other when the bot’s model answers when asked again, so failing real replies still mark the key Down', async () => {
+    db.findFirst.mockResolvedValue({ ...hosted, model: 'deepseek-v4-flash', failedReplies: 1 });
+    (moveBotOffGoneModel as jest.Mock).mockResolvedValue('count');
+    db.update.mockResolvedValue({ failedReplies: 2 });
+    await recordReply('key-1', { ok: false, status: 404 }, 'b1');
+    expect(db.update).toHaveBeenCalledWith(expect.objectContaining({ data: { failedReplies: { increment: 1 } } }));
+    expect(db.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ downReason: 'errors' }) }));
+  });
+
   it('never asks about another failure', async () => {
     db.findFirst.mockResolvedValue({ ...hosted, model: 'deepseek-v4-flash', failedReplies: 0 });
     await recordReply('key-1', { ok: false, status: 401 }, 'b1');
@@ -462,7 +471,8 @@ describe('checkKey and checkAndRecord', () => {
       chat.mockReset();
       chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'gone' });
       chat.mockResolvedValue({ ok: false, reason: 'request', message: 'a chat call failed (400).' });
-      expect(await checkKey(withModel(hosted))).toMatchObject({ ok: false });
+      // The check model being gone is what the owner hears, not the others' refusals
+      expect(await checkKey(withModel(hosted))).toMatchObject({ ok: false, reason: 'model', message: 'gone' });
       expect(chat).toHaveBeenCalledTimes(4);
     });
 

@@ -17,13 +17,15 @@ import { allowedModels, forgetKeyModels, keyModels, lendModels, modelFactsOf, se
  *
  * A model the provider still lists but that answers a bot with a 404 is treated the same for that bot (another listed model
  * may still answer), the key's check model too. Before anything moves, the bot's model is asked once more: one that answers
- * now (a reply sent before the bot moved to it, a passing hiccup), or no clear answer, changes nothing.
+ * now (a reply sent before the bot moved to it, a passing hiccup), or no clear answer, moves nothing. One that answers is
+ * returned as `'count'`: the reply's failure counts like any other, so a bot whose real replies keep failing while the
+ * tiny one works still marks the key Down after a few, and its owner hears of it.
  *
  * Returns false when this can't be decided (the list can't be loaded, the provider has no list, or more models are allowed
  * than are asked): then the reply's failure counts against the key as before. When asking showed the key itself refused or
  * out of credit, that is returned instead, so the key is marked Down for what really went wrong.
  */
-export function moveBotOffGoneModel(key: KeyForModels & { ownerId: string | null; name: string }, botId: string): Promise<boolean | KeyFailure> {
+export function moveBotOffGoneModel(key: KeyForModels & { ownerId: string | null; name: string }, botId: string): Promise<GoneVerdict> {
   // Replies in flight at once report the same 404: they share one answer, so the provider is asked once, not once each
   const id = `${key.providerId}|${botId}`;
   const running = deciding.get(id);
@@ -43,7 +45,10 @@ export function moveBotOffGoneModel(key: KeyForModels & { ownerId: string | null
 /** The key itself failed when a model was asked: refused, or out of credit. */
 export type KeyFailure = 'rejected' | 'credit';
 
-const deciding = new Map<string, Promise<boolean | KeyFailure>>();
+/** Decided (true), left to the key's rules (false), the key itself failed, or the model answers: count the failure. */
+export type GoneVerdict = boolean | KeyFailure | 'count';
+
+const deciding = new Map<string, Promise<GoneVerdict>>();
 
 type ChatAnswer = ReturnType<typeof probeChat>;
 /** How long answers are shared while bots keep reporting: a run of reports that never ends still asks again after this. */
@@ -58,7 +63,7 @@ function sharedAnswers(providerId: string) {
   return fresh;
 }
 
-async function decide(key: KeyForModels & { ownerId: string | null; name: string }, botId: string, asked: Map<string, ChatAnswer>): Promise<boolean | KeyFailure> {
+async function decide(key: KeyForModels & { ownerId: string | null; name: string }, botId: string, asked: Map<string, ChatAnswer>): Promise<GoneVerdict> {
   if (!key.ownerId) return false;
   const bot = await prisma.bot.findUnique({
     where: { id: botId },
@@ -75,7 +80,8 @@ async function decide(key: KeyForModels & { ownerId: string | null; name: string
   const gone = servedModel(bot, key, lend);
   if (!gone) return false;
   // One 404 is not the last word: the model is asked once more first. It answers now (a reply sent before the bot moved to
-  // it, a passing hiccup) or no clear answer comes: nothing changes, and the next report asks again. A refused key: the
+  // it, a passing hiccup): nothing moves and the failure counts as any other. No clear answer: nothing changes, and the
+  // next report asks again. A refused key: the
   // key is marked Down for what it said. Only a provider that says, again, that it has no such model moves anything.
   // A bot's reply always offers tools (sending an image, a file), and OpenRouter answers a model with none that calls them
   // with a 404: every model here is asked with one tool, as a bot asks, so a model that chats but calls no tools is not
@@ -83,6 +89,7 @@ async function decide(key: KeyForModels & { ownerId: string | null; name: string
   if (modelFactsOf(key, gone).tools !== false) {
     const again = await askAbout(key, gone, asked);
     if (again === 'rejected' || again === 'credit') return again;
+    if (again === 'answers') return 'count';
     if (again !== 'gone') return true;
   }
   const list = await keyModels(key, { fresh: true });
