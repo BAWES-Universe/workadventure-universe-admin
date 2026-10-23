@@ -187,6 +187,15 @@ describe('moveBotOffGoneModel', () => {
     expect(db.bot.updateMany).not.toHaveBeenCalled();
   });
 
+  it('opens no late-report window when the bot was changed meanwhile and did not move here', async () => {
+    db.bot.updateMany.mockResolvedValue({ count: 0 });
+    list.mockResolvedValue({ ok: true, models: ['anthropic/claude-haiku-5-5', 'openai/gpt-5-mini'], facts: {}, listed: true });
+    expect(await moveBotOffGoneModel(key, guide.id)).toBe(true);
+    list.mockClear();
+    await moveBotOffGoneModel(key, guide.id);
+    expect(list).toHaveBeenCalled();
+  });
+
   it('counts a report again once a save that noted a change is taken back', async () => {
     const undo = noteModelChanged(guide.id);
     undo();
