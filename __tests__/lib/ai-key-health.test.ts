@@ -109,6 +109,13 @@ describe('recordReply: a missing model is about one bot (#575)', () => {
     expect(db.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ downReason: 'model' }) }));
   });
 
+  it('marks the key Down for what asking again showed: refused or out of credit', async () => {
+    db.findFirst.mockResolvedValue({ ...hosted, model: 'deepseek-v4-flash', failedReplies: 0 });
+    (moveBotOffGoneModel as jest.Mock).mockResolvedValue('credit');
+    await recordReply('key-1', { ok: false, status: 404 }, 'b1');
+    expect(db.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ downReason: 'credit' }) }));
+  });
+
   it('never asks about another failure', async () => {
     db.findFirst.mockResolvedValue({ ...hosted, model: 'deepseek-v4-flash', failedReplies: 0 });
     await recordReply('key-1', { ok: false, status: 401 }, 'b1');
