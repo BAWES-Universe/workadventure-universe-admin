@@ -19,10 +19,11 @@ import { allowedModels, forgetKeyModels, keyModels, lendModels, modelFactsOf, se
  * may still answer), the key's check model too. Before anything moves, the bot's model is asked once more: one that answers
  * now (a reply sent before the bot moved to it, a passing hiccup), or no clear answer, changes nothing.
  *
- * Returns false when this can't be decided (the list can't be loaded, the provider has no list, the key was refused, or more
- * models are allowed than are asked): then the reply's failure counts against the key as before.
+ * Returns false when this can't be decided (the list can't be loaded, the provider has no list, or more models are allowed
+ * than are asked): then the reply's failure counts against the key as before. When asking showed the key itself refused or
+ * out of credit, that is returned instead, so the key is marked Down for what really went wrong.
  */
-export function moveBotOffGoneModel(key: KeyForModels & { ownerId: string | null; name: string }, botId: string): Promise<boolean> {
+export function moveBotOffGoneModel(key: KeyForModels & { ownerId: string | null; name: string }, botId: string): Promise<boolean | KeyFailure> {
   // Replies in flight at once report the same 404: they share one answer, so the provider is asked once, not once each
   const id = `${key.providerId}|${botId}`;
   const running = deciding.get(id);
@@ -32,9 +33,12 @@ export function moveBotOffGoneModel(key: KeyForModels & { ownerId: string | null
   return decided;
 }
 
-const deciding = new Map<string, Promise<boolean>>();
+/** The key itself failed when a model was asked: refused, or out of credit. */
+export type KeyFailure = 'rejected' | 'credit';
 
-async function decide(key: KeyForModels & { ownerId: string | null; name: string }, botId: string): Promise<boolean> {
+const deciding = new Map<string, Promise<boolean | KeyFailure>>();
+
+async function decide(key: KeyForModels & { ownerId: string | null; name: string }, botId: string): Promise<boolean | KeyFailure> {
   if (!key.ownerId) return false;
   const bot = await prisma.bot.findUnique({
     where: { id: botId },
@@ -52,9 +56,10 @@ async function decide(key: KeyForModels & { ownerId: string | null; name: string
   if (!gone) return false;
   // One 404 is not the last word: the model is asked once more first. It answers now (a reply sent before the bot moved to
   // it, a passing hiccup) or no clear answer comes: nothing changes, and the next report asks again. A refused key: the
-  // key's own rules apply. Only a provider that says, again, that it has no such model moves anything.
+  // key is marked Down for what it said. Only a provider that says, again, that it has no such model moves anything.
   const again = await askAbout(key, gone);
-  if (again !== 'gone') return again !== 'key';
+  if (again === 'rejected' || again === 'credit') return again;
+  if (again !== 'gone') return true;
   const list = await keyModels(key, { fresh: true });
   if (!list.ok || !list.listed) return false;
   // A model the provider still lists but that won't answer is that model's failure only, the key's check model too: the
@@ -104,7 +109,9 @@ async function decide(key: KeyForModels & { ownerId: string | null; name: string
   }
   if (!found.answered) {
     // The bot is never moved to a model nobody checked. The provider busy or not answering just now: nothing is decided, and
-    // the next report asks again. The key refused, or not every allowed model could be asked: the key's own rules apply.
+    // the next report asks again. The key refused or out of credit: it is marked Down for that. Not every allowed model
+    // could be asked: the key's own rules apply.
+    if (found.why === 'rejected' || found.why === 'credit') return found.why;
     return found.why === 'busy' || found.why === 'unreachable';
   }
   const next = found.model;
@@ -128,22 +135,22 @@ async function decide(key: KeyForModels & { ownerId: string | null; name: string
 
 /**
  * What the provider says about this model to one tiny reply: it answers (a refused tiny request counts), it has no such model
- * to answer with, no clear answer (busy, not answering), or the key itself was refused.
+ * to answer with, no clear answer (busy, not answering), or the key itself was refused or is out of credit.
  */
-async function askAbout(key: KeyForModels, model: string): Promise<'answers' | 'gone' | 'unsure' | 'key'> {
+async function askAbout(key: KeyForModels, model: string): Promise<'answers' | 'gone' | 'unsure' | KeyFailure> {
   const info = kindInfo((key.settings as { kind?: unknown } | null)?.kind);
   if (!info) return 'unsure';
   let apiKey: string | undefined;
   try {
     apiKey = key.apiKeyEncrypted ? decryptApiKey(key.apiKeyEncrypted) : undefined;
   } catch {
-    return 'key';
+    return 'rejected';
   }
   const reply = await probeChat({ kind: info.kind, address: key.endpoint ?? undefined, apiKey, model });
   if (reply.ok || reply.reason === 'request') return 'answers';
   if (reply.reason === 'gone') return 'gone';
   // Any other error (a timeout, a conflict) says nothing sure about the model
-  return reply.reason === 'rejected' || reply.reason === 'credit' ? 'key' : 'unsure';
+  return reply.reason === 'rejected' || reply.reason === 'credit' ? reply.reason : 'unsure';
 }
 
 /**
