@@ -361,17 +361,28 @@ export function chatPath(info: AiKeyKindInfo): string {
   return info.protocol === 'anthropic' ? '/messages' : '/chat/completions';
 }
 
+/**
+ * The one tool a check offers when asked to, as a bot's reply always offers tools. It has one optional field: Gemini refuses
+ * a tool whose parameters have no fields at all.
+ */
+const PROBE_TOOL = { name: 'noop', description: 'Does nothing.', schema: { type: 'object', properties: { note: { type: 'string', description: 'Not used.' } } } };
+
 /** The smallest chat call that gets one reply, in the provider's own format. */
 export function chatProbeBody(info: AiKeyKindInfo, model: string, options: { withTool?: boolean } = {}): Record<string, unknown> {
   if (info.protocol === 'anthropic') {
-    return { model, max_tokens: 32, messages: [{ role: 'user', content: 'Say ok.' }], ...(options.withTool ? { tools: [{ name: 'noop', description: 'Does nothing.', input_schema: { type: 'object', properties: {} } }] } : {}) };
+    return {
+      model,
+      max_tokens: 32,
+      messages: [{ role: 'user', content: 'Say ok.' }],
+      ...(options.withTool ? { tools: [{ name: PROBE_TOOL.name, description: PROBE_TOOL.description, input_schema: PROBE_TOOL.schema }] } : {}),
+    };
   }
   return {
     model,
     messages: [{ role: 'user', content: 'Say ok.' }],
     stream: false,
     [info.tokenLimitField ?? 'max_tokens']: 16,
-    ...(options.withTool ? { tools: [{ type: 'function', function: { name: 'noop', description: 'Does nothing.', parameters: { type: 'object', properties: {} } } }] } : {}),
+    ...(options.withTool ? { tools: [{ type: 'function', function: { name: PROBE_TOOL.name, description: PROBE_TOOL.description, parameters: PROBE_TOOL.schema } }] } : {}),
   };
 }
 

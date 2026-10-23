@@ -214,11 +214,12 @@ describe('Claude, the one kind with its own format (#975)', () => {
     expect(chatProbeBody(kindInfo('openai')!, 'gpt-x')).toEqual({ model: 'gpt-x', messages: [{ role: 'user', content: 'Say ok.' }], stream: false, max_completion_tokens: 16 });
   });
 
-  it('offers one tool when asked to, in each format, as a bot’s reply does', () => {
-    expect(chatProbeBody(kindInfo('claude')!, 'claude-haiku-4-5', { withTool: true }).tools).toEqual([{ name: 'noop', description: 'Does nothing.', input_schema: { type: 'object', properties: {} } }]);
-    expect(chatProbeBody(kindInfo('openai')!, 'gpt-x', { withTool: true }).tools).toEqual([
-      { type: 'function', function: { name: 'noop', description: 'Does nothing.', parameters: { type: 'object', properties: {} } } },
-    ]);
+  it('offers one tool when asked to, in each format, as a bot’s reply does, with a field Gemini needs', () => {
+    const schema = { type: 'object', properties: { note: { type: 'string', description: 'Not used.' } } };
+    expect(chatProbeBody(kindInfo('claude')!, 'claude-haiku-4-5', { withTool: true }).tools).toEqual([{ name: 'noop', description: 'Does nothing.', input_schema: schema }]);
+    for (const kind of ['openai', 'gemini']) {
+      expect(chatProbeBody(kindInfo(kind)!, 'gpt-x', { withTool: true }).tools).toEqual([{ type: 'function', function: { name: 'noop', description: 'Does nothing.', parameters: schema } }]);
+    }
     expect(chatProbeBody(kindInfo('openai')!, 'gpt-x')).not.toHaveProperty('tools');
   });
 
