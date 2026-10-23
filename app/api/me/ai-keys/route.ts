@@ -92,20 +92,31 @@ export async function POST(request: NextRequest) {
     let model: string | null = null;
     let refused: string | null = null;
     let refusedForCredit = false;
+    // A listed model that refuses only this tiny request (a reasoning model that wants a bigger cap, say) is not a wrong key
+    // or model, the same as the health check lets it pass. A typed model has no list behind it, so only a real reply keeps it.
+    // A model picked from the list is kept only when none of the others gives a real reply: a model that doesn't chat at all
+    // (an embedding model whose name says nothing) can answer the same way.
+    let refusedRequest: string | null = null;
     for (const candidate of candidates) {
       const chat = await probeChat({ kind: info.kind, address: input.address, region, apiKey, model: candidate, ...(noList ? { noList } : {}) });
-      // A listed model that refuses only this tiny request (a reasoning model that wants a bigger cap, say) is not a wrong key
-      // or model: it is kept, the same as the health check lets it pass. A typed model has no list behind it, so only a real
-      // reply keeps it.
-      if (chat.ok || (!noList && chat.reason === 'request')) {
+      if (chat.ok) {
         model = candidate;
         break;
+      }
+      if (!noList && chat.reason === 'request') {
+        if (typedModel) {
+          model = candidate;
+          break;
+        }
+        refusedRequest ??= candidate;
+        continue;
       }
       // Out of credit is said ahead of a later model's words: it is what the person can fix
       if (!refusedForCredit) refused = chat.message;
       if (chat.reason === 'credit') refusedForCredit = true;
       if (!tryNextModel(chat)) break;
     }
+    model ??= refusedRequest;
     if (!model) return respond(request, { error: refused ?? 'That didn’t work. Try again.' }, 400);
     // What the provider said about the check model, from the list it just gave (never from the request)
     const caps = checked.ok ? modelCaps(checked.facts, model) : {};
