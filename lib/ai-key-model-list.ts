@@ -64,7 +64,9 @@ async function sharedModels(key: KeyForModels, options: { fresh?: boolean; now?:
       const at = Date.now();
       // Lists past their time are dropped as new ones come in, so keys nobody asks about any more don't stay in memory
       for (const [entry, value] of cache) if (at - value.at >= MODEL_LIST_TTL_MS) cache.delete(entry);
-      cache.set(id, { at, list });
+      // A failed ask never hides a list still in its time: pages keep showing that one
+      const held = cache.get(id);
+      if (list.ok || !held?.list.ok) cache.set(id, { at, list });
       if (list.ok && list.listed) await rememberFacts(key, list.facts, list.models.length);
       return list;
     })
@@ -164,9 +166,17 @@ export function allowedModels(list: string[], lend: string[] | null): string[] {
   return lend ? list.filter((model) => lend.includes(model)) : list;
 }
 
+/**
+ * The model of a list a bot is put on when it has to take one: the first the provider doesn't say calls no tools, since a
+ * bot's replies always offer tools, else the first.
+ */
+export function firstForBots(models: string[], key: { settings?: unknown; model: string | null }): string {
+  return models.find((model) => modelFactsOf({ settings: key.settings, model: key.model }, model).tools !== false) ?? models[0];
+}
+
 /** The model a bot on this key replies with: its own pick, else the key's check model, kept to what the lend allows. */
-export function servedModel(bot: { aiModel: string | null }, key: { model: string | null }, lend: string[] | null): string | null {
+export function servedModel(bot: { aiModel: string | null }, key: { model: string | null; settings?: unknown }, lend: string[] | null): string | null {
   const model = bot.aiModel ?? key.model;
   if (!lend || (model && lend.includes(model))) return model;
-  return lend[0];
+  return firstForBots(lend, key);
 }

@@ -4,7 +4,7 @@ import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { meOriginAllowed, meRespond } from '@/lib/me-route';
 import { lendAccess, moveBotsToAllowedModel, parseLendModels } from '@/lib/ai-key-lend';
-import { allowedModels, keyModels, lendModels } from '@/lib/ai-key-model-list';
+import { allowedModels, firstForBots, keyModels, lendModels } from '@/lib/ai-key-model-list';
 
 export const runtime = 'nodejs';
 
@@ -64,7 +64,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       update: models === undefined ? {} : { models: models ?? Prisma.DbNull },
       select: { models: true },
     });
-    const moved = models ? await moveBotsToAllowedModel(key, { universeId, allowed: models, firstAllowed: models[0], actor: { id: user.id, name: user.name } }) : { count: 0 };
+    const moved = models ? await moveBotsToAllowedModel(key, { universeId, allowed: models, firstAllowed: firstForBots(models, key), actor: { id: user.id, name: user.name } }) : { count: 0 };
     return respond(request, { status: 'lent', models: lendModels(saved.models), moved: moved.count }, 200);
   } catch (error) {
     // The key was revoked, or the universe deleted, between the checks above and the save
