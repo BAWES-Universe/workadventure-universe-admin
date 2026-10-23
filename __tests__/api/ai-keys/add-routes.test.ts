@@ -171,6 +171,44 @@ describe('POST /api/me/ai-keys with no model picked (#575)', () => {
     expect(provider.create).not.toHaveBeenCalled();
   });
 
+  it('moves past a model with no credit to a free one the list has, and keeps that', async () => {
+    models.mockResolvedValue({ ok: true, models: ['a', 'b', 'c', 'd', 'e', 'f-free:free'], facts: {} });
+    chat
+      .mockResolvedValueOnce({ ok: false, reason: 'credit', status: 402, message: 'OpenRouter says this key is out of credit.' })
+      .mockResolvedValueOnce({ ok: false, reason: 'credit', status: 402, message: 'OpenRouter says this key is out of credit.' })
+      .mockResolvedValueOnce({ ok: false, reason: 'credit', status: 402, message: 'OpenRouter says this key is out of credit.' })
+      .mockResolvedValueOnce({ ok: false, reason: 'credit', status: 402, message: 'OpenRouter says this key is out of credit.' })
+      .mockResolvedValueOnce({ ok: true });
+    const response = await post({ kind: 'openrouter', apiKey: 'sk-or-v1-abcdef1234' });
+    expect(response.status).toBe(201);
+    expect(chat.mock.calls.map((call) => call[0].model)).toEqual(['a', 'b', 'c', 'd', 'f-free:free']);
+    expect(provider.create.mock.calls[0][0].data.model).toBe('f-free:free');
+  });
+
+  it('says the key is out of credit, not a later model’s words, when nothing answers', async () => {
+    models.mockResolvedValue({ ok: true, models: ['a', 'b'], facts: {} });
+    chat
+      .mockResolvedValueOnce({ ok: false, reason: 'credit', status: 402, message: 'OpenRouter says this key is out of credit.' })
+      .mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'That model isn’t there.' });
+    const response = await post({ kind: 'openrouter', apiKey: 'sk-or-v1-abcdef1234' });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: 'OpenRouter says this key is out of credit.' });
+  });
+
+  it('moves past a model whose server errors, but stops when nobody answers at all', async () => {
+    models.mockResolvedValue({ ok: true, models: ['a-broken', 'b-works', 'c'], facts: {} });
+    chat.mockResolvedValueOnce({ ok: false, reason: 'unreachable', status: 500, message: 'A chat call to a-broken failed (500).' }).mockResolvedValueOnce({ ok: true });
+    const moved = await post({ kind: 'lmstudio', address: 'https://lm.example.com' });
+    expect(moved.status).toBe(201);
+    expect(provider.create.mock.calls[0][0].data.model).toBe('b-works');
+
+    chat.mockReset();
+    chat.mockResolvedValue({ ok: false, reason: 'unreachable', message: 'LM Studio didn’t answer. Try again in a moment.' });
+    const silent = await post({ kind: 'lmstudio', address: 'https://lm.example.com' });
+    expect(silent.status).toBe(400);
+    expect(chat).toHaveBeenCalledTimes(1);
+  });
+
   it('refuses a provider that lists no models, and a provider with no list unless the model is typed', async () => {
     models.mockResolvedValue({ ok: true, models: [], facts: {} });
     expect((await post({ kind: 'lmstudio', address: 'https://lm.example.com' })).status).toBe(400);
