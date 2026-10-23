@@ -2,7 +2,7 @@ import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { kindInfo, type AiKeyKindInfo } from '@/lib/ai-key-kinds';
 import { decryptApiKey } from '@/lib/encryption';
-import { probeChat } from '@/lib/ai-key-models';
+import { firstAnswering } from '@/lib/ai-key-answering';
 import { addNotice } from '@/lib/notices';
 import { moveBotsOffKey } from '@/lib/ai-key-lend';
 import { allowedModels, forgetKeyModels, keyModels, lendModels, modelFactsOf, servedModel, type KeyForModels } from '@/lib/ai-key-model-list';
@@ -80,18 +80,14 @@ export async function moveBotOffGoneModel(key: KeyForModels & { ownerId: string 
   return true;
 }
 
-/** How many of the listed models are asked for a tiny reply before one is picked without one. */
-const PICK_TRIES = 3;
-
 /**
- * Picks the model to move to from a list, in order: the provider's suggested model when listed, then the others. A list
- * can hold a model that doesn't chat (an embedding model whose name says nothing), so the first few are each asked for one
- * tiny reply, the same as Add key, and the first that answers is picked. When none does (the key itself was refused, the
- * provider is busy or didn't answer), the first one is kept, as before: the next report or health check says why.
- * Answers are kept for the one report, so the check model and the bot's model never ask the same model twice.
+ * Picks the model to move to from a list: the first that answers one tiny reply, the same as Add key (the provider's
+ * suggested model first). When none does (the key itself was refused, the provider is busy or didn't answer), the first one
+ * is kept, as before: the next report or health check says why. Answers are kept for the one report, so the check model and
+ * the bot's model never ask the same model twice.
  */
 function answeringPicker(key: KeyForModels, info: AiKeyKindInfo | null) {
-  const answers = new Map<string, Promise<'answers' | 'next' | 'stop'>>();
+  const asked = new Map();
   let apiKey: string | undefined;
   let readable = true;
   try {
@@ -99,28 +95,12 @@ function answeringPicker(key: KeyForModels, info: AiKeyKindInfo | null) {
   } catch {
     readable = false;
   }
-  const ask = (kind: string, model: string) => {
-    let answer = answers.get(model);
-    if (!answer) {
-      answer = probeChat({ kind, address: key.endpoint ?? undefined, apiKey, model }).then((chat) => {
-        // A model that refuses only this tiny request still chats (the same as Add key and the health check let it pass)
-        if (chat.ok || chat.reason === 'request') return 'answers';
-        return chat.reason === 'gone' || chat.reason === 'other' || chat.reason === 'credit' ? 'next' : 'stop';
-      });
-      answers.set(model, answer);
-    }
-    return answer;
-  };
   return async (models: string[]): Promise<string> => {
     const suggested = info?.suggestedModel;
-    const ordered = suggested && models.includes(suggested) ? [suggested, ...models.filter((id) => id !== suggested)] : models;
-    if (!info || !readable) return ordered[0];
-    for (const model of ordered.slice(0, PICK_TRIES)) {
-      const answer = await ask(info.kind, model);
-      if (answer === 'answers') return model;
-      if (answer === 'stop') break;
-    }
-    return ordered[0];
+    const first = suggested && models.includes(suggested) ? suggested : models[0];
+    if (!info || !readable) return first;
+    const found = await firstAnswering({ kind: info.kind, address: key.endpoint ?? undefined, apiKey }, models, suggested, asked);
+    return found.ok ? found.model : first;
   };
 }
 
