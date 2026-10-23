@@ -174,11 +174,11 @@ export async function checkKey(key: KeyRow): Promise<KeyCheck> {
     // A 404 is about that one model, listed or not: the first of the others that really answers becomes the check model
     const asked = cleanModelId(key.model, info.kind);
     // Bots with no model of their own reply with the check model and always offer tools, so one the provider says calls none
-    // never becomes it
+    // never becomes it, and the others are asked with a tool, as a bot asks
     const others = models.ok ? models.models.filter((model) => model !== asked && models.facts?.[model]?.tools !== false) : [];
     if (!chat.ok && chat.reason === 'gone' && others.length > 0) {
       // None answering says why, as before
-      const found = await firstAnswering({ kind: info.kind, address, apiKey }, others, info.suggestedModel, undefined, models.ok ? models.facts : {});
+      const found = await firstAnswering({ kind: info.kind, address, apiKey, withTool: true }, others, info.suggestedModel, undefined, models.ok ? models.facts : {});
       if (!found.ok) return failed(found);
       return { ok: true, checkModel: found.model, facts: (models.ok ? models.facts[found.model] : undefined) ?? {} };
     }
