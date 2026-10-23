@@ -6,6 +6,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import snapshot from '@/lib/ai-key-snapshot.json';
 import { AI_KEY_KINDS, moreBenefit } from '@/lib/ai-key-kinds';
+import { isPlainSvg } from '@/scripts/plain-svg.mjs';
 
 const FOLDER = join(process.cwd(), 'public', 'ai-providers');
 const file = (logo: string) => join(FOLDER, `${logo}.svg`);
@@ -25,6 +26,17 @@ describe('provider logos', () => {
       if (entry.kind === 'custom') expect(entry).toMatchObject({ plainIcon: 'plug' });
       else expect(entry.logo).toBeTruthy();
     }
+  });
+
+  it('keeps only plain shapes in every logo file: no script, handlers or addresses', () => {
+    const names = readdirSync(FOLDER);
+    expect(names.length).toBeGreaterThan(40);
+    for (const name of names) expect([name, isPlainSvg(readFileSync(join(FOLDER, name), 'utf8'))]).toEqual([name, true]);
+    expect(isPlainSvg('<svg><script>alert(1)</script></svg>')).toBe(false);
+    expect(isPlainSvg('<svg onload="x()"><path d="M0 0"/></svg>')).toBe(false);
+    expect(isPlainSvg('<svg><foreignObject/></svg>')).toBe(false);
+    expect(isPlainSvg('<svg><a href="javascript:x()"/></svg>')).toBe(false);
+    expect(isPlainSvg('<svg viewBox="0 0 8 8"><path fill="currentColor" d="M0 0h8v8z"/></svg>')).toBe(true);
   });
 
   it('keeps no logo file nothing uses', () => {
