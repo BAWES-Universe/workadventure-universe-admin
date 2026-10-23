@@ -86,8 +86,8 @@ export async function moveBotOffGoneModel(key: KeyForModels & { ownerId: string 
   }
   const { model: next } = await pick(allowed);
   const moved = await prisma.bot.updateMany({ where: { id: bot.id, aiProviderRef: key.providerId, aiModel: bot.aiModel }, data: { aiModel: next } });
-  noteModelChanged(bot.id);
   if (moved.count > 0) {
+    noteModelChanged(bot.id);
     try {
       await addNotice({
         userId: key.ownerId,
