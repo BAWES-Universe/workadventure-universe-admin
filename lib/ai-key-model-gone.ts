@@ -19,10 +19,10 @@ export { LATE_REPORT_MS, noteModelChanged } from '@/lib/ai-key-late-report';
  * gets a new check model, so the health check does not mark it Down for a model nobody uses.
  *
  * A model the provider still lists but that answers a bot with a 404 is treated the same for that bot (another listed model
- * may still answer), unless it is the key's check model.
+ * may still answer), the key's check model too.
  *
- * Returns false when this can't be decided (the list can't be loaded, the provider has no list, or the check model is still
- * listed): then the reply's failure counts against the key as before. A report that comes in just after the bot was moved is
+ * Returns false when this can't be decided (the list can't be loaded, the provider has no list, or the lend's only model is
+ * still listed): then the reply's failure counts against the key as before. A report that comes in just after the bot was moved is
  * about the model it left (a reply already on its way, or the bot server still holding the old answer), so it is let go.
  */
 export async function moveBotOffGoneModel(key: KeyForModels & { ownerId: string | null; name: string }, botId: string): Promise<boolean> {
@@ -42,19 +42,17 @@ export async function moveBotOffGoneModel(key: KeyForModels & { ownerId: string 
   // The model the reply was asked of: the bot's own, or the one its lend falls back to
   const gone = servedModel(bot, key, lend);
   if (!gone) return false;
+  // A model the provider still lists but that won't answer is that model's failure only, the key's check model too: the
+  // bot moves off it the same as off a gone one, and the key gets another check model when one answers
   const listed = list.models.includes(gone);
-  if (listed) {
-    // The key's own check model still listed but not answering is the key's failure, counted as before. Any other listed
-    // model that won't answer is that bot's model only: the bot moves off it the same as off a gone one.
-    if (gone === key.model) return false;
-  }
 
   const info = kindInfo((key.settings as { kind?: unknown } | null)?.kind);
   const label = info?.label ?? 'The provider';
   const pick = answeringPicker(key, info, list.facts);
-  if (gone === key.model && list.models.length > 0) {
+  const others = list.models.filter((model) => model !== gone);
+  if (gone === key.model && others.length > 0) {
     // Only a model that answered becomes the check model: else the next health check finds one, as it does for a gone one
-    const check = await pick(list.models);
+    const check = await pick(others);
     if (check.answered) await replaceCheckModel(key, check.model);
   }
 
@@ -85,10 +83,12 @@ export async function moveBotOffGoneModel(key: KeyForModels & { ownerId: string 
     }
     return true;
   }
-  const { model: next } = await pick(allowed);
+  const { model: next, answered } = await pick(allowed);
   const moved = await prisma.bot.updateMany({ where: { id: bot.id, aiProviderRef: key.providerId, aiModel: bot.aiModel }, data: { aiModel: next } });
   if (moved.count > 0) {
-    noteModelChanged(bot.id);
+    // A report just after the move is late news about the model it left, but only when the new one is known to answer:
+    // a model that didn't answer may fail too, and then its report has to count
+    if (answered) noteModelChanged(bot.id);
     try {
       await addNotice({
         userId: key.ownerId,
