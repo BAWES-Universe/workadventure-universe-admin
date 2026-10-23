@@ -287,9 +287,11 @@ export async function probeModels(input: KeyTargetInput & { apiKey?: unknown }):
 /**
  * Asks the key's provider for one tiny reply from the saved model. A model list can answer while chat does not (the model
  * was removed, chat credit ran out), so this is what proves a key that went Down on failed replies works again.
+ *
+ * `noList`: the provider has no model list, so its words must not say it lists its models. `withTool`: the reply offers one
+ * tool, as a bot's reply always does, since a provider can refuse a model only when tools come with the call.
  */
-/** `noList`: the provider has no model list, so its words must not say it lists its models. */
-export async function probeChat(input: KeyTargetInput & { apiKey?: unknown; model: string; noList?: boolean }): Promise<{ ok: true } | { ok: false; message: string; reason: ProbeFailure }> {
+export async function probeChat(input: KeyTargetInput & { apiKey?: unknown; model: string; noList?: boolean; withTool?: boolean }): Promise<{ ok: true } | { ok: false; message: string; reason: ProbeFailure }> {
   const resolved = keyTarget(input);
   if (!resolved.ok) return { ...resolved, reason: 'other' };
   const { info, modelsUrl } = resolved.target;
@@ -306,7 +308,7 @@ export async function probeChat(input: KeyTargetInput & { apiKey?: unknown; mode
     safeRequest(checked, {
       method: 'POST',
       headers: authHeaders(info, apiKey),
-      body: { ...chatProbeBody(info, input.model), ...extra },
+      body: { ...chatProbeBody(info, input.model, { withTool: input.withTool }), ...extra },
       // A server on your own computer may load its model on the first call, which can take well over 30 seconds
       timeoutMs: info.group === 'own-computer' ? 120_000 : 30_000,
       maxBytes: 200_000,

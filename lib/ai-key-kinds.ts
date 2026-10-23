@@ -362,9 +362,17 @@ export function chatPath(info: AiKeyKindInfo): string {
 }
 
 /** The smallest chat call that gets one reply, in the provider's own format. */
-export function chatProbeBody(info: AiKeyKindInfo, model: string): Record<string, unknown> {
-  if (info.protocol === 'anthropic') return { model, max_tokens: 32, messages: [{ role: 'user', content: 'Say ok.' }] };
-  return { model, messages: [{ role: 'user', content: 'Say ok.' }], stream: false, [info.tokenLimitField ?? 'max_tokens']: 16 };
+export function chatProbeBody(info: AiKeyKindInfo, model: string, options: { withTool?: boolean } = {}): Record<string, unknown> {
+  if (info.protocol === 'anthropic') {
+    return { model, max_tokens: 32, messages: [{ role: 'user', content: 'Say ok.' }], ...(options.withTool ? { tools: [{ name: 'noop', description: 'Does nothing.', input_schema: { type: 'object', properties: {} } }] } : {}) };
+  }
+  return {
+    model,
+    messages: [{ role: 'user', content: 'Say ok.' }],
+    stream: false,
+    [info.tokenLimitField ?? 'max_tokens']: 16,
+    ...(options.withTool ? { tools: [{ type: 'function', function: { name: 'noop', description: 'Does nothing.', parameters: { type: 'object', properties: {} } } }] } : {}),
+  };
 }
 
 const withoutSlash = (url: string) => {
