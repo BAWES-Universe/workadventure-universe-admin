@@ -47,7 +47,7 @@ describe('Add a key', () => {
     expect(screen.getByRole('heading', { name: 'Set up Claude' })).toBeTruthy();
     expect(within(screen.getByTestId('picked-provider')).getByText('Claude')).toBeTruthy();
     expect(screen.queryByRole('radio', { name: /^Gemini/ })).toBeNull();
-    ['Get your Claude key', 'Paste your key', 'Pick a model', 'Name it'].forEach((part, index) => {
+    ['Get your Claude key', 'Paste your key', 'Its models', 'Name it'].forEach((part, index) => {
       expect(screen.getByRole('heading', { name: part }).textContent).toBe(`${index + 1}${part}`);
     });
     // Read about sits inside the setup card, never outside it
@@ -85,7 +85,7 @@ describe('Add a key', () => {
     expect(screen.getByText('On aistudio.google.com, choose Get API key.')).toBeTruthy();
   });
 
-  it('keeps Add key off until the models loaded and one is picked, then adds and goes back to the list', async () => {
+  it('keeps Add key off until the models loaded, then adds with no model picked and goes back to the list (#575)', async () => {
     fetchMock.mockImplementation((url: string) =>
       url.endsWith('/models') ? json({ ok: true, models: ['gemma-3-12b', 'qwen3-8b'] }) : json({ id: 'key-new' }),
     );
@@ -93,15 +93,17 @@ describe('Add a key', () => {
     fireEvent.click(screen.getByRole('radio', { name: /LM Studio/ }));
     expect((screen.getByRole('button', { name: /Load models/ }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.change(screen.getByLabelText('Address'), { target: { value: 'https://lm.example.com' } });
+    expect((addButton() as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: /Load models/ }));
     await screen.findByText(/It answered. LM Studio has 2 models./);
-    expect((addButton() as HTMLButtonElement).disabled).toBe(true);
-    fireEvent.click(screen.getByRole('radio', { name: 'qwen3-8b' }));
+    // The list is to look at: nothing to pick
+    expect(screen.getAllByTestId('model-row').map((row) => row.textContent)).toEqual(['gemma-3-12b', 'qwen3-8b']);
+    expect(screen.queryByRole('radio', { name: 'qwen3-8b' })).toBeNull();
     expect((addButton() as HTMLButtonElement).disabled).toBe(false);
     fireEvent.click(addButton());
     await waitFor(() => expect(push).toHaveBeenCalledWith('/admin/you/ai-keys'));
     const [, init] = fetchMock.mock.calls.at(-1)!;
-    expect(JSON.parse(init.body)).toEqual({ kind: 'lmstudio', address: 'https://lm.example.com', apiKey: '', model: 'qwen3-8b', name: 'My LM Studio' });
+    expect(JSON.parse(init.body)).toEqual({ kind: 'lmstudio', address: 'https://lm.example.com', apiKey: '', name: 'My LM Studio' });
   });
 
   it('asks for the model name when the provider has no model list, and adds it as typed (#456)', async () => {
@@ -158,16 +160,16 @@ describe('Add a key', () => {
     expect((addButton() as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it('forgets the loaded models, and the model picked, as soon as the key or address changes', async () => {
+  it('forgets the loaded models as soon as the key or address changes', async () => {
     fetchMock.mockImplementation(() => json({ ok: true, models: ['gemini-flash-latest', 'gemini-pro-latest'] }));
     render(<AddAiKeyPage />);
     fireEvent.click(screen.getByRole('radio', { name: /Gemini/ }));
     fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'AIza-first' } });
     fireEvent.click(screen.getByRole('button', { name: /Load models/ }));
-    fireEvent.click(await screen.findByRole('radio', { name: 'gemini-flash-latest' }));
+    await screen.findByText(/It answered/);
     expect((addButton() as HTMLButtonElement).disabled).toBe(false);
     fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'AIza-second' } });
-    expect(screen.queryByRole('radio', { name: 'gemini-flash-latest' })).toBeNull();
+    expect(screen.queryByTestId('model-picker')).toBeNull();
     expect((addButton() as HTMLButtonElement).disabled).toBe(true);
   });
 
@@ -178,10 +180,34 @@ describe('Add a key', () => {
     fireEvent.click(screen.getByRole('radio', { name: /OpenRouter/ }));
     fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'sk-or-123' } });
     fireEvent.click(screen.getByRole('button', { name: /Load models/ }));
-    await screen.findByLabelText('Search models');
-    expect(within(screen.getByRole('radiogroup', { name: 'Model' })).getAllByRole('radio')).toHaveLength(30);
-    fireEvent.change(screen.getByLabelText('Search models'), { target: { value: 'model-3' } });
-    expect(within(screen.getByRole('radiogroup', { name: 'Model' })).getAllByRole('radio')).toHaveLength(10);
+    const search = await screen.findByLabelText('Search OpenRouter models');
+    expect(screen.getAllByTestId('model-row')).toHaveLength(40);
+    fireEvent.change(search, { target: { value: 'model-3' } });
+    expect(screen.getAllByTestId('model-row')).toHaveLength(10);
+    expect(screen.getByText('10 models')).toBeTruthy();
+  });
+
+  it('groups a list from many makers, folded, with the biggest makers first and the rest behind Show all', async () => {
+    const makers = ['openai', 'google', 'meta-llama', 'mistralai', 'qwen', 'deepseek', 'moonshotai', 'x-ai', 'z-ai', 'nvidia'];
+    const many = makers.flatMap((maker, index) => Array.from({ length: makers.length - index }, (_, n) => `${maker}/model-${n}`));
+    fetchMock.mockImplementation(() => json({ ok: true, models: many }));
+    render(<AddAiKeyPage />);
+    fireEvent.click(screen.getByRole('radio', { name: /OpenRouter/ }));
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'sk-or-123' } });
+    fireEvent.click(screen.getByRole('button', { name: /Load models/ }));
+    await screen.findByText(`It answered. OpenRouter has ${many.length} models from 10 makers.`);
+    const makerRows = screen.getAllByTestId('maker-row');
+    expect(makerRows).toHaveLength(8);
+    expect(makerRows[0].textContent).toContain('OpenAI');
+    expect(makerRows[0].textContent).toContain('10 models');
+    expect(screen.queryAllByTestId('model-row')).toHaveLength(0);
+    fireEvent.click(makerRows[0]);
+    expect(screen.getAllByTestId('model-row').map((row) => row.textContent)[0]).toBe('model-0');
+    fireEvent.click(screen.getByRole('button', { name: 'Show all 10 makers' }));
+    expect(screen.getAllByTestId('maker-row')).toHaveLength(10);
+    // A search shows what matches, makers and all
+    fireEvent.change(screen.getByLabelText('Search OpenRouter models'), { target: { value: 'nvidia' } });
+    expect(screen.getAllByTestId('model-row')).toHaveLength(1);
   });
 
   it('shows what the server said when adding fails, and stays here', async () => {
@@ -301,19 +327,18 @@ describe('Add a key: more providers, regions and search', () => {
   });
 });
 
-describe('Add a key: a model that cannot use bot tools', () => {
-  it('warns once such a model is picked, and not for one the provider said nothing about', async () => {
+describe('Add a key: a model with no Tools', () => {
+  it('marks a model the provider says has no Tools, and nothing for one it said nothing about', async () => {
     fetchMock.mockImplementation(() => json({ ok: true, models: ['big-model', 'tiny-chat'], facts: { 'tiny-chat': { tools: false } } }));
     render(<AddAiKeyPage />);
     fireEvent.click(screen.getByRole('radio', { name: /^LM Studio/ }));
     fireEvent.change(screen.getByLabelText('Address'), { target: { value: 'https://lm.example.com' } });
     fireEvent.click(screen.getByRole('button', { name: /Load models/ }));
     await screen.findByText(/It answered/);
-    fireEvent.click(screen.getByRole('radio', { name: 'big-model' }));
-    expect(screen.queryByTestId('no-tools-warning')).toBeNull();
-    fireEvent.click(screen.getByRole('radio', { name: 'tiny-chat' }));
-    expect(screen.getByTestId('no-tools-warning').textContent).toBe('This model has no Tools. Bots on it can still chat.');
-    // The warning does not stop Add key
+    const [big, tiny] = screen.getAllByTestId('model-row');
+    expect(big.textContent).toBe('big-model');
+    expect(tiny.textContent).toBe('tiny-chatNo tools');
+    // The mark does not stop Add key
     expect((addButton() as HTMLButtonElement).disabled).toBe(false);
   });
 });
@@ -361,12 +386,12 @@ describe('Add a key: More providers', () => {
     await screen.findByText(/It answered/);
     fireEvent.click(addButton());
     await waitFor(() => expect(push).toHaveBeenCalledWith('/admin/you/ai-keys'));
-    expect(JSON.parse(fetchMock.mock.calls.at(-1)![1].body)).toMatchObject({ kind: 'nebius', apiKey: 'sk-1', model: 'm-1' });
+    expect(JSON.parse(fetchMock.mock.calls.at(-1)![1].body)).toEqual({ kind: 'nebius', address: '', apiKey: 'sk-1', name: 'My Nebius Token Factory' });
   });
 });
 
-describe('Add a key: DeepSeek shows which model has Vision', () => {
-  it('starts on deepseek-v4-flash, shows Vision only next to the image model, and adds the key on it', async () => {
+describe('Add a key: what the models can do', () => {
+  it('shows Vision only next to the image model, and adds the key with no model picked', async () => {
     fetchMock.mockImplementation((url: string) =>
       url.endsWith('/models')
         ? json({ ok: true, models: ['deepseek-v4-flash', 'deepseek-v4-flash-vision-exp', 'deepseek-v4-pro'], facts: { 'deepseek-v4-flash': { vision: false }, 'deepseek-v4-flash-vision-exp': { vision: true }, 'deepseek-v4-pro': { vision: false } } })
@@ -377,24 +402,22 @@ describe('Add a key: DeepSeek shows which model has Vision', () => {
     fireEvent.change(screen.getByLabelText(/API key/), { target: { value: 'sk-test' } });
     fireEvent.click(screen.getByRole('button', { name: /Load models/ }));
     await screen.findByText(/It answered/);
-    expect((screen.getByRole('radio', { name: 'deepseek-v4-flash' }) as HTMLElement).getAttribute('aria-checked')).toBe('true');
-    expect(screen.getByRole('radio', { name: /^deepseek-v4-flash-vision-exp/ }).textContent).toContain('Vision');
-    expect(screen.getByRole('radio', { name: 'deepseek-v4-flash' }).textContent).not.toContain('Vision');
-    expect(screen.getByRole('radio', { name: /^deepseek-v4-pro/ }).textContent).not.toContain('Vision');
+    expect(screen.getAllByTestId('model-row').map((row) => row.textContent)).toEqual(['deepseek-v4-flash', 'deepseek-v4-flash-vision-expVision', 'deepseek-v4-pro']);
     fireEvent.click(addButton());
     await waitFor(() => expect(push).toHaveBeenCalled());
     const add = fetchMock.mock.calls.find((call) => !String(call[0]).endsWith('/models'))!;
-    expect(JSON.parse(add[1].body)).toMatchObject({ kind: 'deepseek', model: 'deepseek-v4-flash' });
+    expect(JSON.parse(add[1].body)).not.toHaveProperty('model');
   });
 
-  it('picks nothing when the list does not hold the suggested model', async () => {
-    fetchMock.mockImplementation(() => json({ ok: true, models: ['deepseek-v4-pro', 'deepseek-chat'] }));
+  it('says once what every model has, instead of on each row', async () => {
+    fetchMock.mockImplementation(() => json({ ok: true, models: ['claude-haiku-5-5', 'claude-opus-5-5'], facts: { 'claude-haiku-5-5': { vision: true }, 'claude-opus-5-5': { vision: true } } }));
     render(<AddAiKeyPage />);
-    fireEvent.click(screen.getByRole('radio', { name: /^DeepSeek/ }));
-    fireEvent.change(screen.getByLabelText(/API key/), { target: { value: 'sk-test' } });
+    fireEvent.click(screen.getByRole('radio', { name: /^Claude/ }));
+    fireEvent.change(screen.getByLabelText(/API key/), { target: { value: 'sk-ant-1' } });
     fireEvent.click(screen.getByRole('button', { name: /Load models/ }));
     await screen.findByText(/It answered/);
-    expect((addButton() as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText(/All 2 have/).textContent).toBe('All 2 have Vision');
+    expect(screen.getAllByTestId('model-row').map((row) => row.textContent)).toEqual(['claude-haiku-5-5', 'claude-opus-5-5']);
   });
 });
 
@@ -408,7 +431,7 @@ describe('Add a key: Claude', () => {
     expect(screen.getByLabelText('API key')).toBeTruthy();
   });
 
-  it('loads Claude’s models, sending the kind and key, and adds the one picked', async () => {
+  it('loads Claude’s models, sending the kind and key, and adds the key', async () => {
     fetchMock.mockImplementation((url: string) =>
       url.endsWith('/models') ? json({ ok: true, models: ['claude-haiku-4-5', 'claude-opus-5-5'], facts: {} }) : json({ id: 'key-new' }),
     );
@@ -418,9 +441,8 @@ describe('Add a key: Claude', () => {
     fireEvent.click(screen.getByRole('button', { name: /Load models/ }));
     await screen.findByText(/It answered. Claude has 2 models./);
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({ kind: 'claude', apiKey: 'sk-ant-api03-abcd' });
-    fireEvent.click(screen.getByRole('radio', { name: 'claude-haiku-4-5' }));
     fireEvent.click(addButton());
     await waitFor(() => expect(push).toHaveBeenCalled());
-    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toMatchObject({ kind: 'claude', model: 'claude-haiku-4-5' });
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ kind: 'claude', address: '', apiKey: 'sk-ant-api03-abcd', name: 'My Claude' });
   });
 });

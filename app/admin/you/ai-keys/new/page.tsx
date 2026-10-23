@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import type React from 'react';
 import { useRouter } from 'next/navigation';
 import { Check, Download, ExternalLink, KeyRound } from 'lucide-react';
@@ -9,6 +9,7 @@ import { PickCard, Radio } from '@/components/ui/choice';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { ProviderLogo } from '../../../components/ds/provider-logo';
+import { ModelPicker, makerOf } from '../../../components/ds/model-picker';
 import { useToast } from '@/components/ui/toast';
 import { authenticatedFetch } from '@/lib/client-auth';
 import { AI_KEY_KINDS, kindInfo, type AiKeyKind, type AiKeyKindInfo } from '@/lib/ai-key-kinds';
@@ -17,13 +18,9 @@ import { AiKeyFailure, aiKeyError, aiKeyFailureText } from '../../../hooks/use-a
 
 type Models = { status: 'none' } | { status: 'loading' } | { status: 'ready'; models: string[]; facts: Record<string, { tools?: boolean; vision?: boolean }> } | { status: 'failed'; message: string } | { status: 'typed' };
 
-/** Said when a provider's own list says the model cannot call tools (it does not say, for most models, and then nothing is said). */
-const NO_TOOLS = 'This model has no Tools. Bots on it can still chat.';
-
 const FIELD_HINT = 'text-[13px] text-muted-foreground';
-/** More models than this and a search box appears; only this many are shown at once. */
+/** More providers than this and a search box appears. */
 const SEARCH_FROM = 8;
-const SHOWN = 30;
 
 /** One setup step: its words, and the command to copy when it has one. */
 function SetupStep({ step }: { step: AiKeyKindInfo['steps'][number] }) {
@@ -83,8 +80,9 @@ function SetupCard({ info }: { info: AiKeyKindInfo }) {
 
 /**
  * Add a key (#374, two steps since #575): step 1 picks a provider; step 2 sets it up in numbered parts: how to get a
- * key (Read about inside that card), its address and key, load its models (which also proves it answers) and pick
- * one, then a name. Add key stays off until the models loaded. The key is sent once and never shown again.
+ * key (Read about inside that card), its address and key, load its models (which also proves it answers) and see
+ * them, then a name. No model is picked here: each bot picks its own, and a lend can limit them. A provider with no
+ * model list has its one model typed. Add key stays off until the models loaded. The key is sent once and never shown again.
  */
 export default function AddAiKeyPage() {
   const router = useRouter();
@@ -99,7 +97,6 @@ export default function AddAiKeyPage() {
   const [apiKey, setApiKey] = useState('');
   const [models, setModels] = useState<Models>({ status: 'none' });
   const [model, setModel] = useState<string | null>(null);
-  const [search, setSearch] = useState('');
   const [typedName, setTypedName] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
@@ -137,7 +134,6 @@ export default function AddAiKeyPage() {
     latestLoad.current += 1;
     setModels({ status: 'none' });
     setModel(null);
-    setSearch('');
     setFailure(null);
   }
 
@@ -162,10 +158,8 @@ export default function AddAiKeyPage() {
       const data: { ok?: boolean; models?: string[]; facts?: Record<string, { tools?: boolean; vision?: boolean }>; message?: string; noList?: boolean } = await response.json().catch(() => ({}));
       if (mine !== latestLoad.current) return;
       if (data.ok && Array.isArray(data.models)) {
+        // Nothing is picked here: each bot picks its own model from the key's list
         setModels({ status: 'ready', models: data.models, facts: data.facts ?? {} });
-        // The one model there is, is the one picked; otherwise the one this provider suggests, when it lists it.
-        if (data.models.length === 1) setModel(data.models[0]);
-        else if (info.suggestedModel && data.models.includes(info.suggestedModel)) setModel(info.suggestedModel);
       } else if (data.noList) {
         // This provider has no model list: the model is typed, and Add key proves it with one tiny reply
         setModels({ status: 'typed' });
@@ -178,15 +172,18 @@ export default function AddAiKeyPage() {
     }
   }
 
+  // A listed provider needs at least one model for the key's check; a provider with no list needs its model typed
+  const canAdd = models.status === 'ready' ? models.models.length > 0 : models.status === 'typed' && !!model && model.trim() !== '';
+
   async function add() {
-    if (!info || !model) return;
+    if (!info || !canAdd) return;
     setSaving(true);
     setFailure(null);
     try {
       const response = await authenticatedFetch('/api/me/ai-keys', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ kind: info.kind, address, ...(region ? { region } : {}), apiKey, model: model.trim(), name }),
+        body: JSON.stringify({ kind: info.kind, address, ...(region ? { region } : {}), apiKey, ...(model ? { model: model.trim() } : {}), name }),
       });
       if (!response.ok) {
         const data: { error?: string } = await response.json().catch(() => ({}));
@@ -200,13 +197,8 @@ export default function AddAiKeyPage() {
     }
   }
 
-  const visible = useMemo(() => {
-    if (models.status !== 'ready') return [];
-    const needle = search.trim().toLowerCase();
-    return models.models.filter((id) => !needle || id.toLowerCase().includes(needle)).slice(0, SHOWN);
-  }, [models, search]);
-
   const own = info?.group === 'own-computer';
+  const makerCount = models.status === 'ready' ? new Set(models.models.map((id) => makerOf(id).key)).size : 0;
   const loaded = models.status === 'ready' || models.status === 'typed';
   let part = 1;
 
@@ -362,13 +354,13 @@ export default function AddAiKeyPage() {
               {models.status === 'ready' && (
                 <p className="flex items-center gap-1.5 text-sm text-muted-foreground">
                   <Check size={16} aria-hidden="true" className="text-[#4ade80]" />
-                  It answered. {info.label} has {models.models.length} {models.models.length === 1 ? 'model' : 'models'}.
+                  It answered. {info.label} has {models.models.length} {models.models.length === 1 ? 'model' : 'models'}{makerCount > 1 ? ` from ${makerCount} makers` : ''}.
                 </p>
               )}
             </div>
           </Part>
 
-          <Part n={part++} title="Pick a model">
+          <Part n={part++} title={models.status === 'typed' ? 'Name its model' : 'Its models'}>
             {!loaded && <p className={FIELD_HINT}>{info.label}’s models show here once they load.</p>}
             {models.status === 'typed' && (
               <div className="grid gap-1.5">
@@ -390,27 +382,8 @@ export default function AddAiKeyPage() {
             )}
             {models.status === 'ready' && (
               <>
-                {models.models.length > SEARCH_FROM && (
-                  <Input
-                    type="search"
-                    aria-label="Search models"
-                    placeholder="Search models"
-                    value={search}
-                    onChange={(event) => setSearch(event.target.value)}
-                    className="h-11 rounded-xl"
-                  />
-                )}
-                <div role="radiogroup" aria-label="Model" className="grid gap-2">
-                  {visible.map((id) => (
-                    <PickCard key={id} role="radio" picked={model === id} onClick={() => setModel(id)} indicator={<Radio checked={model === id} />} title={id} description={models.facts[id]?.vision ? 'Vision' : undefined} className="[&_span.block]:break-all" />
-                  ))}
-                  {visible.length === 0 && <p className={FIELD_HINT}>No model matches that.</p>}
-                </div>
-                {model && models.facts[model]?.tools === false && (
-                  <p className="text-sm text-[#F5C451]" data-testid="no-tools-warning">
-                    {NO_TOOLS}
-                  </p>
-                )}
+                <p className={FIELD_HINT}>Nothing to pick here. Each bot picks one of these on its own page. When you lend the key, you can limit which ones bots there may use.</p>
+                <ModelPicker models={models.models} facts={models.facts} mode="browse" label={`${info.label} models`} />
               </>
             )}
           </Part>
@@ -430,7 +403,7 @@ export default function AddAiKeyPage() {
           )}
 
           <div className="grid gap-2">
-            <Button type="submit" className="h-11" disabled={!model || model.trim() === '' || name.trim() === '' || saving}>
+            <Button type="submit" className="h-11" disabled={!canAdd || name.trim() === '' || saving}>
               {saving ? 'Adding…' : 'Add key'}
             </Button>
             <Button type="button" variant="outline" className="h-11" disabled={saving} onClick={() => router.back()}>

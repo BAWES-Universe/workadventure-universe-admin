@@ -86,7 +86,6 @@ describe('POST /api/me/ai-keys', () => {
 
   it.each([
     ['no type', { model: 'm' }],
-    ['no model', { kind: 'lmstudio', address: 'https://lm.example.com' }],
     ['no address on an own-computer type', { kind: 'lmstudio', model: 'qwen3-8b' }],
     ['a name that is too long', { kind: 'lmstudio', address: 'https://lm.example.com', model: 'qwen3-8b', name: 'x'.repeat(61) }],
     ['a key with a space in it', { kind: 'openai', apiKey: 'sk- abc', model: 'qwen3-8b' }],
@@ -129,6 +128,56 @@ describe('POST /api/me/ai-keys/models', () => {
   it('refuses a body that is not an object', async () => {
     expect((await post('[1]', loadModelsRoute)).status).toBe(400);
     expect((await post('nope', loadModelsRoute)).status).toBe(400);
+  });
+});
+
+describe('POST /api/me/ai-keys with no model picked (#575)', () => {
+  it('keeps the provider’s suggested model as the check model when it lists it, with what it says about it', async () => {
+    models.mockResolvedValue({ ok: true, models: ['deepseek-chat', 'deepseek-v4-flash', 'deepseek-v4-pro'], facts: { 'deepseek-v4-flash': { vision: false, tools: true } } });
+    const response = await post({ kind: 'deepseek', apiKey: 'sk-abcdef4f2a' });
+    expect(response.status).toBe(201);
+    expect(chat).toHaveBeenCalledTimes(1);
+    expect(chat).toHaveBeenCalledWith(expect.objectContaining({ model: 'deepseek-v4-flash' }));
+    expect(provider.create.mock.calls[0][0].data).toMatchObject({ model: 'deepseek-v4-flash', supportsVision: false, settings: { kind: 'deepseek', caps: { vision: false, tools: true } } });
+  });
+
+  it('keeps the first listed model that answers when the provider suggests none', async () => {
+    models.mockResolvedValue({ ok: true, models: ['a-gone', 'b-works', 'c'], facts: {} });
+    chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'That model isn’t there.' }).mockResolvedValueOnce({ ok: true });
+    const response = await post({ kind: 'lmstudio', address: 'https://lm.example.com' });
+    expect(response.status).toBe(201);
+    expect(chat.mock.calls.map((call) => call[0].model)).toEqual(['a-gone', 'b-works']);
+    expect(provider.create.mock.calls[0][0].data.model).toBe('b-works');
+  });
+
+  it('stops at once when the key itself is refused, and says why, saving nothing', async () => {
+    models.mockResolvedValue({ ok: true, models: ['a', 'b', 'c'], facts: {} });
+    chat.mockResolvedValue({ ok: false, reason: 'rejected', message: 'DeepSeek didn’t accept this key.' });
+    const response = await post({ kind: 'deepseek', apiKey: 'sk-bad' });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: 'DeepSeek didn’t accept this key.' });
+    expect(chat).toHaveBeenCalledTimes(1);
+    expect(provider.create).not.toHaveBeenCalled();
+  });
+
+  it('tries only a few models, then says why the last one failed', async () => {
+    models.mockResolvedValue({ ok: true, models: ['a', 'b', 'c', 'd', 'e', 'f'], facts: {} });
+    chat.mockResolvedValue({ ok: false, reason: 'gone', message: 'That model isn’t there.' });
+    const response = await post({ kind: 'lmstudio', address: 'https://lm.example.com' });
+    expect(response.status).toBe(400);
+    expect(chat).toHaveBeenCalledTimes(4);
+    expect(provider.create).not.toHaveBeenCalled();
+  });
+
+  it('refuses a provider that lists no models, and a provider with no list unless the model is typed', async () => {
+    models.mockResolvedValue({ ok: true, models: [], facts: {} });
+    expect((await post({ kind: 'lmstudio', address: 'https://lm.example.com' })).status).toBe(400);
+    models.mockResolvedValue({ ok: false, noList: true, message: 'Groq doesn’t share a list of its models.' });
+    const response = await post({ kind: 'groq', apiKey: 'gsk-1234' });
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toBe('Groq doesn’t share a list of its models. Type the model name.');
+    expect(chat).not.toHaveBeenCalled();
+    expect(provider.create).not.toHaveBeenCalled();
   });
 });
 

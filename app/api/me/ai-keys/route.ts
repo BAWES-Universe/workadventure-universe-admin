@@ -32,11 +32,17 @@ export async function GET(request: NextRequest) {
   }
 }
 
+/** How many of a provider's listed models Add key tries for its one tiny reply before it says why none answered. */
+const CHECK_TRIES = 4;
+
 /**
- * POST /api/me/ai-keys { kind, address?, region?, apiKey?, model, name? } - add a key for the caller. The provider is asked
- * for its models first, then for one tiny reply from the model picked, so a key that doesn't answer is never saved and the
- * model is one it really has (some providers list their models to anyone, so the list alone can't prove a key). The key
- * is stored encrypted and never sent back.
+ * POST /api/me/ai-keys { kind, address?, region?, apiKey?, model?, name? } - add a key for the caller. The provider is asked
+ * for its models first, then for one tiny reply, so a key that doesn't answer is never saved (some providers list their
+ * models to anyone, so the list alone can't prove a key). The key is stored encrypted and never sent back.
+ *
+ * No model is picked when adding a key (#575): each bot picks its own. The key keeps a check model for that reply and the
+ * health check: the provider's suggested model when it lists it, else the first listed one that answers. A provider with
+ * no model list has its model typed (`model`), which is then its check model and its one model.
  */
 export async function POST(request: NextRequest) {
   if (!meOriginAllowed(request)) return respond(request, { error: 'Origin not allowed' }, 403);
@@ -55,8 +61,8 @@ export async function POST(request: NextRequest) {
   if (!resolved.ok) return respond(request, { error: resolved.message }, 400);
   const { info, endpoint, region } = resolved.target;
 
-  const model = typeof input.model === 'string' ? input.model.trim() : '';
-  if (!model || model.length > 255) return respond(request, { error: 'Pick a model first.' }, 400);
+  const typedModel = typeof input.model === 'string' ? input.model.trim() : '';
+  if (typedModel.length > 255) return respond(request, { error: 'That model name is too long.' }, 400);
   const typedName = typeof input.name === 'string' ? input.name.trim() : '';
   if (typedName.length > 60) return respond(request, { error: 'Keep the name under 60 characters.' }, 400);
   const name = typedName || `My ${info.label}`;
@@ -72,16 +78,35 @@ export async function POST(request: NextRequest) {
     // A provider with no model list: the person typed the model, so nothing says it exists but the chat reply below
     const noList = !checked.ok && checked.noList === true;
     if (!checked.ok && !noList) return respond(request, { error: checked.message }, 400);
-    if (checked.ok && !checked.models.includes(model)) {
+    if (noList && !typedModel) return respond(request, { error: `${info.label} doesn’t share a list of its models. Type the model name.` }, 400);
+    if (checked.ok && checked.models.length === 0) return respond(request, { error: `${info.label} lists no models for this key.` }, 400);
+    // An older page still sends the model it picked: it must be on the list, as before
+    if (checked.ok && typedModel && !checked.models.includes(typedModel)) {
       return respond(request, { error: 'That model isn’t on the list. Load models again and pick one.' }, 400);
     }
-    // What the provider said about this model, from the list it just gave (never from the request)
+    const candidates = !checked.ok
+      ? [typedModel]
+      : typedModel
+        ? [typedModel]
+        : checkCandidates(checked.models, info.suggestedModel);
+    let model: string | null = null;
+    let refused: string | null = null;
+    for (const candidate of candidates) {
+      const chat = await probeChat({ kind: info.kind, address: input.address, region, apiKey, model: candidate, ...(noList ? { noList } : {}) });
+      // A listed model that refuses only this tiny request (a reasoning model that wants a bigger cap, say) is not a wrong key
+      // or model: it is kept, the same as the health check lets it pass. A typed model has no list behind it, so only a real
+      // reply keeps it.
+      if (chat.ok || (!noList && chat.reason === 'request')) {
+        model = candidate;
+        break;
+      }
+      refused = chat.message;
+      // The key itself was refused, is out of credit, or nobody answered: another model would say the same
+      if (chat.reason !== 'gone' && chat.reason !== 'other') break;
+    }
+    if (!model) return respond(request, { error: refused ?? 'That didn’t work. Try again.' }, 400);
+    // What the provider said about the check model, from the list it just gave (never from the request)
     const caps = checked.ok ? modelCaps(checked.facts, model) : {};
-    const chat = await probeChat({ kind: info.kind, address: input.address, region, apiKey, model, ...(noList ? { noList } : {}) });
-    // The model is on the list, so a 400 here is the provider refusing this tiny request (a reasoning model that wants a bigger
-    // cap, say), not a wrong key or model: it is saved, the same as the health check lets it pass. A typed model has no list
-    // behind it, so only a real reply saves it.
-    if (!chat.ok && (noList || chat.reason !== 'request')) return respond(request, { error: chat.message }, 400);
     const row = await prisma.botsAiProvider.create({
       data: {
         providerId: `key-${randomUUID()}`,
@@ -114,4 +139,10 @@ export async function POST(request: NextRequest) {
     console.error('[AiKeys] Add failed:', error instanceof Error ? error.message : 'unknown');
     return respond(request, { error: 'Internal server error' }, 500);
   }
+}
+
+/** The models Add key tries for its one tiny reply: the provider's suggested model when listed, then the first few listed. */
+function checkCandidates(listed: string[], suggested: string | undefined): string[] {
+  const first = suggested && listed.includes(suggested) ? [suggested] : [];
+  return [...first, ...listed.filter((id) => id !== suggested)].slice(0, CHECK_TRIES);
 }
