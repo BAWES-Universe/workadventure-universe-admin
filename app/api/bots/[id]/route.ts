@@ -532,7 +532,8 @@ export async function PUT(
     }
 
     // A reply still on its way reports the model the bot had: it must not count against the key it is on now (#575)
-    if ((updateData.aiModel !== undefined && updateData.aiModel !== existingBot.aiModel) || nextRef !== existingBot.aiProviderRef) noteModelChanged(id);
+    const changed = (updateData.aiModel !== undefined && updateData.aiModel !== existingBot.aiModel) || nextRef !== existingBot.aiProviderRef;
+    const undoNote = changed ? noteModelChanged(id) : undefined;
 
     const bot = await prisma.bot.update({
       where: { id },
@@ -565,6 +566,10 @@ export async function PUT(
           },
         },
       },
+    }).catch((error: unknown) => {
+      // The save failed, so the model didn't change: a report about it counts again
+      undoNote?.();
+      throw error;
     });
 
     // Transform to camelCase

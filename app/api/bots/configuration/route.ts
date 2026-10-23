@@ -516,8 +516,6 @@ export async function POST(request: NextRequest) {
         });
         // A model belongs to one key (#575): a bot moved to another key, or off keys, starts on that key's check model
         moveOffModel = updateData.aiProviderRef !== undefined && updateData.aiProviderRef !== (existing?.aiProviderRef ?? null);
-        // A reply still on its way reports the model it had: it must not count against the key it is on now
-        if (moveOffModel) noteModelChanged(validatedData.botId);
         // Hide bot conversations (#435): a move out of a hiding universe keeps the bot Private
         keepPrivate = !!existing?.roomId && existing.roomId !== roomId && (await mustStayPrivateAfterMove(validatedData.botId, roomId));
         const existingConfig = (existing?.behaviorConfig as Record<string, unknown> | null) || {};
@@ -531,6 +529,9 @@ export async function POST(request: NextRequest) {
             existingConfig.assignedSpace ?? { center: { x: 0, y: 0 }, radius: 0 },
         };
       }
+      // A reply still on its way reports the model it had: it must not count against the key it is on now. A save that
+      // fails changes nothing, so then the note is taken back.
+      const undoNote = moveOffModel ? noteModelChanged(validatedData.botId) : undefined;
       bot = await prisma.bot.update({
         where: { id: validatedData.botId },
         data: { ...updateData, ...(keepPrivate ? { hideConversations: true } : {}), ...(moveOffModel ? { aiModel: null } : {}) },
@@ -551,6 +552,9 @@ export async function POST(request: NextRequest) {
             select: { id: true, name: true, email: true },
           },
         },
+      }).catch((error: unknown) => {
+        undoNote?.();
+        throw error;
       });
       statusCode = 200;
     } else {
