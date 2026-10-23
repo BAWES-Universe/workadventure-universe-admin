@@ -25,6 +25,14 @@ import { allowedModels, forgetKeyModels, keyModels, lendModels, modelFactsOf, se
 export const LATE_REPORT_MS = 10 * 60_000;
 const movedAt = new Map<string, number>();
 
+/**
+ * A bot's model just changed (its maker picked another, or it moved key): a model-gone report in the next few minutes is
+ * about the model it had, from a reply already on its way, so it is let go the same as after a move made here.
+ */
+export function noteModelChanged(botId: string): void {
+  movedAt.set(botId, Date.now());
+}
+
 export async function moveBotOffGoneModel(key: KeyForModels & { ownerId: string | null; name: string }, botId: string): Promise<boolean> {
   if (!key.ownerId) return false;
   const bot = await prisma.bot.findUnique({
@@ -32,8 +40,8 @@ export async function moveBotOffGoneModel(key: KeyForModels & { ownerId: string 
     select: { id: true, name: true, aiModel: true, aiProviderRef: true, room: { select: { world: { select: { universe: { select: { id: true, name: true } } } } } } },
   });
   if (!bot || bot.aiProviderRef !== key.providerId) return false;
-  // Moved in the last few minutes: this is late news about the model it left, so the provider isn't even asked
-  const at = movedAt.get(`${key.providerId}:${bot.id}`);
+  // Moved or changed in the last few minutes, on any key: late news about the model it left, so the provider isn't even asked
+  const at = movedAt.get(bot.id);
   if (at !== undefined && Date.now() - at < LATE_REPORT_MS) return true;
   const list = await keyModels(key, { fresh: true });
   if (!list.ok || !list.listed) return false;
@@ -65,7 +73,7 @@ export async function moveBotOffGoneModel(key: KeyForModels & { ownerId: string 
   }
   const next = await pick(allowed);
   const moved = await prisma.bot.updateMany({ where: { id: bot.id, aiProviderRef: key.providerId, aiModel: bot.aiModel }, data: { aiModel: next } });
-  movedAt.set(`${key.providerId}:${bot.id}`, Date.now());
+  noteModelChanged(bot.id);
   if (moved.count > 0) {
     try {
       await addNotice({

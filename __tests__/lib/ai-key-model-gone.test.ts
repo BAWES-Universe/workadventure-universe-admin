@@ -4,7 +4,7 @@ import { keyModels } from '@/lib/ai-key-model-list';
 import { moveBotsOffKey } from '@/lib/ai-key-lend';
 import { probeChat } from '@/lib/ai-key-models';
 import { decryptApiKey } from '@/lib/encryption';
-import { LATE_REPORT_MS, moveBotOffGoneModel } from '@/lib/ai-key-model-gone';
+import { LATE_REPORT_MS, moveBotOffGoneModel, noteModelChanged } from '@/lib/ai-key-model-gone';
 
 /** A provider drops the model one bot uses (#575): that bot moves, the key stays Working. */
 
@@ -162,6 +162,13 @@ describe('moveBotOffGoneModel', () => {
     list.mockResolvedValue({ ok: true, models: ['meta-llama/llama-4-maverick', 'openai/gpt-5-mini'], facts: {}, listed: true });
     expect(await moveBotOffGoneModel(key, 'b4')).toBe(false);
     expect(moveBotsOffKey).not.toHaveBeenCalled();
+    expect(db.bot.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('lets a report go just after the maker changed the bot’s model or key, since it is about the model it had', async () => {
+    noteModelChanged(guide.id);
+    expect(await moveBotOffGoneModel(key, guide.id)).toBe(true);
+    expect(list).not.toHaveBeenCalled();
     expect(db.bot.updateMany).not.toHaveBeenCalled();
   });
 
