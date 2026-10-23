@@ -13,8 +13,13 @@ import { allowedModels, forgetKeyModels, keyModels, lendModels, modelFactsOf, se
  * gets a new check model, so the health check does not mark it Down for a model nobody uses.
  *
  * Returns false when this can't be decided (the list can't be loaded, the provider has no list, or the model is still on
- * it): then the reply's failure counts against the key as before.
+ * it): then the reply's failure counts against the key as before. A report that comes in just after the bot was moved is
+ * about the model it left (a reply already on its way, or the bot server still holding the old answer), so it is let go.
  */
+/** How long after a move a model-gone report for that bot is taken as late news about the model it left. */
+export const LATE_REPORT_MS = 10 * 60_000;
+const movedAt = new Map<string, number>();
+
 export async function moveBotOffGoneModel(key: KeyForModels & { ownerId: string | null; name: string }, botId: string): Promise<boolean> {
   if (!key.ownerId) return false;
   const bot = await prisma.bot.findUnique({
@@ -29,7 +34,10 @@ export async function moveBotOffGoneModel(key: KeyForModels & { ownerId: string 
   const lend = lendModels(lent?.models);
   // The model the reply was asked of: the bot's own, or the one its lend falls back to
   const gone = servedModel(bot, key, lend);
-  if (!gone || list.models.includes(gone)) return false;
+  if (!gone || list.models.includes(gone)) {
+    const at = movedAt.get(`${key.providerId}:${bot.id}`);
+    return at !== undefined && Date.now() - at < LATE_REPORT_MS;
+  }
 
   const info = kindInfo((key.settings as { kind?: unknown } | null)?.kind);
   const label = info?.label ?? 'The provider';
@@ -43,6 +51,7 @@ export async function moveBotOffGoneModel(key: KeyForModels & { ownerId: string 
   }
   const next = info?.suggestedModel && allowed.includes(info.suggestedModel) ? info.suggestedModel : allowed[0];
   const moved = await prisma.bot.updateMany({ where: { id: bot.id, aiProviderRef: key.providerId, aiModel: bot.aiModel }, data: { aiModel: next } });
+  movedAt.set(`${key.providerId}:${bot.id}`, Date.now());
   if (moved.count > 0) {
     try {
       await addNotice({

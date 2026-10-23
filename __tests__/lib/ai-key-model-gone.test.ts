@@ -2,7 +2,7 @@ import { prisma } from '@/lib/db';
 import { addNotice } from '@/lib/notices';
 import { keyModels } from '@/lib/ai-key-model-list';
 import { moveBotsOffKey } from '@/lib/ai-key-lend';
-import { moveBotOffGoneModel } from '@/lib/ai-key-model-gone';
+import { LATE_REPORT_MS, moveBotOffGoneModel } from '@/lib/ai-key-model-gone';
 
 /** A provider drops the model one bot uses (#575): that bot moves, the key stays Working. */
 
@@ -80,6 +80,8 @@ describe('moveBotOffGoneModel', () => {
   });
 
   it('can’t decide, and leaves it to the usual count, when the list fails, the provider has none, or the model is still listed', async () => {
+    // A bot this file never moved, so no late report is in play
+    db.bot.findUnique.mockResolvedValue({ ...guide, id: 'b9' });
     list.mockResolvedValueOnce({ ok: false, message: 'down' });
     expect(await moveBotOffGoneModel(key, 'b1')).toBe(false);
     list.mockResolvedValueOnce({ ok: true, models: ['openai/gpt-5-mini'], facts: {}, listed: false });
@@ -87,6 +89,20 @@ describe('moveBotOffGoneModel', () => {
     list.mockResolvedValueOnce({ ok: true, models: ['meta-llama/llama-4-maverick'], facts: {}, listed: true });
     expect(await moveBotOffGoneModel(key, 'b1')).toBe(false);
     expect(db.bot.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('lets a late report go for a bot it just moved, without moving it again, and counts it again later', async () => {
+    db.bot.findUnique.mockResolvedValue({ ...guide, id: 'b7' });
+    expect(await moveBotOffGoneModel(key, 'b7')).toBe(true);
+    db.bot.updateMany.mockClear();
+    // The bot is on its new model now, which the provider lists; a reply already on its way reports the old one
+    db.bot.findUnique.mockResolvedValue({ ...guide, id: 'b7', aiModel: 'deepseek/deepseek-v4-flash' });
+    expect(await moveBotOffGoneModel(key, 'b7')).toBe(true);
+    expect(db.bot.updateMany).not.toHaveBeenCalled();
+    const now = Date.now();
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(now + LATE_REPORT_MS + 1);
+    expect(await moveBotOffGoneModel(key, 'b7')).toBe(false);
+    clock.mockRestore();
   });
 
   it('does nothing for a bot that is not on this key any more', async () => {
