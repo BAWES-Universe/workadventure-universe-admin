@@ -3,7 +3,7 @@ import { prisma } from '@/lib/db';
 import { kindInfo, type AiKeyKindInfo } from '@/lib/ai-key-kinds';
 import { decryptApiKey } from '@/lib/encryption';
 import { firstAnswering } from '@/lib/ai-key-answering';
-import { changedLately, noteModelChanged } from '@/lib/ai-key-late-report';
+import { changedLately, noteCheckModelChanged, noteModelChanged } from '@/lib/ai-key-late-report';
 import { addNotice } from '@/lib/notices';
 import { moveBotsOffKey } from '@/lib/ai-key-lend';
 import { allowedModels, forgetKeyModels, keyModels, lendModels, modelFactsOf, servedModel, type KeyForModels } from '@/lib/ai-key-model-list';
@@ -32,7 +32,7 @@ export async function moveBotOffGoneModel(key: KeyForModels & { ownerId: string 
   });
   if (!bot || bot.aiProviderRef !== key.providerId) return false;
   // Moved or changed in the last few minutes, on any key: late news about the model it left, so the provider isn't even asked
-  if (changedLately(bot.id)) return true;
+  if (changedLately(bot, key.providerId)) return true;
   const list = await keyModels(key, { fresh: true });
   if (!list.ok || !list.listed) return false;
   const universe = bot.room.world.universe;
@@ -116,4 +116,5 @@ async function replaceCheckModel(key: KeyForModels, model: string): Promise<void
     data: { model, settings: settings as Prisma.InputJsonValue, supportsVision: caps.vision ?? null },
   });
   forgetKeyModels(key.providerId);
+  noteCheckModelChanged(key.providerId);
 }
