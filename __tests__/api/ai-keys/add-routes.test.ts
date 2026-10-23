@@ -169,6 +169,20 @@ describe('POST /api/me/ai-keys with no model picked (#575)', () => {
     expect(provider.create).not.toHaveBeenCalled();
   });
 
+  it('prefers a model that really replies over one that only refused the tiny request, and keeps that one when none replies', async () => {
+    models.mockResolvedValue({ ok: true, models: ['a-embed', 'b-chat', 'c'], facts: {} });
+    chat.mockResolvedValueOnce({ ok: false, reason: 'request', message: 'a chat call to a-embed failed (400).' }).mockResolvedValueOnce({ ok: true });
+    expect((await post({ kind: 'lmstudio', address: 'https://lm.example.com' })).status).toBe(201);
+    expect(provider.create.mock.calls[0][0].data.model).toBe('b-chat');
+
+    chat.mockReset();
+    provider.create.mockClear();
+    chat.mockResolvedValue({ ok: false, reason: 'request', message: 'a chat call failed (400).' });
+    expect((await post({ kind: 'lmstudio', address: 'https://lm.example.com' })).status).toBe(201);
+    expect(chat).toHaveBeenCalledTimes(3);
+    expect(provider.create.mock.calls[0][0].data.model).toBe('a-embed');
+  });
+
   it('moves past a model with no credit to a free one the list has, and keeps that', async () => {
     models.mockResolvedValue({ ok: true, models: ['a', 'b', 'c', 'd', 'e', 'f-free:free'], facts: {} });
     chat
