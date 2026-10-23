@@ -3,6 +3,7 @@ import { has } from '@/lib/permissions';
 import { permissionsForWorld } from '@/lib/roles';
 import { addNotice } from '@/lib/notices';
 import { UNIVERSE_AI_REF, resolveUniverseAiProvider } from '@/lib/universe-ai';
+import { noteModelChanged } from '@/lib/ai-key-late-report';
 
 /**
  * Lending a personal AI key to a universe (#374). A person may lend a key where they have Manage bots: the universe's
@@ -179,6 +180,8 @@ export async function moveBotsToAllowedModel(
   );
   const moved = leaving.filter((_, index) => results[index].count > 0);
   if (moved.length === 0) return { count: 0 };
+  // A reply already on its way used the old model: its report must not move the bot again
+  for (const bot of moved) noteModelChanged(bot.id);
   const universe = moved[0].room.world.universe;
   if (universe.ownerId !== options.actor.id) {
     const names = moved.map((bot) => bot.name);

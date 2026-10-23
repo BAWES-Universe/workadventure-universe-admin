@@ -9,7 +9,7 @@ import { LATE_REPORT_MS, moveBotOffGoneModel, noteModelChanged } from '@/lib/ai-
 /** A provider drops the model one bot uses (#575): that bot moves, the key stays Working. */
 
 jest.mock('@/lib/db', () => ({
-  prisma: { bot: { findUnique: jest.fn(), updateMany: jest.fn() }, aiKeyLend: { findUnique: jest.fn() }, botsAiProvider: { updateMany: jest.fn() } },
+  prisma: { bot: { findUnique: jest.fn(), updateMany: jest.fn() }, aiKeyLend: { findUnique: jest.fn() }, botsAiProvider: { findUnique: jest.fn(), updateMany: jest.fn() } },
 }));
 jest.mock('@/lib/notices', () => ({ addNotice: jest.fn() }));
 jest.mock('@/lib/ai-key-lend', () => ({ moveBotsOffKey: jest.fn() }));
@@ -17,7 +17,7 @@ jest.mock('@/lib/ai-key-model-list', () => ({ ...jest.requireActual('@/lib/ai-ke
 jest.mock('@/lib/ai-key-models', () => ({ ...jest.requireActual('@/lib/ai-key-models'), probeChat: jest.fn() }));
 jest.mock('@/lib/encryption', () => ({ decryptApiKey: jest.fn() }));
 
-const db = prisma as unknown as { bot: Record<'findUnique' | 'updateMany', jest.Mock>; aiKeyLend: Record<'findUnique', jest.Mock>; botsAiProvider: Record<'updateMany', jest.Mock> };
+const db = prisma as unknown as { bot: Record<'findUnique' | 'updateMany', jest.Mock>; aiKeyLend: Record<'findUnique', jest.Mock>; botsAiProvider: Record<'findUnique' | 'updateMany', jest.Mock> };
 const list = keyModels as jest.Mock;
 const notice = addNotice as jest.Mock;
 const chat = probeChat as jest.Mock;
@@ -37,6 +37,7 @@ beforeEach(() => {
   db.bot.findUnique.mockResolvedValue(guide);
   db.bot.updateMany.mockResolvedValue({ count: 1 });
   db.aiKeyLend.findUnique.mockResolvedValue({ models: null });
+  db.botsAiProvider.updateMany.mockResolvedValue({ count: 1 });
   list.mockResolvedValue({ ok: true, models: ['deepseek/deepseek-v4-flash', 'openai/gpt-5-mini'], facts: {}, listed: true });
   chat.mockResolvedValue({ ok: true });
   (decryptApiKey as jest.Mock).mockReturnValue('sk-or-v1-abcdef1234');
@@ -185,6 +186,21 @@ describe('moveBotOffGoneModel', () => {
     db.bot.findUnique.mockResolvedValue({ ...guide, id: 'follower', aiModel: null });
     expect(await moveBotOffGoneModel({ ...key, model: 'deepseek/deepseek-v4-flash' }, 'follower')).toBe(true);
     expect(list).not.toHaveBeenCalled();
+  });
+
+  it('keeps settings saved meanwhile, and leaves a model someone else picked meanwhile', async () => {
+    db.bot.findUnique.mockResolvedValue({ ...guide, aiModel: null, aiProviderRef: 'key-9' });
+    db.botsAiProvider.findUnique.mockResolvedValue({ settings: { kind: 'openrouter', label: 'Work' } });
+    db.botsAiProvider.updateMany.mockResolvedValue({ count: 0 });
+    list.mockResolvedValue({ ok: true, models: ['deepseek/deepseek-v4-flash', 'qwen/qwen3-235b'], facts: {}, listed: true });
+    const other = { ...key, providerId: 'key-9' };
+    await moveBotOffGoneModel(other, guide.id);
+    expect(db.botsAiProvider.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ settings: { kind: 'openrouter', label: 'Work' } }) }));
+    // The check model did not change here, so a follower's report is not a late one
+    list.mockClear();
+    db.bot.findUnique.mockResolvedValue({ ...guide, id: 'follower-9', aiModel: null, aiProviderRef: 'key-9' });
+    await moveBotOffGoneModel({ ...other, model: 'deepseek/deepseek-v4-flash' }, 'follower-9');
+    expect(list).toHaveBeenCalled();
   });
 
   it('does nothing for a bot that is not on this key any more', async () => {

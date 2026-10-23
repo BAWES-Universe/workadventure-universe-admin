@@ -230,13 +230,17 @@ export async function checkAndRecord(key: KeyRow): Promise<KeyCheck> {
 /** The key's check model went and another one answered: it is saved with what the provider says about it (#575). */
 async function saveCheckModel(key: KeyRow, model: string, facts: { tools?: boolean; vision?: boolean }): Promise<void> {
   const caps = { ...(typeof facts.tools === 'boolean' ? { tools: facts.tools } : {}), ...(typeof facts.vision === 'boolean' ? { vision: facts.vision } : {}) };
-  const settings: Record<string, unknown> = { ...((key.settings as Record<string, unknown> | null) ?? {}) };
+  // The check took a while: settings saved meanwhile (a new label, say) are kept
+  const saved = await prisma.botsAiProvider.findUnique({ where: { providerId: key.providerId }, select: { settings: true } });
+  const settings: Record<string, unknown> = { ...(((saved ? saved.settings : key.settings) as Record<string, unknown> | null) ?? {}) };
   if (Object.keys(caps).length > 0) settings.caps = caps;
   else delete settings.caps;
-  await prisma.botsAiProvider.updateMany({
+  const { count } = await prisma.botsAiProvider.updateMany({
     where: { providerId: key.providerId, ownerId: { not: null }, model: key.model ?? null },
     data: { model, settings: settings as Prisma.InputJsonValue, supportsVision: caps.vision ?? null },
   });
+  // Someone changed the model meanwhile: theirs stands
+  if (count === 0) return;
   forgetKeyModels(key.providerId);
   // Bots that follow the check model now reply with this one: a report about the old one may still come in
   noteCheckModelChanged(key.providerId);
