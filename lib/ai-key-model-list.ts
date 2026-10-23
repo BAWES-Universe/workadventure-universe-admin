@@ -10,7 +10,7 @@ import { probeModels, type ModelFacts, type ModelFactsById } from '@/lib/ai-key-
  *
  * The provider's list is asked with the saved key and kept here for a few minutes, so a bot page and a save in a row don't
  * call out twice. A provider with no model list (the model was typed when the key was added) has that one model. What the
- * provider says about each model (Tools, Vision) is kept on the key too (`settings.modelFacts`), so a bot's reply never
+ * provider says about each model (Tools, Vision, how much it reads) is kept on the key too (`settings.modelFacts`), so a bot's reply never
  * waits for the list to say whether its model sees images.
  */
 
@@ -40,8 +40,17 @@ export function forgetKeyModels(providerId: string): void {
   for (const entry of cache.keys()) if (entry.startsWith(`${providerId}|`)) cache.delete(entry);
 }
 
-/** The models this key's provider has now, from the list kept for a few minutes or asked for again (`fresh`: always asked). */
+/**
+ * The models this key's provider has now, from the list kept for a few minutes or asked for again (`fresh`: always asked).
+ * Every caller's `key` then holds what the list said about each model, also one that joined a request already running.
+ */
 export async function keyModels(key: KeyForModels, options: { fresh?: boolean; now?: number } = {}): Promise<KeyModelList> {
+  const list = await sharedModels(key, options);
+  if (list.ok && list.listed) key.settings = { ...(isRecord(key.settings) ? key.settings : {}), modelFacts: slimFacts(list.facts), modelCount: list.models.length };
+  return list;
+}
+
+async function sharedModels(key: KeyForModels, options: { fresh?: boolean; now?: number }): Promise<KeyModelList> {
   const id = cacheKey(key);
   const now = options.now ?? Date.now();
   const kept = cache.get(id);
@@ -77,14 +86,20 @@ async function askProvider(key: KeyForModels): Promise<KeyModelList> {
   return { ok: false, message: result.message };
 }
 
-/** Only Tools and Vision are kept per model; a fact the provider left out stays unknown. */
+/** The facts about one model that are well-formed (Tools, Vision, how much it reads); one the provider left out stays unknown. */
+export function cleanFacts(fact: unknown): ModelFacts {
+  if (!isRecord(fact)) return {};
+  return {
+    ...(typeof fact.tools === 'boolean' ? { tools: fact.tools } : {}),
+    ...(typeof fact.vision === 'boolean' ? { vision: fact.vision } : {}),
+    ...(typeof fact.context === 'number' && Number.isFinite(fact.context) && fact.context > 0 ? { context: fact.context } : {}),
+  };
+}
+
 function slimFacts(facts: ModelFactsById): Record<string, ModelFacts> {
   const slim: Record<string, ModelFacts> = {};
   for (const [model, fact] of Object.entries(facts)) {
-    const kept: ModelFacts = {
-      ...(typeof fact.tools === 'boolean' ? { tools: fact.tools } : {}),
-      ...(typeof fact.vision === 'boolean' ? { vision: fact.vision } : {}),
-    };
+    const kept = cleanFacts(fact);
     if (Object.keys(kept).length > 0) slim[model] = kept;
   }
   return slim;
@@ -122,11 +137,7 @@ export function modelFactsOf(key: { settings: unknown; model: string | null; sup
   const settings = isRecord(key.settings) ? key.settings : {};
   const listed = isRecord(settings.modelFacts) && isRecord(settings.modelFacts[model]) ? (settings.modelFacts[model] as Record<string, unknown>) : null;
   const known = kindInfo(settings.kind)?.knownFacts?.[model];
-  const fact = listed ?? known ?? (model === key.model && isRecord(settings.caps) ? settings.caps : null) ?? {};
-  return {
-    ...(typeof fact.tools === 'boolean' ? { tools: fact.tools } : {}),
-    ...(typeof fact.vision === 'boolean' ? { vision: fact.vision } : {}),
-  };
+  return cleanFacts(listed ?? known ?? (model === key.model && isRecord(settings.caps) ? settings.caps : null));
 }
 
 /** Whether a bot on this model sees images: the provider's word (null when it said nothing, left to the bot server's guess). */

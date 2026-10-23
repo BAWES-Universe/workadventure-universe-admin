@@ -2,12 +2,12 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { decryptApiKey } from '@/lib/encryption';
 import { kindInfo } from '@/lib/ai-key-kinds';
-import { cleanModelId, probeChat, probeModels, type ProbeFailure } from '@/lib/ai-key-models';
+import { cleanModelId, probeChat, probeModels, type ModelFacts, type ProbeFailure } from '@/lib/ai-key-models';
 import { addNotice, clearNotices } from '@/lib/notices';
 import { moveBotOffGoneModel } from '@/lib/ai-key-model-gone';
 import { firstAnswering } from '@/lib/ai-key-answering';
 import { noteCheckModelChanged } from '@/lib/ai-key-late-report';
-import { forgetKeyModels } from '@/lib/ai-key-model-list';
+import { cleanFacts, forgetKeyModels } from '@/lib/ai-key-model-list';
 
 /**
  * Is a personal key working, and what do its bots do while it isn't (#374). A key is Down after two replies in a row
@@ -140,7 +140,7 @@ export async function markWorking(key: Pick<KeyRow, 'providerId' | 'ownerId'>, n
 }
 
 export type KeyCheck =
-  | { ok: true; checkModel?: string; facts?: { tools?: boolean; vision?: boolean } }
+  | { ok: true; checkModel?: string; facts?: ModelFacts }
   | { ok: false; reason: DownReason; message: string }
   | { ok: false; busy: true; message: string };
 
@@ -174,7 +174,7 @@ export async function checkKey(key: KeyRow): Promise<KeyCheck> {
     // that is the request's problem, not the key's, and a real reply's 400 is not counted against a key either
     if (!chat.ok && chat.reason === 'gone' && models.ok && models.models.length > 0 && !models.models.includes(cleanModelId(key.model, info.kind))) {
       // The first of the others that really answers becomes the check model; none answering says why, as before
-      const found = await firstAnswering({ kind: info.kind, address, apiKey }, models.models, info.suggestedModel);
+      const found = await firstAnswering({ kind: info.kind, address, apiKey }, models.models, info.suggestedModel, undefined, models.facts);
       if (!found.ok) return failed(found);
       return { ok: true, checkModel: found.model, facts: models.facts[found.model] ?? {} };
     }
@@ -228,8 +228,8 @@ export async function checkAndRecord(key: KeyRow): Promise<KeyCheck> {
 }
 
 /** The key's check model went and another one answered: it is saved with what the provider says about it (#575). */
-async function saveCheckModel(key: KeyRow, model: string, facts: { tools?: boolean; vision?: boolean }): Promise<void> {
-  const caps = { ...(typeof facts.tools === 'boolean' ? { tools: facts.tools } : {}), ...(typeof facts.vision === 'boolean' ? { vision: facts.vision } : {}) };
+async function saveCheckModel(key: KeyRow, model: string, facts: ModelFacts): Promise<void> {
+  const caps = cleanFacts(facts);
   // The check took a while: settings saved meanwhile (a new label, say) are kept
   const saved = await prisma.botsAiProvider.findUnique({ where: { providerId: key.providerId }, select: { settings: true } });
   const settings: Record<string, unknown> = { ...(((saved ? saved.settings : key.settings) as Record<string, unknown> | null) ?? {}) };

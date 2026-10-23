@@ -129,6 +129,22 @@ describe('checkAndRecord: a new check model (#575)', () => {
     });
   });
 
+  it('keeps how much the new check model reads, as Add key does', async () => {
+    probe.mockResolvedValue({ ok: true, models: ['deepseek-chat'], facts: { 'deepseek-chat': { tools: true, context: 128000 } } });
+    chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'gone' });
+    chat.mockResolvedValueOnce({ ok: true });
+    await checkAndRecord({ ...hosted, model: 'deepseek-v4-flash' });
+    expect(db.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ settings: { kind: 'deepseek', caps: { tools: true, context: 128000 } } }) }));
+  });
+
+  it('asks models the provider says call tools first, past a list that starts with ones that don’t chat', async () => {
+    probe.mockResolvedValue({ ok: true, models: ['embed-a', 'embed-b', 'embed-c', 'embed-d', 'chat-x'], facts: { 'chat-x': { tools: true } } });
+    chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'gone' });
+    chat.mockResolvedValueOnce({ ok: true });
+    expect(await checkKey({ ...hosted, model: 'deepseek-v4-flash' })).toMatchObject({ ok: true, checkModel: 'chat-x' });
+    expect(chat).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps settings saved while the check ran', async () => {
     probe.mockResolvedValue({ ok: true, models: ['deepseek-chat'], facts: {} });
     chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'gone' });

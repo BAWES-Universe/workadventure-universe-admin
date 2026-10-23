@@ -1,7 +1,7 @@
-import { probeChat, type ProbeFailure } from '@/lib/ai-key-models';
+import { probeChat, type ModelFactsById, type ProbeFailure } from '@/lib/ai-key-models';
 
 /** How many of a key's listed models are asked for one tiny reply before giving up on finding one that answers. */
-export const ANSWER_TRIES = 3;
+export const ANSWER_TRIES = 4;
 
 type ChatResult = Awaited<ReturnType<typeof probeChat>>;
 export type Answering = { ok: true; model: string } | { ok: false; message: string; reason: ProbeFailure };
@@ -14,15 +14,20 @@ export type Answering = { ok: true; model: string } | { ok: false; message: stri
  * out of credit for another model (that model's refusal proves nothing then). A refused key, a busy provider or no answer
  * at all would say the same for every model, so the search stops there.
  *
- * `asked` keeps the answers for one caller, so the same model is never asked twice.
+ * Models the provider says call tools are asked ahead of the rest, the same as Add key: those are chat models, so a list
+ * that starts with embedding or image models still finds one that replies. `asked` keeps the answers for one caller, so the
+ * same model is never asked twice.
  */
 export async function firstAnswering(
   target: { kind: string; address?: string; apiKey?: string },
   models: string[],
   suggested: string | undefined,
   asked: Map<string, Promise<ChatResult>> = new Map(),
+  facts: ModelFactsById = {},
 ): Promise<Answering> {
-  const ordered = suggested && models.includes(suggested) ? [suggested, ...models.filter((id) => id !== suggested)] : models;
+  const first = suggested && models.includes(suggested) ? [suggested] : [];
+  const rest = models.filter((id) => !first.includes(id));
+  const ordered = [...first, ...rest.filter((id) => facts[id]?.tools === true), ...rest.filter((id) => facts[id]?.tools !== true)];
   let refusedRequest: string | null = null;
   let last: { message: string; reason: ProbeFailure } | null = null;
   let credit: { message: string; reason: ProbeFailure } | null = null;

@@ -1,6 +1,6 @@
 import { prisma } from '@/lib/db';
 import { probeModels } from '@/lib/ai-key-models';
-import { allowedModels, forgetKeyModels, keyModels, lendModels, modelSupportsVision, servedModel, MODEL_LIST_TTL_MS } from '@/lib/ai-key-model-list';
+import { allowedModels, forgetKeyModels, keyModels, lendModels, modelFactsOf, modelSupportsVision, servedModel, MODEL_LIST_TTL_MS } from '@/lib/ai-key-model-list';
 import { providerPayload } from '@/lib/ai-provider-payload';
 
 /** A bot picks its own model on a key, and a lend can allow only some (#575). */
@@ -77,14 +77,14 @@ describe('keyModels', () => {
     expect(probe).toHaveBeenCalledTimes(4);
   });
 
-  it('keeps what the provider said about each model on the key, Tools and Vision only, once', async () => {
+  it('keeps what the provider said about each model on the key, Tools, Vision and how much it reads, once', async () => {
     probe.mockResolvedValue(LIST);
     const key = claudeKey();
     db.findUnique.mockResolvedValue({ settings: { kind: 'claude', caps: { vision: true } } });
     await keyModels(key);
     expect(db.updateMany).toHaveBeenCalledWith({
       where: { providerId: key.providerId, ownerId: { not: null } },
-      data: { settings: { kind: 'claude', caps: { vision: true }, modelFacts: { 'claude-haiku-5-5': { vision: true, tools: true } }, modelCount: LIST.models.length } },
+      data: { settings: { kind: 'claude', caps: { vision: true }, modelFacts: { 'claude-haiku-5-5': { vision: true, tools: true, context: 200000 } }, modelCount: LIST.models.length } },
     });
     db.updateMany.mockClear();
     await keyModels(key, { fresh: true });
@@ -93,9 +93,22 @@ describe('keyModels', () => {
 
   it('doesn’t save again when the saved facts only differ in key order (Postgres reorders a jsonb)', async () => {
     probe.mockResolvedValue(LIST);
-    const key = claudeKey({ settings: { kind: 'claude', modelFacts: { 'claude-haiku-5-5': { tools: true, vision: true } }, modelCount: 3 } });
+    const key = claudeKey({ settings: { kind: 'claude', modelFacts: { 'claude-haiku-5-5': { context: 200000, tools: true, vision: true } }, modelCount: 3 } });
     await keyModels(key, { fresh: true });
     expect(db.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('gives a caller that joined a request already running the same facts', async () => {
+    let answer: ((value: unknown) => void) | undefined;
+    probe.mockReturnValue(new Promise((resolve) => (answer = resolve)));
+    db.findUnique.mockResolvedValue({ settings: { kind: 'claude' } });
+    const first = claudeKey();
+    const joiner = { ...first, settings: { kind: 'claude' } };
+    const asks = [keyModels(first, { fresh: true }), keyModels(joiner)];
+    answer?.(LIST);
+    await Promise.all(asks);
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(modelFactsOf(joiner, 'claude-haiku-5-5')).toEqual({ vision: true, tools: true, context: 200000 });
   });
 
   it('gives a provider with no model list its one typed model', async () => {
