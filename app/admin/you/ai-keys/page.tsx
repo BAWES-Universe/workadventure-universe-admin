@@ -490,24 +490,33 @@ function LendSheet({
     setFailure(null);
     setLimit(lent?.models ? 'only' : 'all');
     setOnly(lent?.models ?? []);
-    authenticatedFetch('/api/me/ai-keys/universes')
-      .then(async (response) => {
-        if (!response.ok) throw new Error('failed');
-        const data = (await response.json()) as { universes?: LendableUniverse[] };
-        if (cancelled) return;
-        const list = data.universes ?? [];
-        setUniverses(list);
-        setPicked(editing ?? list.find((universe) => !lentIds.has(universe.id))?.id ?? null);
-      })
-      .catch(() => {
-        if (!cancelled) setLoadFailed(true);
-      });
+    // Changing one lend's models needs no universe list: that universe is the one saved
+    setPicked(editing ?? null);
+    if (!editing) {
+      authenticatedFetch('/api/me/ai-keys/universes')
+        .then(async (response) => {
+          if (!response.ok) throw new Error('failed');
+          const data = (await response.json()) as { universes?: LendableUniverse[] };
+          if (cancelled) return;
+          const list = data.universes ?? [];
+          setUniverses(list);
+          setPicked(list.find((universe) => !lentIds.has(universe.id))?.id ?? null);
+        })
+        .catch(() => {
+          if (!cancelled) setLoadFailed(true);
+        });
+    }
     // The key's models, for "Only these"
     authenticatedFetch(`/api/me/ai-keys/${encodeURIComponent(keyToLend.id)}/models`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
       .then(async (response) => {
         const data = (await response.json().catch(() => ({}))) as { ok?: boolean; models?: string[]; facts?: Record<string, { tools?: boolean; vision?: boolean }>; message?: string; noList?: boolean };
         if (cancelled) return;
-        if (data.ok && Array.isArray(data.models)) setModels({ status: 'ready', models: data.models, facts: data.facts ?? {} });
+        if (data.ok && Array.isArray(data.models)) {
+          const listed = data.models;
+          setModels({ status: 'ready', models: listed, facts: data.facts ?? {} });
+          // A model the provider no longer has can't be ticked off, so it is dropped from the ones kept
+          setOnly((kept) => kept.filter((id) => listed.includes(id)));
+        }
         else if (data.noList) setModels({ status: 'typed' });
         else setModels({ status: 'failed', message: data.message || 'Couldn’t load the models. Close this and try again.' });
       })
@@ -522,7 +531,7 @@ function LendSheet({
   }, [keyToLend?.id, editing]);
 
   async function lend() {
-    if (!keyToLend || !picked || !universes) return;
+    if (!keyToLend || !picked || (!editing && !universes)) return;
     setBusy(true);
     setFailure(null);
     try {
@@ -536,7 +545,7 @@ function LendSheet({
         const body = await response.json().catch(() => null);
         throw new AiKeyFailure(aiKeyError(response.status, body?.error));
       }
-      onLent(keyToLend, universes.find((universe) => universe.id === picked)?.name ?? 'the universe');
+      onLent(keyToLend, lent?.universeName ?? universes?.find((universe) => universe.id === picked)?.name ?? 'the universe');
     } catch (error) {
       setFailure(aiKeyFailureText(error));
     } finally {

@@ -275,6 +275,23 @@ describe('Lend sheet', () => {
     expect(JSON.parse(init.body)).toEqual({ universeId: 'bawes', models: null });
   });
 
+  it('saves a lend’s models without the universe list, dropping a model the provider no longer has', async () => {
+    const limited = {
+      ...deepseek,
+      lentTo: [{ universeId: 'bawes', universeName: 'BAWES Universe', ownedByYou: true, models: ['deepseek-v3-retired', 'deepseek-v4-pro'], bots: [] }],
+    };
+    serve([limited], universes);
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Change the models bots in BAWES Universe may use' }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(await within(dialog).findByRole('checkbox', { name: /deepseek-v4-flash/ }));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(calls('POST').filter(([url]) => String(url).endsWith('/lend'))).toHaveLength(1));
+    const [, init] = calls('POST').find(([url]) => String(url).endsWith('/lend'))!;
+    expect(JSON.parse(init.body)).toEqual({ universeId: 'bawes', models: ['deepseek-v4-pro', 'deepseek-v4-flash'] });
+    expect(fetchMock.mock.calls.some(([url]) => url === '/api/me/ai-keys/universes')).toBe(false);
+  });
+
   it('says there is nothing to limit on a key whose provider lists no models', async () => {
     serve([{ ...lmStudio, lentTo: [{ universeId: 'bawes', universeName: 'BAWES Universe', ownedByYou: true, models: null, bots: [] }] }], universes, { ok: false, noList: true, message: 'No list' });
     render(<AiKeysPage />);
