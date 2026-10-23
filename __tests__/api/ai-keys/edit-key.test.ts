@@ -319,10 +319,10 @@ describe('POST /api/me/ai-keys/:id/models', () => {
   it('keeps how many models the key has, for its card, when listed at the saved address (#575)', async () => {
     const older = { ...openai, providerId: 'key-9' };
     db.botsAiProvider.findFirst.mockResolvedValue(older);
-    db.botsAiProvider.findUnique.mockResolvedValue({ settings: { kind: 'openai' } });
+    db.botsAiProvider.findUnique.mockResolvedValue({ settings: { kind: 'openai' }, endpoint: older.endpoint });
     (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4.1', 'gpt-5-mini'], facts: {} });
     await models('key-9', {});
-    expect(db.botsAiProvider.updateMany).toHaveBeenCalledWith({ where: { providerId: 'key-9', ownerId: { not: null } }, data: { settings: { kind: 'openai', modelFacts: {}, modelCount: 2 } } });
+    expect(db.botsAiProvider.updateMany).toHaveBeenCalledWith({ where: { providerId: 'key-9', ownerId: { not: null }, endpoint: older.endpoint }, data: { settings: { kind: 'openai', modelFacts: {}, modelCount: 2 } } });
   });
 
   it('tries a new address when one is given', async () => {

@@ -77,13 +77,21 @@ describe('keyModels', () => {
     expect(probe).toHaveBeenCalledTimes(4);
   });
 
+  it('never keeps a list asked of an address the key has since left', async () => {
+    probe.mockResolvedValue(LIST);
+    const key = claudeKey();
+    db.findUnique.mockResolvedValue({ settings: { kind: 'claude' }, endpoint: 'https://somewhere-else.example.com' });
+    await keyModels(key);
+    expect(db.updateMany).not.toHaveBeenCalled();
+  });
+
   it('keeps what the provider said about each model on the key, Tools, Vision and how much it reads, once', async () => {
     probe.mockResolvedValue(LIST);
     const key = claudeKey();
-    db.findUnique.mockResolvedValue({ settings: { kind: 'claude', caps: { vision: true } } });
+    db.findUnique.mockResolvedValue({ settings: { kind: 'claude', caps: { vision: true } }, endpoint: key.endpoint });
     await keyModels(key);
     expect(db.updateMany).toHaveBeenCalledWith({
-      where: { providerId: key.providerId, ownerId: { not: null } },
+      where: { providerId: key.providerId, ownerId: { not: null }, endpoint: key.endpoint },
       data: { settings: { kind: 'claude', caps: { vision: true }, modelFacts: { 'claude-haiku-5-5': { vision: true, tools: true, context: 200000 } }, modelCount: LIST.models.length } },
     });
     db.updateMany.mockClear();
