@@ -419,6 +419,18 @@ describe('Add a key: what the models can do', () => {
     expect(screen.getByText(/All 2 have/).textContent).toBe('All 2 have Vision');
     expect(screen.getAllByTestId('model-row').map((row) => row.textContent)).toEqual(['claude-haiku-5-5', 'claude-opus-5-5']);
   });
+
+  it('says nothing more on a maker’s row when the whole list already said it', async () => {
+    const models = ['openai/gpt-5', 'openai/gpt-5-mini', 'google/gemini-3-pro'];
+    fetchMock.mockImplementation(() => json({ ok: true, models, facts: Object.fromEntries(models.map((id) => [id, { vision: true }])) }));
+    render(<AddAiKeyPage />);
+    fireEvent.click(screen.getByRole('radio', { name: /OpenRouter/ }));
+    fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'sk-or-123' } });
+    fireEvent.click(screen.getByRole('button', { name: /Load models/ }));
+    await screen.findByText(/It answered/);
+    expect(screen.getByText(/All 3 have/).textContent).toBe('All 3 have Vision');
+    expect(screen.getAllByTestId('maker-row').map((row) => row.textContent)).toEqual(['OpenAI2 models', 'Google1 model']);
+  });
 });
 
 describe('Add a key: Claude', () => {
