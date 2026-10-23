@@ -206,8 +206,8 @@ describe('a lend that allows only some models (#575)', () => {
     expect(notice.mock.calls[0][0]).toMatchObject({ userId: 'owner', kind: 'ai-key-moved', title: '2 bots now reply with claude-haiku-5-5', href: '/admin/universes/uni-1' });
     expect(notice.mock.calls[0][0].body).toBe('Mishari changed which models of their AI key bots in Sandbox Universe may use. The 2 bots were on ones they took out, so they now reply with claude-haiku-5-5.');
     // A reply still on its way reports the model each bot had: it is let go for a few minutes
-    expect(changedLately('b1')).toBe(true);
-    expect(changedLately('b3')).toBe(true);
+    expect(changedLately({ id: 'b1', aiModel: 'claude-haiku-5-5' }, 'key-1')).toBe(true);
+    expect(changedLately({ id: 'b3', aiModel: 'claude-haiku-5-5' }, 'key-1')).toBe(true);
   });
 
   it('tells nobody when it is your own universe, and moves nobody when every bot is on a kept model', async () => {
