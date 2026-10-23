@@ -11,7 +11,7 @@ import { editSavedKey, listModelsForSavedKey } from '@/lib/ai-key-edit';
 import { probeChat, probeModels, allowKeyAttempt } from '@/lib/ai-key-models';
 import { markWorking } from '@/lib/ai-key-health';
 
-jest.mock('@/lib/db', () => ({ prisma: { botsAiProvider: { findFirst: jest.fn(), updateMany: jest.fn() }, bot: { updateMany: jest.fn() } } }));
+jest.mock('@/lib/db', () => ({ prisma: { botsAiProvider: { findFirst: jest.fn(), findUnique: jest.fn(), updateMany: jest.fn() }, bot: { updateMany: jest.fn() } } }));
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
 jest.mock('@/lib/encryption', () => ({ decryptApiKey: jest.fn((value: string) => value.replace('enc:', '')) }));
 jest.mock('@/lib/ai-key-lend', () => ({ moveBotsOffKey: jest.fn() }));
@@ -23,7 +23,7 @@ jest.mock('@/lib/ai-key-models', () => ({
   allowKeyAttempt: jest.fn(() => true),
 }));
 
-const db = prisma as unknown as { botsAiProvider: Record<'findFirst' | 'updateMany', jest.Mock>; bot: { updateMany: jest.Mock } };
+const db = prisma as unknown as { botsAiProvider: Record<'findFirst' | 'findUnique' | 'updateMany', jest.Mock>; bot: { updateMany: jest.Mock } };
 const alice = { id: 'maker', uuid: 'uuid-a', email: 'a@example.com', name: 'A', tags: [], isSuperAdmin: false };
 
 const lmStudio = {
@@ -292,6 +292,15 @@ describe('POST /api/me/ai-keys/:id/models', () => {
     expect(body).toEqual({ ok: true, models: ['gpt-4.1'], facts: { 'gpt-4.1': { tools: true } } });
     expect(JSON.stringify(body)).not.toContain('sk-secret');
     expect(probeModels).toHaveBeenCalledWith(expect.objectContaining({ apiKey: 'sk-secret', address: 'https://api.openai.com/v1' }));
+  });
+
+  it('keeps how many models the key has, for its card, when listed at the saved address (#575)', async () => {
+    const older = { ...openai, providerId: 'key-9' };
+    db.botsAiProvider.findFirst.mockResolvedValue(older);
+    db.botsAiProvider.findUnique.mockResolvedValue({ settings: { kind: 'openai' } });
+    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4.1', 'gpt-5-mini'], facts: {} });
+    await models('key-9', {});
+    expect(db.botsAiProvider.updateMany).toHaveBeenCalledWith({ where: { providerId: 'key-9', ownerId: { not: null } }, data: { settings: { kind: 'openai', modelFacts: {}, modelCount: 2 } } });
   });
 
   it('tries a new address when one is given', async () => {
