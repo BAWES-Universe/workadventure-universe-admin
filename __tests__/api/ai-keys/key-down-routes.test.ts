@@ -96,6 +96,15 @@ describe('GET /api/bots/:id/ai-credentials with a key that may be down', () => {
     expect(body).toMatchObject({ source: 'own-key', providerId: 'key-1' });
   });
 
+  it('serves the key as the recheck left it, so a check model it just moved to is the one the bot gets (#575)', async () => {
+    db.botsAiProvider.findUnique
+      .mockResolvedValueOnce(down({ ifDown: 'stop', model: 'qwen3-8b' }))
+      .mockResolvedValueOnce({ ...ownKey, ifDown: 'stop', model: 'llama-3.1-8b', supportsVision: true, settings: { kind: 'lmstudio', caps: { vision: true } } });
+    (recheckIfDue as jest.Mock).mockResolvedValue({ ...down({ ifDown: 'stop' }), downSince: null, model: 'llama-3.1-8b' });
+    const body = await (await ask()).json();
+    expect(body).toMatchObject({ source: 'own-key', providerId: 'key-1', model: 'llama-3.1-8b', supportsVision: true });
+  });
+
   it('does not ask about a key that may not run the bot: that bot moves to Universe AI as before', async () => {
     db.botsAiProvider.findUnique.mockResolvedValue(down());
     (checkKeyForBot as jest.Mock).mockResolvedValue({ ok: false, reason: 'not-lent' });
