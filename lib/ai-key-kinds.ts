@@ -277,21 +277,19 @@ export function moreBenefit(provider: { models?: number; open?: number; free?: n
 }
 
 /**
- * The link to read about a More provider. Most models.dev addresses are pages to read. A few are the API itself
- * (api.example.com, or example.com/v1/models), which show raw data or nothing: those go to the provider's own landing page
- * (its main domain) instead.
+ * Where "Read about" goes for the few More providers whose models.dev address leads nowhere useful: a 404 (Morph), their
+ * sign-in page (SiliconFlow), raw JSON (Chutes, Cortecs) or a bare API page (Berget, Vultr). Each goes to the provider's own
+ * landing page instead. Every other provider keeps the models.dev address.
  */
-export function docsPage(address: string | undefined): string | undefined {
-  if (!address) return undefined;
-  try {
-    const url = new URL(address);
-    if (url.protocol !== 'https:') return undefined;
-    if (!url.hostname.startsWith('api.') && !/^\/v\d+\/models\/?$/.test(url.pathname)) return address;
-    return `https://${url.hostname.split('.').slice(-2).join('.')}`;
-  } catch {
-    return undefined;
-  }
-}
+export const LANDING_PAGES: Record<string, string> = {
+  berget: 'https://berget.ai',
+  chutes: 'https://chutes.ai',
+  cortecs: 'https://cortecs.ai',
+  morph: 'https://www.morphllm.com',
+  siliconflow: 'https://www.siliconflow.com',
+  'siliconflow-cn': 'https://www.siliconflow.cn',
+  vultr: 'https://www.vultr.com/products/cloud-inference/',
+};
 
 /**
  * More providers, from lib/ai-key-snapshot.json (built by scripts/build-ai-key-snapshot.mjs from the models.dev project).
@@ -314,7 +312,7 @@ const MORE_KINDS: AiKeyKindInfo[] = snapshot.providers
       benefit: moreBenefit(provider),
       ...('logo' in provider && provider.logo ? { logo: provider.id } : {}),
       base: provider.base,
-      docs: docsPage('docs' in provider ? provider.docs : undefined),
+      docs: LANDING_PAGES[provider.id] ?? ('docs' in provider ? provider.docs : undefined),
       // We only know the provider's name, so the steps say what every provider's dashboard has in common
       steps: [
         { text: `Open ${provider.label}’s dashboard and sign in.` },

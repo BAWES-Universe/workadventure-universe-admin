@@ -2,7 +2,7 @@
  * The catalog of AI key kinds (#374): the seven that exist keep behaving exactly as before, now as data. These rows are
  * the no-regression list for the move from if-statements to catalog fields.
  */
-import { AI_KEY_KINDS, authHeaders, chatPath, chatProbeBody, docsPage, hostedBase, isTypedEndpoint, kindInfo, providerBases, typedEndpoint, writeModelId } from '@/lib/ai-key-kinds';
+import { AI_KEY_KINDS, LANDING_PAGES, authHeaders, chatPath, chatProbeBody, hostedBase, isTypedEndpoint, kindInfo, providerBases, typedEndpoint, writeModelId } from '@/lib/ai-key-kinds';
 import { cleanModelIds, keyTarget } from '@/lib/ai-key-models';
 
 describe('the seven kinds, exactly as they were', () => {
@@ -159,21 +159,18 @@ describe('More providers, from the snapshot', () => {
     }
   });
 
-  it('links the page to read, and the provider’s own landing page when the address is the API itself', () => {
-    expect(docsPage('https://docs.baseten.co/inference/model-apis/overview')).toBe('https://docs.baseten.co/inference/model-apis/overview');
-    expect(docsPage('https://api.berget.ai')).toBe('https://berget.ai');
-    expect(docsPage('https://llm.chutes.ai/v1/models')).toBe('https://chutes.ai');
-    expect(docsPage('https://api.vultrinference.com/')).toBe('https://vultrinference.com');
-    // A versioned docs path is still docs
-    expect(docsPage('https://opencode.ai/v2/docs/console/models/')).toBe('https://opencode.ai/v2/docs/console/models/');
-    expect(docsPage('http://docs.example.com')).toBeUndefined();
-    expect(docsPage('not a link')).toBeUndefined();
-    expect(docsPage(undefined)).toBeUndefined();
+  it('sends the seven providers whose models.dev link leads nowhere useful to their own landing page', () => {
+    expect(Object.keys(LANDING_PAGES).sort()).toEqual(['berget', 'chutes', 'cortecs', 'morph', 'siliconflow', 'siliconflow-cn', 'vultr']);
+    for (const [id, landing] of Object.entries(LANDING_PAGES)) expect(kindInfo(id)?.docs).toBe(landing);
+    // Every other More provider keeps its models.dev address, and none is an API address
     for (const info of more) {
-      const url = new URL(info.docs ?? 'https://x.test');
+      if (info.kind in LANDING_PAGES || !info.docs) continue;
+      const url = new URL(info.docs);
+      expect(url.protocol).toBe('https:');
       expect(url.hostname.startsWith('api.')).toBe(false);
       expect(url.pathname).not.toMatch(/^\/v\d+\/models\/?$/);
     }
+    expect(kindInfo('opencode')?.docs).toBe('https://opencode.ai/v2/docs/console/models/');
   });
 
   it('says what every provider’s dashboard has in common: open it, make a key, paste it', () => {
