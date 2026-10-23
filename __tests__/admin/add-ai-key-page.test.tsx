@@ -3,7 +3,7 @@
 import React from 'react';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 
-/** Add a key (#374): pick a type, load its models (which proves it answers), pick one, add. */
+/** Add a key (#374, two steps since #575): pick a provider, then set it up: load its models (which proves it answers), pick one, add. */
 
 const fetchMock = jest.fn();
 const push = jest.fn();
@@ -18,6 +18,8 @@ function json(body: unknown, ok = true) {
 }
 
 const addButton = () => screen.getByRole('button', { name: 'Add key' });
+/** Step 2's Change: back to the provider list, with the pick kept. */
+const change = () => fireEvent.click(screen.getByRole('button', { name: 'Change' }));
 
 beforeEach(() => {
   fetchMock.mockReset();
@@ -25,15 +27,49 @@ beforeEach(() => {
 });
 
 describe('Add a key', () => {
-  it('shows the types in two groups, none picked, and nothing to fill in yet', () => {
+  it('starts on step 1: the types in two groups, none picked, and nothing to fill in yet', () => {
     render(<AddAiKeyPage />);
+    expect(screen.getByText('Step 1 of 2')).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Pick a provider' })).toBeTruthy();
     expect(screen.getByText('On your own computer')).toBeTruthy();
     expect(screen.getByText('Hosted, with an API key')).toBeTruthy();
     for (const label of ['LM Studio', 'Ollama or llama.cpp', 'OpenRouter', 'Gemini', 'NVIDIA NIM', 'OpenAI', 'DeepSeek']) {
       expect(screen.getByRole('radio', { name: new RegExp(`^${label}`) })).toBeTruthy();
     }
     expect(screen.queryByLabelText('Address')).toBeNull();
-    expect((addButton() as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByRole('button', { name: 'Add key' })).toBeNull();
+  });
+
+  it('goes to step 2 once a provider is picked, with the picked row and its numbered parts', () => {
+    render(<AddAiKeyPage />);
+    fireEvent.click(screen.getByRole('radio', { name: /^Claude/ }));
+    expect(screen.getByText('Step 2 of 2')).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Set up Claude' })).toBeTruthy();
+    expect(within(screen.getByTestId('picked-provider')).getByText('Claude')).toBeTruthy();
+    expect(screen.queryByRole('radio', { name: /^Gemini/ })).toBeNull();
+    ['Get your Claude key', 'Paste your key', 'Pick a model', 'Name it'].forEach((part, index) => {
+      expect(screen.getByRole('heading', { name: part }).textContent).toBe(`${index + 1}${part}`);
+    });
+    // Read about sits inside the setup card, never outside it
+    expect(within(screen.getByTestId('setup-card')).getByRole('link', { name: /Read about Claude/ })).toBeTruthy();
+    change();
+    expect(screen.getByText('Step 1 of 2')).toBeTruthy();
+    expect(screen.getByRole('radio', { name: /^Claude/ }).getAttribute('aria-checked')).toBe('true');
+  });
+
+  it('clears the typed key and address when another provider is picked, and keeps them for the same one', () => {
+    render(<AddAiKeyPage />);
+    fireEvent.click(screen.getByRole('radio', { name: /^LM Studio/ }));
+    fireEvent.change(screen.getByLabelText('Address'), { target: { value: 'https://lm.example.com' } });
+    fireEvent.change(screen.getByLabelText(/API key/), { target: { value: 'lm-secret' } });
+    change();
+    fireEvent.click(screen.getByRole('radio', { name: /^LM Studio/ }));
+    expect((screen.getByLabelText('Address') as HTMLInputElement).value).toBe('https://lm.example.com');
+    expect((screen.getByLabelText(/API key/) as HTMLInputElement).value).toBe('lm-secret');
+    change();
+    fireEvent.click(screen.getByRole('radio', { name: /^Ollama/ }));
+    expect((screen.getByLabelText('Address') as HTMLInputElement).value).toBe('');
+    expect((screen.getByLabelText(/API key/) as HTMLInputElement).value).toBe('');
   });
 
   it('opens the setup steps of the picked type, with the command to copy', () => {
@@ -42,6 +78,7 @@ describe('Add a key', () => {
     expect(screen.getByText('cloudflared tunnel --url http://localhost:1234')).toBeTruthy();
     expect(screen.getByLabelText('Address')).toBeTruthy();
     expect(screen.getByLabelText('API key, if your server asks for one')).toBeTruthy();
+    change();
     fireEvent.click(screen.getByRole('radio', { name: /Gemini/ }));
     expect(screen.queryByText(/cloudflared/)).toBeNull();
     expect(screen.queryByLabelText('Address')).toBeNull();
@@ -94,6 +131,7 @@ describe('Add a key', () => {
     fireEvent.click(screen.getByRole('radio', { name: /Groq/ }));
     fireEvent.change(screen.getByLabelText('API key'), { target: { value: 'gsk-1234' } });
     fireEvent.click(screen.getByRole('button', { name: /Load models/ }));
+    change();
     fireEvent.click(screen.getByRole('radio', { name: /Gemini/ }));
     answerGroq(await json({ ok: false, noList: true, message: 'x' }));
     await waitFor(() => expect(screen.queryByLabelText('Model name')).toBeNull());
@@ -169,6 +207,7 @@ describe('Add a key: more providers, regions and search', () => {
       expect(screen.getByRole('radio', { name: new RegExp(`^${label}`) })).toBeTruthy();
     }
     fireEvent.click(screen.getByRole('radio', { name: /^Groq/ }));
+    change();
     fireEvent.change(screen.getByLabelText('Search providers'), { target: { value: 'mistral' } });
     expect(screen.getByRole('radio', { name: /^Mistral/ })).toBeTruthy();
     expect(screen.getByRole('radio', { name: /^Groq/ })).toBeTruthy();
@@ -197,8 +236,10 @@ describe('Add a key: more providers, regions and search', () => {
     fireEvent.click(screen.getByRole('radio', { name: /^Gemini/ }));
     expect(screen.getByText('On aistudio.google.com, choose Get API key.')).toBeTruthy();
     expect(screen.queryAllByRole('listitem')).toHaveLength(0);
+    change();
     fireEvent.click(screen.getByRole('radio', { name: /^Claude/ }));
     expect(screen.getAllByRole('listitem')).toHaveLength(2);
+    change();
     fireEvent.change(screen.getByLabelText('Search providers'), { target: { value: 'baseten' } });
     fireEvent.click(screen.getByRole('radio', { name: /^Baseten/ }));
     expect(screen.getAllByRole('listitem')).toHaveLength(3);
@@ -227,6 +268,7 @@ describe('Add a key: more providers, regions and search', () => {
     render(<AddAiKeyPage />);
     fireEvent.click(screen.getByRole('radio', { name: /^Qwen/ }));
     fireEvent.click(screen.getByRole('radio', { name: /^Global/ }));
+    change();
     fireEvent.click(screen.getByRole('radio', { name: /^Kimi/ }));
     expect(screen.getByRole('radio', { name: /^Global/ }).getAttribute('aria-checked')).toBe('false');
   });
@@ -235,6 +277,7 @@ describe('Add a key: more providers, regions and search', () => {
     render(<AddAiKeyPage />);
     fireEvent.click(screen.getByRole('radio', { name: /^Qwen/ }));
     fireEvent.click(screen.getByRole('radio', { name: /^Global/ }));
+    change();
     fireEvent.click(screen.getByRole('radio', { name: /^Qwen/ }));
     expect(screen.getByRole('radio', { name: /^Global/ }).getAttribute('aria-checked')).toBe('true');
   });
@@ -278,12 +321,12 @@ describe('Add a key: a model that cannot use bot tools', () => {
 describe('Add a key: More providers', () => {
   it('keeps the long tail out of sight until asked for, with a count', () => {
     render(<AddAiKeyPage />);
-    expect(screen.queryByText('More providers', { selector: 'h2' })).toBeNull();
+    expect(screen.queryByText('More providers', { selector: 'h3' })).toBeNull();
     expect(screen.queryByRole('radio', { name: /^Nebius/ })).toBeNull();
     const button = screen.getByRole('button', { name: /^More providers \(\d+\)$/ });
     expect(button.getAttribute('aria-expanded')).toBe('false');
     fireEvent.click(button);
-    expect(screen.getByText('More providers', { selector: 'h2' })).toBeTruthy();
+    expect(screen.getByText('More providers', { selector: 'h3' })).toBeTruthy();
     expect(screen.getByRole('radio', { name: /^Nebius/ })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Show fewer providers' }).getAttribute('aria-expanded')).toBe('true');
   });
@@ -296,8 +339,9 @@ describe('Add a key: More providers', () => {
     const docs = screen.getByRole('link', { name: /Read about Nebius/ });
     expect(docs.getAttribute('href')).toMatch(/^https:\/\//);
     expect(docs.getAttribute('rel')).toContain('noreferrer');
-    // A link is never inside the radio button itself
-    expect(screen.getByRole('radio', { name: /^Nebius/ }).contains(docs)).toBe(false);
+    // The link sits in step 2's setup card, never in the picked provider's row
+    expect(screen.getByTestId('setup-card').contains(docs)).toBe(true);
+    expect(screen.getByTestId('picked-provider').contains(docs)).toBe(false);
   });
 
   it('searches the line under a long-tail provider as well as its name', () => {
