@@ -200,8 +200,9 @@ export function ModelPicker({
           groups.filter((group, index) => !folded || allMakers || filtering || index < MAKERS_SHOWN || group.ids.some((id) => pickedSet.has(id))).map(({ maker, ids }) => {
             const isOpen = !folded || opened.has(maker.key);
             const pickedHere = ids.filter((id) => pickedSet.has(id)).length;
-            // What every model of this maker has is said once, on the maker's row
+            // What every model of this maker has is said once, on the maker's row, unless the whole list already said it
             const groupShared = sharedCaps(ids, facts);
+            const groupSays = { tools: groupShared.tools && !shared.tools, vision: groupShared.vision && !shared.vision };
             return (
               <div key={maker.key} className={`rounded-2xl border ${isOpen && folded ? 'border-foreground/10 bg-foreground/[.03]' : 'border-transparent'}`}>
                 <button
@@ -219,9 +220,9 @@ export function ModelPicker({
                       {ids.length} {ids.length === 1 ? 'model' : 'models'}
                       {pickedHere > 0 && ` · ${pickedHere} picked`}
                     </span>
-                    {isOpen && (groupShared.tools || groupShared.vision) && (
+                    {isOpen && (groupSays.tools || groupSays.vision) && (
                       <span className="flex flex-wrap items-center gap-x-1.5 text-xs text-muted-foreground [&>span]:mt-0">
-                        All have <ModelCaps facts={{ tools: (groupShared.tools && !shared.tools) || undefined, vision: (groupShared.vision && !shared.vision) || undefined }} />
+                        All have <ModelCaps facts={{ tools: groupSays.tools || undefined, vision: groupSays.vision || undefined }} />
                       </span>
                     )}
                   </span>
