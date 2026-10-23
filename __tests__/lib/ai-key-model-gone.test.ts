@@ -283,6 +283,23 @@ describe('moveBotOffGoneModel', () => {
     expect(db.bot.updateMany).toHaveBeenCalledTimes(1);
   });
 
+  it('asks every model with one tool, as a bot asks, so a model that chats but won’t take tools isn’t taken as answering', async () => {
+    list.mockResolvedValue({ ok: true, models: ['anthropic/claude-haiku-5-5', 'openai/gpt-5-mini'], facts: {}, listed: true });
+    expect(await moveBotOffGoneModel(key, guide.id)).toBe(true);
+    expect(chat.mock.calls.length).toBeGreaterThan(1);
+    for (const [asked] of chat.mock.calls) expect(asked.withTool).toBe(true);
+  });
+
+  it('shares what each model answered between bots on the key reporting at once, so no model is asked twice', async () => {
+    list.mockResolvedValue({ ok: true, models: ['anthropic/claude-haiku-5-5', 'openai/gpt-5-mini'], facts: {}, listed: true });
+    db.bot.findUnique.mockImplementation(({ where }: { where: { id: string } }) => Promise.resolve({ ...guide, id: where.id }));
+    const both = await Promise.all([moveBotOffGoneModel(key, `${guide.id}-a`), moveBotOffGoneModel(key, `${guide.id}-b`)]);
+    expect(both).toEqual([true, true]);
+    // The bot's model once, and the model both move to once
+    expect(chat.mock.calls.map((call) => call[0].model)).toEqual(['meta-llama/llama-4-maverick', 'anthropic/claude-haiku-5-5']);
+    expect(db.bot.updateMany).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps the check model and the bot where they are when no listed model answers while the provider is busy', async () => {
     db.bot.findUnique.mockResolvedValue({ ...guide, aiModel: null });
     list.mockResolvedValue({ ok: true, models: ['deepseek/deepseek-v4-flash', 'qwen/qwen3-235b'], facts: {}, listed: true });
