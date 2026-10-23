@@ -11,6 +11,7 @@ jest.mock('@/lib/db', () => ({
     worldMember: { findMany: jest.fn() },
     universeMember: { findMany: jest.fn() },
     bot: { findMany: jest.fn(), updateMany: jest.fn() },
+    $transaction: jest.fn(),
   },
 }));
 jest.mock('@/lib/roles', () => ({ permissionsForWorld: jest.fn() }));
@@ -22,6 +23,7 @@ const db = prisma as unknown as {
   worldMember: Record<'findMany', jest.Mock>;
   universeMember: Record<'findMany', jest.Mock>;
   bot: Record<'findMany' | 'updateMany', jest.Mock>;
+  $transaction: jest.Mock;
 };
 const permissions = permissionsForWorld as jest.Mock;
 const notice = addNotice as jest.Mock;
@@ -32,7 +34,8 @@ beforeEach(() => {
   db.worldMember.findMany.mockResolvedValue([]);
   db.universeMember.findMany.mockResolvedValue([]);
   db.universe.findMany.mockResolvedValue([]);
-  db.bot.updateMany.mockImplementation(async ({ where }: { where: { id: { in: string[] } } }) => ({ count: where.id.in.length }));
+  db.bot.updateMany.mockResolvedValue({ count: 1 });
+  db.$transaction.mockImplementation((operations: Promise<unknown>[]) => Promise.all(operations));
 });
 
 describe('lendAccess', () => {
@@ -85,7 +88,8 @@ describe('moveBotsOffKey', () => {
     notice.mockResolvedValue(true);
     const result = await moveBotsOffKey('key-1', { actor, why: 'revoked' });
     expect(db.bot.findMany.mock.calls[0][0].where).toEqual({ aiProviderRef: 'key-1' });
-    expect(db.bot.updateMany).toHaveBeenCalledWith({ where: { id: { in: ['b1', 'b2', 'b3'] }, aiProviderRef: 'key-1' }, data: { aiProviderRef: 'universe-ai' } });
+    expect(db.bot.updateMany).toHaveBeenCalledTimes(3);
+    expect(db.bot.updateMany).toHaveBeenCalledWith({ where: { id: 'b2', aiProviderRef: 'key-1' }, data: { aiProviderRef: 'universe-ai' } });
     expect(result.count).toBe(3);
     expect(notice).toHaveBeenCalledTimes(2);
     expect(notice.mock.calls[0][0]).toMatchObject({ userId: 'owner-bawes', kind: 'ai-key-moved', title: 'Sam moved to Universe AI', href: '/admin/universes/bawes' });
@@ -130,6 +134,23 @@ describe('moveBotsOffKey', () => {
     db.bot.findMany.mockResolvedValue([bot('b1', 'Sam', bawes)]);
     db.bot.updateMany.mockResolvedValue({ count: 0 });
     expect(await moveBotsOffKey('key-1', { actor, why: 'revoked' })).toEqual({ count: 0, universes: [] });
+    expect(notice).not.toHaveBeenCalled();
+  });
+
+  it('counts and tells about only the bots this request really moved when another request took some first', async () => {
+    db.bot.findMany.mockResolvedValue([bot('b1', 'Sam', bawes), bot('b2', 'Guide', bawes), bot('b3', 'Nora', sandbox)]);
+    db.bot.updateMany.mockImplementation(async ({ where }: { where: { id: string } }) => ({ count: where.id === 'b2' ? 0 : 1 }));
+    notice.mockResolvedValue(true);
+    const result = await moveBotsOffKey('key-1', { actor, why: 'revoked' });
+    expect(result.count).toBe(2);
+    expect(result.universes.map((universe) => universe.botNames)).toEqual([['Sam'], ['Nora']]);
+    expect(notice.mock.calls[0][0].title).toBe('Sam moved to Universe AI');
+  });
+
+  it('moves the bots in one transaction, so a failure moves none and tells nobody', async () => {
+    db.bot.findMany.mockResolvedValue([bot('b1', 'Sam', bawes), bot('b2', 'Guide', sandbox)]);
+    db.$transaction.mockRejectedValue(new Error('db down'));
+    await expect(moveBotsOffKey('key-1', { actor, why: 'revoked' })).rejects.toThrow('db down');
     expect(notice).not.toHaveBeenCalled();
   });
 

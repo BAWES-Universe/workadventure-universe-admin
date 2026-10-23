@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { addNotice, clearNotices } from '@/lib/notices';
 import { probeChat, probeModels } from '@/lib/ai-key-models';
@@ -99,6 +100,19 @@ describe('recordReply', () => {
     expect(notice).not.toHaveBeenCalled();
   });
 
+  it('does nothing more when the key is revoked between the read and the count', async () => {
+    db.findFirst.mockResolvedValue(row({ failedReplies: 1 }));
+    db.update.mockRejectedValue(new Prisma.PrismaClientKnownRequestError('Record not found', { code: 'P2025', clientVersion: 'test' }));
+    await expect(recordReply('key-1', { ok: false })).resolves.toBeUndefined();
+    expect(notice).not.toHaveBeenCalled();
+  });
+
+  it('still fails loudly on any other database error while counting', async () => {
+    db.findFirst.mockResolvedValue(row());
+    db.update.mockRejectedValue(new Error('connection lost'));
+    await expect(recordReply('key-1', { ok: false })).rejects.toThrow('connection lost');
+  });
+
   it('marks it Down after two in a row', async () => {
     db.findFirst.mockResolvedValue(row({ failedReplies: 1 }));
     db.update.mockResolvedValue({ failedReplies: 2 });
@@ -180,6 +194,16 @@ describe('judgeFailedReply', () => {
 });
 
 describe('checkKey and checkAndRecord', () => {
+  it('asks a key with no model list for a chat reply every time, and does not mark it Down for the missing list (#456)', async () => {
+    const groq: KeyRow = { ...hosted, settings: { kind: 'groq' }, model: 'llama-3.3-70b' } as KeyRow;
+    probe.mockResolvedValue({ ok: false, noList: true, reason: 'other', message: 'Groq doesn’t share a list of its models. Type the model name.' });
+    chat.mockResolvedValue({ ok: true });
+    expect(await checkKey(groq)).toEqual({ ok: true });
+    expect(chat).toHaveBeenCalledTimes(1);
+    chat.mockResolvedValue({ ok: false, reason: 'rejected', message: 'Groq didn’t accept this key.' });
+    expect(await checkKey(groq)).toMatchObject({ ok: false, reason: 'rejected' });
+  });
+
   it('asks the provider with the saved key and the type it was added as', async () => {
     probe.mockResolvedValue({ ok: true, models: ['m'] });
     expect(await checkKey(hosted)).toEqual({ ok: true });
@@ -370,6 +394,20 @@ describe('recheckIfDue', () => {
     const key = downNow(own, { healthCheckedAt: minutesAgo(6) });
     expect(await recheckIfDue(key, now)).toBe(key);
     expect(probe).not.toHaveBeenCalled();
+  });
+
+  it('keeps the key as it is when the database fails while claiming the check', async () => {
+    db.updateMany.mockRejectedValue(new Error('connection lost'));
+    const key = downNow(own, { ifDown: 'stop', healthCheckedAt: minutesAgo(6) });
+    expect(await recheckIfDue(key, now)).toBe(key);
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  it('keeps the key as it is when the database fails reading it after the check', async () => {
+    probe.mockResolvedValue({ ok: true, models: ['m'] });
+    db.findUnique.mockRejectedValue(new Error('connection lost'));
+    const key = downNow(own, { ifDown: 'stop', healthCheckedAt: minutesAgo(6) });
+    expect(await recheckIfDue(key, now)).toBe(key);
   });
 
   it('with Stop replying it waits for the check and returns the key as it is after', async () => {

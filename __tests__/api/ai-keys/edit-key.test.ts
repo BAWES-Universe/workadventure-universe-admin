@@ -47,6 +47,32 @@ beforeEach(() => {
   (probeChat as jest.Mock).mockResolvedValue({ ok: true });
 });
 
+describe('a key whose provider has no model list (#456)', () => {
+  const groq = { ...openai, providerId: 'key-3', name: 'My Groq', settings: { kind: 'groq' }, model: 'old-model' };
+  const noList = { ok: false, noList: true, reason: 'other', message: 'Groq doesn’t share a list of its models. Type the model name.' };
+  beforeEach(() => {
+    db.botsAiProvider.findFirst.mockResolvedValue(groq);
+    (probeModels as jest.Mock).mockResolvedValue(noList);
+  });
+
+  it('tells the Edit sheet there is no list, so it asks for a typed name', async () => {
+    const response = await models('key-3', {});
+    expect(await response.json()).toMatchObject({ ok: false, noList: true });
+  });
+
+  it('saves a typed model after one tiny reply, leaving the saved model facts alone', async () => {
+    expect(await editSavedKey('maker', 'key-3', { model: 'new-model' })).toMatchObject({ ok: true, model: 'new-model' });
+    expect(probeChat).toHaveBeenCalledWith(expect.objectContaining({ model: 'new-model' }));
+    expect(db.botsAiProvider.updateMany.mock.calls[0][0].data).not.toHaveProperty('settings');
+  });
+
+  it('does not save a typed model the provider refuses, even with a 400', async () => {
+    (probeChat as jest.Mock).mockResolvedValue({ ok: false, reason: 'request', message: 'Groq lists its models, but a chat call to nope failed (400). Check the model.' });
+    expect(await editSavedKey('maker', 'key-3', { model: 'nope' })).toMatchObject({ ok: false, status: 400 });
+    expect(db.botsAiProvider.updateMany).not.toHaveBeenCalled();
+  });
+});
+
 describe('editSavedKey', () => {
   it('moves a key to its new address on the SAME row, and never touches lends or bots', async () => {
     const result = await editSavedKey('maker', 'key-1', { address: 'https://new.trycloudflare.com/v1' });

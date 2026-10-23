@@ -51,11 +51,10 @@ export async function lendableUniverses(userId: string): Promise<LendableUnivers
   for (const entry of worldMemberships) candidates.set(entry.world.universe.id, entry.world.universe.name);
   for (const entry of universeMemberships) candidates.set(entry.universe.id, entry.universe.name);
 
+  // Each universe is asked at the same time, so the list takes as long as the slowest one, not all of them one after another
+  const checked = await Promise.all([...candidates].map(async ([id, name]) => ({ id, name, access: await lendAccess(userId, id) })));
   const result: LendableUniverse[] = [];
-  for (const [id, name] of candidates) {
-    const access = await lendAccess(userId, id);
-    if (access) result.push({ id, name, access });
-  }
+  for (const { id, name, access } of checked) if (access) result.push({ id, name, access });
   return result.sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -84,15 +83,15 @@ export async function moveBotsOffKey(
   });
   if (bots.length === 0) return { count: 0, universes: [] };
 
-  // Only rows still on the key move, so a second request that ran at the same time finds nothing left to move and tells nobody
-  const moved = await prisma.bot.updateMany({
-    where: { id: { in: bots.map((bot) => bot.id) }, aiProviderRef: providerId },
-    data: { aiProviderRef: UNIVERSE_AI_REF },
-  });
-  if (moved.count === 0) return { count: 0, universes: [] };
+  // Only rows still on the key move, one by one in a single transaction, so a second request that ran at the same time can't be told about or counted twice
+  const results = await prisma.$transaction(
+    bots.map((bot) => prisma.bot.updateMany({ where: { id: bot.id, aiProviderRef: providerId }, data: { aiProviderRef: UNIVERSE_AI_REF } })),
+  );
+  const movedBots = bots.filter((_, index) => results[index].count > 0);
+  if (movedBots.length === 0) return { count: 0, universes: [] };
 
   const byUniverse = new Map<string, MovedBots['universes'][number]>();
-  for (const bot of bots) {
+  for (const bot of movedBots) {
     const universe = bot.room.world.universe;
     const entry = byUniverse.get(universe.id) ?? { id: universe.id, name: universe.name, ownerId: universe.ownerId, botNames: [] };
     entry.botNames.push(bot.name);
@@ -126,5 +125,5 @@ export async function moveBotsOffKey(
       console.error('[AiKeys] Could not tell the universe owner:', error instanceof Error ? error.message : 'unknown');
     }
   }
-  return { count: bots.length, universes };
+  return { count: movedBots.length, universes };
 }

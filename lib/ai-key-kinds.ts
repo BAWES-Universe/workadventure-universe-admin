@@ -96,7 +96,7 @@ const TUNNEL = 'Make it reachable from the web. Run:';
 const NAMED_KINDS: AiKeyKindInfo[] = [
   define({
     kind: 'lmstudio', label: 'LM Studio', logo: 'lmstudio', group: 'own-computer', providerType: 'lmstudio', address: 'required', apiKey: 'optional',
-    benefit: 'Free. Runs on your computer, so conversations go only there.',
+    benefit: 'Free. Runs on your computer, so conversations stay there while it’s on.',
     steps: [
       { text: 'In LM Studio, load a model and start the server (Developer tab).' },
       { text: TUNNEL, code: 'cloudflared tunnel --url http://localhost:1234' },

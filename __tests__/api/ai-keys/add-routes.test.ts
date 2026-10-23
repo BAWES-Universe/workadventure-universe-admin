@@ -54,6 +54,13 @@ describe('POST /api/me/ai-keys', () => {
     expect(JSON.stringify(await response.json())).not.toContain('sk-abcdef');
   });
 
+  it('keeps no plain-text last four for a short key, which would be most of it', async () => {
+    const response = await post({ kind: 'lmstudio', address: 'https://lm.example.com', apiKey: 'abc12', model: 'qwen3-8b' });
+    expect(response.status).toBe(201);
+    const data = provider.create.mock.calls[0][0].data;
+    expect(data).toMatchObject({ apiKeyEncrypted: 'enc(abc12)', apiKeyLast4: null });
+  });
+
   it('refuses a key with a smart quote, a zero-width space or a space as a plain 400, saving nothing', async () => {
     for (const apiKey of ['sk-abc\u201Cdef', 'sk-\u200Babc', 'sk-a b', 'sk-é']) {
       const response = await post({ kind: 'deepseek', apiKey, model: 'm' });
@@ -218,5 +225,35 @@ describe('POST /api/me/ai-keys: Claude (#975)', () => {
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: 'Claude says this key is out of credit.' });
     expect(provider.create).not.toHaveBeenCalled();
+  });
+
+  describe('a provider with no model list (#456)', () => {
+    beforeEach(() => models.mockResolvedValue({ ok: false, noList: true, message: 'Groq doesn’t share a list of its models. Type the model name.' }));
+
+    it('saves the typed model once one tiny reply proves the key and the model, with no model facts', async () => {
+      const response = await post({ kind: 'groq', apiKey: 'gsk-abcdef4f2a', model: 'llama-3.3-70b' });
+      expect(response.status).toBe(201);
+      expect(chat).toHaveBeenCalledWith(expect.objectContaining({ kind: 'groq', model: 'llama-3.3-70b' }));
+      expect(provider.create.mock.calls[0][0].data).toMatchObject({ model: 'llama-3.3-70b', supportsVision: null, settings: { kind: 'groq' }, tested: true });
+    });
+
+    it('saves nothing when the reply fails, even a 400 that a listed model would be forgiven', async () => {
+      chat.mockResolvedValue({ ok: false, reason: 'request', message: 'Groq lists its models, but a chat call to nope failed (400). Check the model.' });
+      expect((await post({ kind: 'groq', apiKey: 'gsk-abcdef4f2a', model: 'nope' })).status).toBe(400);
+      chat.mockResolvedValue({ ok: false, reason: 'rejected', message: 'Groq didn’t accept this key.' });
+      expect((await post({ kind: 'groq', apiKey: 'gsk-abcdef4f2a', model: 'llama-3.3-70b' })).status).toBe(400);
+      expect(provider.create).not.toHaveBeenCalled();
+    });
+
+    it('still refuses a listed provider’s model that is not on its list', async () => {
+      models.mockResolvedValue({ ok: true, models: ['a'], facts: {} });
+      expect((await post({ kind: 'groq', apiKey: 'gsk-abcdef4f2a', model: 'b' })).status).toBe(400);
+    });
+
+    it('still stops on any other failed list (a wrong key, a busy provider)', async () => {
+      models.mockResolvedValue({ ok: false, message: 'Groq didn’t accept this key.' });
+      expect((await post({ kind: 'groq', apiKey: 'gsk-abcdef4f2a', model: 'llama-3.3-70b' })).status).toBe(400);
+      expect(chat).not.toHaveBeenCalled();
+    });
   });
 });
