@@ -353,6 +353,21 @@ describe('checkKey and checkAndRecord', () => {
       expect(await checkKey({ ...withModel(hosted), model: 'deepseek-v3' })).toEqual({ ok: true, checkModel: 'deepseek-v4-flash', facts: { vision: false } });
     });
 
+    it('a gone check model moves to the first listed model that really replies, past one that doesn’t chat', async () => {
+      probe.mockResolvedValue({ ok: true, models: ['all-minilm', 'nomic-text', 'qwen3-8b'], facts: {} });
+      chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'gone' });
+      chat.mockResolvedValueOnce({ ok: false, reason: 'other', message: 'not a chat model' });
+      chat.mockResolvedValueOnce({ ok: false, reason: 'request', message: 'a chat call to nomic-text failed (400).' });
+      chat.mockResolvedValueOnce({ ok: true });
+      expect(await checkKey(withModel(hosted))).toEqual({ ok: true, checkModel: 'qwen3-8b', facts: {} });
+      // Only a model that refused the tiny request: it is kept when nothing else really replies
+      chat.mockReset();
+      chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'gone' });
+      chat.mockResolvedValue({ ok: false, reason: 'request', message: 'a chat call failed (400).' });
+      expect(await checkKey(withModel(hosted))).toEqual({ ok: true, checkModel: 'all-minilm', facts: {} });
+      expect(chat).toHaveBeenCalledTimes(4);
+    });
+
     it('Gemini’s "models/" prefix does not make a listed model look missing', async () => {
       const gemini: KeyRow = { ...hosted, settings: { kind: 'gemini' }, endpoint: 'https://generativelanguage.googleapis.com/v1beta/openai', model: 'gemini-flash-latest' };
       probe.mockResolvedValue({ ok: true, models: ['gemini-flash-latest'] });

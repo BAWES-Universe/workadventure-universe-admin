@@ -5,6 +5,7 @@ import { kindInfo } from '@/lib/ai-key-kinds';
 import { cleanModelId, probeChat, probeModels, type ProbeFailure } from '@/lib/ai-key-models';
 import { addNotice, clearNotices } from '@/lib/notices';
 import { moveBotOffGoneModel } from '@/lib/ai-key-model-gone';
+import { firstAnswering } from '@/lib/ai-key-answering';
 import { forgetKeyModels } from '@/lib/ai-key-model-list';
 
 /**
@@ -171,10 +172,10 @@ export async function checkKey(key: KeyRow): Promise<KeyCheck> {
     // The provider took the key and the model but refused this tiny request (a reasoning model that wants a bigger cap, say):
     // that is the request's problem, not the key's, and a real reply's 400 is not counted against a key either
     if (!chat.ok && chat.reason === 'gone' && models.ok && models.models.length > 0 && !models.models.includes(cleanModelId(key.model, info.kind))) {
-      const checkModel = info.suggestedModel && models.models.includes(info.suggestedModel) ? info.suggestedModel : models.models[0];
-      const other = await probeChat({ kind: info.kind, address, apiKey, model: checkModel });
-      if (!other.ok && other.reason !== 'request') return failed(other);
-      return { ok: true, checkModel, facts: models.facts[checkModel] ?? {} };
+      // The first of the others that really answers becomes the check model; none answering says why, as before
+      const found = await firstAnswering({ kind: info.kind, address, apiKey }, models.models, info.suggestedModel);
+      if (!found.ok) return failed(found);
+      return { ok: true, checkModel: found.model, facts: models.facts[found.model] ?? {} };
     }
     if (!chat.ok && chat.reason !== 'request') return failed(chat);
   }
