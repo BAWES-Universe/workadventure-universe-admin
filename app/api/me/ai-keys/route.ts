@@ -113,10 +113,14 @@ export async function POST(request: NextRequest) {
         refusedRequest ??= candidate;
         continue;
       }
-      // Out of credit is said ahead of a later model's words: it is what the person can fix
-      if (!refusedForCredit) refused = chat.message;
-      if (chat.reason === 'credit') refusedForCredit = true;
-      if (chat.reason === 'busy') sawBusy = true;
+      // Out of credit is said ahead of a later model's words, as it is what the person can fix; then busy (try again)
+      if (chat.reason === 'credit') {
+        if (!refusedForCredit) refused = chat.message;
+        refusedForCredit = true;
+      } else if (chat.reason === 'busy') {
+        if (!refusedForCredit && !sawBusy) refused = chat.message;
+        sawBusy = true;
+      } else if (!refusedForCredit && !sawBusy) refused = chat.message;
       if (!tryNextModel(chat)) {
         // The key or the provider failed, not this model: one that only refused the tiny request earlier proves nothing now
         refusedRequest = null;
