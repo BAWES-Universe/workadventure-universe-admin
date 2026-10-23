@@ -177,9 +177,9 @@ export async function checkKey(key: KeyRow): Promise<KeyCheck> {
     // never becomes it, and the others are asked with a tool, as a bot asks
     const others = models.ok ? models.models.filter((model) => model !== asked && models.facts?.[model]?.tools !== false) : [];
     if (!chat.ok && chat.reason === 'gone' && others.length > 0) {
-      // None answering says why, as before
       const found = await firstAnswering({ kind: info.kind, address, apiKey, withTool: true }, others, info.suggestedModel, undefined, models.ok ? models.facts : {});
-      if (!found.ok) return failed(found);
+      // None answering says why; a refused call with a tool in it says less than the check model being gone
+      if (!found.ok) return failed(found.reason === 'request' ? chat : found);
       return { ok: true, checkModel: found.model, facts: (models.ok ? models.facts[found.model] : undefined) ?? {} };
     }
     if (!chat.ok && chat.reason !== 'request') return failed(chat);
@@ -273,9 +273,12 @@ export async function recordReply(
   if (verdict.down) {
     const decided = verdict.down === 'model' && botId ? await moveBotOffGoneModel(key, botId) : false;
     if (decided === true) return;
-    // Asking again can show the key itself was refused or ran out of credit: it is Down for that, not for a model
-    await markDown(key, decided || verdict.down);
-    return;
+    // Asking again can show the key itself was refused or ran out of credit: it is Down for that, not for a model. A
+    // model that answers when asked again counts the failure as any other, below.
+    if (decided !== 'count') {
+      await markDown(key, decided || verdict.down);
+      return;
+    }
   }
   // The key can be revoked between the read above and this count: then there is nothing left to count and the report is done
   const bumped = await prisma.botsAiProvider
