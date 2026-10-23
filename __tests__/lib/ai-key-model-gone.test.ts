@@ -207,6 +207,17 @@ describe('moveBotOffGoneModel', () => {
     expect(db.bot.updateMany).not.toHaveBeenCalled();
   });
 
+  it('moves nobody off the key when one other allowed model failed for another reason than gone', async () => {
+    list.mockResolvedValue({ ok: true, models: ['meta-llama/llama-4-maverick', 'm-1', 'm-2'], facts: {}, listed: true });
+    chat.mockReset()
+      .mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'OpenRouter doesn’t have that model.' })
+      .mockResolvedValueOnce({ ok: false, reason: 'other', message: 'Request timed out.' })
+      .mockResolvedValue({ ok: false, reason: 'gone', message: 'OpenRouter doesn’t have that model.' });
+    expect(await moveBotOffGoneModel(key, guide.id)).toBe(false);
+    expect(moveBotsOffKey).not.toHaveBeenCalled();
+    expect(db.bot.updateMany).not.toHaveBeenCalled();
+  });
+
   it('leaves it to the key’s own rules when not every allowed model could be asked', async () => {
     db.bot.findUnique.mockResolvedValue({ ...guide, id: 'b8' });
     list.mockResolvedValue({ ok: true, models: ['meta-llama/llama-4-maverick', 'm-1', 'm-2', 'm-3', 'm-4', 'm-5'], facts: {}, listed: true });
