@@ -273,7 +273,11 @@ jobs:
               "${COOLIFY_BASE}/api/v1/deployments/${deployment}" \
               -H "Authorization: Bearer ${COOLIFY_TOKEN}") || code=000
             case "$code" in
-              401|403|404)
+              403)
+                # The token may start deploys without being allowed to read them (Coolify "read" permission).
+                echo "::warning::Deploy accepted but not checked: COOLIFY_TOKEN may not read deployments (403)"
+                exit 0 ;;
+              401|404)
                 echo "::error::Coolify answered $code when reading deployment $deployment"
                 exit 1 ;;
             esac
