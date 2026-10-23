@@ -45,8 +45,9 @@ async function decide(key: KeyForModels & { ownerId: string | null; name: string
   });
   if (!bot || bot.aiProviderRef !== key.providerId) return false;
   const universe = bot.room.world.universe;
-  const lent = await prisma.aiKeyLend.findUnique({ where: { providerId_universeId: { providerId: key.providerId, universeId: universe.id } }, select: { models: true } });
-  const lend = lendModels(lent?.models);
+  const readLend = async () =>
+    lendModels((await prisma.aiKeyLend.findUnique({ where: { providerId_universeId: { providerId: key.providerId, universeId: universe.id } }, select: { models: true } }))?.models);
+  const lend = await readLend();
   // The model the reply was asked of: the bot's own, or the one its lend falls back to
   const gone = servedModel(bot, key, lend);
   if (!gone) return false;
@@ -73,6 +74,9 @@ async function decide(key: KeyForModels & { ownerId: string | null; name: string
   // The lend's only model is still listed but won't answer: not a dropped model, so the key's own rules apply (If this is down)
   if (allowed.length === 0 && listed) return false;
   if (allowed.length === 0) {
+    // The owner changed the lend while the provider was asked: the lend change already moved these bots where it allows,
+    // so nobody is pulled off the key on the old lend's say, and a later report is decided on the new one
+    if (JSON.stringify(await readLend()) !== JSON.stringify(lend)) return true;
     // Nothing allowed here is offered any more: the bots here can't run on this key, as if it were pulled
     const moved = await moveBotsOffKey(key.providerId, { universeId: universe.id, actor: { id: '', name: label }, why: 'models-gone' });
     // That tells the universe's owner. The key's owner made these bots, so they hear it too when it is someone else's universe.

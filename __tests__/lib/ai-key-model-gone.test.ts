@@ -78,6 +78,13 @@ describe('moveBotOffGoneModel', () => {
     expect(notice).not.toHaveBeenCalled();
   });
 
+  it('pulls nobody off the key when the owner changed the lend while the provider was asked', async () => {
+    db.aiKeyLend.findUnique.mockResolvedValueOnce({ models: ['meta-llama/llama-4-maverick'] }).mockResolvedValueOnce({ models: null });
+    expect(await moveBotOffGoneModel(key, 'b1')).toBe(true);
+    expect(moveBotsOffKey).not.toHaveBeenCalled();
+    expect(db.bot.updateMany).not.toHaveBeenCalled();
+  });
+
   it('tells the key’s owner too when the bots moved in someone else’s universe', async () => {
     db.aiKeyLend.findUnique.mockResolvedValue({ models: ['meta-llama/llama-4-maverick'] });
     (moveBotsOffKey as jest.Mock).mockResolvedValue({ count: 1, universes: [{ id: 'uni-1', name: 'Sandbox Universe', ownerId: 'someone', botNames: ['Guide'] }] });

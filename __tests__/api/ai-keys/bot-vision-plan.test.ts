@@ -77,6 +77,14 @@ describe('nothing picked', () => {
     expect((await ask()).vision).toEqual({ choice: 'universe-ai' });
   });
 
+  it('uses the key’s check model for images when it sees and the bot’s own model on that key doesn’t (#575)', async () => {
+    setRows(universeAiProvider, { ...lmStudioKey, model: 'qwen3-vl-8b', supportsVision: true });
+    bot.findUnique.mockResolvedValue({ ...botOn('key-2'), aiModel: 'qwen3-8b' });
+    const body = await ask();
+    expect(body).toMatchObject({ source: 'own-key', providerId: 'key-2', model: 'qwen3-8b' });
+    expect(body.vision).toMatchObject({ choice: 'another', credentials: { providerId: 'key-2', model: 'qwen3-vl-8b', supportsVision: true } });
+  });
+
   it('says nothing for a model that sees images itself', async () => {
     bot.findUnique.mockResolvedValue(botOn('key-3'));
     expect('vision' in (await ask())).toBe(false);

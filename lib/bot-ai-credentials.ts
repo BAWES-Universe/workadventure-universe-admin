@@ -100,6 +100,11 @@ async function visionPlan(bot: BotForCredentials, main: ServedProvider): Promise
   // Another model on the same key only when the lend there allows it (#575)
   const lend = own && !picked ? await lentModelsHere(main.providerId, bot.room.world.universe.id) : null;
   const mainSees = resolveVisionSupport(main.model ?? '', main.supportsVision);
+  // A bot on its own model still has the key's check model to look at images when that one sees (#575)
+  const key =
+    own && !picked && !mainSees
+      ? ((await prisma.botsAiProvider.findUnique({ where: { providerId: main.providerId }, select: { model: true, supportsVision: true, settings: true } })) ?? main)
+      : main;
   const choice: VisionPick | null =
     picked ??
     (own
@@ -107,7 +112,7 @@ async function visionPlan(bot: BotForCredentials, main: ServedProvider): Promise
           ownKeyId: main.providerId,
           sees: mainSees,
           sameKeyModel:
-            keyVisionModels({ model: main.model, supportsVision: main.supportsVision, settings: main.settings }).find(
+            keyVisionModels({ model: key.model, supportsVision: key.supportsVision, settings: key.settings }).find(
               (model) => model !== main.model && (!lend || lend.includes(model)),
             ) ?? null,
         })
