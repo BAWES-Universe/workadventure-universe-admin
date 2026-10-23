@@ -132,14 +132,24 @@ describe('moveBotOffGoneModel', () => {
     expect(db.bot.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: { aiModel: 'qwen/qwen3-235b' } }));
   });
 
-  it('opens no late-report window after a move to a model that didn’t answer', async () => {
+  it('never moves a bot while the provider is busy, and decides again on the next report', async () => {
     list.mockResolvedValue({ ok: true, models: ['anthropic/claude-haiku-5-5', 'openai/gpt-5-mini'], facts: {}, listed: true });
     chat.mockResolvedValue({ ok: false, reason: 'busy', message: 'OpenRouter is busy right now.' });
     expect(await moveBotOffGoneModel(key, guide.id)).toBe(true);
+    expect(db.bot.updateMany).not.toHaveBeenCalled();
     list.mockClear();
-    db.bot.findUnique.mockResolvedValue({ ...guide, aiModel: 'anthropic/claude-haiku-5-5' });
-    await moveBotOffGoneModel(key, guide.id);
+    chat.mockResolvedValue({ ok: true });
+    expect(await moveBotOffGoneModel(key, guide.id)).toBe(true);
     expect(list).toHaveBeenCalled();
+    expect(db.bot.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: { aiModel: 'anthropic/claude-haiku-5-5' } }));
+  });
+
+  it('leaves it to the key’s own rules when the provider refuses the key while other models are asked', async () => {
+    list.mockResolvedValue({ ok: true, models: ['anthropic/claude-haiku-5-5', 'openai/gpt-5-mini'], facts: {}, listed: true });
+    chat.mockResolvedValue({ ok: false, reason: 'rejected', message: 'OpenRouter didn’t accept this key.' });
+    expect(await moveBotOffGoneModel(key, guide.id)).toBe(false);
+    expect(db.bot.updateMany).not.toHaveBeenCalled();
+    expect(moveBotsOffKey).not.toHaveBeenCalled();
   });
 
   it('moves a bot off its own model when the provider still lists it but won’t answer with it, keeping the key Working', async () => {
@@ -186,21 +196,30 @@ describe('moveBotOffGoneModel', () => {
     expect(chat).toHaveBeenCalledWith(expect.objectContaining({ kind: 'openrouter', address: 'https://openrouter.ai/api/v1', apiKey: 'sk-or-v1-abcdef1234' }));
   });
 
-  it('keeps the first model, as before, when the provider doesn’t answer the tiny reply at all', async () => {
+  it('moves nobody when the provider doesn’t answer the tiny reply at all, asking only once', async () => {
     list.mockResolvedValue({ ok: true, models: ['deepseek/deepseek-v4-flash', 'openai/gpt-5-mini', 'qwen/qwen3-235b'], facts: {}, listed: true });
     chat.mockResolvedValue({ ok: false, reason: 'unreachable', message: 'OpenRouter didn’t answer.' });
     expect(await moveBotOffGoneModel(key, 'b1')).toBe(true);
     expect(chat).toHaveBeenCalledTimes(1);
-    expect(db.bot.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: { aiModel: 'deepseek/deepseek-v4-flash' } }));
+    expect(db.bot.updateMany).not.toHaveBeenCalled();
   });
 
-  it('leaves it to the key’s own rules when its listed model won’t answer and no other one does either, so bots never cycle', async () => {
+  it('moves the bots there to Universe AI when none of the other allowed models answers either, so bots never cycle', async () => {
     db.bot.findUnique.mockResolvedValue({ ...guide, id: 'b7' });
     list.mockResolvedValue({ ok: true, models: ['meta-llama/llama-4-maverick', 'openai/gpt-5-mini'], facts: {}, listed: true });
     chat.mockResolvedValue({ ok: false, reason: 'gone', message: 'OpenRouter doesn’t have that model.' });
-    expect(await moveBotOffGoneModel(key, 'b7')).toBe(false);
+    expect(await moveBotOffGoneModel(key, 'b7')).toBe(true);
+    expect(moveBotsOffKey).toHaveBeenCalledWith('key-1', { universeId: 'uni-1', actor: { id: '', name: 'OpenRouter' }, why: 'models-gone' });
     expect(db.bot.updateMany).not.toHaveBeenCalled();
-    expect(notice).not.toHaveBeenCalled();
+  });
+
+  it('leaves it to the key’s own rules when not every allowed model could be asked', async () => {
+    db.bot.findUnique.mockResolvedValue({ ...guide, id: 'b8' });
+    list.mockResolvedValue({ ok: true, models: ['meta-llama/llama-4-maverick', 'm-1', 'm-2', 'm-3', 'm-4', 'm-5'], facts: {}, listed: true });
+    chat.mockResolvedValue({ ok: false, reason: 'gone', message: 'OpenRouter doesn’t have that model.' });
+    expect(await moveBotOffGoneModel(key, 'b8')).toBe(false);
+    expect(moveBotsOffKey).not.toHaveBeenCalled();
+    expect(db.bot.updateMany).not.toHaveBeenCalled();
   });
 
   it('leaves it to the key’s own rules when the lend’s only model is still listed but won’t answer', async () => {
@@ -266,13 +285,13 @@ describe('moveBotOffGoneModel', () => {
     expect(list).toHaveBeenCalled();
   });
 
-  it('keeps the check model when no listed model answers, and still moves the bot off the gone one', async () => {
+  it('keeps the check model and the bot where they are when no listed model answers while the provider is busy', async () => {
     db.bot.findUnique.mockResolvedValue({ ...guide, aiModel: null });
     list.mockResolvedValue({ ok: true, models: ['deepseek/deepseek-v4-flash', 'qwen/qwen3-235b'], facts: {}, listed: true });
     chat.mockResolvedValue({ ok: false, reason: 'busy', message: 'OpenRouter is busy right now.' });
     expect(await moveBotOffGoneModel(key, guide.id)).toBe(true);
     expect(db.botsAiProvider.updateMany).not.toHaveBeenCalled();
-    expect(db.bot.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: { aiModel: 'deepseek/deepseek-v4-flash' } }));
+    expect(db.bot.updateMany).not.toHaveBeenCalled();
   });
 
   it('lets a report go from a bot that follows the check model, just after the check model changed', async () => {
