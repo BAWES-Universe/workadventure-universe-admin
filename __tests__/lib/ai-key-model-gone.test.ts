@@ -212,6 +212,28 @@ describe('moveBotOffGoneModel', () => {
     expect(list).toHaveBeenCalled();
   });
 
+  it('asks the provider once for replies in flight at once that report the same 404', async () => {
+    list.mockResolvedValue({ ok: true, models: ['anthropic/claude-haiku-5-5', 'openai/gpt-5-mini'], facts: {}, listed: true });
+    const answers = await Promise.all([moveBotOffGoneModel(key, guide.id), moveBotOffGoneModel(key, guide.id), moveBotOffGoneModel(key, guide.id)]);
+    expect(answers).toEqual([true, true, true]);
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(db.bot.updateMany).toHaveBeenCalledTimes(1);
+  });
+
+  it('lets a new check model’s window pass a bot whose lend leaves that model out: it replies with the lend’s own', async () => {
+    // The check model moves to qwen...
+    db.bot.findUnique.mockResolvedValue({ ...guide, aiModel: null, aiProviderRef: 'key-7' });
+    list.mockResolvedValue({ ok: true, models: ['qwen/qwen3-235b', 'deepseek/deepseek-v4-flash'], facts: {}, listed: true });
+    await moveBotOffGoneModel({ ...key, providerId: 'key-7' }, guide.id);
+    expect(db.botsAiProvider.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ model: 'qwen/qwen3-235b' }) }));
+    // ...and a bot in a universe whose lend allows only deepseek reports a 404 on deepseek: that counts
+    list.mockClear();
+    db.aiKeyLend.findUnique.mockResolvedValue({ models: ['deepseek/deepseek-v4-flash'] });
+    db.bot.findUnique.mockResolvedValue({ ...guide, id: 'other-7', aiModel: null, aiProviderRef: 'key-7' });
+    await moveBotOffGoneModel({ ...key, providerId: 'key-7', model: 'qwen/qwen3-235b' }, 'other-7');
+    expect(list).toHaveBeenCalled();
+  });
+
   it('counts a report again once a save that noted a change is taken back', async () => {
     const undo = noteModelChanged(guide.id);
     undo();

@@ -25,23 +25,36 @@ export { LATE_REPORT_MS, noteModelChanged } from '@/lib/ai-key-late-report';
  * still listed): then the reply's failure counts against the key as before. A report that comes in just after the bot was moved is
  * about the model it left (a reply already on its way, or the bot server still holding the old answer), so it is let go.
  */
-export async function moveBotOffGoneModel(key: KeyForModels & { ownerId: string | null; name: string }, botId: string): Promise<boolean> {
+export function moveBotOffGoneModel(key: KeyForModels & { ownerId: string | null; name: string }, botId: string): Promise<boolean> {
+  // Replies in flight at once report the same 404: they share one answer, so the provider is asked once, not once each
+  const id = `${key.providerId}|${botId}`;
+  const running = deciding.get(id);
+  if (running) return running;
+  const decided = decide(key, botId).finally(() => deciding.delete(id));
+  deciding.set(id, decided);
+  return decided;
+}
+
+const deciding = new Map<string, Promise<boolean>>();
+
+async function decide(key: KeyForModels & { ownerId: string | null; name: string }, botId: string): Promise<boolean> {
   if (!key.ownerId) return false;
   const bot = await prisma.bot.findUnique({
     where: { id: botId },
     select: { id: true, name: true, aiModel: true, aiProviderRef: true, room: { select: { world: { select: { universe: { select: { id: true, name: true } } } } } } },
   });
   if (!bot || bot.aiProviderRef !== key.providerId) return false;
-  // Moved or changed in the last few minutes, on any key: late news about the model it left, so the provider isn't even asked
-  if (changedLately(bot, key.providerId)) return true;
-  const list = await keyModels(key, { fresh: true });
-  if (!list.ok || !list.listed) return false;
   const universe = bot.room.world.universe;
   const lent = await prisma.aiKeyLend.findUnique({ where: { providerId_universeId: { providerId: key.providerId, universeId: universe.id } }, select: { models: true } });
   const lend = lendModels(lent?.models);
   // The model the reply was asked of: the bot's own, or the one its lend falls back to
   const gone = servedModel(bot, key, lend);
   if (!gone) return false;
+  // Moved or changed in the last few minutes: late news about the model it left, so the provider isn't even asked. A new
+  // check model only counts for a bot that really replies with it (a lend that leaves it out serves its own first model).
+  if (changedLately(bot, key.providerId, gone === key.model)) return true;
+  const list = await keyModels(key, { fresh: true });
+  if (!list.ok || !list.listed) return false;
   // A model the provider still lists but that won't answer is that model's failure only, the key's check model too: the
   // bot moves off it the same as off a gone one, and the key gets another check model when one answers
   const listed = list.models.includes(gone);
