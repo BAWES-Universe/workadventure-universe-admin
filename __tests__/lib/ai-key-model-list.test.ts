@@ -88,10 +88,10 @@ describe('keyModels', () => {
   it('keeps what the provider said about each model on the key, Tools, Vision and how much it reads, once', async () => {
     probe.mockResolvedValue(LIST);
     const key = claudeKey();
-    db.findUnique.mockResolvedValue({ settings: { kind: 'claude', caps: { vision: true } }, endpoint: key.endpoint });
+    db.findUnique.mockResolvedValue({ settings: { kind: 'claude', caps: { vision: true } }, endpoint: key.endpoint, model: key.model });
     await keyModels(key);
     expect(db.updateMany).toHaveBeenCalledWith({
-      where: { providerId: key.providerId, ownerId: { not: null }, endpoint: key.endpoint },
+      where: { providerId: key.providerId, ownerId: { not: null }, endpoint: key.endpoint, model: key.model },
       data: { settings: { kind: 'claude', caps: { vision: true }, modelFacts: { 'claude-haiku-5-5': { vision: true, tools: true, context: 200000 } }, modelCount: LIST.models.length } },
     });
     db.updateMany.mockClear();
@@ -106,10 +106,19 @@ describe('keyModels', () => {
     expect(db.updateMany).not.toHaveBeenCalled();
   });
 
+  it('never writes over a check model saved between its read and its write', async () => {
+    probe.mockResolvedValue(LIST);
+    const key = claudeKey();
+    db.findUnique.mockResolvedValue({ settings: { kind: 'claude', caps: { vision: true } }, endpoint: key.endpoint, model: key.model });
+    await keyModels(key);
+    // The write only lands while the key still has the check model it read
+    expect(db.updateMany.mock.calls[0][0].where.model).toBe(key.model);
+  });
+
   it('gives a caller that joined a request already running the same facts', async () => {
     let answer: ((value: unknown) => void) | undefined;
     probe.mockReturnValue(new Promise((resolve) => (answer = resolve)));
-    db.findUnique.mockResolvedValue({ settings: { kind: 'claude' } });
+    db.findUnique.mockResolvedValue({ settings: { kind: 'claude' }, model: 'claude-sonnet-5-5' });
     const first = claudeKey();
     const joiner = { ...first, settings: { kind: 'claude' } };
     const asks = [keyModels(first, { fresh: true }), keyModels(joiner)];
