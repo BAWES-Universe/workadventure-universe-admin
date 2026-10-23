@@ -11,6 +11,8 @@ const ATTRIBUTES = new Set([
 ]);
 const TAG = /<(\/?)([A-Za-z][\w:.-]*)((?:\s+[^\s=<>/"']+\s*=\s*(?:"[^"]*"|'[^']*'))*)\s*(\/?)>/g;
 const ATTRIBUTE = /([^\s=]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
+/** A style is only plain `name: word` pairs, so no escapes, brackets or addresses can be written in it. */
+const PLAIN_STYLE = /^\s*[a-z-]+\s*:\s*[a-z0-9.% -]+(?:;\s*[a-z-]+\s*:\s*[a-z0-9.% -]+)*;?\s*$/i;
 /** Values that can pull something in or run it. */
 const UNSAFE_VALUE = /url\s*\(|javascript:|data:|@import|expression\s*\(|[<>]/i;
 
@@ -31,7 +33,9 @@ export function isPlainSvg(svg) {
       continue;
     }
     for (const attribute of attributes.matchAll(ATTRIBUTE)) {
-      if (!ATTRIBUTES.has(attribute[1]) || UNSAFE_VALUE.test(attribute[2] ?? attribute[3] ?? '')) return false;
+      const value = attribute[2] ?? attribute[3] ?? '';
+      if (!ATTRIBUTES.has(attribute[1]) || UNSAFE_VALUE.test(value)) return false;
+      if (attribute[1] === 'style' && !PLAIN_STYLE.test(value)) return false;
     }
     if (!selfClosing) stack += 1;
   }

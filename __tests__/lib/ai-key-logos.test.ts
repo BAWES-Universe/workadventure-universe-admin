@@ -39,6 +39,8 @@ describe('provider logos', () => {
     expect(isPlainSvg('<svg xmlns="http://www.w3.org/2000/svg" xmlns:s="http://www.w3.org/2000/svg"><s:script>alert(1)</s:script><path fill="currentColor" d="M0 0h8v8z"/></svg>')).toBe(false);
     expect(isPlainSvg('<svg><path d="M0 0" onclick="x()"/></svg>')).toBe(false);
     expect(isPlainSvg('<svg><path d="M0 0" style="fill:url(https://x.test/a.svg#b)"/></svg>')).toBe(false);
+    expect(isPlainSvg('<svg><path d="M0 0" style="fill:u\\72l(https://example.com/logo.svg#mark)"/></svg>')).toBe(false);
+    expect(isPlainSvg('<svg><path d="M0 0" style="flex:none;line-height:1"/></svg>')).toBe(true);
     expect(isPlainSvg('<svg><!-- note --><path d="M0 0"/></svg>')).toBe(false);
     expect(isPlainSvg('<svg><![CDATA[x]]><path d="M0 0"/></svg>')).toBe(false);
     expect(isPlainSvg('<svg><path d="M0 0"></svg>')).toBe(false);
