@@ -159,6 +159,16 @@ describe('checkAndRecord: a new check model (#575)', () => {
     expect(chat).not.toHaveBeenCalledWith(expect.objectContaining({ model: 'plain-x' }));
   });
 
+  it('asks the models that could replace the check model with a tool, as a bot asks, and never takes one that refuses it', async () => {
+    probe.mockResolvedValue({ ok: true, models: ['no-tools', 'chat-x'], facts: {} });
+    chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'gone' });
+    chat.mockResolvedValueOnce({ ok: false, reason: 'request', message: 'Tools are not supported.' });
+    chat.mockResolvedValueOnce({ ok: true });
+    expect(await checkKey({ ...hosted, model: 'deepseek-v4-flash' })).toMatchObject({ ok: true, checkModel: 'chat-x' });
+    expect(chat.mock.calls[0][0]).not.toHaveProperty('withTool');
+    expect(chat.mock.calls.slice(1).map(([asked]) => asked.withTool)).toEqual([true, true]);
+  });
+
   it('asks models the provider says call tools first, past a list that starts with ones that don’t chat', async () => {
     probe.mockResolvedValue({ ok: true, models: ['embed-a', 'embed-b', 'embed-c', 'embed-d', 'chat-x'], facts: { 'chat-x': { tools: true } } });
     chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'gone' });
@@ -426,11 +436,12 @@ describe('checkKey and checkAndRecord', () => {
       chat.mockResolvedValueOnce({ ok: false, reason: 'request', message: 'a chat call to nomic-text failed (400).' });
       chat.mockResolvedValueOnce({ ok: true });
       expect(await checkKey(withModel(hosted))).toEqual({ ok: true, checkModel: 'qwen3-8b', facts: {} });
-      // Only a model that refused the tiny request: it is kept when nothing else really replies
+      // Only models that refused a call with a tool in it, as bots send: none becomes the check model, since bots on it
+      // couldn't reply either
       chat.mockReset();
       chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'gone' });
       chat.mockResolvedValue({ ok: false, reason: 'request', message: 'a chat call failed (400).' });
-      expect(await checkKey(withModel(hosted))).toEqual({ ok: true, checkModel: 'all-minilm', facts: {} });
+      expect(await checkKey(withModel(hosted))).toMatchObject({ ok: false });
       expect(chat).toHaveBeenCalledTimes(4);
     });
 
