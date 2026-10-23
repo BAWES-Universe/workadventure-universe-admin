@@ -18,7 +18,7 @@ export interface KeyEditInput {
 
 export type KeyEditResult =
   | { ok: true; model: string; endpoint: string }
-  | { ok: false; status: 400 | 404 | 500; message: string; code?: 'model-missing' };
+  | { ok: false; status: 400 | 404 | 409 | 500; message: string; code?: 'model-missing' };
 
 const KEY_SELECT = {
   providerId: true,
@@ -132,9 +132,10 @@ export async function editSavedKey(ownerId: string, id: string, input: KeyEditIn
     else delete settings.caps;
   }
 
-  // Same row, same id: lends and the bots running on it stay exactly as they are
-  await prisma.botsAiProvider.updateMany({
-    where: { providerId: id, ownerId },
+  // Same row, same id: lends and the bots running on it stay exactly as they are. The checks took a while: when only the
+  // address changed, a check model swapped meanwhile (the old one went, #575) is never put back.
+  const { count } = await prisma.botsAiProvider.updateMany({
+    where: { providerId: id, ownerId, ...(typedModel === null ? { model: key.model } : {}) },
     data: {
       endpoint: target.target.endpoint,
       model,
@@ -144,6 +145,7 @@ export async function editSavedKey(ownerId: string, id: string, input: KeyEditIn
       ...(onList ? { settings, supportsVision: caps.vision ?? null } : {}),
     },
   });
+  if (count === 0) return { ok: false, status: 409, message: 'This key changed while it was checked. Open Edit again.' };
   // A new address can list other models: the list kept for the old one is asked again next time
   forgetKeyModels(id);
   // It just answered a real chat call, so a key that was Down is Working again

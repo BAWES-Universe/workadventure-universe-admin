@@ -160,24 +160,26 @@ async function mainCredentials(bot: BotForCredentials): Promise<BotAiCredentials
       const answer = await universeAi();
       return answer.status === 200 && answer.body.source === 'universe-ai' ? { status: 200, body: { ...answer.body, standingInFor: ref } } : answer;
     }
-    const info = kindInfo((provider.settings as { kind?: unknown } | null)?.kind);
+    // A recheck that just brought the key back may have moved it to a new check model (#575): the bot gets the key as it is now
+    const key = health === provider ? provider : ((await prisma.botsAiProvider.findUnique({ where: { providerId: ref } })) ?? provider);
+    const info = kindInfo((key.settings as { kind?: unknown } | null)?.kind);
     // The bot's own model on this key; the bot server reads `model` and `supportsVision`, so it needs nothing new
-    const model = servedModel(bot, provider, verdict.lendModels) ?? provider.model;
+    const model = servedModel(bot, key, verdict.lendModels) ?? key.model;
     return {
       status: 200,
       body: {
         ...providerPayload({
-          ...provider,
+          ...key,
           model,
-          supportsVision: model ? modelSupportsVision(provider, model) : provider.supportsVision,
-          settings: model && model !== provider.model ? settingsForModel(provider, model) : provider.settings,
+          supportsVision: model ? modelSupportsVision(key, model) : key.supportsVision,
+          settings: model && model !== key.model ? settingsForModel(key, model) : key.settings,
         }),
         source: 'own-key',
         keyOwnerId: provider.ownerId,
         keyKind: info?.kind ?? null,
         keyGroup: info?.group ?? null,
         // A hosted kind sits at its provider's fixed base; anything else is an address the person typed
-        keyAddressTyped: isTypedEndpoint(info, provider.endpoint),
+        keyAddressTyped: isTypedEndpoint(info, key.endpoint),
       },
     };
   }
