@@ -2,6 +2,8 @@ import { prisma } from '@/lib/db';
 import { addNotice } from '@/lib/notices';
 import { keyModels } from '@/lib/ai-key-model-list';
 import { moveBotsOffKey } from '@/lib/ai-key-lend';
+import { probeChat } from '@/lib/ai-key-models';
+import { decryptApiKey } from '@/lib/encryption';
 import { LATE_REPORT_MS, moveBotOffGoneModel } from '@/lib/ai-key-model-gone';
 
 /** A provider drops the model one bot uses (#575): that bot moves, the key stays Working. */
@@ -12,10 +14,13 @@ jest.mock('@/lib/db', () => ({
 jest.mock('@/lib/notices', () => ({ addNotice: jest.fn() }));
 jest.mock('@/lib/ai-key-lend', () => ({ moveBotsOffKey: jest.fn() }));
 jest.mock('@/lib/ai-key-model-list', () => ({ ...jest.requireActual('@/lib/ai-key-model-list'), keyModels: jest.fn() }));
+jest.mock('@/lib/ai-key-models', () => ({ ...jest.requireActual('@/lib/ai-key-models'), probeChat: jest.fn() }));
+jest.mock('@/lib/encryption', () => ({ decryptApiKey: jest.fn() }));
 
 const db = prisma as unknown as { bot: Record<'findUnique' | 'updateMany', jest.Mock>; aiKeyLend: Record<'findUnique', jest.Mock>; botsAiProvider: Record<'updateMany', jest.Mock> };
 const list = keyModels as jest.Mock;
 const notice = addNotice as jest.Mock;
+const chat = probeChat as jest.Mock;
 
 const key = { providerId: 'key-1', name: 'My OpenRouter', ownerId: 'maker', endpoint: 'https://openrouter.ai/api/v1', apiKeyEncrypted: 'enc', settings: { kind: 'openrouter' }, model: 'openai/gpt-5-mini' };
 const guide = { id: 'b1', name: 'Guide', aiModel: 'meta-llama/llama-4-maverick', aiProviderRef: 'key-1', room: { world: { universe: { id: 'uni-1', name: 'Sandbox Universe' } } } };
@@ -26,6 +31,8 @@ beforeEach(() => {
   db.bot.updateMany.mockResolvedValue({ count: 1 });
   db.aiKeyLend.findUnique.mockResolvedValue({ models: null });
   list.mockResolvedValue({ ok: true, models: ['deepseek/deepseek-v4-flash', 'openai/gpt-5-mini'], facts: {}, listed: true });
+  chat.mockResolvedValue({ ok: true });
+  (decryptApiKey as jest.Mock).mockReturnValue('sk-or-v1-abcdef1234');
 });
 
 describe('moveBotOffGoneModel', () => {
@@ -103,6 +110,25 @@ describe('moveBotOffGoneModel', () => {
     const clock = jest.spyOn(Date, 'now').mockReturnValue(now + LATE_REPORT_MS + 1);
     expect(await moveBotOffGoneModel(key, 'b7')).toBe(false);
     clock.mockRestore();
+  });
+
+  it('skips a listed model that doesn’t chat (an embedding model), for the bot and the check model alike, asking each once', async () => {
+    db.bot.findUnique.mockResolvedValue({ ...guide, aiModel: null });
+    list.mockResolvedValue({ ok: true, models: ['all-minilm', 'qwen/qwen3-235b'], facts: {}, listed: true });
+    chat.mockImplementation(async ({ model }: { model: string }) => (model === 'all-minilm' ? { ok: false, reason: 'other', message: 'not a chat model' } : { ok: true }));
+    await moveBotOffGoneModel(key, 'b1');
+    expect(db.botsAiProvider.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ model: 'qwen/qwen3-235b' }) }));
+    expect(db.bot.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: { aiModel: 'qwen/qwen3-235b' } }));
+    expect(chat.mock.calls.map((call) => call[0].model)).toEqual(['all-minilm', 'qwen/qwen3-235b']);
+    expect(chat).toHaveBeenCalledWith(expect.objectContaining({ kind: 'openrouter', address: 'https://openrouter.ai/api/v1', apiKey: 'sk-or-v1-abcdef1234' }));
+  });
+
+  it('keeps the first model, as before, when the provider doesn’t answer the tiny reply at all', async () => {
+    list.mockResolvedValue({ ok: true, models: ['deepseek/deepseek-v4-flash', 'openai/gpt-5-mini', 'qwen/qwen3-235b'], facts: {}, listed: true });
+    chat.mockResolvedValue({ ok: false, reason: 'unreachable', message: 'OpenRouter didn’t answer.' });
+    expect(await moveBotOffGoneModel(key, 'b1')).toBe(true);
+    expect(chat).toHaveBeenCalledTimes(1);
+    expect(db.bot.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: { aiModel: 'deepseek/deepseek-v4-flash' } }));
   });
 
   it('does nothing for a bot that is not on this key any more', async () => {
