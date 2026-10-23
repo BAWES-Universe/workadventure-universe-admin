@@ -21,9 +21,8 @@ export { LATE_REPORT_MS, noteModelChanged } from '@/lib/ai-key-late-report';
  * A model the provider still lists but that answers a bot with a 404 is treated the same for that bot (another listed model
  * may still answer), the key's check model too.
  *
- * Returns false when this can't be decided (the list can't be loaded, the provider has no list, the lend's only model is
- * still listed, the key was refused, or more models are allowed than are asked): then the reply's failure counts against the
- * key as before. A provider busy or not answering while the models are asked decides nothing, and the next report asks again. A report that comes in just after the bot was moved is
+ * Returns false when this can't be decided (the list can't be loaded, the provider has no list, the key was refused, or more
+ * models are allowed than are asked): then the reply's failure counts against the key as before. A provider busy or not answering while the models are asked decides nothing, and the next report asks again. A report that comes in just after the bot was moved is
  * about the model it left (a reply already on its way, or the bot server still holding the old answer), so it is let go.
  */
 export function moveBotOffGoneModel(key: KeyForModels & { ownerId: string | null; name: string }, botId: string): Promise<boolean> {
@@ -55,7 +54,7 @@ async function decide(key: KeyForModels & { ownerId: string | null; name: string
   // Moved or changed in the last few minutes: late news about the model it left, as long as the one it has now answers. When
   // the provider says it doesn't have that one either, the report is about it, and the bot moves off it as from any other.
   // A new check model only counts for a bot that really replies with it (a lend that leaves it out serves its own first model).
-  if (changedLately(bot, key.providerId, gone === key.model) && !(await saysGone(key, gone))) return true;
+  if (changedLately(bot, key.providerId, gone === key.model) && (await askAbout(key, gone)) !== 'gone') return true;
   const list = await keyModels(key, { fresh: true });
   if (!list.ok || !list.listed) return false;
   // A model the provider still lists but that won't answer is that model's failure only, the key's check model too: the
@@ -73,12 +72,15 @@ async function decide(key: KeyForModels & { ownerId: string | null; name: string
   }
 
   const allowed = allowedModels(list.models, lend).filter((model) => model !== gone);
-  // The lend's only model is still listed but won't answer: not a dropped model, so the key's own rules apply (If this is down)
-  if (allowed.length === 0 && listed) return false;
   const found = allowed.length > 0 ? await pick(allowed) : null;
   // Every other model allowed here was asked and the provider says it has none of them to answer with: as good as none left
   const noneAnswer = found !== null && !found.answered && (found.why === 'gone' || found.why === 'other') && allowed.length <= ANSWER_TRIES;
   if (!found || noneAnswer) {
+    // One report is not the last word before every bot here leaves the key: the bot's own model is asked once more (a local
+    // provider's list can leave out a model it hasn't loaded yet). One that answers now, or no clear answer, decides nothing;
+    // a refused key leaves it to the key's own rules.
+    const again = await askAbout(key, gone);
+    if (again !== 'gone') return again !== 'key';
     // The owner changed the lend while the provider was asked: the lend change already moved these bots where it allows,
     // so nobody is pulled off the key on the old lend's say, and a later report is decided on the new one
     if (JSON.stringify(await readLend()) !== JSON.stringify(lend)) return true;
@@ -131,18 +133,23 @@ async function decide(key: KeyForModels & { ownerId: string | null; name: string
   return true;
 }
 
-/** Whether the provider says, to one tiny reply, that it doesn't have this model. Anything else (an answer, busy, no answer) says no. */
-async function saysGone(key: KeyForModels, model: string): Promise<boolean> {
+/**
+ * What the provider says about this model to one tiny reply: it answers (a refused tiny request counts), it has no such model
+ * to answer with, no clear answer (busy, not answering), or the key itself was refused.
+ */
+async function askAbout(key: KeyForModels, model: string): Promise<'answers' | 'gone' | 'unsure' | 'key'> {
   const info = kindInfo((key.settings as { kind?: unknown } | null)?.kind);
-  if (!info) return false;
+  if (!info) return 'unsure';
   let apiKey: string | undefined;
   try {
     apiKey = key.apiKeyEncrypted ? decryptApiKey(key.apiKeyEncrypted) : undefined;
   } catch {
-    return false;
+    return 'key';
   }
   const reply = await probeChat({ kind: info.kind, address: key.endpoint ?? undefined, apiKey, model });
-  return !reply.ok && reply.reason === 'gone';
+  if (reply.ok || reply.reason === 'request') return 'answers';
+  if (reply.reason === 'gone' || reply.reason === 'other') return 'gone';
+  return reply.reason === 'busy' || reply.reason === 'unreachable' ? 'unsure' : 'key';
 }
 
 /**

@@ -12,6 +12,7 @@ jest.mock('@/lib/db', () => ({
     worldMember: { findMany: jest.fn() },
     universeMember: { findMany: jest.fn() },
     bot: { findMany: jest.fn(), updateMany: jest.fn() },
+    botsAiProvider: { findUnique: jest.fn() },
     $transaction: jest.fn(),
   },
 }));
@@ -24,6 +25,7 @@ const db = prisma as unknown as {
   worldMember: Record<'findMany', jest.Mock>;
   universeMember: Record<'findMany', jest.Mock>;
   bot: Record<'findMany' | 'updateMany', jest.Mock>;
+  botsAiProvider: Record<'findUnique', jest.Mock>;
   $transaction: jest.Mock;
 };
 const permissions = permissionsForWorld as jest.Mock;
@@ -179,6 +181,7 @@ describe('a lend that allows only some models (#575)', () => {
     jest.resetAllMocks();
     db.$transaction.mockImplementation(async (calls: unknown[]) => Promise.all(calls));
     db.bot.updateMany.mockResolvedValue({ count: 1 });
+    db.botsAiProvider.findUnique.mockResolvedValue({ model: key.model });
   });
 
   it('reads the list: left out, null for all, or each model once', () => {
@@ -208,6 +211,13 @@ describe('a lend that allows only some models (#575)', () => {
     // They left a model that worked, for one nobody asked yet: a 404 just after is about the new one, and counts
     expect(changedLately({ id: 'b1', aiModel: 'claude-haiku-5-5' }, 'key-1')).toBe(false);
     expect(changedLately({ id: 'b3', aiModel: 'claude-haiku-5-5' }, 'key-1')).toBe(false);
+  });
+
+  it('judges a bot with no model of its own by the check model the key has now, not the one read before the list', async () => {
+    db.botsAiProvider.findUnique.mockResolvedValue({ model: 'claude-haiku-5-5' });
+    db.bot.findMany.mockResolvedValue([{ id: 'b3', name: 'Scout', aiModel: null, room: sandbox }]);
+    expect(await moveBotsToAllowedModel(key, { universeId: 'uni-1', allowed: ['claude-haiku-5-5'], firstAllowed: 'claude-haiku-5-5', actor: { id: 'maker', name: 'Mishari' } })).toEqual({ count: 0 });
+    expect(db.bot.updateMany).not.toHaveBeenCalled();
   });
 
   it('tells nobody when it is your own universe, and moves nobody when every bot is on a kept model', async () => {
