@@ -183,6 +183,24 @@ describe('POST /api/me/ai-keys with no model picked (#575)', () => {
     expect(provider.create.mock.calls[0][0].data.model).toBe('a-embed');
   });
 
+  it('tries models the provider says call tools first, ahead of a name-sorted list’s first ones', async () => {
+    models.mockResolvedValue({ ok: true, models: ['aa-1', 'ab-2', 'ac-3', 'ad-4', 'zz-chat'], facts: { 'zz-chat': { tools: true } } });
+    expect((await post({ kind: 'lmstudio', address: 'https://lm.example.com' })).status).toBe(201);
+    expect(chat.mock.calls[0][0].model).toBe('zz-chat');
+    expect(provider.create.mock.calls[0][0].data.model).toBe('zz-chat');
+  });
+
+  it('saves nothing when the key is refused after a model only refused the tiny request', async () => {
+    models.mockResolvedValue({ ok: true, models: ['a', 'b', 'c'], facts: {} });
+    chat
+      .mockResolvedValueOnce({ ok: false, reason: 'request', message: 'a chat call to a failed (400).' })
+      .mockResolvedValueOnce({ ok: false, reason: 'rejected', message: 'DeepSeek didn’t accept this key.' });
+    const response = await post({ kind: 'deepseek', apiKey: 'sk-abcdef4f2a' });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: 'DeepSeek didn’t accept this key.' });
+    expect(provider.create).not.toHaveBeenCalled();
+  });
+
   it('moves past a model with no credit to a free one the list has, and keeps that', async () => {
     models.mockResolvedValue({ ok: true, models: ['a', 'b', 'c', 'd', 'e', 'f-free:free'], facts: {} });
     chat

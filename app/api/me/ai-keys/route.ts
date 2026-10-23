@@ -88,7 +88,7 @@ export async function POST(request: NextRequest) {
       ? [typedModel]
       : typedModel
         ? [typedModel]
-        : checkCandidates(checked.models, info.suggestedModel);
+        : checkCandidates(checked.models, checked.facts, info.suggestedModel);
     let model: string | null = null;
     let refused: string | null = null;
     let refusedForCredit = false;
@@ -114,7 +114,11 @@ export async function POST(request: NextRequest) {
       // Out of credit is said ahead of a later model's words: it is what the person can fix
       if (!refusedForCredit) refused = chat.message;
       if (chat.reason === 'credit') refusedForCredit = true;
-      if (!tryNextModel(chat)) break;
+      if (!tryNextModel(chat)) {
+        // The key or the provider failed, not this model: one that only refused the tiny request earlier proves nothing now
+        refusedRequest = null;
+        break;
+      }
     }
     model ??= refusedRequest;
     if (!model) return respond(request, { error: refused ?? 'That didn’t work. Try again.' }, 400);
@@ -155,12 +159,15 @@ export async function POST(request: NextRequest) {
 }
 
 /**
- * The models Add key tries for its one tiny reply: the provider's suggested model when listed, then the first few listed, and
- * a free model when the list has one (OpenRouter's ":free" models answer a key with no credit, which can still run them).
+ * The models Add key tries for its one tiny reply: the provider's suggested model when listed, then models the provider says
+ * call tools (a model that calls tools chats; a list sorted by name can start with ones that don't), then the rest, the first
+ * few of those, and a free model when the list has one (OpenRouter's ":free" models answer a key with no credit).
  */
-function checkCandidates(listed: string[], suggested: string | undefined): string[] {
+function checkCandidates(listed: string[], facts: Record<string, { tools?: boolean }>, suggested: string | undefined): string[] {
   const first = suggested && listed.includes(suggested) ? [suggested] : [];
-  const candidates = [...first, ...listed.filter((id) => id !== suggested)].slice(0, CHECK_TRIES);
+  const rest = listed.filter((id) => id !== suggested);
+  const chats = rest.filter((id) => facts[id]?.tools === true);
+  const candidates = [...first, ...chats, ...rest.filter((id) => facts[id]?.tools !== true)].slice(0, CHECK_TRIES);
   const free = listed.find((id) => id.endsWith(':free'));
   return free && !candidates.includes(free) ? [...candidates, free] : candidates;
 }
