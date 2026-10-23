@@ -23,10 +23,14 @@ const notice = addNotice as jest.Mock;
 const chat = probeChat as jest.Mock;
 
 const key = { providerId: 'key-1', name: 'My OpenRouter', ownerId: 'maker', endpoint: 'https://openrouter.ai/api/v1', apiKeyEncrypted: 'enc', settings: { kind: 'openrouter' }, model: 'openai/gpt-5-mini' };
-const guide = { id: 'b1', name: 'Guide', aiModel: 'meta-llama/llama-4-maverick', aiProviderRef: 'key-1', room: { world: { universe: { id: 'uni-1', name: 'Sandbox Universe' } } } };
+// Each test gets a bot of its own: a bot moved in one test is let go as a late report in the next
+let botCount = 0;
+const base = { id: 'b1', name: 'Guide', aiModel: 'meta-llama/llama-4-maverick', aiProviderRef: 'key-1', room: { world: { universe: { id: 'uni-1', name: 'Sandbox Universe' } } } };
+let guide = base;
 
 beforeEach(() => {
   jest.resetAllMocks();
+  guide = { ...base, id: `bot-${++botCount}` };
   db.bot.findUnique.mockResolvedValue(guide);
   db.bot.updateMany.mockResolvedValue({ count: 1 });
   db.aiKeyLend.findUnique.mockResolvedValue({ models: null });
@@ -40,7 +44,7 @@ describe('moveBotOffGoneModel', () => {
     list.mockResolvedValue({ ok: true, models: ['anthropic/claude-haiku-5-5', 'deepseek/deepseek-v4-flash', 'openai/gpt-5-mini'], facts: {}, listed: true });
     expect(await moveBotOffGoneModel(key, 'b1')).toBe(true);
     expect(list).toHaveBeenCalledWith(key, { fresh: true });
-    expect(db.bot.updateMany).toHaveBeenCalledWith({ where: { id: 'b1', aiProviderRef: 'key-1', aiModel: 'meta-llama/llama-4-maverick' }, data: { aiModel: 'anthropic/claude-haiku-5-5' } });
+    expect(db.bot.updateMany).toHaveBeenCalledWith({ where: { id: guide.id, aiProviderRef: 'key-1', aiModel: 'meta-llama/llama-4-maverick' }, data: { aiModel: 'anthropic/claude-haiku-5-5' } });
     expect(notice.mock.calls[0][0]).toMatchObject({ userId: 'maker', kind: 'ai-key-moved', title: 'Guide now replies with anthropic/claude-haiku-5-5' });
     expect(notice.mock.calls[0][0].body).toBe('OpenRouter no longer has meta-llama/llama-4-maverick, so Guide in Sandbox Universe moved to anthropic/claude-haiku-5-5 on My OpenRouter. Pick another model for it on its bot page if you like.');
     // The key's check model is still there: the key is not touched
@@ -118,6 +122,13 @@ describe('moveBotOffGoneModel', () => {
     db.bot.findUnique.mockResolvedValue({ ...guide, id: 'b7', aiModel: 'deepseek/deepseek-v4-flash' });
     expect(await moveBotOffGoneModel(key, 'b7')).toBe(true);
     expect(db.bot.updateMany).not.toHaveBeenCalled();
+    // Even while the provider's list can't be loaded, the provider isn't asked at all
+    list.mockClear();
+    list.mockResolvedValueOnce({ ok: false, message: 'down' });
+    expect(await moveBotOffGoneModel(key, 'b7')).toBe(true);
+    expect(list).not.toHaveBeenCalled();
+    list.mockReset();
+    list.mockResolvedValue({ ok: true, models: ['deepseek/deepseek-v4-flash', 'openai/gpt-5-mini'], facts: {}, listed: true });
     const now = Date.now();
     const clock = jest.spyOn(Date, 'now').mockReturnValue(now + LATE_REPORT_MS + 1);
     // Later, a 404 is news about the new model: the bot moves off that one too

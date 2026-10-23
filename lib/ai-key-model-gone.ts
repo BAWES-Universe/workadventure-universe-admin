@@ -32,6 +32,9 @@ export async function moveBotOffGoneModel(key: KeyForModels & { ownerId: string 
     select: { id: true, name: true, aiModel: true, aiProviderRef: true, room: { select: { world: { select: { universe: { select: { id: true, name: true } } } } } } },
   });
   if (!bot || bot.aiProviderRef !== key.providerId) return false;
+  // Moved in the last few minutes: this is late news about the model it left, so the provider isn't even asked
+  const at = movedAt.get(`${key.providerId}:${bot.id}`);
+  if (at !== undefined && Date.now() - at < LATE_REPORT_MS) return true;
   const list = await keyModels(key, { fresh: true });
   if (!list.ok || !list.listed) return false;
   const universe = bot.room.world.universe;
@@ -42,8 +45,6 @@ export async function moveBotOffGoneModel(key: KeyForModels & { ownerId: string 
   if (!gone) return false;
   const listed = list.models.includes(gone);
   if (listed) {
-    const at = movedAt.get(`${key.providerId}:${bot.id}`);
-    if (at !== undefined && Date.now() - at < LATE_REPORT_MS) return true;
     // The key's own check model still listed but not answering is the key's failure, counted as before. Any other listed
     // model that won't answer is that bot's model only: the bot moves off it the same as off a gone one.
     if (gone === key.model) return false;
