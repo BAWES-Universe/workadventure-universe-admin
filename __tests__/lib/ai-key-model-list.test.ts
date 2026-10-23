@@ -1,6 +1,6 @@
 import { prisma } from '@/lib/db';
 import { probeModels } from '@/lib/ai-key-models';
-import { allowedModels, forgetKeyModels, keyModels, lendModels, modelFactsOf, modelSupportsVision, servedModel, MODEL_LIST_FAILED_TTL_MS, MODEL_LIST_TTL_MS } from '@/lib/ai-key-model-list';
+import { allowedModels, firstForBots, forgetKeyModels, keyModels, lendModels, modelFactsOf, modelSupportsVision, servedModel, MODEL_LIST_FAILED_TTL_MS, MODEL_LIST_TTL_MS } from '@/lib/ai-key-model-list';
 import { providerPayload } from '@/lib/ai-provider-payload';
 
 /** A bot picks its own model on a key, and a lend can allow only some (#575). */
@@ -33,6 +33,14 @@ describe('the model a bot replies with', () => {
   it('is never one the lend leaves out: the first one it allows instead', () => {
     expect(servedModel({ aiModel: 'claude-opus-5-5' }, { model: 'claude-sonnet-5-5' }, ['claude-haiku-5-5'])).toBe('claude-haiku-5-5');
     expect(servedModel({ aiModel: null }, { model: 'claude-sonnet-5-5' }, ['claude-haiku-5-5', 'claude-sonnet-5-5'])).toBe('claude-sonnet-5-5');
+  });
+
+  it('puts a bot that has to take a model on one that calls tools, since its replies always offer them', () => {
+    const key = { settings: { kind: 'openrouter', modelFacts: { 'tiny:free': { tools: false } } }, model: 'deepseek-v4-flash' };
+    expect(firstForBots(['tiny:free', 'deepseek-v4-pro'], key)).toBe('deepseek-v4-pro');
+    expect(servedModel({ aiModel: 'gone-model' }, key, ['tiny:free', 'deepseek-v4-pro'])).toBe('deepseek-v4-pro');
+    // Nothing on the list calls tools: the first one, as before
+    expect(firstForBots(['tiny:free'], key)).toBe('tiny:free');
   });
 
   it('sees images by what the provider said about that model; the check model keeps what was saved with the key', () => {
@@ -144,6 +152,16 @@ describe('keyModels', () => {
     expect(probe).toHaveBeenCalledTimes(2);
     await keyModels(key, { fresh: true });
     expect(probe).toHaveBeenCalledTimes(3);
+  });
+
+  it('keeps showing a list still in its time when a fresh ask fails', async () => {
+    probe.mockResolvedValueOnce(LIST).mockResolvedValueOnce({ ok: false, message: 'Claude is busy.', reason: 'busy' });
+    db.findUnique.mockResolvedValue(null);
+    const key = claudeKey();
+    await keyModels(key);
+    expect((await keyModels(key, { fresh: true })).ok).toBe(false);
+    expect(await keyModels(key)).toMatchObject({ ok: true, models: LIST.models });
+    expect(probe).toHaveBeenCalledTimes(2);
   });
 
   it('asks once for two calls at the same time', async () => {
