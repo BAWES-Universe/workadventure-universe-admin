@@ -1,3 +1,4 @@
+import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { providerPayload } from '@/lib/ai-provider-payload';
 import { checkKeyForBot, type KeyForBot } from '@/lib/ai-key-pay';
@@ -7,7 +8,7 @@ import { isTypedEndpoint, kindInfo } from '@/lib/ai-key-kinds';
 import { RESTING_LINE, recheckIfDue } from '@/lib/ai-key-health';
 import { autoVision, keyVisionModels, readVisionPick, usableVisionKey, type VisionPick } from '@/lib/bot-vision';
 import { resolveVisionSupport } from '@/lib/vision-models';
-import { lendModels, modelSupportsVision, servedModel } from '@/lib/ai-key-model-list';
+import { lendModels, modelFactsOf, modelSupportsVision, servedModel } from '@/lib/ai-key-model-list';
 
 /**
  * What the bot server gets when it asks how a bot talks to its AI, by bot id (#374). The bot's own `aiProviderRef` decides:
@@ -165,7 +166,12 @@ async function mainCredentials(bot: BotForCredentials): Promise<BotAiCredentials
     return {
       status: 200,
       body: {
-        ...providerPayload({ ...provider, model, supportsVision: model ? modelSupportsVision(provider, model) : provider.supportsVision }),
+        ...providerPayload({
+          ...provider,
+          model,
+          supportsVision: model ? modelSupportsVision(provider, model) : provider.supportsVision,
+          settings: model && model !== provider.model ? settingsForModel(provider, model) : provider.settings,
+        }),
         source: 'own-key',
         keyOwnerId: provider.ownerId,
         keyKind: info?.kind ?? null,
@@ -177,6 +183,16 @@ async function mainCredentials(bot: BotForCredentials): Promise<BotAiCredentials
   }
 
   return moveToUniverseAi(bot, ref, verdict.reason);
+}
+
+/** The key's `caps` describe its check model: a bot on another model is told that model's facts instead. */
+function settingsForModel(provider: { settings: unknown; model: string | null; supportsVision: boolean | null }, model: string): Prisma.JsonValue {
+  const base = provider.settings && typeof provider.settings === 'object' && !Array.isArray(provider.settings) ? (provider.settings as Record<string, unknown>) : {};
+  const settings: Record<string, unknown> = { ...base };
+  const caps = modelFactsOf(provider, model);
+  if (Object.keys(caps).length > 0) settings.caps = caps;
+  else delete settings.caps;
+  return settings as Prisma.JsonValue;
 }
 
 /**
