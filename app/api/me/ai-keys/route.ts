@@ -110,7 +110,9 @@ export async function POST(request: NextRequest) {
       // what is left of the time budget, so the page always gets an answer
       const left = CHECK_BUDGET_MS - (Date.now() - started);
       if (index > 0 && left <= 0) break;
-      const chat = await probeChat({ kind: info.kind, address: input.address, region, apiKey, model: candidate, ...(noList ? { noList } : {}), ...(index > 0 ? { timeoutMs: left } : {}) });
+      // A model picked from the list becomes the model of every bot with none of its own, and bots always offer tools, so it
+      // is asked with a tool, as a bot asks (#575); a typed model is the person's own pick, asked as before
+      const chat = await probeChat({ kind: info.kind, address: input.address, region, apiKey, model: candidate, ...(noList ? { noList } : {}), ...(typedModel ? {} : { withTool: true }), ...(index > 0 ? { timeoutMs: left } : {}) });
       if (chat.ok) {
         model = candidate;
         break;
