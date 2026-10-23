@@ -28,7 +28,14 @@ export function moveBotOffGoneModel(key: KeyForModels & { ownerId: string | null
   const id = `${key.providerId}|${botId}`;
   const running = deciding.get(id);
   if (running) return running;
-  const decided = decide(key, botId).finally(() => deciding.delete(id));
+  // Other bots on the key deciding at the same time share what each model answered, so no model is asked twice for them
+  const shared = sharedAnswers(key.providerId);
+  shared.users += 1;
+  const decided = decide(key, botId, shared.asked).finally(() => {
+    deciding.delete(id);
+    shared.users -= 1;
+    if (shared.users === 0 && answers.get(key.providerId) === shared) answers.delete(key.providerId);
+  });
   deciding.set(id, decided);
   return decided;
 }
@@ -38,7 +45,20 @@ export type KeyFailure = 'rejected' | 'credit';
 
 const deciding = new Map<string, Promise<boolean | KeyFailure>>();
 
-async function decide(key: KeyForModels & { ownerId: string | null; name: string }, botId: string): Promise<boolean | KeyFailure> {
+type ChatAnswer = ReturnType<typeof probeChat>;
+/** How long answers are shared while bots keep reporting: a run of reports that never ends still asks again after this. */
+const SHARED_ANSWERS_MS = 60_000;
+const answers = new Map<string, { at: number; users: number; asked: Map<string, ChatAnswer> }>();
+
+function sharedAnswers(providerId: string) {
+  const held = answers.get(providerId);
+  if (held && Date.now() - held.at < SHARED_ANSWERS_MS) return held;
+  const fresh = { at: Date.now(), users: 0, asked: new Map<string, ChatAnswer>() };
+  answers.set(providerId, fresh);
+  return fresh;
+}
+
+async function decide(key: KeyForModels & { ownerId: string | null; name: string }, botId: string, asked: Map<string, ChatAnswer>): Promise<boolean | KeyFailure> {
   if (!key.ownerId) return false;
   const bot = await prisma.bot.findUnique({
     where: { id: botId },
@@ -58,10 +78,10 @@ async function decide(key: KeyForModels & { ownerId: string | null; name: string
   // it, a passing hiccup) or no clear answer comes: nothing changes, and the next report asks again. A refused key: the
   // key is marked Down for what it said. Only a provider that says, again, that it has no such model moves anything.
   // A bot's reply always offers tools (sending an image, a file), and OpenRouter answers a model with none that calls them
-  // with a 404: the tiny reply, which offers none, would still get an answer, so a model the provider says calls no tools
-  // is not asked, its 404 is real for bots.
+  // with a 404: every model here is asked with one tool, as a bot asks, so a model that chats but calls no tools is not
+  // taken as answering. One the provider already says calls no tools is not asked: its 404 is real for bots.
   if (modelFactsOf(key, gone).tools !== false) {
-    const again = await askAbout(key, gone);
+    const again = await askAbout(key, gone, asked);
     if (again === 'rejected' || again === 'credit') return again;
     if (again !== 'gone') return true;
   }
@@ -73,7 +93,7 @@ async function decide(key: KeyForModels & { ownerId: string | null; name: string
 
   const info = kindInfo((key.settings as { kind?: unknown } | null)?.kind);
   const label = info?.label ?? 'The provider';
-  const pick = answeringPicker(key, info, list.facts);
+  const pick = answeringPicker(key, info, list.facts, asked);
   // Bots with no model of their own reply with the check model, so it too is one that calls tools when the provider says
   const others = list.models.filter((model) => model !== gone && list.facts[model]?.tools !== false);
   if (gone === key.model && others.length > 0) {
@@ -144,7 +164,7 @@ async function decide(key: KeyForModels & { ownerId: string | null; name: string
  * What the provider says about this model to one tiny reply: it answers (a refused tiny request counts), it has no such model
  * to answer with, no clear answer (busy, not answering), or the key itself was refused or is out of credit.
  */
-async function askAbout(key: KeyForModels, model: string): Promise<'answers' | 'gone' | 'unsure' | KeyFailure> {
+async function askAbout(key: KeyForModels, model: string, asked: Map<string, ChatAnswer>): Promise<'answers' | 'gone' | 'unsure' | KeyFailure> {
   const info = kindInfo((key.settings as { kind?: unknown } | null)?.kind);
   if (!info) return 'unsure';
   let apiKey: string | undefined;
@@ -153,7 +173,12 @@ async function askAbout(key: KeyForModels, model: string): Promise<'answers' | '
   } catch {
     return 'rejected';
   }
-  const reply = await probeChat({ kind: info.kind, address: key.endpoint ?? undefined, apiKey, model });
+  let answer = asked.get(model);
+  if (!answer) {
+    answer = probeChat({ kind: info.kind, address: key.endpoint ?? undefined, apiKey, model, withTool: true });
+    asked.set(model, answer);
+  }
+  const reply = await answer;
   if (reply.ok || reply.reason === 'request') return 'answers';
   if (reply.reason === 'gone') return 'gone';
   // Any other error (a timeout, a conflict) says nothing sure about the model
@@ -163,10 +188,9 @@ async function askAbout(key: KeyForModels, model: string): Promise<'answers' | '
 /**
  * Picks the model to move to from a list: the first that answers one tiny reply, the same as Add key (the provider's
  * suggested model first). `answered` says whether one did; when none did, `why` says what the last one asked said.
- * Answers are kept for the one report, so the check model and the bot's model never ask the same model twice.
+ * Answers are shared by every report on the key being decided at once, so no model is asked twice for them.
  */
-function answeringPicker(key: KeyForModels, info: AiKeyKindInfo | null, facts: ModelFactsById) {
-  const asked = new Map();
+function answeringPicker(key: KeyForModels, info: AiKeyKindInfo | null, facts: ModelFactsById, asked: Map<string, ChatAnswer>) {
   let apiKey: string | undefined;
   let readable = true;
   try {
@@ -177,7 +201,7 @@ function answeringPicker(key: KeyForModels, info: AiKeyKindInfo | null, facts: M
   return async (models: string[]): Promise<{ model: string; answered: true } | { answered: false; why: ProbeFailure }> => {
     const suggested = info?.suggestedModel;
     if (!info || !readable) return { answered: false, why: 'rejected' };
-    const found = await firstAnswering({ kind: info.kind, address: key.endpoint ?? undefined, apiKey }, models, suggested, asked, facts);
+    const found = await firstAnswering({ kind: info.kind, address: key.endpoint ?? undefined, apiKey, withTool: true }, models, suggested, asked, facts);
     return found.ok ? { model: found.model, answered: true } : { answered: false, why: found.reason };
   };
 }

@@ -19,7 +19,7 @@ export type Answering = { ok: true; model: string } | { ok: false; message: stri
  * same model is never asked twice.
  */
 export async function firstAnswering(
-  target: { kind: string; address?: string; apiKey?: string },
+  target: { kind: string; address?: string; apiKey?: string; withTool?: boolean },
   models: string[],
   suggested: string | undefined,
   asked: Map<string, Promise<ChatResult>> = new Map(),
