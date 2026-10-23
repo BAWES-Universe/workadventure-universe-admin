@@ -188,6 +188,15 @@ describe('checkAndRecord: a new check model (#575)', () => {
     expect(chat).toHaveBeenCalledTimes(2);
   });
 
+  it('leaves a Down key Down when the new check model can’t be saved, so the next due check tries again', async () => {
+    probe.mockResolvedValue({ ok: true, models: ['deepseek-chat'], facts: {} });
+    chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'gone' });
+    chat.mockResolvedValueOnce({ ok: true });
+    db.findUnique.mockRejectedValue(new Error('connection lost'));
+    await expect(checkAndRecord(downNow({ ...hosted, model: 'deepseek-v4-flash' }))).rejects.toThrow('connection lost');
+    expect(db.updateMany).not.toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ downSince: null }) }));
+  });
+
   it('keeps settings saved while the check ran', async () => {
     probe.mockResolvedValue({ ok: true, models: ['deepseek-chat'], facts: {} });
     chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'gone' });

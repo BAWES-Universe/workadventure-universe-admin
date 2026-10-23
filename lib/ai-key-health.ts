@@ -218,9 +218,10 @@ export async function checkAndRecord(key: KeyRow): Promise<KeyCheck> {
     return result;
   }
   if (result.ok) {
+    // The new check model is saved first: a save that fails leaves a Down key Down, so the next due check tries again
+    if (result.checkModel) await saveCheckModel(key, result.checkModel, result.facts ?? {});
     await markWorking(key);
     await prisma.botsAiProvider.updateMany({ where: { providerId: key.providerId }, data: { healthCheckedAt: new Date() } });
-    if (result.checkModel) await saveCheckModel(key, result.checkModel, result.facts ?? {});
   } else if (!(await markDown(key, result.reason))) {
     // Already Down: a plainer "stopped" never replaces a better explanation, but a rejection, no credit or a missing model does.
     await prisma.botsAiProvider.updateMany({
