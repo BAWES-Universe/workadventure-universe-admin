@@ -112,12 +112,17 @@ describe('GET /api/bots/:id/ai-credentials', () => {
     bot.findUnique.mockResolvedValue(botOn('key-1', { aiModel: 'claude-text-1' }));
     let body = await (await ask()).json();
     expect(body).toMatchObject({ source: 'own-key', providerId: 'key-1', model: 'claude-text-1', supportsVision: false });
-    // The facts about every model stay in Orbit
-    expect(body.settings).toEqual({ kind: 'claude', caps: { vision: true } });
+    // The facts about every model stay in Orbit, and the bot is told its own model's, not the check model's
+    expect(body.settings).toEqual({ kind: 'claude', caps: { vision: false } });
     // No model of its own: the key's check model, exactly as before
     bot.findUnique.mockResolvedValue(botOn('key-1', { aiModel: null }));
     body = await (await ask()).json();
     expect(body).toMatchObject({ model: 'claude-sonnet-5-5', supportsVision: true });
+    expect(body.settings).toEqual({ kind: 'claude', caps: { vision: true } });
+    // A model the provider said nothing about: no facts, rather than the check model's
+    bot.findUnique.mockResolvedValue(botOn('key-1', { aiModel: 'claude-new-1' }));
+    body = await (await ask()).json();
+    expect(body.settings).toEqual({ kind: 'claude' });
   });
 
   it('never serves a model the lend leaves out: the first one it allows', async () => {
