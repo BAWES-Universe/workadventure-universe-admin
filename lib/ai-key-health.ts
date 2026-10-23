@@ -83,7 +83,7 @@ async function tellOwner(key: KeyRow, since: Date, reason: DownReason) {
       : reason === 'credit'
         ? `${label} says this key is out of credit.`
         : reason === 'model'
-          ? `${label} no longer has the model this key uses, and Universe couldn’t find another one on it.`
+          ? `${label} no longer has the model this key uses.`
           : `${info?.label ?? 'It'} stopped answering.`;
   const meanwhile =
     key.ifDown === 'stop'

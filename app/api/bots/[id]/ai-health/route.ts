@@ -11,7 +11,8 @@ import { recordReply } from '@/lib/ai-key-health';
  * and a 400 never) (#374). Which key it is
  * comes from the bot, never from the request, so a report can only ever count against the key the bot runs on.
  *
- * Auth: service token only. Answers 204 whatever happens to the key, so a report never slows or breaks a reply.
+ * Auth: service token only. Answers 204 whatever happens to the key, so a report never slows or breaks a reply: the report
+ * is recorded after the answer, since a missing model has Orbit ask the provider for another one, which takes a while.
  */
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -25,7 +26,11 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const httpStatus = typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599 ? status : undefined;
     const bot = await prisma.bot.findUnique({ where: { id }, select: { aiProviderRef: true } });
     if (!bot?.aiProviderRef) return new NextResponse(null, { status: 204 });
-    await recordReply(bot.aiProviderRef, ok ? { ok: true } : { ok: false, rejected: rejected === true, status: httpStatus }, id);
+    void Promise.resolve(recordReply(bot.aiProviderRef, ok ? { ok: true } : { ok: false, rejected: rejected === true, status: httpStatus }, id)).catch(
+      (error: unknown) => {
+        console.error('[BotAi] Health report failed:', error instanceof Error ? error.message : 'unknown');
+      },
+    );
     return new NextResponse(null, { status: 204 });
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized: Invalid service token') {

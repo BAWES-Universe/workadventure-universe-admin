@@ -63,7 +63,7 @@ describe('markDown', () => {
     notice.mockClear();
     db.updateMany.mockResolvedValue({ count: 1 });
     await markDown(hosted, 'model');
-    expect(notice.mock.calls[0][0].body).toMatch(/^DeepSeek no longer has the model this key uses, and Universe couldn’t find another one on it\./);
+    expect(notice.mock.calls[0][0].body).toMatch(/^DeepSeek no longer has the model this key uses\./);
   });
 
   it('does nothing, and tells nobody, when another request already marked it Down', async () => {
@@ -363,6 +363,15 @@ describe('checkKey and checkAndRecord', () => {
       chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'DeepSeek no longer has the model deepseek-v4-flash.' });
       chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'DeepSeek no longer has the model something-else.' });
       expect(await checkKey(withModel(hosted))).toMatchObject({ ok: false, reason: 'model' });
+    });
+
+    it('a model that only refused the tiny request is never picked on a key out of credit', async () => {
+      probe.mockResolvedValue({ ok: true, models: ['all-minilm', 'deepseek-chat', 'qwen3-8b'], facts: {} });
+      chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'gone' });
+      chat.mockResolvedValueOnce({ ok: false, reason: 'request', message: 'a chat call to all-minilm failed (400).' });
+      chat.mockResolvedValueOnce({ ok: false, reason: 'credit', message: 'DeepSeek says this key is out of credit.' });
+      chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'gone' });
+      expect(await checkKey(withModel(hosted))).toMatchObject({ ok: false, reason: 'credit' });
     });
 
     it('a gone check model is replaced by the provider’s suggested model when it lists it', async () => {

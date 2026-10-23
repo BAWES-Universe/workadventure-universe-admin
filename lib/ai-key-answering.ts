@@ -10,8 +10,9 @@ export type Answering = { ok: true; model: string } | { ok: false; message: stri
  * The first of a key's listed models that answers one tiny reply, the provider's suggested model first (#575). A list can
  * hold a model that doesn't chat (an embedding model whose name says nothing), so a model is only picked once it answers.
  * One that refused only this tiny request (a 400, as a reasoning model that wants a bigger cap does) is picked only when
- * none of the others really replies, since a model that doesn't chat can answer the same way. A refused key, a busy
- * provider or no answer at all would say the same for every model, so the search stops there.
+ * none of the others really replies, since a model that doesn't chat can answer the same way, and never on a key that is
+ * out of credit for another model (that model's refusal proves nothing then). A refused key, a busy provider or no answer
+ * at all would say the same for every model, so the search stops there.
  *
  * `asked` keeps the answers for one caller, so the same model is never asked twice.
  */
@@ -24,6 +25,7 @@ export async function firstAnswering(
   const ordered = suggested && models.includes(suggested) ? [suggested, ...models.filter((id) => id !== suggested)] : models;
   let refusedRequest: string | null = null;
   let last: { message: string; reason: ProbeFailure } | null = null;
+  let credit: { message: string; reason: ProbeFailure } | null = null;
   for (const model of ordered.slice(0, ANSWER_TRIES)) {
     let answer = asked.get(model);
     if (!answer) {
@@ -37,9 +39,11 @@ export async function firstAnswering(
       continue;
     }
     last = chat;
+    // A free model can still answer on a key out of credit, so the search goes on
+    if (chat.reason === 'credit') credit ??= chat;
     // The key or the provider failed, not this model: one that only refused the tiny request earlier proves nothing now
     if (chat.reason !== 'gone' && chat.reason !== 'other' && chat.reason !== 'credit') return { ok: false, message: chat.message, reason: chat.reason };
   }
-  if (refusedRequest) return { ok: true, model: refusedRequest };
-  return { ok: false, ...(last ?? { message: 'No model answered.', reason: 'other' }) };
+  if (refusedRequest && !credit) return { ok: true, model: refusedRequest };
+  return { ok: false, ...(credit ?? last ?? { message: 'No model answered.', reason: 'other' }) };
 }
