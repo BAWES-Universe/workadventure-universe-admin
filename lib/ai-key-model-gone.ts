@@ -62,7 +62,26 @@ export async function moveBotOffGoneModel(key: KeyForModels & { ownerId: string 
   if (allowed.length === 0 && listed) return false;
   if (allowed.length === 0) {
     // Nothing allowed here is offered any more: the bots here can't run on this key, as if it were pulled
-    await moveBotsOffKey(key.providerId, { universeId: universe.id, actor: { id: '', name: label }, why: 'models-gone' });
+    const moved = await moveBotsOffKey(key.providerId, { universeId: universe.id, actor: { id: '', name: label }, why: 'models-gone' });
+    // That tells the universe's owner. The key's owner made these bots, so they hear it too when it is someone else's universe.
+    const elsewhere = moved.universes.find((entry) => entry.ownerId !== key.ownerId);
+    if (elsewhere) {
+      const names = elsewhere.botNames;
+      try {
+        await addNotice({
+          userId: key.ownerId,
+          kind: 'ai-key-moved',
+          dedupeKey: `models-gone:${key.providerId}:${elsewhere.id}:${new Date().toISOString()}`,
+          title: names.length === 1 ? `${names[0]} moved to Universe AI` : `${names.length} bots moved to Universe AI`,
+          body: `${label} no longer has any of the models ${key.name} may use in ${elsewhere.name}, so ${
+            names.length === 1 ? `${names[0]} now replies` : `the ${names.length} bots there now reply`
+          } on Universe AI.`,
+          href: '/admin/you/ai-keys',
+        });
+      } catch (error) {
+        console.error('[AiKeys] Could not tell the key owner:', error instanceof Error ? error.message : 'unknown');
+      }
+    }
     return true;
   }
   const { model: next } = await pick(allowed);

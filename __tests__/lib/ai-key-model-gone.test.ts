@@ -38,6 +38,7 @@ beforeEach(() => {
   db.bot.updateMany.mockResolvedValue({ count: 1 });
   db.aiKeyLend.findUnique.mockResolvedValue({ models: null });
   db.botsAiProvider.updateMany.mockResolvedValue({ count: 1 });
+  (moveBotsOffKey as jest.Mock).mockResolvedValue({ count: 0, universes: [] });
   list.mockResolvedValue({ ok: true, models: ['deepseek/deepseek-v4-flash', 'openai/gpt-5-mini'], facts: {}, listed: true });
   chat.mockResolvedValue({ ok: true });
   (decryptApiKey as jest.Mock).mockReturnValue('sk-or-v1-abcdef1234');
@@ -73,6 +74,16 @@ describe('moveBotOffGoneModel', () => {
     expect(await moveBotOffGoneModel(key, 'b1')).toBe(true);
     expect(moveBotsOffKey).toHaveBeenCalledWith('key-1', { universeId: 'uni-1', actor: { id: '', name: 'OpenRouter' }, why: 'models-gone' });
     expect(db.bot.updateMany).not.toHaveBeenCalled();
+    // The universe is the key owner's own: the universe owner's notice is theirs, so nothing more
+    expect(notice).not.toHaveBeenCalled();
+  });
+
+  it('tells the key’s owner too when the bots moved in someone else’s universe', async () => {
+    db.aiKeyLend.findUnique.mockResolvedValue({ models: ['meta-llama/llama-4-maverick'] });
+    (moveBotsOffKey as jest.Mock).mockResolvedValue({ count: 1, universes: [{ id: 'uni-1', name: 'Sandbox Universe', ownerId: 'someone', botNames: ['Guide'] }] });
+    expect(await moveBotOffGoneModel(key, guide.id)).toBe(true);
+    expect(notice.mock.calls[0][0]).toMatchObject({ userId: 'maker', kind: 'ai-key-moved', title: 'Guide moved to Universe AI', href: '/admin/you/ai-keys' });
+    expect(notice.mock.calls[0][0].body).toBe('OpenRouter no longer has any of the models My OpenRouter may use in Sandbox Universe, so Guide now replies on Universe AI.');
   });
 
   it('gives the key a new check model when the one that went was it', async () => {
