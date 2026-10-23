@@ -93,12 +93,24 @@ describe('moveBotOffGoneModel', () => {
     expect(await moveBotOffGoneModel(key, 'b1')).toBe(false);
     list.mockResolvedValueOnce({ ok: true, models: ['openai/gpt-5-mini'], facts: {}, listed: false });
     expect(await moveBotOffGoneModel(key, 'b1')).toBe(false);
-    list.mockResolvedValueOnce({ ok: true, models: ['meta-llama/llama-4-maverick'], facts: {}, listed: true });
+    // The key's own check model, still listed, not answering: the key's failure, as before
+    db.bot.findUnique.mockResolvedValue({ ...guide, id: 'b9', aiModel: null });
+    list.mockResolvedValueOnce({ ok: true, models: ['openai/gpt-5-mini', 'qwen/qwen3-235b'], facts: {}, listed: true });
     expect(await moveBotOffGoneModel(key, 'b1')).toBe(false);
     expect(db.bot.updateMany).not.toHaveBeenCalled();
   });
 
-  it('lets a late report go for a bot it just moved, without moving it again, and counts it again later', async () => {
+  it('moves a bot off its own model when the provider still lists it but won’t answer with it, keeping the key Working', async () => {
+    // A bot this file never moved, so no late report is in play
+    db.bot.findUnique.mockResolvedValue({ ...guide, id: 'b5' });
+    list.mockResolvedValue({ ok: true, models: ['meta-llama/llama-4-maverick', 'openai/gpt-5-mini'], facts: {}, listed: true });
+    expect(await moveBotOffGoneModel(key, 'b5')).toBe(true);
+    expect(db.bot.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: { aiModel: 'openai/gpt-5-mini' } }));
+    expect(chat.mock.calls.map((call) => call[0].model)).toEqual(['openai/gpt-5-mini']);
+    expect(notice.mock.calls[0][0].body).toBe('OpenRouter doesn’t answer with meta-llama/llama-4-maverick, so Guide in Sandbox Universe moved to openai/gpt-5-mini on My OpenRouter. Pick another model for it on its bot page if you like.');
+  });
+
+  it('lets a late report go for a bot it just moved, without moving it again, and acts on it again later', async () => {
     db.bot.findUnique.mockResolvedValue({ ...guide, id: 'b7' });
     expect(await moveBotOffGoneModel(key, 'b7')).toBe(true);
     db.bot.updateMany.mockClear();
@@ -108,7 +120,9 @@ describe('moveBotOffGoneModel', () => {
     expect(db.bot.updateMany).not.toHaveBeenCalled();
     const now = Date.now();
     const clock = jest.spyOn(Date, 'now').mockReturnValue(now + LATE_REPORT_MS + 1);
-    expect(await moveBotOffGoneModel(key, 'b7')).toBe(false);
+    // Later, a 404 is news about the new model: the bot moves off that one too
+    expect(await moveBotOffGoneModel(key, 'b7')).toBe(true);
+    expect(db.bot.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: { aiModel: 'openai/gpt-5-mini' } }));
     clock.mockRestore();
   });
 

@@ -14,8 +14,11 @@ import { allowedModels, forgetKeyModels, keyModels, lendModels, modelFactsOf, se
  * bots there move to Universe AI, the same as when a key is pulled. When the key's check model is the one that went, the key
  * gets a new check model, so the health check does not mark it Down for a model nobody uses.
  *
- * Returns false when this can't be decided (the list can't be loaded, the provider has no list, or the model is still on
- * it): then the reply's failure counts against the key as before. A report that comes in just after the bot was moved is
+ * A model the provider still lists but that answers a bot with a 404 is treated the same for that bot (another listed model
+ * may still answer), unless it is the key's check model.
+ *
+ * Returns false when this can't be decided (the list can't be loaded, the provider has no list, or the check model is still
+ * listed): then the reply's failure counts against the key as before. A report that comes in just after the bot was moved is
  * about the model it left (a reply already on its way, or the bot server still holding the old answer), so it is let go.
  */
 /** How long after a move a model-gone report for that bot is taken as late news about the model it left. */
@@ -36,9 +39,14 @@ export async function moveBotOffGoneModel(key: KeyForModels & { ownerId: string 
   const lend = lendModels(lent?.models);
   // The model the reply was asked of: the bot's own, or the one its lend falls back to
   const gone = servedModel(bot, key, lend);
-  if (!gone || list.models.includes(gone)) {
+  if (!gone) return false;
+  const listed = list.models.includes(gone);
+  if (listed) {
     const at = movedAt.get(`${key.providerId}:${bot.id}`);
-    return at !== undefined && Date.now() - at < LATE_REPORT_MS;
+    if (at !== undefined && Date.now() - at < LATE_REPORT_MS) return true;
+    // The key's own check model still listed but not answering is the key's failure, counted as before. Any other listed
+    // model that won't answer is that bot's model only: the bot moves off it the same as off a gone one.
+    if (gone === key.model) return false;
   }
 
   const info = kindInfo((key.settings as { kind?: unknown } | null)?.kind);
@@ -46,7 +54,7 @@ export async function moveBotOffGoneModel(key: KeyForModels & { ownerId: string 
   const pick = answeringPicker(key, info);
   if (gone === key.model && list.models.length > 0) await replaceCheckModel(key, await pick(list.models));
 
-  const allowed = allowedModels(list.models, lend);
+  const allowed = allowedModels(list.models, lend).filter((model) => model !== gone);
   if (allowed.length === 0) {
     // Nothing allowed here is offered any more: the bots here can't run on this key, as if it were pulled
     await moveBotsOffKey(key.providerId, { universeId: universe.id, actor: { id: '', name: label }, why: 'models-gone' });
@@ -62,7 +70,7 @@ export async function moveBotOffGoneModel(key: KeyForModels & { ownerId: string 
         kind: 'ai-key-moved',
         dedupeKey: `model-gone:${key.providerId}:${bot.id}:${new Date().toISOString()}`,
         title: `${bot.name} now replies with ${next}`,
-        body: `${label} no longer has ${gone}, so ${bot.name} in ${universe.name} moved to ${next} on ${key.name}. Pick another model for it on its bot page if you like.`,
+        body: `${label} ${listed ? 'doesn’t answer with' : 'no longer has'} ${gone}, so ${bot.name} in ${universe.name} moved to ${next} on ${key.name}. Pick another model for it on its bot page if you like.`,
         href: '/admin/you/ai-keys',
       });
     } catch (error) {
