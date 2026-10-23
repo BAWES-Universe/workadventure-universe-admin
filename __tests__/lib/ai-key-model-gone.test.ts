@@ -219,6 +219,15 @@ describe('moveBotOffGoneModel', () => {
     expect(db.bot.updateMany).not.toHaveBeenCalled();
   });
 
+  it('acts on a report just after the maker’s change when the provider says it doesn’t have the new model either', async () => {
+    noteModelChanged(guide.id);
+    list.mockResolvedValue({ ok: true, models: ['deepseek/deepseek-v4-flash', 'openai/gpt-5-mini'], facts: {}, listed: true });
+    chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'OpenRouter doesn’t have that model.' });
+    expect(await moveBotOffGoneModel(key, guide.id)).toBe(true);
+    expect(chat.mock.calls[0][0].model).toBe('meta-llama/llama-4-maverick');
+    expect(db.bot.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: { aiModel: 'deepseek/deepseek-v4-flash' } }));
+  });
+
   it('opens no late-report window when the bot was changed meanwhile and did not move here', async () => {
     db.bot.updateMany.mockResolvedValue({ count: 0 });
     list.mockResolvedValue({ ok: true, models: ['anthropic/claude-haiku-5-5', 'openai/gpt-5-mini'], facts: {}, listed: true });
