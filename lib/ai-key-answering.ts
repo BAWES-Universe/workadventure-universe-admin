@@ -11,8 +11,9 @@ export type Answering = { ok: true; model: string } | { ok: false; message: stri
  * hold a model that doesn't chat (an embedding model whose name says nothing), so a model is only picked once it answers.
  * One that refused only this tiny request (a 400, as a reasoning model that wants a bigger cap does) is picked only when
  * none of the others really replies, since a model that doesn't chat can answer the same way, never on a key that is
- * out of credit for another model (that model's refusal proves nothing then), and never when asked with a tool. A refused key, a busy provider or no answer
- * at all would say the same for every model, so the search stops there.
+ * out of credit for another model (that model's refusal proves nothing then), and never when asked with a tool (the
+ * refusal can be about the tool). A refused key, a busy provider or no answer at all would say the same for every model,
+ * so the search stops there.
  *
  * Models the provider says call tools are asked ahead of the rest, the same as Add key: those are chat models, so a list
  * that starts with embedding or image models still finds one that replies. `asked` keeps the answers for one caller, so the
