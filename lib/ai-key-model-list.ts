@@ -99,7 +99,7 @@ export function cleanFacts(fact: unknown): ModelFacts {
   };
 }
 
-function slimFacts(facts: ModelFactsById): Record<string, ModelFacts> {
+export function slimFacts(facts: ModelFactsById): Record<string, ModelFacts> {
   const slim: Record<string, ModelFacts> = {};
   for (const [model, fact] of Object.entries(facts)) {
     const kept = cleanFacts(fact);

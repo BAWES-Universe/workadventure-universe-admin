@@ -114,17 +114,26 @@ describe('editSavedKey', () => {
     (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4o-mini', 'gpt-4.1'], facts: {} });
     await editSavedKey('maker', 'key-2', { model: 'gpt-4.1' });
     const data = db.botsAiProvider.updateMany.mock.calls[0][0].data;
-    expect(data.settings).toEqual({ kind: 'openai' });
+    expect(data.settings).toEqual({ kind: 'openai', modelFacts: {}, modelCount: 2 });
     expect(data.supportsVision).toBeNull();
   });
 
-  it('leaves the facts alone when the saved model is one the list misses', async () => {
+  it('leaves the saved model’s facts alone when the list misses it, and keeps the new list’s count and facts', async () => {
     db.botsAiProvider.findFirst.mockResolvedValue({ ...lmStudio, settings: { kind: 'lmstudio', caps: { tools: true } } });
     (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['other-model'], facts: {} });
     await editSavedKey('maker', 'key-1', { address: 'https://new.trycloudflare.com' });
     const data = db.botsAiProvider.updateMany.mock.calls[0][0].data;
-    expect(data.settings).toBeUndefined();
+    expect(data.settings).toEqual({ kind: 'lmstudio', caps: { tools: true }, modelFacts: {}, modelCount: 1 });
     expect(data.supportsVision).toBeUndefined();
+  });
+
+  it('replaces the old address’s model count and facts with the new address’s', async () => {
+    db.botsAiProvider.findFirst.mockResolvedValue({ ...lmStudio, settings: { kind: 'lmstudio', modelCount: 9, modelFacts: { 'old-model': { vision: true } } } });
+    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['qwen3-8b', 'qwen3-vl-8b', 'llama-3.1-8b'], facts: { 'qwen3-vl-8b': { vision: true } } });
+    await editSavedKey('maker', 'key-1', { address: 'https://new.trycloudflare.com' });
+    const { settings } = db.botsAiProvider.updateMany.mock.calls[0][0].data;
+    expect(settings.modelCount).toBe(3);
+    expect(settings.modelFacts).toEqual({ 'qwen3-vl-8b': { vision: true } });
   });
 
   it('refuses a model that is not on the list, and saves nothing', async () => {
