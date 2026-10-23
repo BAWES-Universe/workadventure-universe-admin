@@ -43,7 +43,8 @@ export async function firstAnswering(
       refusedRequest ??= model;
       continue;
     }
-    last = chat;
+    // A model that went says less than any other failure: "gone" is only the answer when every model asked said so
+    if (!last || last.reason === 'gone' || chat.reason !== 'gone') last = chat;
     // A free model can still answer on a key out of credit, so the search goes on
     if (chat.reason === 'credit') credit ??= chat;
     // The key or the provider failed, not this model: one that only refused the tiny request earlier proves nothing now
