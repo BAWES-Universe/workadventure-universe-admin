@@ -11,6 +11,7 @@ import { checkAiProviderRef } from '@/lib/ai-provider-ref';
 import { checkConfigVision } from '@/lib/bot-vision';
 import { toolTimeoutSecondsSchema } from '@/lib/bot-tool-timeout';
 import { mustStayPrivateAfterMove } from '@/lib/bot-privacy';
+import { noteModelChanged } from '@/lib/ai-key-model-gone';
 import { z } from 'zod';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Prisma
@@ -515,6 +516,8 @@ export async function POST(request: NextRequest) {
         });
         // A model belongs to one key (#575): a bot moved to another key, or off keys, starts on that key's check model
         moveOffModel = updateData.aiProviderRef !== undefined && updateData.aiProviderRef !== (existing?.aiProviderRef ?? null);
+        // A reply still on its way reports the model it had: it must not count against the key it is on now
+        if (moveOffModel) noteModelChanged(validatedData.botId);
         // Hide bot conversations (#435): a move out of a hiding universe keeps the bot Private
         keepPrivate = !!existing?.roomId && existing.roomId !== roomId && (await mustStayPrivateAfterMove(validatedData.botId, roomId));
         const existingConfig = (existing?.behaviorConfig as Record<string, unknown> | null) || {};
