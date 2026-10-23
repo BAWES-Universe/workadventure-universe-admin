@@ -143,6 +143,15 @@ describe('POST /api/me/ai-keys with no model picked (#575)', () => {
     expect(provider.create.mock.calls[0][0].data.settings.modelCount).toBe(3);
   });
 
+  it('asks a model picked from the list with a tool, as a bot asks, and a typed model as before', async () => {
+    models.mockResolvedValue({ ok: true, models: ['deepseek-chat', 'deepseek-v4-flash'], facts: {} });
+    await post({ kind: 'deepseek', apiKey: 'sk-abcdef4f2a' });
+    expect(chat.mock.calls[0][0]).toMatchObject({ model: 'deepseek-v4-flash', withTool: true });
+    chat.mockClear();
+    await post({ kind: 'deepseek', apiKey: 'sk-abcdef4f2a', model: 'deepseek-chat' });
+    expect(chat.mock.calls[0][0]).not.toHaveProperty('withTool');
+  });
+
   it('keeps the first listed model that answers when the provider suggests none', async () => {
     models.mockResolvedValue({ ok: true, models: ['a-gone', 'b-works', 'c'], facts: {} });
     chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'That model isn’t there.' }).mockResolvedValueOnce({ ok: true });
