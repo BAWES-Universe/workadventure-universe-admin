@@ -15,6 +15,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { isPlainSvg } from './plain-svg.mjs';
 
 const SOURCE = 'https://raw.githubusercontent.com/anomalyco/models.dev/dev/providers';
 const LOGOS = fileURLToPath(new URL('../public/ai-providers/', import.meta.url));
@@ -37,14 +38,14 @@ function modelFacts(provider) {
   };
 }
 
-/** Keeps a provider's logo when it is one colour (it uses currentColor), so it can be drawn in the page's ink. */
+/** Keeps a provider's logo when it is one colour (it uses currentColor) and plain shapes only, so it can be drawn in the page's ink. */
 async function keepLogo(id) {
   const file = `${LOGOS}${id}.svg`;
   if (!existsSync(file)) {
     const response = await fetch(`${SOURCE}/${id}/logo.svg`);
     if (!response.ok) return false;
     const svg = await response.text();
-    if (!svg.includes('<svg') || !svg.includes('currentColor')) return false;
+    if (!isPlainSvg(svg) || !svg.includes('currentColor')) return false;
     writeFileSync(file, svg);
   }
   return true;

@@ -293,11 +293,11 @@ describe('Add a key: More providers', () => {
     expect(screen.getByRole('radio', { name: /^Nebius/ }).contains(docs)).toBe(false);
   });
 
-  it('searches the name of the long-tail providers only, not the line they all share', () => {
+  it('searches the line under a long-tail provider as well as its name', () => {
     render(<AddAiKeyPage />);
-    fireEvent.change(screen.getByLabelText('Search providers'), { target: { value: 'models.dev' } });
+    fireEvent.change(screen.getByLabelText('Search providers'), { target: { value: 'its own' } });
+    expect(screen.getByRole('radio', { name: /^Morph/ })).toBeTruthy();
     expect(screen.queryByRole('radio', { name: /^Nebius/ })).toBeNull();
-    expect(screen.queryByText('More providers', { selector: 'h2' })).toBeNull();
   });
 
   it('adds one of them like any other: same request, its own kind', async () => {
