@@ -3,7 +3,6 @@ import { prisma } from '@/lib/db';
 import { addNotice, clearNotices } from '@/lib/notices';
 import { probeChat, probeModels } from '@/lib/ai-key-models';
 import { moveBotOffGoneModel } from '@/lib/ai-key-model-gone';
-import { changedLately } from '@/lib/ai-key-late-report';
 import { checkAndRecord, checkKey, judgeFailedReply, markDown, markWorking, recheckIfDue, recordReply, CHECK_WAIT_MS, RECHECK_MS, type KeyRow } from '@/lib/ai-key-health';
 
 jest.mock('@/lib/db', () => ({ prisma: { botsAiProvider: { findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn(), updateMany: jest.fn() } } }));
@@ -145,6 +144,27 @@ describe('checkAndRecord: a new check model (#575)', () => {
     expect(chat).toHaveBeenCalledTimes(2);
   });
 
+  it('goes past another model’s 403 or server error to one that answers, and says why when none does', async () => {
+    probe.mockResolvedValue({ ok: true, models: ['deepseek-v4-flash', 'model-a', 'model-b', 'model-c'], facts: {} });
+    chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'gone' });
+    chat.mockResolvedValueOnce({ ok: false, reason: 'rejected', status: 403, message: 'not for this model' });
+    chat.mockResolvedValueOnce({ ok: false, reason: 'unreachable', status: 503, message: 'down' });
+    chat.mockResolvedValueOnce({ ok: true });
+    expect(await checkKey(downNow({ ...hosted, model: 'deepseek-v4-flash' }))).toMatchObject({ ok: true, checkModel: 'model-c' });
+    chat.mockReset();
+    chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'gone' });
+    chat.mockResolvedValue({ ok: false, reason: 'rejected', status: 403, message: 'not for this model' });
+    expect(await checkKey(downNow({ ...hosted, model: 'deepseek-v4-flash' }))).toMatchObject({ ok: false, reason: 'rejected' });
+  });
+
+  it('still stops at a 401: the key itself was refused', async () => {
+    probe.mockResolvedValue({ ok: true, models: ['deepseek-v4-flash', 'model-a', 'model-b'], facts: {} });
+    chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'gone' });
+    chat.mockResolvedValueOnce({ ok: false, reason: 'rejected', status: 401, message: 'refused' });
+    expect(await checkKey(downNow({ ...hosted, model: 'deepseek-v4-flash' }))).toMatchObject({ ok: false, reason: 'rejected' });
+    expect(chat).toHaveBeenCalledTimes(2);
+  });
+
   it('asks models the provider says call tools first, past a list that starts with ones that don’t chat', async () => {
     probe.mockResolvedValue({ ok: true, models: ['embed-a', 'embed-b', 'embed-c', 'embed-d', 'chat-x'], facts: { 'chat-x': { tools: true } } });
     chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'gone' });
@@ -160,15 +180,6 @@ describe('checkAndRecord: a new check model (#575)', () => {
     db.findUnique.mockResolvedValue({ settings: { kind: 'deepseek', label: 'Work' } });
     await checkAndRecord({ ...hosted, model: 'deepseek-v4-flash' });
     expect(db.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ model: 'deepseek-chat', settings: { kind: 'deepseek', label: 'Work' } }) }));
-  });
-
-  it('leaves the late-report window alone when someone changed the model meanwhile', async () => {
-    probe.mockResolvedValue({ ok: true, models: ['deepseek-chat'], facts: {} });
-    chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'gone' });
-    chat.mockResolvedValueOnce({ ok: true });
-    db.updateMany.mockImplementation(async (args: { data: { model?: string } }) => ({ count: args.data.model ? 0 : 1 }));
-    await checkAndRecord({ ...hosted, providerId: 'key-9', model: 'deepseek-v4-flash' });
-    expect(changedLately({ id: 'follower', aiModel: null }, 'key-9')).toBe(false);
   });
 });
 

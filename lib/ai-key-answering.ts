@@ -12,7 +12,7 @@ export type Answering = { ok: true; model: string } | { ok: false; message: stri
  * One that refused only this tiny request (a 400, as a reasoning model that wants a bigger cap does) is picked only when
  * none of the others really replies, since a model that doesn't chat can answer the same way, and never on a key that is
  * out of credit for another model (that model's refusal proves nothing then). A refused key, a busy provider or no answer
- * at all would say the same for every model, so the search stops there.
+ * at all would say the same for every model, so the search stops there; a 403 or a server error can be one model's, so it goes on.
  *
  * Models the provider says call tools are asked ahead of the rest, the same as Add key: those are chat models, so a list
  * that starts with embedding or image models still finds one that replies. `asked` keeps the answers for one caller, so the
@@ -31,6 +31,7 @@ export async function firstAnswering(
   let refusedRequest: string | null = null;
   let last: { message: string; reason: ProbeFailure } | null = null;
   let credit: { message: string; reason: ProbeFailure } | null = null;
+  let perModel: { message: string; reason: ProbeFailure } | null = null;
   for (const model of ordered.slice(0, ANSWER_TRIES)) {
     let answer = asked.get(model);
     if (!answer) {
@@ -46,9 +47,16 @@ export async function firstAnswering(
     last = chat;
     // A free model can still answer on a key out of credit, so the search goes on
     if (chat.reason === 'credit') credit ??= chat;
+    // A 403 or a server error with a status is given per model (an organization not verified for it, one model's host
+    // down), the same as Add key reads them: the next model is asked, and the key is judged on that refusal only if none answers
+    if ((chat.reason === 'rejected' && chat.status === 403) || (chat.reason === 'unreachable' && chat.status !== undefined)) {
+      perModel ??= chat;
+      continue;
+    }
     // The key or the provider failed, not this model: one that only refused the tiny request earlier proves nothing now
     if (chat.reason !== 'gone' && chat.reason !== 'other' && chat.reason !== 'credit') return { ok: false, message: chat.message, reason: chat.reason };
   }
   if (refusedRequest && !credit) return { ok: true, model: refusedRequest };
-  return { ok: false, ...(credit ?? last ?? { message: 'No model answered.', reason: 'other' }) };
+  const why = credit ?? perModel ?? last ?? { message: 'No model answered.', reason: 'other' as const };
+  return { ok: false, message: why.message, reason: why.reason };
 }

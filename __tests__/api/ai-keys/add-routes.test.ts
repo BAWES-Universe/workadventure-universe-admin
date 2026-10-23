@@ -171,6 +171,22 @@ describe('POST /api/me/ai-keys with no model picked (#575)', () => {
     expect(provider.create).not.toHaveBeenCalled();
   });
 
+  it('starts no further model once the tries have taken long, and says why the last one failed', async () => {
+    models.mockResolvedValue({ ok: true, models: ['a', 'b', 'c', 'd'], facts: {} });
+    let now = 1_000_000;
+    const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    // Each model hangs until its 30-second timeout
+    chat.mockImplementation(async () => {
+      now += 30_000;
+      return { ok: false, reason: 'gone', message: 'That model isn’t there.' };
+    });
+    const response = await post({ kind: 'lmstudio', address: 'https://lm.example.com' });
+    clock.mockRestore();
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: 'That model isn’t there.' });
+    expect(chat).toHaveBeenCalledTimes(2);
+  });
+
   it('prefers a model that really replies over one that only refused the tiny request, and keeps that one when none replies', async () => {
     models.mockResolvedValue({ ok: true, models: ['a-embed', 'b-chat', 'c'], facts: {} });
     chat.mockResolvedValueOnce({ ok: false, reason: 'request', message: 'a chat call to a-embed failed (400).' }).mockResolvedValueOnce({ ok: true });

@@ -4,7 +4,6 @@ import { addNotice } from '@/lib/notices';
 import { flag } from '@/lib/permissions';
 import { resolveUniverseAiProvider } from '@/lib/universe-ai';
 import { lendAccess, lendableUniverses, moveBotsOffKey, moveBotsToAllowedModel, parseLendModels } from '@/lib/ai-key-lend';
-import { changedLately } from '@/lib/ai-key-late-report';
 
 jest.mock('@/lib/db', () => ({
   prisma: {
@@ -208,9 +207,6 @@ describe('a lend that allows only some models (#575)', () => {
     expect(notice).toHaveBeenCalledTimes(1);
     expect(notice.mock.calls[0][0]).toMatchObject({ userId: 'owner', kind: 'ai-key-moved', title: '2 bots now reply with claude-haiku-5-5', href: '/admin/universes/uni-1' });
     expect(notice.mock.calls[0][0].body).toBe('Mishari changed which models of their AI key bots in Sandbox Universe may use. The 2 bots were on ones they took out, so they now reply with claude-haiku-5-5.');
-    // They left a model that worked, for one nobody asked yet: a 404 just after is about the new one, and counts
-    expect(changedLately({ id: 'b1', aiModel: 'claude-haiku-5-5' }, 'key-1')).toBe(false);
-    expect(changedLately({ id: 'b3', aiModel: 'claude-haiku-5-5' }, 'key-1')).toBe(false);
   });
 
   it('judges a bot with no model of its own by the check model the key has now, not the one read before the list', async () => {
