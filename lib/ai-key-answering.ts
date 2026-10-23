@@ -37,7 +37,8 @@ export async function firstAnswering(
       continue;
     }
     last = chat;
-    if (chat.reason !== 'gone' && chat.reason !== 'other' && chat.reason !== 'credit') break;
+    // The key or the provider failed, not this model: one that only refused the tiny request earlier proves nothing now
+    if (chat.reason !== 'gone' && chat.reason !== 'other' && chat.reason !== 'credit') return { ok: false, message: chat.message, reason: chat.reason };
   }
   if (refusedRequest) return { ok: true, model: refusedRequest };
   return { ok: false, ...(last ?? { message: 'No model answered.', reason: 'other' }) };

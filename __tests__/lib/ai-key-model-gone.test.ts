@@ -145,6 +145,15 @@ describe('moveBotOffGoneModel', () => {
     expect(db.bot.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: { aiModel: 'deepseek/deepseek-v4-flash' } }));
   });
 
+  it('leaves it to the key’s own rules when the lend’s only model is still listed but won’t answer', async () => {
+    db.bot.findUnique.mockResolvedValue({ ...guide, id: 'b4' });
+    db.aiKeyLend.findUnique.mockResolvedValue({ models: ['meta-llama/llama-4-maverick'] });
+    list.mockResolvedValue({ ok: true, models: ['meta-llama/llama-4-maverick', 'openai/gpt-5-mini'], facts: {}, listed: true });
+    expect(await moveBotOffGoneModel(key, 'b4')).toBe(false);
+    expect(moveBotsOffKey).not.toHaveBeenCalled();
+    expect(db.bot.updateMany).not.toHaveBeenCalled();
+  });
+
   it('does nothing for a bot that is not on this key any more', async () => {
     db.bot.findUnique.mockResolvedValue({ ...guide, aiProviderRef: 'universe-ai' });
     expect(await moveBotOffGoneModel(key, 'b1')).toBe(false);

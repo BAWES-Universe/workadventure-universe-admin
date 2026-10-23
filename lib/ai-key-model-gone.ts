@@ -55,6 +55,8 @@ export async function moveBotOffGoneModel(key: KeyForModels & { ownerId: string 
   if (gone === key.model && list.models.length > 0) await replaceCheckModel(key, await pick(list.models));
 
   const allowed = allowedModels(list.models, lend).filter((model) => model !== gone);
+  // The lend's only model is still listed but won't answer: not a dropped model, so the key's own rules apply (If this is down)
+  if (allowed.length === 0 && listed) return false;
   if (allowed.length === 0) {
     // Nothing allowed here is offered any more: the bots here can't run on this key, as if it were pulled
     await moveBotsOffKey(key.providerId, { universeId: universe.id, actor: { id: '', name: label }, why: 'models-gone' });
