@@ -34,6 +34,11 @@ export async function GET(request: NextRequest) {
 
 /** How many of a provider's listed models Add key tries for its one tiny reply before it says why none answered. */
 const CHECK_TRIES = 4;
+/**
+ * Each try can wait out its whole timeout when a model hangs: once this long has gone by, no further model is started, so
+ * Add key answers well before a gateway gives up on the request.
+ */
+const CHECK_BUDGET_MS = 45_000;
 
 /**
  * POST /api/me/ai-keys { kind, address?, region?, apiKey?, model?, name? } - add a key for the caller. The provider is asked
@@ -99,7 +104,9 @@ export async function POST(request: NextRequest) {
     // (an embedding model whose name says nothing) can answer the same way. On a key out of credit for another model, or
     // when another said busy, it proves nothing, so the person is told about the credit or to try again instead.
     let refusedRequest: string | null = null;
-    for (const candidate of candidates) {
+    const started = Date.now();
+    for (const [index, candidate] of candidates.entries()) {
+      if (index > 0 && Date.now() - started > CHECK_BUDGET_MS) break;
       const chat = await probeChat({ kind: info.kind, address: input.address, region, apiKey, model: candidate, ...(noList ? { noList } : {}) });
       if (chat.ok) {
         model = candidate;
