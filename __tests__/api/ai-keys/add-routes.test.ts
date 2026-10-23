@@ -201,6 +201,24 @@ describe('POST /api/me/ai-keys with no model picked (#575)', () => {
     expect(provider.create).not.toHaveBeenCalled();
   });
 
+  it('moves past a model the key may not use (403) or has no quota for (429), but stops at a key refused outright (401)', async () => {
+    models.mockResolvedValue({ ok: true, models: ['o3', 'gemini-pro', 'gpt-5-mini'], facts: {} });
+    chat
+      .mockResolvedValueOnce({ ok: false, reason: 'rejected', status: 403, message: 'OpenAI didn’t accept this key.' })
+      .mockResolvedValueOnce({ ok: false, reason: 'busy', status: 429, message: 'OpenAI is busy right now. Try again in a moment.' })
+      .mockResolvedValueOnce({ ok: true });
+    expect((await post({ kind: 'deepseek', apiKey: 'sk-abcdef4f2a' })).status).toBe(201);
+    expect(provider.create.mock.calls[0][0].data.model).toBe('gpt-5-mini');
+
+    chat.mockReset();
+    provider.create.mockClear();
+    chat.mockResolvedValueOnce({ ok: false, reason: 'rejected', status: 401, message: 'DeepSeek didn’t accept this key.' });
+    const response = await post({ kind: 'deepseek', apiKey: 'sk-abcdef4f2a' });
+    expect(response.status).toBe(400);
+    expect(chat).toHaveBeenCalledTimes(1);
+    expect(provider.create).not.toHaveBeenCalled();
+  });
+
   it('saves nothing, and says out of credit, when the only other model refused just the tiny request', async () => {
     models.mockResolvedValue({ ok: true, models: ['a', 'b'], facts: {} });
     chat
