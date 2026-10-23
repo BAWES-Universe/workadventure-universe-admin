@@ -90,11 +90,18 @@ function slimFacts(facts: ModelFactsById): Record<string, ModelFacts> {
   return slim;
 }
 
+/** Whether two saved values hold the same thing, whatever order their keys come in (Postgres reorders a jsonb's keys). */
+function sameJson(a: unknown, b: unknown): boolean {
+  const stable = (value: unknown): string =>
+    isRecord(value) ? `{${Object.keys(value).sort().map((name) => `${JSON.stringify(name)}:${stable(value[name])}`).join(',')}}` : JSON.stringify(value);
+  return stable(a) === stable(b);
+}
+
 /** Saves what the provider says about each model on the key, only when it changed. A failed save only costs a later guess. */
 async function rememberFacts(key: KeyForModels, facts: ModelFactsById): Promise<void> {
   const slim = slimFacts(facts);
   const saved = isRecord(key.settings) ? key.settings.modelFacts : undefined;
-  if (JSON.stringify(saved ?? {}) === JSON.stringify(slim)) return;
+  if (sameJson(saved ?? {}, slim)) return;
   try {
     // Read again just before writing, so a change made meanwhile (a new address, a new check model) is never undone
     const row = await prisma.botsAiProvider.findUnique({ where: { providerId: key.providerId }, select: { settings: true } });

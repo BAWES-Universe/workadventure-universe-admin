@@ -91,6 +91,13 @@ describe('keyModels', () => {
     expect(db.updateMany).not.toHaveBeenCalled();
   });
 
+  it('doesn’t save again when the saved facts only differ in key order (Postgres reorders a jsonb)', async () => {
+    probe.mockResolvedValue(LIST);
+    const key = claudeKey({ settings: { kind: 'claude', modelFacts: { 'claude-haiku-5-5': { tools: true, vision: true } } } });
+    await keyModels(key, { fresh: true });
+    expect(db.updateMany).not.toHaveBeenCalled();
+  });
+
   it('gives a provider with no model list its one typed model', async () => {
     probe.mockResolvedValue({ ok: false, noList: true, message: 'Groq doesn’t share a list of its models.', reason: 'other' });
     expect(await keyModels(claudeKey({ settings: { kind: 'groq' }, model: 'llama-3.3-70b' }))).toEqual({ ok: true, models: ['llama-3.3-70b'], facts: {}, listed: false });
