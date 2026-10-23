@@ -4,26 +4,23 @@ import { kindInfo, type AiKeyKindInfo } from '@/lib/ai-key-kinds';
 import { decryptApiKey } from '@/lib/encryption';
 import { ANSWER_TRIES, firstAnswering } from '@/lib/ai-key-answering';
 import { probeChat, type ModelFactsById, type ProbeFailure } from '@/lib/ai-key-models';
-import { changedLately, noteCheckModelChanged, noteModelChanged } from '@/lib/ai-key-late-report';
 import { addNotice } from '@/lib/notices';
 import { moveBotsOffKey } from '@/lib/ai-key-lend';
 import { allowedModels, forgetKeyModels, keyModels, lendModels, modelFactsOf, servedModel, type KeyForModels } from '@/lib/ai-key-model-list';
-
-export { LATE_REPORT_MS, noteModelChanged } from '@/lib/ai-key-late-report';
 
 /**
  * A provider stopped offering the model one bot replies with (#575). That says nothing about the key's other models, so the
  * key is not marked Down: the bot moves to the first model its lend still allows that answers one tiny reply (the provider's
  * suggested one first), and the key's owner, who made the bot, is told. When the lend allows none that the provider still
- * lists, or none of them answers, the bots there move to Universe AI, the same as when a key is pulled. When the key's check model is the one that went, the key
- * gets a new check model, so the health check does not mark it Down for a model nobody uses.
+ * lists, or none of them answers, the bots there move to Universe AI, the same as when a key is pulled. When the key's check
+ * model is the one that went, the key gets a new check model, so the health check does not mark it Down for a model nobody uses.
  *
  * A model the provider still lists but that answers a bot with a 404 is treated the same for that bot (another listed model
- * may still answer), the key's check model too.
+ * may still answer), the key's check model too. Before anything moves, the bot's model is asked once more: one that answers
+ * now (a reply sent before the bot moved to it, a passing hiccup), or no clear answer, changes nothing.
  *
  * Returns false when this can't be decided (the list can't be loaded, the provider has no list, the key was refused, or more
- * models are allowed than are asked): then the reply's failure counts against the key as before. A provider busy or not answering while the models are asked decides nothing, and the next report asks again. A report that comes in just after the bot was moved is
- * about the model it left (a reply already on its way, or the bot server still holding the old answer), so it is let go.
+ * models are allowed than are asked): then the reply's failure counts against the key as before.
  */
 export function moveBotOffGoneModel(key: KeyForModels & { ownerId: string | null; name: string }, botId: string): Promise<boolean> {
   // Replies in flight at once report the same 404: they share one answer, so the provider is asked once, not once each
@@ -43,7 +40,9 @@ async function decide(key: KeyForModels & { ownerId: string | null; name: string
     where: { id: botId },
     select: { id: true, name: true, aiModel: true, aiProviderRef: true, room: { select: { world: { select: { universe: { select: { id: true, name: true } } } } } } },
   });
-  if (!bot || bot.aiProviderRef !== key.providerId) return false;
+  if (!bot) return false;
+  // The bot left this key while the reply was on its way: the report is about a key it isn't on, so it says nothing here
+  if (bot.aiProviderRef !== key.providerId) return true;
   const universe = bot.room.world.universe;
   const readLend = async () =>
     lendModels((await prisma.aiKeyLend.findUnique({ where: { providerId_universeId: { providerId: key.providerId, universeId: universe.id } }, select: { models: true } }))?.models);
@@ -51,10 +50,11 @@ async function decide(key: KeyForModels & { ownerId: string | null; name: string
   // The model the reply was asked of: the bot's own, or the one its lend falls back to
   const gone = servedModel(bot, key, lend);
   if (!gone) return false;
-  // Moved or changed in the last few minutes: late news about the model it left, as long as the one it has now answers. When
-  // the provider says it doesn't have that one either, the report is about it, and the bot moves off it as from any other.
-  // A new check model only counts for a bot that really replies with it (a lend that leaves it out serves its own first model).
-  if (changedLately(bot, key.providerId, gone === key.model) && (await askAbout(key, gone)) !== 'gone') return true;
+  // One 404 is not the last word: the model is asked once more first. It answers now (a reply sent before the bot moved to
+  // it, a passing hiccup) or no clear answer comes: nothing changes, and the next report asks again. A refused key: the
+  // key's own rules apply. Only a provider that says, again, that it has no such model moves anything.
+  const again = await askAbout(key, gone);
+  if (again !== 'gone') return again !== 'key';
   const list = await keyModels(key, { fresh: true });
   if (!list.ok || !list.listed) return false;
   // A model the provider still lists but that won't answer is that model's failure only, the key's check model too: the
@@ -74,13 +74,8 @@ async function decide(key: KeyForModels & { ownerId: string | null; name: string
   const allowed = allowedModels(list.models, lend).filter((model) => model !== gone);
   const found = allowed.length > 0 ? await pick(allowed) : null;
   // Every other model allowed here was asked and the provider says it has none of them to answer with: as good as none left
-  const noneAnswer = found !== null && !found.answered && (found.why === 'gone' || found.why === 'other') && allowed.length <= ANSWER_TRIES;
+  const noneAnswer = found !== null && !found.answered && found.why === 'gone' && allowed.length <= ANSWER_TRIES;
   if (!found || noneAnswer) {
-    // One report is not the last word before every bot here leaves the key: the bot's own model is asked once more (a local
-    // provider's list can leave out a model it hasn't loaded yet). One that answers now, or no clear answer, decides nothing;
-    // a refused key leaves it to the key's own rules.
-    const again = await askAbout(key, gone);
-    if (again !== 'gone') return again !== 'key';
     // The owner changed the lend while the provider was asked: the lend change already moved these bots where it allows,
     // so nobody is pulled off the key on the old lend's say, and a later report is decided on the new one
     if (JSON.stringify(await readLend()) !== JSON.stringify(lend)) return true;
@@ -115,8 +110,6 @@ async function decide(key: KeyForModels & { ownerId: string | null; name: string
   const next = found.model;
   const moved = await prisma.bot.updateMany({ where: { id: bot.id, aiProviderRef: key.providerId, aiModel: bot.aiModel }, data: { aiModel: next } });
   if (moved.count > 0) {
-    // A report just after the move is late news about the model it left: the new one just answered
-    noteModelChanged(bot.id);
     try {
       await addNotice({
         userId: key.ownerId,
@@ -148,8 +141,9 @@ async function askAbout(key: KeyForModels, model: string): Promise<'answers' | '
   }
   const reply = await probeChat({ kind: info.kind, address: key.endpoint ?? undefined, apiKey, model });
   if (reply.ok || reply.reason === 'request') return 'answers';
-  if (reply.reason === 'gone' || reply.reason === 'other') return 'gone';
-  return reply.reason === 'busy' || reply.reason === 'unreachable' ? 'unsure' : 'key';
+  if (reply.reason === 'gone') return 'gone';
+  // Any other error (a timeout, a conflict) says nothing sure about the model
+  return reply.reason === 'rejected' || reply.reason === 'credit' ? 'key' : 'unsure';
 }
 
 /**
@@ -189,5 +183,4 @@ async function replaceCheckModel(key: KeyForModels, model: string): Promise<void
   // Someone changed the model meanwhile: theirs stands
   if (count === 0) return;
   forgetKeyModels(key.providerId);
-  noteCheckModelChanged(key.providerId);
 }
