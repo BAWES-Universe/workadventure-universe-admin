@@ -6,6 +6,7 @@ import { cleanModelId, probeChat, probeModels, type ProbeFailure } from '@/lib/a
 import { addNotice, clearNotices } from '@/lib/notices';
 import { moveBotOffGoneModel } from '@/lib/ai-key-model-gone';
 import { firstAnswering } from '@/lib/ai-key-answering';
+import { noteCheckModelChanged } from '@/lib/ai-key-late-report';
 import { forgetKeyModels } from '@/lib/ai-key-model-list';
 
 /**
@@ -237,6 +238,8 @@ async function saveCheckModel(key: KeyRow, model: string, facts: { tools?: boole
     data: { model, settings: settings as Prisma.InputJsonValue, supportsVision: caps.vision ?? null },
   });
   forgetKeyModels(key.providerId);
+  // Bots that follow the check model now reply with this one: a report about the old one may still come in
+  noteCheckModelChanged(key.providerId);
 }
 
 /**

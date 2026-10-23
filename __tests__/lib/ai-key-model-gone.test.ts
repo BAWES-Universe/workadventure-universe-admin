@@ -23,14 +23,17 @@ const notice = addNotice as jest.Mock;
 const chat = probeChat as jest.Mock;
 
 const key = { providerId: 'key-1', name: 'My OpenRouter', ownerId: 'maker', endpoint: 'https://openrouter.ai/api/v1', apiKeyEncrypted: 'enc', settings: { kind: 'openrouter' }, model: 'openai/gpt-5-mini' };
-// Each test gets a bot of its own: a bot moved in one test is let go as a late report in the next
+// Each test gets a bot of its own, and a clock well past the last one's: a change in one test is not a late report in the next
 let botCount = 0;
+const realNow = Date.now;
 const base = { id: 'b1', name: 'Guide', aiModel: 'meta-llama/llama-4-maverick', aiProviderRef: 'key-1', room: { world: { universe: { id: 'uni-1', name: 'Sandbox Universe' } } } };
 let guide = base;
 
 beforeEach(() => {
   jest.resetAllMocks();
   guide = { ...base, id: `bot-${++botCount}` };
+  const shift = botCount * 3 * LATE_REPORT_MS;
+  jest.spyOn(Date, 'now').mockImplementation(() => realNow() + shift);
   db.bot.findUnique.mockResolvedValue(guide);
   db.bot.updateMany.mockResolvedValue({ count: 1 });
   db.aiKeyLend.findUnique.mockResolvedValue({ models: null });
@@ -170,6 +173,18 @@ describe('moveBotOffGoneModel', () => {
     expect(await moveBotOffGoneModel(key, guide.id)).toBe(true);
     expect(list).not.toHaveBeenCalled();
     expect(db.bot.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('lets a report go from a bot that follows the check model, just after the check model changed', async () => {
+    // A bot of its own model moves the check model off a gone one...
+    db.bot.findUnique.mockResolvedValue({ ...guide, aiModel: null });
+    list.mockResolvedValue({ ok: true, models: ['deepseek/deepseek-v4-flash', 'qwen/qwen3-235b'], facts: {}, listed: true });
+    await moveBotOffGoneModel(key, guide.id);
+    // ...then another bot on the same key, with no model of its own, reports the old check model a moment later
+    list.mockClear();
+    db.bot.findUnique.mockResolvedValue({ ...guide, id: 'follower', aiModel: null });
+    expect(await moveBotOffGoneModel({ ...key, model: 'deepseek/deepseek-v4-flash' }, 'follower')).toBe(true);
+    expect(list).not.toHaveBeenCalled();
   });
 
   it('does nothing for a bot that is not on this key any more', async () => {
