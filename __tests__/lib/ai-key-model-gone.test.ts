@@ -71,7 +71,10 @@ describe('moveBotOffGoneModel', () => {
 
   it('moves the bots there to Universe AI when the lend allows nothing the provider still lists', async () => {
     db.aiKeyLend.findUnique.mockResolvedValue({ models: ['meta-llama/llama-4-maverick'] });
+    chat.mockResolvedValue({ ok: false, reason: 'gone', message: 'OpenRouter doesn’t have that model.' });
     expect(await moveBotOffGoneModel(key, 'b1')).toBe(true);
+    // The bot's own model was asked once more before anyone left the key
+    expect(chat.mock.calls.map((call) => call[0].model)).toEqual(['meta-llama/llama-4-maverick']);
     expect(moveBotsOffKey).toHaveBeenCalledWith('key-1', { universeId: 'uni-1', actor: { id: '', name: 'OpenRouter' }, why: 'models-gone' });
     expect(db.bot.updateMany).not.toHaveBeenCalled();
     // The universe is the key owner's own: the universe owner's notice is theirs, so nothing more
@@ -80,6 +83,7 @@ describe('moveBotOffGoneModel', () => {
 
   it('pulls nobody off the key when the owner changed the lend while the provider was asked', async () => {
     db.aiKeyLend.findUnique.mockResolvedValueOnce({ models: ['meta-llama/llama-4-maverick'] }).mockResolvedValueOnce({ models: null });
+    chat.mockResolvedValue({ ok: false, reason: 'gone', message: 'OpenRouter doesn’t have that model.' });
     expect(await moveBotOffGoneModel(key, 'b1')).toBe(true);
     expect(moveBotsOffKey).not.toHaveBeenCalled();
     expect(db.bot.updateMany).not.toHaveBeenCalled();
@@ -88,6 +92,7 @@ describe('moveBotOffGoneModel', () => {
   it('tells the key’s owner too when the bots moved in someone else’s universe', async () => {
     db.aiKeyLend.findUnique.mockResolvedValue({ models: ['meta-llama/llama-4-maverick'] });
     (moveBotsOffKey as jest.Mock).mockResolvedValue({ count: 1, universes: [{ id: 'uni-1', name: 'Sandbox Universe', ownerId: 'someone', botNames: ['Guide'] }] });
+    chat.mockResolvedValue({ ok: false, reason: 'gone', message: 'OpenRouter doesn’t have that model.' });
     expect(await moveBotOffGoneModel(key, guide.id)).toBe(true);
     expect(notice.mock.calls[0][0]).toMatchObject({ userId: 'maker', kind: 'ai-key-moved', title: 'Guide moved to Universe AI', href: '/admin/you/ai-keys' });
     expect(notice.mock.calls[0][0].body).toBe('OpenRouter no longer has any of the models My OpenRouter may use in Sandbox Universe, so Guide now replies on Universe AI.');
@@ -222,13 +227,31 @@ describe('moveBotOffGoneModel', () => {
     expect(db.bot.updateMany).not.toHaveBeenCalled();
   });
 
-  it('leaves it to the key’s own rules when the lend’s only model is still listed but won’t answer', async () => {
+  it('moves nobody when the lend’s only model answers when asked again, or no clear answer comes', async () => {
     db.bot.findUnique.mockResolvedValue({ ...guide, id: 'b4' });
     db.aiKeyLend.findUnique.mockResolvedValue({ models: ['meta-llama/llama-4-maverick'] });
     list.mockResolvedValue({ ok: true, models: ['meta-llama/llama-4-maverick', 'openai/gpt-5-mini'], facts: {}, listed: true });
-    expect(await moveBotOffGoneModel(key, 'b4')).toBe(false);
+    expect(await moveBotOffGoneModel(key, 'b4')).toBe(true);
+    chat.mockResolvedValue({ ok: false, reason: 'busy', message: 'OpenRouter is busy right now.' });
+    expect(await moveBotOffGoneModel(key, 'b4')).toBe(true);
     expect(moveBotsOffKey).not.toHaveBeenCalled();
     expect(db.bot.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('moves the bots there to Universe AI when the lend’s only model is listed but the provider says it hasn’t it, the key staying Working', async () => {
+    db.bot.findUnique.mockResolvedValue({ ...guide, id: 'b9' });
+    db.aiKeyLend.findUnique.mockResolvedValue({ models: ['meta-llama/llama-4-maverick'] });
+    list.mockResolvedValue({ ok: true, models: ['meta-llama/llama-4-maverick', 'openai/gpt-5-mini'], facts: {}, listed: true });
+    chat.mockResolvedValue({ ok: false, reason: 'gone', message: 'OpenRouter doesn’t have that model.' });
+    expect(await moveBotOffGoneModel(key, 'b9')).toBe(true);
+    expect(moveBotsOffKey).toHaveBeenCalledWith('key-1', { universeId: 'uni-1', actor: { id: '', name: 'OpenRouter' }, why: 'models-gone' });
+  });
+
+  it('leaves it to the key’s own rules when the key is refused as the bot’s model is asked again', async () => {
+    db.aiKeyLend.findUnique.mockResolvedValue({ models: ['meta-llama/llama-4-maverick'] });
+    chat.mockResolvedValue({ ok: false, reason: 'rejected', message: 'OpenRouter didn’t accept this key.' });
+    expect(await moveBotOffGoneModel(key, guide.id)).toBe(false);
+    expect(moveBotsOffKey).not.toHaveBeenCalled();
   });
 
   it('lets a report go just after the maker changed the bot’s model or key, since it is about the model it had', async () => {
