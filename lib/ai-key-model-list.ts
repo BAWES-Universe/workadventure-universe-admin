@@ -122,11 +122,12 @@ async function rememberFacts(key: KeyForModels, facts: ModelFactsById): Promise<
   if (sameJson(saved ?? {}, slim)) return;
   try {
     // Read again just before writing, so a change made meanwhile (a new address, a new check model) is never undone. A list
-    // asked of an address the key has since left says nothing about it, so it is not kept.
-    const row = await prisma.botsAiProvider.findUnique({ where: { providerId: key.providerId }, select: { settings: true, endpoint: true } });
+    // asked of an address the key has since left says nothing about it, so it is not kept. A new check model saved between
+    // the read and the write brings its own settings, which this never writes over: the facts are kept on a later list.
+    const row = await prisma.botsAiProvider.findUnique({ where: { providerId: key.providerId }, select: { settings: true, endpoint: true, model: true } });
     if (!row || row.endpoint !== key.endpoint) return;
     const settings = { ...(isRecord(row.settings) ? row.settings : {}), modelFacts: slim };
-    await prisma.botsAiProvider.updateMany({ where: { providerId: key.providerId, ownerId: { not: null }, endpoint: key.endpoint }, data: { settings } });
+    await prisma.botsAiProvider.updateMany({ where: { providerId: key.providerId, ownerId: { not: null }, endpoint: key.endpoint, model: row.model }, data: { settings } });
     key.settings = settings;
   } catch (error) {
     console.error('[AiKeys] Could not keep the model facts:', error instanceof Error ? error.message : 'unknown');
