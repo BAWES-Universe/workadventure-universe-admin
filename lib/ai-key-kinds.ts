@@ -278,7 +278,7 @@ export function moreBenefit(provider: { models?: number; open?: number; free?: n
 
 /**
  * The link to read about a More provider. Most models.dev addresses are pages to read. A few are the API itself
- * (api.example.com, or /v1/models), which show raw data or nothing: those go to the provider's own landing page
+ * (api.example.com, or example.com/v1/models), which show raw data or nothing: those go to the provider's own landing page
  * (its main domain) instead.
  */
 export function docsPage(address: string | undefined): string | undefined {
@@ -286,7 +286,7 @@ export function docsPage(address: string | undefined): string | undefined {
   try {
     const url = new URL(address);
     if (url.protocol !== 'https:') return undefined;
-    if (!url.hostname.startsWith('api.') && !/^\/v\d+(\/|$)/.test(url.pathname)) return address;
+    if (!url.hostname.startsWith('api.') && !/^\/v\d+\/models\/?$/.test(url.pathname)) return address;
     return `https://${url.hostname.split('.').slice(-2).join('.')}`;
   } catch {
     return undefined;

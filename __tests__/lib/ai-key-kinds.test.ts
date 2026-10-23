@@ -164,10 +164,16 @@ describe('More providers, from the snapshot', () => {
     expect(docsPage('https://api.berget.ai')).toBe('https://berget.ai');
     expect(docsPage('https://llm.chutes.ai/v1/models')).toBe('https://chutes.ai');
     expect(docsPage('https://api.vultrinference.com/')).toBe('https://vultrinference.com');
+    // A versioned docs path is still docs
+    expect(docsPage('https://opencode.ai/v2/docs/console/models/')).toBe('https://opencode.ai/v2/docs/console/models/');
     expect(docsPage('http://docs.example.com')).toBeUndefined();
     expect(docsPage('not a link')).toBeUndefined();
     expect(docsPage(undefined)).toBeUndefined();
-    for (const info of more) expect(info.docs).toMatch(/^https:\/\/(?!api\.)[^/]+(\/(?!v\d+(\/|$)).*)?$/);
+    for (const info of more) {
+      const url = new URL(info.docs ?? 'https://x.test');
+      expect(url.hostname.startsWith('api.')).toBe(false);
+      expect(url.pathname).not.toMatch(/^\/v\d+\/models\/?$/);
+    }
   });
 
   it('says what every provider’s dashboard has in common: open it, make a key, paste it', () => {
