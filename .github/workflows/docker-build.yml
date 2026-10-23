@@ -255,7 +255,7 @@ jobs:
         run: |
           # Coolify answering "queued" only means it took the job: follow the deployment until it is finished.
           echo "Deploying v${{ needs.release.outputs.new_version }}..."
-          queued=$(curl -sSf -X POST "${COOLIFY_BASE}/api/v1/deploy?uuid=${COOLIFY_ADMIN_UUID}" \
+          queued=$(curl -sSf --max-time 60 -X POST "${COOLIFY_BASE}/api/v1/deploy?uuid=${COOLIFY_ADMIN_UUID}" \
             -H "Authorization: Bearer ${COOLIFY_TOKEN}")
           deployment=$(echo "$queued" | jq -r '.deployments[0].deployment_uuid // empty')
           if [ -z "$deployment" ]; then
@@ -269,7 +269,7 @@ jobs:
             sleep 10
             # A refused or missing read (401, 403, 404) will not get better: stop. Any other failed read
             # (network blip, 5xx while Coolify restarts) is not a failed deploy: keep waiting.
-            code=$(curl -s -o "$RUNNER_TEMP/coolify-status.json" -w '%{http_code}' \
+            code=$(curl -s --max-time 30 -o "$RUNNER_TEMP/coolify-status.json" -w '%{http_code}' \
               "${COOLIFY_BASE}/api/v1/deployments/${deployment}" \
               -H "Authorization: Bearer ${COOLIFY_TOKEN}") || code=000
             case "$code" in
