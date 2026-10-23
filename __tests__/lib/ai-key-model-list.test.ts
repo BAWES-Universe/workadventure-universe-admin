@@ -1,6 +1,6 @@
 import { prisma } from '@/lib/db';
 import { probeModels } from '@/lib/ai-key-models';
-import { allowedModels, forgetKeyModels, keyModels, lendModels, modelFactsOf, modelSupportsVision, servedModel, MODEL_LIST_TTL_MS } from '@/lib/ai-key-model-list';
+import { allowedModels, forgetKeyModels, keyModels, lendModels, modelFactsOf, modelSupportsVision, servedModel, MODEL_LIST_FAILED_TTL_MS, MODEL_LIST_TTL_MS } from '@/lib/ai-key-model-list';
 import { providerPayload } from '@/lib/ai-provider-payload';
 
 /** A bot picks its own model on a key, and a lend can allow only some (#575). */
@@ -133,12 +133,17 @@ describe('keyModels', () => {
     expect(await keyModels(claudeKey({ settings: { kind: 'groq' }, model: 'llama-3.3-70b' }))).toEqual({ ok: true, models: ['llama-3.3-70b'], facts: {}, listed: false });
   });
 
-  it('says why when the list can’t be loaded, and keeps nothing', async () => {
+  it('says why when the list can’t be loaded, and asks again only after a minute, or when asked fresh', async () => {
     probe.mockResolvedValue({ ok: false, message: 'Claude didn’t accept this key.', reason: 'rejected' });
     const key = claudeKey();
     expect(await keyModels(key)).toEqual({ ok: false, message: 'Claude didn’t accept this key.' });
-    await keyModels(key);
+    // A provider that doesn't answer holds up the next page open no more
+    expect(await keyModels(key)).toEqual({ ok: false, message: 'Claude didn’t accept this key.' });
+    expect(probe).toHaveBeenCalledTimes(1);
+    await keyModels(key, { now: Date.now() + MODEL_LIST_FAILED_TTL_MS + 1 });
     expect(probe).toHaveBeenCalledTimes(2);
+    await keyModels(key, { fresh: true });
+    expect(probe).toHaveBeenCalledTimes(3);
   });
 
   it('asks once for two calls at the same time', async () => {

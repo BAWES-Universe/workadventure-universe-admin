@@ -173,7 +173,9 @@ export async function checkKey(key: KeyRow): Promise<KeyCheck> {
     // that is the request's problem, not the key's, and a real reply's 400 is not counted against a key either
     // A 404 is about that one model, listed or not: the first of the others that really answers becomes the check model
     const asked = cleanModelId(key.model, info.kind);
-    const others = models.ok ? models.models.filter((model) => model !== asked) : [];
+    // Bots with no model of their own reply with the check model and always offer tools, so one the provider says calls none
+    // never becomes it
+    const others = models.ok ? models.models.filter((model) => model !== asked && models.facts?.[model]?.tools !== false) : [];
     if (!chat.ok && chat.reason === 'gone' && others.length > 0) {
       // None answering says why, as before
       const found = await firstAnswering({ kind: info.kind, address, apiKey }, others, info.suggestedModel, undefined, models.ok ? models.facts : {});

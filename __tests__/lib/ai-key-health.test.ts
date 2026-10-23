@@ -151,6 +151,14 @@ describe('checkAndRecord: a new check model (#575)', () => {
     expect(chat).toHaveBeenCalledTimes(2);
   });
 
+  it('never makes a model the provider says calls no tools the check model, since bots on it offer tools', async () => {
+    probe.mockResolvedValue({ ok: true, models: ['plain-x', 'chat-x'], facts: { 'plain-x': { tools: false } } });
+    chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'gone' });
+    chat.mockResolvedValueOnce({ ok: true });
+    expect(await checkKey({ ...hosted, model: 'deepseek-v4-flash' })).toMatchObject({ ok: true, checkModel: 'chat-x' });
+    expect(chat).not.toHaveBeenCalledWith(expect.objectContaining({ model: 'plain-x' }));
+  });
+
   it('asks models the provider says call tools first, past a list that starts with ones that don’t chat', async () => {
     probe.mockResolvedValue({ ok: true, models: ['embed-a', 'embed-b', 'embed-c', 'embed-d', 'chat-x'], facts: { 'chat-x': { tools: true } } });
     chat.mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'gone' });
