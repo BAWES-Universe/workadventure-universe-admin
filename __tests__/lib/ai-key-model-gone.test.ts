@@ -46,6 +46,13 @@ describe('moveBotOffGoneModel', () => {
     expect(db.bot.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: { aiModel: 'openai/gpt-5-mini' } }));
   });
 
+  it('checks the model the reply was really asked of: the lend’s first when the bot’s own isn’t allowed there', async () => {
+    db.bot.findUnique.mockResolvedValue({ ...guide, aiModel: 'openai/gpt-5-mini' });
+    db.aiKeyLend.findUnique.mockResolvedValue({ models: ['x-ai/grok-old', 'deepseek/deepseek-v4-flash'] });
+    expect(await moveBotOffGoneModel(key, 'b1')).toBe(true);
+    expect(db.bot.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: { aiModel: 'deepseek/deepseek-v4-flash' } }));
+  });
+
   it('moves the bots there to Universe AI when the lend allows nothing the provider still lists', async () => {
     db.aiKeyLend.findUnique.mockResolvedValue({ models: ['meta-llama/llama-4-maverick'] });
     expect(await moveBotOffGoneModel(key, 'b1')).toBe(true);

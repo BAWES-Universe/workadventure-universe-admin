@@ -3,7 +3,7 @@ import { prisma } from '@/lib/db';
 import { kindInfo } from '@/lib/ai-key-kinds';
 import { addNotice } from '@/lib/notices';
 import { moveBotsOffKey } from '@/lib/ai-key-lend';
-import { allowedModels, forgetKeyModels, keyModels, lendModels, modelFactsOf, type KeyForModels } from '@/lib/ai-key-model-list';
+import { allowedModels, forgetKeyModels, keyModels, lendModels, modelFactsOf, servedModel, type KeyForModels } from '@/lib/ai-key-model-list';
 
 /**
  * A provider stopped offering the model one bot replies with (#575). That says nothing about the key's other models, so the
@@ -24,16 +24,18 @@ export async function moveBotOffGoneModel(key: KeyForModels & { ownerId: string 
   if (!bot || bot.aiProviderRef !== key.providerId) return false;
   const list = await keyModels(key, { fresh: true });
   if (!list.ok || !list.listed) return false;
-  const gone = bot.aiModel ?? key.model;
+  const universe = bot.room.world.universe;
+  const lent = await prisma.aiKeyLend.findUnique({ where: { providerId_universeId: { providerId: key.providerId, universeId: universe.id } }, select: { models: true } });
+  const lend = lendModels(lent?.models);
+  // The model the reply was asked of: the bot's own, or the one its lend falls back to
+  const gone = servedModel(bot, key, lend);
   if (!gone || list.models.includes(gone)) return false;
 
   const info = kindInfo((key.settings as { kind?: unknown } | null)?.kind);
   const label = info?.label ?? 'The provider';
   if (gone === key.model && list.models.length > 0) await replaceCheckModel(key, list.models, info?.suggestedModel);
 
-  const universe = bot.room.world.universe;
-  const lent = await prisma.aiKeyLend.findUnique({ where: { providerId_universeId: { providerId: key.providerId, universeId: universe.id } }, select: { models: true } });
-  const allowed = allowedModels(list.models, lendModels(lent?.models));
+  const allowed = allowedModels(list.models, lend);
   if (allowed.length === 0) {
     // Nothing allowed here is offered any more: the bots here can't run on this key, as if it were pulled
     await moveBotsOffKey(key.providerId, { universeId: universe.id, actor: { id: '', name: label }, why: 'models-gone' });
