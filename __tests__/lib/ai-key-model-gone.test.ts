@@ -78,6 +78,13 @@ describe('moveBotOffGoneModel', () => {
     expect(notice).not.toHaveBeenCalled();
   });
 
+  it('pulls nobody off the key when the owner changed the lend while the provider was asked', async () => {
+    db.aiKeyLend.findUnique.mockResolvedValueOnce({ models: ['meta-llama/llama-4-maverick'] }).mockResolvedValueOnce({ models: null });
+    expect(await moveBotOffGoneModel(key, 'b1')).toBe(true);
+    expect(moveBotsOffKey).not.toHaveBeenCalled();
+    expect(db.bot.updateMany).not.toHaveBeenCalled();
+  });
+
   it('tells the key’s owner too when the bots moved in someone else’s universe', async () => {
     db.aiKeyLend.findUnique.mockResolvedValue({ models: ['meta-llama/llama-4-maverick'] });
     (moveBotsOffKey as jest.Mock).mockResolvedValue({ count: 1, universes: [{ id: 'uni-1', name: 'Sandbox Universe', ownerId: 'someone', botNames: ['Guide'] }] });
@@ -185,6 +192,15 @@ describe('moveBotOffGoneModel', () => {
     expect(await moveBotOffGoneModel(key, 'b1')).toBe(true);
     expect(chat).toHaveBeenCalledTimes(1);
     expect(db.bot.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: { aiModel: 'deepseek/deepseek-v4-flash' } }));
+  });
+
+  it('leaves it to the key’s own rules when its listed model won’t answer and no other one does either, so bots never cycle', async () => {
+    db.bot.findUnique.mockResolvedValue({ ...guide, id: 'b7' });
+    list.mockResolvedValue({ ok: true, models: ['meta-llama/llama-4-maverick', 'openai/gpt-5-mini'], facts: {}, listed: true });
+    chat.mockResolvedValue({ ok: false, reason: 'gone', message: 'OpenRouter doesn’t have that model.' });
+    expect(await moveBotOffGoneModel(key, 'b7')).toBe(false);
+    expect(db.bot.updateMany).not.toHaveBeenCalled();
+    expect(notice).not.toHaveBeenCalled();
   });
 
   it('leaves it to the key’s own rules when the lend’s only model is still listed but won’t answer', async () => {
