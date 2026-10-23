@@ -171,6 +171,14 @@ describe('POST /api/me/ai-keys with no model picked (#575)', () => {
     expect(provider.create).not.toHaveBeenCalled();
   });
 
+  it('never makes a model the provider says calls no tools the check model, a free one included', async () => {
+    models.mockResolvedValue({ ok: true, models: ['paid-x', 'plain:free', 'chat:free'], facts: { 'plain:free': { tools: false } } });
+    chat.mockImplementation(async ({ model }: { model: string }) => (model === 'paid-x' ? { ok: false, reason: 'credit', message: 'No credit.' } : { ok: true }));
+    expect((await post({ kind: 'openrouter', apiKey: 'sk-or-123' })).status).toBe(201);
+    expect(chat).not.toHaveBeenCalledWith(expect.objectContaining({ model: 'plain:free' }));
+    expect(provider.create.mock.calls[0][0].data.model).toBe('chat:free');
+  });
+
   it('starts no further model once the tries have taken long, and says why the last one failed', async () => {
     models.mockResolvedValue({ ok: true, models: ['a', 'b', 'c', 'd'], facts: {} });
     let now = 1_000_000;

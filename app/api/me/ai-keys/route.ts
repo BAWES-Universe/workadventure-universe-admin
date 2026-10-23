@@ -176,9 +176,13 @@ export async function POST(request: NextRequest) {
 /**
  * The models Add key tries for its one tiny reply: the provider's suggested model when listed, then models the provider says
  * call tools (a model that calls tools chats; a list sorted by name can start with ones that don't), then the rest, the first
- * few of those, and a free model when the list has one (OpenRouter's ":free" models answer a key with no credit).
+ * few of those, and a free model when the list has one (OpenRouter's ":free" models answer a key with no credit). Bots with no
+ * model of their own reply with the check model and always offer tools, so a model the provider says calls none is left
+ * out, unless the provider lists nothing else.
  */
-function checkCandidates(listed: string[], facts: Record<string, { tools?: boolean }>, suggested: string | undefined): string[] {
+function checkCandidates(all: string[], facts: Record<string, { tools?: boolean }>, suggested: string | undefined): string[] {
+  const withTools = all.filter((id) => facts[id]?.tools !== false);
+  const listed = withTools.length > 0 ? withTools : all;
   const first = suggested && listed.includes(suggested) ? [suggested] : [];
   const rest = listed.filter((id) => id !== suggested);
   const chats = rest.filter((id) => facts[id]?.tools === true);
