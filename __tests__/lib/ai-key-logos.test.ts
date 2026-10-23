@@ -41,6 +41,7 @@ describe('provider logos', () => {
     expect(isPlainSvg('<svg><path d="M0 0" style="fill:url(https://x.test/a.svg#b)"/></svg>')).toBe(false);
     expect(isPlainSvg('<svg><path d="M0 0" style="fill:u\\72l(https://example.com/logo.svg#mark)"/></svg>')).toBe(false);
     expect(isPlainSvg('<svg><path d="M0 0" style="flex:none;line-height:1"/></svg>')).toBe(true);
+    expect(isPlainSvg('<svg><path d="M0 0" fill="u&#114;l(https://example.com/a.svg#b)"/></svg>')).toBe(false);
     expect(isPlainSvg('<svg><!-- note --><path d="M0 0"/></svg>')).toBe(false);
     expect(isPlainSvg('<svg><![CDATA[x]]><path d="M0 0"/></svg>')).toBe(false);
     expect(isPlainSvg('<svg><path d="M0 0"></svg>')).toBe(false);

@@ -13,8 +13,8 @@ const TAG = /<(\/?)([A-Za-z][\w:.-]*)((?:\s+[^\s=<>/"']+\s*=\s*(?:"[^"]*"|'[^']*
 const ATTRIBUTE = /([^\s=]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
 /** A style is only plain `name: word` pairs, so no escapes, brackets or addresses can be written in it. */
 const PLAIN_STYLE = /^\s*[a-z-]+\s*:\s*[a-z0-9.% -]+(?:;\s*[a-z-]+\s*:\s*[a-z0-9.% -]+)*;?\s*$/i;
-/** Values that can pull something in or run it. */
-const UNSAFE_VALUE = /url\s*\(|javascript:|data:|@import|expression\s*\(|[<>]/i;
+/** Values that can pull something in or run it. An & or a backslash is refused outright, so no entity or escape can spell one of the words below. */
+const UNSAFE_VALUE = /url\s*\(|javascript:|data:|@import|expression\s*\(|[<>&\\]/i;
 
 export function isPlainSvg(svg) {
   const body = svg.replace(/^\s*<\?xml[^>]*\?>/, '').trim();
