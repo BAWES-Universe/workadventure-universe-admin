@@ -11,8 +11,14 @@ const changedAt = new Map<string, number>();
 const checkModelChangedAt = new Map<string, number>();
 const recent = (at: number | undefined) => at !== undefined && Date.now() - at < LATE_REPORT_MS;
 
-export function noteModelChanged(botId: string): void {
+/** Returns how to take the note back, for a save that then fails: the bot's model did not change after all. */
+export function noteModelChanged(botId: string): () => void {
+  const before = changedAt.get(botId);
   changedAt.set(botId, Date.now());
+  return () => {
+    if (before === undefined) changedAt.delete(botId);
+    else changedAt.set(botId, before);
+  };
 }
 
 /** The key got a new check model: every bot on it with no model of its own now replies with that one. */

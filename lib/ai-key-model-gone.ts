@@ -51,7 +51,11 @@ export async function moveBotOffGoneModel(key: KeyForModels & { ownerId: string 
   const info = kindInfo((key.settings as { kind?: unknown } | null)?.kind);
   const label = info?.label ?? 'The provider';
   const pick = answeringPicker(key, info);
-  if (gone === key.model && list.models.length > 0) await replaceCheckModel(key, await pick(list.models));
+  if (gone === key.model && list.models.length > 0) {
+    // Only a model that answered becomes the check model: else the next health check finds one, as it does for a gone one
+    const check = await pick(list.models);
+    if (check.answered) await replaceCheckModel(key, check.model);
+  }
 
   const allowed = allowedModels(list.models, lend).filter((model) => model !== gone);
   // The lend's only model is still listed but won't answer: not a dropped model, so the key's own rules apply (If this is down)
@@ -61,7 +65,7 @@ export async function moveBotOffGoneModel(key: KeyForModels & { ownerId: string 
     await moveBotsOffKey(key.providerId, { universeId: universe.id, actor: { id: '', name: label }, why: 'models-gone' });
     return true;
   }
-  const next = await pick(allowed);
+  const { model: next } = await pick(allowed);
   const moved = await prisma.bot.updateMany({ where: { id: bot.id, aiProviderRef: key.providerId, aiModel: bot.aiModel }, data: { aiModel: next } });
   noteModelChanged(bot.id);
   if (moved.count > 0) {
@@ -83,8 +87,8 @@ export async function moveBotOffGoneModel(key: KeyForModels & { ownerId: string 
 
 /**
  * Picks the model to move to from a list: the first that answers one tiny reply, the same as Add key (the provider's
- * suggested model first). When none does (the key itself was refused, the provider is busy or didn't answer), the first one
- * is kept, as before: the next report or health check says why. Answers are kept for the one report, so the check model and
+ * suggested model first). When none does (the key itself was refused, the provider is busy or didn't answer), a bot still
+ * moves to the first one, off the gone one: the next report or health check says why. `answered` says which it was. Answers are kept for the one report, so the check model and
  * the bot's model never ask the same model twice.
  */
 function answeringPicker(key: KeyForModels, info: AiKeyKindInfo | null) {
@@ -96,12 +100,12 @@ function answeringPicker(key: KeyForModels, info: AiKeyKindInfo | null) {
   } catch {
     readable = false;
   }
-  return async (models: string[]): Promise<string> => {
+  return async (models: string[]): Promise<{ model: string; answered: boolean }> => {
     const suggested = info?.suggestedModel;
     const first = suggested && models.includes(suggested) ? suggested : models[0];
-    if (!info || !readable) return first;
+    if (!info || !readable) return { model: first, answered: false };
     const found = await firstAnswering({ kind: info.kind, address: key.endpoint ?? undefined, apiKey }, models, suggested, asked);
-    return found.ok ? found.model : first;
+    return found.ok ? { model: found.model, answered: true } : { model: first, answered: false };
   };
 }
 

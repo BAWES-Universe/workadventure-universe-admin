@@ -176,6 +176,22 @@ describe('moveBotOffGoneModel', () => {
     expect(db.bot.updateMany).not.toHaveBeenCalled();
   });
 
+  it('counts a report again once a save that noted a change is taken back', async () => {
+    const undo = noteModelChanged(guide.id);
+    undo();
+    expect(await moveBotOffGoneModel(key, guide.id)).toBe(true);
+    expect(list).toHaveBeenCalled();
+  });
+
+  it('keeps the check model when no listed model answers, and still moves the bot off the gone one', async () => {
+    db.bot.findUnique.mockResolvedValue({ ...guide, aiModel: null });
+    list.mockResolvedValue({ ok: true, models: ['deepseek/deepseek-v4-flash', 'qwen/qwen3-235b'], facts: {}, listed: true });
+    chat.mockResolvedValue({ ok: false, reason: 'busy', message: 'OpenRouter is busy right now.' });
+    expect(await moveBotOffGoneModel(key, guide.id)).toBe(true);
+    expect(db.botsAiProvider.updateMany).not.toHaveBeenCalled();
+    expect(db.bot.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: { aiModel: 'deepseek/deepseek-v4-flash' } }));
+  });
+
   it('lets a report go from a bot that follows the check model, just after the check model changed', async () => {
     // A bot of its own model moves the check model off a gone one...
     db.bot.findUnique.mockResolvedValue({ ...guide, aiModel: null });
