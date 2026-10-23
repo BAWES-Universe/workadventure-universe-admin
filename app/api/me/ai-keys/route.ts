@@ -175,11 +175,13 @@ function checkCandidates(listed: string[], facts: Record<string, { tools?: boole
 }
 
 /**
- * Whether another listed model may still answer after this one failed. A refused key or a busy provider would say the same
- * for every model, and so would a provider that didn't answer at all (each try could wait the whole timeout). A model that
- * is gone, out of this key's credit (a free one may still run), or answered with its own error says nothing about the next.
+ * Whether another listed model may still answer after this one failed. A key refused outright (401) would be refused for
+ * every model, and a provider that didn't answer at all would wait the whole timeout each try. A model that is gone, out of
+ * this key's credit (a free one may still run), or answered with its own error says nothing about the next, and neither
+ * does a 403 or a busy answer: OpenAI and Gemini give those per model (an organization not verified for it, no quota on it).
  */
 function tryNextModel(chat: { reason: ProbeFailure; status?: number }): boolean {
-  if (chat.reason === 'gone' || chat.reason === 'other' || chat.reason === 'credit') return true;
+  if (chat.reason === 'gone' || chat.reason === 'other' || chat.reason === 'credit' || chat.reason === 'busy') return true;
+  if (chat.reason === 'rejected') return chat.status === 403;
   return chat.reason === 'unreachable' && chat.status !== undefined;
 }

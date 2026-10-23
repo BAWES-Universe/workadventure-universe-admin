@@ -318,8 +318,8 @@ export async function probeChat(input: KeyTargetInput & { apiKey?: unknown; mode
   if (result.ok && result.status === 400 && /enable_thinking/i.test(result.body)) result = await ask({ enable_thinking: false });
   if (!result.ok) return { ok: false, reason: 'unreachable', message: `${info.label} didn’t answer. Try again in a moment.` };
   if (result.status >= 200 && result.status < 300) return { ok: true };
-  if (keyRefused(info, result.status, result.body)) return { ok: false, reason: 'rejected', message: `${info.label} didn’t accept this key.` };
-  if (result.status === 429 || result.status === 529) return { ok: false, reason: 'busy', message: `${info.label} is busy right now. Try again in a moment.` };
+  if (keyRefused(info, result.status, result.body)) return { ok: false, reason: 'rejected', status: result.status, message: `${info.label} didn’t accept this key.` };
+  if (result.status === 429 || result.status === 529) return { ok: false, reason: 'busy', status: result.status, message: `${info.label} is busy right now. Try again in a moment.` };
   // Claude says "out of credit" and "spend limit reached" as a plain 400; other providers' 400s are about the request
   if (result.status === 402 || (info.protocol === 'anthropic' && result.status === 400 && /credit balance|usage limits|billing/i.test(result.body))) return { ok: false, reason: 'credit', status: result.status, message: `${info.label} says this key is out of credit.` };
   if (result.status === 404) return { ok: false, reason: 'gone', message: `${info.label} no longer has the model ${input.model}.` };
