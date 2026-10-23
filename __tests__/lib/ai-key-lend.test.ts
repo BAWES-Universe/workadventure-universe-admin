@@ -11,6 +11,7 @@ jest.mock('@/lib/db', () => ({
     worldMember: { findMany: jest.fn() },
     universeMember: { findMany: jest.fn() },
     bot: { findMany: jest.fn(), updateMany: jest.fn() },
+    botsAiProvider: { findUnique: jest.fn() },
     $transaction: jest.fn(),
   },
 }));
@@ -23,6 +24,7 @@ const db = prisma as unknown as {
   worldMember: Record<'findMany', jest.Mock>;
   universeMember: Record<'findMany', jest.Mock>;
   bot: Record<'findMany' | 'updateMany', jest.Mock>;
+  botsAiProvider: Record<'findUnique', jest.Mock>;
   $transaction: jest.Mock;
 };
 const permissions = permissionsForWorld as jest.Mock;
@@ -178,6 +180,7 @@ describe('a lend that allows only some models (#575)', () => {
     jest.resetAllMocks();
     db.$transaction.mockImplementation(async (calls: unknown[]) => Promise.all(calls));
     db.bot.updateMany.mockResolvedValue({ count: 1 });
+    db.botsAiProvider.findUnique.mockResolvedValue({ model: key.model });
   });
 
   it('reads the list: left out, null for all, or each model once', () => {
@@ -204,6 +207,13 @@ describe('a lend that allows only some models (#575)', () => {
     expect(notice).toHaveBeenCalledTimes(1);
     expect(notice.mock.calls[0][0]).toMatchObject({ userId: 'owner', kind: 'ai-key-moved', title: '2 bots now reply with claude-haiku-5-5', href: '/admin/universes/uni-1' });
     expect(notice.mock.calls[0][0].body).toBe('Mishari changed which models of their AI key bots in Sandbox Universe may use. The 2 bots were on ones they took out, so they now reply with claude-haiku-5-5.');
+  });
+
+  it('judges a bot with no model of its own by the check model the key has now, not the one read before the list', async () => {
+    db.botsAiProvider.findUnique.mockResolvedValue({ model: 'claude-haiku-5-5' });
+    db.bot.findMany.mockResolvedValue([{ id: 'b3', name: 'Scout', aiModel: null, room: sandbox }]);
+    expect(await moveBotsToAllowedModel(key, { universeId: 'uni-1', allowed: ['claude-haiku-5-5'], firstAllowed: 'claude-haiku-5-5', actor: { id: 'maker', name: 'Mishari' } })).toEqual({ count: 0 });
+    expect(db.bot.updateMany).not.toHaveBeenCalled();
   });
 
   it('tells nobody when it is your own universe, and moves nobody when every bot is on a kept model', async () => {

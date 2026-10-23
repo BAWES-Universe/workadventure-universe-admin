@@ -167,8 +167,11 @@ export async function moveBotsToAllowedModel(
     where: { aiProviderRef: key.providerId, room: { world: { universeId: options.universeId } } },
     select: { id: true, name: true, aiModel: true, room: { select: { world: { select: { universe: { select: { id: true, name: true, ownerId: true } } } } } } },
   });
+  // The provider's list was asked first and took a while: a bot with no model of its own follows the check model it has now
+  const current = await prisma.botsAiProvider.findUnique({ where: { providerId: key.providerId }, select: { model: true } });
+  const checkModel = current ? current.model : key.model;
   const leaving = bots.filter((bot) => {
-    const model = bot.aiModel ?? key.model;
+    const model = bot.aiModel ?? checkModel;
     return !model || !options.allowed.includes(model);
   });
   if (leaving.length === 0) return { count: 0 };
