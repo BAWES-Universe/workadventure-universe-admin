@@ -4,7 +4,7 @@ import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { listAiKeys } from '@/lib/ai-keys';
 import { MAX_AI_KEYS } from '@/lib/ai-key-kinds';
-import { KEY_CHARACTERS, KEY_LOOKS_WRONG, allowKeyAttempt, keyTarget, loadModels, modelCaps, probeChat } from '@/lib/ai-key-models';
+import { KEY_CHARACTERS, KEY_LOOKS_WRONG, allowKeyAttempt, keyTarget, loadModels, modelCaps, probeChat, type ProbeFailure } from '@/lib/ai-key-models';
 import { encryptApiKey } from '@/lib/encryption';
 import { meOriginAllowed, meRespond } from '@/lib/me-route';
 
@@ -91,6 +91,7 @@ export async function POST(request: NextRequest) {
         : checkCandidates(checked.models, info.suggestedModel);
     let model: string | null = null;
     let refused: string | null = null;
+    let refusedForCredit = false;
     for (const candidate of candidates) {
       const chat = await probeChat({ kind: info.kind, address: input.address, region, apiKey, model: candidate, ...(noList ? { noList } : {}) });
       // A listed model that refuses only this tiny request (a reasoning model that wants a bigger cap, say) is not a wrong key
@@ -100,9 +101,10 @@ export async function POST(request: NextRequest) {
         model = candidate;
         break;
       }
-      refused = chat.message;
-      // The key itself was refused, is out of credit, or nobody answered: another model would say the same
-      if (chat.reason !== 'gone' && chat.reason !== 'other') break;
+      // Out of credit is said ahead of a later model's words: it is what the person can fix
+      if (!refusedForCredit) refused = chat.message;
+      if (chat.reason === 'credit') refusedForCredit = true;
+      if (!tryNextModel(chat)) break;
     }
     if (!model) return respond(request, { error: refused ?? 'That didn’t work. Try again.' }, 400);
     // What the provider said about the check model, from the list it just gave (never from the request)
@@ -141,8 +143,23 @@ export async function POST(request: NextRequest) {
   }
 }
 
-/** The models Add key tries for its one tiny reply: the provider's suggested model when listed, then the first few listed. */
+/**
+ * The models Add key tries for its one tiny reply: the provider's suggested model when listed, then the first few listed, and
+ * a free model when the list has one (OpenRouter's ":free" models answer a key with no credit, which can still run them).
+ */
 function checkCandidates(listed: string[], suggested: string | undefined): string[] {
   const first = suggested && listed.includes(suggested) ? [suggested] : [];
-  return [...first, ...listed.filter((id) => id !== suggested)].slice(0, CHECK_TRIES);
+  const candidates = [...first, ...listed.filter((id) => id !== suggested)].slice(0, CHECK_TRIES);
+  const free = listed.find((id) => id.endsWith(':free'));
+  return free && !candidates.includes(free) ? [...candidates, free] : candidates;
+}
+
+/**
+ * Whether another listed model may still answer after this one failed. A refused key or a busy provider would say the same
+ * for every model, and so would a provider that didn't answer at all (each try could wait the whole timeout). A model that
+ * is gone, out of this key's credit (a free one may still run), or answered with its own error says nothing about the next.
+ */
+function tryNextModel(chat: { reason: ProbeFailure; status?: number }): boolean {
+  if (chat.reason === 'gone' || chat.reason === 'other' || chat.reason === 'credit') return true;
+  return chat.reason === 'unreachable' && chat.status !== undefined;
 }
