@@ -553,8 +553,10 @@ function LendSheet({
     }
   }
 
-  // Bots there on a model that is no longer allowed move to the first allowed one, in the provider's order
-  const firstKept = models.status === 'ready' ? models.models.find((id) => only.includes(id)) : undefined;
+  // Bots there on a model that is no longer allowed move to the first allowed one, in the provider's order, that the provider
+  // doesn't say calls no tools (a bot's replies always offer them), the same pick the save makes
+  const kept = models.status === 'ready' ? models.models.filter((id) => only.includes(id)) : [];
+  const firstKept = models.status === 'ready' ? (kept.find((id) => models.facts[id]?.tools !== false) ?? kept[0]) : undefined;
   const moving = limit === 'only' && firstKept && lent ? lent.bots.filter((bot) => bot.model !== null && !only.includes(bot.model)) : [];
   const provider = keyToLend?.kindLabel ?? 'the provider';
   // A provider that doesn't list its models has only the key's one model: nothing to limit

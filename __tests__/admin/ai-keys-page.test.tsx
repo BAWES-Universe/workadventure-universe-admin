@@ -252,6 +252,21 @@ describe('Lend sheet', () => {
     expect(JSON.parse(init.body)).toEqual({ universeId: 'uniboz', models: ['deepseek-v4-pro'] });
   });
 
+  it('names the model bots really move to: never one the provider says calls no tools', async () => {
+    const limited = {
+      ...deepseek,
+      lentTo: [{ universeId: 'bawes', universeName: 'BAWES Universe', ownedByYou: false, models: null, bots: [{ ...sam, model: 'deepseek-v4-flash' }] }],
+    };
+    serve([limited], universes, { ok: true, models: ['deepseek-v4-flash', 'deepseek-chat-lite', 'deepseek-v4-pro'], facts: { 'deepseek-chat-lite': { tools: false } } });
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Change the models bots in BAWES Universe may use' }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('radio', { name: 'Only these' }));
+    fireEvent.click(await within(dialog).findByRole('checkbox', { name: /deepseek-chat-lite/ }));
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: /deepseek-v4-pro/ }));
+    expect(within(dialog).getByTestId('lend-moving').textContent).toBe('Sam uses deepseek-v4-flash. It moves to deepseek-v4-pro, and the owner of BAWES Universe is told.');
+  });
+
   it('changes the models of a lend from its Change, says which bots move, and saves All models as null', async () => {
     const limited = {
       ...deepseek,
