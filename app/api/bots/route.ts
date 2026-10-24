@@ -6,7 +6,7 @@ import { canManageBots } from '@/lib/bot-permissions';
 import { parsePlayUri } from '@/lib/utils';
 import { validateAccessToken } from '@/lib/oidc';
 import { z } from 'zod';
-import { checkAiProviderRef } from '@/lib/ai-provider-ref';
+import { checkAiProviderRef, checkBotModel } from '@/lib/ai-provider-ref';
 import { toolTimeoutSecondsSchema } from '@/lib/bot-tool-timeout';
 import { mayReadRoomBots } from '@/lib/bot-room-access';
 import { checkConfigVision } from '@/lib/bot-vision';
@@ -47,6 +47,8 @@ const createBotSchema = z.object({
   chatInstructions: z.string().optional().nullable(),
   movementInstructions: z.string().optional().nullable(),
   aiProviderRef: z.string().max(100, 'aiProviderRef must be at most 100 characters').optional().nullable(),
+  // The bot's model on a person's key (#575); null = the key's check model
+  aiModel: z.string().trim().min(1, 'aiModel cannot be empty').max(255, 'aiModel must be at most 255 characters').optional().nullable(),
   toolTimeoutSeconds: toolTimeoutSecondsSchema,
   companionTextureId: z.string().max(100, 'companionTextureId must be at most 100 characters').optional().nullable(),
 });
@@ -65,6 +67,7 @@ function transformBot(bot: any) {
     chatInstructions: bot.chatInstructions,
     movementInstructions: bot.movementInstructions,
     aiProviderRef: bot.aiProviderRef,
+    aiModel: bot.aiModel ?? null,
     toolTimeoutSeconds: bot.toolTimeoutSeconds ?? null,
     companionTextureId: bot.companionTextureId ?? null,
     createdAt: bot.createdAt,
@@ -488,6 +491,23 @@ export async function POST(request: NextRequest) {
       return response;
     }
 
+    // The bot's model on its key (#575), checked like the key itself
+    const modelError = await checkBotModel(validatedData.aiModel, {
+      ref: validatedData.aiProviderRef ?? null,
+      currentRef: null,
+      currentModel: null,
+      actorId: userId ?? null,
+      makerId: userId ?? null,
+      roomId,
+    });
+    if (modelError) {
+      const response = NextResponse.json({ error: modelError }, { status: 400 });
+      Object.entries(corsHeaders()).forEach(([key, value]) => {
+        response.headers.set(key, value);
+      });
+      return response;
+    }
+
     // Where the bot's images go (the Vision row) is checked like its provider
     const visionError = await checkConfigVision(validatedData.behaviorConfig, { storedConfig: null, actorId: userId ?? null, makerId: userId ?? null, roomId });
     if (visionError) {
@@ -514,6 +534,7 @@ export async function POST(request: NextRequest) {
         chatInstructions: validatedData.chatInstructions ?? null,
         movementInstructions: validatedData.movementInstructions ?? null,
         aiProviderRef: validatedData.aiProviderRef ?? null,
+        aiModel: validatedData.aiModel ?? null,
         toolTimeoutSeconds: validatedData.toolTimeoutSeconds ?? null,
         companionTextureId: validatedData.companionTextureId ?? null,
         createdById: userId ?? null,

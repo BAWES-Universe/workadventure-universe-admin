@@ -6,6 +6,7 @@ import { moveBotsOffKey } from '@/lib/ai-key-lend';
 import { clearDownNotice, isIfDown } from '@/lib/ai-key-health';
 import { allowKeyAttempt } from '@/lib/ai-key-models';
 import { editSavedKey } from '@/lib/ai-key-edit';
+import { forgetKeyModels } from '@/lib/ai-key-model-list';
 
 export const runtime = 'nodejs';
 
@@ -71,6 +72,7 @@ export async function DELETE(request: NextRequest, { params }: { params: Promise
     if (!key) return respond(request, { error: 'Key not found' }, 404);
     const moved = await moveBotsOffKey(id, { actor: { id: user.id, name: user.name }, why: 'revoked' });
     await prisma.botsAiProvider.deleteMany({ where: { providerId: id, ownerId: user.id } });
+    forgetKeyModels(id);
     try {
       await clearDownNotice(user.id, id);
     } catch (error) {

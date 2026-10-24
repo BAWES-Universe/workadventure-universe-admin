@@ -82,7 +82,8 @@ export async function usableVisionKey(
   if (!key || !key.ownerId) return { ok: false, problem: 'gone', key: null };
   const verdict = await checkKeyForBot({ keyId: key.providerId, keyOwnerId: key.ownerId, makerId: bot.createdById, roomId: bot.roomId });
   if (!verdict.ok) return { ok: false, problem: verdict.reason, key };
-  if (!keyVisionModels(key).includes(pick.model)) return { ok: false, problem: 'no-model', key };
+  // A model the lend there leaves out (#575) is not one this bot may use, for images either
+  if (!keyVisionModels(key).includes(pick.model) || (verdict.lendModels && !verdict.lendModels.includes(pick.model))) return { ok: false, problem: 'no-model', key };
   if (key.downSince) {
     // A key used only for images is never asked for as a bot's main key, so nothing else would check it again: ask here (the
     // 5-minute rule is the same). The answer does not wait for the check; the next request sees what it found.

@@ -165,6 +165,26 @@ describe('/api/bots/configuration', () => {
       expect(response.status).toBe(200);
       expect(prisma.botsAiProvider.findUnique).not.toHaveBeenCalled();
     });
+
+    it('forgets the bot’s model when the save moves it to another provider (#575)', async () => {
+      (prisma.bot.findUnique as jest.Mock).mockResolvedValue({ aiProviderRef: 'key-a', behaviorConfig: null });
+
+      const response = await POST(
+        configRequest({ ...validBody, botId: '00000000-0000-4000-8000-000000000001', aiProviderRef: 'openai' })
+      );
+
+      expect(response.status).toBe(200);
+      expect((prisma.bot.update as jest.Mock).mock.calls[0][0].data.aiModel).toBeNull();
+    });
+
+    it('keeps the bot’s model when the save leaves its provider as it is', async () => {
+      (prisma.bot.findUnique as jest.Mock).mockResolvedValue({ aiProviderRef: 'openai', behaviorConfig: null });
+
+      await POST(configRequest({ ...validBody, botId: '00000000-0000-4000-8000-000000000001', aiProviderRef: 'openai' }));
+      await POST(configRequest({ ...validBody, botId: '00000000-0000-4000-8000-000000000001' }));
+
+      for (const call of (prisma.bot.update as jest.Mock).mock.calls) expect('aiModel' in call[0].data).toBe(false);
+    });
   });
 
   describe('legacy vision fallback fields (create)', () => {

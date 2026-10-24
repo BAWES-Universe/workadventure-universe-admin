@@ -11,7 +11,11 @@ import { editSavedKey, listModelsForSavedKey } from '@/lib/ai-key-edit';
 import { probeChat, probeModels, allowKeyAttempt } from '@/lib/ai-key-models';
 import { markWorking } from '@/lib/ai-key-health';
 
-jest.mock('@/lib/db', () => ({ prisma: { botsAiProvider: { findFirst: jest.fn(), updateMany: jest.fn() }, bot: { updateMany: jest.fn() } } }));
+jest.mock('@/lib/db', () => {
+  const prisma: Record<string, unknown> = { botsAiProvider: { findFirst: jest.fn(), updateMany: jest.fn() }, bot: { updateMany: jest.fn() }, aiKeyLend: { findMany: jest.fn() }, $queryRaw: jest.fn() };
+  prisma.$transaction = jest.fn((run: (tx: unknown) => unknown) => run(prisma));
+  return { prisma };
+});
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
 jest.mock('@/lib/encryption', () => ({ decryptApiKey: jest.fn((value: string) => value.replace('enc:', '')) }));
 jest.mock('@/lib/ai-key-lend', () => ({ moveBotsOffKey: jest.fn() }));
@@ -23,7 +27,7 @@ jest.mock('@/lib/ai-key-models', () => ({
   allowKeyAttempt: jest.fn(() => true),
 }));
 
-const db = prisma as unknown as { botsAiProvider: Record<'findFirst' | 'updateMany', jest.Mock>; bot: { updateMany: jest.Mock } };
+const db = prisma as unknown as { botsAiProvider: Record<'findFirst' | 'updateMany', jest.Mock>; bot: { updateMany: jest.Mock }; aiKeyLend: { findMany: jest.Mock } };
 const alice = { id: 'maker', uuid: 'uuid-a', email: 'a@example.com', name: 'A', tags: [], isSuperAdmin: false };
 
 const lmStudio = {
@@ -41,8 +45,9 @@ beforeEach(() => {
   jest.clearAllMocks();
   (getSessionUser as jest.Mock).mockResolvedValue(alice);
   (allowKeyAttempt as jest.Mock).mockReturnValue(true);
-  db.botsAiProvider.findFirst.mockResolvedValue(lmStudio);
+  db.botsAiProvider.findFirst.mockReset().mockResolvedValue(lmStudio);
   db.botsAiProvider.updateMany.mockResolvedValue({ count: 1 });
+  db.aiKeyLend.findMany.mockResolvedValue([]);
   (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['qwen3-8b', 'llama-3.1-8b'], facts: {} });
   (probeChat as jest.Mock).mockResolvedValue({ ok: true });
 });
@@ -81,7 +86,7 @@ describe('editSavedKey', () => {
     expect(probeChat).toHaveBeenCalledWith(expect.objectContaining({ address: 'https://new.trycloudflare.com/v1', model: 'qwen3-8b' }));
     expect(db.botsAiProvider.updateMany).toHaveBeenCalledTimes(1);
     const call = db.botsAiProvider.updateMany.mock.calls[0][0];
-    expect(call.where).toEqual({ providerId: 'key-1', ownerId: 'maker' });
+    expect(call.where).toEqual({ providerId: 'key-1', ownerId: 'maker', model: 'qwen3-8b' });
     expect(call.data).toMatchObject({ endpoint: 'https://new.trycloudflare.com', model: 'qwen3-8b', tested: true });
     // Lends are other rows keyed on the provider; the edit only ever updates the one provider row
     // The model is on the list, so what the provider says about it is refreshed too; nothing else changes
@@ -114,17 +119,24 @@ describe('editSavedKey', () => {
     (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4o-mini', 'gpt-4.1'], facts: {} });
     await editSavedKey('maker', 'key-2', { model: 'gpt-4.1' });
     const data = db.botsAiProvider.updateMany.mock.calls[0][0].data;
-    expect(data.settings).toEqual({ kind: 'openai' });
+    expect(data.settings).toEqual({ kind: 'openai', modelFacts: {} });
     expect(data.supportsVision).toBeNull();
   });
 
-  it('leaves the facts alone when the saved model is one the list misses', async () => {
+  it('leaves the saved model’s facts alone when the list misses it, and keeps the new list’s facts', async () => {
     db.botsAiProvider.findFirst.mockResolvedValue({ ...lmStudio, settings: { kind: 'lmstudio', caps: { tools: true } } });
     (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['other-model'], facts: {} });
     await editSavedKey('maker', 'key-1', { address: 'https://new.trycloudflare.com' });
     const data = db.botsAiProvider.updateMany.mock.calls[0][0].data;
-    expect(data.settings).toBeUndefined();
+    expect(data.settings).toEqual({ kind: 'lmstudio', caps: { tools: true }, modelFacts: {} });
     expect(data.supportsVision).toBeUndefined();
+  });
+
+  it('replaces the old address’s model facts with the new address’s', async () => {
+    db.botsAiProvider.findFirst.mockResolvedValue({ ...lmStudio, settings: { kind: 'lmstudio', modelFacts: { 'old-model': { vision: true } } } });
+    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['qwen3-8b', 'qwen3-vl-8b'], facts: { 'qwen3-vl-8b': { vision: true } } });
+    await editSavedKey('maker', 'key-1', { address: 'https://new.trycloudflare.com' });
+    expect(db.botsAiProvider.updateMany.mock.calls[0][0].data.settings.modelFacts).toEqual({ 'qwen3-vl-8b': { vision: true } });
   });
 
   it('refuses a model that is not on the list, and saves nothing', async () => {
@@ -138,6 +150,87 @@ describe('editSavedKey', () => {
     (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['other-model'], facts: {} });
     const result = await editSavedKey('maker', 'key-1', { address: 'https://new.trycloudflare.com' });
     expect(result).toMatchObject({ ok: true, model: 'qwen3-8b' });
+  });
+
+  it('moves the bots still on the old model to the new one in the same save, never a bot given another model (#575)', async () => {
+    db.botsAiProvider.findFirst.mockResolvedValue(openai);
+    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4o-mini', 'gpt-4.1'], facts: {} });
+    await editSavedKey('maker', 'key-2', { model: 'gpt-4.1' });
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(db.bot.updateMany).toHaveBeenCalledTimes(1);
+    expect(db.bot.updateMany).toHaveBeenCalledWith({ where: { aiProviderRef: 'key-2', aiModel: 'gpt-4o-mini' }, data: { aiModel: 'gpt-4.1' } });
+  });
+
+  it('locks the key’s row before reading its model, so two saves at the same moment run one after the other', async () => {
+    db.botsAiProvider.findFirst.mockResolvedValue(openai);
+    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4o-mini', 'gpt-4.1'], facts: {} });
+    await editSavedKey('maker', 'key-2', { model: 'gpt-4.1' });
+    const lock = (prisma.$queryRaw as jest.Mock).mock;
+    expect(lock.calls).toHaveLength(1);
+    expect(lock.calls[0][0].join('?')).toMatch(/FROM "bots_ai_providers" WHERE "provider_id" = \? AND "owner_id" = \? FOR UPDATE$/);
+    expect(lock.calls[0].slice(1)).toEqual(['key-2', 'maker']);
+    // Read after the lock: the model a save that went first committed
+    expect(lock.invocationCallOrder[0]).toBeLessThan(db.botsAiProvider.findFirst.mock.invocationCallOrder[1]);
+  });
+
+  it('takes no lock when no bots can move (only the address changed)', async () => {
+    await editSavedKey('maker', 'key-1', { address: 'https://new.trycloudflare.com/v1' });
+    expect(prisma.$queryRaw).not.toHaveBeenCalled();
+  });
+
+  it('brings the bots back when another tab changed the model and this one types the model the key had before', async () => {
+    // Opened on gpt-4o-mini; another tab saved gpt-4.1 (key and bots) while this one was checked; this one saves gpt-4o-mini
+    db.botsAiProvider.findFirst.mockResolvedValueOnce(openai).mockResolvedValueOnce({ model: 'gpt-4.1' });
+    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4o-mini', 'gpt-4.1'], facts: {} });
+    await editSavedKey('maker', 'key-2', { model: 'gpt-4o-mini' });
+    expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
+    expect(db.bot.updateMany).toHaveBeenCalledWith({ where: { aiProviderRef: 'key-2', aiModel: 'gpt-4.1' }, data: { aiModel: 'gpt-4o-mini' } });
+  });
+
+  it('moves the bots on the model the key has now, never one it had when this edit was opened', async () => {
+    // Opened on gpt-4o-mini; another tab saved gpt-4o (and moved its bots) while this one was checked. A bot put on
+    // gpt-4o-mini on purpose since then stays there; the bots on gpt-4o move to gpt-4.1
+    db.botsAiProvider.findFirst.mockResolvedValueOnce(openai).mockResolvedValueOnce({ model: 'gpt-4o' });
+    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1'], facts: {} });
+    await editSavedKey('maker', 'key-2', { model: 'gpt-4.1' });
+    expect(db.bot.updateMany).toHaveBeenCalledTimes(1);
+    expect(db.bot.updateMany).toHaveBeenCalledWith({ where: { aiProviderRef: 'key-2', aiModel: 'gpt-4o' }, data: { aiModel: 'gpt-4.1' } });
+  });
+
+  it('leaves the bots of a universe whose lend does not allow the new model on the old one', async () => {
+    db.botsAiProvider.findFirst.mockResolvedValue(openai);
+    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4o-mini', 'gpt-4.1'], facts: {} });
+    db.aiKeyLend.findMany.mockResolvedValue([
+      { universeId: 'u-all', models: null },
+      { universeId: 'u-old-only', models: ['gpt-4o-mini'] },
+      { universeId: 'u-both', models: ['gpt-4o-mini', 'gpt-4.1'] },
+    ]);
+    await editSavedKey('maker', 'key-2', { model: 'gpt-4.1' });
+    expect(db.bot.updateMany).toHaveBeenCalledWith({
+      where: { aiProviderRef: 'key-2', aiModel: 'gpt-4o-mini', NOT: { room: { world: { universeId: { in: ['u-old-only'] } } } } },
+      data: { aiModel: 'gpt-4.1' },
+    });
+  });
+
+  it('moves no bots when the model stays the same or the key changed while it was checked', async () => {
+    await editSavedKey('maker', 'key-1', { model: 'qwen3-8b' });
+    db.botsAiProvider.updateMany.mockResolvedValueOnce({ count: 0 });
+    const result = await editSavedKey('maker', 'key-1', { model: 'llama-3.1-8b' });
+    expect(result).toMatchObject({ ok: false, status: 409 });
+    expect(db.bot.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('never puts back a check model that was swapped while only the address was checked (#575)', async () => {
+    db.botsAiProvider.updateMany.mockResolvedValueOnce({ count: 0 });
+    const result = await editSavedKey('maker', 'key-1', { address: 'https://new.trycloudflare.com/v1' });
+    expect(result).toMatchObject({ ok: false, status: 409 });
+    expect(db.botsAiProvider.updateMany.mock.calls[0][0].where).toEqual({ providerId: 'key-1', ownerId: 'maker', model: 'qwen3-8b' });
+    expect(markWorking).not.toHaveBeenCalled();
+  });
+
+  it('saves a model the person picked whatever the key had meanwhile', async () => {
+    await editSavedKey('maker', 'key-1', { model: 'llama-3.1-8b' });
+    expect(db.botsAiProvider.updateMany.mock.calls[0][0].where).toEqual({ providerId: 'key-1', ownerId: 'maker' });
   });
 
   it('saves nothing when the new address does not answer', async () => {
