@@ -14,7 +14,7 @@ jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
 jest.mock('@/lib/db', () => ({
   prisma: {
     botsAiProvider: { findFirst: jest.fn() },
-    aiKeyLend: { upsert: jest.fn(), findFirst: jest.fn(), deleteMany: jest.fn() },
+    aiKeyLend: { upsert: jest.fn(), update: jest.fn(), findFirst: jest.fn(), deleteMany: jest.fn() },
   },
 }));
 jest.mock('@/lib/ai-key-lend', () => ({
@@ -27,7 +27,7 @@ jest.mock('@/lib/ai-key-lend', () => ({
 jest.mock('@/lib/ai-key-model-list', () => ({ ...jest.requireActual('@/lib/ai-key-model-list'), keyModels: jest.fn() }));
 
 const key = prisma.botsAiProvider as unknown as { findFirst: jest.Mock };
-const lends = prisma.aiKeyLend as unknown as Record<'upsert' | 'findFirst' | 'deleteMany', jest.Mock>;
+const lends = prisma.aiKeyLend as unknown as Record<'upsert' | 'update' | 'findFirst' | 'deleteMany', jest.Mock>;
 const alice = { id: 'user-a', uuid: 'uuid-a', email: 'a@example.com', name: 'Alice', tags: [], isSuperAdmin: false };
 
 const post = (body: unknown, id = 'key-1', headers: Record<string, string> = {}) =>
@@ -81,6 +81,20 @@ describe('POST /api/me/ai-keys/:id/lend', () => {
     // All models: nothing is asked of the provider and no bot moves
     expect(keyModels).not.toHaveBeenCalled();
     expect(moveBotsToAllowedModel).not.toHaveBeenCalled();
+  });
+
+  it('changes a lend without lending again when it was removed meanwhile (existing)', async () => {
+    key.findFirst.mockResolvedValue({ providerId: 'key-1' });
+    (lendAccess as jest.Mock).mockResolvedValue('manage');
+    lends.update.mockResolvedValue({ models: null });
+    expect((await post({ universeId: 'uni-1', models: null, existing: true })).status).toBe(200);
+    expect(lends.update).toHaveBeenCalledWith({ where: { providerId_universeId: { providerId: 'key-1', universeId: 'uni-1' } }, data: { models: Prisma.DbNull }, select: { models: true } });
+
+    lends.update.mockRejectedValue(Object.assign(new Error('Record to update not found.'), { code: 'P2025' }));
+    const gone = await post({ universeId: 'uni-1', models: null, existing: true });
+    expect(gone.status).toBe(409);
+    expect(await gone.json()).toEqual({ error: 'This key isn’t lent to that universe any more. Reload the page to see where it’s lent.' });
+    expect(lends.upsert).not.toHaveBeenCalled();
   });
 
   describe('which models bots there may use (#575)', () => {

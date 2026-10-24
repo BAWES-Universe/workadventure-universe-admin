@@ -253,7 +253,7 @@ export default function AiKeysPage() {
             </div>
             <p className="text-sm text-muted-foreground [overflow-wrap:anywhere]">{describe(key)}</p>
           </header>
-          {!key.modelCount && key.caps?.tools === false && (
+          {(key.modelCount ?? 0) <= 1 && key.caps?.tools === false && (
             <p className="text-sm text-[#F5C451]" data-testid="ai-key-no-tools">
               {NO_TOOLS}
             </p>
@@ -544,7 +544,8 @@ function LendSheet({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         // A new lend with All models sends none: all is what a new lend gets. A change of an existing lend always says which.
-        body: JSON.stringify({ universeId: picked, ...(limited ? { models: only } : editing ? { models: null } : {}) }),
+        // A change says so, so a lend removed meanwhile (in another tab, or by the universe) is not made again
+        body: JSON.stringify({ universeId: picked, ...(limited ? { models: only } : editing ? { models: null } : {}), ...(editing ? { existing: true } : {}) }),
       });
       if (!response.ok) {
         const body = await response.json().catch(() => null);

@@ -287,7 +287,7 @@ describe('Lend sheet', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(calls('POST').filter(([url]) => String(url).endsWith('/lend'))).toHaveLength(1));
     const [, init] = calls('POST').find(([url]) => String(url).endsWith('/lend'))!;
-    expect(JSON.parse(init.body)).toEqual({ universeId: 'bawes', models: null });
+    expect(JSON.parse(init.body)).toEqual({ universeId: 'bawes', models: null, existing: true });
   });
 
   it('saves a lend’s models without the universe list, dropping a model the provider no longer has', async () => {
@@ -303,7 +303,7 @@ describe('Lend sheet', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(calls('POST').filter(([url]) => String(url).endsWith('/lend'))).toHaveLength(1));
     const [, init] = calls('POST').find(([url]) => String(url).endsWith('/lend'))!;
-    expect(JSON.parse(init.body)).toEqual({ universeId: 'bawes', models: ['deepseek-v4-pro', 'deepseek-v4-flash'] });
+    expect(JSON.parse(init.body)).toEqual({ universeId: 'bawes', models: ['deepseek-v4-pro', 'deepseek-v4-flash'], existing: true });
     expect(fetchMock.mock.calls.some(([url]) => url === '/api/me/ai-keys/universes')).toBe(false);
   });
 
@@ -336,7 +336,7 @@ describe('Lend sheet', () => {
     fireEvent.click(save);
     await waitFor(() => expect(calls('POST').filter(([url]) => String(url).endsWith('/lend'))).toHaveLength(1));
     const [, init] = calls('POST').find(([url]) => String(url).endsWith('/lend'))!;
-    expect(JSON.parse(init.body)).toEqual({ universeId: 'bawes', models: null });
+    expect(JSON.parse(init.body)).toEqual({ universeId: 'bawes', models: null, existing: true });
   });
 
   it('says so, and offers nothing to lend to, when you can’t manage bots anywhere', async () => {
@@ -606,6 +606,13 @@ describe('Models that cannot use bot tools', () => {
     render(<AiKeysPage />);
     await screen.findByText('LM Studio · 2 models · lm.example.com');
     expect(screen.queryByTestId('ai-key-no-tools')).toBeNull();
+  });
+
+  it('still says so on a key whose list has only that one model', async () => {
+    answer([{ ...lmStudio, modelCount: 1, caps: { tools: false } }]);
+    render(<AiKeysPage />);
+    await screen.findByText('My LM Studio', { selector: 'h2' });
+    expect(screen.getAllByTestId('ai-key-no-tools')).toHaveLength(1);
   });
 
   it('says nothing for a key saved before this was known', async () => {

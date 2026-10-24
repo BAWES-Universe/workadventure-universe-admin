@@ -22,6 +22,7 @@ export async function OPTIONS(request: NextRequest) {
  * `models` (#575) says which of the key's models bots there may use: null = all of them, a list = only these (each one must
  * be on the key's list now), left out = as it is (all, for a new lend). Narrowing a lend moves the bots there on a model it
  * took out to the first one kept, and the universe's owner is told when it is not the caller.
+ * `existing: true` changes a lend only: when there is none (removed meanwhile) nothing is lent and the answer is a 409.
  */
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   if (!meOriginAllowed(request)) return respond(request, { error: 'Origin not allowed' }, 403);
@@ -34,7 +35,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   } catch {
     return respond(request, { error: 'Invalid JSON body' }, 400);
   }
-  const input = typeof body === 'object' && body !== null ? (body as { universeId?: unknown; models?: unknown }) : {};
+  const input = typeof body === 'object' && body !== null ? (body as { universeId?: unknown; models?: unknown; existing?: unknown }) : {};
+  const existing = input.existing === true;
   const universeId = input.universeId;
   if (typeof universeId !== 'string' || !universeId) return respond(request, { error: 'Pick a universe first.' }, 400);
   const parsed = parseLendModels(input.models);
@@ -58,17 +60,20 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       if (missing) return respond(request, { error: `${missing} isn’t on this key’s list. Load its models again and pick from them.` }, 400);
       models = allowedModels(list.models, models);
     }
-    const saved = await prisma.aiKeyLend.upsert({
-      where: { providerId_universeId: { providerId: id, universeId } },
-      create: { providerId: id, universeId, models: models ?? Prisma.DbNull },
-      update: models === undefined ? {} : { models: models ?? Prisma.DbNull },
-      select: { models: true },
-    });
+    const where = { providerId_universeId: { providerId: id, universeId } };
+    const update = models === undefined ? {} : { models: models ?? Prisma.DbNull };
+    // A change of a lend (`existing`) never lends again: one removed meanwhile, in another tab or by the universe, stays removed
+    const saved = existing
+      ? await prisma.aiKeyLend.update({ where, data: update, select: { models: true } })
+      : await prisma.aiKeyLend.upsert({ where, create: { providerId: id, universeId, models: models ?? Prisma.DbNull }, update, select: { models: true } });
     const moved = models ? await moveBotsToAllowedModel(key, { universeId, allowed: models, firstAllowed: firstForBots(models, key), actor: { id: user.id, name: user.name } }) : { count: 0 };
     return respond(request, { status: 'lent', models: lendModels(saved.models), moved: moved.count }, 200);
   } catch (error) {
     // The key was revoked, or the universe deleted, between the checks above and the save
     if ((error as { code?: unknown })?.code === 'P2003') return respond(request, { error: 'Key or universe not found' }, 404);
+    if (existing && (error as { code?: unknown })?.code === 'P2025') {
+      return respond(request, { error: 'This key isn’t lent to that universe any more. Reload the page to see where it’s lent.' }, 409);
+    }
     console.error('[AiKeys] Lend failed:', error instanceof Error ? error.message : 'unknown');
     return respond(request, { error: 'Internal server error' }, 500);
   }
