@@ -8,13 +8,17 @@ import {
   ORBIT_BRIDGE_CAPABILITIES,
   ORBIT_BRIDGE_VERSION,
   ORBIT_HOME_PATH,
+  MAX_CHECKED_LINKS,
   parseBridgeMessage,
   type OrbitBridgeAck,
   type OrbitBridgeAckError,
   type OrbitBridgeReady,
+  type OrbitCheckLinks,
   type OrbitEventTopic,
   type OrbitInvitePerson,
+  type OrbitLinks,
   type OrbitMessagePerson,
+  type OrbitOpenLink,
   type OrbitProfileChanged,
   type OrbitView,
 } from '@/lib/orbit-bridge';
@@ -29,6 +33,8 @@ let gameVisit: { roomRevision: string; capabilities: string[]; maxNameLength?: n
 const gameVisitListeners = new Set<() => void>();
 
 function setGameVisit(visit: typeof gameVisit) {
+  // The game's answers about links belong to its visit: a new room or connection asks again.
+  if (visit?.roomRevision !== gameVisit?.roomRevision) forgetLinkAnswers();
   gameVisit = visit;
   gameVisitListeners.forEach((listener) => listener());
 }
@@ -45,7 +51,10 @@ export function useGameCapability(capability: string): boolean {
   );
 }
 
-function postToGame(build: (roomRevision: string) => OrbitInvitePerson | OrbitMessagePerson, capability: string): boolean {
+function postToGame(
+  build: (roomRevision: string) => OrbitInvitePerson | OrbitMessagePerson | OrbitCheckLinks | OrbitOpenLink,
+  capability: string,
+): boolean {
   if (!gameVisit?.capabilities.includes(capability) || !isInsideFrame()) return false;
   window.parent.postMessage(build(gameVisit.roomRevision), PLAY_ORIGIN);
   return true;
@@ -64,6 +73,98 @@ export function messageInGame(uuid: string, name: string, chatId: string): boole
   return postToGame(
     (roomRevision) => ({ type: 'orbit-message-person', version: ORBIT_BRIDGE_VERSION, roomRevision, uuid, name, chatId }),
     'message',
+  );
+}
+
+/** How long Orbit waits for the game to say which links it can show before leaving them to open a new tab. */
+const LINK_CHECK_TIMEOUT_MS = 10_000;
+
+/** What the game said about each link this visit: true when it can show the page in its own window. */
+const linkAnswers = new Map<string, boolean>();
+const pendingLinkChecks = new Map<string, { urls: string[]; timer: ReturnType<typeof setTimeout> }>();
+const linkListeners = new Set<() => void>();
+let linkAnswersVersion = 0;
+let nextLinkCheck = 0;
+
+function settleLinks(urls: string[], openHere: readonly string[]) {
+  for (const url of urls) linkAnswers.set(url, openHere.includes(url));
+  linkAnswersVersion += 1;
+  linkListeners.forEach((listener) => listener());
+}
+
+function forgetLinkAnswers() {
+  for (const { timer } of pendingLinkChecks.values()) clearTimeout(timer);
+  pendingLinkChecks.clear();
+  linkAnswers.clear();
+  linkAnswersVersion += 1;
+  linkListeners.forEach((listener) => listener());
+}
+
+/** The game answered which links it can show (`orbit-links`). An answer for another visit, or unasked, is ignored. */
+function onLinksAnswer(message: OrbitLinks) {
+  const pending = pendingLinkChecks.get(message.requestId);
+  if (!pending || message.roomRevision !== gameVisit?.roomRevision) return;
+  clearTimeout(pending.timer);
+  pendingLinkChecks.delete(message.requestId);
+  // Only links Orbit asked about can open here.
+  settleLinks(pending.urls, message.openHere);
+}
+
+/** Asks the game about the https links it hasn't answered for yet (an http page can't load inside the game). */
+function askGameAboutLinks(urls: string[]) {
+  const asked = new Set([...pendingLinkChecks.values()].flatMap((pending) => pending.urls));
+  const fresh = [...new Set(urls)].filter(
+    (url) => /^https:\/\//i.test(url) && url.length <= 2048 && !linkAnswers.has(url) && !asked.has(url),
+  );
+  for (let start = 0; start < fresh.length; start += MAX_CHECKED_LINKS) {
+    const batch = fresh.slice(start, start + MAX_CHECKED_LINKS);
+    nextLinkCheck += 1;
+    const requestId = `links-${nextLinkCheck}`;
+    const sent = postToGame(
+      (roomRevision) => ({ type: 'orbit-check-links', version: ORBIT_BRIDGE_VERSION, requestId, roomRevision, urls: batch }),
+      'open-link',
+    );
+    if (!sent) return;
+    // No answer in time: these links keep opening a new tab, as before.
+    const timer = setTimeout(() => {
+      pendingLinkChecks.delete(requestId);
+      settleLinks(batch, []);
+    }, LINK_CHECK_TIMEOUT_MS);
+    pendingLinkChecks.set(requestId, { urls: batch, timer });
+  }
+}
+
+/**
+ * Which of these links open in the game's window: the ones the game, asked when they show, said it can show. None
+ * outside the game, in a game that can't, or until the game answers; those keep opening a new tab.
+ */
+export function useLinksOpeningInGame(urls: readonly string[]): ReadonlySet<string> {
+  const canOpen = useGameCapability('open-link');
+  const key = urls.join('\n');
+  useEffect(() => {
+    if (canOpen && key) askGameAboutLinks(key.split('\n'));
+  }, [canOpen, key]);
+  // Renders again when the game answers.
+  useSyncExternalStore(
+    (listener) => {
+      linkListeners.add(listener);
+      return () => linkListeners.delete(listener);
+    },
+    () => linkAnswersVersion,
+    () => 0,
+  );
+  return new Set(canOpen ? urls.filter((url) => linkAnswers.get(url) === true) : []);
+}
+
+/**
+ * Asks the game to open a link in its window, in front of Orbit, which stays as it is behind it. Only a link the game
+ * said it can show; false otherwise (the link then opens a new tab as before).
+ */
+export function openLinkInGame(url: string): boolean {
+  if (linkAnswers.get(url) !== true) return false;
+  return postToGame(
+    (roomRevision) => ({ type: 'orbit-open-link', version: ORBIT_BRIDGE_VERSION, roomRevision, url }),
+    'open-link',
   );
 }
 
@@ -153,6 +254,11 @@ export default function OrbitBridge({
 
       if (parsed.kind === 'view') {
         onViewRef.current?.(parsed.message.view);
+        return;
+      }
+
+      if (parsed.kind === 'links') {
+        onLinksAnswer(parsed.message);
         return;
       }
 

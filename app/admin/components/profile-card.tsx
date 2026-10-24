@@ -8,7 +8,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { authenticatedFetch } from '@/lib/client-auth';
 import { DraftNotice } from './draft-notice';
 import { useDraft } from '../hooks/use-draft';
-import { announceProfileName, gameMaxNameLength } from './orbit-bridge';
+import { announceProfileName, gameMaxNameLength, openLinkInGame, useLinksOpeningInGame } from './orbit-bridge';
 import { useMyWoka } from '../admin-bootstrap-context';
 import { KindIcon } from './ds';
 import { nameColour } from '@/lib/name-colour';
@@ -421,20 +421,36 @@ function useWokaLoadFailure(layers: string[]): boolean {
   return failedKey === key;
 }
 
-/** Someone's links as pills. Only web addresses are ever shown. */
+/**
+ * Someone's links as pills. Only web addresses are ever shown. Inside the game, a plain click on a link the game can
+ * show opens it in the game's window, in front of Orbit, and that link has no new-tab icon. Every other link, and a
+ * Ctrl, Cmd, Shift or middle click, opens a new tab.
+ */
 export function ProfileLinks({ links }: { links: ProfileLink[] }) {
   const shown = links.filter((link) => /^https?:\/\//i.test(link.url));
+  const opensHere = useLinksOpeningInGame(shown.map((link) => link.url));
   if (shown.length === 0) return null;
   return (
     <ul className={styles.links}>
-      {shown.map((link, index) => (
-        <li key={`${link.url}-${index}`}>
-          <a href={link.url} target="_blank" rel="noopener noreferrer">
-            {link.label}
-            <ExternalLink size={13} aria-hidden="true" />
-          </a>
-        </li>
-      ))}
+      {shown.map((link, index) => {
+        const here = opensHere.has(link.url);
+        return (
+          <li key={`${link.url}-${index}`}>
+            <a
+              href={link.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(event) => {
+                if (!here || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+                if (openLinkInGame(link.url)) event.preventDefault();
+              }}
+            >
+              {link.label}
+              {!here && <ExternalLink size={13} aria-hidden="true" />}
+            </a>
+          </li>
+        );
+      })}
     </ul>
   );
 }

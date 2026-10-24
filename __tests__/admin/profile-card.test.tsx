@@ -10,6 +10,8 @@ const announceProfileName = jest.fn((name: string) => Boolean(name));
 jest.mock('@/app/admin/components/orbit-bridge', () => ({
   announceProfileName: (name: string) => announceProfileName(name),
   gameMaxNameLength: () => 10,
+  useLinksOpeningInGame: () => new Set(),
+  openLinkInGame: () => false,
 }));
 jest.mock('@/lib/client-auth', () => ({
   authenticatedFetch: (...args: unknown[]) => fetchMock(...args),
