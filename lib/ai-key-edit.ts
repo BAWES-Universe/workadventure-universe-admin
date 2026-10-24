@@ -3,7 +3,7 @@ import { decryptApiKey } from '@/lib/encryption';
 import { kindInfo } from '@/lib/ai-key-kinds';
 import { cleanModelId, keyTarget, modelCaps, probeChat, probeModels, type ModelFactsById } from '@/lib/ai-key-models';
 import { markWorking } from '@/lib/ai-key-health';
-import { forgetKeyModels, slimFacts } from '@/lib/ai-key-model-list';
+import { forgetKeyModels, lendModels, slimFacts } from '@/lib/ai-key-model-list';
 
 /**
  * Changing where a saved key points, or which model it uses (#374). The row stays the same row, so its lends and the
@@ -130,7 +130,8 @@ export async function editSavedKey(ownerId: string, id: string, input: KeyEditIn
   // Same row, same id: lends and the bots running on it stay. The checks took a while: when only the address changed, a
   // check model swapped meanwhile (the old one went, #575) is never put back.
   // Bots on the key were given its model when each bot got a model of its own (#575), so a bot still on the old model moves
-  // to the new one in the same save, as Change model always did; a bot given another model on purpose keeps it.
+  // to the new one in the same save, as Change model always did; a bot given another model on purpose keeps it, and so does
+  // a bot in a universe whose lend doesn't allow the new model.
   const movesBots = typedModel !== null && key.model !== null && model !== key.model;
   const count = await prisma.$transaction(async (tx) => {
     const saved = await tx.botsAiProvider.updateMany({
@@ -145,7 +146,14 @@ export async function editSavedKey(ownerId: string, id: string, input: KeyEditIn
         ...(onList ? { supportsVision: caps.vision ?? null } : {}),
       },
     });
-    if (saved.count > 0 && movesBots) await tx.bot.updateMany({ where: { aiProviderRef: id, aiModel: key.model }, data: { aiModel: model } });
+    if (saved.count > 0 && movesBots) {
+      const lends = await tx.aiKeyLend.findMany({ where: { providerId: id }, select: { universeId: true, models: true } });
+      const closed = lends.filter((lend) => !(lendModels(lend.models)?.includes(model) ?? true)).map((lend) => lend.universeId);
+      await tx.bot.updateMany({
+        where: { aiProviderRef: id, aiModel: key.model, ...(closed.length > 0 ? { NOT: { room: { world: { universeId: { in: closed } } } } } : {}) },
+        data: { aiModel: model },
+      });
+    }
     return saved.count;
   });
   if (count === 0) return { ok: false, status: 409, message: 'This key changed while it was checked. Open Edit again.' };
