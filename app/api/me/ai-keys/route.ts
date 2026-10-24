@@ -104,6 +104,8 @@ export async function POST(request: NextRequest) {
     // (an embedding model whose name says nothing) can answer the same way. On a key out of credit for another model, or
     // when another said busy, it proves nothing, so the person is told about the credit or to try again instead.
     let refusedRequest: string | null = null;
+    // A listed model that answers without the tool but refuses it takes no tools, so bots could never reply with it
+    let noTools: string | null = null;
     const started = Date.now();
     for (const [index, candidate] of candidates.entries()) {
       // The first model gets the provider's whole wait (a server on your own computer may be loading it); the rest share
@@ -112,7 +114,8 @@ export async function POST(request: NextRequest) {
       if (index > 0 && left <= 0) break;
       // A model picked from the list becomes the model of every bot with none of its own, and bots always offer tools, so it
       // is asked with a tool, as a bot asks (#575); a typed model is the person's own pick, asked as before
-      const chat = await probeChat({ kind: info.kind, address: input.address, region, apiKey, model: candidate, ...(noList ? { noList } : {}), ...(typedModel ? {} : { withTool: true }), ...(index > 0 ? { timeoutMs: left } : {}) });
+      const target = { kind: info.kind, address: input.address, region, apiKey, model: candidate, ...(noList ? { noList } : {}) };
+      const chat = await probeChat({ ...target, ...(typedModel ? {} : { withTool: true }), ...(index > 0 ? { timeoutMs: left } : {}) });
       if (chat.ok) {
         model = candidate;
         break;
@@ -125,7 +128,12 @@ export async function POST(request: NextRequest) {
           model = candidate;
           break;
         }
-        refusedRequest ??= candidate;
+        // The refusal can be about the tool (Ollama says a model "does not support tools"): the same tiny request without it
+        // tells the two apart, and only a model that refuses both ways is the one that wants a bigger cap
+        const plainLeft = CHECK_BUDGET_MS - (Date.now() - started);
+        const plain = plainLeft > 0 ? await probeChat({ ...target, timeoutMs: plainLeft }) : null;
+        if (plain?.ok) noTools ??= candidate;
+        else refusedRequest ??= candidate;
         continue;
       }
       // Out of credit is said ahead of a later model's words, as it is what the person can fix; then busy (try again)
@@ -143,7 +151,8 @@ export async function POST(request: NextRequest) {
       }
     }
     if (!refusedForCredit && !sawBusy) model ??= refusedRequest;
-    if (!model) return respond(request, { error: refused ?? 'That didn’t work. Try again.' }, 400);
+    const toolWords = noTools && !refusedForCredit && !sawBusy ? `${info.label} answered, but ${noTools} can’t use tools, which bots need.` : null;
+    if (!model) return respond(request, { error: toolWords ?? refused ?? 'That didn’t work. Try again.' }, 400);
     // What the provider said about the check model, from the list it just gave (never from the request)
     const caps = checked.ok ? modelCaps(checked.facts, model) : {};
     const row = await prisma.botsAiProvider.create({
