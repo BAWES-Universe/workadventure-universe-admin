@@ -130,9 +130,10 @@ export async function botAiOptions(input: {
         const { lend, models, problem } = keyLists[index];
         return { id: key.providerId, name: key.name, kind: info?.kind ?? null, kindLabel: info?.label ?? 'AI', group: info?.group ?? null, universeName: universe.name, status: key.downSince ? 'down' : 'working', ifDown: isIfDown(key.ifDown) ? key.ifDown : 'universe-ai', model: key.model, supportsVision: key.supportsVision, visionModels: keyVisionModels(key).filter((model) => !lend || lend.includes(model)), models, modelsProblem: problem, limited: !!lend };
       }),
+      // The model the bot is served, and the key's own Vision models, as the server reads them when it picks one for images
       currentKey:
         current && current.ownerId
-          ? { id: current.providerId, name: current.name, ownerName: maker?.id === current.ownerId ? maker.name : null, mine: current.ownerId === input.viewer.id, status: current.downSince ? 'down' : 'working', ifDown: isIfDown(current.ifDown) ? current.ifDown : 'universe-ai', group: kindInfo((current.settings as { kind?: unknown } | null)?.kind)?.group ?? null, model: currentModel ?? current.model, supportsVision: currentModel ? modelSupportsVision(current, currentModel) : current.supportsVision, visionModels: keyVisionModels({ ...current, model: currentModel ?? current.model, supportsVision: currentModel ? modelSupportsVision(current, currentModel) : current.supportsVision }).filter((model) => !currentLend || currentLend.includes(model)) }
+          ? { id: current.providerId, name: current.name, ownerName: maker?.id === current.ownerId ? maker.name : null, mine: current.ownerId === input.viewer.id, status: current.downSince ? 'down' : 'working', ifDown: isIfDown(current.ifDown) ? current.ifDown : 'universe-ai', group: kindInfo((current.settings as { kind?: unknown } | null)?.kind)?.group ?? null, model: currentModel ?? current.model, supportsVision: currentModel ? modelSupportsVision(current, currentModel) : current.supportsVision, visionModels: keyVisionModels(current).filter((model) => !currentLend || currentLend.includes(model)) }
           : null,
       vision: { saved, savedKey },
       providers: providers ? providers.map((provider) => ({ id: provider.providerId, name: provider.name, type: provider.type, model: provider.model, enabled: provider.enabled })) : null,
