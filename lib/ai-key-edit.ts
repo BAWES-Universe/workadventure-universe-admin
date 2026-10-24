@@ -7,7 +7,7 @@ import { forgetKeyModels, slimFacts } from '@/lib/ai-key-model-list';
 
 /**
  * Changing where a saved key points, or which model it uses (#374). The row stays the same row, so its lends and the
- * bots on it are untouched: a free cloudflared tunnel gets a new address every time it restarts, and revoking the key
+ * bots on it stay (a bot still on the old model moves to the new one with it): a free cloudflared tunnel gets a new address every time it restarts, and revoking the key
  * to add it again would have lost them. Nothing is saved until the new address answers the model list with the saved
  * key, the model is on it, and one tiny chat reply from that model comes back.
  */
@@ -127,19 +127,26 @@ export async function editSavedKey(ownerId: string, id: string, input: KeyEditIn
   // The list just read is this address's: each model's facts are its own, not the old address's
   if (probed.ok) settings.modelFacts = slimFacts(models.facts);
 
-  // Same row, same id: lends and the bots running on it stay exactly as they are. The checks took a while: when only the
-  // address changed, a check model swapped meanwhile (the old one went, #575) is never put back.
-  const { count } = await prisma.botsAiProvider.updateMany({
-    where: { providerId: id, ownerId, ...(typedModel === null ? { model: key.model } : {}) },
-    data: {
-      endpoint: target.target.endpoint,
-      model,
-      tested: true,
-      testedAt: new Date(),
-      healthCheckedAt: new Date(),
-      ...(probed.ok ? { settings } : {}),
-      ...(onList ? { supportsVision: caps.vision ?? null } : {}),
-    },
+  // Same row, same id: lends and the bots running on it stay. The checks took a while: when only the address changed, a
+  // check model swapped meanwhile (the old one went, #575) is never put back.
+  // Bots on the key were given its model when each bot got a model of its own (#575), so a bot still on the old model moves
+  // to the new one in the same save, as Change model always did; a bot given another model on purpose keeps it.
+  const movesBots = typedModel !== null && key.model !== null && model !== key.model;
+  const count = await prisma.$transaction(async (tx) => {
+    const saved = await tx.botsAiProvider.updateMany({
+      where: { providerId: id, ownerId, ...(typedModel === null ? { model: key.model } : {}) },
+      data: {
+        endpoint: target.target.endpoint,
+        model,
+        tested: true,
+        testedAt: new Date(),
+        healthCheckedAt: new Date(),
+        ...(probed.ok ? { settings } : {}),
+        ...(onList ? { supportsVision: caps.vision ?? null } : {}),
+      },
+    });
+    if (saved.count > 0 && movesBots) await tx.bot.updateMany({ where: { aiProviderRef: id, aiModel: key.model }, data: { aiModel: model } });
+    return saved.count;
   });
   if (count === 0) return { ok: false, status: 409, message: 'This key changed while it was checked. Open Edit again.' };
   // A new address can list other models: the list kept for the old one is asked again next time
