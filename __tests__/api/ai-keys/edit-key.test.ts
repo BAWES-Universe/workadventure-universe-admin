@@ -81,7 +81,7 @@ describe('editSavedKey', () => {
     expect(probeChat).toHaveBeenCalledWith(expect.objectContaining({ address: 'https://new.trycloudflare.com/v1', model: 'qwen3-8b' }));
     expect(db.botsAiProvider.updateMany).toHaveBeenCalledTimes(1);
     const call = db.botsAiProvider.updateMany.mock.calls[0][0];
-    expect(call.where).toEqual({ providerId: 'key-1', ownerId: 'maker' });
+    expect(call.where).toEqual({ providerId: 'key-1', ownerId: 'maker', model: 'qwen3-8b' });
     expect(call.data).toMatchObject({ endpoint: 'https://new.trycloudflare.com', model: 'qwen3-8b', tested: true });
     // Lends are other rows keyed on the provider; the edit only ever updates the one provider row
     // The model is on the list, so what the provider says about it is refreshed too; nothing else changes
@@ -114,17 +114,24 @@ describe('editSavedKey', () => {
     (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4o-mini', 'gpt-4.1'], facts: {} });
     await editSavedKey('maker', 'key-2', { model: 'gpt-4.1' });
     const data = db.botsAiProvider.updateMany.mock.calls[0][0].data;
-    expect(data.settings).toEqual({ kind: 'openai' });
+    expect(data.settings).toEqual({ kind: 'openai', modelFacts: {} });
     expect(data.supportsVision).toBeNull();
   });
 
-  it('leaves the facts alone when the saved model is one the list misses', async () => {
+  it('leaves the saved model’s facts alone when the list misses it, and keeps the new list’s facts', async () => {
     db.botsAiProvider.findFirst.mockResolvedValue({ ...lmStudio, settings: { kind: 'lmstudio', caps: { tools: true } } });
     (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['other-model'], facts: {} });
     await editSavedKey('maker', 'key-1', { address: 'https://new.trycloudflare.com' });
     const data = db.botsAiProvider.updateMany.mock.calls[0][0].data;
-    expect(data.settings).toBeUndefined();
+    expect(data.settings).toEqual({ kind: 'lmstudio', caps: { tools: true }, modelFacts: {} });
     expect(data.supportsVision).toBeUndefined();
+  });
+
+  it('replaces the old address’s model facts with the new address’s', async () => {
+    db.botsAiProvider.findFirst.mockResolvedValue({ ...lmStudio, settings: { kind: 'lmstudio', modelFacts: { 'old-model': { vision: true } } } });
+    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['qwen3-8b', 'qwen3-vl-8b'], facts: { 'qwen3-vl-8b': { vision: true } } });
+    await editSavedKey('maker', 'key-1', { address: 'https://new.trycloudflare.com' });
+    expect(db.botsAiProvider.updateMany.mock.calls[0][0].data.settings.modelFacts).toEqual({ 'qwen3-vl-8b': { vision: true } });
   });
 
   it('refuses a model that is not on the list, and saves nothing', async () => {
@@ -138,6 +145,19 @@ describe('editSavedKey', () => {
     (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['other-model'], facts: {} });
     const result = await editSavedKey('maker', 'key-1', { address: 'https://new.trycloudflare.com' });
     expect(result).toMatchObject({ ok: true, model: 'qwen3-8b' });
+  });
+
+  it('never puts back a check model that was swapped while only the address was checked (#575)', async () => {
+    db.botsAiProvider.updateMany.mockResolvedValueOnce({ count: 0 });
+    const result = await editSavedKey('maker', 'key-1', { address: 'https://new.trycloudflare.com/v1' });
+    expect(result).toMatchObject({ ok: false, status: 409 });
+    expect(db.botsAiProvider.updateMany.mock.calls[0][0].where).toEqual({ providerId: 'key-1', ownerId: 'maker', model: 'qwen3-8b' });
+    expect(markWorking).not.toHaveBeenCalled();
+  });
+
+  it('saves a model the person picked whatever the key had meanwhile', async () => {
+    await editSavedKey('maker', 'key-1', { model: 'llama-3.1-8b' });
+    expect(db.botsAiProvider.updateMany.mock.calls[0][0].where).toEqual({ providerId: 'key-1', ownerId: 'maker' });
   });
 
   it('saves nothing when the new address does not answer', async () => {

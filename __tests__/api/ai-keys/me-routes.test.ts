@@ -78,17 +78,18 @@ describe('GET /api/me/ai-keys', () => {
         ? [{ providerId: 'key-1', botId: 'b1', _sum: { apiCalls: 1240 } }]
         : [{ providerId: 'key-1', _sum: { apiCalls: 1240, tokensUsed: 412000 } }]);
     lendRows.findMany.mockResolvedValue([
-      { providerId: 'key-1', universe: { id: 'bawes', name: 'BAWES Universe', ownerId: 'someone-else' } },
-      { providerId: 'key-1', universe: { id: 'sandbox', name: 'Sandbox Universe', ownerId: 'user-a' } },
+      { providerId: 'key-1', models: null, universe: { id: 'bawes', name: 'BAWES Universe', ownerId: 'someone-else' } },
+      { providerId: 'key-1', models: ['deepseek-v4-pro'], universe: { id: 'sandbox', name: 'Sandbox Universe', ownerId: 'user-a' } },
     ]);
     botRows.findMany.mockResolvedValue([
-      { id: 'b1', name: 'Sam', aiProviderRef: 'key-1', room: { world: { universeId: 'bawes' } } },
+      { id: 'b1', name: 'Sam', aiProviderRef: 'key-1', aiModel: null, room: { world: { universeId: 'bawes' } } },
       { id: 'b2', name: 'Elsewhere', aiProviderRef: 'key-1', room: { world: { universeId: 'not-lent-here' } } },
     ]);
     const [key] = (await (await list()).json()).keys;
     expect(key.lentTo).toEqual([
-      { universeId: 'bawes', universeName: 'BAWES Universe', ownedByYou: false, bots: [{ id: 'b1', name: 'Sam', replies: 1240 }] },
-      { universeId: 'sandbox', universeName: 'Sandbox Universe', ownedByYou: true, bots: [] },
+      // A bot with no model of its own replies with the key's check model; a lend with a list says which models it allows (#575)
+      { universeId: 'bawes', universeName: 'BAWES Universe', ownedByYou: false, models: null, bots: [{ id: 'b1', name: 'Sam', replies: 1240, model: row.model }] },
+      { universeId: 'sandbox', universeName: 'Sandbox Universe', ownedByYou: true, models: ['deepseek-v4-pro'], bots: [] },
     ]);
     // Only this key's lends and bots are read
     expect(lendRows.findMany.mock.calls[0][0].where).toEqual({ providerId: { in: ['key-1'] } });

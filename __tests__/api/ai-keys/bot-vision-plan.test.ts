@@ -14,6 +14,7 @@ jest.mock('@/lib/db', () => ({
   prisma: {
     bot: { findUnique: jest.fn(), updateMany: jest.fn() },
     botsAiProvider: { findUnique: jest.fn(), findFirst: jest.fn() },
+    aiKeyLend: { findUnique: jest.fn(async () => null) },
   },
 }));
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
@@ -74,6 +75,14 @@ describe('nothing picked', () => {
   it('uses Universe AI when the key has no Vision model to offer', async () => {
     bot.findUnique.mockResolvedValue(botOn('key-2'));
     expect((await ask()).vision).toEqual({ choice: 'universe-ai' });
+  });
+
+  it('uses the key’s check model for images when it sees and the bot’s own model on that key doesn’t (#575)', async () => {
+    setRows(universeAiProvider, { ...lmStudioKey, model: 'qwen3-vl-8b', supportsVision: true });
+    bot.findUnique.mockResolvedValue({ ...botOn('key-2'), aiModel: 'qwen3-8b' });
+    const body = await ask();
+    expect(body).toMatchObject({ source: 'own-key', providerId: 'key-2', model: 'qwen3-8b' });
+    expect(body.vision).toMatchObject({ choice: 'another', credentials: { providerId: 'key-2', model: 'qwen3-vl-8b', supportsVision: true } });
   });
 
   it('says nothing for a model that sees images itself', async () => {

@@ -2,8 +2,11 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { decryptApiKey } from '@/lib/encryption';
 import { kindInfo } from '@/lib/ai-key-kinds';
-import { cleanModelId, probeChat, probeModels, type ProbeFailure } from '@/lib/ai-key-models';
+import { cleanModelId, probeChat, probeModels, type ModelFacts, type ProbeFailure } from '@/lib/ai-key-models';
 import { addNotice, clearNotices } from '@/lib/notices';
+import { moveBotOffGoneModel } from '@/lib/ai-key-model-gone';
+import { firstAnswering } from '@/lib/ai-key-answering';
+import { cleanFacts, forgetKeyModels } from '@/lib/ai-key-model-list';
 
 /**
  * Is a personal key working, and what do its bots do while it isn't (#374). A key is Down after two replies in a row
@@ -79,7 +82,7 @@ async function tellOwner(key: KeyRow, since: Date, reason: DownReason) {
       : reason === 'credit'
         ? `${label} says this key is out of credit.`
         : reason === 'model'
-          ? `${label} no longer has the model this key uses. Pick another model on the AI keys page.`
+          ? `${label} no longer has the model this key uses.`
           : `${info?.label ?? 'It'} stopped answering.`;
   const meanwhile =
     key.ifDown === 'stop'
@@ -135,13 +138,20 @@ export async function markWorking(key: Pick<KeyRow, 'providerId' | 'ownerId'>, n
   return true;
 }
 
-export type KeyCheck = { ok: true } | { ok: false; reason: DownReason; message: string } | { ok: false; busy: true; message: string };
+export type KeyCheck =
+  | { ok: true; checkModel?: string; facts?: ModelFacts }
+  | { ok: false; reason: DownReason; message: string }
+  | { ok: false; busy: true; message: string };
 
 /**
  * Asks the key's provider for its model list with the saved key: the same check Add key runs. Then the saved model must
  * really answer: a Down key must get one tiny chat reply from it before it is trusted again, and a key whose model is
  * not on the list is asked too (a list can miss an alias that chat accepts, so the chat reply decides, not the list).
  * A model list can answer while chat does not (the model was removed, the credit ran out).
+ *
+ * Since #575 the saved model is only the key's check model: bots pick their own. When the provider no longer has it but
+ * lists others, one of those (its suggested model, else the first) becomes the check model and is asked instead, so a key
+ * is never marked Down for one model it dropped (`checkModel` says which, for `checkAndRecord` to save).
  */
 export async function checkKey(key: KeyRow): Promise<KeyCheck> {
   const info = kindInfo((key.settings as { kind?: unknown } | null)?.kind);
@@ -161,6 +171,17 @@ export async function checkKey(key: KeyRow): Promise<KeyCheck> {
     const chat = await probeChat({ kind: info.kind, address, apiKey, model: key.model, ...(models.ok ? {} : { noList: true }) });
     // The provider took the key and the model but refused this tiny request (a reasoning model that wants a bigger cap, say):
     // that is the request's problem, not the key's, and a real reply's 400 is not counted against a key either
+    // A 404 is about that one model, listed or not: the first of the others that really answers becomes the check model
+    const asked = cleanModelId(key.model, info.kind);
+    // Bots with no model of their own reply with the check model and always offer tools, so one the provider says calls none
+    // never becomes it, and the others are asked with a tool, as a bot asks
+    const others = models.ok ? models.models.filter((model) => model !== asked && models.facts?.[model]?.tools !== false) : [];
+    if (!chat.ok && chat.reason === 'gone' && others.length > 0) {
+      const found = await firstAnswering({ kind: info.kind, address, apiKey, withTool: true }, others, info.suggestedModel, undefined, models.ok ? models.facts : {});
+      // None answering says why; a refused call with a tool in it says less than the check model being gone
+      if (!found.ok) return failed(found.reason === 'request' ? chat : found);
+      return { ok: true, checkModel: found.model, facts: (models.ok ? models.facts[found.model] : undefined) ?? {} };
+    }
     if (!chat.ok && chat.reason !== 'request') return failed(chat);
   }
   return { ok: true };
@@ -197,6 +218,8 @@ export async function checkAndRecord(key: KeyRow): Promise<KeyCheck> {
     return result;
   }
   if (result.ok) {
+    // The new check model is saved first: a save that fails leaves a Down key Down, so the next due check tries again
+    if (result.checkModel) await saveCheckModel(key, result.checkModel, result.facts ?? {});
     await markWorking(key);
     await prisma.botsAiProvider.updateMany({ where: { providerId: key.providerId }, data: { healthCheckedAt: new Date() } });
   } else if (!(await markDown(key, result.reason))) {
@@ -209,12 +232,34 @@ export async function checkAndRecord(key: KeyRow): Promise<KeyCheck> {
   return result;
 }
 
+/** The key's check model went and another one answered: it is saved with what the provider says about it (#575). */
+async function saveCheckModel(key: KeyRow, model: string, facts: ModelFacts): Promise<void> {
+  const caps = cleanFacts(facts);
+  // The check took a while: settings saved meanwhile (a new label, say) are kept
+  const saved = await prisma.botsAiProvider.findUnique({ where: { providerId: key.providerId }, select: { settings: true } });
+  const settings: Record<string, unknown> = { ...(((saved ? saved.settings : key.settings) as Record<string, unknown> | null) ?? {}) };
+  if (Object.keys(caps).length > 0) settings.caps = caps;
+  else delete settings.caps;
+  const { count } = await prisma.botsAiProvider.updateMany({
+    where: { providerId: key.providerId, ownerId: { not: null }, model: key.model ?? null },
+    data: { model, settings: settings as Prisma.InputJsonValue, supportsVision: caps.vision ?? null },
+  });
+  // Someone changed the model meanwhile: theirs stands
+  if (count === 0) return;
+  forgetKeyModels(key.providerId);
+}
+
 /**
  * A reply on a personal key worked or failed (the bot server tells us, by bot id, only for replies it really sent
  * through the key). A success clears a run of failures; two failures in a row, or a rejection, mark the key Down. A Down
- * key is not on the replies' path, so only a check brings it back.
+ * key is not on the replies' path, so only a check brings it back. A missing model (404) is about that bot's model only
+ * (#575): the bot moves to another model its lend allows and the key stays Working, when the provider's list says so.
  */
-export async function recordReply(providerId: string, outcome: { ok: true } | { ok: false; rejected?: boolean; status?: number }): Promise<void> {
+export async function recordReply(
+  providerId: string,
+  outcome: { ok: true } | { ok: false; rejected?: boolean; status?: number },
+  botId?: string,
+): Promise<void> {
   const key = await prisma.botsAiProvider.findFirst({ where: { providerId, ownerId: { not: null } }, select: { ...KEY_SELECT, failedReplies: true } });
   if (!key) return;
   // Already Down: replies are not going through this key now, so a report says nothing new
@@ -226,8 +271,14 @@ export async function recordReply(providerId: string, outcome: { ok: true } | { 
   const verdict = judgeFailedReply(outcome.status, outcome.rejected === true);
   if (!verdict.counts) return;
   if (verdict.down) {
-    await markDown(key, verdict.down);
-    return;
+    const decided = verdict.down === 'model' && botId ? await moveBotOffGoneModel(key, botId) : false;
+    if (decided === true) return;
+    // Asking again can show the key itself was refused or ran out of credit: it is Down for that, not for a model. A
+    // model that answers when asked again counts the failure as any other, below.
+    if (decided !== 'count') {
+      await markDown(key, decided || verdict.down);
+      return;
+    }
   }
   // The key can be revoked between the read above and this count: then there is nothing left to count and the report is done
   const bumped = await prisma.botsAiProvider

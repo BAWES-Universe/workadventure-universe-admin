@@ -19,8 +19,8 @@ beforeEach(() => {
 
 describe('who pays for a bot on a personal key', () => {
   it('is allowed when the key is the maker’s, lent to the bot’s universe, and the maker still manages bots there', async () => {
-    expect(await checkKeyForBot(input)).toEqual({ ok: true });
-    expect(lend).toHaveBeenCalledWith({ where: { providerId_universeId: { providerId: 'key-1', universeId: 'uni-1' } }, select: { id: true } });
+    expect(await checkKeyForBot(input)).toEqual({ ok: true, lendModels: null });
+    expect(lend).toHaveBeenCalledWith({ where: { providerId_universeId: { providerId: 'key-1', universeId: 'uni-1' } }, select: { id: true, models: true } });
     expect(manages).toHaveBeenCalledWith('maker', 'room-1');
   });
 

@@ -8,7 +8,7 @@ import { mayReadRoomBots } from '@/lib/bot-room-access';
 import { validateAccessToken } from '@/lib/oidc';
 import { parsePlayUri } from '@/lib/utils';
 import { z } from 'zod';
-import { checkAiProviderRef } from '@/lib/ai-provider-ref';
+import { checkAiProviderRef, checkBotModel } from '@/lib/ai-provider-ref';
 import { toolTimeoutSecondsSchema } from '@/lib/bot-tool-timeout';
 import { keepToolCallSetting, keepVisionPick } from '@/lib/bot-config-helpers';
 import { checkConfigVision } from '@/lib/bot-vision';
@@ -111,6 +111,8 @@ const updateBotSchema = z.object({
   chatInstructions: z.string().optional().nullable(),
   movementInstructions: z.string().optional().nullable(),
   aiProviderRef: z.string().max(100, 'aiProviderRef must be at most 100 characters').optional().nullable(),
+  // The bot's model on a person's key (#575); null = the key's check model
+  aiModel: z.string().trim().min(1, 'aiModel cannot be empty').max(255, 'aiModel must be at most 255 characters').optional().nullable(),
   toolTimeoutSeconds: toolTimeoutSecondsSchema,
   companionTextureId: z.string().max(100, 'companionTextureId must be at most 100 characters').optional().nullable(),
 });
@@ -129,6 +131,7 @@ function transformBot(bot: any) {
     chatInstructions: bot.chatInstructions,
     movementInstructions: bot.movementInstructions,
     aiProviderRef: bot.aiProviderRef,
+    aiModel: bot.aiModel ?? null,
     toolTimeoutSeconds: bot.toolTimeoutSeconds ?? null,
     companionTextureId: bot.companionTextureId ?? null,
     createdAt: bot.createdAt,
@@ -463,6 +466,26 @@ export async function PUT(
       }
     }
 
+    // The bot's model on its key (#575): the key the bot will be on after this save, a model it has and its lend allows
+    const nextRef = validatedData.aiProviderRef !== undefined ? validatedData.aiProviderRef : existingBot.aiProviderRef;
+    {
+      const modelError = await checkBotModel(validatedData.aiModel, {
+        ref: nextRef ?? null,
+        currentRef: existingBot.aiProviderRef,
+        currentModel: existingBot.aiModel,
+        actorId: userId ?? null,
+        makerId: existingBot.createdById ?? null,
+        roomId: resolvedRoomId ?? existingBot.roomId,
+      });
+      if (modelError) {
+        const response = NextResponse.json({ error: modelError }, { status: 400 });
+        Object.entries(corsHeaders()).forEach(([key, value]) => {
+          response.headers.set(key, value);
+        });
+        return response;
+      }
+    }
+
     // Where the bot's images go is checked like its provider: a key may only be picked by the person who made the bot
     {
       const visionError = await checkConfigVision(validatedData.behaviorConfig, {
@@ -495,6 +518,9 @@ export async function PUT(
     if (validatedData.chatInstructions !== undefined) updateData.chatInstructions = validatedData.chatInstructions;
     if (validatedData.movementInstructions !== undefined) updateData.movementInstructions = validatedData.movementInstructions;
     if (validatedData.aiProviderRef !== undefined) updateData.aiProviderRef = validatedData.aiProviderRef;
+    // A model belongs to one key: a bot moved to another key (or off keys) without a model picked starts on its check model
+    if (validatedData.aiModel !== undefined) updateData.aiModel = validatedData.aiModel;
+    else if (nextRef !== existingBot.aiProviderRef) updateData.aiModel = null;
     if (validatedData.toolTimeoutSeconds !== undefined) updateData.toolTimeoutSeconds = validatedData.toolTimeoutSeconds;
     if (validatedData.companionTextureId !== undefined) updateData.companionTextureId = validatedData.companionTextureId;
 

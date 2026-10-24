@@ -3,6 +3,7 @@ import { decryptApiKey } from '@/lib/encryption';
 import { kindInfo } from '@/lib/ai-key-kinds';
 import { cleanModelId, keyTarget, modelCaps, probeChat, probeModels, type ModelFactsById } from '@/lib/ai-key-models';
 import { markWorking } from '@/lib/ai-key-health';
+import { forgetKeyModels, slimFacts } from '@/lib/ai-key-model-list';
 
 /**
  * Changing where a saved key points, or which model it uses (#374). The row stays the same row, so its lends and the
@@ -17,7 +18,7 @@ export interface KeyEditInput {
 
 export type KeyEditResult =
   | { ok: true; model: string; endpoint: string }
-  | { ok: false; status: 400 | 404 | 500; message: string; code?: 'model-missing' };
+  | { ok: false; status: 400 | 404 | 409 | 500; message: string; code?: 'model-missing' };
 
 const KEY_SELECT = {
   providerId: true,
@@ -123,19 +124,26 @@ export async function editSavedKey(ownerId: string, id: string, input: KeyEditIn
     if (Object.keys(caps).length > 0) settings.caps = caps;
     else delete settings.caps;
   }
+  // The list just read is this address's: each model's facts are its own, not the old address's
+  if (probed.ok) settings.modelFacts = slimFacts(models.facts);
 
-  // Same row, same id: lends and the bots running on it stay exactly as they are
-  await prisma.botsAiProvider.updateMany({
-    where: { providerId: id, ownerId },
+  // Same row, same id: lends and the bots running on it stay exactly as they are. The checks took a while: when only the
+  // address changed, a check model swapped meanwhile (the old one went, #575) is never put back.
+  const { count } = await prisma.botsAiProvider.updateMany({
+    where: { providerId: id, ownerId, ...(typedModel === null ? { model: key.model } : {}) },
     data: {
       endpoint: target.target.endpoint,
       model,
       tested: true,
       testedAt: new Date(),
       healthCheckedAt: new Date(),
-      ...(onList ? { settings, supportsVision: caps.vision ?? null } : {}),
+      ...(probed.ok ? { settings } : {}),
+      ...(onList ? { supportsVision: caps.vision ?? null } : {}),
     },
   });
+  if (count === 0) return { ok: false, status: 409, message: 'This key changed while it was checked. Open Edit again.' };
+  // A new address can list other models: the list kept for the old one is asked again next time
+  forgetKeyModels(id);
   // It just answered a real chat call, so a key that was Down is Working again
   if (key.downSince) await markWorking({ providerId: key.providerId, ownerId });
   return { ok: true, model, endpoint: target.target.endpoint };
