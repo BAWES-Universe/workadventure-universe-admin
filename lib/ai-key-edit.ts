@@ -132,7 +132,9 @@ export async function editSavedKey(ownerId: string, id: string, input: KeyEditIn
   // Bots on the key were given its model when each bot got a model of its own (#575), so a bot still on the old model moves
   // to the new one in the same save, as Change model always did; a bot given another model on purpose keeps it, and so does
   // a bot in a universe whose lend doesn't allow the new model.
-  const movesBots = typedModel !== null && key.model !== null && model !== key.model;
+  // Any Change model reads the key's model again under the lock, even one that types the model the key had when it was
+  // opened: another tab may have changed it while this one was checked, and its bots come back with the key.
+  const movesBots = typedModel !== null;
   const count = await prisma.$transaction(async (tx) => {
     // Another Change model may have saved while this one was checked: bots it moved are on its model, so they move too. The
     // row is locked first, so a save at the same moment waits for this one and then reads the model it saved.
