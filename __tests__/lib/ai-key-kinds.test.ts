@@ -2,7 +2,7 @@
  * The catalog of AI key kinds (#374): the seven that exist keep behaving exactly as before, now as data. These rows are
  * the no-regression list for the move from if-statements to catalog fields.
  */
-import { AI_KEY_KINDS, authHeaders, chatPath, chatProbeBody, hostedBase, isTypedEndpoint, kindInfo, providerBases, typedEndpoint, writeModelId } from '@/lib/ai-key-kinds';
+import { AI_KEY_KINDS, LANDING_PAGES, authHeaders, chatPath, chatProbeBody, hostedBase, isTypedEndpoint, kindInfo, providerBases, typedEndpoint, writeModelId } from '@/lib/ai-key-kinds';
 import { cleanModelIds, keyTarget } from '@/lib/ai-key-models';
 
 describe('the seven kinds, exactly as they were', () => {
@@ -159,6 +159,24 @@ describe('More providers, from the snapshot', () => {
     }
   });
 
+  it('sends the seven providers whose models.dev link leads nowhere useful to their own landing page', () => {
+    expect(Object.keys(LANDING_PAGES).sort()).toEqual(['berget', 'chutes', 'cortecs', 'morph', 'siliconflow', 'siliconflow-cn', 'vultr']);
+    for (const [id, landing] of Object.entries(LANDING_PAGES)) expect(kindInfo(id)?.docs).toBe(landing);
+    // Every other More provider keeps its models.dev address, and none is an API address
+    for (const info of more) {
+      if (info.kind in LANDING_PAGES || !info.docs) continue;
+      const url = new URL(info.docs);
+      expect(url.protocol).toBe('https:');
+      expect(url.hostname.startsWith('api.')).toBe(false);
+      expect(url.pathname).not.toMatch(/^\/v\d+\/models\/?$/);
+    }
+    expect(kindInfo('opencode')?.docs).toBe('https://opencode.ai/v2/docs/console/models/');
+  });
+
+  it('says what every provider’s dashboard has in common: open it, make a key, paste it', () => {
+    for (const info of more) expect(info.steps.map((step) => step.text)).toEqual([`Open ${info.label}’s dashboard and sign in.`, 'Create an API key (often under API keys or Access tokens).', 'Copy it and paste it below.']);
+  });
+
   it('proves a key with a chat reply, since none of them has been tried for a public model list', () => {
     for (const info of more) expect(info.keyCheck).toEqual({ type: 'chat' });
   });
@@ -194,6 +212,15 @@ describe('Claude, the one kind with its own format (#975)', () => {
     expect(chatProbeBody(kindInfo('claude')!, 'claude-haiku-4-5')).toEqual({ model: 'claude-haiku-4-5', max_tokens: 32, messages: [{ role: 'user', content: 'Say ok.' }] });
     for (const info of AI_KEY_KINDS.filter((entry) => entry.kind !== 'claude')) expect(chatPath(info)).toBe('/chat/completions');
     expect(chatProbeBody(kindInfo('openai')!, 'gpt-x')).toEqual({ model: 'gpt-x', messages: [{ role: 'user', content: 'Say ok.' }], stream: false, max_completion_tokens: 16 });
+  });
+
+  it('offers one tool when asked to, in each format, as a bot’s reply does, with a field Gemini needs', () => {
+    const schema = { type: 'object', properties: { note: { type: 'string', description: 'Not used.' } } };
+    expect(chatProbeBody(kindInfo('claude')!, 'claude-haiku-4-5', { withTool: true }).tools).toEqual([{ name: 'noop', description: 'Does nothing.', input_schema: schema }]);
+    for (const kind of ['openai', 'gemini']) {
+      expect(chatProbeBody(kindInfo(kind)!, 'gpt-x', { withTool: true }).tools).toEqual([{ type: 'function', function: { name: 'noop', description: 'Does nothing.', parameters: schema } }]);
+    }
+    expect(chatProbeBody(kindInfo('openai')!, 'gpt-x')).not.toHaveProperty('tools');
   });
 
   it('is the only kind that is not on the OpenAI format or a Bearer key', () => {

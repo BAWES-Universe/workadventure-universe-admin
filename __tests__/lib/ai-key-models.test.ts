@@ -49,6 +49,8 @@ describe('keyTarget', () => {
 describe('cleanModelIds', () => {
   it('drops duplicates and models that cannot chat, and sorts', () => {
     expect(cleanModelIds(['gpt-4o', 'text-embedding-3-small', 'whisper-1', 'gpt-4o', 'dall-e-3', 'a-model'], 'openai')).toEqual(['a-model', 'gpt-4o']);
+    // Completions-only models can't chat (Sentry on #577); an open model whose name ends in Instruct still can
+    expect(cleanModelIds(['babbage-002', 'davinci-002', 'gpt-3.5-turbo-instruct', 'gpt-3.5-turbo', 'meta-llama/llama-3.1-8b-instruct'], 'openai')).toEqual(['gpt-3.5-turbo', 'meta-llama/llama-3.1-8b-instruct']);
   });
   it('strips Gemini’s models/ prefix', () => {
     expect(cleanModelIds(['models/gemini-flash-latest'], 'gemini')).toEqual(['gemini-flash-latest']);
@@ -286,6 +288,15 @@ describe('probeChat', () => {
   ])('says why a chat call failed for %j', async (reply, reason) => {
     post.mockResolvedValue(reply);
     expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'gone' })).toMatchObject({ ok: false, reason });
+  });
+
+  it('gives the HTTP status of a failed answer, and none when nobody answered in time', async () => {
+    post.mockResolvedValue(answer(503, {}));
+    expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'm' })).toMatchObject({ reason: 'unreachable', status: 503 });
+    post.mockResolvedValue(answer(403, {}));
+    expect(await probeChat({ kind: 'openai', apiKey: 'sk-1234', model: 'm' })).toMatchObject({ status: 403 });
+    post.mockResolvedValue({ ok: false, reason: 'timeout' });
+    expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'm' })).not.toHaveProperty('status');
   });
 
   it('names the model when the provider no longer has it, and the status for any other chat failure', async () => {

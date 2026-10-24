@@ -6,7 +6,9 @@ import { DELETE as pull } from '@/app/api/me/ai-keys/[id]/lend/[universeId]/rout
 import { GET as universes } from '@/app/api/me/ai-keys/universes/route';
 import { getSessionUser } from '@/lib/auth-session';
 import { prisma } from '@/lib/db';
-import { lendAccess, lendableUniverses, moveBotsOffKey } from '@/lib/ai-key-lend';
+import { Prisma } from '@prisma/client';
+import { lendAccess, lendableUniverses, moveBotsOffKey, moveBotsToAllowedModel } from '@/lib/ai-key-lend';
+import { keyModels } from '@/lib/ai-key-model-list';
 
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
 jest.mock('@/lib/db', () => ({
@@ -15,7 +17,14 @@ jest.mock('@/lib/db', () => ({
     aiKeyLend: { upsert: jest.fn(), findFirst: jest.fn(), deleteMany: jest.fn() },
   },
 }));
-jest.mock('@/lib/ai-key-lend', () => ({ lendAccess: jest.fn(), lendableUniverses: jest.fn(), moveBotsOffKey: jest.fn() }));
+jest.mock('@/lib/ai-key-lend', () => ({
+  parseLendModels: jest.requireActual('@/lib/ai-key-lend').parseLendModels,
+  lendAccess: jest.fn(),
+  lendableUniverses: jest.fn(),
+  moveBotsOffKey: jest.fn(),
+  moveBotsToAllowedModel: jest.fn(),
+}));
+jest.mock('@/lib/ai-key-model-list', () => ({ ...jest.requireActual('@/lib/ai-key-model-list'), keyModels: jest.fn() }));
 
 const key = prisma.botsAiProvider as unknown as { findFirst: jest.Mock };
 const lends = prisma.aiKeyLend as unknown as Record<'upsert' | 'findFirst' | 'deleteMany', jest.Mock>;
@@ -47,7 +56,7 @@ describe('POST /api/me/ai-keys/:id/lend', () => {
   it('is "not found" for someone else’s key and for a server provider: lookup is by owner', async () => {
     key.findFirst.mockResolvedValue(null);
     expect((await post({ universeId: 'uni-1' }, 'deepseek-flash')).status).toBe(404);
-    expect(key.findFirst).toHaveBeenCalledWith({ where: { providerId: 'deepseek-flash', ownerId: 'user-a' }, select: { providerId: true } });
+    expect(key.findFirst).toHaveBeenCalledWith({ where: { providerId: 'deepseek-flash', ownerId: 'user-a' }, select: { providerId: true, endpoint: true, apiKeyEncrypted: true, settings: true, model: true } });
     expect(lends.upsert).not.toHaveBeenCalled();
   });
 
@@ -63,12 +72,66 @@ describe('POST /api/me/ai-keys/:id/lend', () => {
   it('lends it, and lending again changes nothing', async () => {
     key.findFirst.mockResolvedValue({ providerId: 'key-1' });
     (lendAccess as jest.Mock).mockResolvedValue('manage');
-    lends.upsert.mockResolvedValue({});
+    lends.upsert.mockResolvedValue({ models: null });
     const response = await post({ universeId: 'uni-1' });
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ status: 'lent' });
-    expect(lends.upsert).toHaveBeenCalledWith({ where: { providerId_universeId: { providerId: 'key-1', universeId: 'uni-1' } }, create: { providerId: 'key-1', universeId: 'uni-1' }, update: {} });
+    expect(await response.json()).toEqual({ status: 'lent', models: null, moved: 0 });
+    expect(lends.upsert).toHaveBeenCalledWith({ where: { providerId_universeId: { providerId: 'key-1', universeId: 'uni-1' } }, create: { providerId: 'key-1', universeId: 'uni-1', models: Prisma.DbNull }, update: {}, select: { models: true } });
     expect(lendAccess).toHaveBeenCalledWith('user-a', 'uni-1');
+    // All models: nothing is asked of the provider and no bot moves
+    expect(keyModels).not.toHaveBeenCalled();
+    expect(moveBotsToAllowedModel).not.toHaveBeenCalled();
+  });
+
+  describe('which models bots there may use (#575)', () => {
+    const LIST = { ok: true, models: ['claude-haiku-5-5', 'claude-opus-5-5', 'claude-sonnet-5-5'], facts: {}, listed: true };
+    beforeEach(() => {
+      key.findFirst.mockResolvedValue({ providerId: 'key-1', model: 'claude-sonnet-5-5' });
+      (lendAccess as jest.Mock).mockResolvedValue('owner');
+      (keyModels as jest.Mock).mockResolvedValue(LIST);
+      (moveBotsToAllowedModel as jest.Mock).mockResolvedValue({ count: 1 });
+    });
+
+    it('saves Only these in the provider’s order, and moves the bots on a model taken out to the first kept one', async () => {
+      lends.upsert.mockResolvedValue({ models: ['claude-haiku-5-5', 'claude-opus-5-5'] });
+      const response = await post({ universeId: 'uni-1', models: ['claude-opus-5-5', 'claude-haiku-5-5', 'claude-opus-5-5'] });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ status: 'lent', models: ['claude-haiku-5-5', 'claude-opus-5-5'], moved: 1 });
+      expect(keyModels).toHaveBeenCalledWith(expect.objectContaining({ providerId: 'key-1' }), { fresh: true });
+      const saved = { models: ['claude-haiku-5-5', 'claude-opus-5-5'] };
+      expect(lends.upsert).toHaveBeenCalledWith(expect.objectContaining({ create: { providerId: 'key-1', universeId: 'uni-1', ...saved }, update: saved }));
+      expect(moveBotsToAllowedModel).toHaveBeenCalledWith(expect.objectContaining({ providerId: 'key-1' }), {
+        universeId: 'uni-1',
+        allowed: ['claude-haiku-5-5', 'claude-opus-5-5'],
+        firstAllowed: 'claude-haiku-5-5',
+        actor: { id: 'user-a', name: 'Alice' },
+      });
+    });
+
+    it('goes back to All models with null, and moves nobody', async () => {
+      lends.upsert.mockResolvedValue({ models: null });
+      expect(await (await post({ universeId: 'uni-1', models: null })).json()).toEqual({ status: 'lent', models: null, moved: 0 });
+      expect(lends.upsert).toHaveBeenCalledWith(expect.objectContaining({ update: { models: Prisma.DbNull } }));
+      expect(moveBotsToAllowedModel).not.toHaveBeenCalled();
+    });
+
+    it('refuses a model the key doesn’t have, an empty list, and a list it can’t read, saving nothing', async () => {
+      const missing = await post({ universeId: 'uni-1', models: ['gpt-5'] });
+      expect(missing.status).toBe(400);
+      expect((await missing.json()).error).toMatch(/gpt-5 isn’t on this key’s list/);
+      expect((await post({ universeId: 'uni-1', models: [] })).status).toBe(400);
+      expect((await post({ universeId: 'uni-1', models: [42] })).status).toBe(400);
+      expect((await post({ universeId: 'uni-1', models: 'claude-opus-5-5' })).status).toBe(400);
+      expect(lends.upsert).not.toHaveBeenCalled();
+    });
+
+    it('says why when the key’s models can’t be loaded, and saves nothing', async () => {
+      (keyModels as jest.Mock).mockResolvedValue({ ok: false, message: 'Claude didn’t accept this key.' });
+      const response = await post({ universeId: 'uni-1', models: ['claude-haiku-5-5'] });
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toBe('Claude didn’t accept this key.');
+      expect(lends.upsert).not.toHaveBeenCalled();
+    });
   });
 
   it('is "not found", not a 500, when the key or universe went away between the checks and the save', async () => {

@@ -3,7 +3,7 @@ import { permissionsForWorld } from '@/lib/roles';
 import { addNotice } from '@/lib/notices';
 import { flag } from '@/lib/permissions';
 import { resolveUniverseAiProvider } from '@/lib/universe-ai';
-import { lendAccess, lendableUniverses, moveBotsOffKey } from '@/lib/ai-key-lend';
+import { lendAccess, lendableUniverses, moveBotsOffKey, moveBotsToAllowedModel, parseLendModels } from '@/lib/ai-key-lend';
 
 jest.mock('@/lib/db', () => ({
   prisma: {
@@ -11,6 +11,7 @@ jest.mock('@/lib/db', () => ({
     worldMember: { findMany: jest.fn() },
     universeMember: { findMany: jest.fn() },
     bot: { findMany: jest.fn(), updateMany: jest.fn() },
+    botsAiProvider: { findUnique: jest.fn() },
     $transaction: jest.fn(),
   },
 }));
@@ -23,6 +24,7 @@ const db = prisma as unknown as {
   worldMember: Record<'findMany', jest.Mock>;
   universeMember: Record<'findMany', jest.Mock>;
   bot: Record<'findMany' | 'updateMany', jest.Mock>;
+  botsAiProvider: Record<'findUnique', jest.Mock>;
   $transaction: jest.Mock;
 };
 const permissions = permissionsForWorld as jest.Mock;
@@ -89,7 +91,7 @@ describe('moveBotsOffKey', () => {
     const result = await moveBotsOffKey('key-1', { actor, why: 'revoked' });
     expect(db.bot.findMany.mock.calls[0][0].where).toEqual({ aiProviderRef: 'key-1' });
     expect(db.bot.updateMany).toHaveBeenCalledTimes(3);
-    expect(db.bot.updateMany).toHaveBeenCalledWith({ where: { id: 'b2', aiProviderRef: 'key-1' }, data: { aiProviderRef: 'universe-ai' } });
+    expect(db.bot.updateMany).toHaveBeenCalledWith({ where: { id: 'b2', aiProviderRef: 'key-1' }, data: { aiProviderRef: 'universe-ai', aiModel: null } });
     expect(result.count).toBe(3);
     expect(notice).toHaveBeenCalledTimes(2);
     expect(notice.mock.calls[0][0]).toMatchObject({ userId: 'owner-bawes', kind: 'ai-key-moved', title: 'Sam moved to Universe AI', href: '/admin/universes/bawes' });
@@ -168,5 +170,58 @@ describe('moveBotsOffKey', () => {
     expect((await moveBotsOffKey('key-1', { actor, why: 'revoked' })).count).toBe(1);
     expect(spy).toHaveBeenCalledWith('[AiKeys] Could not tell the universe owner:', 'db down');
     spy.mockRestore();
+  });
+});
+
+describe('a lend that allows only some models (#575)', () => {
+  const sandbox = { world: { universe: { id: 'uni-1', name: 'Sandbox Universe', ownerId: 'owner' } } };
+  const key = { providerId: 'key-1', model: 'claude-sonnet-5-5' };
+  beforeEach(() => {
+    jest.resetAllMocks();
+    db.$transaction.mockImplementation(async (calls: unknown[]) => Promise.all(calls));
+    db.bot.updateMany.mockResolvedValue({ count: 1 });
+    db.botsAiProvider.findUnique.mockResolvedValue({ model: key.model });
+  });
+
+  it('reads the list: left out, null for all, or each model once', () => {
+    expect(parseLendModels(undefined)).toEqual({ ok: true, models: undefined });
+    expect(parseLendModels(null)).toEqual({ ok: true, models: null });
+    expect(parseLendModels([' claude-haiku-5-5', 'claude-haiku-5-5'])).toEqual({ ok: true, models: ['claude-haiku-5-5'] });
+    expect(parseLendModels([])).toMatchObject({ ok: false });
+    expect(parseLendModels(['a', ''])).toMatchObject({ ok: false });
+    expect(parseLendModels('a')).toMatchObject({ ok: false });
+  });
+
+  it('moves only the bots on a model taken out to the first kept one, and tells the universe’s owner when it is not yours', async () => {
+    db.bot.findMany.mockResolvedValue([
+      { id: 'b1', name: 'Guide', aiModel: 'claude-opus-5-5', room: sandbox },
+      { id: 'b2', name: 'Nora', aiModel: 'claude-haiku-5-5', room: sandbox },
+      // No model of its own: it was on the check model, which was taken out
+      { id: 'b3', name: 'Scout', aiModel: null, room: sandbox },
+    ]);
+    const moved = await moveBotsToAllowedModel(key, { universeId: 'uni-1', allowed: ['claude-haiku-5-5'], firstAllowed: 'claude-haiku-5-5', actor: { id: 'maker', name: 'Mishari' } });
+    expect(moved).toEqual({ count: 2 });
+    expect(db.bot.updateMany).toHaveBeenCalledTimes(2);
+    expect(db.bot.updateMany).toHaveBeenCalledWith({ where: { id: 'b1', aiProviderRef: 'key-1', aiModel: 'claude-opus-5-5' }, data: { aiModel: 'claude-haiku-5-5' } });
+    expect(db.bot.updateMany).toHaveBeenCalledWith({ where: { id: 'b3', aiProviderRef: 'key-1', aiModel: null }, data: { aiModel: 'claude-haiku-5-5' } });
+    expect(notice).toHaveBeenCalledTimes(1);
+    expect(notice.mock.calls[0][0]).toMatchObject({ userId: 'owner', kind: 'ai-key-moved', title: '2 bots now reply with claude-haiku-5-5', href: '/admin/universes/uni-1' });
+    expect(notice.mock.calls[0][0].body).toBe('Mishari changed which models of their AI key bots in Sandbox Universe may use. The 2 bots were on ones they took out, so they now reply with claude-haiku-5-5.');
+  });
+
+  it('judges a bot with no model of its own by the check model the key has now, not the one read before the list', async () => {
+    db.botsAiProvider.findUnique.mockResolvedValue({ model: 'claude-haiku-5-5' });
+    db.bot.findMany.mockResolvedValue([{ id: 'b3', name: 'Scout', aiModel: null, room: sandbox }]);
+    expect(await moveBotsToAllowedModel(key, { universeId: 'uni-1', allowed: ['claude-haiku-5-5'], firstAllowed: 'claude-haiku-5-5', actor: { id: 'maker', name: 'Mishari' } })).toEqual({ count: 0 });
+    expect(db.bot.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('tells nobody when it is your own universe, and moves nobody when every bot is on a kept model', async () => {
+    db.bot.findMany.mockResolvedValue([{ id: 'b1', name: 'Guide', aiModel: 'claude-opus-5-5', room: sandbox }]);
+    await moveBotsToAllowedModel(key, { universeId: 'uni-1', allowed: ['claude-haiku-5-5'], firstAllowed: 'claude-haiku-5-5', actor: { id: 'owner', name: 'Khalid' } });
+    expect(notice).not.toHaveBeenCalled();
+    db.bot.updateMany.mockClear();
+    expect(await moveBotsToAllowedModel(key, { universeId: 'uni-1', allowed: ['claude-opus-5-5'], firstAllowed: 'claude-opus-5-5', actor: { id: 'maker', name: null } })).toEqual({ count: 0 });
+    expect(db.bot.updateMany).not.toHaveBeenCalled();
   });
 });

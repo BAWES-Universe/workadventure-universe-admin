@@ -245,6 +245,7 @@ jobs:
     if: needs.release.outputs.created == 'true'
     needs: release
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Deploy to Coolify
         env:
@@ -252,9 +253,46 @@ jobs:
           COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
           COOLIFY_ADMIN_UUID: ${{ secrets.COOLIFY_ADMIN_UUID }}
         run: |
+          # Coolify answering "queued" only means it took the job: follow the deployment until it is finished.
           echo "Deploying v${{ needs.release.outputs.new_version }}..."
-          curl -sSf -X POST "${COOLIFY_BASE}/api/v1/deploy?uuid=${COOLIFY_ADMIN_UUID}" \
-            -H "Authorization: Bearer ${COOLIFY_TOKEN}"
+          queued=$(curl -sSf --max-time 60 -X POST "${COOLIFY_BASE}/api/v1/deploy?uuid=${COOLIFY_ADMIN_UUID}" \
+            -H "Authorization: Bearer ${COOLIFY_TOKEN}")
+          deployment=$(echo "$queued" | jq -r '.deployments[0].deployment_uuid // empty')
+          if [ -z "$deployment" ]; then
+            echo "::error::Coolify gave no deployment to follow"
+            exit 1
+          fi
+          echo "Coolify deployment $deployment queued"
+          last=""
+          end=$((SECONDS + 1200))
+          while [ "$SECONDS" -lt "$end" ]; do
+            sleep 10
+            # A refused or missing read (401, 403, 404) will not get better: stop. Any other failed read
+            # (network blip, 5xx while Coolify restarts) is not a failed deploy: keep waiting.
+            code=$(curl -s --max-time 30 -o "$RUNNER_TEMP/coolify-status.json" -w '%{http_code}' \
+              "${COOLIFY_BASE}/api/v1/deployments/${deployment}" \
+              -H "Authorization: Bearer ${COOLIFY_TOKEN}") || code=000
+            case "$code" in
+              401|403|404)
+                # 403 usually means the token may start deploys but lacks the Coolify "read" permission.
+                echo "::error::Coolify answered $code when reading deployment $deployment (COOLIFY_TOKEN needs the read permission)"
+                exit 1 ;;
+            esac
+            status=""
+            if [ "$code" = "200" ]; then status=$(jq -r '.status // empty' "$RUNNER_TEMP/coolify-status.json" || true); fi
+            if [ -n "$status" ] && [ "$status" != "$last" ]; then
+              echo "Coolify deployment: $status"
+              last="$status"
+            fi
+            case "$status" in
+              finished) exit 0 ;;
+              failed|cancelled-by-user)
+                echo "::error::Orbit did not deploy: Coolify deployment $deployment is $status"
+                exit 1 ;;
+            esac
+          done
+          echo "::error::Orbit did not finish deploying within 20 minutes (Coolify deployment $deployment, last status: ${last:-unknown})"
+          exit 1
       - name: Record GitHub deployment
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

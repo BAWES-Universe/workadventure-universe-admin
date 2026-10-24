@@ -507,11 +507,14 @@ export async function POST(request: NextRequest) {
       // scalar column). Provided config still merges over the existing one;
       // assignedSpace is preserved unless the request explicitly supplies it.
       let keepPrivate = false;
+      let moveOffModel = false;
       {
         const existing = await prisma.bot.findUnique({
           where: { id: validatedData.botId },
-          select: { behaviorConfig: true, roomId: true },
+          select: { behaviorConfig: true, roomId: true, aiProviderRef: true },
         });
+        // A model belongs to one key (#575): a bot moved to another key, or off keys, starts on that key's check model
+        moveOffModel = updateData.aiProviderRef !== undefined && updateData.aiProviderRef !== (existing?.aiProviderRef ?? null);
         // Hide bot conversations (#435): a move out of a hiding universe keeps the bot Private
         keepPrivate = !!existing?.roomId && existing.roomId !== roomId && (await mustStayPrivateAfterMove(validatedData.botId, roomId));
         const existingConfig = (existing?.behaviorConfig as Record<string, unknown> | null) || {};
@@ -527,7 +530,7 @@ export async function POST(request: NextRequest) {
       }
       bot = await prisma.bot.update({
         where: { id: validatedData.botId },
-        data: keepPrivate ? { ...updateData, hideConversations: true } : updateData,
+        data: { ...updateData, ...(keepPrivate ? { hideConversations: true } : {}), ...(moveOffModel ? { aiModel: null } : {}) },
         include: {
           room: {
             include: {

@@ -110,7 +110,8 @@ function errorWords(body: string): string {
   return body;
 }
 
-const NOT_CHAT = /embed|whisper|tts|dall-e|moderation|rerank|transcribe|image|audio|realtime|guard|safety/i;
+// OpenAI's babbage-002, davinci-002 and gpt-3.5-turbo-instruct only do completions: a chat request to them fails
+const NOT_CHAT = /embed|whisper|tts|dall-e|moderation|rerank|transcribe|image|audio|realtime|guard|safety|babbage-|davinci-|turbo-instruct/i;
 
 /** One model id as the bot server will use it. Gemini lists "models/gemini-flash-latest" but takes "gemini-flash-latest". */
 export function cleanModelId(raw: string, kind: AiKeyKind): string {
@@ -286,9 +287,12 @@ export async function probeModels(input: KeyTargetInput & { apiKey?: unknown }):
 /**
  * Asks the key's provider for one tiny reply from the saved model. A model list can answer while chat does not (the model
  * was removed, chat credit ran out), so this is what proves a key that went Down on failed replies works again.
+ *
+ * `noList`: the provider has no model list, so its words must not say it lists its models. `withTool`: the reply offers one
+ * tool, as a bot's reply always does, since a provider can refuse a model only when tools come with the call. `status`: the
+ * HTTP status when the provider answered with an error (absent when nobody answered in time).
  */
-/** `noList`: the provider has no model list, so its words must not say it lists its models. */
-export async function probeChat(input: KeyTargetInput & { apiKey?: unknown; model: string; noList?: boolean }): Promise<{ ok: true } | { ok: false; message: string; reason: ProbeFailure }> {
+export async function probeChat(input: KeyTargetInput & { apiKey?: unknown; model: string; noList?: boolean; withTool?: boolean }): Promise<{ ok: true } | { ok: false; message: string; reason: ProbeFailure; status?: number }> {
   const resolved = keyTarget(input);
   if (!resolved.ok) return { ...resolved, reason: 'other' };
   const { info, modelsUrl } = resolved.target;
@@ -305,7 +309,7 @@ export async function probeChat(input: KeyTargetInput & { apiKey?: unknown; mode
     safeRequest(checked, {
       method: 'POST',
       headers: authHeaders(info, apiKey),
-      body: { ...chatProbeBody(info, input.model), ...extra },
+      body: { ...chatProbeBody(info, input.model, { withTool: input.withTool }), ...extra },
       // A server on your own computer may load its model on the first call, which can take well over 30 seconds
       timeoutMs: info.group === 'own-computer' ? 120_000 : 30_000,
       maxBytes: 200_000,
@@ -316,10 +320,10 @@ export async function probeChat(input: KeyTargetInput & { apiKey?: unknown; mode
   if (result.ok && result.status === 400 && /enable_thinking/i.test(result.body)) result = await ask({ enable_thinking: false });
   if (!result.ok) return { ok: false, reason: 'unreachable', message: `${info.label} didn’t answer. Try again in a moment.` };
   if (result.status >= 200 && result.status < 300) return { ok: true };
-  if (keyRefused(info, result.status, result.body)) return { ok: false, reason: 'rejected', message: `${info.label} didn’t accept this key.` };
-  if (result.status === 429 || result.status === 529) return { ok: false, reason: 'busy', message: `${info.label} is busy right now. Try again in a moment.` };
+  if (keyRefused(info, result.status, result.body)) return { ok: false, reason: 'rejected', status: result.status, message: `${info.label} didn’t accept this key.` };
+  if (result.status === 429 || result.status === 529) return { ok: false, reason: 'busy', status: result.status, message: `${info.label} is busy right now. Try again in a moment.` };
   // Claude says "out of credit" and "spend limit reached" as a plain 400; other providers' 400s are about the request
-  if (result.status === 402 || (info.protocol === 'anthropic' && result.status === 400 && /credit balance|usage limits|billing/i.test(result.body))) return { ok: false, reason: 'credit', message: `${info.label} says this key is out of credit.` };
+  if (result.status === 402 || (info.protocol === 'anthropic' && result.status === 400 && /credit balance|usage limits|billing/i.test(result.body))) return { ok: false, reason: 'credit', status: result.status, message: `${info.label} says this key is out of credit.` };
   if (result.status === 404) return { ok: false, reason: 'gone', message: `${info.label} no longer has the model ${input.model}.` };
   // Some providers answer a model they do not have, or one this key may not use, with a 400 or 422 instead of a 404
   if ((result.status === 400 || result.status === 422) && MODEL_REFUSED.test(errorWords(result.body))) {
@@ -328,6 +332,7 @@ export async function probeChat(input: KeyTargetInput & { apiKey?: unknown; mode
   return {
     ok: false,
     reason: result.status >= 500 ? 'unreachable' : [400, 413, 422].includes(result.status) ? 'request' : 'other',
+    status: result.status,
     message: `${info.label} ${input.noList ? 'answered' : 'lists its models'}, but a chat call to ${input.model} failed (${result.status}). Check the model.`,
   };
 }
