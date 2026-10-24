@@ -161,7 +161,8 @@ export async function POST(request: NextRequest) {
         break;
       }
     }
-    if (!refusedForCredit && !sawBusy) model ??= refusedRequest;
+    // A model that answered without the tool is a real reply: one that only refused the tiny request is then not kept
+    if (!refusedForCredit && !sawBusy && !noTools) model ??= refusedRequest;
     const toolWords = noTools && !refusedForCredit && !sawBusy ? `${info.label} answered, but ${noTools} can’t use tools, which bots need.` : null;
     if (!model) return respond(request, { error: toolWords ?? refused ?? 'That didn’t work. Try again.' }, 400);
     // What the provider said about the check model, from the list it just gave (never from the request)
