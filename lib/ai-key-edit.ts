@@ -152,12 +152,14 @@ export async function editSavedKey(ownerId: string, id: string, input: KeyEditIn
         ...(onList ? { supportsVision: caps.vision ?? null } : {}),
       },
     });
-    const from = [...new Set([key.model, before?.model])].filter((old): old is string => !!old && old !== model);
-    if (saved.count > 0 && from.length > 0) {
+    // Only the model the key has now, read under the lock: one it had when this edit was opened may have been left since,
+    // and a bot put on it on purpose afterwards keeps it
+    const from = before?.model && before.model !== model ? before.model : null;
+    if (saved.count > 0 && from) {
       const lends = await tx.aiKeyLend.findMany({ where: { providerId: id }, select: { universeId: true, models: true } });
       const closed = lends.filter((lend) => !(lendModels(lend.models)?.includes(model) ?? true)).map((lend) => lend.universeId);
       await tx.bot.updateMany({
-        where: { aiProviderRef: id, aiModel: { in: from }, ...(closed.length > 0 ? { NOT: { room: { world: { universeId: { in: closed } } } } } : {}) },
+        where: { aiProviderRef: id, aiModel: from, ...(closed.length > 0 ? { NOT: { room: { world: { universeId: { in: closed } } } } } : {}) },
         data: { aiModel: model },
       });
     }
