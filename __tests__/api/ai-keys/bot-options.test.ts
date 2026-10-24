@@ -107,6 +107,14 @@ describe('GET /api/me/bot-ai', () => {
     expect(body.viewerIsMaker).toBe(true);
   });
 
+  it('lists the key’s check model among its Vision models for a bot on another model, as the server uses it for images (#575)', async () => {
+    // The check model sees; the bot runs on one that doesn't, so images go to the check model on the same key
+    db.bot.findUnique.mockResolvedValue({ id: 'guide', roomId: 'room-1', aiProviderRef: 'key-1', aiModel: 'text-only', createdBy: { id: 'mishari', name: 'Mishari' } });
+    db.botsAiProvider.findUnique.mockResolvedValue({ providerId: 'key-1', name: 'My LM Studio', ownerId: 'mishari', settings: { kind: 'lmstudio', modelFacts: { 'text-only': { vision: false } } }, model: 'sees-all', supportsVision: true, lends: [] });
+    const body = await (await get('botId=guide')).json();
+    expect(body.currentKey).toMatchObject({ model: 'text-only', supportsVision: false, visionModels: ['sees-all'] });
+  });
+
   it('says when the key is down and what its bots do meanwhile, so the picker can say Universe AI answers', async () => {
     db.bot.findUnique.mockResolvedValue({ id: 'guide', roomId: 'room-1', aiProviderRef: 'key-1', createdBy: { id: 'mishari', name: 'Mishari' } });
     db.botsAiProvider.findUnique.mockResolvedValue({ providerId: 'key-1', name: 'My DeepSeek', ownerId: 'mishari', downSince: new Date(), ifDown: 'stop', lends: [] });
