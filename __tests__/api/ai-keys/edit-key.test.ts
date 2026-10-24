@@ -45,7 +45,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   (getSessionUser as jest.Mock).mockResolvedValue(alice);
   (allowKeyAttempt as jest.Mock).mockReturnValue(true);
-  db.botsAiProvider.findFirst.mockResolvedValue(lmStudio);
+  db.botsAiProvider.findFirst.mockReset().mockResolvedValue(lmStudio);
   db.botsAiProvider.updateMany.mockResolvedValue({ count: 1 });
   db.aiKeyLend.findMany.mockResolvedValue([]);
   (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['qwen3-8b', 'llama-3.1-8b'], facts: {} });
@@ -178,6 +178,15 @@ describe('editSavedKey', () => {
   it('takes no lock when no bots can move (only the address changed)', async () => {
     await editSavedKey('maker', 'key-1', { address: 'https://new.trycloudflare.com/v1' });
     expect(prisma.$queryRaw).not.toHaveBeenCalled();
+  });
+
+  it('brings the bots back when another tab changed the model and this one types the model the key had before', async () => {
+    // Opened on gpt-4o-mini; another tab saved gpt-4.1 (key and bots) while this one was checked; this one saves gpt-4o-mini
+    db.botsAiProvider.findFirst.mockResolvedValueOnce(openai).mockResolvedValueOnce({ model: 'gpt-4.1' });
+    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4o-mini', 'gpt-4.1'], facts: {} });
+    await editSavedKey('maker', 'key-2', { model: 'gpt-4o-mini' });
+    expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
+    expect(db.bot.updateMany).toHaveBeenCalledWith({ where: { aiProviderRef: 'key-2', aiModel: { in: ['gpt-4.1'] } }, data: { aiModel: 'gpt-4o-mini' } });
   });
 
   it('also moves the bots another Change model moved while this one was checked', async () => {
