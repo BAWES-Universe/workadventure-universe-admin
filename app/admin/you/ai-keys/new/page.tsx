@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type React from 'react';
 import { useRouter } from 'next/navigation';
 import { Check, Download, ExternalLink, KeyRound } from 'lucide-react';
@@ -102,6 +102,14 @@ export default function AddAiKeyPage() {
   const [failure, setFailure] = useState<string | null>(null);
   // Only the newest model load may answer: a slow one for a type, address or key since changed is dropped
   const latestLoad = useRef(0);
+  // The heading of the step on screen: moving to a step puts keyboard focus there, never on a card that went away
+  const stepHeading = useRef<HTMLHeadingElement>(null);
+  const focusStep = useRef(false);
+  useEffect(() => {
+    if (!focusStep.current) return;
+    focusStep.current = false;
+    stepHeading.current?.focus();
+  }, [step]);
 
   const info = kindInfo(kind);
   const name = typedName ?? (info ? `My ${info.label}` : '');
@@ -124,7 +132,13 @@ export default function AddAiKeyPage() {
       setApiKey('');
       changed();
     }
-    setStep('setup');
+    goToStep('setup');
+  }
+
+  /** Picking and Change move between the steps the same way: back to the top, with focus on the step's heading. */
+  function goToStep(next: 'pick' | 'setup') {
+    focusStep.current = true;
+    setStep(next);
     window.scrollTo({ top: 0 });
   }
 
@@ -212,7 +226,7 @@ export default function AddAiKeyPage() {
         <div className="grid w-full max-w-[720px] gap-4 rounded-3xl border border-foreground/10 bg-foreground/[.03] p-4" data-testid="step-pick">
           <div className="grid gap-0.5">
             <span className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Step 1 of 2</span>
-            <h2 className="text-lg font-semibold">Pick a provider</h2>
+            <h2 ref={stepHeading} tabIndex={-1} className="text-lg font-semibold focus:outline-none">Pick a provider</h2>
           </div>
           {AI_KEY_KINDS.length > SEARCH_FROM && (
             <Input
@@ -266,7 +280,7 @@ export default function AddAiKeyPage() {
           <div className="grid gap-3">
             <div className="grid gap-0.5">
               <span className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Step 2 of 2</span>
-              <h2 className="text-lg font-semibold">Set up {info.label}</h2>
+              <h2 ref={stepHeading} tabIndex={-1} className="text-lg font-semibold focus:outline-none">Set up {info.label}</h2>
             </div>
             <div className="flex items-center gap-3 rounded-2xl border border-[rgba(167,139,250,.7)] bg-[rgba(134,41,252,.14)] px-3.5 py-2.5" data-testid="picked-provider">
               <ProviderLogo info={info} />
@@ -274,7 +288,7 @@ export default function AddAiKeyPage() {
                 <span className="block text-sm font-bold">{info.label}</span>
                 <span className="mt-0.5 block text-xs text-muted-foreground">{info.benefit}</span>
               </span>
-              <Button type="button" variant="outline" className="h-11 shrink-0 px-4" disabled={saving} onClick={() => setStep('pick')}>
+              <Button type="button" variant="outline" className="h-11 shrink-0 px-4" disabled={saving} onClick={() => goToStep('pick')}>
                 Change
               </Button>
             </div>
