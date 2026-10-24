@@ -134,6 +134,8 @@ export async function editSavedKey(ownerId: string, id: string, input: KeyEditIn
   // a bot in a universe whose lend doesn't allow the new model.
   const movesBots = typedModel !== null && key.model !== null && model !== key.model;
   const count = await prisma.$transaction(async (tx) => {
+    // Another Change model may have saved while this one was checked: bots it moved are on its model, so they move too
+    const before = movesBots ? await tx.botsAiProvider.findFirst({ where: { providerId: id, ownerId }, select: { model: true } }) : null;
     const saved = await tx.botsAiProvider.updateMany({
       where: { providerId: id, ownerId, ...(typedModel === null ? { model: key.model } : {}) },
       data: {
@@ -146,11 +148,12 @@ export async function editSavedKey(ownerId: string, id: string, input: KeyEditIn
         ...(onList ? { supportsVision: caps.vision ?? null } : {}),
       },
     });
-    if (saved.count > 0 && movesBots) {
+    const from = [...new Set([key.model, before?.model])].filter((old): old is string => !!old && old !== model);
+    if (saved.count > 0 && from.length > 0) {
       const lends = await tx.aiKeyLend.findMany({ where: { providerId: id }, select: { universeId: true, models: true } });
       const closed = lends.filter((lend) => !(lendModels(lend.models)?.includes(model) ?? true)).map((lend) => lend.universeId);
       await tx.bot.updateMany({
-        where: { aiProviderRef: id, aiModel: key.model, ...(closed.length > 0 ? { NOT: { room: { world: { universeId: { in: closed } } } } } : {}) },
+        where: { aiProviderRef: id, aiModel: { in: from }, ...(closed.length > 0 ? { NOT: { room: { world: { universeId: { in: closed } } } } } : {}) },
         data: { aiModel: model },
       });
     }
