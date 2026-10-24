@@ -3,6 +3,7 @@ import { has } from '@/lib/permissions';
 import { permissionsForWorld } from '@/lib/roles';
 import { addNotice } from '@/lib/notices';
 import { UNIVERSE_AI_REF, resolveUniverseAiProvider } from '@/lib/universe-ai';
+import { servedModel } from '@/lib/ai-key-model-list';
 
 /**
  * Lending a personal AI key to a universe (#374). A person may lend a key where they have Manage bots: the universe's
@@ -160,18 +161,21 @@ export function parseLendModels(raw: unknown): { ok: true; models: string[] | nu
  * save that raced this one is never undone or counted twice.
  */
 export async function moveBotsToAllowedModel(
-  key: { providerId: string; model: string | null },
-  options: { universeId: string; allowed: string[]; firstAllowed: string; actor: { id: string; name: string | null } },
+  key: { providerId: string; model: string | null; settings?: unknown },
+  options: { universeId: string; allowed: string[]; firstAllowed: string; actor: { id: string; name: string | null }; before?: string[] | null },
 ): Promise<{ count: number }> {
   const bots = await prisma.bot.findMany({
     where: { aiProviderRef: key.providerId, room: { world: { universeId: options.universeId } } },
     select: { id: true, name: true, aiModel: true, room: { select: { world: { select: { universe: { select: { id: true, name: true, ownerId: true } } } } } } },
   });
   // The provider's list was asked first and took a while: a bot with no model of its own follows the check model it has now
-  const current = await prisma.botsAiProvider.findUnique({ where: { providerId: key.providerId }, select: { model: true } });
+  const current = await prisma.botsAiProvider.findUnique({ where: { providerId: key.providerId }, select: { model: true, settings: true } });
   const checkModel = current ? current.model : key.model;
+  // What each bot replies with under the lend as it was (`before`, null = all models): a bot with no model of its own on a
+  // check model the lend left out already replies with one it kept, and stays where it is when that one is kept again
+  const served = { model: checkModel, settings: current ? current.settings : key.settings };
   const leaving = bots.filter((bot) => {
-    const model = bot.aiModel ?? checkModel;
+    const model = servedModel(bot, served, options.before ?? null);
     return !model || !options.allowed.includes(model);
   });
   if (leaving.length === 0) return { count: 0 };

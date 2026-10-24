@@ -139,6 +139,8 @@ describe('POST /api/me/ai-keys with no model picked (#575)', () => {
     expect(chat).toHaveBeenCalledTimes(1);
     expect(chat).toHaveBeenCalledWith(expect.objectContaining({ model: 'deepseek-v4-flash' }));
     expect(provider.create.mock.calls[0][0].data).toMatchObject({ model: 'deepseek-v4-flash', supportsVision: false, settings: { kind: 'deepseek', caps: { vision: false, tools: true } } });
+    // How many models it has, for the key card
+    expect(provider.create.mock.calls[0][0].data.settings.modelCount).toBe(3);
   });
 
   it('asks a model picked from the list with a tool, as a bot asks, and a typed model as before', async () => {

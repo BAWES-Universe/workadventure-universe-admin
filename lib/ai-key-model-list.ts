@@ -48,7 +48,7 @@ export function forgetKeyModels(providerId: string): void {
  */
 export async function keyModels(key: KeyForModels, options: { fresh?: boolean; now?: number } = {}): Promise<KeyModelList> {
   const list = await sharedModels(key, options);
-  if (list.ok && list.listed) key.settings = { ...(isRecord(key.settings) ? key.settings : {}), modelFacts: slimFacts(list.facts) };
+  if (list.ok && list.listed) key.settings = { ...(isRecord(key.settings) ? key.settings : {}), modelFacts: slimFacts(list.facts), modelCount: list.models.length };
   return list;
 }
 
@@ -67,7 +67,7 @@ async function sharedModels(key: KeyForModels, options: { fresh?: boolean; now?:
       // A failed ask never hides a list still in its time: pages keep showing that one
       const held = cache.get(id);
       if (list.ok || !held?.list.ok) cache.set(id, { at, list });
-      if (list.ok && list.listed) await rememberFacts(key, list.facts);
+      if (list.ok && list.listed) await rememberFacts(key, list.facts, list.models.length);
       return list;
     })
     .finally(() => asking.delete(id));
@@ -117,18 +117,21 @@ function sameJson(a: unknown, b: unknown): boolean {
   return stable(a) === stable(b);
 }
 
-/** Saves what the provider says about each model on the key, only when it changed. A failed save only costs a later guess. */
-async function rememberFacts(key: KeyForModels, facts: ModelFactsById): Promise<void> {
+/**
+ * Saves what the provider says about each model on the key, and how many models it has (shown on the key card), only when
+ * that changed. A failed save only costs a later guess.
+ */
+async function rememberFacts(key: KeyForModels, facts: ModelFactsById, modelCount: number): Promise<void> {
   const slim = slimFacts(facts);
-  const saved = isRecord(key.settings) ? key.settings.modelFacts : undefined;
-  if (sameJson(saved ?? {}, slim)) return;
+  const saved = isRecord(key.settings) ? key.settings : {};
+  if (sameJson(saved.modelFacts ?? {}, slim) && saved.modelCount === modelCount) return;
   try {
     // Read again just before writing, so a change made meanwhile (a new address, a new check model) is never undone. A list
     // asked of an address the key has since left says nothing about it, so it is not kept. A new check model saved between
     // the read and the write brings its own settings, which this never writes over: the facts are kept on a later list.
     const row = await prisma.botsAiProvider.findUnique({ where: { providerId: key.providerId }, select: { settings: true, endpoint: true, model: true } });
     if (!row || row.endpoint !== key.endpoint) return;
-    const settings = { ...(isRecord(row.settings) ? row.settings : {}), modelFacts: slim };
+    const settings = { ...(isRecord(row.settings) ? row.settings : {}), modelFacts: slim, modelCount };
     await prisma.botsAiProvider.updateMany({ where: { providerId: key.providerId, ownerId: { not: null }, endpoint: key.endpoint, model: row.model }, data: { settings } });
     key.settings = settings;
   } catch (error) {
