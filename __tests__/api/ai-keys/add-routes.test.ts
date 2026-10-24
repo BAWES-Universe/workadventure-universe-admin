@@ -272,6 +272,21 @@ describe('POST /api/me/ai-keys with no model picked (#575)', () => {
     expect(provider.create).not.toHaveBeenCalled();
   });
 
+  it('keeps no model that only refused the tiny request once another answered without the tool, and says it can’t use tools', async () => {
+    models.mockResolvedValue({ ok: true, models: ['a-embed', 'llama-no-tools'], facts: {} });
+    chat
+      // a-embed refuses the tiny request with the tool and without it
+      .mockResolvedValueOnce({ ok: false, reason: 'request', message: 'a chat call to a-embed failed (400).' })
+      .mockResolvedValueOnce({ ok: false, reason: 'request', message: 'a chat call to a-embed failed (400).' })
+      // llama-no-tools refuses the tool and answers without it
+      .mockResolvedValueOnce({ ok: false, reason: 'request', message: 'llama-no-tools does not support tools (400).' })
+      .mockResolvedValueOnce({ ok: true });
+    const response = await post({ kind: 'lmstudio', address: 'https://lm.example.com' });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: 'LM Studio answered, but llama-no-tools can’t use tools, which bots need.' });
+    expect(provider.create).not.toHaveBeenCalled();
+  });
+
   it('reads what a model said when asked again without the tool like any failed model, never keeping it', async () => {
     models.mockResolvedValue({ ok: true, models: ['a', 'b'], facts: {} });
     chat
