@@ -137,11 +137,12 @@ export async function POST(request: NextRequest) {
           noTools ??= candidate;
           continue;
         }
-        // Refused both ways, or no time left to ask again (which says nothing new): the model that wants a bigger cap
-        const cutOff = !plain || (plain.reason === 'unreachable' && Date.now() - started >= CHECK_BUDGET_MS);
-        if (cutOff || plain.reason === 'request') {
+        // No time left to ask again: nothing says whether it refused the tool or the tiny request, so it is not kept, and
+        // the search ends there as it does for any try cut off by the time budget
+        if (!plain || (plain.reason === 'unreachable' && Date.now() - started >= CHECK_BUDGET_MS)) break;
+        // Refused both ways: the model that wants a bigger cap
+        if (plain.reason === 'request') {
           refusedRequest ??= candidate;
-          if (cutOff) break;
           continue;
         }
         // Any other answer without the tool (out of credit, busy, the key refused) is read like any failed model

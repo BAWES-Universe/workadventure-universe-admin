@@ -211,6 +211,29 @@ describe('POST /api/me/ai-keys with no model picked (#575)', () => {
     models.mockResolvedValue({ ok: true, models: ['a', 'b', 'c'], facts: {} });
     let now = 1_000_000;
     const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    const refuse = async () => {
+      now += 10_000;
+      return { ok: false, reason: 'request', message: 'a chat call to a failed (400).' };
+    };
+    chat
+      // a refuses the tiny request with the tool and without it
+      .mockImplementationOnce(refuse)
+      .mockImplementationOnce(refuse)
+      .mockImplementationOnce(async () => {
+        now += 30_000;
+        return { ok: false, reason: 'unreachable', message: 'LM Studio didn’t answer in time.' };
+      });
+    const response = await post({ kind: 'lmstudio', address: 'https://lm.example.com' });
+    clock.mockRestore();
+    expect(response.status).toBe(201);
+    expect(chat).toHaveBeenCalledTimes(3);
+    expect(provider.create.mock.calls[0][0].data.model).toBe('a');
+  });
+
+  it('keeps no model whose ask without the tool was cut off by the time budget: it was never seen to answer', async () => {
+    models.mockResolvedValue({ ok: true, models: ['a', 'b', 'c'], facts: {} });
+    let now = 1_000_000;
+    const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
     chat
       .mockImplementationOnce(async () => {
         now += 10_000;
@@ -222,9 +245,9 @@ describe('POST /api/me/ai-keys with no model picked (#575)', () => {
       });
     const response = await post({ kind: 'lmstudio', address: 'https://lm.example.com' });
     clock.mockRestore();
-    expect(response.status).toBe(201);
+    expect(response.status).toBe(400);
     expect(chat).toHaveBeenCalledTimes(2);
-    expect(provider.create.mock.calls[0][0].data.model).toBe('a');
+    expect(provider.create).not.toHaveBeenCalled();
   });
 
   it('prefers a model that really replies over one that only refused the tiny request, and keeps that one when none replies', async () => {
