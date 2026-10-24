@@ -227,7 +227,11 @@ describe('POST /api/me/ai-keys with no model picked (#575)', () => {
 
   it('prefers a model that really replies over one that only refused the tiny request, and keeps that one when none replies', async () => {
     models.mockResolvedValue({ ok: true, models: ['a-embed', 'b-chat', 'c'], facts: {} });
-    chat.mockResolvedValueOnce({ ok: false, reason: 'request', message: 'a chat call to a-embed failed (400).' }).mockResolvedValueOnce({ ok: true });
+    // a-embed refuses the tiny request with the tool and without it
+    chat
+      .mockResolvedValueOnce({ ok: false, reason: 'request', message: 'a chat call to a-embed failed (400).' })
+      .mockResolvedValueOnce({ ok: false, reason: 'request', message: 'a chat call to a-embed failed (400).' })
+      .mockResolvedValueOnce({ ok: true });
     expect((await post({ kind: 'lmstudio', address: 'https://lm.example.com' })).status).toBe(201);
     expect(provider.create.mock.calls[0][0].data.model).toBe('b-chat');
 
@@ -235,7 +239,8 @@ describe('POST /api/me/ai-keys with no model picked (#575)', () => {
     provider.create.mockClear();
     chat.mockResolvedValue({ ok: false, reason: 'request', message: 'a chat call failed (400).' });
     expect((await post({ kind: 'lmstudio', address: 'https://lm.example.com' })).status).toBe(201);
-    expect(chat).toHaveBeenCalledTimes(3);
+    // Each model is asked with the tool, then without it
+    expect(chat).toHaveBeenCalledTimes(6);
     expect(provider.create.mock.calls[0][0].data.model).toBe('a-embed');
   });
 
@@ -246,9 +251,31 @@ describe('POST /api/me/ai-keys with no model picked (#575)', () => {
     expect(provider.create.mock.calls[0][0].data.model).toBe('zz-chat');
   });
 
+  it('never keeps a model that answers without the tool but refuses it, and says it can’t use tools (#575)', async () => {
+    models.mockResolvedValue({ ok: true, models: ['llama-no-tools', 'qwen-tools'], facts: {} });
+    chat
+      .mockResolvedValueOnce({ ok: false, reason: 'request', message: 'llama-no-tools does not support tools (400).' })
+      .mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: true });
+    expect((await post({ kind: 'lmstudio', address: 'https://lm.example.com' })).status).toBe(201);
+    expect(chat.mock.calls[1][0]).toMatchObject({ model: 'llama-no-tools' });
+    expect(chat.mock.calls[1][0]).not.toHaveProperty('withTool');
+    expect(provider.create.mock.calls[0][0].data.model).toBe('qwen-tools');
+
+    chat.mockReset();
+    provider.create.mockClear();
+    models.mockResolvedValue({ ok: true, models: ['llama-no-tools'], facts: {} });
+    chat.mockResolvedValueOnce({ ok: false, reason: 'request', message: 'does not support tools (400).' }).mockResolvedValueOnce({ ok: true });
+    const response = await post({ kind: 'lmstudio', address: 'https://lm.example.com' });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: 'LM Studio answered, but llama-no-tools can’t use tools, which bots need.' });
+    expect(provider.create).not.toHaveBeenCalled();
+  });
+
   it('saves nothing when the key is refused after a model only refused the tiny request', async () => {
     models.mockResolvedValue({ ok: true, models: ['a', 'b', 'c'], facts: {} });
     chat
+      .mockResolvedValueOnce({ ok: false, reason: 'request', message: 'a chat call to a failed (400).' })
       .mockResolvedValueOnce({ ok: false, reason: 'request', message: 'a chat call to a failed (400).' })
       .mockResolvedValueOnce({ ok: false, reason: 'rejected', message: 'DeepSeek didn’t accept this key.' });
     const response = await post({ kind: 'deepseek', apiKey: 'sk-abcdef4f2a' });
@@ -279,6 +306,7 @@ describe('POST /api/me/ai-keys with no model picked (#575)', () => {
     models.mockResolvedValue({ ok: true, models: ['a', 'b'], facts: {} });
     chat
       .mockResolvedValueOnce({ ok: false, reason: 'request', message: 'a chat call to a failed (400).' })
+      .mockResolvedValueOnce({ ok: false, reason: 'request', message: 'a chat call to a failed (400).' })
       .mockResolvedValueOnce({ ok: false, reason: 'busy', status: 429, message: 'DeepSeek is busy right now. Try again in a moment.' })
       .mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'DeepSeek no longer has the model c.' });
     models.mockResolvedValue({ ok: true, models: ['a', 'b', 'c'], facts: {} });
@@ -291,6 +319,7 @@ describe('POST /api/me/ai-keys with no model picked (#575)', () => {
   it('saves nothing, and says out of credit, when the only other model refused just the tiny request', async () => {
     models.mockResolvedValue({ ok: true, models: ['a', 'b'], facts: {} });
     chat
+      .mockResolvedValueOnce({ ok: false, reason: 'request', message: 'a chat call to a failed (400).' })
       .mockResolvedValueOnce({ ok: false, reason: 'request', message: 'a chat call to a failed (400).' })
       .mockResolvedValueOnce({ ok: false, reason: 'credit', message: 'OpenRouter says this key is out of credit.' });
     const response = await post({ kind: 'deepseek', apiKey: 'sk-abcdef4f2a' });
