@@ -134,7 +134,9 @@ export async function editSavedKey(ownerId: string, id: string, input: KeyEditIn
   // a bot in a universe whose lend doesn't allow the new model.
   const movesBots = typedModel !== null && key.model !== null && model !== key.model;
   const count = await prisma.$transaction(async (tx) => {
-    // Another Change model may have saved while this one was checked: bots it moved are on its model, so they move too
+    // Another Change model may have saved while this one was checked: bots it moved are on its model, so they move too. The
+    // row is locked first, so a save at the same moment waits for this one and then reads the model it saved.
+    if (movesBots) await tx.$queryRaw`SELECT 1 FROM "bots_ai_providers" WHERE "provider_id" = ${id} AND "owner_id" = ${ownerId} FOR UPDATE`;
     const before = movesBots ? await tx.botsAiProvider.findFirst({ where: { providerId: id, ownerId }, select: { model: true } }) : null;
     const saved = await tx.botsAiProvider.updateMany({
       where: { providerId: id, ownerId, ...(typedModel === null ? { model: key.model } : {}) },
