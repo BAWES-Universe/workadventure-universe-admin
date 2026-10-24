@@ -57,6 +57,18 @@ describe('Add a key', () => {
     expect(screen.getByRole('radio', { name: /^Claude/ }).getAttribute('aria-checked')).toBe('true');
   });
 
+  it('moves between the steps the same way both ways: back to the top, with focus on the step’s heading', () => {
+    const scroll = jest.spyOn(window, 'scrollTo').mockImplementation(() => {});
+    render(<AddAiKeyPage />);
+    fireEvent.click(screen.getByRole('radio', { name: /^Claude/ }));
+    expect(scroll).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Set up Claude' }));
+    change();
+    expect(scroll).toHaveBeenCalledTimes(2);
+    expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Pick a provider' }));
+    scroll.mockRestore();
+  });
+
   it('clears the typed key and address when another provider is picked, and keeps them for the same one', () => {
     render(<AddAiKeyPage />);
     fireEvent.click(screen.getByRole('radio', { name: /^LM Studio/ }));
