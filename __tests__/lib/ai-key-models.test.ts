@@ -290,6 +290,15 @@ describe('probeChat', () => {
     expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'gone' })).toMatchObject({ ok: false, reason });
   });
 
+  it('gives the HTTP status of a failed answer, and none when nobody answered in time', async () => {
+    post.mockResolvedValue(answer(503, {}));
+    expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'm' })).toMatchObject({ reason: 'unreachable', status: 503 });
+    post.mockResolvedValue(answer(403, {}));
+    expect(await probeChat({ kind: 'openai', apiKey: 'sk-1234', model: 'm' })).toMatchObject({ status: 403 });
+    post.mockResolvedValue({ ok: false, reason: 'timeout' });
+    expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'm' })).not.toHaveProperty('status');
+  });
+
   it('names the model when the provider no longer has it, and the status for any other chat failure', async () => {
     post.mockResolvedValue(answer(404, {}));
     expect(await probeChat({ kind: 'deepseek', apiKey: 'k-1234', model: 'gone' })).toMatchObject({ message: 'DeepSeek no longer has the model gone.' });
