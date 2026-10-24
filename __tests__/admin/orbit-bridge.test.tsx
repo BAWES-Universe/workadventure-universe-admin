@@ -221,6 +221,18 @@ describe('OrbitBridge', () => {
       expect(pill(container, 'About').querySelector('svg')).not.toBeNull();
     });
 
+    it('asks again for a card still showing when the game starts a new visit', () => {
+      const { container } = show();
+      answer([links[0].url]);
+      fromGame({ type: 'orbit-bridge-init', version: 1, roomRevision: otherRevision, capabilities: ['navigate', 'open-link'] });
+      expect(pill(container, 'About').querySelector('svg')).not.toBeNull();
+      const asked = sent('orbit-check-links');
+      expect(asked).toHaveLength(2);
+      expect(asked[1]).toEqual(expect.objectContaining({ roomRevision: otherRevision, urls: [links[0].url, links[1].url] }));
+      answer([links[0].url], (asked[1] as { requestId: string }).requestId, otherRevision);
+      expect(pill(container, 'About').querySelector('svg')).toBeNull();
+    });
+
     it('asks nothing in a game that cannot open links, and every link keeps its icon', () => {
       const { container } = show(['navigate']);
       expect(sent('orbit-check-links')).toHaveLength(0);

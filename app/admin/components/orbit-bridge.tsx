@@ -140,10 +140,19 @@ function askGameAboutLinks(urls: string[]) {
  */
 export function useLinksOpeningInGame(urls: readonly string[]): ReadonlySet<string> {
   const canOpen = useGameCapability('open-link');
+  // A new visit forgets the answers (see setGameVisit): a card still showing asks again.
+  const visit = useSyncExternalStore(
+    (listener) => {
+      gameVisitListeners.add(listener);
+      return () => gameVisitListeners.delete(listener);
+    },
+    () => gameVisit?.roomRevision ?? null,
+    () => null,
+  );
   const key = urls.join('\n');
   useEffect(() => {
-    if (canOpen && key) askGameAboutLinks(key.split('\n'));
-  }, [canOpen, key]);
+    if (canOpen && visit && key) askGameAboutLinks(key.split('\n'));
+  }, [canOpen, visit, key]);
   // Renders again when the game answers.
   useSyncExternalStore(
     (listener) => {
