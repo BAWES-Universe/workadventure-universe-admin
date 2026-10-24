@@ -272,6 +272,27 @@ describe('POST /api/me/ai-keys with no model picked (#575)', () => {
     expect(provider.create).not.toHaveBeenCalled();
   });
 
+  it('reads what a model said when asked again without the tool like any failed model, never keeping it', async () => {
+    models.mockResolvedValue({ ok: true, models: ['a', 'b'], facts: {} });
+    chat
+      .mockResolvedValueOnce({ ok: false, reason: 'request', message: 'a chat call to a failed (400).' })
+      .mockResolvedValueOnce({ ok: false, reason: 'credit', status: 402, message: 'OpenRouter says this key is out of credit.' })
+      .mockResolvedValueOnce({ ok: false, reason: 'gone', message: 'OpenRouter no longer has the model b.' });
+    const response = await post({ kind: 'deepseek', apiKey: 'sk-abcdef4f2a' });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: 'OpenRouter says this key is out of credit.' });
+    expect(provider.create).not.toHaveBeenCalled();
+
+    chat.mockReset();
+    chat
+      .mockResolvedValueOnce({ ok: false, reason: 'request', message: 'a chat call to a failed (400).' })
+      .mockResolvedValueOnce({ ok: false, reason: 'rejected', status: 401, message: 'DeepSeek didn’t accept this key.' });
+    const refused = await post({ kind: 'deepseek', apiKey: 'sk-abcdef4f2a' });
+    expect(await refused.json()).toEqual({ error: 'DeepSeek didn’t accept this key.' });
+    expect(chat).toHaveBeenCalledTimes(2);
+    expect(provider.create).not.toHaveBeenCalled();
+  });
+
   it('saves nothing when the key is refused after a model only refused the tiny request', async () => {
     models.mockResolvedValue({ ok: true, models: ['a', 'b', 'c'], facts: {} });
     chat

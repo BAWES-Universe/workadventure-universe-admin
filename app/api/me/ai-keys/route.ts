@@ -123,6 +123,7 @@ export async function POST(request: NextRequest) {
       // A later try that ran out of the time budget was cut off here, not refused by the provider: it says nothing about
       // the key, so the search just ends there, keeping a model that only refused the tiny request and the reason given before
       if (index > 0 && chat.reason === 'unreachable' && Date.now() - started >= CHECK_BUDGET_MS) break;
+      let failure = chat;
       if (!noList && chat.reason === 'request') {
         if (typedModel) {
           model = candidate;
@@ -132,19 +133,29 @@ export async function POST(request: NextRequest) {
         // tells the two apart, and only a model that refuses both ways is the one that wants a bigger cap
         const plainLeft = CHECK_BUDGET_MS - (Date.now() - started);
         const plain = plainLeft > 0 ? await probeChat({ ...target, timeoutMs: plainLeft }) : null;
-        if (plain?.ok) noTools ??= candidate;
-        else refusedRequest ??= candidate;
-        continue;
+        if (plain?.ok) {
+          noTools ??= candidate;
+          continue;
+        }
+        // Refused both ways, or no time left to ask again (which says nothing new): the model that wants a bigger cap
+        const cutOff = !plain || (plain.reason === 'unreachable' && Date.now() - started >= CHECK_BUDGET_MS);
+        if (cutOff || plain.reason === 'request') {
+          refusedRequest ??= candidate;
+          if (cutOff) break;
+          continue;
+        }
+        // Any other answer without the tool (out of credit, busy, the key refused) is read like any failed model
+        failure = plain;
       }
       // Out of credit is said ahead of a later model's words, as it is what the person can fix; then busy (try again)
-      if (chat.reason === 'credit') {
-        if (!refusedForCredit) refused = chat.message;
+      if (failure.reason === 'credit') {
+        if (!refusedForCredit) refused = failure.message;
         refusedForCredit = true;
-      } else if (chat.reason === 'busy') {
-        if (!refusedForCredit && !sawBusy) refused = chat.message;
+      } else if (failure.reason === 'busy') {
+        if (!refusedForCredit && !sawBusy) refused = failure.message;
         sawBusy = true;
-      } else if (!refusedForCredit && !sawBusy) refused = chat.message;
-      if (!tryNextModel(chat)) {
+      } else if (!refusedForCredit && !sawBusy) refused = failure.message;
+      if (!tryNextModel(failure)) {
         // The key or the provider failed, not this model: one that only refused the tiny request earlier proves nothing now
         refusedRequest = null;
         break;
