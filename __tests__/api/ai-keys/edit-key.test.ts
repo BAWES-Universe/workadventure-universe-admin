@@ -160,7 +160,7 @@ describe('editSavedKey', () => {
     await editSavedKey('maker', 'key-2', { model: 'gpt-4.1' });
     expect(prisma.$transaction).toHaveBeenCalledTimes(1);
     expect(db.bot.updateMany).toHaveBeenCalledTimes(1);
-    expect(db.bot.updateMany).toHaveBeenCalledWith({ where: { aiProviderRef: 'key-2', aiModel: { in: ['gpt-4o-mini'] } }, data: { aiModel: 'gpt-4.1' } });
+    expect(db.bot.updateMany).toHaveBeenCalledWith({ where: { aiProviderRef: 'key-2', aiModel: 'gpt-4o-mini' }, data: { aiModel: 'gpt-4.1' } });
   });
 
   it('locks the key’s row before reading its model, so two saves at the same moment run one after the other', async () => {
@@ -186,14 +186,17 @@ describe('editSavedKey', () => {
     (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4o-mini', 'gpt-4.1'], facts: {} });
     await editSavedKey('maker', 'key-2', { model: 'gpt-4o-mini' });
     expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
-    expect(db.bot.updateMany).toHaveBeenCalledWith({ where: { aiProviderRef: 'key-2', aiModel: { in: ['gpt-4.1'] } }, data: { aiModel: 'gpt-4o-mini' } });
+    expect(db.bot.updateMany).toHaveBeenCalledWith({ where: { aiProviderRef: 'key-2', aiModel: 'gpt-4.1' }, data: { aiModel: 'gpt-4o-mini' } });
   });
 
-  it('also moves the bots another Change model moved while this one was checked', async () => {
+  it('moves the bots on the model the key has now, never one it had when this edit was opened', async () => {
+    // Opened on gpt-4o-mini; another tab saved gpt-4o (and moved its bots) while this one was checked. A bot put on
+    // gpt-4o-mini on purpose since then stays there; the bots on gpt-4o move to gpt-4.1
     db.botsAiProvider.findFirst.mockResolvedValueOnce(openai).mockResolvedValueOnce({ model: 'gpt-4o' });
     (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1'], facts: {} });
     await editSavedKey('maker', 'key-2', { model: 'gpt-4.1' });
-    expect(db.bot.updateMany).toHaveBeenCalledWith({ where: { aiProviderRef: 'key-2', aiModel: { in: ['gpt-4o-mini', 'gpt-4o'] } }, data: { aiModel: 'gpt-4.1' } });
+    expect(db.bot.updateMany).toHaveBeenCalledTimes(1);
+    expect(db.bot.updateMany).toHaveBeenCalledWith({ where: { aiProviderRef: 'key-2', aiModel: 'gpt-4o' }, data: { aiModel: 'gpt-4.1' } });
   });
 
   it('leaves the bots of a universe whose lend does not allow the new model on the old one', async () => {
@@ -206,7 +209,7 @@ describe('editSavedKey', () => {
     ]);
     await editSavedKey('maker', 'key-2', { model: 'gpt-4.1' });
     expect(db.bot.updateMany).toHaveBeenCalledWith({
-      where: { aiProviderRef: 'key-2', aiModel: { in: ['gpt-4o-mini'] }, NOT: { room: { world: { universeId: { in: ['u-old-only'] } } } } },
+      where: { aiProviderRef: 'key-2', aiModel: 'gpt-4o-mini', NOT: { room: { world: { universeId: { in: ['u-old-only'] } } } } },
       data: { aiModel: 'gpt-4.1' },
     });
   });
