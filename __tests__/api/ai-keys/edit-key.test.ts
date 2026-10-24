@@ -12,7 +12,7 @@ import { probeChat, probeModels, allowKeyAttempt } from '@/lib/ai-key-models';
 import { markWorking } from '@/lib/ai-key-health';
 
 jest.mock('@/lib/db', () => {
-  const prisma: Record<string, unknown> = { botsAiProvider: { findFirst: jest.fn(), updateMany: jest.fn() }, bot: { updateMany: jest.fn() }, aiKeyLend: { findMany: jest.fn() } };
+  const prisma: Record<string, unknown> = { botsAiProvider: { findFirst: jest.fn(), updateMany: jest.fn() }, bot: { updateMany: jest.fn() }, aiKeyLend: { findMany: jest.fn() }, $queryRaw: jest.fn() };
   prisma.$transaction = jest.fn((run: (tx: unknown) => unknown) => run(prisma));
   return { prisma };
 });
@@ -159,6 +159,23 @@ describe('editSavedKey', () => {
     expect(prisma.$transaction).toHaveBeenCalledTimes(1);
     expect(db.bot.updateMany).toHaveBeenCalledTimes(1);
     expect(db.bot.updateMany).toHaveBeenCalledWith({ where: { aiProviderRef: 'key-2', aiModel: { in: ['gpt-4o-mini'] } }, data: { aiModel: 'gpt-4.1' } });
+  });
+
+  it('locks the key’s row before reading its model, so two saves at the same moment run one after the other', async () => {
+    db.botsAiProvider.findFirst.mockResolvedValue(openai);
+    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4o-mini', 'gpt-4.1'], facts: {} });
+    await editSavedKey('maker', 'key-2', { model: 'gpt-4.1' });
+    const lock = (prisma.$queryRaw as jest.Mock).mock;
+    expect(lock.calls).toHaveLength(1);
+    expect(lock.calls[0][0].join('?')).toMatch(/FROM "bots_ai_providers" WHERE "provider_id" = \? AND "owner_id" = \? FOR UPDATE$/);
+    expect(lock.calls[0].slice(1)).toEqual(['key-2', 'maker']);
+    // Read after the lock: the model a save that went first committed
+    expect(lock.invocationCallOrder[0]).toBeLessThan(db.botsAiProvider.findFirst.mock.invocationCallOrder[1]);
+  });
+
+  it('takes no lock when no bots can move (only the address changed)', async () => {
+    await editSavedKey('maker', 'key-1', { address: 'https://new.trycloudflare.com/v1' });
+    expect(prisma.$queryRaw).not.toHaveBeenCalled();
   });
 
   it('also moves the bots another Change model moved while this one was checked', async () => {
