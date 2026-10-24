@@ -549,7 +549,7 @@ describe('a role page', () => {
     expect(within(bots).getByText('Chat with bots nearby')).toBeTruthy();
     expect(within(bots).getByText('Lets people walk up to a bot on the map and chat in its bubble. Everyone in the bubble sees it.')).toBeTruthy();
     expect(within(bots).getByText('DM bots')).toBeTruthy();
-    expect(within(bots).getByText("Lets signed-in people who can see the bot's room chat privately with it, one to one, from anywhere. Only they and the bot see it.")).toBeTruthy();
+    expect(within(bots).getByText("Lets signed-in people who can see the bot's room send it direct messages, one to one, from anywhere. Only they and the bot see them.")).toBeTruthy();
     expect(within(bots).getByText('Summon bots')).toBeTruthy();
     expect(within(bots).getByText('Lets people, including guests, summon a bot to them in its own room.')).toBeTruthy();
   });

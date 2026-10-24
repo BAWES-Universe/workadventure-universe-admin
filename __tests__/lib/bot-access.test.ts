@@ -10,7 +10,8 @@ const state = {
   bot: null as null | { id: string; name: string; createdById: string | null; isPublicRoom: boolean; isPublicWorld: boolean },
   ownerId: 'owner',
   universePublic: true,
-  users: [] as { id: string; uuid: string; email: string | null }[],
+  users: [] as { id: string; uuid: string; email: string | null; name?: string | null; isGuest?: boolean; matrixChatId?: string | null }[],
+  bannedUserIds: [] as string[],
   worldMembers: [] as { worldId: string; userId: string; tags: string[] }[],
   everyone: null as bigint | null,
   member: BigInt(0),
@@ -42,6 +43,17 @@ jest.mock('@/lib/db', () => ({
     user: {
       findFirst: jest.fn(async ({ where }: { where: { OR: { uuid?: string; email?: string }[] } }) =>
         state.users.find((user) => where.OR.some((cond) => cond.uuid === user.uuid || cond.email === user.email)) ?? null,
+      ),
+      findMany: jest.fn(async ({ where, take }: { where: { matrixChatId: string }; take: number }) =>
+        state.users
+          .filter((user) => user.matrixChatId === where.matrixChatId)
+          .slice(0, take)
+          .map((user) => ({ id: user.id, uuid: user.uuid, email: user.email, name: user.name ?? null, isGuest: !!user.isGuest })),
+      ),
+    },
+    ban: {
+      findFirst: jest.fn(async ({ where }: { where: { AND: [unknown, { userId: string }] } }) =>
+        state.bannedUserIds.includes(where.AND[1].userId) ? { id: 'ban-1' } : null,
       ),
     },
     worldMember: {
@@ -93,14 +105,15 @@ function join(user: { id: string }, given: Given[] = [], scope: { allWorlds: boo
   state.worldMembers.push({ worldId: 'w1', userId: user.id, tags: ['member'] });
 }
 
-const ask = (action: BotAction, person: { signedIn: boolean; identifier?: string | null }) =>
+const ask = (action: BotAction, person: { signedIn: boolean; identifier?: string | null; chatId?: string | null }) =>
   checkBotAccess({ botId: 'bot-1', action, person });
 
 beforeEach(() => {
   state.bot = { id: 'bot-1', name: 'Nora', createdById: USERS.nora.id, isPublicRoom: true, isPublicWorld: true };
   state.ownerId = USERS.boss.id;
   state.universePublic = true;
-  state.users = Object.values(USERS);
+  state.users = Object.values(USERS).map((user) => ({ ...user }));
+  state.bannedUserIds = [];
   state.worldMembers = [];
   state.everyone = EVERYONE_DEFAULT_PERMISSIONS;
   state.member = ZERO;
@@ -224,7 +237,7 @@ describe('a permission turned off', () => {
     }
   });
 
-  it('even the owner needs an account for a private chat', async () => {
+  it('even the owner needs an account for a direct message', async () => {
     expect((await ask('dm', GUEST))!.code).toBe('sign_in_required');
   });
 
@@ -235,7 +248,7 @@ describe('a permission turned off', () => {
   });
 });
 
-describe('a private chat and the room', () => {
+describe('a direct message and the room', () => {
   beforeEach(() => {
     state.bot!.isPublicRoom = false;
   });
@@ -262,6 +275,77 @@ describe('a private chat and the room', () => {
   });
 });
 
+describe('a direct message that reached the bot over chat', () => {
+  const chatOf = (user: { id: string }, chatId: string, extra: { name?: string; isGuest?: boolean } = {}) => {
+    const row = state.users.find((candidate) => candidate.id === user.id)!;
+    Object.assign(row, { matrixChatId: chatId, ...extra });
+  };
+  const byChat = (chatId: string) => ask('dm', { signedIn: true, chatId });
+
+  it('finds whose chat account it is, decides as for them, and says who they are', async () => {
+    chatOf(USERS.sara, '@sara:chat.example', { name: 'Sara' });
+    join(USERS.sara);
+    expect(await byChat('@sara:chat.example')).toEqual({
+      allowed: true,
+      code: 'allowed',
+      reason: null,
+      person: { uuid: 'uuid-sara', name: 'Sara' },
+    });
+  });
+
+  it('follows the owner’s rules for that person, exactly as for the same person asking from the game', async () => {
+    chatOf(USERS.sara, '@sara:chat.example');
+    join(USERS.sara);
+    state.everyone = ZERO;
+    const fromChat = await byChat('@sara:chat.example');
+    const fromGame = (await ask('dm', signedIn(USERS.sara)))!;
+    expect(fromGame.allowed).toBe(false);
+    expect(fromChat).toMatchObject({ allowed: false, code: fromGame.code, reason: fromGame.reason });
+  });
+
+  it('refuses a chat account no Orbit account has', async () => {
+    expect(await byChat('@stranger:elsewhere.example')).toEqual({
+      allowed: false,
+      code: 'unknown_person',
+      reason: "You can't message Nora now.",
+    });
+  });
+
+  it('refuses a chat account two accounts claim, and names neither', async () => {
+    chatOf(USERS.sara, '@shared:chat.example');
+    chatOf(USERS.omar, '@shared:chat.example');
+    const answer = await byChat('@shared:chat.example');
+    expect(answer).toEqual({ allowed: false, code: 'shared_chat_id', reason: "You can't message Nora now." });
+  });
+
+  it('a guest account’s chat is a guest’s: it needs to sign in', async () => {
+    chatOf(USERS.omar, '@guest-omar:chat.example', { isGuest: true });
+    expect(await byChat('@guest-omar:chat.example')).toMatchObject({ allowed: false, code: 'sign_in_required' });
+  });
+
+  it('keeps out someone banned from the bot’s world, from chat and from the game, even the bot’s creator', async () => {
+    chatOf(USERS.sara, '@sara:chat.example');
+    join(USERS.sara);
+    state.bannedUserIds = [USERS.sara.id, USERS.nora.id];
+    expect(await byChat('@sara:chat.example')).toEqual({ allowed: false, code: 'banned', reason: "You can't message Nora now." });
+    expect(await ask('dm', signedIn(USERS.sara))).toMatchObject({ allowed: false, code: 'banned' });
+    expect(await ask('dm', signedIn(USERS.nora))).toMatchObject({ allowed: false, code: 'banned' });
+  });
+
+  it('a ban changes nothing for chatting nearby or summoning: being in the room is already decided', async () => {
+    join(USERS.sara);
+    state.bannedUserIds = [USERS.sara.id];
+    expect(await ask('chat', signedIn(USERS.sara))).toMatchObject({ allowed: true });
+    expect(await ask('summon', signedIn(USERS.sara))).toMatchObject({ allowed: true });
+  });
+
+  it('the bot’s creator reaches their own bot over chat', async () => {
+    chatOf(USERS.nora, '@nora:chat.example');
+    state.everyone = ZERO;
+    expect(await byChat('@nora:chat.example')).toMatchObject({ allowed: true, person: { uuid: 'uuid-nora' } });
+  });
+});
+
 describe('decideBotAccess', () => {
   const base = { action: 'chat' as BotAction, botName: 'Atlas', signedIn: true, passes: false, permissions: ZERO, canSeeRoom: true };
 
@@ -272,7 +356,7 @@ describe('decideBotAccess', () => {
     expect(decideBotAccess({ ...base, action: 'dm', signedIn: false }).reason).toBe('Sign in to message Atlas.');
   });
 
-  it('only asks about the room for a private chat', () => {
+  it('only asks about the room for a direct message', () => {
     const everyone = EVERYONE_DEFAULT_PERMISSIONS;
     expect(decideBotAccess({ ...base, permissions: everyone, canSeeRoom: false }).allowed).toBe(true);
     expect(decideBotAccess({ ...base, action: 'summon', permissions: everyone, canSeeRoom: false }).allowed).toBe(true);

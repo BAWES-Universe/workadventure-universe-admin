@@ -5,10 +5,11 @@ import { verdictFor, type RuleBits } from '@/lib/bot-rules';
 import { canSeeRoom } from '@/lib/room-visibility';
 import { findUserByIdentifier } from '@/lib/user-identifier';
 import { isSuperAdmin } from '@/lib/super-admin';
+import { bansCoveringWorld } from '@/lib/moderation';
 
 /**
- * Can this person do this with this bot? (#426) What people do with a bot: chat in its bubble on the map, message it
- * privately, or summon it. The bot server and the game ask this with the service token before they let it happen,
+ * Can this person do this with this bot? (#426) What people do with a bot: chat in its bubble on the map, send it
+ * direct messages, or summon it. The bot server and the game ask this with the service token before they let it happen,
  * and show `reason` when the answer is no.
  *
  * The answer comes from the role permissions in the bot's world (the same number the game gets, see permissionsForWorld),
@@ -29,12 +30,18 @@ const ACTION_PERMISSION: Record<BotAction, PermissionKey> = {
 export type BotAccessCode =
   /** Allowed. */
   | 'allowed'
-  /** A private chat needs an account. */
+  /** A direct message needs an account. */
   | 'sign_in_required'
   /** The roles this person has don't allow it. */
   | 'not_allowed'
-  /** A private chat with a bot in a room this person can't see. */
-  | 'no_room_access';
+  /** A direct message with a bot in a room this person can't see. */
+  | 'no_room_access'
+  /** A direct message from a chat account no Orbit account has. */
+  | 'unknown_person'
+  /** A direct message from a chat account two Orbit accounts claim: Orbit can't tell whose it is. */
+  | 'shared_chat_id'
+  /** A direct message from someone banned from the bot's world. */
+  | 'banned';
 
 export interface BotAccessAnswer {
   allowed: boolean;
@@ -43,6 +50,11 @@ export interface BotAccessAnswer {
   reason: string | null;
   /** The owner's own line for people who may not chat with the bot, only on a refused chat when the owner wrote one. */
   reply?: string;
+  /**
+   * Who the chat account belongs to, when the caller named the person by it: their WorkAdventure uuid and name, so
+   * the bot keeps one memory of them in its bubble and its chats. Only once Orbit has found exactly one account.
+   */
+  person?: { uuid: string; name: string | null };
 }
 
 const ALLOWED: BotAccessAnswer = { allowed: true, code: 'allowed', reason: null };
@@ -63,7 +75,7 @@ function refusal(
 }
 
 /**
- * The decision itself, from what was found out about the person. A private chat always needs sign-in, even for an
+ * The decision itself, from what was found out about the person. A direct message always needs sign-in, even for an
  * owner. The bot's creator, the universe's owner, super admins and Admin pass; everyone else needs the permission.
  */
 export function decideBotAccess(input: {
@@ -82,7 +94,7 @@ export function decideBotAccess(input: {
   roleRules?: readonly RuleBits[];
   /** What the owner wants refused people to hear when they chat nearby. */
   fixedReply?: string | null;
-  /** Whether they may see the bot's room: only a private chat asks. */
+  /** Whether they may see the bot's room: only a direct message asks. */
   canSeeRoom: boolean;
 }): BotAccessAnswer {
   const { action, botName } = input;
@@ -107,8 +119,15 @@ export interface BotAccessRequest {
     signedIn: boolean;
     /** Their WorkAdventure identifier: their email when signed in. */
     identifier?: string | null;
+    /**
+     * Their chat (Matrix) ID, for a direct message that reached the bot over chat, where the bot server knows nothing
+     * else about them. Orbit finds the one account that has it, and that account's guest flag decides signed in.
+     */
+    chatId?: string | null;
   };
 }
+
+const PERSON_SELECT = { id: true, uuid: true, email: true, name: true, isGuest: true } as const;
 
 /** The answer, or null when there is no such bot. */
 export async function checkBotAccess(request: BotAccessRequest): Promise<BotAccessAnswer | null> {
@@ -135,8 +154,32 @@ export async function checkBotAccess(request: BotAccessRequest): Promise<BotAcce
   if (!bot) return null;
   const { world } = bot.room;
 
-  // An account that signed in; a guest, or a signed-in person Orbit has no account for, has only what Everyone has
-  const user = person.signedIn && person.identifier ? await findUserByIdentifier(person.identifier) : null;
+  let user: { id: string; uuid: string; email: string | null; name: string | null; isGuest: boolean } | null;
+  let signedIn = person.signedIn;
+  let named: BotAccessAnswer['person'];
+  if (person.chatId) {
+    // The game saves the chat ID each player's client reports, so two accounts can claim one. Refuse rather than
+    // guess, or one person's words would reach the bot as someone else and land in the other's memory.
+    const owners = await prisma.user.findMany({ where: { matrixChatId: person.chatId }, take: 2, select: PERSON_SELECT });
+    if (owners.length === 0) return refusal('unknown_person', action, bot.name);
+    if (owners.length > 1) return refusal('shared_chat_id', action, bot.name);
+    user = owners[0].isGuest ? null : owners[0];
+    signedIn = !owners[0].isGuest;
+    named = { uuid: owners[0].uuid, name: owners[0].name };
+  } else {
+    // An account that signed in; a guest, or a signed-in person Orbit has no account for, has only what Everyone has
+    user = person.signedIn && person.identifier ? await findUserByIdentifier(person.identifier) : null;
+  }
+
+  // A direct message can come from anywhere, so a ban from the bot's world keeps it out too. Chatting nearby and
+  // summoning need the person in the room, which a ban already stops.
+  if (action === 'dm' && user) {
+    const ban = await prisma.ban.findFirst({
+      where: { AND: [bansCoveringWorld({ id: world.id, universeId: world.universeId }), { userId: user.id }] },
+      select: { id: true },
+    });
+    if (ban) return refusal('banned', action, bot.name);
+  }
   const membership = user
     ? await prisma.worldMember.findFirst({ where: { worldId: world.id, userId: user.id }, select: { tags: true } })
     : null;
@@ -154,10 +197,10 @@ export async function checkBotAccess(request: BotAccessRequest): Promise<BotAcce
   const personRule = user ? (rules.find((rule) => rule.userId === user.id) ?? null) : null;
   const roleRules = rules.filter((rule) => rule.roleId && roleIds.has(rule.roleId));
 
-  return decideBotAccess({
+  const answer = decideBotAccess({
     action,
     botName: bot.name,
-    signedIn: person.signedIn,
+    signedIn,
     passes: !!user && (bot.createdById === user.id || world.universe.ownerId === user.id || superAdmin),
     isAdmin: has(permissions, 'ADMINISTRATOR') || roles.some((role) => role.key === ADMIN_KEY) || worldTags.includes(ADMIN_KEY),
     permissions,
@@ -171,4 +214,5 @@ export async function checkBotAccess(request: BotAccessRequest): Promise<BotAcce
       new Set(membership ? [world.id] : []),
     ),
   });
+  return named ? { ...answer, person: named } : answer;
 }
