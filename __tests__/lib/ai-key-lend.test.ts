@@ -216,6 +216,15 @@ describe('a lend that allows only some models (#575)', () => {
     expect(db.bot.updateMany).not.toHaveBeenCalled();
   });
 
+  it('leaves a bot with no model of its own where it is when the lend already kept it off the check model', async () => {
+    // The lend allowed haiku and opus, not the check model, so the bot replies with haiku; keeping only haiku changes nothing for it
+    db.bot.findMany.mockResolvedValue([{ id: 'b3', name: 'Scout', aiModel: null, room: sandbox }]);
+    const options = { universeId: 'uni-1', allowed: ['claude-haiku-5-5'], firstAllowed: 'claude-haiku-5-5', actor: { id: 'maker', name: 'Mishari' } };
+    expect(await moveBotsToAllowedModel(key, { ...options, before: ['claude-haiku-5-5', 'claude-opus-5-5'] })).toEqual({ count: 0 });
+    expect(db.bot.updateMany).not.toHaveBeenCalled();
+    expect(notice).not.toHaveBeenCalled();
+  });
+
   it('tells nobody when it is your own universe, and moves nobody when every bot is on a kept model', async () => {
     db.bot.findMany.mockResolvedValue([{ id: 'b1', name: 'Guide', aiModel: 'claude-opus-5-5', room: sandbox }]);
     await moveBotsToAllowedModel(key, { universeId: 'uni-1', allowed: ['claude-haiku-5-5'], firstAllowed: 'claude-haiku-5-5', actor: { id: 'owner', name: 'Khalid' } });
