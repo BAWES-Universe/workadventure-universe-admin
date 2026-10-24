@@ -14,7 +14,7 @@ jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
 jest.mock('@/lib/db', () => ({
   prisma: {
     botsAiProvider: { findFirst: jest.fn() },
-    aiKeyLend: { upsert: jest.fn(), update: jest.fn(), findFirst: jest.fn(), deleteMany: jest.fn() },
+    aiKeyLend: { upsert: jest.fn(), update: jest.fn(), findUnique: jest.fn(), findFirst: jest.fn(), deleteMany: jest.fn() },
   },
 }));
 jest.mock('@/lib/ai-key-lend', () => ({
@@ -27,7 +27,7 @@ jest.mock('@/lib/ai-key-lend', () => ({
 jest.mock('@/lib/ai-key-model-list', () => ({ ...jest.requireActual('@/lib/ai-key-model-list'), keyModels: jest.fn() }));
 
 const key = prisma.botsAiProvider as unknown as { findFirst: jest.Mock };
-const lends = prisma.aiKeyLend as unknown as Record<'upsert' | 'update' | 'findFirst' | 'deleteMany', jest.Mock>;
+const lends = prisma.aiKeyLend as unknown as Record<'upsert' | 'update' | 'findUnique' | 'findFirst' | 'deleteMany', jest.Mock>;
 const alice = { id: 'user-a', uuid: 'uuid-a', email: 'a@example.com', name: 'Alice', tags: [], isSuperAdmin: false };
 
 const post = (body: unknown, id = 'key-1', headers: Record<string, string> = {}) =>
@@ -119,7 +119,16 @@ describe('POST /api/me/ai-keys/:id/lend', () => {
         allowed: ['claude-haiku-5-5', 'claude-opus-5-5'],
         firstAllowed: 'claude-haiku-5-5',
         actor: { id: 'user-a', name: 'Alice' },
+        before: null,
       });
+    });
+
+    it('tells the move which models the lend allowed before this save', async () => {
+      lends.findUnique.mockResolvedValue({ models: ['claude-haiku-5-5', 'claude-opus-5-5'] });
+      lends.upsert.mockResolvedValue({ models: ['claude-haiku-5-5'] });
+      await post({ universeId: 'uni-1', models: ['claude-haiku-5-5'] });
+      expect(moveBotsToAllowedModel).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ before: ['claude-haiku-5-5', 'claude-opus-5-5'] }));
+      expect(lends.findUnique.mock.invocationCallOrder[0]).toBeLessThan(lends.upsert.mock.invocationCallOrder[0]);
     });
 
     it('goes back to All models with null, and moves nobody', async () => {

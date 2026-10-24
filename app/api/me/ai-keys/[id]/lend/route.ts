@@ -62,11 +62,13 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     }
     const where = { providerId_universeId: { providerId: id, universeId } };
     const update = models === undefined ? {} : { models: models ?? Prisma.DbNull };
+    // What bots there reply with now is judged by the lend as it was, so only bots on a model taken out move
+    const before = models ? await prisma.aiKeyLend.findUnique({ where, select: { models: true } }) : null;
     // A change of a lend (`existing`) never lends again: one removed meanwhile, in another tab or by the universe, stays removed
     const saved = existing
       ? await prisma.aiKeyLend.update({ where, data: update, select: { models: true } })
       : await prisma.aiKeyLend.upsert({ where, create: { providerId: id, universeId, models: models ?? Prisma.DbNull }, update, select: { models: true } });
-    const moved = models ? await moveBotsToAllowedModel(key, { universeId, allowed: models, firstAllowed: firstForBots(models, key), actor: { id: user.id, name: user.name } }) : { count: 0 };
+    const moved = models ? await moveBotsToAllowedModel(key, { universeId, allowed: models, firstAllowed: firstForBots(models, key), actor: { id: user.id, name: user.name }, before: lendModels(before?.models) }) : { count: 0 };
     return respond(request, { status: 'lent', models: lendModels(saved.models), moved: moved.count }, 200);
   } catch (error) {
     // The key was revoked, or the universe deleted, between the checks above and the save
