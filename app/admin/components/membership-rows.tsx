@@ -15,10 +15,10 @@ export interface UniverseMembership {
   roles: { key: string; name: string; color: string; allWorlds: boolean; worldIds: string[] }[];
 }
 
-const month = (iso: string) => new Date(iso).toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+export const month = (iso: string) => new Date(iso).toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
 
 /** The worlds you're in there: one or two names, else a count; null when it has none. */
-function worldsIn(membership: UniverseMembership): string | null {
+export function worldsIn(membership: UniverseMembership): string | null {
   const inWorlds = membership.worlds.allWorlds
     ? membership.universe.worlds
     : membership.universe.worlds.filter((world) => membership.worlds.worldIds.includes(world.id));
