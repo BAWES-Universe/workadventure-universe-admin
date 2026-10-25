@@ -185,6 +185,11 @@ export function PlaceHero({
         ))}
       </dl>
       {rank}
+      {here && here.count === 0 && here.bots > 0 && (
+        <div className={styles.here}>
+          <span className="text-muted-foreground">{botsText(here.bots)} here now</span>
+        </div>
+      )}
       {here && here.count > 0 && (
         <div className={styles.here}>
           {here.people.length > 0 && <Faces here={here.people} />}
@@ -287,7 +292,7 @@ function RoomRow({ room }: { room: RoomRowData }) {
       <div className={styles.rowMain}>
         <Link href={`/admin/rooms/${room.id}`} className={styles.rowName}>{room.name}</Link>
         <span className={styles.rowSub}>
-          {room.here.count > 0 ? (
+          {room.here.count > 0 || room.here.bots > 0 ? (
             <>
               <span className={styles.live}>
                 <i className={styles.dot} />

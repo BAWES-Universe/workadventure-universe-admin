@@ -63,6 +63,8 @@ export interface LiveView {
   available: true;
   generatedAt: number;
   places: LivePlace[];
+  /** Rooms with only bots in them: the room, world and universe pages count them, Live now leaves them out. */
+  botRooms: LivePlace[];
   /** Each person once, at the place they went to last; you are left out. */
   people: (LivePerson & { place: Pick<LivePlace, 'roomId' | 'name' | 'world' | 'universe' | 'playPath'> })[];
 }
@@ -172,7 +174,7 @@ export async function buildLiveView(snapshot: PresenceSnapshot, viewer: SessionU
   }
 
   const keys = [...new Set([...usersByKey.keys(), ...visitorsByKey.keys()])].slice(0, MAX_ROOMS);
-  if (keys.length === 0) return { available: true, generatedAt: snapshot.generatedAt, places: [], people: [] };
+  if (keys.length === 0) return { available: true, generatedAt: snapshot.generatedAt, places: [], botRooms: [], people: [] };
 
   const rooms = await prisma.room.findMany({
     where: {
@@ -251,13 +253,14 @@ export async function buildLiveView(snapshot: PresenceSnapshot, viewer: SessionU
   }
 
   const places: LivePlace[] = [];
+  const botRooms: LivePlace[] = [];
   const latest = new Map<string, { since: number; place: LivePlace }>();
   for (const room of visibleRooms) {
     const key = slugKey(room.world.universe.slug, room.world.slug, room.slug);
     const entries = (usersByKey.get(key) ?? []).filter((entry) => shown.has(entry.uuid));
     const visitors = visitorsByKey.get(key) ?? { guests: 0, bots: 0 };
     const count = entries.length + visitors.guests;
-    if (count === 0) continue;
+    if (count === 0 && visitors.bots === 0) continue;
     const place: LivePlace = {
       roomId: room.id,
       name: room.name,
@@ -272,6 +275,10 @@ export async function buildLiveView(snapshot: PresenceSnapshot, viewer: SessionU
       people: [...entries].sort((a, b) => b.since - a.since).map((entry) => shown.get(entry.uuid)!),
       here: entries.some((entry) => entry.uuid === viewer.uuid),
     };
+    if (count === 0) {
+      botRooms.push(place);
+      continue;
+    }
     places.push(place);
     for (const entry of entries) {
       const seen = latest.get(entry.uuid);
@@ -289,5 +296,5 @@ export async function buildLiveView(snapshot: PresenceSnapshot, viewer: SessionU
   }
   peopleOnline.sort((a, b) => a.name.localeCompare(b.name));
 
-  return { available: true, generatedAt: snapshot.generatedAt, places, people: peopleOnline };
+  return { available: true, generatedAt: snapshot.generatedAt, places, botRooms, people: peopleOnline };
 }

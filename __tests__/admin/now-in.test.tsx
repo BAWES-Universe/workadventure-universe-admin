@@ -34,6 +34,7 @@ const view: LiveView = {
   available: true,
   generatedAt: 1,
   places: [hall, hq],
+  botRooms: [],
   people: [
     { ...person('omar'), place: at(hq) },
     { ...person('dana'), place: at(hall) },

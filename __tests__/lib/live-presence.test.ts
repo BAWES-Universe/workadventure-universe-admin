@@ -98,9 +98,11 @@ describe('buildLiveView', () => {
     expect(lobby.people.map((person) => person.uuid)).toEqual(['sara', 'me']);
   });
 
-  it('leaves out a room with only bots in it, as the Discord report does', async () => {
+  it('keeps a room with only bots apart from Live now, for the place pages', async () => {
     const view = await buildLiveView(snapshot(), viewer);
     expect(view.places.map((place) => place.name)).not.toContain('Workshop');
+    expect(view.botRooms).toHaveLength(1);
+    expect(view.botRooms[0]).toMatchObject({ name: 'Workshop', count: 0, guests: 0, bots: 3, here: false });
   });
 
   it('still honours the older "hide where I am" switch', async () => {

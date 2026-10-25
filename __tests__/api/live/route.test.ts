@@ -32,7 +32,7 @@ it('answers with what you may see', async () => {
   (getSessionUser as jest.Mock).mockResolvedValue(me);
   const snapshot = { generatedAt: 1, users: [], rooms: {} };
   (fetchPresenceSnapshot as jest.Mock).mockResolvedValue(snapshot);
-  (buildLiveView as jest.Mock).mockResolvedValue({ available: true, generatedAt: 1, places: [], people: [] });
+  (buildLiveView as jest.Mock).mockResolvedValue({ available: true, generatedAt: 1, places: [], botRooms: [], people: [] });
   const response = await GET(request());
   expect(buildLiveView).toHaveBeenCalledWith(snapshot, me);
   expect((await response.json()).available).toBe(true);
@@ -52,7 +52,7 @@ describe('from the game', () => {
   it("answers the game's own origin, with its CORS headers", async () => {
     (getSessionUser as jest.Mock).mockResolvedValue(me);
     (fetchPresenceSnapshot as jest.Mock).mockResolvedValue({ generatedAt: 1, users: [], rooms: {} });
-    (buildLiveView as jest.Mock).mockResolvedValue({ available: true, generatedAt: 1, places: [], people: [] });
+    (buildLiveView as jest.Mock).mockResolvedValue({ available: true, generatedAt: 1, places: [], botRooms: [], people: [] });
     const response = await GET(from(PLAY));
     expect(response.status).toBe(200);
     expect(response.headers.get('Access-Control-Allow-Origin')).toBe(PLAY);
