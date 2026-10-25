@@ -4,8 +4,9 @@ import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 /**
- * Get started, once hidden, can be shown again from You's settings, while any of its steps is left. That row is
- * all Settings holds now: Appearance, Sharing and Sign out moved to the Orbit menu.
+ * Get started, once hidden, can be shown again from a row at the end of You, while any of its steps is left. You has
+ * no Settings heading: AI keys is a card under the profile (#605), and Appearance, Sharing and Sign out moved to the
+ * Orbit menu.
  */
 
 jest.mock('next/navigation', () => ({
@@ -68,7 +69,7 @@ describe('You: Get started comes back', () => {
     expect(screen.queryByRole('button', { name: 'Show' })).toBeNull();
   });
 
-  it('after Hide, Settings shows it again, saved for every device, and scrolls up to it', async () => {
+  it('after Hide, the row at the end shows it again, saved for every device, and scrolls up to it', async () => {
     stored(false);
     render(<YouPage />);
     fireEvent.click(await screen.findByRole('button', { name: 'Hide' }));
@@ -101,12 +102,12 @@ describe('You: Get started comes back', () => {
     expect(screen.queryByRole('button', { name: /Sign out/ })).toBeNull();
   });
 
-  it('holds only the AI keys row in Settings while Get started shows', async () => {
+  it('has no Settings heading: AI keys is a card that opens the AI keys page', async () => {
     stored(false);
     render(<YouPage />);
     await screen.findByTestId('get-started');
-    expect(screen.getByRole('heading', { name: 'Settings' })).toBeTruthy();
-    expect(screen.getByTestId('ai-keys-row').getAttribute('href')).toBe('/admin/you/ai-keys');
+    expect(screen.queryByRole('heading', { name: 'Settings' })).toBeNull();
+    expect(screen.getByTestId('ai-keys-card').getAttribute('href')).toBe('/admin/you/ai-keys');
     expect(screen.queryByRole('button', { name: 'Show' })).toBeNull();
   });
 
