@@ -38,7 +38,7 @@ it('lists each universe you joined with your roles there, highest first, and whe
       joinedAt: new Date('2026-10-01T00:00:00Z'),
       allWorlds: true,
       worldIds: [],
-      universe: { id: 'u1', name: 'BAWES', ownerId: 'someone', isPublic: true, createdAt: new Date(), worlds },
+      universe: { id: 'u1', name: 'BAWES', ownerId: 'someone', isPublic: true, createdAt: new Date('2025-06-01T00:00:00Z'), worlds },
       roles: [
         { allWorlds: true, worldIds: [], role: { key: 'accountant', name: 'Accountant', color: '#34D399', position: 12 } },
         { allWorlds: false, worldIds: ['hq'], role: { key: 'editor', name: 'Editor', color: '#60A5FA', position: 2 } },
@@ -49,7 +49,7 @@ it('lists each universe you joined with your roles there, highest first, and whe
   const body = await (await call()).json();
   expect(body.universes).toHaveLength(1);
   const [membership] = body.universes;
-  expect(membership.universe).toEqual({ id: 'u1', name: 'BAWES', worlds: shown });
+  expect(membership.universe).toEqual({ id: 'u1', name: 'BAWES', createdAt: '2025-06-01T00:00:00.000Z', worlds: shown });
   expect(membership.isOwner).toBe(false);
   expect(membership.worlds).toEqual({ allWorlds: true, worldIds: [] });
   expect(membership.roles.map((role: { name: string }) => role.name)).toEqual(['Moderator', 'Accountant', 'Editor']);
@@ -62,7 +62,7 @@ it('lists a universe you own even when you never joined it, as the owner everywh
   db.universe.findMany.mockResolvedValue([{ id: 'u2', name: 'Mine', ownerId: 'me', isPublic: false, createdAt: new Date('2026-01-01T00:00:00Z'), worlds }]);
   const body = await (await call()).json();
   expect(body.universes).toHaveLength(1);
-  expect(body.universes[0]).toMatchObject({ universe: { id: 'u2' }, isOwner: true, worlds: { allWorlds: true }, roles: [] });
+  expect(body.universes[0]).toMatchObject({ universe: { id: 'u2', createdAt: '2026-01-01T00:00:00.000Z' }, isOwner: true, worlds: { allWorlds: true }, roles: [] });
 });
 
 it('lists an owned universe once when you also joined it', async () => {

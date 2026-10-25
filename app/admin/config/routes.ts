@@ -65,6 +65,7 @@ export const ROUTES: RouteDefinition[] = [
   // You
   { pattern: '/admin/profile', title: 'Profile', parent: '/admin/you' },
   { pattern: '/admin/sharing', title: 'Sharing', parent: '/admin/you' },
+  { pattern: '/admin/you/passport', title: 'Your passport', parent: '/admin/you' },
   { pattern: '/admin/you/ai-keys', title: 'AI keys', parent: '/admin/you' },
   { pattern: '/admin/you/ai-keys/new', title: 'Add a key', parent: '/admin/you/ai-keys' },
 
