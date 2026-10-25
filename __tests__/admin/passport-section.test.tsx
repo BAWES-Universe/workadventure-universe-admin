@@ -198,6 +198,32 @@ describe('Your activity', () => {
     expect(within(section).queryByRole('link', { name: /You starred HQ Lobby/ })).toBeNull();
   });
 
+  it('on You shows the latest three, with View all for the rest; the full page shows every one', async () => {
+    const at = new Date(Date.now() - 3600_000).toISOString();
+    answer({ events: ['a', 'b', 'c', 'd', 'e'].map((id) => ({ id, kind: 'star', text: `You starred room ${id}`, at, href: null })) });
+    const onYou = render(<ActivitySection limit={3} />);
+    const section = await screen.findByTestId('activity');
+    expect(within(section).getAllByRole('listitem')).toHaveLength(3);
+    expect(within(section).getByText('You starred room a')).toBeTruthy();
+    expect(within(section).getByRole('link', { name: 'View all' }).getAttribute('href')).toBe('/admin/you/activity');
+    onYou.unmount();
+
+    render(<ActivitySection bare />);
+    const full = await screen.findByTestId('activity');
+    expect(within(full).getAllByRole('listitem')).toHaveLength(5);
+    expect(within(full).queryByRole('link', { name: 'View all' })).toBeNull();
+    expect(within(full).queryByRole('heading')).toBeNull();
+  });
+
+  it('has no View all when every activity already shows', async () => {
+    const at = new Date(Date.now() - 3600_000).toISOString();
+    answer({ events: ['a', 'b'].map((id) => ({ id, kind: 'star', text: `You starred room ${id}`, at, href: null })) });
+    render(<ActivitySection limit={3} />);
+    const section = await screen.findByTestId('activity');
+    expect(within(section).getAllByRole('listitem')).toHaveLength(2);
+    expect(within(section).queryByRole('link', { name: 'View all' })).toBeNull();
+  });
+
   it('is left out when nothing happened yet, or it cannot be read', async () => {
     answer({ events: [] });
     const { container, unmount } = render(<ActivitySection />);

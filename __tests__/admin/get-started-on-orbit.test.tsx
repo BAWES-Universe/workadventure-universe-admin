@@ -6,8 +6,8 @@ import { GetStartedOnOrbit } from '@/app/admin/components/orbit/get-started-on-o
 import { AdminBootstrapProvider, type AdminBootstrap } from '@/app/admin/admin-bootstrap-context';
 
 /**
- * Get started at the top of Orbit: the whole checklist when nothing is done, one line with the next step once something
- * is, nothing when every step is done or it was hidden.
+ * Get started on Orbit, under the timeline: the whole checklist when nothing is done, one line with the next step once
+ * something is, nothing when every step is done. Hidden, it leaves one row that brings it back while a step is left.
  */
 
 jest.mock('next/link', () => ({
@@ -89,7 +89,7 @@ describe('Get started on Orbit', () => {
     expect(within(strip).getByRole('link', { name: /Invite a member/ }).getAttribute('href')).toBe('/admin/worlds/w1?tab=members');
   });
 
-  it('Hide saves it for the account, on Orbit and You together, and removes the line', async () => {
+  it('Hide saves it for the account and removes the line', async () => {
     serve({ bio: 'Hello' });
     show(MINE_NONE);
     const strip = await screen.findByTestId('get-started-strip');
@@ -101,13 +101,57 @@ describe('Get started on Orbit', () => {
     });
   });
 
-  it('shows nothing when it was hidden before, and asks the profile and lists for nothing', async () => {
-    serve({ hidden: true });
-    const { container } = show(MINE_NONE);
-    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
-    await new Promise((resolve) => setTimeout(resolve, 0));
+  it('hidden before, it leaves only the row that brings it back; Show brings it back for the account and scrolls to it', async () => {
+    Element.prototype.scrollIntoView = jest.fn();
+    serve({ hidden: true, bio: 'Hello' });
+    show(MINE_NONE);
+    const row = await screen.findByTestId('get-started-hidden');
+    expect(row.textContent).toContain('Your first steps, hidden for now.');
+    expect(screen.queryByTestId('get-started-strip')).toBeNull();
+    fireEvent.click(within(row).getByRole('button', { name: 'Show' }));
+    expect(await screen.findByTestId('get-started-strip')).toBeTruthy();
+    expect(screen.queryByTestId('get-started-hidden')).toBeNull();
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/me/preferences', {
+      method: 'PUT',
+      body: JSON.stringify({ key: 'guidance.dismissed.getStarted', value: { hidden: false } }),
+    });
+    await waitFor(() => expect(Element.prototype.scrollIntoView).toHaveBeenCalled());
+  });
+
+  it('after Hide, the row that brings it back shows at once', async () => {
+    serve({ bio: 'Hello' });
+    show(MINE_NONE);
+    fireEvent.click(within(await screen.findByTestId('get-started-strip')).getByRole('button', { name: 'Hide' }));
+    expect(await screen.findByTestId('get-started-hidden')).toBeTruthy();
+  });
+
+  it('offers no way back once every step is done', async () => {
+    serve({
+      hidden: true,
+      bio: 'Hello',
+      universes: [{ id: 'u1', name: 'BAWES', isPublic: true }],
+      memberships: [{ id: 'm1', tags: ['admin'], isUniverseOwner: true, world: { id: 'w1', name: 'HQ', universe: { name: 'BAWES' } } }],
+      stars: [{ id: 'r1' }],
+    });
+    const { container } = show({ universes: 1, worlds: 1, ownedWorlds: 1, invitationsSent: 1, stars: 1, invitations: 0 });
+    await waitFor(() => expect(fetchMock.mock.calls.some((call) => String(call[0]).startsWith('/api/admin/profile'))).toBe(true));
+    await new Promise((resolve) => setTimeout(resolve, 20));
     expect(container.textContent).toBe('');
-    expect(fetchMock.mock.calls.map((call) => String(call[0]).split('?')[0])).toEqual(['/api/me/preferences']);
+  });
+
+  it('does not flash the row while the profile is still unknown', async () => {
+    let answer: (value: unknown) => void = () => undefined;
+    fetchMock.mockImplementation((url: string) => {
+      const path = url.split('?')[0];
+      if (path === '/api/me/preferences') return ok({ preferences: { 'guidance.dismissed.getStarted': { hidden: true } } });
+      if (path === '/api/admin/profile') return new Promise((resolve) => (answer = resolve));
+      return ok({});
+    });
+    const { container } = show(MINE_NONE);
+    await waitFor(() => expect(fetchMock.mock.calls.some((call) => String(call[0]).startsWith('/api/admin/profile'))).toBe(true));
+    expect(container.textContent).toBe('');
+    answer({ ok: true, json: () => Promise.resolve({ bio: '', links: [] }) });
+    expect(await screen.findByTestId('get-started-hidden')).toBeTruthy();
   });
 
   it('shows nothing when every step is done', async () => {

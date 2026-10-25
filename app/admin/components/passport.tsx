@@ -145,8 +145,11 @@ export function PassportSection({ userId, name, small = false, bare = false }: {
   );
 }
 
-/** Your activity: what happened to you lately. Only you see it. */
-export function ActivitySection() {
+/**
+ * Your activity: what happened to you lately. Only you see it. On You, `limit` shows the latest few with View all for
+ * the rest; `bare` leaves out the heading for the page that has its own.
+ */
+export function ActivitySection({ limit, bare = false }: { limit?: number; bare?: boolean } = {}) {
   const [events, setEvents] = useState<ActivityEvent[] | null>(null);
   useEffect(() => {
     let cancelled = false;
@@ -165,18 +168,27 @@ export function ActivitySection() {
   }, []);
   if (!events || events.length === 0) return null;
   return (
-    <section className={styles.section} aria-labelledby="activity-heading" data-testid="activity">
+    <section className={styles.section} aria-labelledby={bare ? undefined : 'activity-heading'} aria-label={bare ? 'Your activity' : undefined} data-testid="activity">
       <div className={styles.head}>
-        <h2 id="activity-heading" className="orbit-display">
-          Your activity
-        </h2>
+        {!bare && (
+          <div className={styles.headRow}>
+            <h2 id="activity-heading" className="orbit-display">
+              Your activity
+            </h2>
+            {limit !== undefined && events.length > limit && (
+              <Link href="/admin/you/activity" className={`orbit-press ${dsStyles.sectionAction}`} data-testid="activity-all">
+                View all
+              </Link>
+            )}
+          </div>
+        )}
         <span className={styles.visible}>
           <Lock size={13} aria-hidden="true" /> Only you can see this
         </span>
       </div>
       <div className={styles.card} style={{ paddingTop: 6, paddingBottom: 6 }}>
         <ul className={styles.events}>
-          {events.map((event) => {
+          {(limit === undefined ? events : events.slice(0, limit)).map((event) => {
             const Icon = KIND_ICON[event.kind];
             const body = (
               <>

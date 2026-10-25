@@ -1,12 +1,12 @@
 /** @jest-environment jsdom */
 
 import React from 'react';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 
 /**
- * Get started, once hidden, can be shown again from a row at the end of You, while any of its steps is left. You has
- * no Settings heading: AI keys is a card under the profile (#605), and Appearance, Sharing and Sign out moved to the
- * Orbit menu.
+ * You after Orbit #606: the profile, AI keys, the passport and your latest activity. Get started, your universes,
+ * memberships and stars are on Orbit. You has no Settings heading: AI keys is a card under the profile (#605), and
+ * Appearance, Sharing and Sign out moved to the Orbit menu.
  */
 
 jest.mock('next/navigation', () => ({
@@ -14,88 +14,58 @@ jest.mock('next/navigation', () => ({
   useRouter: () => ({ replace: jest.fn() }),
 }));
 jest.mock('@/app/admin/components/profile-card', () => ({ ProfileCard: () => null }));
-jest.mock('@/app/admin/components/passport', () => ({ PassportSection: () => null, ActivitySection: () => null }));
+const activityProps = jest.fn();
+jest.mock('@/app/admin/components/passport', () => ({
+  PassportSection: () => null,
+  ActivitySection: (props: { limit?: number }) => {
+    activityProps(props);
+    return <section data-testid="activity" />;
+  },
+}));
 jest.mock('@/app/admin/admin-bootstrap-context', () => ({
   useAdminBootstrap: () => ({ user: { id: 'u', uuid: 'u', name: 'Me', email: null, tags: [], isSuperAdmin: false }, mine: null }),
 }));
-
-// Stands in for What's yours: the card and its Hide, as Yours draws them from what You hands down.
-let allDone = false;
-// True while the profile answer hasn't come in, so Yours can't tell yet whether every step is done.
-let progressUnknown = false;
-jest.mock('@/app/admin/components/yours', () => {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { useEffect } = require('react') as typeof import('react');
-  function MockYours({ getStarted }: { getStarted: { hidden: boolean | null; hide: () => void; onAllDone?: (done: boolean | null) => void } }) {
-    useEffect(() => getStarted.onAllDone?.(progressUnknown ? null : allDone), [getStarted]);
-    return getStarted.hidden === false && !allDone ? (
-      <section data-testid="get-started">
-        <h2 id="get-started-heading">Get started</h2>
-        <button type="button" onClick={getStarted.hide}>
-          Hide
-        </button>
-      </section>
-    ) : null;
-  }
-  return { __esModule: true, default: MockYours };
-});
 
 const fetchMock = jest.fn();
 jest.mock('@/lib/client-auth', () => ({ authenticatedFetch: (...args: unknown[]) => fetchMock(...args) }));
 
 import YouPage from '@/app/admin/you/page';
 
-function stored(hidden: boolean) {
-  fetchMock.mockImplementation((_url: string, init?: RequestInit) =>
-    Promise.resolve({
-      ok: true,
-      json: () => Promise.resolve(init?.method === 'PUT' ? {} : { preferences: { 'guidance.dismissed.getStarted': { hidden } } }),
-    }),
-  );
-}
-
 beforeEach(() => {
   fetchMock.mockReset();
-  allDone = false;
-  progressUnknown = false;
-  Element.prototype.scrollIntoView = jest.fn();
+  fetchMock.mockImplementation(() =>
+    Promise.resolve({ ok: true, json: () => Promise.resolve({ preferences: { 'guidance.dismissed.getStarted': { hidden: true } } }) }),
+  );
+  activityProps.mockReset();
 });
 
-describe('You: Get started comes back', () => {
-  it('offers nothing in settings while Get started shows', async () => {
-    stored(false);
+describe('You after the move to Orbit', () => {
+  it('shows the latest three activities, with View all for the rest', async () => {
     render(<YouPage />);
-    await screen.findByTestId('get-started');
-    expect(screen.queryByRole('button', { name: 'Show' })).toBeNull();
+    await screen.findByTestId('activity');
+    expect(activityProps).toHaveBeenCalledWith({ limit: 3 });
   });
 
-  it('after Hide, the row at the end shows it again, saved for every device, and scrolls up to it', async () => {
-    stored(false);
+  it('carries no Get started, and no row to bring it back: both are on Orbit', async () => {
     render(<YouPage />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Hide' }));
-    expect(screen.queryByTestId('get-started')).toBeNull();
-
-    fireEvent.click(await screen.findByRole('button', { name: 'Show' }));
-    await screen.findByTestId('get-started');
+    await screen.findByTestId('activity');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.queryByText('Get started')).toBeNull();
     expect(screen.queryByRole('button', { name: 'Show' })).toBeNull();
-    expect(fetchMock).toHaveBeenLastCalledWith('/api/me/preferences', {
-      method: 'PUT',
-      body: JSON.stringify({ key: 'guidance.dismissed.getStarted', value: { hidden: false } }),
-    });
-    await waitFor(() => expect(Element.prototype.scrollIntoView).toHaveBeenCalled());
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('guidance.dismissed.getStarted'))).toBe(false);
   });
 
-  it('shows the way back on a later visit too, when it was hidden before', async () => {
-    stored(true);
+  it('carries no universes, memberships or stars', async () => {
     render(<YouPage />);
-    expect(await screen.findByRole('button', { name: 'Show' })).toBeTruthy();
-    expect(screen.getByText('Get started')).toBeTruthy();
+    await screen.findByTestId('activity');
+    expect(screen.queryByText('Your universes')).toBeNull();
+    expect(screen.queryByText('Memberships')).toBeNull();
+    expect(screen.queryByText('Stars')).toBeNull();
   });
 
   it('no longer carries Appearance, Sharing or Sign out: they live in the Orbit menu', async () => {
-    stored(true);
     render(<YouPage />);
-    await screen.findByRole('button', { name: 'Show' });
+    await screen.findByTestId('activity');
     expect(screen.queryByText('Appearance')).toBeNull();
     expect(screen.queryByText('Sharing')).toBeNull();
     expect(screen.queryByText('Account')).toBeNull();
@@ -103,30 +73,8 @@ describe('You: Get started comes back', () => {
   });
 
   it('has no Settings heading: AI keys is a card that opens the AI keys page', async () => {
-    stored(false);
     render(<YouPage />);
-    await screen.findByTestId('get-started');
+    await waitFor(() => expect(screen.getByTestId('ai-keys-card').getAttribute('href')).toBe('/admin/you/ai-keys'));
     expect(screen.queryByRole('heading', { name: 'Settings' })).toBeNull();
-    expect(screen.getByTestId('ai-keys-card').getAttribute('href')).toBe('/admin/you/ai-keys');
-    expect(screen.queryByRole('button', { name: 'Show' })).toBeNull();
-  });
-
-  it('does not flash the Show row while it is still unknown whether every step is done', async () => {
-    stored(true);
-    allDone = true;
-    progressUnknown = true;
-    render(<YouPage />);
-    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(screen.queryByRole('button', { name: 'Show' })).toBeNull();
-  });
-
-  it('offers nothing once every step is done', async () => {
-    stored(true);
-    allDone = true;
-    render(<YouPage />);
-    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(screen.queryByRole('button', { name: 'Show' })).toBeNull();
   });
 });
