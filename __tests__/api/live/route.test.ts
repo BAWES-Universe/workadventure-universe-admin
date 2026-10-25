@@ -7,7 +7,7 @@ jest.mock('@/lib/live-presence', () => ({ fetchPresenceSnapshot: jest.fn(), buil
 import { NextRequest } from 'next/server';
 import { getSessionUser } from '@/lib/auth-session';
 import { buildLiveView, fetchPresenceSnapshot } from '@/lib/live-presence';
-import { GET } from '@/app/api/live/route';
+import { GET, OPTIONS } from '@/app/api/live/route';
 
 const request = () => new NextRequest('http://orbit.test/api/live');
 const me = { id: 'u-me', uuid: 'me', email: null, name: 'Me', tags: [], isSuperAdmin: false };
@@ -36,4 +36,34 @@ it('answers with what you may see', async () => {
   const response = await GET(request());
   expect(buildLiveView).toHaveBeenCalledWith(snapshot, me);
   expect((await response.json()).available).toBe(true);
+});
+
+describe('from the game', () => {
+  const PLAY = 'https://play.example';
+  const saved = process.env.NEXT_PUBLIC_PLAY_URL;
+  beforeAll(() => {
+    process.env.NEXT_PUBLIC_PLAY_URL = PLAY;
+  });
+  afterAll(() => {
+    process.env.NEXT_PUBLIC_PLAY_URL = saved;
+  });
+  const from = (origin: string, method = 'GET') => new NextRequest('http://orbit.test/api/live', { method, headers: { Origin: origin } });
+
+  it("answers the game's own origin, with its CORS headers", async () => {
+    (getSessionUser as jest.Mock).mockResolvedValue(me);
+    (fetchPresenceSnapshot as jest.Mock).mockResolvedValue({ generatedAt: 1, users: [], rooms: {} });
+    (buildLiveView as jest.Mock).mockResolvedValue({ available: true, generatedAt: 1, places: [], people: [] });
+    const response = await GET(from(PLAY));
+    expect(response.status).toBe(200);
+    expect(response.headers.get('Access-Control-Allow-Origin')).toBe(PLAY);
+    expect((await OPTIONS(from(PLAY, 'OPTIONS'))).status).toBe(204);
+  });
+
+  it('refuses any other origin before reading anything', async () => {
+    (getSessionUser as jest.Mock).mockResolvedValue(me);
+    expect((await GET(from('https://evil.example'))).status).toBe(403);
+    expect((await OPTIONS(from('https://evil.example', 'OPTIONS'))).status).toBe(403);
+    expect(getSessionUser).not.toHaveBeenCalled();
+    expect(fetchPresenceSnapshot).not.toHaveBeenCalled();
+  });
 });
