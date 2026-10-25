@@ -224,6 +224,30 @@ describe('Your memberships on Orbit', () => {
     expect(await screen.findByText('Plugn')).toBeTruthy();
   });
 
+  it('says which roles an accepted invitation could not bring, and nothing when it brought them all', async () => {
+    const invitations = { invitations: [{ id: 'i1', tags: ['member'], world: { id: 'w3', name: 'Studio', universe: { name: 'Plugn' } }, invitedBy: { name: 'Sara', email: null } }] };
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (init?.method === 'POST') return ok({ rolesNotGiven: ['Accountant'] });
+      return ok(url.split('?')[0] === '/api/memberships/my/universes' ? { universes: [] } : invitations);
+    });
+    const { unmount } = render(<MembershipsRow />);
+    fireEvent.click(within(await screen.findByTestId('invitation')).getByRole('button', { name: 'Accept' }));
+    const notice = await screen.findByRole('status');
+    expect(notice.textContent).toContain('You joined without Accountant.');
+    expect(notice.textContent).toContain('Ask an Admin of Plugn to give it to you.');
+    unmount();
+
+    fetchMock.mockReset();
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (init?.method === 'POST') return ok({});
+      return ok(url.split('?')[0] === '/api/memberships/my/universes' ? { universes: [] } : invitations);
+    });
+    render(<MembershipsRow />);
+    fireEvent.click(within(await screen.findByTestId('invitation')).getByRole('button', { name: 'Accept' }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/memberships/invitations/i1/accept', { method: 'POST' }));
+    expect(screen.queryByRole('status')).toBeNull();
+  });
+
   it('keeps an accepted invitation until the new membership has loaded, so the row never reads empty between', async () => {
     let joined = false;
     let answerMemberships: () => void = () => undefined;

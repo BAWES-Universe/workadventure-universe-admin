@@ -131,7 +131,7 @@ export function AiKeysCard() {
       status={
         <span className="flex items-center gap-1.5 text-[13px] font-semibold" data-testid="ai-keys-card-status">
           <Dot down={down > 0} />
-          <span className={down > 0 ? 'text-[#F5C451]' : undefined}>{down > 0 ? `${down} down` : keys.length === 1 ? 'Working' : 'All working'}</span>
+          <span className={down > 0 ? 'text-[#92400E] dark:text-[#F5C451]' : undefined}>{down > 0 ? `${down} down` : keys.length === 1 ? 'Working' : 'All working'}</span>
         </span>
       }
     >
@@ -142,7 +142,7 @@ export function AiKeysCard() {
               <ProviderLogo info={key.kind ? kindInfo(key.kind) : undefined} size={22} slot={28} />
               <strong className="min-w-0 flex-1 truncate text-[15px] font-semibold">{key.name}</strong>
               {key.status === 'down' && (
-                <span className="inline-flex h-[22px] items-center gap-1.5 whitespace-nowrap rounded-full border border-[rgb(245_196_81/0.55)] px-2.5 text-[11px] font-semibold text-[#F5C451]">
+                <span className="inline-flex h-[22px] items-center gap-1.5 whitespace-nowrap rounded-full border border-[rgb(245_196_81/0.55)] px-2.5 text-[11px] font-semibold text-[#92400E] dark:text-[#F5C451]">
                   <Dot down />
                   Down
                 </span>

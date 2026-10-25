@@ -15,7 +15,7 @@ export interface UniverseMembership {
   roles: { key: string; name: string; color: string; allWorlds: boolean; worldIds: string[] }[];
 }
 
-export const month = (iso: string) => new Date(iso).toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+export const month = (iso: string) => new Date(iso).toLocaleDateString('en-US', { month: 'short', year: 'numeric', timeZone: 'UTC' });
 
 /** The worlds you're in there: one or two names, else a count; null when it has none. */
 export function worldsIn(membership: UniverseMembership): string | null {

@@ -57,7 +57,7 @@ describe('sending a notification', () => {
     const [subscription, payload, options] = send.mock.calls[0];
     expect(subscription).toEqual({ endpoint: devices[0].endpoint, keys: { p256dh: 'p1', auth: 'a1' } });
     expect(JSON.parse(payload)).toEqual(message);
-    expect(options).toMatchObject({ TTL: 86400, urgency: 'normal', topic: pushTopic(message.tag) });
+    expect(options).toMatchObject({ TTL: 86400, urgency: 'normal', topic: pushTopic(message.tag), timeout: 10_000 });
     expect(prisma.pushDevice.updateMany).toHaveBeenCalledWith({ where: { id: { in: ['d1', 'd2'] } }, data: { lastNotifiedAt: expect.any(Date) } });
   });
 

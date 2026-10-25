@@ -41,11 +41,15 @@ const record = (value: unknown): Record<string, unknown> | null =>
   typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 const text = (value: unknown): string | null => (typeof value === 'string' && value.length > 0 ? value : null);
 
+/** Synapse sends one device per notification; a body with many is not from it. */
+const MAX_DEVICES = 20;
+
 export function readNotification(body: unknown): GatewayNotification | null {
   const notification = record(record(body)?.notification);
   if (!notification || !Array.isArray(notification.devices)) return null;
   const devices: GatewayDevice[] = [];
   for (const item of notification.devices) {
+    if (devices.length >= MAX_DEVICES) break;
     const device = record(item);
     const pushkey = text(device?.pushkey);
     if (device && pushkey && device.app_id === PUSH_APP_ID) {

@@ -3,6 +3,7 @@
 import React from 'react';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import MyMembershipsPage from '@/app/admin/memberships/page';
+import { month } from '@/app/admin/components/membership-rows';
 import { clearSummaryCache } from '@/app/admin/hooks/use-room-analytics';
 
 jest.mock('next/link', () => ({
@@ -136,6 +137,11 @@ describe('Memberships', () => {
       { key: 'editor', name: 'Editor', color: '#60A5FA', allWorlds: false, worldIds: ['hq'] },
     ],
   };
+
+  it('names the month the date was set in, whatever time zone the browser is in', () => {
+    expect(month('2026-10-01T00:00:00Z')).toBe('Oct 2026');
+    expect(month('2025-12-31T23:59:59Z')).toBe('Dec 2025');
+  });
 
   it('lists your universes with your roles there and where each works, and says you join a universe once', async () => {
     fetchMock.mockImplementation((url: string) => {

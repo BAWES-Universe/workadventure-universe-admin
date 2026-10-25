@@ -26,4 +26,5 @@
 .loading { min-height: 132px; }
 .universe.loading { min-height: 226px; border: 1px solid hsl(var(--border)); border-radius: 16px; background: hsl(var(--card)); }
 .error { padding: 8px 0; font-size: 12px; color: hsl(var(--destructive)); }
+.notice { padding: 8px 0; font-size: 12px; color: hsl(var(--muted-foreground)); }
 @media (prefers-reduced-motion: reduce) { .card { transition: none; } }

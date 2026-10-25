@@ -185,6 +185,15 @@ describe('one of our bots', () => {
   });
 });
 
+describe('reading the gateway body', () => {
+  it('takes at most 20 devices, so a big body cannot force a big query', () => {
+    const many = Array.from({ length: 500 }, (_, index) => ({ app_id: 'net.bawes.universe.web', pushkey: `d${index}`, data: {}, tweaks: {} }));
+    const read = readNotification({ notification: { devices: many } })!;
+    expect(read.devices).toHaveLength(20);
+    expect(read.devices[0].pushkey).toBe('d0');
+  });
+});
+
 describe('a direct message notification', () => {
   const notification = readNotification(post())!;
 
