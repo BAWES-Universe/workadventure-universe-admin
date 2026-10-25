@@ -124,6 +124,10 @@ export async function sendPushOnceADay(userId: string, kind: PushKind, message: 
   if (recentlySent.size > 10_000) {
     for (const [entry, at] of recentlySent) if (now - at >= ONCE_A_DAY_MS) recentlySent.delete(entry);
   }
+  // Held before sending so two at once don't both go; let go again when nothing reached a device (none yet, quiet
+  // hours, switched off), so the next one within the day still gets through.
   recentlySent.set(key, now);
-  return sendPush(userId, kind, message, options);
+  const sent = await sendPush(userId, kind, message, options);
+  if (sent === 0 && recentlySent.get(key) === now) recentlySent.delete(key);
+  return sent;
 }
