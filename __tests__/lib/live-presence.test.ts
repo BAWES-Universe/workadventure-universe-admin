@@ -19,6 +19,7 @@ const db = prisma as unknown as Record<string, Record<string, jest.Mock>>;
 const PLAY = 'https://play.example.test';
 const LOBBY = `${PLAY}/@/acme/office/lobby`;
 const VAULT = `${PLAY}/@/acme/secret/vault`;
+const BOTS_ONLY = `${PLAY}/@/acme/office/workshop`;
 
 const ACME = { id: 'uni', name: 'Acme', slug: 'acme', isPublic: true, ownerId: 'owner' };
 const ROOMS = [
@@ -36,6 +37,13 @@ const ROOMS = [
     isPublic: true,
     world: { id: 'w-secret', name: 'Secret', slug: 'secret', isPublic: false, universe: ACME },
   },
+  {
+    id: 'r-workshop',
+    name: 'Workshop',
+    slug: 'workshop',
+    isPublic: true,
+    world: { id: 'w-office', name: 'Office', slug: 'office', isPublic: true, universe: ACME },
+  },
 ];
 
 const viewer: SessionUser = { id: 'u-me', uuid: 'me', email: null, name: 'Me', tags: [], isSuperAdmin: false };
@@ -49,7 +57,7 @@ function snapshot(): PresenceSnapshot {
       { uuid: 'hidden', status: 'online', woka: [], sessions: [{ playUri: LOBBY, since: 30 }] },
       { uuid: 'omar', status: 'online', woka: [], sessions: [{ playUri: VAULT, since: 5 }] },
     ],
-    rooms: { [LOBBY]: { guests: 2, bots: 1 }, [VAULT]: { guests: 1, bots: 0 } },
+    rooms: { [LOBBY]: { guests: 2, bots: 1 }, [VAULT]: { guests: 1, bots: 0 }, [BOTS_ONLY]: { guests: 0, bots: 3 } },
   };
 }
 
@@ -83,11 +91,18 @@ describe('buildLiveView', () => {
     expect(view.people.map((person) => person.userId)).toEqual(['u-sara']);
   });
 
-  it('counts guests and bots, but not someone who hides where they are', async () => {
+  it('counts people and guests, the bots apart, but not someone who hides where they are', async () => {
     const [lobby] = (await buildLiveView(snapshot(), viewer)).places;
-    // Me, Sara, 2 guests and a bot; the hidden person is in neither the faces nor the count.
-    expect(lobby).toMatchObject({ count: 5, guests: 2, bots: 1, here: true, playPath: '/@/acme/office/lobby' });
+    // Me, Sara and 2 guests, then a bot apart; the hidden person is in neither the faces nor the count.
+    expect(lobby).toMatchObject({ count: 4, guests: 2, bots: 1, here: true, playPath: '/@/acme/office/lobby' });
     expect(lobby.people.map((person) => person.uuid)).toEqual(['sara', 'me']);
+  });
+
+  it('keeps a room with only bots apart from Live now, for the place pages', async () => {
+    const view = await buildLiveView(snapshot(), viewer);
+    expect(view.places.map((place) => place.name)).not.toContain('Workshop');
+    expect(view.botRooms).toHaveLength(1);
+    expect(view.botRooms[0]).toMatchObject({ name: 'Workshop', count: 0, guests: 0, bots: 3, here: false });
   });
 
   it('still honours the older "hide where I am" switch', async () => {
@@ -110,8 +125,8 @@ describe('buildLiveView', () => {
     const view = await buildLiveView(snapshot(), viewer);
     expect(view.people.map((person) => person.name)).toEqual(['Sara']);
     const [lobby] = view.places;
-    // Me, Sara, 2 guests and a bot; the friends-only stranger is in neither the faces nor the count.
-    expect(lobby.count).toBe(5);
+    // Me, Sara and 2 guests; the friends-only stranger is in neither the faces nor the count.
+    expect(lobby.count).toBe(4);
   });
 
   it('marks the people who are your friends, whoever they share with', async () => {

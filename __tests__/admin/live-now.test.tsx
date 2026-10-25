@@ -53,13 +53,14 @@ const place = (
   ...extra,
 });
 
-const hall = place('hall', 'Main Hall', BAWES, [person('Me', { you: true }), person('Dana')], { here: true, count: 4, bots: 2 });
+const hall = place('hall', 'Main Hall', BAWES, [person('Me', { you: true }), person('Dana')], { here: true, bots: 2 });
 const arcade = place('arcade', 'Arcade', FUN, [person('Omar', { status: 'busy' })]);
 const at = (p: LivePlace) => ({ roomId: p.roomId, name: p.name, world: p.world, universe: p.universe, playPath: p.playPath });
 const view: LiveView = {
   available: true,
   generatedAt: 1,
   places: [hall, arcade],
+  botRooms: [],
   people: [
     { ...person('Dana'), place: at(hall) },
     { ...person('Omar', { status: 'busy' }), place: at(arcade) },
@@ -75,6 +76,9 @@ describe('Live now', () => {
     expect(cards.map((card) => within(card).getByRole('heading').textContent)).toEqual(['Main Hall', 'Arcade']);
     expect(within(cards[0]).getByText('You’re here')).toBeTruthy();
     expect(within(cards[0]).getByText('2 bots')).toBeTruthy();
+    // People only in the count and the faces: the bots are the chip, not "+2".
+    expect(within(cards[0]).getByText('2 here')).toBeTruthy();
+    expect(within(cards[0]).queryByText('+2')).toBeNull();
     // You're in the hall: Dana is "Here", Omar is a Go.
     const rows = screen.getAllByTestId('live-person');
     expect(within(rows[0]).getByText('Here')).toBeTruthy();
@@ -101,7 +105,7 @@ describe('Live now', () => {
     const { rerender } = render(<LiveNowView view={view} layout="space" />);
     fireEvent.click(within(screen.getAllByTestId('live-person')[1]).getByRole('button', { name: /Omar/ }));
     await screen.findByTestId('live-person-sheet');
-    const emptied: LiveView = { available: true, generatedAt: 2, places: [], people: [] };
+    const emptied: LiveView = { available: true, generatedAt: 2, places: [], botRooms: [], people: [] };
     rerender(<LiveNowView view={emptied} layout="space" />);
     expect(screen.queryByTestId('people-online')).toBeNull();
     expect(screen.getByTestId('live-person-sheet')).toBeTruthy();
@@ -125,6 +129,7 @@ describe('Live now', () => {
       available: true,
       generatedAt: 1,
       places: [hall, arcade, lounge],
+      botRooms: [],
       people: [
         { ...dana, place: at(lounge) },
         { ...person('Omar', { friend: true }), place: at(lounge) },
@@ -192,7 +197,7 @@ describe('Live now', () => {
   });
 
   it('says so when nobody is around, and stays out of Orbit home', () => {
-    const empty: LiveView = { available: true, generatedAt: 1, places: [], people: [] };
+    const empty: LiveView = { available: true, generatedAt: 1, places: [], botRooms: [], people: [] };
     const { container, unmount } = render(<LiveNowView view={empty} layout="home-inline" />);
     expect(container.textContent).toBe('');
     unmount();
@@ -213,9 +218,9 @@ describe('The Live now strip', () => {
     render(<LiveStrip view={view} />);
     const strip = screen.getByTestId('live-strip');
     expect(strip.getAttribute('href')).toBe('/admin/live');
-    // The hall counts 4 (two people and two bots), the arcade 1.
-    expect(within(strip).getByText('5 people live in 2 rooms')).toBeTruthy();
-    expect(within(strip).getByText('Main Hall and Arcade')).toBeTruthy();
+    // Two people in the hall and one in the arcade; the hall's two bots are named apart.
+    expect(within(strip).getByText('3 people live in 2 rooms')).toBeTruthy();
+    expect(within(strip).getByText('Main Hall and Arcade · 2 bots')).toBeTruthy();
   });
 
   it('names three rooms and counts the rest past four', () => {
@@ -228,11 +233,12 @@ describe('The Live now strip', () => {
   });
 
   it('says it in the singular, and stays out when nobody is around', () => {
-    const one: LiveView = { ...view, places: [place('solo', 'Solo', BAWES, [person('Dana')])] };
+    const one: LiveView = { ...view, places: [place('solo', 'Solo', BAWES, [person('Dana')], { bots: 1 })] };
     const { container, unmount } = render(<LiveStrip view={one} />);
     expect(within(container).getByText('1 person live in 1 room')).toBeTruthy();
+    expect(within(container).getByText('Solo · 1 bot')).toBeTruthy();
     unmount();
-    const none = render(<LiveStrip view={{ available: true, generatedAt: 1, places: [], people: [] }} />);
+    const none = render(<LiveStrip view={{ available: true, generatedAt: 1, places: [], botRooms: [], people: [] }} />);
     expect(none.container.textContent).toBe('');
   });
 });

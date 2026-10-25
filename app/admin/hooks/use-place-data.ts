@@ -13,13 +13,15 @@ export interface Face {
 
 /** Who is in a place right now, as you may see it. */
 export interface Here {
-  /** Everyone counted: the people listed, guests and bots. */
+  /** The people counted: those listed and guests. */
   count: number;
+  /** Bots, counted apart from the people. */
+  bots: number;
   people: Face[];
   youAreHere: boolean;
 }
 
-const NOBODY: Here = { count: 0, people: [], youAreHere: false };
+const NOBODY: Here = { count: 0, bots: 0, people: [], youAreHere: false };
 
 function hereOf(places: LivePlace[]): Here {
   if (places.length === 0) return NOBODY;
@@ -34,6 +36,7 @@ function hereOf(places: LivePlace[]): Here {
   }
   return {
     count: places.reduce((sum, place) => sum + place.count, 0),
+    bots: places.reduce((sum, place) => sum + place.bots, 0),
     people,
     youAreHere: places.some((place) => place.here),
   };
@@ -47,13 +50,15 @@ export function useHere(scope: 'universe' | 'world' | 'room', id: string) {
   const live = useLive();
   return useMemo(() => {
     if (!live) return { known: false, here: NOBODY, byRoom: new Map<string, Here>() };
-    const inScope = live.places.filter((place) =>
+    // Rooms with only bots count here too, though Live now leaves them out.
+    const allPlaces = [...live.places, ...live.botRooms];
+    const inScope = allPlaces.filter((place) =>
       scope === 'universe' ? place.universe.id === id : scope === 'world' ? place.world.id === id : place.roomId === id,
     );
     return {
       known: true,
       here: hereOf(inScope),
-      byRoom: new Map(live.places.map((place) => [place.roomId, hereOf([place])] as const)),
+      byRoom: new Map(allPlaces.map((place) => [place.roomId, hereOf([place])] as const)),
     };
   }, [live, scope, id]);
 }

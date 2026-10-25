@@ -16,7 +16,7 @@ jest.mock('next/navigation', () => ({
 jest.mock('@/app/admin/admin-bootstrap-context', () => ({ useIsSuperAdmin: () => false }));
 jest.mock('@/app/admin/orbit-frame-context', () => ({ useReplacePage: () => jest.fn() }));
 jest.mock('@/app/admin/hooks/use-place-data', () => ({
-  useHere: () => ({ here: { count: 0, people: [], youAreHere: false }, known: false, byRoom: new Map() }),
+  useHere: () => ({ here: { count: 0, bots: 0, people: [], youAreHere: false }, known: false, byRoom: new Map() }),
   useMembersPreview: () => ({ universeId: 'u1', yourTags: ['editor'], members: [], total: 0 }),
   useStarToggle: () => ({ toggle: jest.fn(), busy: false }),
 }));
