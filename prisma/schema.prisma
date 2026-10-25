@@ -53,6 +53,7 @@ model User {
   preferences      UserPreference[]
   universeMemberships UniverseMember[]
   notices          UserNotice[]
+  pushDevices      PushDevice[]
 
   @@map("users")
 }
@@ -94,6 +95,30 @@ model UserNotice {
   @@unique([userId, dedupeKey])
   @@index([userId, dismissedAt])
   @@map("user_notices")
+}
+
+// A browser or installed app where this person turned on notifications (game #863): its Web Push subscription, which Orbit
+// sends to while Universe is closed. One row per subscription; signing in elsewhere on the same browser moves it.
+model PushDevice {
+  id             String    @id @default(uuid())
+  userId         String    @map("user_id")
+  // The push service address the browser gave; Orbit only keeps the push services of the main browsers
+  endpoint       String    @unique @db.VarChar(1000)
+  p256dh         String    @db.VarChar(200)
+  auth           String    @db.VarChar(100)
+  // What the person sees in Your devices ("Chrome on Android", "Universe app on iPhone")
+  label          String    @db.VarChar(60)
+  // The device's own on/off switch in Settings > Notifications
+  enabled        Boolean   @default(true)
+  createdAt      DateTime  @default(now()) @map("created_at")
+  // Last time this device registered again (every start of Universe on it)
+  lastSeenAt     DateTime  @default(now()) @map("last_seen_at")
+  lastNotifiedAt DateTime? @map("last_notified_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("push_devices")
 }
 
 // Universes
