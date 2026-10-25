@@ -100,6 +100,8 @@ describe('push devices', () => {
     expect(again.id).toBe(first.id);
     expect(again.enabled).toBe(false);
     expect(rows).toHaveLength(1);
+    // Its Matrix pusher keeps working
+    expect((prisma.pushDevice.upsert as jest.Mock).mock.calls[1][0].update.gatewaySecret).toBeUndefined();
   });
 
   it('moves a browser to whoever signs in on it, switched on and with a fresh history', async () => {
@@ -110,6 +112,8 @@ describe('push devices', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].userId).toBe('user-b');
     expect(moved).toMatchObject({ enabled: true, lastNotifiedAt: null });
+    // The previous owner's Matrix pusher can no longer reach this browser
+    expect((prisma.pushDevice.upsert as jest.Mock).mock.calls[1][0].update.gatewaySecret).toBeNull();
   });
 
   it('drops the devices not seen for longest beyond the limit', async () => {
