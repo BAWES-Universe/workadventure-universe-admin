@@ -53,7 +53,7 @@ const shown = { hidden: false, hide: () => undefined };
 beforeEach(() => fetchMock.mockReset());
 
 describe('You, for someone new', () => {
-  it('shows first steps and empty sections that lead somewhere, with no "View all" on empty lists', async () => {
+  it('shows first steps, and no universes, memberships or stars: those are rows on Orbit', async () => {
     route({
       '/api/admin/universes': { universes: [] },
       '/api/memberships/my': { memberships: [] },
@@ -71,11 +71,10 @@ describe('You, for someone new', () => {
     // A world needs a universe first, and inviting needs a world: those steps aren't links yet.
     expect(within(steps).queryByRole('link', { name: /Create a world/ })).toBeNull();
     expect(within(steps).queryByRole('link', { name: /Invite a member/ })).toBeNull();
-    expect((await screen.findByTestId('empty-universes')).getAttribute('href')).toBe('/admin/universes/new');
-    expect((await screen.findByTestId('empty-memberships')).textContent).toMatch(/invites you|world of your own/);
-    expect((await screen.findByTestId('empty-stars')).getAttribute('href')).toBe('/admin/discover/rooms');
-    expect(screen.queryByText('View all')).toBeNull();
-    expect(screen.queryByText('Manage')).toBeNull();
+    expect(screen.queryByText('Your universes')).toBeNull();
+    expect(screen.queryByText('Memberships')).toBeNull();
+    expect(screen.queryByText('Stars')).toBeNull();
+    expect(screen.queryByTestId('empty-universes')).toBeNull();
   });
 });
 
@@ -96,106 +95,25 @@ describe('You, with one universe and no world', () => {
     await waitFor(() =>
       expect(within(steps).getByRole('link', { name: /Create a world/ }).getAttribute('href')).toBe('/admin/worlds/new?universeId=u1'),
     );
-    expect((await screen.findByTestId('empty-memberships')).getAttribute('href')).toBe('/admin/worlds/new?universeId=u1');
   });
 });
 
-describe('You, with a featured universe', () => {
-  it('shows the Featured pill beside Public, and only on featured universes', async () => {
-    route({
-      '/api/admin/universes': {
-        universes: [
-          { id: 'u1', name: 'BAWES', isPublic: true, featured: true, _count: { worlds: 2, rooms: 18 } },
-          { id: 'u2', name: 'Plugn', isPublic: true, featured: false, _count: { worlds: 1, rooms: 3 } },
-        ],
-      },
-      '/api/memberships/my': { memberships: [] },
-      '/api/memberships/invitations': { invitations: [] },
-      '/api/admin/stars/rooms': { rooms: [] },
-    });
-    render(
-      <AdminBootstrapProvider value={bootstrap({ universes: 2, worlds: 3, stars: 0, invitations: 0 })}>
-        <Yours profileComplete getStarted={shown} />
-      </AdminBootstrapProvider>,
-    );
-    await screen.findByText('BAWES');
-    await waitFor(() => expect(screen.getAllByText('Featured')).toHaveLength(1));
-    expect(screen.getAllByText('Public').length).toBeGreaterThanOrEqual(2);
-  });
-});
-
-describe('You, with memberships', () => {
-  it('answers an invitation in place and shows roles', async () => {
+describe('You, as an owner', () => {
+  it('keeps "Invite a member" as a step: being a member (even an owner) does not tick it', async () => {
     route({
       '/api/admin/universes': { universes: [{ id: 'u1', name: 'BAWES', isPublic: true, _count: { worlds: 2, rooms: 18 } }] },
       '/api/memberships/my': {
         memberships: [{ id: 'm1', tags: ['admin'], isUniverseOwner: true, world: { id: 'w1', name: 'Office', universe: { name: 'BAWES' } } }],
       },
-      '/api/memberships/invitations': {
-        invitations: [{ id: 'i1', tags: ['member'], world: { id: 'w3', name: 'Studio', universe: { name: 'Plugn' } }, invitedBy: { name: 'Sara', email: null } }],
-      },
       '/api/admin/stars/rooms': { rooms: [] },
     });
     render(
-      <AdminBootstrapProvider value={bootstrap({ universes: 1, worlds: 1, stars: 0, invitations: 1 })}>
+      <AdminBootstrapProvider value={bootstrap({ universes: 1, worlds: 1, stars: 0, invitations: 0 })}>
         <Yours profileComplete getStarted={shown} />
       </AdminBootstrapProvider>,
     );
-    const invitations = await screen.findByTestId('invitations');
-    expect(invitations.textContent).toContain('Sara invited you as member');
-    // The invitation opens its own page for more before deciding.
-    expect(within(invitations).getByRole('link', { name: 'Studio' }).getAttribute('href')).toBe('/admin/invitations/i1');
-    fireEvent.click(within(invitations).getByRole('button', { name: 'Accept' }));
-    await waitFor(() => expect(screen.queryByTestId('invitations')).toBeNull());
-    expect(fetchMock).toHaveBeenCalledWith('/api/memberships/invitations/i1/accept', { method: 'POST' });
-    expect((await screen.findByText('Office')).closest('div')?.parentElement?.textContent).toMatch(/Owner.*Admin/);
-    // The roles sit on the same line as the name, not off to the side.
-    const nameLine = (await screen.findByText('Office')).closest('strong')?.parentElement?.parentElement;
-    expect(nameLine?.textContent).toMatch(/Office.*Owner.*Admin/);
-    // Being a member (even an owner) doesn't tick "Invite a member" or "Star a room": the steps stay.
     const steps = await screen.findByTestId('get-started');
-    expect(within(steps).getByRole('link', { name: /Invite a member/ }).getAttribute('href')).toBe('/admin/worlds/w1?tab=members');
-  });
-});
-
-describe('You, declining', () => {
-  it('asks before declining, and locks only the invitation being answered', async () => {
-    let finishFirst: () => void = () => undefined;
-    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
-      if (init?.method === 'POST' && url.includes('/i1/')) return new Promise((resolve) => (finishFirst = () => resolve({ ok: true, json: () => Promise.resolve({}) })));
-      if (init?.method === 'POST') return ok({});
-      const path = url.split('?')[0];
-      const routes: Record<string, unknown> = {
-        '/api/admin/universes': { universes: [] },
-        '/api/memberships/my': { memberships: [] },
-        '/api/memberships/invitations': {
-          invitations: [
-            { id: 'i1', tags: ['member'], world: { id: 'w1', name: 'Studio', universe: { name: 'Plugn' } }, invitedBy: { name: 'Sara', email: null } },
-            { id: 'i2', tags: ['member'], world: { id: 'w2', name: 'Office', universe: { name: 'BAWES' } }, invitedBy: { name: 'Sara', email: null } },
-          ],
-        },
-        '/api/admin/stars/rooms': { rooms: [] },
-      };
-      return ok(routes[path] ?? {});
-    });
-    render(
-      <AdminBootstrapProvider value={bootstrap({ universes: 0, worlds: 0, stars: 0, invitations: 2 })}>
-        <Yours profileComplete={false} getStarted={shown} />
-      </AdminBootstrapProvider>,
-    );
-    const invitations = await screen.findByTestId('invitations');
-    fireEvent.click(within(invitations).getAllByRole('button', { name: 'Accept' })[0]);
-    // Answering Studio leaves Office free to answer.
-    const [studioAccept, officeAccept] = within(invitations).getAllByRole('button', { name: 'Accept' });
-    expect((studioAccept as HTMLButtonElement).disabled).toBe(true);
-    expect((officeAccept as HTMLButtonElement).disabled).toBe(false);
-    // Declining asks first.
-    fireEvent.click(within(invitations).getByRole('button', { name: /Decline the invitation to Office/ }));
-    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/i2/reject'))).toBe(false);
-    fireEvent.click(within(invitations).getByRole('button', { name: 'Decline' }));
-    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/i2/reject'))).toBe(true));
-    finishFirst();
-    await waitFor(() => expect(screen.queryByTestId('invitations')).toBeNull());
+    await waitFor(() => expect(within(steps).getByRole('link', { name: /Invite a member/ }).getAttribute('href')).toBe('/admin/worlds/w1?tab=members'));
   });
 });
 

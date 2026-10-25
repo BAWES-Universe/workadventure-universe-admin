@@ -12,9 +12,9 @@ import Yours from '../components/yours';
 import styles from './you.module.css';
 
 /**
- * You: your profile as others see it (edited in place), how your AI keys are doing, then what's yours (universes,
- * memberships, stars), and last a row for bringing Get started back (Appearance, Sharing and Sign out live in the Orbit
- * menu). Someone new gets first steps; finding new places is Space's job.
+ * You: your profile as others see it (edited in place), how your AI keys are doing, your passport and activity, and
+ * last a row for bringing Get started back (Appearance, Sharing and Sign out live in the Orbit menu). Someone new gets
+ * first steps. Your stars, universes and memberships are rows on Orbit; finding new places is Space's job.
  */
 export default function YouPage() {
   return (
