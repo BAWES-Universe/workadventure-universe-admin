@@ -144,6 +144,22 @@ describe('Your universes on Orbit', () => {
     expect((await screen.findByRole('link', { name: /All 30 universes/ })).getAttribute('href')).toBe('/admin/universes');
   });
 
+  it('picks the busiest from more than it shows, so an older universe with people in it still makes the row', async () => {
+    route({
+      '/api/admin/universes': { universes: Array.from({ length: 30 }, (_, index) => ({ id: `u${index}`, name: `Universe ${index}`, isPublic: true })) },
+    });
+    render(
+      <AdminBootstrapProvider value={bootstrap(30)}>
+        <UniversesRow live={live([place('r1', 'u28', 3)])} />
+      </AdminBootstrapProvider>,
+    );
+    const row = await screen.findByTestId('orbit-universes');
+    await waitFor(() => expect(names(row, 'h3')[0]).toBe('Universe 28'));
+    expect(row.querySelectorAll('a[data-kind="universe"]')).toHaveLength(24);
+    expect(String(fetchMock.mock.calls[0][0])).toContain('limit=100');
+    expect(within(row).getByRole('link', { name: /All 30 universes/ })).toBeTruthy();
+  });
+
   it('invites someone with none to make one', async () => {
     route({ '/api/admin/universes': { universes: [] } });
     render(
@@ -206,6 +222,31 @@ describe('Your memberships on Orbit', () => {
     await waitFor(() => expect(screen.queryByTestId('invitation')).toBeNull());
     expect(fetchMock).toHaveBeenCalledWith('/api/memberships/invitations/i1/accept', { method: 'POST' });
     expect(await screen.findByText('Plugn')).toBeTruthy();
+  });
+
+  it('keeps an accepted invitation until the new membership has loaded, so the row never reads empty between', async () => {
+    let joined = false;
+    let answerMemberships: () => void = () => undefined;
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        joined = true;
+        return ok({});
+      }
+      if (url.startsWith('/api/memberships/my/universes')) {
+        if (!joined) return ok({ universes: [] });
+        return new Promise((resolve) => (answerMemberships = () => resolve({ ok: true, json: () => Promise.resolve({ universes: [membership('u9', 'Plugn')] }) })));
+      }
+      return ok({ invitations: [{ id: 'i1', tags: [], world: { id: 'w3', name: 'Studio', universe: { name: 'Plugn' } }, invitedBy: null }] });
+    });
+    render(<MembershipsRow />);
+    fireEvent.click(within(await screen.findByTestId('invitation')).getByRole('button', { name: 'Accept' }));
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => String(url).startsWith('/api/memberships/my/universes'))).toHaveLength(2));
+    expect(screen.queryByTestId('empty-memberships')).toBeNull();
+    expect((within(screen.getByTestId('invitation')).getByRole('button', { name: 'Accept' }) as HTMLButtonElement).disabled).toBe(true);
+    answerMemberships();
+    await waitFor(() => expect(screen.queryByTestId('invitation')).toBeNull());
+    expect(screen.getByText('Plugn')).toBeTruthy();
+    expect(screen.queryByTestId('empty-memberships')).toBeNull();
   });
 
   it('asks before declining, and locks only the invitation being answered', async () => {

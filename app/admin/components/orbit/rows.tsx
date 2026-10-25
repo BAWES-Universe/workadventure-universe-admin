@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useState, type CSSProperties } from 'react';
+import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { ArrowUpRight, Check, Plus, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { authenticatedFetch } from '@/lib/client-auth';
@@ -17,6 +17,8 @@ import styles from './rows.module.css';
 
 /** Your universes shown on Orbit before the "All N universes" card. */
 const UNIVERSES_SHOWN = 24;
+/** Read to pick the busiest from: more than are shown, so an older universe with people in it still makes the row. */
+const UNIVERSES_READ = 100;
 
 /**
  * People in each room right now, as Live now counts them (bots apart, never counted; only rooms you can enter), and
@@ -122,10 +124,11 @@ const isUniverse = (value: unknown): value is MyUniverse => isNamed(value) && ty
 /** The universes you own, as the same planet cards You had, busiest first. Past 24, a card opens the whole list. */
 export function UniversesRow({ live }: { live?: LiveView | null }) {
   const { mine } = useAdminBootstrap();
-  const { result, retry } = useCollection(`/api/admin/universes?scope=my&limit=${UNIVERSES_SHOWN}`, 'universes', isUniverse);
+  const { result, retry } = useCollection(`/api/admin/universes?scope=my&limit=${UNIVERSES_READ}`, 'universes', isUniverse);
   const { universes } = peopleNow(live);
-  const items = result.status === 'ready' ? busiestFirst(result.items, (universe) => universes.get(universe.id) ?? 0) : null;
-  const total = Math.max(mine?.universes ?? 0, items?.length ?? 0);
+  const items =
+    result.status === 'ready' ? busiestFirst(result.items, (universe) => universes.get(universe.id) ?? 0).slice(0, UNIVERSES_SHOWN) : null;
+  const total = Math.max(mine?.universes ?? 0, result.status === 'ready' ? result.items.length : 0);
   return (
     <ScrollSection
       id="universes-heading"
@@ -191,6 +194,7 @@ export function MembershipsRow({ live }: { live?: LiveView | null }) {
   const [pending, setPending] = useState<ReadonlySet<string>>(new Set());
   const [confirmingDecline, setConfirmingDecline] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const joining = useRef<{ ids: string[]; after: unknown }>({ ids: [], after: null });
 
   const joined =
     memberships.result.status === 'ready'
@@ -210,19 +214,37 @@ export function MembershipsRow({ live }: { live?: LiveView | null }) {
     try {
       const response = await authenticatedFetch(`/api/memberships/invitations/${invitation.id}/${choice}`, { method: 'POST' });
       if (!response.ok) throw new Error('answer failed');
+      if (choice === 'accept') {
+        // The invitation stays (locked) until the new membership has loaded, so the row never reads empty between.
+        joining.current = { ids: [...joining.current.ids, invitation.id], after: memberships.result };
+        memberships.retry();
+        return;
+      }
       invitations.update((items) => items.filter((item) => item.id !== invitation.id));
-      if (choice === 'accept') memberships.retry();
     } catch {
       setError(`Couldn’t ${choice === 'accept' ? 'accept' : 'decline'} the invitation to ${invitation.world.name}. Try again.`);
     } finally {
-      setPending((current) => {
-        const next = new Set(current);
-        next.delete(invitation.id);
-        return next;
-      });
       setConfirmingDecline((current) => (current === invitation.id ? null : current));
     }
+    unlock([invitation.id]);
   }
+
+  function unlock(ids: string[]) {
+    setPending((current) => {
+      const next = new Set(current);
+      for (const id of ids) next.delete(id);
+      return next;
+    });
+  }
+
+  // Your memberships answered again after accepting: the accepted invitations make way for the memberships.
+  useEffect(() => {
+    const { ids, after } = joining.current;
+    if (ids.length === 0 || memberships.result === after) return;
+    joining.current = { ids: [], after: null };
+    invitations.update((items) => items.filter((item) => !ids.includes(item.id)));
+    unlock(ids);
+  }, [memberships.result, invitations]);
 
   return (
     <>
