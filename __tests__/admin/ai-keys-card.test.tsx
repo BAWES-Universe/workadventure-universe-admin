@@ -111,4 +111,13 @@ describe('AI keys card', () => {
     expect(screen.getByTestId('ai-keys-card').getAttribute('href')).toBe('/admin/you/ai-keys');
     expect(screen.queryByTestId('ai-keys-card-status')).toBeNull();
   });
+
+  it('names the card link from its whole content, so a screen reader hears how the keys are doing', async () => {
+    answer({ ok: true, keys: [claude, { ...router, status: 'down', downSince: '2026-10-25T10:00:00.000Z' }] });
+    render(<AiKeysCard />);
+    const card = await screen.findByTestId('ai-keys-card');
+    expect(card.getAttribute('aria-labelledby')).toBeNull();
+    expect(card.textContent).toMatch(/AI keys\s*2/);
+    expect(card.textContent).toContain('1 down');
+  });
 });

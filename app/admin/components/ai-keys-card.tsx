@@ -64,7 +64,6 @@ function Shell({ down = false, title, status, children }: { down?: boolean; titl
   return (
     <Link
       href="/admin/you/ai-keys"
-      aria-labelledby="ai-keys-heading"
       className={`group grid gap-3 rounded-[20px] border bg-card p-4 text-inherit no-underline transition-[border-color,transform] hover:-translate-y-px focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring ${
         down ? 'border-[rgb(245_196_81/0.55)]' : 'border-border hover:border-foreground/25'
       }`}
@@ -72,7 +71,7 @@ function Shell({ down = false, title, status, children }: { down?: boolean; titl
     >
       <div className="flex min-h-7 items-center gap-2.5">
         <KeyRound size={20} aria-hidden="true" className="shrink-0" />
-        <h2 id="ai-keys-heading" className="orbit-display text-lg font-bold">
+        <h2 className="orbit-display text-lg font-bold">
           {title}
         </h2>
         <span className="ml-auto flex items-center gap-2.5">
