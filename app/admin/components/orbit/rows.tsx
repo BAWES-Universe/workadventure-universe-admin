@@ -20,19 +20,26 @@ const UNIVERSES_SHOWN = 24;
 
 /**
  * People in each room right now, as Live now counts them (bots apart, never counted; only rooms you can enter), and
- * the room you're in. You are left out, so a count is always the people you would find there.
+ * the rooms you're in. You are left out, so a count is always the people you would find there. Someone in two rooms of
+ * one universe at once (two tabs) counts once for the universe.
  */
 function peopleNow(live: LiveView | null | undefined) {
   const rooms = new Map<string, number>();
-  const universes = new Map<string, number>();
-  let hereRoomId: string | null = null;
+  const listed = new Map<string, Set<string>>();
+  const unnamed = new Map<string, number>();
+  const hereRooms = new Set<string>();
   for (const place of live?.places ?? []) {
-    const others = place.count - (place.here ? 1 : 0);
-    if (place.here) hereRoomId = place.roomId;
-    rooms.set(place.roomId, others);
-    universes.set(place.universe.id, (universes.get(place.universe.id) ?? 0) + others);
+    if (place.here) hereRooms.add(place.roomId);
+    rooms.set(place.roomId, place.count - (place.here ? 1 : 0));
+    const id = place.universe.id;
+    const uuids = listed.get(id) ?? new Set<string>();
+    for (const person of place.people) if (!person.you) uuids.add(person.uuid);
+    listed.set(id, uuids);
+    // Guests have no name to tell them apart, so each one counts.
+    unnamed.set(id, (unnamed.get(id) ?? 0) + place.guests);
   }
-  return { rooms, universes, hereRoomId };
+  const universes = new Map([...listed].map(([id, uuids]) => [id, uuids.size + (unnamed.get(id) ?? 0)]));
+  return { rooms, universes, hereRooms };
 }
 
 /** Busiest first, so you can join people faster; places with nobody keep their own order after them. */
@@ -66,7 +73,7 @@ const isStar = (value: unknown): value is StarredRoom =>
 /** The rooms you starred, busiest first, each with who is there now (or that you are). */
 export function StarsRow({ live }: { live?: LiveView | null }) {
   const { result, retry } = useCollection('/api/admin/stars/rooms', 'rooms', isStar);
-  const { rooms, hereRoomId } = peopleNow(live);
+  const { rooms, hereRooms } = peopleNow(live);
   const items = result.status === 'ready' ? busiestFirst(result.items, (room) => rooms.get(room.id) ?? 0) : null;
   return (
     <ScrollSection
@@ -97,7 +104,7 @@ export function StarsRow({ live }: { live?: LiveView | null }) {
             <Link key={room.id} href={`/admin/rooms/${room.id}`} className={`${styles.card} orbit-kind-wash`} data-kind="star">
               <span className={styles.top}>
                 <NameGlyph kind="star" size={20} />
-                {room.id === hereRoomId ? <span className={styles.youHere}>You’re here</span> : <PeopleHere count={rooms.get(room.id) ?? 0} />}
+                {hereRooms.has(room.id) ? <span className={styles.youHere}>You’re here</span> : <PeopleHere count={rooms.get(room.id) ?? 0} />}
               </span>
               <strong className={styles.name}>{room.name}</strong>
               <span className={styles.lines}>
@@ -193,6 +200,8 @@ export function MembershipsRow({ live }: { live?: LiveView | null }) {
         )
       : null;
   const waiting = invitations.result.status === 'ready' ? invitations.result.items : [];
+  // Invitations still show (and can be answered) when your memberships can't be read.
+  const failed = memberships.result.status === 'error';
 
   async function answer(invitation: Invitation, choice: 'accept' | 'reject') {
     if (pending.has(invitation.id)) return;
@@ -225,9 +234,9 @@ export function MembershipsRow({ live }: { live?: LiveView | null }) {
         action={joined && joined.length > 0 ? { href: '/admin/memberships', label: 'Manage' } : null}
         testId="orbit-memberships"
         empty={
-          memberships.result.status === 'error' ? (
+          failed && waiting.length === 0 ? (
             <LoadError label="your memberships" retry={memberships.retry} />
-          ) : joined && joined.length === 0 && waiting.length === 0 ? (
+          ) : joined && joined.length === 0 && waiting.length === 0 && invitations.result.status !== 'loading' ? (
             <EmptyCard kind="universe" title="No memberships yet." text="When someone invites you to their universe, it shows up here." testId="empty-memberships" />
           ) : undefined
         }
@@ -282,7 +291,11 @@ export function MembershipsRow({ live }: { live?: LiveView | null }) {
             </div>
           );
         })}
-        {joined === null ? (
+        {failed ? (
+          <div className={`${styles.card} ${styles.member}`}>
+            <LoadError label="your memberships" retry={memberships.retry} />
+          </div>
+        ) : joined === null ? (
           <div className={`${styles.card} ${styles.member} ${styles.loading}`} aria-hidden="true" />
         ) : (
           joined.map((membership) => {

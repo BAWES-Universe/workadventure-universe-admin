@@ -61,10 +61,13 @@ const responses: Record<string, unknown> = {
 
 /** Paths that answer 500 until cleared: a server failure, not a missing room. */
 const failing = new Set<string>();
+/** Paths that wait for their gate to open before answering. */
+const gates = new Map<string, Promise<void>>();
 
 jest.mock('@/lib/client-auth', () => ({
   authenticatedFetch: async (url: string) => {
     const path = url.split('?')[0];
+    await gates.get(path);
     if (failing.has(path)) return { ok: false, status: 500, json: async () => ({}) } as Response;
     const body = isSummariesUrl(url) ? summariesBody(url, (id) => analytics[id]) : responses[path];
     return { ok: body !== undefined, status: body ? 200 : 404, json: async () => body } as Response;
@@ -132,6 +135,22 @@ describe('Home rooms keep their numbers', () => {
     const times = Array.from(timeline.querySelectorAll('time')).map((time) => time.textContent);
     expect(times).toEqual(expect.arrayContaining(['40 minutes ago', '3 hours ago']));
     expect(timeline.textContent).toContain('Now');
+  });
+
+  it('waits for the room before this before lining up earlier rooms, so it never shows twice for a moment', async () => {
+    let open = () => {};
+    gates.set('/api/admin/rooms/previous', new Promise<void>((resolve) => (open = resolve)));
+    try {
+      render(inGame(<HerePanel />));
+      await screen.findByTestId('room-card-here');
+      await waitFor(() => expect(screen.getByTestId('here').textContent).toContain('Headquarters'));
+      expect(screen.queryAllByTestId('room-card-previous')).toHaveLength(0);
+      open();
+      await waitFor(() => expect(screen.getAllByTestId('room-card-previous')).toHaveLength(2));
+      expect(screen.getAllByTestId('room-card-previous').map((card) => card.querySelector('h3')?.textContent)).toEqual(['Creative Hub', 'Cafe']);
+    } finally {
+      gates.clear();
+    }
   });
 
   it('shows nothing under a name with no description', async () => {

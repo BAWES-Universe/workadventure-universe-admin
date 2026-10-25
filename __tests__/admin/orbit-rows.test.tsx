@@ -36,8 +36,18 @@ const bootstrap = (universes: number): AdminBootstrap => ({
   mine: { universes, worlds: 0, stars: 0, invitations: 0 },
 });
 
+/** A room with `count` people listed in it (you among them when `here`), as Live now gives it. */
 function place(roomId: string, universeId: string, count: number, bots = 0, here = false): LivePlace {
-  return { roomId, name: roomId, world: { id: 'w', name: 'World' }, universe: { id: universeId, name: universeId }, playPath: '/@/x', count, guests: 0, bots, here, people: [] };
+  const people = Array.from({ length: count }, (_, index) => ({
+    uuid: here && index === 0 ? 'me' : `${roomId}-${index}`,
+    userId: `${roomId}-${index}`,
+    name: `Person ${index}`,
+    status: 'online',
+    woka: [],
+    you: here && index === 0,
+    friend: false,
+  })) as LivePlace['people'];
+  return { roomId, name: roomId, world: { id: 'w', name: 'World' }, universe: { id: universeId, name: universeId }, playPath: '/@/x', count, guests: 0, bots, here, people };
 }
 const live = (places: LivePlace[]): LiveView => ({ available: true, generatedAt: Date.now(), places, botRooms: [], people: [] });
 
@@ -106,6 +116,22 @@ describe('Your universes on Orbit', () => {
     expect(bawes.textContent).not.toMatch(/\d here/);
     expect(screen.getAllByText('Featured')).toHaveLength(1);
     expect(within(row).getByRole('link', { name: /New universe/ }).getAttribute('href')).toBe('/admin/universes/new');
+  });
+
+  it('counts someone in two rooms of one universe at once only once', async () => {
+    route({ '/api/admin/universes': { universes: [{ id: 'u1', name: 'BAWES', isPublic: true }] } });
+    const sara = { uuid: 'sara', userId: 's', name: 'Sara', status: 'online', woka: [], you: false, friend: false } as LivePlace['people'][number];
+    const me = { ...sara, uuid: 'me', userId: 'm', name: 'Khalid', you: true };
+    const lobby = { ...place('r1', 'u1', 2, 0, true), people: [sara, me] };
+    const studio = { ...place('r2', 'u1', 2), guests: 1, people: [sara] };
+    render(
+      <AdminBootstrapProvider value={bootstrap(1)}>
+        <UniversesRow live={live([lobby, studio])} />
+      </AdminBootstrapProvider>,
+    );
+    const row = await screen.findByTestId('orbit-universes');
+    // Sara (in both rooms) and one guest; you are left out.
+    await waitFor(() => expect(row.querySelector('a[data-kind="universe"]')?.textContent).toContain('2 here'));
   });
 
   it('ends with a card to all of them when there are more than it shows', async () => {
@@ -208,6 +234,32 @@ describe('Your memberships on Orbit', () => {
     finishFirst();
     await waitFor(() => expect(screen.queryAllByTestId('invitation')).toHaveLength(0));
     expect(await screen.findByTestId('empty-memberships')).toBeTruthy();
+  });
+
+  it('keeps invitations you can answer when your memberships cannot load', async () => {
+    fetchMock.mockImplementation((url: string) => {
+      if (url.startsWith('/api/memberships/my/universes')) return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}) });
+      return ok({ invitations: [{ id: 'i1', tags: [], world: { id: 'w1', name: 'Studio', universe: { name: 'Plugn' } }, invitedBy: null }] });
+    });
+    render(<MembershipsRow />);
+    const invitation = await screen.findByTestId('invitation');
+    expect(within(invitation).getByRole('button', { name: 'Accept' })).toBeTruthy();
+    expect((await screen.findByRole('alert')).textContent).toContain('We couldn’t load your memberships.');
+  });
+
+  it('waits for your invitations before saying you have joined nothing', async () => {
+    let answer: () => void = () => undefined;
+    fetchMock.mockImplementation((url: string) => {
+      if (url.startsWith('/api/memberships/my/universes')) return ok({ universes: [] });
+      return new Promise((resolve) => (answer = () => resolve({ ok: true, json: () => Promise.resolve({ invitations: [{ id: 'i1', tags: [], world: { id: 'w1', name: 'Studio', universe: { name: 'Plugn' } }, invitedBy: null }] }) })));
+    });
+    render(<MembershipsRow />);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/memberships/my/universes', expect.anything()));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(screen.queryByTestId('empty-memberships')).toBeNull();
+    answer();
+    expect(await screen.findByTestId('invitation')).toBeTruthy();
+    expect(screen.queryByTestId('empty-memberships')).toBeNull();
   });
 
   it('says so when you have joined nothing yet', async () => {
