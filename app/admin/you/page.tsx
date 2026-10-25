@@ -66,7 +66,7 @@ function You() {
           )
         }
       />
-      <PassportSection />
+      <PassportSection small />
       <ActivitySection />
       <Yours
         profileComplete={profileComplete}

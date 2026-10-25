@@ -23,13 +23,14 @@ import {
   PageHeader,
   Place,
   SectionHeader,
-  StatLine,
   StatusPill,
 } from '../components/ds';
-import { OWNER_PILL, worldsLabel } from '@/lib/member-roles';
 import { RoleChip } from '../components/universe-people';
+import { JoinedUniverseRow, OwnedUniverseRow, type UniverseMembership } from '../components/membership-rows';
 
 const UniverseGlyph = KIND_ICON.universe;
+/** A group of universe rows: one column on a phone, two on a wide screen. */
+const GROUP = 'grid min-w-0 gap-2 md:grid-cols-2';
 
 interface Invitation {
   id: string;
@@ -66,13 +67,7 @@ function invitedWorlds(invitation: Invitation): string {
   return `${worldIds.length} worlds`;
 }
 
-interface Membership {
-  universe: { id: string; name: string; worlds: { id: string; name: string }[] };
-  isOwner: boolean;
-  joinedAt: string;
-  worlds: { allWorlds: boolean; worldIds: string[] };
-  roles: { key: string; name: string; color: string; allWorlds: boolean; worldIds: string[] }[];
-}
+type Membership = UniverseMembership;
 
 type Loaded<T> = { status: 'loading' } | { status: 'error' } | { status: 'ready'; items: T[] };
 
@@ -100,6 +95,9 @@ export default function MyMembershipsPage() {
 
   const invitations = invitationList.status === 'ready' ? invitationList.items : [];
   const memberships = membershipList.status === 'ready' ? membershipList.items : [];
+  // Universes you joined come first (the ones you can leave); the ones you own say so once, in their heading.
+  const joined = memberships.filter((membership) => !membership.isOwner);
+  const owned = memberships.filter((membership) => membership.isOwner);
 
   // A reload keeps what is shown until the answer arrives; only a failure replaces it (with a retry).
   // Answers can overlap (two invitations accepted at once): only the latest request of each list paints.
@@ -334,11 +332,7 @@ export default function MyMembershipsPage() {
             </section>
           )}
 
-          <section
-            className="grid min-w-0 gap-2"
-            {...(invitations.length > 0 ? { 'aria-labelledby': 'memberships-heading' } : { 'aria-label': 'Your universes' })}
-          >
-            {invitations.length > 0 && <SectionHeader id="memberships-heading" title="Universes" count={memberships.length} />}
+          <section className="grid min-w-0 gap-6" aria-label="Your universes">
             {membershipList.status === 'error' ? (
               <LoadError label="your memberships" retry={() => void loadMemberships()} />
             ) : memberships.length === 0 ? (
@@ -350,59 +344,32 @@ export default function MyMembershipsPage() {
                 action="Go to You"
               />
             ) : (
-              <div className="grid min-w-0 gap-0.5">
-                {memberships.map((membership) => {
-                  const names = new Map(membership.universe.worlds.map((world) => [world.id, world.name]));
-                  const inWorlds = membership.worlds.allWorlds ? membership.universe.worlds : membership.universe.worlds.filter((world) => membership.worlds.worldIds.includes(world.id));
-                  const where =
-                    inWorlds.length === 0 ? null : inWorlds.length <= 2 ? inWorlds.map((world) => world.name).join(' and ') : `${inWorlds.length} worlds`;
-                  return (
-                    <EntityRow
-                      key={membership.universe.id}
-                      href={`/admin/universes/${membership.universe.id}`}
-                      kind="universe"
-                      leading={<UniverseGlyph size={32} className="mx-1 shrink-0" aria-hidden="true" />}
-                      title={membership.universe.name}
-                      context={
-                        <StatLine
-                          items={[
-                            "Universe",
-                            where,
-                            `Joined ${new Date(membership.joinedAt).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}`,
-                          ]}
-                        />
-                      }
-                      meta={
-                        <span className="inline-flex flex-wrap items-center gap-1.5">
-                          {membership.isOwner && <RoleChip name={OWNER_PILL.name} color={OWNER_PILL.color} />}
-                          {membership.roles.length === 0 && !membership.isOwner && <RoleChip name="Member" color="#A78BFA" />}
-                          {membership.roles.map((role) => {
-                            const roleWhere = worldsLabel(role, names);
-                            return (
-                              <span key={role.key} className="inline-flex items-center gap-1.5">
-                                <RoleChip name={role.name} color={role.color} />
-                                {roleWhere && <span className="text-xs text-muted-foreground">{roleWhere}</span>}
-                              </span>
-                            );
-                          })}
-                        </span>
-                      }
-                      trailing={
-                        !membership.isOwner ? (
-                          <Button
-                            variant="outline"
-                            className="h-11 px-4"
-                            onClick={() => setLeaving(membership)}
-                            aria-label={`Leave ${membership.universe.name}`}
-                          >
-                            Leave
-                          </Button>
-                        ) : undefined
-                      }
-                    />
-                  );
-                })}
-              </div>
+              <>
+                {joined.length > 0 && (
+                  <div className="grid min-w-0" data-testid="joined-universes">
+                    <SectionHeader id="joined-heading" title="Member of" count={joined.length} />
+                    <div className={GROUP} aria-labelledby="joined-heading" role="list">
+                      {joined.map((membership) => (
+                        <div key={membership.universe.id} role="listitem" className="min-w-0">
+                          <JoinedUniverseRow membership={membership} onLeave={() => setLeaving(membership)} />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {owned.length > 0 && (
+                  <div className="grid min-w-0" data-testid="owned-universes">
+                    <SectionHeader id="owned-heading" title="You own" count={owned.length} />
+                    <div className={GROUP} aria-labelledby="owned-heading" role="list">
+                      {owned.map((membership) => (
+                        <div key={membership.universe.id} role="listitem" className="min-w-0">
+                          <OwnedUniverseRow membership={membership} />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </>
             )}
             {memberships.length > 0 && (
               <p className="text-sm text-muted-foreground">
