@@ -202,8 +202,10 @@ export default function HerePanel({ live }: { live?: LiveView | null }) {
 
   // Rooms you were in lately: two more than shown, in case where you are and the room before it are among them.
   const recent = useCollection(`/api/admin/rooms/recent?limit=${EARLIER + 2}`, 'rooms', isRecentRoom);
+  // Held until we know where you are and the room before it, so neither shows for a moment as an earlier room.
+  const settled = unavailable || located.kind === 'failed' || (located.kind !== 'loading' && previousFor !== null);
   const earlier =
-    recent.result.status === 'ready'
+    recent.result.status === 'ready' && settled
       ? recent.result.items.filter((room) => room.roomId !== roomId && room.roomId !== previousId).slice(0, EARLIER).map(fromRecent)
       : null;
 
