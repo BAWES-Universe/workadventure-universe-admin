@@ -25,6 +25,8 @@ export interface PushOptions {
   /** How long the push service keeps it for a device that is offline, in seconds. */
   ttl?: number;
   urgency?: 'normal' | 'high';
+  /** Only these of the person's devices (a direct message arrives once per device); all of them when left out. */
+  deviceIds?: string[];
 }
 
 const DAY = 24 * 60 * 60;
@@ -71,7 +73,7 @@ export async function sendPush(userId: string, kind: PushKind, message: PushMess
     if (!wantsPush(await getPushSettings(userId), kind, now)) return 0;
 
     const devices = await prisma.pushDevice.findMany({
-      where: { userId, enabled: true },
+      where: { userId, enabled: true, ...(options.deviceIds ? { id: { in: options.deviceIds } } : {}) },
       select: { id: true, endpoint: true, p256dh: true, auth: true },
     });
     if (devices.length === 0) return 0;

@@ -114,7 +114,8 @@ async function savePushDevice(userId: string, input: PushDeviceInput): Promise<P
       auth: input.auth,
       label: input.label,
       lastSeenAt: now,
-      ...(sameOwner ? {} : { enabled: true, lastNotifiedAt: null, createdAt: now }),
+      // A new owner starts fresh, and the previous owner's Matrix pusher stops being able to reach this browser
+      ...(sameOwner ? {} : { enabled: true, lastNotifiedAt: null, createdAt: now, gatewaySecret: null }),
     },
     select: VIEW_SELECT,
   });
