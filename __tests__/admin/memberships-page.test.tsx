@@ -156,6 +156,63 @@ describe('Memberships', () => {
     expect(screen.getAllByRole('button', { name: /^Leave / })).toHaveLength(1);
   });
 
+  it('puts the universes you joined under Member of first and the ones you own under You own, saying Owner once', async () => {
+    const mine = {
+      ...universe,
+      universe: { ...universe.universe, id: 'u2', name: 'Mine' },
+      isOwner: true,
+      joinedAt: '2025-12-01T00:00:00Z',
+      // An owner keeps roles from before; the heading already says what they are there.
+      roles: [{ key: 'admin', name: 'Admin', color: '#F87171', allWorlds: false, worldIds: ['hq'] }],
+    };
+    const empty = { ...mine, universe: { id: 'u3', name: 'Empty', worlds: [] }, roles: [] };
+    fetchMock.mockImplementation((url: string) => {
+      if (url === '/api/auth/me') return json({ user: { id: 'me' } });
+      if (url === '/api/memberships/invitations') return json({ invitations: [] });
+      if (url === '/api/memberships/my/universes') return json({ universes: [mine, universe, empty] });
+      return json({});
+    });
+    render(<MyMembershipsPage />);
+    const joined = await screen.findByTestId('joined-universes');
+    const owned = screen.getByTestId('owned-universes');
+    expect(joined.compareDocumentPosition(owned) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(joined.querySelector('h2')?.textContent).toBe('Member of1');
+    expect(owned.querySelector('h2')?.textContent).toBe('You own2');
+    expect(joined.textContent).toContain('BAWES');
+    expect(joined.textContent).toContain('Joined Oct 2026');
+
+    const ownedText = owned.textContent ?? '';
+    expect(ownedText).toContain('Mine');
+    expect(ownedText).toContain('HQ and Campus');
+    expect(ownedText).toContain('Created Dec 2025');
+    expect(ownedText).toContain('No worlds yet');
+    expect(ownedText).not.toContain('Owner');
+    expect(ownedText).not.toContain('Admin');
+    expect(ownedText).not.toContain('Joined');
+    // The page lists only universes, so no row repeats the word.
+    expect(screen.queryByText(/^Universe$/)).toBeNull();
+    expect(document.body.textContent).not.toContain('Universe ·');
+  });
+
+  it('says where a role works only when that differs from the worlds you are in', async () => {
+    const limited = {
+      ...universe,
+      worlds: { allWorlds: false, worldIds: ['hq'] },
+      roles: [{ key: 'admin', name: 'Admin', color: '#F87171', allWorlds: false, worldIds: ['hq'] }],
+    };
+    fetchMock.mockImplementation((url: string) => {
+      if (url === '/api/auth/me') return json({ user: { id: 'me' } });
+      if (url === '/api/memberships/invitations') return json({ invitations: [] });
+      if (url === '/api/memberships/my/universes') return json({ universes: [limited] });
+      return json({});
+    });
+    render(<MyMembershipsPage />);
+    const joined = await screen.findByTestId('joined-universes');
+    expect(joined.textContent).toContain('Admin');
+    expect(joined.textContent).toContain('HQ');
+    expect(joined.textContent).not.toContain('HQ only');
+  });
+
   it('asks before leaving, with Cancel as the way out, then leaves the universe and reloads', async () => {
     let left = false;
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
