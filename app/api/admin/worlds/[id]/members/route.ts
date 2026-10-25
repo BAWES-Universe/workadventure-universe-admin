@@ -8,6 +8,7 @@ import { viewerWorldId } from '@/lib/viewer-world';
 import { NOT_SYSTEM_USER } from '@/lib/system-user';
 import { canSeeWorld } from '@/lib/room-visibility';
 import { BUILT_IN_ROLES } from '@/lib/roles';
+import { notifyInvitation } from '@/lib/push-messages';
 
 const inviteMemberSchema = z.object({
   userId: z.string().uuid(),
@@ -353,6 +354,7 @@ export async function POST(
       });
     }
 
+    if (invitation.world) notifyInvitation({ id: data.userId }, invitation.world.universe);
     return NextResponse.json({ invitation }, { status: 201 });
   } catch (error) {
     if (error instanceof z.ZodError) {

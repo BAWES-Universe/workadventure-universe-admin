@@ -6,6 +6,7 @@ import { allows, invitationReach, isAdministratorRole, ranksAbove, reachOf, worl
 import { SYSTEM_USER_EMAIL } from '@/lib/system-user';
 import { withWokas } from '@/lib/woka-avatar';
 import { badRequest, checkScope, failed, needs, scopeSchema, universeContext } from '@/lib/universe-route';
+import { notifyInvitation } from '@/lib/push-messages';
 
 const inviteSchema = z.object({
   userId: z.string().uuid(),
@@ -80,6 +81,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const invitation = earlier
       ? await prisma.membershipInvitation.update({ where: { id: earlier.id }, data: fields })
       : await prisma.membershipInvitation.create({ data: { ...fields, worldId, invitedUserId: invitee.id } });
+    notifyInvitation(invitee, universe);
 
     return NextResponse.json(
       {

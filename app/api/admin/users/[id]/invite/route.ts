@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { z } from 'zod';
 import { getSessionUser } from '@/lib/auth-session';
 import { ADMIN_EVERY_WORLD, tagsGiveAdministrator } from '@/lib/universe-members';
+import { notifyInvitation } from '@/lib/push-messages';
 
 const inviteToWorldSchema = z.object({
   worldId: z.string().uuid(),
@@ -206,6 +207,7 @@ export async function POST(
       });
     }
 
+    if (invitation.world) notifyInvitation({ id: invitedUserId }, invitation.world.universe);
     return NextResponse.json({ invitation }, { status: 201 });
   } catch (error) {
     if (error instanceof z.ZodError) {

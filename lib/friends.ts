@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from './db';
+import { notifyFriendAccepted, notifyFriendRequest } from './push-messages';
 import { parsePlayUri } from './utils';
 import {
   PEOPLE_PREFERENCE_KEYS,
@@ -368,6 +369,7 @@ async function runAction(me: Account, target: Account, action: FriendAction): Pr
       if (open >= MAX_OPEN_REQUESTS) throw new FriendsError('too_many_open_requests', 429);
 
       await prisma.friendship.create({ data: { ...pair, status: 'pending', requestedById: me.id } });
+      notifyFriendRequest(target, me);
       return 'request_sent';
     }
     case 'accept':
@@ -416,6 +418,8 @@ async function accept(me: Account, target: Account): Promise<Relationship> {
   if (count === 0) {
     const now = relationshipFor(me.id, await findPair(me.id, target.id));
     if (now !== 'friends') throw new FriendsError('no_request', 409);
+  } else {
+    notifyFriendAccepted(target, me);
   }
   return 'friends';
 }

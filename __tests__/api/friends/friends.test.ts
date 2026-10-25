@@ -7,8 +7,10 @@ import { GET as relationship } from '@/app/api/friends/relationship/route';
 import { POST as places } from '@/app/api/friends/places/route';
 import { MAX_OPEN_REQUESTS } from '@/lib/friends';
 import { addUser, db } from '../../helpers/friends-db';
+import { notifyFriendAccepted, notifyFriendRequest } from '@/lib/push-messages';
 
 jest.mock('@/lib/db', () => ({ prisma: jest.requireActual('../../helpers/friends-db').fakePrisma }));
+jest.mock('@/lib/push-messages', () => ({ notifyFriendRequest: jest.fn(), notifyFriendAccepted: jest.fn() }));
 
 const BASE = 'http://localhost:3333/api/friends';
 const TOKEN = 'test-admin-token';
@@ -93,6 +95,28 @@ describe('/api/friends', () => {
     expect(alice.friends[0]).toEqual(expect.objectContaining({ chatId: '@b:chat', shareLocation: true }));
     expect(alice.incoming).toEqual([]);
     expect(alice.outgoing).toEqual([]);
+  });
+
+  it('notifies the person asked, and the person who asked when it is accepted; nothing else notifies', async () => {
+    await action('a', 'b', 'request');
+    expect(notifyFriendRequest).toHaveBeenCalledTimes(1);
+    expect(notifyFriendRequest).toHaveBeenCalledWith(expect.objectContaining({ id: 'b' }), expect.objectContaining({ uuid: 'uuid-a', name: 'Alice' }));
+    await action('a', 'b', 'request');
+    expect(notifyFriendRequest).toHaveBeenCalledTimes(1);
+
+    await action('b', 'a', 'accept');
+    expect(notifyFriendAccepted).toHaveBeenCalledTimes(1);
+    expect(notifyFriendAccepted).toHaveBeenCalledWith(expect.objectContaining({ id: 'a' }), expect.objectContaining({ uuid: 'uuid-b', name: 'Bilal' }));
+    await action('b', 'a', 'accept');
+    await action('a', 'b', 'remove');
+    expect(notifyFriendAccepted).toHaveBeenCalledTimes(1);
+  });
+
+  it('a request back to someone who asked you tells them it was accepted', async () => {
+    await action('a', 'b', 'request');
+    await action('b', 'a', 'request');
+    expect(notifyFriendRequest).toHaveBeenCalledTimes(1);
+    expect(notifyFriendAccepted).toHaveBeenCalledWith(expect.objectContaining({ id: 'a' }), expect.objectContaining({ uuid: 'uuid-b' }));
   });
 
   it('a request back to someone who asked you accepts theirs', async () => {
