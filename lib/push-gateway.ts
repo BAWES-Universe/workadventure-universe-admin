@@ -16,8 +16,8 @@ import { getPushSettings, type DmSource } from '@/lib/push-settings';
 export const PUSH_APP_ID = 'net.bawes.universe.web';
 export const GATEWAY_PATH = '/_matrix/push/v1/notify';
 
-/** Bots are the `universe-bots` app service users. */
-const BOT_SENDER = /^@bot_[^:]+:/;
+/** Bots are the `universe-bots` app service users, on our own homeserver. */
+const BOT_SENDER = /^@bot_[^:]+:(.+)$/;
 const PREVIEW_LENGTH = 120;
 
 interface GatewayDevice {
@@ -106,9 +106,19 @@ function secretMatches(stored: string, given: unknown): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+/**
+ * One of our bots: `@bot_…` on the recipient's own homeserver. The same name from another server is someone else, and
+ * goes through the checks below like any person.
+ */
+export function isOurBot(sender: string, recipientMatrixId: string | null): boolean {
+  const server = BOT_SENDER.exec(sender)?.[1];
+  const colon = recipientMatrixId?.indexOf(':') ?? -1;
+  return server !== undefined && colon > 0 && recipientMatrixId!.slice(colon + 1) === server;
+}
+
 /** Whether `dmFrom` lets this sender through. Someone blocked either way never does. */
-async function senderAllowed(recipientId: string, sender: string, dmFrom: DmSource): Promise<boolean> {
-  if (BOT_SENDER.test(sender)) return true;
+async function senderAllowed(recipientId: string, recipientMatrixId: string | null, sender: string, dmFrom: DmSource): Promise<boolean> {
+  if (isOurBot(sender, recipientMatrixId)) return true;
   const person = await prisma.user.findFirst({ where: { matrixChatId: sender }, select: { id: true } });
   if (!person) return dmFrom === 'anyone';
   if (person.id === recipientId) return false;
@@ -169,7 +179,7 @@ export async function handleGatewayNotification(body: unknown): Promise<{ reject
 
     void (async () => {
       const settings = await getPushSettings(row.userId);
-      if (!settings.directMessages || !(await senderAllowed(row.userId, sender, settings.dmFrom))) return;
+      if (!settings.directMessages || !(await senderAllowed(row.userId, row.user.matrixChatId, sender, settings.dmFrom))) return;
       await notifyDevice(row.userId, row.id, notification, sender);
     })().catch((error) => console.error('[Push] Direct message failed:', error instanceof Error ? error.message : 'unknown'));
   }

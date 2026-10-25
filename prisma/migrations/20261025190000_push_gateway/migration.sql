@@ -7,9 +7,7 @@ ALTER TABLE "push_devices" ADD COLUMN     "gateway_secret" VARCHAR(64);
 -- CreateTable
 CREATE TABLE "push_activity" (
     "user_id" TEXT NOT NULL,
-    "front_at" TIMESTAMP(3),
-    "front_tab_id" VARCHAR(64),
-    "open_chat_room_id" VARCHAR(255),
+    "fronts" JSONB NOT NULL DEFAULT '{}',
     "left_chat_room_id" VARCHAR(255),
     "left_chat_at" TIMESTAMP(3),
     "updated_at" TIMESTAMP(3) NOT NULL,

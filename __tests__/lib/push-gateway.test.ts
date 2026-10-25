@@ -1,4 +1,4 @@
-import { handleGatewayNotification, isDirectMessage, messageLine, readNotification } from '@/lib/push-gateway';
+import { handleGatewayNotification, isDirectMessage, isOurBot, messageLine, readNotification } from '@/lib/push-gateway';
 import { sendPush } from '@/lib/push';
 import { getActivity } from '@/lib/push-activity';
 import { DEFAULT_PUSH_SETTINGS, getPushSettings } from '@/lib/push-settings';
@@ -101,6 +101,15 @@ describe('the push gateway', () => {
     expect(prisma.user.findFirst).not.toHaveBeenCalled();
   });
 
+  it('treats a bot name from another server as anyone else: blocked and "from" still apply', async () => {
+    (getPushSettings as jest.Mock).mockResolvedValue({ ...DEFAULT_PUSH_SETTINGS, dmFrom: 'friends' });
+    (prisma.user.findFirst as jest.Mock).mockResolvedValue(null);
+    await handleGatewayNotification(post({ sender: '@bot_nova:other.server', sender_display_name: 'Nova' }));
+    await settle();
+    expect(sendPush).not.toHaveBeenCalled();
+    expect(prisma.user.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { matrixChatId: '@bot_nova:other.server' } }));
+  });
+
   it('follows "Direct messages from": members of a shared world pass with Friends and members only', async () => {
     (prisma.friendship.findUnique as jest.Mock).mockResolvedValue(null);
     await handleGatewayNotification(post());
@@ -139,7 +148,7 @@ describe('the push gateway', () => {
   });
 
   it('sends nothing while Universe is in front on any of their devices', async () => {
-    (getActivity as jest.Mock).mockResolvedValue({ frontAt: new Date(), frontTabId: 't', openChatRoomId: null, leftChatRoomId: null, leftChatAt: null });
+    (getActivity as jest.Mock).mockResolvedValue({ fronts: { t: { at: Date.now(), chatRoomId: null } }, leftChatRoomId: null, leftChatAt: null });
     await handleGatewayNotification(post());
     await settle();
     expect(sendPush).not.toHaveBeenCalled();
@@ -148,8 +157,8 @@ describe('the push gateway', () => {
   it('waits a minute after the chat was left, and sends nothing if they came back', async () => {
     jest.useFakeTimers();
     try {
-      const left = { frontAt: null, frontTabId: null, openChatRoomId: null, leftChatRoomId: '!dm:chat', leftChatAt: new Date() };
-      (getActivity as jest.Mock).mockResolvedValueOnce(left).mockResolvedValueOnce({ ...left, frontAt: new Date(Date.now() + 59_000) });
+      const left = { fronts: {}, leftChatRoomId: '!dm:chat', leftChatAt: new Date() };
+      (getActivity as jest.Mock).mockResolvedValueOnce(left).mockResolvedValueOnce({ ...left, fronts: { t: { at: Date.now() + 59_000, chatRoomId: null } } });
       await handleGatewayNotification(post());
       await jest.advanceTimersByTimeAsync(30_000);
       expect(sendPush).not.toHaveBeenCalled();
@@ -163,6 +172,16 @@ describe('the push gateway', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+});
+
+describe('one of our bots', () => {
+  it('is @bot_… on the recipient’s own homeserver, nowhere else', () => {
+    expect(isOurBot('@bot_nova:chat.bawes.net', '@khalid:chat.bawes.net')).toBe(true);
+    expect(isOurBot('@bot_nova:other.server', '@khalid:chat.bawes.net')).toBe(false);
+    expect(isOurBot('@bot_nova:bawes.net', '@khalid:chat.bawes.net')).toBe(false);
+    expect(isOurBot('@sara:chat.bawes.net', '@khalid:chat.bawes.net')).toBe(false);
+    expect(isOurBot('@bot_nova:chat.bawes.net', null)).toBe(false);
   });
 });
 

@@ -129,12 +129,9 @@ model PushDevice {
 // will see in Universe sends no notification. One row per person, across their devices.
 model PushActivity {
   userId         String    @id @map("user_id")
-  // Last time Universe was in front on any of their devices
-  frontAt        DateTime? @map("front_at")
-  // The tab that said so: another tab going to the back does not undo it
-  frontTabId     String?   @map("front_tab_id") @db.VarChar(64)
-  // The chat open in front then, and the one they just left
-  openChatRoomId String?   @map("open_chat_room_id") @db.VarChar(255)
+  // The tabs where Universe is in front now, by tab id: when each last said so, and the chat open there
+  fronts         Json      @default("{}")
+  // The chat they just left
   leftChatRoomId String?   @map("left_chat_room_id") @db.VarChar(255)
   leftChatAt     DateTime? @map("left_chat_at")
   updatedAt      DateTime  @updatedAt @map("updated_at")

@@ -1,3 +1,4 @@
+import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 
 /**
@@ -18,13 +19,21 @@ export interface ActivityReport {
   chatRoomId: string | null;
 }
 
+/** One tab where Universe is in front: when it last said so, and the chat open there. */
+export interface FrontTab {
+  at: number;
+  chatRoomId: string | null;
+}
+
 export interface Activity {
-  frontAt: Date | null;
-  frontTabId: string | null;
-  openChatRoomId: string | null;
+  /** By tab id, so one device going to the back leaves the others in front */
+  fronts: Record<string, FrontTab>;
   leftChatRoomId: string | null;
   leftChatAt: Date | null;
 }
+
+/** More tabs than anyone keeps in front at once; past this the oldest reports go. */
+export const MAX_FRONT_TABS = 10;
 
 const TAB_ID = /^[A-Za-z0-9_-]{8,64}$/;
 
@@ -36,28 +45,32 @@ export function readActivityReport(body: unknown): ActivityReport | null {
   return { tabId, front, chatRoomId: front ? (chatRoomId ?? null) : null };
 }
 
-/** The row after a report: a chat that stops being the one open in front becomes the one just left. */
+const isFresh = (tab: FrontTab, now: Date) => now.getTime() - tab.at < FRONT_FRESH_MS;
+
+/** The tabs still in front, newest first, at most MAX_FRONT_TABS. */
+function freshFronts(fronts: Record<string, FrontTab>, now: Date): [string, FrontTab][] {
+  return Object.entries(fronts)
+    .filter(([, tab]) => isFresh(tab, now))
+    .sort(([, a], [, b]) => b.at - a.at)
+    .slice(0, MAX_FRONT_TABS);
+}
+
+/** The row after a report: a chat that stops being open in front in that tab becomes the one just left. */
 export function nextActivity(current: Activity | null, report: ActivityReport, now: Date): Activity {
-  const previous: Activity = current ?? { frontAt: null, frontTabId: null, openChatRoomId: null, leftChatRoomId: null, leftChatAt: null };
-  // Another tab still counts as in front until its own report goes stale
-  if (!report.front && previous.frontTabId !== null && previous.frontTabId !== report.tabId && isFront(previous, now)) {
-    return previous;
-  }
-  const next: Activity = {
-    ...previous,
-    frontAt: report.front ? now : null,
-    frontTabId: report.front ? report.tabId : null,
-    openChatRoomId: report.chatRoomId,
-  };
-  if (previous.openChatRoomId && previous.openChatRoomId !== report.chatRoomId) {
-    next.leftChatRoomId = previous.openChatRoomId;
+  const previous: Activity = current ?? { fronts: {}, leftChatRoomId: null, leftChatAt: null };
+  const before = previous.fronts[report.tabId]?.chatRoomId ?? null;
+  const others = freshFronts(previous.fronts, now).filter(([tabId]) => tabId !== report.tabId);
+  const tabs = report.front ? [[report.tabId, { at: now.getTime(), chatRoomId: report.chatRoomId }] as const, ...others] : others;
+  const next: Activity = { ...previous, fronts: Object.fromEntries(tabs.slice(0, MAX_FRONT_TABS)) };
+  if (before && before !== report.chatRoomId) {
+    next.leftChatRoomId = before;
     next.leftChatAt = now;
   }
   return next;
 }
 
 export function isFront(activity: Activity | null, now: Date): boolean {
-  return activity?.frontAt != null && now.getTime() - activity.frontAt.getTime() < FRONT_FRESH_MS;
+  return Object.values(activity?.fronts ?? {}).some((tab) => isFresh(tab, now));
 }
 
 /**
@@ -73,13 +86,28 @@ export function messageDecision(activity: Activity | null, chatRoomId: string, n
   return { send: true };
 }
 
-const SELECT = { frontAt: true, frontTabId: true, openChatRoomId: true, leftChatRoomId: true, leftChatAt: true } as const;
-
-export function getActivity(userId: string): Promise<Activity | null> {
-  return prisma.pushActivity.findUnique({ where: { userId }, select: SELECT });
+/** The stored tabs, keeping only well-formed ones. */
+function readFronts(value: unknown): Record<string, FrontTab> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return {};
+  const fronts: Record<string, FrontTab> = {};
+  for (const [tabId, tab] of Object.entries(value as Record<string, unknown>)) {
+    const { at, chatRoomId } = (tab ?? {}) as Record<string, unknown>;
+    if (typeof at === 'number' && (typeof chatRoomId === 'string' || chatRoomId === null)) fronts[tabId] = { at, chatRoomId };
+  }
+  return fronts;
 }
 
+export async function getActivity(userId: string): Promise<Activity | null> {
+  const row = await prisma.pushActivity.findUnique({ where: { userId }, select: { fronts: true, leftChatRoomId: true, leftChatAt: true } });
+  return row && { fronts: readFronts(row.fronts), leftChatRoomId: row.leftChatRoomId, leftChatAt: row.leftChatAt };
+}
+
+/**
+ * Two tabs reporting at the same moment can each write over the other's report; the one lost comes back with that
+ * tab's next report, 30 seconds later at most.
+ */
 export async function recordActivity(userId: string, report: ActivityReport): Promise<void> {
   const next = nextActivity(await getActivity(userId), report, new Date());
-  await prisma.pushActivity.upsert({ where: { userId }, create: { userId, ...next }, update: next });
+  const data = { fronts: next.fronts as unknown as Prisma.InputJsonObject, leftChatRoomId: next.leftChatRoomId, leftChatAt: next.leftChatAt };
+  await prisma.pushActivity.upsert({ where: { userId }, create: { userId, ...data }, update: data });
 }
