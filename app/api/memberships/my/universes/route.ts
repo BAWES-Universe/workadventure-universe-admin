@@ -52,7 +52,7 @@ export async function GET(request: NextRequest) {
 
     const everywhere = { allWorlds: true, worldIds: [] as string[] };
     const memberships = joined.map((member) => ({
-      universe: { id: member.universe.id, name: member.universe.name, worlds: seen(member.universe) },
+      universe: { id: member.universe.id, name: member.universe.name, createdAt: member.universe.createdAt, worlds: seen(member.universe) },
       isOwner: member.universe.ownerId === sessionUser.id,
       joinedAt: member.joinedAt,
       worlds: { allWorlds: member.allWorlds, worldIds: member.worldIds },
@@ -70,7 +70,7 @@ export async function GET(request: NextRequest) {
     for (const universe of owned) {
       if (joinedIds.has(universe.id)) continue;
       memberships.push({
-        universe: { id: universe.id, name: universe.name, worlds: seen(universe) },
+        universe: { id: universe.id, name: universe.name, createdAt: universe.createdAt, worlds: seen(universe) },
         isOwner: true,
         joinedAt: universe.createdAt,
         worlds: everywhere,

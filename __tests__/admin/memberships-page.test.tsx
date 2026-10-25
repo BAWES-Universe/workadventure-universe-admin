@@ -159,13 +159,15 @@ describe('Memberships', () => {
   it('puts the universes you joined under Member of first and the ones you own under You own, saying Owner once', async () => {
     const mine = {
       ...universe,
-      universe: { ...universe.universe, id: 'u2', name: 'Mine' },
+      universe: { ...universe.universe, id: 'u2', name: 'Mine', createdAt: '2025-12-01T00:00:00Z' },
       isOwner: true,
-      joinedAt: '2025-12-01T00:00:00Z',
+      // Joined when the first world was made, and only into HQ: the row still says when the universe was made, and every world.
+      joinedAt: '2026-02-01T00:00:00Z',
+      worlds: { allWorlds: false, worldIds: ['hq'] },
       // An owner keeps roles from before; the heading already says what they are there.
       roles: [{ key: 'admin', name: 'Admin', color: '#F87171', allWorlds: false, worldIds: ['hq'] }],
     };
-    const empty = { ...mine, universe: { id: 'u3', name: 'Empty', worlds: [] }, roles: [] };
+    const empty = { ...mine, universe: { id: 'u3', name: 'Empty', createdAt: '2025-12-01T00:00:00Z', worlds: [] }, roles: [] };
     fetchMock.mockImplementation((url: string) => {
       if (url === '/api/auth/me') return json({ user: { id: 'me' } });
       if (url === '/api/memberships/invitations') return json({ invitations: [] });
@@ -189,6 +191,7 @@ describe('Memberships', () => {
     expect(ownedText).not.toContain('Owner');
     expect(ownedText).not.toContain('Admin');
     expect(ownedText).not.toContain('Joined');
+    expect(ownedText).not.toContain('Feb 2026');
     // The page lists only universes, so no row repeats the word.
     expect(screen.queryByText(/^Universe$/)).toBeNull();
     expect(document.body.textContent).not.toContain('Universe ·');

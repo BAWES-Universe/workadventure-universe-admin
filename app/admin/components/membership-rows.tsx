@@ -7,7 +7,8 @@ import { RoleChip } from './universe-people';
 
 /** A universe you belong to, as /api/memberships/my/universes gives it. */
 export interface UniverseMembership {
-  universe: { id: string; name: string; worlds: { id: string; name: string }[] };
+  /** createdAt: when the universe was made (Created on an owned row). */
+  universe: { id: string; name: string; createdAt?: string; worlds: { id: string; name: string }[] };
   isOwner: boolean;
   joinedAt: string;
   worlds: { allWorlds: boolean; worldIds: string[] };
@@ -45,16 +46,17 @@ function Roles({ membership }: { membership: UniverseMembership }) {
   );
 }
 
-/** A universe you own: its section says so, so the row is the name, your worlds and when you made it. */
+/** A universe you own: its section says so, so the row is the name, its worlds (all yours) and when you made it. */
 export function OwnedUniverseRow({ membership }: { membership: UniverseMembership }) {
-  const where = worldsIn(membership);
+  // The owner has every world, whatever an older membership row says.
+  const where = worldsIn({ ...membership, worlds: { allWorlds: true, worldIds: [] } });
   return (
     <EntityRow
       href={`/admin/universes/${membership.universe.id}`}
       kind="universe"
       universeId={membership.universe.id}
       title={membership.universe.name}
-      context={<StatLine items={[where ? <Place key="worlds" kind="world" label={where} /> : 'No worlds yet', `Created ${month(membership.joinedAt)}`]} />}
+      context={<StatLine items={[where ? <Place key="worlds" kind="world" label={where} /> : 'No worlds yet', `Created ${month(membership.universe.createdAt ?? membership.joinedAt)}`]} />}
     />
   );
 }
