@@ -114,7 +114,7 @@ function PlaceCard({ place, friendsOnly = false }: { place: LivePlace; friendsOn
         </span>
         {place.bots > 0 && (
           <span className={styles.bot}>
-            {place.bots} bot{place.bots === 1 ? '' : 's'}
+            {botsText(place.bots)}
           </span>
         )}
         {place.here ? (
@@ -198,6 +198,11 @@ function Note() {
   );
 }
 
+/** "1 bot", "21 bots", kept on one line. */
+export function botsText(bots: number): string {
+  return `${bots}\u00a0${bots === 1 ? 'bot' : 'bots'}`;
+}
+
 /** "A, B, C and D"; past four rooms, the first three and how many more. */
 function roomNames(names: string[]): string {
   const shown = names.length > 4 ? names.slice(0, 3) : names;
@@ -209,6 +214,7 @@ function roomNames(names: string[]): string {
 /** Orbit's top line: how many people are live and in how many rooms, which rooms, and a few faces; opens Live now. Nothing when nobody is around. */
 export function LiveStrip({ view }: { view: LiveView }) {
   const people = view.places.reduce((sum, place) => sum + place.count, 0);
+  const bots = view.places.reduce((sum, place) => sum + place.bots, 0);
   if (view.places.length === 0 || people === 0) return null;
   const rooms = view.places.length;
   const faces = view.places.flatMap((place) => place.people).slice(0, 4);
@@ -219,7 +225,10 @@ export function LiveStrip({ view }: { view: LiveView }) {
         <b>
           {people} {people === 1 ? 'person' : 'people'} live in {rooms} {rooms === 1 ? 'room' : 'rooms'}
         </b>
-        <small>{roomNames(view.places.map((place) => place.name))}</small>
+        <small>
+          {roomNames(view.places.map((place) => place.name))}
+          {bots > 0 && `\u00a0·\u00a0${botsText(bots)}`}
+        </small>
       </p>
       <span className={styles.stripFaces} aria-hidden="true">
         {faces.map((person) => (

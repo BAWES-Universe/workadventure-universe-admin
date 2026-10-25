@@ -34,6 +34,7 @@ import {
 import { ProfileActions, ProfileFrame, ProfileLinks, WokaAvatar } from '../../components/profile-card';
 import { inviteInGame, messageInGame, useGameCapability } from '../../components/orbit-bridge';
 import { PassportSection } from '../../components/passport';
+import { NowIn } from '../../components/now-in';
 import { Planet } from '../../components/ds/planet-icon';
 import InviteSheet, { firstUniverse, personNote, type UniverseChoice, type SentInvitation } from '../../components/invite-sheet';
 import { useCurrentUniverseId } from '../../hooks/use-current-universe';
@@ -707,6 +708,7 @@ export default function UserDetailPage() {
             {friendError}
           </p>
         )}
+        {!isSelf && <NowIn live={live} uuid={user.uuid} />}
         {(bio || links.length > 0) && (
           <div className="grid min-w-0 gap-3">
             {bio && <p className="whitespace-pre-line text-sm leading-relaxed [overflow-wrap:anywhere]">{bio}</p>}
