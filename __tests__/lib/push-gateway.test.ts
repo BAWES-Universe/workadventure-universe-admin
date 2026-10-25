@@ -169,12 +169,12 @@ describe('the push gateway', () => {
 describe('a direct message notification', () => {
   const notification = readNotification(post())!;
 
-  it('shows the text, or what was sent, or "New message" with text off', () => {
-    expect(messageLine(notification, true)).toBe('are you coming to standup?');
-    expect(messageLine(notification, false)).toBe('New message');
-    expect(messageLine({ ...notification, content: { msgtype: 'm.image', body: 'cat.png' } }, true)).toBe('sent an image');
-    expect(messageLine({ ...notification, type: 'm.room.encrypted', content: { ciphertext: 'x' } }, true)).toBe('New message');
-    const long = messageLine({ ...notification, content: { msgtype: 'm.text', body: 'a'.repeat(300) } }, true);
+  it('shows the text, or what was sent, or "New message from Sara" with text off', () => {
+    expect(messageLine(notification, true, 'Sara')).toBe('are you coming to standup?');
+    expect(messageLine(notification, false, 'Sara')).toBe('New message from Sara');
+    expect(messageLine({ ...notification, content: { msgtype: 'm.image', body: 'cat.png' } }, true, 'Sara')).toBe('sent an image');
+    expect(messageLine({ ...notification, type: 'm.room.encrypted', content: { ciphertext: 'x' } }, true, 'Sara')).toBe('New message from Sara');
+    const long = messageLine({ ...notification, content: { msgtype: 'm.text', body: 'a'.repeat(300) } }, true, 'Sara');
     expect(long).toHaveLength(120);
     expect(long.endsWith('…')).toBe(true);
   });

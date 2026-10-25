@@ -74,10 +74,14 @@ export function isDirectMessage(notification: GatewayNotification, tweaks: Recor
   return tweaks.sound !== undefined;
 }
 
-/** "are you coming to standup?", or what kind of message it is; "New message" when text is off or unreadable. */
-export function messageLine(notification: GatewayNotification, previews: boolean): string {
+/**
+ * "are you coming to standup?", or what kind of message it is; "New message from Sara" when message text is off or
+ * cannot be read.
+ */
+export function messageLine(notification: GatewayNotification, previews: boolean, senderName: string): string {
   const content = notification.content;
-  if (!previews || notification.type !== 'm.room.message' || !content) return 'New message';
+  const plain = `New message from ${senderName}`;
+  if (!previews || notification.type !== 'm.room.message' || !content) return plain;
   switch (content.msgtype) {
     case 'm.image':
       return 'sent an image';
@@ -89,7 +93,7 @@ export function messageLine(notification: GatewayNotification, previews: boolean
       return 'sent a file';
     default: {
       const body = text(content.body)?.replace(/\s+/g, ' ').trim();
-      if (!body) return 'New message';
+      if (!body) return plain;
       return body.length > PREVIEW_LENGTH ? `${body.slice(0, PREVIEW_LENGTH - 1)}…` : body;
     }
   }
@@ -126,12 +130,13 @@ async function notifyDevice(userId: string, deviceId: string, notification: Gate
     if (isFront(await getActivity(userId), new Date())) return;
   }
   const settings = await getPushSettings(userId);
+  const senderName = notification.senderName ?? sender;
   await sendPush(
     userId,
     'directMessages',
     {
-      title: notification.senderName ?? sender,
-      body: messageLine(notification, settings.previews),
+      title: senderName,
+      body: messageLine(notification, settings.previews, senderName),
       tag: `chat:${roomId}`,
       chatRoomId: roomId,
     },
