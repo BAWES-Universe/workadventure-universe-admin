@@ -139,6 +139,33 @@ describe('Get started on Orbit', () => {
     expect(container.textContent).toBe('');
   });
 
+  it('waits for this visit’s numbers before offering the way back, so a step just finished elsewhere never brings it back for a moment', async () => {
+    serve({
+      hidden: true,
+      bio: 'Hello',
+      universes: [{ id: 'u1', name: 'BAWES', isPublic: true }],
+      memberships: [{ id: 'm1', tags: ['admin'], isUniverseOwner: true, world: { id: 'w1', name: 'HQ', universe: { name: 'BAWES' } } }],
+      stars: [{ id: 'r1' }],
+    });
+    // The invitation was just sent on another page; the numbers from before don't know it yet.
+    const before = bootstrap({ universes: 1, worlds: 1, ownedWorlds: 1, invitationsSent: 0, stars: 1, invitations: 0 });
+    const { container, rerender } = render(
+      <AdminBootstrapProvider value={before} fresh={false}>
+        <GetStartedOnOrbit />
+      </AdminBootstrapProvider>,
+    );
+    await waitFor(() => expect(fetchMock.mock.calls.some((call) => String(call[0]).startsWith('/api/admin/profile'))).toBe(true));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(container.textContent).toBe('');
+    rerender(
+      <AdminBootstrapProvider value={bootstrap({ ...before.mine!, invitationsSent: 1 })} fresh>
+        <GetStartedOnOrbit />
+      </AdminBootstrapProvider>,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(container.textContent).toBe('');
+  });
+
   it('does not flash the row while the profile is still unknown', async () => {
     let answer: (value: unknown) => void = () => undefined;
     fetchMock.mockImplementation((url: string) => {

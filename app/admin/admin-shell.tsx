@@ -50,8 +50,13 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
   const [attempt, setAttempt] = useState(0);
   const [view, setView] = useState<OrbitView>('compact');
   const hasBootstrap = bootstrap !== null;
+  // The request the numbers last answered: until this one's arrive, a page sees the earlier visit's numbers.
+  const [numbersFor, setNumbersFor] = useState<string | null>(null);
 
   const request = `${attempt}|${pathname}`;
+  // The first load, every visit to Orbit, You or Space, and a change in the game bring the numbers too; elsewhere,
+  // only the session is re-checked.
+  const rootPage = pathname === '/admin' || pathname === '/admin/you' || pathname === '/admin/space';
   const error = failure?.request === request ? failure.message : null;
   // Trying again shows the loader, not the last error, until the answer comes.
   const load = useCallback(() => {
@@ -72,9 +77,6 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
     }
 
     const controller = new AbortController();
-    // The first load, every visit to Orbit, You or Space, and a change in the game bring the numbers too; elsewhere,
-    // only the session is re-checked.
-    const rootPage = pathname === '/admin' || pathname === '/admin/you' || pathname === '/admin/space';
     const endpoint = !hasBootstrap || rootPage || wantBootstrap.current ? '/api/admin/bootstrap' : '/api/auth/me';
     void authenticatedFetch(endpoint, { signal: controller.signal })
       .then(async (response) => {
@@ -84,7 +86,10 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
         const data = await response.json();
         if (controller.signal.aborted) return;
         // Only fresh numbers answer the game's ask; a failed or abandoned load leaves it for the next one.
-        if (endpoint === '/api/admin/bootstrap') wantBootstrap.current = false;
+        if (endpoint === '/api/admin/bootstrap') {
+          wantBootstrap.current = false;
+          setNumbersFor(request);
+        }
         setFailure(null);
         setBootstrap((current) =>
           endpoint === '/api/admin/bootstrap'
@@ -135,7 +140,7 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
   }
 
   return (
-    <AdminBootstrapProvider value={bootstrap}>
+    <AdminBootstrapProvider value={bootstrap} fresh={!rootPage || numbersFor === request}>
       <WorkAdventureProvider>
         <OrbitBridge onRefresh={refreshFromGame} onView={setView} />
         <ShellChrome view={view} user={bootstrap.user} error={error} retry={load}>

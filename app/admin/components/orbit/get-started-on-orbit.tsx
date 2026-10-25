@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { authenticatedFetch } from '@/lib/client-auth';
-import { useAdminBootstrap } from '../../admin-bootstrap-context';
+import { useAdminBootstrap, useBootstrapFresh } from '../../admin-bootstrap-context';
 import { isNamed, isRecord, useCollection } from '../../hooks/use-collection';
 import { useGuidanceDismissed } from '../../hooks/use-guidance-dismissed';
 import { deriveProgress, getStartedSteps } from '../get-started-steps';
@@ -26,6 +26,7 @@ const PROFILE_RETRY_DELAYS_MS = [1500, 4000];
  */
 export function useGetStartedOnOrbit(): { guide: ReactNode; comesBack: ReactNode } {
   const { mine } = useAdminBootstrap();
+  const fresh = useBootstrapFresh();
   const [hidden, hide, show] = useGuidanceDismissed('getStarted');
   // `null` while reading; `'unknown'` once every try failed (the guide still shows, the profile step as not done yet).
   const [profileComplete, setProfileComplete] = useState<boolean | 'unknown' | null>(null);
@@ -88,8 +89,9 @@ export function useGetStartedOnOrbit(): { guide: ReactNode; comesBack: ReactNode
         <GetStartedStrip done={done} total={steps.length} next={next ? { title: next.title, href: next.href! } : null} onHide={hide} />
       );
   }
+  // The quiet row waits for this visit's numbers: a step finished on another page must not bring it back for a moment.
   const comesBack =
-    left && hidden === true ? (
+    left && hidden === true && fresh ? (
       <div className={styles.comesBack} data-testid="get-started-hidden">
         <span>
           <strong>Get started</strong>
