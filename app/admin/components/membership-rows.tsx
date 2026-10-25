@@ -26,10 +26,18 @@ function worldsIn(membership: UniverseMembership): string | null {
   return inWorlds.length <= 2 ? inWorlds.map((world) => world.name).join(' and ') : `${inWorlds.length} worlds`;
 }
 
+type Scope = { allWorlds: boolean; worldIds: string[] };
+
+/** The same worlds, whatever order they were picked in. */
+function sameWorlds(a: Scope, b: Scope): boolean {
+  if (a.allWorlds || b.allWorlds) return a.allWorlds === b.allWorlds;
+  const ids = new Set(a.worldIds);
+  return ids.size === new Set(b.worldIds).size && b.worldIds.every((id) => ids.has(id));
+}
+
 /** Your roles there; a role says where it works only when that differs from the worlds you're in. */
 function Roles({ membership }: { membership: UniverseMembership }) {
   const names = new Map(membership.universe.worlds.map((world) => [world.id, world.name]));
-  const yours = worldsLabel(membership.worlds, names);
   return (
     <span className="inline-flex flex-wrap items-center gap-1.5">
       {membership.roles.length === 0 && <RoleChip name="Member" color="#A78BFA" />}
@@ -38,7 +46,7 @@ function Roles({ membership }: { membership: UniverseMembership }) {
         return (
           <span key={role.key} className="inline-flex items-center gap-1.5">
             <RoleChip name={role.name} color={role.color} />
-            {where && where !== yours && <span className="text-xs text-muted-foreground">{where}</span>}
+            {where && !sameWorlds(role, membership.worlds) && <span className="text-xs text-muted-foreground">{where}</span>}
           </span>
         );
       })}

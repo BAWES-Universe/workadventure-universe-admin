@@ -216,6 +216,31 @@ describe('Memberships', () => {
     expect(joined.textContent).not.toContain('HQ only');
   });
 
+  it('compares a role with your worlds as sets: the same worlds in another order say nothing, different ones of the same count say where', async () => {
+    const lab = { id: 'lab', name: 'Lab' };
+    const worlds4 = [...universe.universe.worlds, lab, { id: 'pit', name: 'Pit' }];
+    const scoped = {
+      ...universe,
+      universe: { ...universe.universe, worlds: worlds4 },
+      worlds: { allWorlds: false, worldIds: ['hq', 'campus', 'lab'] },
+      roles: [
+        { key: 'admin', name: 'Admin', color: '#F87171', allWorlds: false, worldIds: ['lab', 'hq', 'campus'] },
+        { key: 'editor', name: 'Editor', color: '#60A5FA', allWorlds: false, worldIds: ['hq', 'campus', 'pit'] },
+      ],
+    };
+    fetchMock.mockImplementation((url: string) => {
+      if (url === '/api/auth/me') return json({ user: { id: 'me' } });
+      if (url === '/api/memberships/invitations') return json({ invitations: [] });
+      if (url === '/api/memberships/my/universes') return json({ universes: [scoped] });
+      return json({});
+    });
+    render(<MyMembershipsPage />);
+    const joined = await screen.findByTestId('joined-universes');
+    // Your worlds line says "3 worlds" once; only Editor, with a different three, says it again.
+    expect(joined.textContent?.match(/3 worlds/g)).toHaveLength(2);
+    expect(joined.textContent).toMatch(/Editor3 worlds/);
+  });
+
   it('asks before leaving, with Cancel as the way out, then leaves the universe and reloads', async () => {
     let left = false;
     fetchMock.mockImplementation((url: string, init?: RequestInit) => {
