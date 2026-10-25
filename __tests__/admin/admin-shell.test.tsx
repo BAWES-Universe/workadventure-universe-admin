@@ -233,6 +233,11 @@ describe('AdminShell', () => {
     expect(mockAuthenticatedFetch.mock.calls[2][0]).toBe('/api/admin/bootstrap');
     await act(async () => answerLast());
     expect(await screen.findByText('fresh numbers')).toBeTruthy();
+
+    // A refresh from the game within the visit keeps them current while newer ones load.
+    act(() => mockOnRefresh?.());
+    await waitFor(() => expect(mockAuthenticatedFetch).toHaveBeenCalledTimes(4));
+    expect(screen.getByText('fresh numbers')).toBeTruthy();
   });
 
   it('gives every page a Back that names where it goes, and roots the wordmark', async () => {

@@ -153,7 +153,8 @@ export function ActivitySection({ limit, bare = false }: { limit?: number; bare?
   const [events, setEvents] = useState<ActivityEvent[] | null>(null);
   useEffect(() => {
     let cancelled = false;
-    authenticatedFetch('/api/me/activity')
+    // With no limit it is the Your activity page, which shows everything recent.
+    authenticatedFetch(limit === undefined ? '/api/me/activity?all=1' : '/api/me/activity')
       .then(async (response) => {
         if (!response.ok) throw new Error(`Activity answered ${response.status}`);
         const data = (await response.json()) as { events?: ActivityEvent[] };
@@ -165,7 +166,7 @@ export function ActivitySection({ limit, bare = false }: { limit?: number; bare?
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [limit]);
   if (!events || events.length === 0) return null;
   return (
     <section className={styles.section} aria-labelledby={bare ? undefined : 'activity-heading'} aria-label={bare ? 'Your activity' : undefined} data-testid="activity">

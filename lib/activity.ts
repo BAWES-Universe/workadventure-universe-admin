@@ -17,8 +17,10 @@ export interface ActivityEvent {
   href: string | null;
 }
 
-const PER_SOURCE = 20;
+/** The latest few, as You shows them. */
 export const MAX_EVENTS = 8;
+/** The Your activity page: everything recent, newest first. */
+export const ALL_EVENTS = 100;
 
 function role(tags: string[] | null): string {
   tags ??= [];
@@ -27,24 +29,26 @@ function role(tags: string[] | null): string {
   return 'a member';
 }
 
-export async function loadActivity(userId: string): Promise<ActivityEvent[]> {
+export async function loadActivity(userId: string, { all = false }: { all?: boolean } = {}): Promise<ActivityEvent[]> {
+  // The newest `limit` from each source always hold the newest `limit` overall.
+  const limit = all ? ALL_EVENTS : MAX_EVENTS;
   const [invitations, memberships, stars, universes, worlds] = await Promise.all([
     prisma.membershipInvitation.findMany({
       where: { invitedUserId: userId },
       orderBy: { invitedAt: 'desc' },
-      take: PER_SOURCE,
+      take: limit,
       select: { id: true, invitedAt: true, tags: true, world: { select: { id: true, name: true } }, invitedBy: { select: { name: true } } },
     }),
     prisma.worldMember.findMany({
       where: { userId },
       orderBy: { joinedAt: 'desc' },
-      take: PER_SOURCE,
+      take: limit,
       select: { id: true, joinedAt: true, world: { select: { id: true, name: true, universe: { select: { name: true } } } } },
     }),
     prisma.favorite.findMany({
       where: { userId },
       orderBy: { favoritedAt: 'desc' },
-      take: PER_SOURCE,
+      take: limit,
       select: {
         id: true,
         favoritedAt: true,
@@ -56,13 +60,13 @@ export async function loadActivity(userId: string): Promise<ActivityEvent[]> {
     prisma.universe.findMany({
       where: { ownerId: userId },
       orderBy: { createdAt: 'desc' },
-      take: PER_SOURCE,
+      take: limit,
       select: { id: true, name: true, createdAt: true },
     }),
     prisma.world.findMany({
       where: { universe: { ownerId: userId } },
       orderBy: { createdAt: 'desc' },
-      take: PER_SOURCE,
+      take: limit,
       select: { id: true, name: true, createdAt: true, universe: { select: { name: true } } },
     }),
   ]);
@@ -115,5 +119,5 @@ export async function loadActivity(userId: string): Promise<ActivityEvent[]> {
       href: `/admin/worlds/${world.id}`,
     });
   }
-  return events.sort((a, b) => b.at.localeCompare(a.at)).slice(0, MAX_EVENTS);
+  return events.sort((a, b) => b.at.localeCompare(a.at)).slice(0, limit);
 }

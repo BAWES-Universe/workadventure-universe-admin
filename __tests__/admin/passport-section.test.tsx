@@ -210,6 +210,7 @@ describe('Your activity', () => {
 
     render(<ActivitySection bare />);
     const full = await screen.findByTestId('activity');
+    expect(fetchMock).toHaveBeenLastCalledWith('/api/me/activity?all=1');
     expect(within(full).getAllByRole('listitem')).toHaveLength(5);
     expect(within(full).queryByRole('link', { name: 'View all' })).toBeNull();
     expect(within(full).queryByRole('heading')).toBeNull();
@@ -227,7 +228,7 @@ describe('Your activity', () => {
   it('is left out when nothing happened yet, or it cannot be read', async () => {
     answer({ events: [] });
     const { container, unmount } = render(<ActivitySection />);
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/me/activity'));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/me/activity?all=1'));
     expect(container.textContent).toBe('');
     unmount();
     answer({}, false);
