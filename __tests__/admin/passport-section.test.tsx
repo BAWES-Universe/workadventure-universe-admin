@@ -79,6 +79,82 @@ describe('Your passport', () => {
   });
 });
 
+describe('Your passport on You, as others see it', () => {
+  const many = {
+    ...passport,
+    stamps: [
+      stamp('hq', 'HQ', 'BAWES', 212, '2026-01-12T08:00:00Z'),
+      stamp('lab', 'Lab', 'BAWES', 90, '2026-02-12T08:00:00Z'),
+      stamp('shop', 'Shopfront', 'Plugn', 40, '2026-02-14T08:00:00Z'),
+      stamp('cafe', 'Cafe', 'Plugn', 9, '2026-03-01T08:00:00Z'),
+      stamp('studio', 'Studio', 'Mishari’s universe', 1, '2026-03-19T08:00:00Z'),
+    ],
+    worlds: 5,
+  };
+  // Lab is a private world: the card skips it.
+  const card = [many.stamps[0], many.stamps[2], many.stamps[3]];
+
+  it('shows the three stamps on your card in the game, small, with View all for every stamp', async () => {
+    answer({ passport: many, card, audience: 'everyone' });
+    render(<PassportSection small />);
+    const section = await screen.findByTestId('passport');
+    const stamps = within(section).getAllByTestId('passport-stamp');
+    expect(stamps.map((item) => item.querySelector('strong')?.textContent)).toEqual(['HQ', 'Shopfront', 'Cafe']);
+    expect(within(stamps[0]).queryByText('BAWES')).toBeNull();
+    expect(within(stamps[0]).queryByText(/since/)).toBeNull();
+    expect(within(section).getByText('5 worlds')).toBeTruthy();
+    expect(within(section).getByText('What people see on your card in the game.')).toBeTruthy();
+    expect(within(section).getByRole('link', { name: 'View all' }).getAttribute('href')).toBe('/admin/you/passport');
+  });
+
+  it('says friends see it when only friends do', async () => {
+    answer({ passport: many, card, audience: 'friends' });
+    render(<PassportSection small />);
+    expect(await screen.findByText('What your friends see on your card in the game.')).toBeTruthy();
+  });
+
+  it('keeps your own top three and says the card shows none when nobody sees your stamps', async () => {
+    for (const [audience, shown] of [
+      ['nobody', card],
+      ['everyone', []],
+    ] as const) {
+      answer({ passport: many, card: shown, audience });
+      const { unmount } = render(<PassportSection small />);
+      const section = await screen.findByTestId('passport');
+      expect(within(section).getAllByTestId('passport-stamp').map((item) => item.querySelector('strong')?.textContent)).toEqual(['HQ', 'Lab', 'Shopfront']);
+      expect(within(section).getByText('Your card in the game shows no stamps.')).toBeTruthy();
+      unmount();
+    }
+  });
+
+  it('gives a word too long for a small stamp smaller type', async () => {
+    answer({ passport: many, card, audience: 'everyone' });
+    render(<PassportSection small />);
+    const section = await screen.findByTestId('passport');
+    const names = within(section).getAllByTestId('passport-stamp').map((item) => item.querySelector('strong'));
+    expect(names[0]?.getAttribute('data-long')).toBeNull();
+    expect(names[1]?.getAttribute('data-long')).toBe('long');
+    expect(names[2]?.getAttribute('data-long')).toBeNull();
+  });
+
+  it('has no View all and the usual line for someone with no stamps yet', async () => {
+    answer({ passport: { stamps: [], worlds: 0, universes: 0, since: null, days: 0 }, card: [], audience: 'everyone' });
+    render(<PassportSection small />);
+    expect(await screen.findByText('Your passport gets a stamp for every world you visit.')).toBeTruthy();
+    expect(screen.queryByRole('link', { name: 'View all' })).toBeNull();
+  });
+
+  it('shows every stamp in full on its own page, without a heading of its own', async () => {
+    answer({ passport: many, card, audience: 'everyone' });
+    render(<PassportSection bare />);
+    const section = await screen.findByTestId('passport');
+    expect(within(section).getAllByTestId('passport-stamp')).toHaveLength(5);
+    expect(within(section).queryByRole('heading')).toBeNull();
+    expect(within(section).queryByRole('link', { name: 'View all' })).toBeNull();
+    expect(within(section).getByTestId('passport-visible')).toBeTruthy();
+  });
+});
+
 describe("Someone else's passport", () => {
   it("shows the stamps they share with you, under their name, without the 'who can see me' line", async () => {
     answer({ stamps: passport.stamps.slice(0, 1), passport });
