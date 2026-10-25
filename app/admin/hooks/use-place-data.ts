@@ -13,13 +13,15 @@ export interface Face {
 
 /** Who is in a place right now, as you may see it. */
 export interface Here {
-  /** Everyone counted: the people listed, guests and bots. */
+  /** The people counted: those listed and guests. */
   count: number;
+  /** Bots, counted apart from the people. */
+  bots: number;
   people: Face[];
   youAreHere: boolean;
 }
 
-const NOBODY: Here = { count: 0, people: [], youAreHere: false };
+const NOBODY: Here = { count: 0, bots: 0, people: [], youAreHere: false };
 
 function hereOf(places: LivePlace[]): Here {
   if (places.length === 0) return NOBODY;
@@ -34,6 +36,7 @@ function hereOf(places: LivePlace[]): Here {
   }
   return {
     count: places.reduce((sum, place) => sum + place.count, 0),
+    bots: places.reduce((sum, place) => sum + place.bots, 0),
     people,
     youAreHere: places.some((place) => place.here),
   };
