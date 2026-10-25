@@ -35,9 +35,9 @@ export interface BotAiOptions {
   maker: { id: string; name: string | null } | null;
   viewerIsMaker: boolean;
   /** The viewer's own keys lent to this bot's universe; empty unless the viewer made the bot. */
-  keys: { id: string; name: string; kind: string | null; kindLabel: string; group: 'own-computer' | 'hosted' | null; universeName: string; status: 'working' | 'down'; ifDown: 'universe-ai' | 'stop'; model: string | null; supportsVision: boolean | null; visionModels: string[]; /** The models the lend here allows (null when the provider's list could not be loaded, with why). */ models: KeyModelOption[] | null; modelsProblem: string | null; /** The lend here allows only some models. */ limited: boolean }[];
+  keys: { id: string; name: string; kind: string | null; kindLabel: string; /** The provider's logo file in `public/ai-providers/` (without `.svg`), or what is drawn instead. */ logo: string | null; plainIcon: 'plug' | 'chip' | null; group: 'own-computer' | 'hosted' | null; universeName: string; status: 'working' | 'down'; ifDown: 'universe-ai' | 'stop'; model: string | null; supportsVision: boolean | null; visionModels: string[]; /** The models the lend here allows (null when the provider's list could not be loaded, with why). */ models: KeyModelOption[] | null; modelsProblem: string | null; /** The lend here allows only some models. */ limited: boolean }[];
   /** The key the bot is on now, when it is a personal key: whose it is and what it is called. */
-  currentKey: { id: string; name: string; ownerName: string | null; mine: boolean; status: 'working' | 'down'; ifDown: 'universe-ai' | 'stop'; group: 'own-computer' | 'hosted' | null; model: string | null; supportsVision: boolean | null; visionModels: string[] } | null;
+  currentKey: { id: string; name: string; ownerName: string | null; mine: boolean; status: 'working' | 'down'; ifDown: 'universe-ai' | 'stop'; logo: string | null; plainIcon: 'plug' | 'chip' | null; group: 'own-computer' | 'hosted' | null; model: string | null; supportsVision: boolean | null; visionModels: string[] } | null;
   /** What the owner picked for the bot's images (null = nothing picked), and, for "Another model", the key picked and whether it can be used now. */
   vision: { saved: VisionPick | null; savedKey: { name: string; problem: AnotherProblem | null } | null };
   /** Only for a super admin: the server's own providers, to pin a bot to one. */
@@ -128,12 +128,12 @@ export async function botAiOptions(input: {
       keys: ownKeys.map((key, index) => {
         const info = kindInfo((key.settings as { kind?: unknown } | null)?.kind);
         const { lend, models, problem } = keyLists[index];
-        return { id: key.providerId, name: key.name, kind: info?.kind ?? null, kindLabel: info?.label ?? 'AI', group: info?.group ?? null, universeName: universe.name, status: key.downSince ? 'down' : 'working', ifDown: isIfDown(key.ifDown) ? key.ifDown : 'universe-ai', model: key.model, supportsVision: key.supportsVision, visionModels: keyVisionModels(key).filter((model) => !lend || lend.includes(model)), models, modelsProblem: problem, limited: !!lend };
+        return { id: key.providerId, name: key.name, kind: info?.kind ?? null, kindLabel: info?.label ?? 'AI', logo: info?.logo ?? null, plainIcon: info?.logo ? null : info?.plainIcon ?? 'chip', group: info?.group ?? null, universeName: universe.name, status: key.downSince ? 'down' : 'working', ifDown: isIfDown(key.ifDown) ? key.ifDown : 'universe-ai', model: key.model, supportsVision: key.supportsVision, visionModels: keyVisionModels(key).filter((model) => !lend || lend.includes(model)), models, modelsProblem: problem, limited: !!lend };
       }),
       // The model the bot is served, and the key's own Vision models, as the server reads them when it picks one for images
       currentKey:
         current && current.ownerId
-          ? { id: current.providerId, name: current.name, ownerName: maker?.id === current.ownerId ? maker.name : null, mine: current.ownerId === input.viewer.id, status: current.downSince ? 'down' : 'working', ifDown: isIfDown(current.ifDown) ? current.ifDown : 'universe-ai', group: kindInfo((current.settings as { kind?: unknown } | null)?.kind)?.group ?? null, model: currentModel ?? current.model, supportsVision: currentModel ? modelSupportsVision(current, currentModel) : current.supportsVision, visionModels: keyVisionModels(current).filter((model) => !currentLend || currentLend.includes(model)) }
+          ? { id: current.providerId, name: current.name, ownerName: maker?.id === current.ownerId ? maker.name : null, mine: current.ownerId === input.viewer.id, status: current.downSince ? 'down' : 'working', ifDown: isIfDown(current.ifDown) ? current.ifDown : 'universe-ai', ...currentIcon(current.settings), group: kindInfo((current.settings as { kind?: unknown } | null)?.kind)?.group ?? null, model: currentModel ?? current.model, supportsVision: currentModel ? modelSupportsVision(current, currentModel) : current.supportsVision, visionModels: keyVisionModels(current).filter((model) => !currentLend || currentLend.includes(model)) }
           : null,
       vision: { saved, savedKey },
       providers: providers ? providers.map((provider) => ({ id: provider.providerId, name: provider.name, type: provider.type, model: provider.model, enabled: provider.enabled })) : null,
@@ -148,4 +148,10 @@ async function savedVisionKey(
 ): Promise<{ name: string; problem: AnotherProblem | null }> {
   const usable = await usableVisionKey(saved, bot);
   return { name: (usable.key?.name ?? 'A key that was removed'), problem: usable.ok ? null : usable.problem };
+}
+
+/** What a key's card draws before its name: its provider's logo, else a plug (any server) or a chip. */
+function currentIcon(settings: unknown): { logo: string | null; plainIcon: 'plug' | 'chip' | null } {
+  const info = kindInfo((settings as { kind?: unknown } | null)?.kind);
+  return { logo: info?.logo ?? null, plainIcon: info?.logo ? null : info?.plainIcon ?? 'chip' };
 }

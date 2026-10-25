@@ -18,7 +18,10 @@ export interface AiKeySummary {
   name: string;
   kind: AiKeyKind | null;
   kindLabel: string;
+  /** The model the key is checked with (#575). Each bot picks its own; for a provider with no model list it is the only one. */
   model: string | null;
+  /** How many models the provider listed when last asked; null when it doesn't list them, or hasn't been asked since #575. */
+  modelCount: number | null;
   /** What the provider said about the model when the key was added or its model changed; empty when it said nothing. */
   caps: ModelFacts;
   /** The host of an own-computer key's address, e.g. "lm.example.com"; null for a hosted key. */
@@ -109,7 +112,7 @@ export async function listAiKeys(ownerId: string): Promise<AiKeySummary[]> {
   ]);
   const repliesOf = new Map(perBot.map((entry) => [`${entry.providerId}:${entry.botId}`, Number(entry._sum.apiCalls ?? 0)]));
   return rows.map((row) => {
-    const settings = (row.settings ?? {}) as { kind?: unknown };
+    const settings = (row.settings ?? {}) as { kind?: unknown; modelCount?: unknown };
     const info = kindInfo(settings.kind);
     const sum = spent.get(row.providerId);
     return {
@@ -118,6 +121,7 @@ export async function listAiKeys(ownerId: string): Promise<AiKeySummary[]> {
       kind: info?.kind ?? null,
       kindLabel: info?.label ?? 'AI',
       model: row.model,
+      modelCount: typeof settings.modelCount === 'number' && settings.modelCount > 0 ? settings.modelCount : null,
       caps: capsOf(row.settings),
       address: info?.group === 'own-computer' ? hostOf(row.endpoint) : null,
       last4: row.apiKeyLast4,

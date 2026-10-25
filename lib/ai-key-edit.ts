@@ -3,7 +3,7 @@ import { decryptApiKey } from '@/lib/encryption';
 import { kindInfo } from '@/lib/ai-key-kinds';
 import { cleanModelId, keyTarget, modelCaps, probeChat, probeModels, type ModelFactsById } from '@/lib/ai-key-models';
 import { markWorking } from '@/lib/ai-key-health';
-import { forgetKeyModels, lendModels, slimFacts } from '@/lib/ai-key-model-list';
+import { forgetKeyModels, keyModels, lendModels, slimFacts } from '@/lib/ai-key-model-list';
 
 /**
  * Changing where a saved key points, or which model it uses (#374). The row stays the same row, so its lends and the
@@ -72,6 +72,13 @@ export async function listModelsForSavedKey(
   if (typeof input.address === 'string' && input.address.trim() && !canMoveAddress(info)) {
     return { ok: false, status: 400, message: `${info.label} can’t be moved to another address.` };
   }
+  // At the saved address the key's list is asked again and kept, which also keeps its model facts and count up to date (#575)
+  if (!(typeof input.address === 'string' && input.address.trim())) {
+    const kept = await keyModels(key, { fresh: true });
+    if (!kept.ok) return { ok: false, status: 400, message: kept.message };
+    if (!kept.listed) return { ok: false, status: 400, message: `${info.label} doesn’t share a list of its models. Type the model name.`, noList: true };
+    return { ok: true, models: kept.models, facts: kept.facts };
+  }
   const result = await probeModels({ kind: info.kind, address: addressToTry(input.address, key.endpoint), apiKey: savedApiKey(key) });
   return result.ok ? { ok: true, models: result.models, facts: result.facts } : { ok: false, status: 400, message: result.message, ...(result.noList ? { noList: true as const } : {}) };
 }
@@ -124,8 +131,11 @@ export async function editSavedKey(ownerId: string, id: string, input: KeyEditIn
     if (Object.keys(caps).length > 0) settings.caps = caps;
     else delete settings.caps;
   }
-  // The list just read is this address's: each model's facts are its own, not the old address's
-  if (probed.ok) settings.modelFacts = slimFacts(models.facts);
+  // The list just read is this address's: the card's model count and each model's facts are its own, not the old address's
+  if (probed.ok) {
+    settings.modelFacts = slimFacts(models.facts);
+    settings.modelCount = models.models.length;
+  }
 
   // Same row, same id: lends and the bots running on it stay. The checks took a while: when only the address changed, a
   // check model swapped meanwhile (the old one went, #575) is never put back.
