@@ -102,6 +102,14 @@ describe('sending a notification', () => {
     expect(await sendPushOnceADay('user-a', 'friendRequests', tagged)).toBe(0);
     expect(await sendPushOnceADay('user-b', 'friendRequests', tagged)).toBe(2);
   });
+
+  it('still sends later that day when the first one reached no device', async () => {
+    const tagged = { ...message, tag: 'friend-request:no-device-yet' };
+    (prisma.pushDevice.findMany as jest.Mock).mockResolvedValueOnce([]);
+    expect(await sendPushOnceADay('user-a', 'friendRequests', tagged)).toBe(0);
+    expect(await sendPushOnceADay('user-a', 'friendRequests', tagged)).toBe(2);
+    expect(await sendPushOnceADay('user-a', 'friendRequests', tagged)).toBe(0);
+  });
 });
 
 describe('quiet hours', () => {
