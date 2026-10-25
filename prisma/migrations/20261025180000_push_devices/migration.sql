@@ -1,4 +1,4 @@
--- The browsers and installed apps where people turned on notifications (#863). New table, nothing existing changes.
+-- The browsers and installed apps where people turned on notifications (game #863). New table, nothing existing changes.
 
 -- CreateTable
 CREATE TABLE "push_devices" (

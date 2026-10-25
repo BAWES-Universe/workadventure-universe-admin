@@ -97,7 +97,7 @@ model UserNotice {
   @@map("user_notices")
 }
 
-// A browser or installed app where this person turned on notifications (#863): its Web Push subscription, which Orbit
+// A browser or installed app where this person turned on notifications (game #863): its Web Push subscription, which Orbit
 // sends to while Universe is closed. One row per subscription; signing in elsewhere on the same browser moves it.
 model PushDevice {
   id             String    @id @default(uuid())

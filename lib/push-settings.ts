@@ -2,7 +2,7 @@ import type { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 
 /**
- * What someone wants notifications about, from whom and when (#863, Settings > Notifications). Kept as one
+ * What someone wants notifications about, from whom and when (game #863, Settings > Notifications). Kept as one
  * preference row, written only through /api/me/push/settings, so it is not in the general preference allowlist.
  */
 export const PUSH_SETTINGS_KEY = 'notifications.push';

@@ -2,7 +2,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 
 /**
- * The browsers and installed apps where someone turned on notifications (#863). Each is a Web Push subscription that
+ * The browsers and installed apps where someone turned on notifications (game #863). Each is a Web Push subscription that
  * Orbit sends to while Universe is closed; the person sees them under Settings > Notifications > Your devices.
  */
 
