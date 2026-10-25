@@ -1,0 +1,29 @@
+/* A section whose items scroll sideways (Orbit #606). On touch the row runs to the screen's edges and swipes; with a
+   mouse it stays in the column, fades on the side that has more, and ‹ › sit by the title. */
+.section { --bleed: 16px; min-width: 0; }
+@media (min-width: 640px) { .section { --bleed: 24px; } }
+@media (min-width: 1024px) { .section { --bleed: 32px; } }
+.head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 44px; margin-bottom: 8px; }
+.head h2 { display: flex; align-items: baseline; gap: 8px; font-size: 18px; font-weight: 700; }
+.count { font-family: var(--font-sans); font-size: 12px; font-weight: 600; color: hsl(var(--muted-foreground)); font-variant-numeric: tabular-nums; }
+.tools { display: inline-flex; align-items: center; gap: 8px; }
+.action { display: inline-flex; align-items: center; gap: 6px; min-height: 44px; padding: 0 12px; border: 1px solid hsl(var(--foreground) / 0.15); border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; transition: border-color 160ms, background 160ms; }
+.action:hover { border-color: hsl(var(--foreground) / 0.3); background: hsl(var(--foreground) / 0.05); }
+.row { display: flex; align-items: stretch; gap: 12px; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; margin-inline: calc(-1 * var(--bleed)); padding: 4px var(--bleed) 6px; scroll-padding-inline: var(--bleed); scroll-snap-type: x mandatory; }
+.row::-webkit-scrollbar { display: none; }
+.row > * { flex: none; scroll-snap-align: start; }
+.arrows { display: none; }
+@media (hover: hover) and (pointer: fine) {
+  .section { --bleed: 0px; }
+  .arrows { display: inline-flex; gap: 8px; }
+  .arrow { all: unset; box-sizing: border-box; display: grid; place-items: center; width: 44px; height: 44px; border-radius: 999px; border: 1px solid hsl(var(--foreground) / 0.15); color: hsl(var(--foreground)); cursor: pointer; transition: background-color 120ms, opacity 120ms; }
+  .arrow:hover:not(:disabled) { background: hsl(var(--foreground) / 0.08); }
+  .arrow:disabled { opacity: 0.35; cursor: default; }
+  .arrow:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 2px; }
+  .arrow svg { width: 20px; height: 20px; }
+  .row { scroll-snap-type: x proximity; }
+}
+/* Every row fades on the side that has more, on touch too: at the screen's edge on a phone, at the column's with a mouse. */
+.row[data-next='true'] { mask-image: linear-gradient(to right, #000 calc(100% - 56px), transparent); }
+.row[data-back='true'] { mask-image: linear-gradient(to right, transparent, #000 56px); }
+.row[data-back='true'][data-next='true'] { mask-image: linear-gradient(to right, transparent, #000 56px, #000 calc(100% - 56px), transparent); }

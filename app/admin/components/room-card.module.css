@@ -1,20 +1,23 @@
 /* Where you are wears the same violet wash as the game chat's "Say hi in person" card; links stay neutral, as
    everywhere in Orbit. "You are here" is in bawes.net's headline gradient (Orbit's purple → blue in light mode, where
    the pale one wouldn't read). */
-.location, .recentSection { --signal-accent: #7c3aed; --signal-line: hsl(var(--border)); --here-text: var(--brand-gradient); --here-wash: linear-gradient(145deg, rgb(134 41 252 / .08), rgb(65 86 246 / .05) 55%, rgb(233 199 76 / .04)); --here-edge: rgb(124 58 237 / .25); --here-glow: 0 10px 30px -18px rgb(134 41 252 / .35); min-width: 0; container-type: inline-size; }
-:global(.dark) .location, :global(.dark) .recentSection { --signal-accent: var(--kind-universe-solid); --here-text: linear-gradient(120deg, #c4b5fd 0%, #a78bfa 30%, #fbbf24 70%, #f59e0b 100%); --here-wash: linear-gradient(145deg, rgb(134 41 252 / .14), rgb(65 86 246 / .08) 55%, rgb(233 199 76 / .06)); --here-edge: rgb(167 139 250 / .22); --here-glow: 0 0 32px -12px rgb(134 41 252 / .45); }
+.location { --signal-accent: #7c3aed; --signal-line: hsl(var(--border)); --here-text: var(--brand-gradient); --here-wash: linear-gradient(145deg, rgb(134 41 252 / .08), rgb(65 86 246 / .05) 55%, rgb(233 199 76 / .04)); --here-edge: rgb(124 58 237 / .25); --here-glow: 0 10px 30px -18px rgb(134 41 252 / .35); min-width: 0; container-type: inline-size; }
+:global(.dark) .location { --signal-accent: var(--kind-universe-solid); --here-text: linear-gradient(120deg, #c4b5fd 0%, #a78bfa 30%, #fbbf24 70%, #f59e0b 100%); --here-wash: linear-gradient(145deg, rgb(134 41 252 / .14), rgb(65 86 246 / .08) 55%, rgb(233 199 76 / .06)); --here-edge: rgb(167 139 250 / .22); --here-glow: 0 0 32px -12px rgb(134 41 252 / .45); }
 .card { position: relative; isolation: isolate; display: flex; flex-direction: column; min-width: 0; overflow: hidden; padding: 15px 17px 12px; border: 1px solid var(--signal-line); border-radius: 18px; background: hsl(var(--card)); transition: border-color 160ms, transform 160ms; }
 .card:focus-within, .card:hover { border-color: hsl(var(--foreground) / 0.22); }
 .card a:focus-visible, .card button:focus-visible, .card summary:focus-visible, .notice a:focus-visible, .notice button:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 3px; border-radius: 3px; }
 .current { padding: 17px 18px 14px; border-radius: 18px; border-color: var(--here-edge); background: var(--here-wash), hsl(var(--card)); box-shadow: var(--here-glow); }
-.cardTop { display: flex; align-items: center; gap: 8px; min-height: 16px; }
+.cardTop { display: flex; align-items: center; gap: 8px; min-height: 18px; }
 .eyebrow { display: inline-flex; align-items: center; gap: 7px; color: hsl(var(--muted-foreground)); font-size: 10px; font-weight: 600; letter-spacing: .16em; text-transform: uppercase; }
 .current .eyebrow, .location .notice .eyebrow { font-size: 11px; font-weight: 700; background-image: var(--here-text); -webkit-background-clip: text; background-clip: text; color: transparent; }
+/* People there now: Live now's green dot. On the card you're in, the label's dot says it instead. */
+.peopleHere { position: relative; z-index: 3; display: inline-flex; align-items: center; gap: 6px; margin-left: auto; color: hsl(var(--foreground)); font-size: 12px; font-weight: 700; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.peopleHere > i { width: 7px; height: 7px; border-radius: 50%; background: var(--status-live); box-shadow: 0 0 0 3px rgb(34 197 94 / .2); }
+.peopleHere + .stars { margin-left: 12px; }
 .presence { width: 6px; height: 6px; border-radius: 50%; background: var(--status-live); box-shadow: 0 0 0 4px rgb(34 197 94 / .18); }
 .stars { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; color: hsl(var(--muted-foreground)); font-size: 11px; font-variant-numeric: tabular-nums; }
 .stars svg { color: var(--kind-star-solid); }
 .place { padding-top: 9px; }
-.placeTop { padding-top: 0; }
 .placeWords { min-width: 0; }
 .coordinates { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 5px; margin: 0 0 7px; color: hsl(var(--muted-foreground)); font-size: 12px; line-height: 1.4; }
 .coordinates a { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
@@ -55,9 +58,6 @@
 .peakDetail { margin-bottom: 5px; }
 .disclosureBody .detailsLink { width: 100%; }
 .failure { margin: 0 0 10px; color: hsl(var(--destructive)); font-size: 11px; line-height: 1.5; }
-.locationGrid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
-.previousStop { position: relative; min-width: 0; margin-left: 13px; padding-left: 14px; }
-.previousStop::before { position: absolute; left: 0; top: -12px; width: 12px; height: 35px; content: ''; border-bottom: 1px solid var(--signal-line); border-left: 1px solid var(--signal-line); border-radius: 0 0 0 9px; }
 .previous { border-radius: 18px; padding: 12px 14px 12px; background: hsl(var(--card)); }
 .previous .roomName { font-size: 18px; }
 .nameRow { display: flex; align-items: center; gap: 10px; }
@@ -65,7 +65,6 @@
 .recentHeading h2 { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: -.02em; }
 .recentHeading p { margin: 3px 0 0; color: hsl(var(--muted-foreground)); font-size: 11px; }
 .recentHeading > span { color: hsl(var(--muted-foreground)); font-family: var(--font-mono); font-size: 10px; }
-.recentGrid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: start; }
 .notice { position: relative; padding: 18px; border: 1px solid var(--signal-line); border-radius: 18px; background: hsl(var(--card)); }
 .location .notice { border-color: var(--here-edge); background: var(--here-wash), hsl(var(--card)); box-shadow: var(--here-glow); }
 .noticeTop { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
@@ -85,15 +84,10 @@
   .current .roomName { max-width: 16ch; font-size: 33px; }
   .orbit { width: 250px; height: 179px; top: -4px; right: -30px; opacity: .85; }
 }
-@container (min-width: 540px) { .recentGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @container (min-width: 650px) {
-  .locationGrid.hasPrevious { grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: 17px; align-items: center; }
-  .previousStop { margin: 0; padding: 0; }
-  .previousStop::before { top: 23px; left: -17px; width: 17px; height: 1px; border-left: 0; border-radius: 0; }
   .current .roomName { font-size: 33px; }
   .orbit { width: 200px; right: -44px; opacity: .65; }
 }
-@container (min-width: 960px) { .recentGrid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (prefers-reduced-motion: reduce) { .card, .detailsLink svg { transition: none; } .detailsLink:hover svg { transform: none; } }
 
 /* The name is the card's link: its box covers the card, and the controls sit above it. */
@@ -103,3 +97,8 @@
 .cardLink:focus-visible::after { outline: 2px solid hsl(var(--ring)); outline-offset: -2px; }
 .retry { position: relative; z-index: 3; }
 @container (min-width: 430px) { .current { padding: 18px 21px 14px; } }
+
+/* The earlier rooms on the timeline: one size, one name size, the stats lined up at the bottom of every card. */
+.even .roomName { font-size: 19px; }
+.even .place { margin-bottom: 13px; }
+.even .activity { margin-top: auto; }

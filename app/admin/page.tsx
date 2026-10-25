@@ -1,9 +1,7 @@
 'use client';
 
-import { useState } from 'react';
 import HerePanel from './components/here-panel';
 import PendingInvitationsAlert from './components/pending-invitations-alert';
-import RecentlyVisited from './components/recently-visited';
 import { LiveStrip } from './components/live/live-now';
 import { GetStartedOnOrbit } from './components/orbit/get-started-on-orbit';
 import { useLive } from './hooks/use-live';
@@ -12,12 +10,11 @@ import { NoticesAlert } from './components/notices-alert';
 
 /**
  * Orbit is here and now: who is live right now (one line, on top), an invitation waiting for you, Get started until
- * it's done, notices from Orbit (a key of yours is down), reports waiting in worlds you run, the room you're in and the one before it, and the rooms you were in
- * lately. What's yours is on You; everything out there is in Space.
+ * it's done, notices from Orbit (a key of yours is down), reports waiting in worlds you run, and your timeline: the
+ * room you're in, the one before it and the rooms you were in lately. What's yours is on You; everything out there is
+ * in Space.
  */
 export default function AdminDashboard() {
-  // The rooms under Where you are (here, and just before), so Recently visited doesn't repeat them.
-  const [shownRoomIds, setShownRoomIds] = useState<string[]>([]);
   const live = useLive();
 
   return (
@@ -28,8 +25,7 @@ export default function AdminDashboard() {
       <NoticesAlert />
       <GetStartedOnOrbit />
       <ReportsAlert />
-      <HerePanel onShown={setShownRoomIds} />
-      <RecentlyVisited excludeRoomIds={shownRoomIds} />
+      <HerePanel live={live} />
     </div>
   );
 }
