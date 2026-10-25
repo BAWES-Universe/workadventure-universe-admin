@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { CARD_STAMPS, visibleStamps, type Stamp } from '@/lib/passport';
 import { universeColour } from '@/lib/universe-colour';
+import { PLAY_ORIGIN } from '@/lib/play-origin';
 
 export const dynamic = 'force-dynamic';
 
@@ -151,6 +152,46 @@ function renderHTML(data: { name?: string; bio?: string; links: Array<{ label: s
     }
 
     window.addEventListener('load', notifySize);
+
+    // Inside the game, a plain click on a link the game can show opens it in the game's window, and that link has no
+    // new-tab icon. The game says which links (it checks each page as it does a chat link); every other link, and a
+    // Ctrl, Cmd, Shift or middle click, opens a new tab.
+    var GAME_ORIGIN = ${JSON.stringify(PLAY_ORIGIN)};
+    var openHere = [];
+
+    function askAboutLinks() {
+      // No backslashes in here: this script is written inside a template string, which would drop them.
+      var urls = Array.prototype.filter
+        .call(document.querySelectorAll('a.link-item'), function (link) { return link.protocol === 'https:'; })
+        .map(function (link) { return link.href; })
+        .slice(0, 10);
+      if (urls.length > 0) window.parent.postMessage({ type: 'cvCheckLinks', urls: urls }, GAME_ORIGIN);
+    }
+
+    window.addEventListener('message', function (event) {
+      if (event.source !== window.parent || event.origin !== GAME_ORIGIN) return;
+      var data = event.data;
+      if (!data || data.type !== 'cvLinks' || !Array.isArray(data.openHere)) return;
+      openHere = data.openHere.filter(function (url) { return typeof url === 'string'; });
+      document.querySelectorAll('a.link-item').forEach(function (link) {
+        var icon = link.querySelector('.link-icon');
+        if (icon) icon.style.display = openHere.indexOf(link.href) === -1 ? '' : 'none';
+      });
+    });
+
+    document.addEventListener('click', function (event) {
+      var link = event.target instanceof Element ? event.target.closest('a.link-item') : null;
+      if (!link || openHere.indexOf(link.href) === -1) return;
+      if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+      event.preventDefault();
+      window.parent.postMessage({ type: 'cvOpenLink', url: link.href }, GAME_ORIGIN);
+    });
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', askAboutLinks);
+    } else {
+      askAboutLinks();
+    }
   </script>
   ` : ''}
 </head>

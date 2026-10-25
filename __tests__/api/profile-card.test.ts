@@ -77,6 +77,23 @@ describe('profile card', () => {
     expect(page).not.toContain('javascript:');
   });
 
+  it('asks the game which links it can show, only in the game', async () => {
+    const card = { bio: 'Hi', links: [{ label: 'Site', url: 'https://bawes.net' }] };
+    const embedded = await html(card, true);
+    expect(embedded).toContain("type: 'cvCheckLinks'");
+    expect(embedded).toContain("type: 'cvOpenLink'");
+    // Only the game's own address hears or answers it.
+    expect(embedded).toContain('var GAME_ORIGIN = "http://play.workadventure.localhost";');
+    expect(await html(card, false)).not.toContain('cvCheckLinks');
+  });
+
+  it("writes a script the browser can run, so the game still hears the card's size", async () => {
+    const page = await html({ bio: 'Hi', links: [{ label: 'Site', url: 'https://bawes.net' }] }, true);
+    const script = page.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+    expect(script).toBeDefined();
+    expect(() => new Function(script as string)).not.toThrow();
+  });
+
   describe('passport', () => {
     const visits = (worldId: string, count: number, first = '2026-01-12T10:00:00Z') => ({
       worldId,

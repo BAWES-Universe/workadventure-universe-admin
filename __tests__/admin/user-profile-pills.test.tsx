@@ -28,6 +28,8 @@ jest.mock('@/app/admin/components/orbit-bridge', () => ({
   useGameCapability: (capability: string) => mockCapabilities.includes(capability),
   inviteInGame: (...args: unknown[]) => mockInvite(...args),
   messageInGame: (...args: unknown[]) => mockMessage(...args),
+  useLinksOpeningInGame: () => new Set(),
+  openLinkInGame: () => false,
 }));
 jest.mock('@/app/admin/components/passport', () => ({ PassportSection: () => null }));
 jest.mock('@/app/admin/components/invite-sheet', () => ({
