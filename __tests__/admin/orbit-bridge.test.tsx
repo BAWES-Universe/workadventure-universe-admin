@@ -20,6 +20,7 @@ jest.mock('@/lib/client-auth', () => ({
 }));
 
 import OrbitBridge, { inviteInGame, messageInGame, useGameCapability } from '@/app/admin/components/orbit-bridge';
+import { ProfileLinks } from '@/app/admin/components/profile-card';
 
 const revision = 'rev-aaaaaaaaaaaaaaaa';
 const otherRevision = 'rev-bbbbbbbbbbbbbbbb';
@@ -148,6 +149,107 @@ describe('OrbitBridge', () => {
       expect(getByTestId('can-invite').textContent).toBe('false');
       fromGame({ type: 'orbit-bridge-init', version: 1, roomRevision: revision, capabilities: ['invite'] });
       expect(getByTestId('can-invite').textContent).toBe('true');
+    });
+  });
+
+  describe('profile links the game can show', () => {
+    const links = [
+      { label: 'About', url: 'https://mishari.example/about' },
+      { label: 'LinkedIn', url: 'https://www.linkedin.com/in/mishari' },
+      { label: 'Old site', url: 'http://mishari.example' },
+    ];
+    const sent = (type: string) => posted.filter((message) => (message as { type: string }).type === type);
+    const pill = (container: HTMLElement, label: string) =>
+      [...container.querySelectorAll('a')].find((link) => link.textContent === label) as HTMLAnchorElement;
+
+    function show(capabilities = ['navigate', 'open-link']) {
+      const view = render(
+        <>
+          <OrbitBridge onRefresh={jest.fn()} />
+          <ProfileLinks links={links} />
+        </>,
+      );
+      fromGame({ type: 'orbit-bridge-init', version: 1, roomRevision: revision, capabilities });
+      return view;
+    }
+
+    function answer(openHere: string[], requestId = (sent('orbit-check-links')[0] as { requestId: string }).requestId, roomRevision = revision) {
+      fromGame({ type: 'orbit-links', version: 1, requestId, roomRevision, openHere });
+    }
+
+    it('asks the game about the https links only, once', () => {
+      show();
+      expect(sent('orbit-check-links')).toEqual([
+        expect.objectContaining({ version: 1, roomRevision: revision, urls: [links[0].url, links[1].url] }),
+      ]);
+    });
+
+    it('opens a link the game can show in its window, without the new-tab icon', () => {
+      const { container } = show();
+      answer([links[0].url]);
+      const about = pill(container, 'About');
+      expect(about.querySelector('svg')).toBeNull();
+      expect(pill(container, 'LinkedIn').querySelector('svg')).not.toBeNull();
+      expect(pill(container, 'Old site').querySelector('svg')).not.toBeNull();
+
+      const click = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 });
+      act(() => {
+        about.dispatchEvent(click);
+      });
+      expect(click.defaultPrevented).toBe(true);
+      expect(sent('orbit-open-link')).toEqual([{ type: 'orbit-open-link', version: 1, roomRevision: revision, url: links[0].url }]);
+    });
+
+    it('leaves a Ctrl click, and links the game refused, to open a new tab', () => {
+      const { container } = show();
+      answer([links[0].url]);
+      const ctrlClick = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0, ctrlKey: true });
+      const plainClick = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 });
+      act(() => {
+        pill(container, 'About').dispatchEvent(ctrlClick);
+        pill(container, 'LinkedIn').dispatchEvent(plainClick);
+      });
+      expect(ctrlClick.defaultPrevented).toBe(false);
+      expect(plainClick.defaultPrevented).toBe(false);
+      expect(sent('orbit-open-link')).toHaveLength(0);
+    });
+
+    it("ignores an answer for another visit, or one it didn't ask for", () => {
+      const { container } = show();
+      answer([links[0].url], undefined, otherRevision);
+      answer([links[0].url], 'links-999');
+      expect(pill(container, 'About').querySelector('svg')).not.toBeNull();
+    });
+
+    it('asks again for a card still showing when the game starts a new visit', () => {
+      const { container } = show();
+      answer([links[0].url]);
+      fromGame({ type: 'orbit-bridge-init', version: 1, roomRevision: otherRevision, capabilities: ['navigate', 'open-link'] });
+      expect(pill(container, 'About').querySelector('svg')).not.toBeNull();
+      const asked = sent('orbit-check-links');
+      expect(asked).toHaveLength(2);
+      expect(asked[1]).toEqual(expect.objectContaining({ roomRevision: otherRevision, urls: [links[0].url, links[1].url] }));
+      answer([links[0].url], (asked[1] as { requestId: string }).requestId, otherRevision);
+      expect(pill(container, 'About').querySelector('svg')).toBeNull();
+    });
+
+    it('asks nothing in a game that cannot open links, and every link keeps its icon', () => {
+      const { container } = show(['navigate']);
+      expect(sent('orbit-check-links')).toHaveLength(0);
+      expect(container.querySelectorAll('svg')).toHaveLength(3);
+    });
+
+    it('keeps the new-tab icon when the game never answers', () => {
+      jest.useFakeTimers();
+      try {
+        const { container } = show();
+        act(() => {
+          jest.advanceTimersByTime(10_000);
+        });
+        expect(pill(container, 'About').querySelector('svg')).not.toBeNull();
+      } finally {
+        jest.useRealTimers();
+      }
     });
   });
 });

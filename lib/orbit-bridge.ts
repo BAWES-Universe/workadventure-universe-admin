@@ -48,6 +48,19 @@ export const orbitBridgeInitSchema = z.object({
   maxNameLength: z.number().int().min(1).max(128).optional(),
 });
 
+/** The most links Orbit asks about at once (a profile's links). */
+export const MAX_CHECKED_LINKS = 10;
+const linkUrl = z.string().min(1).max(2048);
+
+/** The game's answer to `orbit-check-links`: which of those links it can show in its own window. */
+export const orbitLinksSchema = z.object({
+  type: z.literal('orbit-links'),
+  version: z.literal(ORBIT_BRIDGE_VERSION),
+  requestId,
+  roomRevision,
+  openHere: z.array(linkUrl).max(MAX_CHECKED_LINKS),
+});
+
 export const orbitViewSchema = z.object({
   type: z.literal('orbit-view'),
   version: z.literal(ORBIT_BRIDGE_VERSION),
@@ -76,6 +89,7 @@ export type OrbitBridgeInit = z.infer<typeof orbitBridgeInitSchema>;
 export type OrbitNavigate = z.infer<typeof orbitNavigateSchema>;
 export type OrbitEvent = z.infer<typeof orbitEventSchema>;
 export type OrbitViewChange = z.infer<typeof orbitViewSchema>;
+export type OrbitLinks = z.infer<typeof orbitLinksSchema>;
 
 export type OrbitBridgeAckError = 'stale-revision' | 'not-ready';
 
@@ -115,6 +129,29 @@ export interface OrbitMessagePerson {
   chatId: string;
 }
 
+/**
+ * Ask the game which of these links it can show in its own window (needs "open-link" in the game's capabilities).
+ * The game checks each page itself, as it does for a chat link, and answers with `orbit-links`.
+ */
+export interface OrbitCheckLinks {
+  type: 'orbit-check-links';
+  version: typeof ORBIT_BRIDGE_VERSION;
+  requestId: string;
+  roomRevision: string;
+  urls: string[];
+}
+
+/**
+ * Ask the game to open a link in its window, in front of Orbit (needs "open-link"). Only for a link the game said it
+ * can show; the game checks that again and ignores any other.
+ */
+export interface OrbitOpenLink {
+  type: 'orbit-open-link';
+  version: typeof ORBIT_BRIDGE_VERSION;
+  roomRevision: string;
+  url: string;
+}
+
 export interface OrbitBridgeAck {
   type: 'orbit-bridge-ack';
   version: typeof ORBIT_BRIDGE_VERSION;
@@ -128,7 +165,8 @@ export type IncomingBridgeMessage =
   | { kind: 'init'; message: OrbitBridgeInit }
   | { kind: 'navigate'; message: OrbitNavigate }
   | { kind: 'event'; message: OrbitEvent }
-  | { kind: 'view'; message: OrbitViewChange };
+  | { kind: 'view'; message: OrbitViewChange }
+  | { kind: 'links'; message: OrbitLinks };
 
 /**
  * Accept a message only from the game: exact origin, the parent window, and a known, well-formed message.
@@ -147,6 +185,8 @@ export function parseBridgeMessage(
   if (orbitEvent.success) return { kind: 'event', message: orbitEvent.data };
   const view = orbitViewSchema.safeParse(event.data);
   if (view.success) return { kind: 'view', message: view.data };
+  const links = orbitLinksSchema.safeParse(event.data);
+  if (links.success) return { kind: 'links', message: links.data };
   return null;
 }
 

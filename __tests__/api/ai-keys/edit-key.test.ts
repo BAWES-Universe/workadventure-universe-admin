@@ -12,7 +12,7 @@ import { probeChat, probeModels, allowKeyAttempt } from '@/lib/ai-key-models';
 import { markWorking } from '@/lib/ai-key-health';
 
 jest.mock('@/lib/db', () => {
-  const prisma: Record<string, unknown> = { botsAiProvider: { findFirst: jest.fn(), updateMany: jest.fn() }, bot: { updateMany: jest.fn() }, aiKeyLend: { findMany: jest.fn() }, $queryRaw: jest.fn() };
+  const prisma: Record<string, unknown> = { botsAiProvider: { findFirst: jest.fn(), findUnique: jest.fn(), updateMany: jest.fn() }, bot: { updateMany: jest.fn() }, aiKeyLend: { findMany: jest.fn() }, $queryRaw: jest.fn() };
   prisma.$transaction = jest.fn((run: (tx: unknown) => unknown) => run(prisma));
   return { prisma };
 });
@@ -27,7 +27,7 @@ jest.mock('@/lib/ai-key-models', () => ({
   allowKeyAttempt: jest.fn(() => true),
 }));
 
-const db = prisma as unknown as { botsAiProvider: Record<'findFirst' | 'updateMany', jest.Mock>; bot: { updateMany: jest.Mock }; aiKeyLend: { findMany: jest.Mock } };
+const db = prisma as unknown as { botsAiProvider: Record<'findFirst' | 'findUnique' | 'updateMany', jest.Mock>; bot: { updateMany: jest.Mock }; aiKeyLend: { findMany: jest.Mock } };
 const alice = { id: 'maker', uuid: 'uuid-a', email: 'a@example.com', name: 'A', tags: [], isSuperAdmin: false };
 
 const lmStudio = {
@@ -119,24 +119,26 @@ describe('editSavedKey', () => {
     (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4o-mini', 'gpt-4.1'], facts: {} });
     await editSavedKey('maker', 'key-2', { model: 'gpt-4.1' });
     const data = db.botsAiProvider.updateMany.mock.calls[0][0].data;
-    expect(data.settings).toEqual({ kind: 'openai', modelFacts: {} });
+    expect(data.settings).toEqual({ kind: 'openai', modelFacts: {}, modelCount: 2 });
     expect(data.supportsVision).toBeNull();
   });
 
-  it('leaves the saved model’s facts alone when the list misses it, and keeps the new list’s facts', async () => {
+  it('leaves the saved model’s facts alone when the list misses it, and keeps the new list’s count and facts', async () => {
     db.botsAiProvider.findFirst.mockResolvedValue({ ...lmStudio, settings: { kind: 'lmstudio', caps: { tools: true } } });
     (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['other-model'], facts: {} });
     await editSavedKey('maker', 'key-1', { address: 'https://new.trycloudflare.com' });
     const data = db.botsAiProvider.updateMany.mock.calls[0][0].data;
-    expect(data.settings).toEqual({ kind: 'lmstudio', caps: { tools: true }, modelFacts: {} });
+    expect(data.settings).toEqual({ kind: 'lmstudio', caps: { tools: true }, modelFacts: {}, modelCount: 1 });
     expect(data.supportsVision).toBeUndefined();
   });
 
-  it('replaces the old address’s model facts with the new address’s', async () => {
-    db.botsAiProvider.findFirst.mockResolvedValue({ ...lmStudio, settings: { kind: 'lmstudio', modelFacts: { 'old-model': { vision: true } } } });
-    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['qwen3-8b', 'qwen3-vl-8b'], facts: { 'qwen3-vl-8b': { vision: true } } });
+  it('replaces the old address’s model count and facts with the new address’s', async () => {
+    db.botsAiProvider.findFirst.mockResolvedValue({ ...lmStudio, settings: { kind: 'lmstudio', modelCount: 9, modelFacts: { 'old-model': { vision: true } } } });
+    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['qwen3-8b', 'qwen3-vl-8b', 'llama-3.1-8b'], facts: { 'qwen3-vl-8b': { vision: true } } });
     await editSavedKey('maker', 'key-1', { address: 'https://new.trycloudflare.com' });
-    expect(db.botsAiProvider.updateMany.mock.calls[0][0].data.settings.modelFacts).toEqual({ 'qwen3-vl-8b': { vision: true } });
+    const { settings } = db.botsAiProvider.updateMany.mock.calls[0][0].data;
+    expect(settings.modelCount).toBe(3);
+    expect(settings.modelFacts).toEqual({ 'qwen3-vl-8b': { vision: true } });
   });
 
   it('refuses a model that is not on the list, and saves nothing', async () => {
@@ -385,6 +387,15 @@ describe('POST /api/me/ai-keys/:id/models', () => {
     expect(body).toEqual({ ok: true, models: ['gpt-4.1'], facts: { 'gpt-4.1': { tools: true } } });
     expect(JSON.stringify(body)).not.toContain('sk-secret');
     expect(probeModels).toHaveBeenCalledWith(expect.objectContaining({ apiKey: 'sk-secret', address: 'https://api.openai.com/v1' }));
+  });
+
+  it('keeps how many models the key has, for its card, when listed at the saved address (#575)', async () => {
+    const older = { ...openai, providerId: 'key-9' };
+    db.botsAiProvider.findFirst.mockResolvedValue(older);
+    db.botsAiProvider.findUnique.mockResolvedValue({ settings: { kind: 'openai' }, endpoint: older.endpoint });
+    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4.1', 'gpt-5-mini'], facts: {} });
+    await models('key-9', {});
+    expect(db.botsAiProvider.updateMany).toHaveBeenCalledWith({ where: { providerId: 'key-9', ownerId: { not: null }, endpoint: older.endpoint }, data: { settings: { kind: 'openai', modelFacts: {}, modelCount: 2 } } });
   });
 
   it('tries a new address when one is given', async () => {

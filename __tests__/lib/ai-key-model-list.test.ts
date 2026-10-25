@@ -100,7 +100,7 @@ describe('keyModels', () => {
     await keyModels(key);
     expect(db.updateMany).toHaveBeenCalledWith({
       where: { providerId: key.providerId, ownerId: { not: null }, endpoint: key.endpoint, model: key.model },
-      data: { settings: { kind: 'claude', caps: { vision: true }, modelFacts: { 'claude-haiku-5-5': { vision: true, tools: true, context: 200000 } } } },
+      data: { settings: { kind: 'claude', caps: { vision: true }, modelFacts: { 'claude-haiku-5-5': { vision: true, tools: true, context: 200000 } }, modelCount: LIST.models.length } },
     });
     db.updateMany.mockClear();
     await keyModels(key, { fresh: true });
@@ -109,7 +109,7 @@ describe('keyModels', () => {
 
   it('doesn’t save again when the saved facts only differ in key order (Postgres reorders a jsonb)', async () => {
     probe.mockResolvedValue(LIST);
-    const key = claudeKey({ settings: { kind: 'claude', modelFacts: { 'claude-haiku-5-5': { context: 200000, tools: true, vision: true } } } });
+    const key = claudeKey({ settings: { kind: 'claude', modelFacts: { 'claude-haiku-5-5': { context: 200000, tools: true, vision: true } }, modelCount: 3 } });
     await keyModels(key, { fresh: true });
     expect(db.updateMany).not.toHaveBeenCalled();
   });

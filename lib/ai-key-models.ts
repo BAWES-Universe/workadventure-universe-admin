@@ -290,9 +290,10 @@ export async function probeModels(input: KeyTargetInput & { apiKey?: unknown }):
  *
  * `noList`: the provider has no model list, so its words must not say it lists its models. `withTool`: the reply offers one
  * tool, as a bot's reply always does, since a provider can refuse a model only when tools come with the call. `status`: the
- * HTTP status when the provider answered with an error (absent when nobody answered in time).
+ * HTTP status when the provider answered with an error (absent when nobody answered in time). `timeoutMs`: waits no longer
+ * than this, when it is shorter than the provider's usual wait.
  */
-export async function probeChat(input: KeyTargetInput & { apiKey?: unknown; model: string; noList?: boolean; withTool?: boolean }): Promise<{ ok: true } | { ok: false; message: string; reason: ProbeFailure; status?: number }> {
+export async function probeChat(input: KeyTargetInput & { apiKey?: unknown; model: string; noList?: boolean; withTool?: boolean; timeoutMs?: number }): Promise<{ ok: true } | { ok: false; message: string; reason: ProbeFailure; status?: number }> {
   const resolved = keyTarget(input);
   if (!resolved.ok) return { ...resolved, reason: 'other' };
   const { info, modelsUrl } = resolved.target;
@@ -311,7 +312,7 @@ export async function probeChat(input: KeyTargetInput & { apiKey?: unknown; mode
       headers: authHeaders(info, apiKey),
       body: { ...chatProbeBody(info, input.model, { withTool: input.withTool }), ...extra },
       // A server on your own computer may load its model on the first call, which can take well over 30 seconds
-      timeoutMs: info.group === 'own-computer' ? 120_000 : 30_000,
+      timeoutMs: Math.min(info.group === 'own-computer' ? 120_000 : 30_000, input.timeoutMs ?? Infinity),
       maxBytes: 200_000,
     });
   let result = await ask({});

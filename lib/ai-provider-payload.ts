@@ -23,11 +23,12 @@ export function providerPayload(provider: BotsAiProvider) {
   };
 }
 
-/** A key's facts about every model it has (#575) are Orbit's to read; the bot server is told about its own model only. */
+/** A key's facts about every model it has, and their count (#575), are Orbit's to read; the bot server is told about its own model only. */
 function withoutModelFacts(settings: BotsAiProvider['settings']) {
   if (!settings || typeof settings !== 'object' || Array.isArray(settings)) return settings || {};
-  if (!('modelFacts' in settings)) return settings;
+  if (!('modelFacts' in settings) && !('modelCount' in settings)) return settings;
   const rest: Record<string, unknown> = { ...(settings as Record<string, unknown>) };
   delete rest.modelFacts;
+  delete rest.modelCount;
   return rest;
 }
