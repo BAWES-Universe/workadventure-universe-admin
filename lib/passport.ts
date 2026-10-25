@@ -27,8 +27,7 @@ export interface Passport {
   days: number;
 }
 
-/** The stamps on the passport the card shows in the game. */
-export const CARD_STAMPS = 3;
+export { CARD_STAMPS } from './stamps';
 const MAX_STAMPS = 60;
 
 const EMPTY: Passport = { stamps: [], worlds: 0, universes: 0, since: null, days: 0 };

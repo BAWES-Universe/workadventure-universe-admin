@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { CARD_STAMPS, visibleStamps, type Stamp } from '@/lib/passport';
 import { universeColour } from '@/lib/universe-colour';
+import { stampNameLength } from '@/lib/stamps';
 import { PLAY_ORIGIN } from '@/lib/play-origin';
 
 export const dynamic = 'force-dynamic';
@@ -61,11 +62,14 @@ function renderStamps(stamps: Stamp[]): string {
   if (stamps.length === 0) return '';
   return `<ul class="stamps" aria-label="Passport">${stamps
     .map(
-      (stamp, index) => `<li class="stamp" style="--c: ${universeColour(stamp.universe.id)}; --r: ${TILTS[index % TILTS.length]}deg">
+      (stamp, index) => {
+        const long = stampNameLength(stamp.world);
+        return `<li class="stamp" style="--c: ${universeColour(stamp.universe.id)}; --r: ${TILTS[index % TILTS.length]}deg">
         ${EARTH_ICON}
-        <strong>${escapeHtml(stamp.world)}</strong>
+        <strong${long ? ` data-long="${long}"` : ''}>${escapeHtml(stamp.world)}</strong>
         <em>${stamp.visits} ${stamp.visits === 1 ? 'visit' : 'visits'}</em>
-      </li>`,
+      </li>`;
+      },
     )
     .join('')}</ul>`;
 }
@@ -114,6 +118,8 @@ function renderHTML(data: { name?: string; bio?: string; links: Array<{ label: s
     .stamp::after { content: ''; position: absolute; inset: 4px; border-radius: 14px; border: 1px solid color-mix(in srgb, var(--c) 35%, transparent); pointer-events: none; }
     .stamp-icon { width: 18px; height: 18px; color: #2dd4bf; }
     .stamp strong { max-width: 100%; margin-top: 2px; font-size: 13px; font-weight: 700; letter-spacing: 0.02em; text-transform: uppercase; overflow-wrap: anywhere; }
+    .stamp strong[data-long='long'] { font-size: 10px; letter-spacing: 0; }
+    .stamp strong[data-long='longer'] { font-size: 9px; letter-spacing: 0; }
     .stamp em { font-style: normal; font-size: 11px; font-weight: 700; color: color-mix(in srgb, var(--c) 75%, white); }
     @media (prefers-reduced-motion: reduce) { .link-item { transition: none; } }
   </style>

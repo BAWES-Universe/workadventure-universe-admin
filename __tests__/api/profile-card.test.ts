@@ -128,6 +128,14 @@ describe('profile card', () => {
       expect(page).not.toContain('Secret');
     });
 
+    it('gives a world name with a word too long for its stamp smaller type, so it never breaks mid-word', async () => {
+      db.world.findMany.mockResolvedValue([world('hq', 'Shopfront'), world('nebula', 'Experimental'), world('studio', 'Studio')]);
+      const page = await html({ bio: 'Hi', links: [] }, true);
+      expect(page).toContain('<strong data-long="long">Shopfront</strong>');
+      expect(page).toContain('<strong data-long="longer">Experimental</strong>');
+      expect(page).toContain('<strong>Studio</strong>');
+    });
+
     it('shows more stamps on the full page', async () => {
       const page = await html({ bio: 'Hi', links: [] }, false);
       expect(page).toContain('<strong>Garage</strong>');

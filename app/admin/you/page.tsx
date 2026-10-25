@@ -64,7 +64,7 @@ function You() {
         }
       />
       <AiKeysCard />
-      <PassportSection />
+      <PassportSection small />
       <ActivitySection />
       <Yours
         profileComplete={profileComplete}
