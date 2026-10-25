@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
+import { universeColour } from '@/lib/universe-colour';
 
 /**
  * GET /api/room/info
@@ -14,8 +15,11 @@ import { prisma } from '@/lib/db';
  * {
  *   "roomName": "Lobby",
  *   "worldName": "Office Building",
- *   "universeName": "My Company"
+ *   "universeName": "My Company",
+ *   "universeColour": "#8b5cf6"
  * }
+ *
+ * universeColour is the universe's own shade, the same one Orbit paints its planet with.
  */
 export async function GET(request: NextRequest) {
   try {
@@ -59,6 +63,7 @@ export async function GET(request: NextRequest) {
             name: true,
             universe: {
               select: {
+                id: true,
                 name: true,
               },
             },
@@ -78,6 +83,7 @@ export async function GET(request: NextRequest) {
       roomName: roomData.name,
       worldName: roomData.world.name,
       universeName: roomData.world.universe.name,
+      universeColour: universeColour(roomData.world.universe.id),
     });
   } catch (error) {
     console.error('Error in /api/room/info:', error);
