@@ -54,6 +54,7 @@ model User {
   universeMemberships UniverseMember[]
   notices          UserNotice[]
   pushDevices      PushDevice[]
+  pushActivity     PushActivity?
 
   @@map("users")
 }
@@ -114,11 +115,33 @@ model PushDevice {
   // Last time this device registered again (every start of Universe on it)
   lastSeenAt     DateTime  @default(now()) @map("last_seen_at")
   lastNotifiedAt DateTime? @map("last_notified_at")
+  // Proves a direct message notification comes from this person's own Matrix pusher (the game registers it with
+  // this secret, and Synapse sends it back). Cleared when the browser moves to someone else.
+  gatewaySecret  String?   @map("gateway_secret") @db.VarChar(64)
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@map("push_devices")
+}
+
+// Where someone is in Universe right now, from the game (game #863), so a direct message they are looking at or
+// will see in Universe sends no notification. One row per person, across their devices.
+model PushActivity {
+  userId         String    @id @map("user_id")
+  // Last time Universe was in front on any of their devices
+  frontAt        DateTime? @map("front_at")
+  // The tab that said so: another tab going to the back does not undo it
+  frontTabId     String?   @map("front_tab_id") @db.VarChar(64)
+  // The chat open in front then, and the one they just left
+  openChatRoomId String?   @map("open_chat_room_id") @db.VarChar(255)
+  leftChatRoomId String?   @map("left_chat_room_id") @db.VarChar(255)
+  leftChatAt     DateTime? @map("left_chat_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("push_activity")
 }
 
 // Universes
