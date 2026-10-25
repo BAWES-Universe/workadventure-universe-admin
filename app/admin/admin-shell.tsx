@@ -53,7 +53,10 @@ export default function AdminShell({ children }: { children: React.ReactNode }) 
   // The request the numbers last answered: until this one's arrive, a page sees the earlier visit's numbers.
   const [numbersFor, setNumbersFor] = useState<string | null>(null);
 
-  const request = `${attempt}|${pathname}`;
+  // Each arrival on a page is its own visit, so coming back to a page never reuses the last visit's answer.
+  const [visit, setVisit] = useState({ pathname, count: 0 });
+  if (visit.pathname !== pathname) setVisit({ pathname, count: visit.count + 1 });
+  const request = `${attempt}|${visit.count}|${pathname}`;
   // The first load, every visit to Orbit, You or Space, and a change in the game bring the numbers too; elsewhere,
   // only the session is re-checked.
   const rootPage = pathname === '/admin' || pathname === '/admin/you' || pathname === '/admin/space';
