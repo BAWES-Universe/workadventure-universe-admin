@@ -517,7 +517,7 @@ export function RoomDetailPage({ view = 'details' }: { view?: 'details' | 'visit
       description: sibling.description,
       favorites: sibling._count?.favorites ?? 0,
       playPath: playPathOf(universeSlug, room.world.slug, sibling.slug),
-      here: byRoom.get(sibling.id) ?? { count: 0, people: [], youAreHere: false },
+      here: byRoom.get(sibling.id) ?? { count: 0, bots: 0, people: [], youAreHere: false },
       you: activity?.lastVisitedByUser?.accessedAt ?? null,
       latest: activity?.lastVisitedOverall?.accessedAt ?? null,
       accesses: activity?.totalAccesses ?? null,

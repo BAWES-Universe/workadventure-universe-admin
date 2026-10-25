@@ -13,6 +13,7 @@ import { timeAgo } from '@/lib/time-ago';
 import { cn } from '@/lib/utils';
 import { WorkAdventureContext } from '../workadventure-context';
 import type { Face, Here } from '../hooks/use-place-data';
+import { botsText } from './live/live-now';
 import { WokaAvatar } from './profile-card';
 import { OrbitalIllustration } from './room-card';
 import { KIND_ICON } from './ds';
@@ -114,7 +115,7 @@ export function BrowseButton({ label, targetId }: { label: string; targetId: str
 
 function hereText(people: Face[], count: number): string {
   const names = people.map((face) => face.name);
-  // Guests and bots are counted but not named.
+  // Guests are counted but not named; bots are counted apart, after this line.
   const unnamed = Math.max(0, count - names.length);
   if (names.length === 0) return `${count} ${count === 1 ? 'person is' : 'people are'} here now`;
   if (unnamed === 0 && names.length === 1) return `${names[0]} is here now`;
@@ -188,7 +189,10 @@ export function PlaceHero({
         <div className={styles.here}>
           {here.people.length > 0 && <Faces here={here.people} />}
           {here.people.length > 5 && <span className={styles.more}>+{here.people.length - 5}</span>}
-          <span>{hereText(here.people, here.count)}</span>
+          <span>
+            {hereText(here.people, here.count)}
+            {here.bots > 0 && <span className="whitespace-nowrap text-muted-foreground"> · {botsText(here.bots)}</span>}
+          </span>
         </div>
       )}
       <div className={styles.actions}>{actions}</div>
@@ -285,7 +289,11 @@ function RoomRow({ room }: { room: RoomRowData }) {
         <span className={styles.rowSub}>
           {room.here.count > 0 ? (
             <>
-              <span className={styles.live}><i className={styles.dot} />{room.here.count} here</span>
+              <span className={styles.live}>
+                <i className={styles.dot} />
+                {room.here.count} here
+                {room.here.bots > 0 && <span className="font-normal text-muted-foreground"> · {botsText(room.here.bots)}</span>}
+              </span>
               {room.here.people.length > 0 && <Faces here={room.here.people} size={22} max={3} />}
             </>
           ) : (

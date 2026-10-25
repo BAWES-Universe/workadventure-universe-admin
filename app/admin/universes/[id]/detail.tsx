@@ -287,7 +287,7 @@ export function UniverseDetailPage({ view = 'details' }: { view?: 'details' | 'v
               name: room.name,
               favorites: room._count?.favorites ?? 0,
               playPath: playPathOf(universe.slug, world.slug, room.slug),
-              here: byRoom.get(room.id) ?? { count: 0, people: [], youAreHere: false },
+              here: byRoom.get(room.id) ?? { count: 0, bots: 0, people: [], youAreHere: false },
               you: activity?.lastVisitedByUser?.accessedAt ?? null,
               latest: activity?.lastVisitedOverall?.accessedAt ?? null,
             };

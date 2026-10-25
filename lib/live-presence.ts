@@ -10,7 +10,8 @@ import { HIDE_LOCATION_KEY, SHARING_KEYS, shareRoomFromRows } from '@/lib/people
  * Live now: who is in Universe right now and where, read from the game server's live directory (the pusher's
  * `GET /presence`) and narrowed to what one person may see. Only rooms they could enter; a private world's people only
  * for its members; anyone who shares their room with no one is left out, from the counts too, and anyone who shares it
- * with friends only shows to their friends.
+ * with friends only shows to their friends. Counts are of people (those listed and guests); bots are counted apart, and a
+ * room with only bots in it is left out, as in the Discord report (#594).
  */
 
 export { HIDE_LOCATION_KEY };
@@ -50,7 +51,7 @@ export interface LivePlace {
   universe: { id: string; name: string };
   /** Where the game goes: `/@/universe/world/room`. */
   playPath: string;
-  /** Everyone counted: the people listed, guests and bots. */
+  /** The people counted: those listed and guests. Bots are apart, in `bots`. */
   count: number;
   guests: number;
   bots: number;
@@ -255,7 +256,7 @@ export async function buildLiveView(snapshot: PresenceSnapshot, viewer: SessionU
     const key = slugKey(room.world.universe.slug, room.world.slug, room.slug);
     const entries = (usersByKey.get(key) ?? []).filter((entry) => shown.has(entry.uuid));
     const visitors = visitorsByKey.get(key) ?? { guests: 0, bots: 0 };
-    const count = entries.length + visitors.guests + visitors.bots;
+    const count = entries.length + visitors.guests;
     if (count === 0) continue;
     const place: LivePlace = {
       roomId: room.id,
