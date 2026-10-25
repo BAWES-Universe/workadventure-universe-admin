@@ -3,12 +3,18 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { ArrowUpRight } from 'lucide-react';
-import { cn } from '@/lib/utils';
 import { authenticatedFetch } from '@/lib/client-auth';
+import type { LiveView } from '@/lib/live-presence';
+import { timeAgo } from '@/lib/time-ago';
+import { cn } from '@/lib/utils';
 import { useWorkAdventure } from '../workadventure-context';
 import { useStartRoom } from '../admin-bootstrap-context';
+import { isRecord, useCollection } from '../hooks/use-collection';
+import { LoadError } from './ds';
+import { ScrollSection } from './orbit/scroll-row';
 import { OrbitalIllustration, RoomCard, RoomCardSkeleton, type RoomCardRoom } from './room-card';
 import styles from './room-card.module.css';
+import timeline from './orbit/timeline.module.css';
 
 interface ApiRoom {
   id: string;
@@ -22,6 +28,41 @@ interface ApiRoom {
   unlisted?: boolean;
   /** One of System's built-in rooms: when it is also the start room, Home calls it the start map. */
   system?: boolean;
+}
+
+/** A room from your visits (the recent rooms list), newest first. */
+interface RecentRoom {
+  roomId: string;
+  roomName: string;
+  roomSlug: string;
+  roomDescription: string | null;
+  roomFavorites: number;
+  worldId: string;
+  worldName: string;
+  worldSlug: string;
+  universeId: string;
+  universeName: string;
+  universeSlug: string;
+  accessedAt: string;
+}
+
+const isRecentRoom = (value: unknown): value is RecentRoom =>
+  isRecord(value) && typeof value.roomId === 'string' && typeof value.roomName === 'string';
+
+/** How many rooms the timeline goes back, after the one before this. */
+const EARLIER = 10;
+
+function fromRecent(room: RecentRoom): RoomCardRoom {
+  return {
+    id: room.roomId,
+    name: room.roomName,
+    slug: room.roomSlug,
+    description: room.roomDescription,
+    favorites: room.roomFavorites,
+    world: { id: room.worldId, name: room.worldName, slug: room.worldSlug },
+    universe: { id: room.universeId, name: room.universeName, slug: room.universeSlug },
+    accessedAt: room.accessedAt,
+  };
 }
 
 function toCardRoom(room: ApiRoom): RoomCardRoom {
@@ -71,12 +112,24 @@ function Notice({ eyebrow, title, children, action }: { eyebrow: string; title: 
   );
 }
 
+/** When you were there, on the line above a room. */
+function When({ at }: { at?: string }) {
+  if (!at) return <span className={timeline.when} />;
+  return (
+    <time className={timeline.when} dateTime={at} title={new Date(at).toLocaleString()}>
+      {timeAgo(new Date(at))}
+    </time>
+  );
+}
+
 /**
- * Where you are and where you were just before: each room with its stars, visits, busiest hour and latest visitor,
- * one tap from its page. On the start map (System's built-in one, or a start room Orbit doesn't know) it says so and
- * points at Space. Outside the game it explains why there is nothing to show.
+ * Your timeline: where you are, the room before it and the rooms you were in lately, newest first, in one row that
+ * scrolls sideways with when you were there on the line above each. Where you are keeps its full card; every earlier
+ * room has the same card at one size: its stars, visits, busiest hour and latest visitor, and how many people are
+ * there now. On the start map (System's built-in one, or a start room Orbit doesn't know) it says so and points at
+ * Space. Outside the game it explains why there is nothing to show, and your rooms still follow.
  */
-export default function HerePanel({ onShown }: { onShown?: (roomIds: string[]) => void }) {
+export default function HerePanel({ live }: { live?: LiveView | null }) {
   const { wa, isReady, isLoading, error } = useWorkAdventure();
   const startRoom = useStartRoom();
   const [located, setLocated] = useState<Located>({ kind: 'loading' });
@@ -146,9 +199,20 @@ export default function HerePanel({ onShown }: { onShown?: (roomIds: string[]) =
   const previousFor = herePlayUri !== null && previous.playUri === herePlayUri ? previous : null;
   const previousRoom = previousFor?.room ?? null;
   const previousId = previousRoom?.id ?? null;
-  useEffect(() => {
-    onShown?.([roomId, previousId].filter((id): id is string => Boolean(id)));
-  }, [roomId, previousId, onShown]);
+
+  // Rooms you were in lately: two more than shown, in case where you are and the room before it are among them.
+  const recent = useCollection(`/api/admin/rooms/recent?limit=${EARLIER + 2}`, 'rooms', isRecentRoom);
+  const earlier =
+    recent.result.status === 'ready'
+      ? recent.result.items.filter((room) => room.roomId !== roomId && room.roomId !== previousId).slice(0, EARLIER).map(fromRecent)
+      : null;
+
+  // People there now, as Live now counts them: you are counted in the room you're in, so its card leaves you out.
+  const places = new Map((live?.places ?? []).map((place) => [place.roomId, place]));
+  const peopleIn = (id: string) => {
+    const place = places.get(id);
+    return place ? place.count - (place.here ? 1 : 0) : 0;
+  };
 
   let current: React.ReactNode;
   if (unavailable) {
@@ -205,30 +269,89 @@ export default function HerePanel({ onShown }: { onShown?: (roomIds: string[]) =
       </Notice>
     );
   } else {
-    current = <RoomCard room={toCardRoom(located.room)} kind="here" />;
+    current = <RoomCard room={toCardRoom(located.room)} kind="here" people={peopleIn(located.room.id)} />;
   }
 
-  return (
-    <section className={styles.location} aria-labelledby="here-heading" data-testid="here">
-      <h2 id="here-heading" className="sr-only">
-        Where you are
-      </h2>
-      <div className={cn(styles.locationGrid, previousRoom && styles.hasPrevious)}>
-        {current}
-        {previousRoom && (
-          <div className={styles.previousStop}>
-            <RoomCard room={toCardRoom(previousRoom)} kind="previous" />
-          </div>
-        )}
-        {previousFor?.failed && (
-          <p className={styles.activityStatus} role="status">
+  const stops: React.ReactNode[] = [];
+  if (previousRoom) {
+    stops.push(
+      <div key="previous" className={timeline.stop}>
+        <When at={previousRoom.accessedAt} />
+        <div className={timeline.card}>
+          <RoomCard room={toCardRoom(previousRoom)} kind="previous" people={peopleIn(previousRoom.id)} even />
+        </div>
+      </div>,
+    );
+  }
+  if (previousFor?.failed) {
+    stops.push(
+      <div key="previous-failed" className={timeline.stop}>
+        <When />
+        <div className={cn(styles.notice, timeline.note)}>
+          <p role="status">
             Couldn&apos;t load the room before this.{' '}
             <button type="button" className={styles.retry} onClick={retry}>
               Try again
             </button>
           </p>
-        )}
+        </div>
+      </div>,
+    );
+  }
+  for (const room of earlier ?? []) {
+    stops.push(
+      <div key={room.id} className={timeline.stop}>
+        <When at={room.accessedAt} />
+        <div className={timeline.card}>
+          <RoomCard room={room} kind="previous" eyebrow="" people={peopleIn(room.id)} even />
+        </div>
+      </div>,
+    );
+  }
+  if (recent.result.status === 'error') {
+    stops.push(
+      <div key="recent-failed" className={timeline.stop}>
+        <When />
+        <div className={timeline.card}>
+          <LoadError label="your recent rooms" retry={recent.retry} />
+        </div>
+      </div>,
+    );
+  } else if (earlier === null) {
+    stops.push(
+      <div key="recent-loading" className={timeline.stop}>
+        <When />
+        <div className={timeline.card}>
+          <RoomCardSkeleton />
+        </div>
+      </div>,
+    );
+  } else if (stops.length === 0) {
+    // Someone who hasn't been anywhere yet: the line shows where their rooms will go.
+    stops.push(
+      <div key="hint" className={cn(timeline.stop, timeline.hintStop)}>
+        <When />
+        <div className={timeline.hint}>
+          <p>Rooms you visit will show up here.</p>
+          <Link href="/admin/discover/rooms" className={styles.detailsLink}>
+            Discover rooms
+            <ArrowUpRight size={15} aria-hidden="true" />
+          </Link>
+        </div>
+      </div>,
+    );
+  }
+
+  return (
+    <ScrollSection id="here-heading" title="Your timeline" label="your timeline" testId="here" className={cn(styles.location, timeline.timeline)}>
+      <div className={cn(timeline.stop, timeline.now)}>
+        <span className={timeline.when}>
+          <i className={timeline.nowDot} aria-hidden="true" />
+          Now
+        </span>
+        <div className={timeline.card}>{current}</div>
       </div>
-    </section>
+      {stops}
+    </ScrollSection>
   );
 }

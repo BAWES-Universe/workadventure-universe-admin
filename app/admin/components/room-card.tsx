@@ -17,11 +17,11 @@ export interface RoomCardRoom {
   favorites?: number;
   world: { id?: string; name: string; slug: string };
   universe: { id?: string; name: string; slug: string };
-  /** When you were there, for a room on your trail. */
+  /** When you were there, for a room on your timeline. */
   accessedAt?: string;
 }
 
-type Kind = 'here' | 'previous' | 'trail';
+type Kind = 'here' | 'previous';
 
 /** A place in your orbit: a decoration, never a picture of activity. */
 export function OrbitalIllustration({ small = false }: { small?: boolean }) {
@@ -57,21 +57,37 @@ function VisitTime({ value }: { value: string }) {
   );
 }
 
-// Recently visited cards need no label: the section says what they are.
-const EYEBROW: Record<Exclude<Kind, 'trail'>, string> = { here: 'You are here', previous: 'Before this' };
+const EYEBROW: Record<Kind, string> = { here: 'You are here', previous: 'Before this' };
 
 /**
- * A room at a glance: where it is, what it is, how popular it is and who was there last, the same on every card.
- * The whole card opens the room's page, which has its details and Visit.
+ * A room at a glance: where it is, what it is, how many people are there now, how popular it is and who was there
+ * last, the same on every card. The whole card opens the room's page, which has its details and Visit.
+ *
+ * `people` is how many people are there right now, as Live now counts them (bots apart, never counted). On the card
+ * you're in it leaves you out, and its label says who is with you, so the card keeps one green dot.
  */
-export function RoomCard({ room, kind }: { room: RoomCardRoom; kind: Kind }) {
+export function RoomCard({
+  room,
+  kind,
+  eyebrow,
+  people = 0,
+  even = false,
+}: {
+  room: RoomCardRoom;
+  kind: Kind;
+  /** The label over an earlier room; an empty one keeps its line. */
+  eyebrow?: string;
+  people?: number;
+  /** On the timeline: every earlier room the same size, the stats lined up at the bottom. */
+  even?: boolean;
+}) {
   const { analytics, loading, failed, retry } = useRoomAnalytics(room.id);
   const titleId = useId();
   const here = kind === 'here';
 
   const you = analytics?.lastVisitedByUser?.accessedAt ?? room.accessedAt ?? null;
   const latest = analytics?.lastVisitedOverall ?? null;
-  const variant = here ? styles.current : kind === 'previous' ? styles.previous : styles.recent;
+  const variant = here ? styles.current : styles.previous;
   const stars = (
     <span className={styles.stars} aria-label={`${room.favorites ?? 0} ${room.favorites === 1 ? 'star' : 'stars'}`}>
       <Star size={13} aria-hidden="true" />
@@ -80,25 +96,28 @@ export function RoomCard({ room, kind }: { room: RoomCardRoom; kind: Kind }) {
   );
 
   return (
-    <article className={cn(styles.card, variant, 'orbit-kind-wash')} data-kind="room" aria-labelledby={titleId} data-testid={`room-card-${kind}`}>
+    <article className={cn(styles.card, variant, even && styles.even, 'orbit-kind-wash')} data-kind="room" aria-labelledby={titleId} data-testid={`room-card-${kind}`}>
       {here && <OrbitalIllustration />}
-      {kind !== 'trail' && (
-        <div className={styles.cardTop}>
-          <span className={styles.eyebrow}>
-            {here && <i className={styles.presence} />}
-            {EYEBROW[kind]}
+      <div className={styles.cardTop}>
+        <span className={styles.eyebrow}>
+          {here && <i className={styles.presence} />}
+          {here && people > 0 ? `You and ${people} ${people === 1 ? 'person' : 'people'} here` : (eyebrow ?? EYEBROW[kind])}
+        </span>
+        {!here && people > 0 && (
+          <span className={styles.peopleHere}>
+            <i aria-hidden="true" />
+            {people} here
           </span>
-          {stars}
-        </div>
-      )}
+        )}
+        {stars}
+      </div>
 
-      <div className={cn(styles.place, kind === 'trail' && styles.placeTop)}>
+      <div className={styles.place}>
         <div className={styles.placeWords}>
           <p className={styles.coordinates}>
             <Place kind="universe" label={room.universe.name} />
             <span aria-hidden="true">/</span>
             <Place kind="world" label={room.world.name} />
-            {kind === 'trail' && stars}
           </p>
           <div className={styles.nameRow}>
             <NameGlyph kind="room" size={22} />
@@ -134,7 +153,7 @@ export function RoomCard({ room, kind }: { room: RoomCardRoom; kind: Kind }) {
               <dd>{analytics.totalAccesses === null ? '—' : analytics.totalAccesses.toLocaleString()}</dd>
             </div>
             <div>
-              <dt>Peak</dt>
+              <dt>Busiest hour</dt>
               <dd>{analytics.peakHour === null ? '—' : formatHour(analytics.peakHour)}</dd>
             </div>
           </dl>
