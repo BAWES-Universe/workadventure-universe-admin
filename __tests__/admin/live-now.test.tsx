@@ -60,6 +60,7 @@ const view: LiveView = {
   available: true,
   generatedAt: 1,
   places: [hall, arcade],
+  botRooms: [],
   people: [
     { ...person('Dana'), place: at(hall) },
     { ...person('Omar', { status: 'busy' }), place: at(arcade) },
@@ -104,7 +105,7 @@ describe('Live now', () => {
     const { rerender } = render(<LiveNowView view={view} layout="space" />);
     fireEvent.click(within(screen.getAllByTestId('live-person')[1]).getByRole('button', { name: /Omar/ }));
     await screen.findByTestId('live-person-sheet');
-    const emptied: LiveView = { available: true, generatedAt: 2, places: [], people: [] };
+    const emptied: LiveView = { available: true, generatedAt: 2, places: [], botRooms: [], people: [] };
     rerender(<LiveNowView view={emptied} layout="space" />);
     expect(screen.queryByTestId('people-online')).toBeNull();
     expect(screen.getByTestId('live-person-sheet')).toBeTruthy();
@@ -128,6 +129,7 @@ describe('Live now', () => {
       available: true,
       generatedAt: 1,
       places: [hall, arcade, lounge],
+      botRooms: [],
       people: [
         { ...dana, place: at(lounge) },
         { ...person('Omar', { friend: true }), place: at(lounge) },
@@ -195,7 +197,7 @@ describe('Live now', () => {
   });
 
   it('says so when nobody is around, and stays out of Orbit home', () => {
-    const empty: LiveView = { available: true, generatedAt: 1, places: [], people: [] };
+    const empty: LiveView = { available: true, generatedAt: 1, places: [], botRooms: [], people: [] };
     const { container, unmount } = render(<LiveNowView view={empty} layout="home-inline" />);
     expect(container.textContent).toBe('');
     unmount();
@@ -236,7 +238,7 @@ describe('The Live now strip', () => {
     expect(within(container).getByText('1 person live in 1 room')).toBeTruthy();
     expect(within(container).getByText('Solo · 1 bot')).toBeTruthy();
     unmount();
-    const none = render(<LiveStrip view={{ available: true, generatedAt: 1, places: [], people: [] }} />);
+    const none = render(<LiveStrip view={{ available: true, generatedAt: 1, places: [], botRooms: [], people: [] }} />);
     expect(none.container.textContent).toBe('');
   });
 });

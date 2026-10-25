@@ -20,6 +20,11 @@ describe('The place hero', () => {
     expect(within(hero).getByText('· 21 bots')).toBeTruthy();
   });
 
+  it('counts only the bots when no people are in', () => {
+    render(<PlaceHero kind="world" title="BAWES World" context={null} stats={[]} here={{ count: 0, bots: 21, people: [], youAreHere: false }} actions={null} />);
+    expect(screen.getByTestId('place-hero').textContent).toContain('21\u00a0bots here now');
+  });
+
   it('says nothing about bots when there are none', () => {
     render(<PlaceHero kind="world" title="BAWES World" context={null} stats={[]} here={{ ...busy, bots: 0 }} actions={null} />);
     expect(screen.getByTestId('place-hero').textContent).not.toMatch(/bot/);
@@ -32,6 +37,11 @@ describe('A room row', () => {
   it('counts the people here, then the bots', () => {
     const { container } = render(<RoomRows rooms={[row({ count: 2, bots: 21, people: [face('Khalid'), face('Mishari')], youAreHere: true })]} />);
     expect(container.textContent).toContain('2 here · 21\u00a0bots');
+  });
+
+  it('still shows the bots of a room with only bots in it', () => {
+    const { container } = render(<RoomRows rooms={[row({ count: 0, bots: 21, people: [], youAreHere: false })]} />);
+    expect(container.textContent).toContain('0 here · 21\u00a0bots');
   });
 
   it('reads as before when no bots are in', () => {

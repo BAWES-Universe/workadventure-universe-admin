@@ -50,13 +50,15 @@ export function useHere(scope: 'universe' | 'world' | 'room', id: string) {
   const live = useLive();
   return useMemo(() => {
     if (!live) return { known: false, here: NOBODY, byRoom: new Map<string, Here>() };
-    const inScope = live.places.filter((place) =>
+    // Rooms with only bots count here too, though Live now leaves them out.
+    const allPlaces = [...live.places, ...live.botRooms];
+    const inScope = allPlaces.filter((place) =>
       scope === 'universe' ? place.universe.id === id : scope === 'world' ? place.world.id === id : place.roomId === id,
     );
     return {
       known: true,
       here: hereOf(inScope),
-      byRoom: new Map(live.places.map((place) => [place.roomId, hereOf([place])] as const)),
+      byRoom: new Map(allPlaces.map((place) => [place.roomId, hereOf([place])] as const)),
     };
   }, [live, scope, id]);
 }
