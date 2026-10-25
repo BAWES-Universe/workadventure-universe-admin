@@ -86,6 +86,14 @@ describe('AI keys card', () => {
     expect(line).toMatch(/Out of credit since 2:14\sPM\. Guide, Nora and Sam reply on Universe AI until it’s back\./);
   });
 
+  it('reads the down count in a darker amber on the light card, and the lighter one in dark mode', async () => {
+    answer({ ok: true, keys: [{ ...claude, status: 'down', downReason: 'credit', downSince: new Date().toISOString() }, router] });
+    render(<AiKeysCard />);
+    const down = (await screen.findByTestId('ai-keys-card-status')).querySelector('span:last-child') as HTMLElement;
+    expect(down.className).toContain('text-[#92400E]');
+    expect(down.className).toContain('dark:text-[#F5C451]');
+  });
+
   it('lists a down key first, even when it comes after the first three', async () => {
     const working = (id: string) => ({ ...router, id, name: `Key ${id}` });
     answer({ ok: true, keys: [working('a'), working('b'), working('c'), { ...router, id: 'd', name: 'Late key', status: 'down', downReason: 'errors', downSince: new Date().toISOString() }] });

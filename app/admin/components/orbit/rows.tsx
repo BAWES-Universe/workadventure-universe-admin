@@ -194,6 +194,7 @@ export function MembershipsRow({ live }: { live?: LiveView | null }) {
   const [pending, setPending] = useState<ReadonlySet<string>>(new Set());
   const [confirmingDecline, setConfirmingDecline] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const joining = useRef<{ ids: string[]; after: unknown }>({ ids: [], after: null });
 
   const joined =
@@ -211,10 +212,18 @@ export function MembershipsRow({ live }: { live?: LiveView | null }) {
     if (pending.has(invitation.id)) return;
     setPending((current) => new Set(current).add(invitation.id));
     setError(null);
+    setNotice(null);
     try {
       const response = await authenticatedFetch(`/api/memberships/invitations/${invitation.id}/${choice}`, { method: 'POST' });
       if (!response.ok) throw new Error('answer failed');
       if (choice === 'accept') {
+        const answered = (await response.json().catch(() => null)) as { rolesNotGiven?: unknown } | null;
+        const notGiven = Array.isArray(answered?.rolesNotGiven) ? answered.rolesNotGiven.map(String) : [];
+        if (notGiven.length > 0) {
+          setNotice(
+            `You joined without ${notGiven.join(', ')}. A role with Administrator works in every world, so it can’t come with an invitation to some worlds. Ask an Admin of ${invitation.world.universe.name} to give it to you.`,
+          );
+        }
         // The invitation stays (locked) until the new membership has loaded, so the row never reads empty between.
         joining.current = { ids: [...joining.current.ids, invitation.id], after: memberships.result };
         memberships.retry();
@@ -351,6 +360,11 @@ export function MembershipsRow({ live }: { live?: LiveView | null }) {
         )}
       </ScrollSection>
       {invitations.result.status === 'error' && <LoadError label="your invitations" retry={invitations.retry} />}
+      {notice && (
+        <p className={styles.notice} role="status">
+          {notice}
+        </p>
+      )}
       {error && (
         <p className={styles.error} role="alert">
           {error}

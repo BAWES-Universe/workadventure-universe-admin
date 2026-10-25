@@ -84,6 +84,8 @@ export async function sendPush(userId: string, kind: PushKind, message: PushMess
       TTL: options.ttl ?? DAY,
       urgency: options.urgency ?? 'normal',
       topic: pushTopic(message.tag),
+      // A push service that never answers ends as one device's failure instead of holding the whole send open.
+      timeout: 10_000,
     };
     const results = await Promise.all(
       devices.map(async (device) => {
