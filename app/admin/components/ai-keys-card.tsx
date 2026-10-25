@@ -10,7 +10,7 @@ import { ProviderLogo } from './ds/provider-logo';
 
 /** The providers the card shows someone with no key yet: what they can bring. */
 const SHOWN_KINDS = ['openrouter', 'claude', 'openai', 'gemini', 'deepseek', 'lmstudio'];
-/** Keys listed on the card; the rest are counted. */
+/** Keys listed on the card, down ones first; the rest are counted. */
 const MAX_SHOWN = 3;
 
 /** Why a key is down, in a few words that start a sentence. */
@@ -118,6 +118,8 @@ export function AiKeysCard() {
   const down = keys.filter((key) => key.status === 'down').length;
   const replies = keys.reduce((total, key) => total + key.month.replies, 0);
   const more = keys.length - MAX_SHOWN;
+  // A down key is always among the ones listed, so the card never says "1 down" without showing which.
+  const shown = [...keys.filter((key) => key.status === 'down'), ...keys.filter((key) => key.status !== 'down')].slice(0, MAX_SHOWN);
   const footer = [more > 0 && `${more} more`, replies > 0 && `${replies.toLocaleString()} ${replies === 1 ? 'reply' : 'replies'} on your keys this month`].filter(Boolean);
   return (
     <Shell
@@ -135,7 +137,7 @@ export function AiKeysCard() {
       }
     >
       <ul className="m-0 grid list-none p-0">
-        {keys.slice(0, MAX_SHOWN).map((key) => (
+        {shown.map((key) => (
           <li key={key.id} className="grid gap-1 border-t border-border py-3 first:border-t-0 first:pt-1 last:pb-0" data-testid="ai-keys-card-key">
             <div className="flex min-w-0 items-center gap-2.5">
               <ProviderLogo info={key.kind ? kindInfo(key.kind) : undefined} size={22} slot={28} />

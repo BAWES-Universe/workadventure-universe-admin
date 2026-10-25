@@ -86,6 +86,17 @@ describe('AI keys card', () => {
     expect(line).toMatch(/Out of credit since 2:14\sPM\. Guide, Nora and Sam reply on Universe AI until it’s back\./);
   });
 
+  it('lists a down key first, even when it comes after the first three', async () => {
+    const working = (id: string) => ({ ...router, id, name: `Key ${id}` });
+    answer({ ok: true, keys: [working('a'), working('b'), working('c'), { ...router, id: 'd', name: 'Late key', status: 'down', downReason: 'errors', downSince: new Date().toISOString() }] });
+    render(<AiKeysCard />);
+    expect((await screen.findByTestId('ai-keys-card-status')).textContent).toBe('1 down');
+    const rows = screen.getAllByTestId('ai-keys-card-key');
+    expect(rows).toHaveLength(3);
+    expect(rows[0].textContent).toContain('Late key');
+    expect(rows[0].textContent).toContain('Kept failing since');
+  });
+
   it('says the bots rest when the key is set to stop replying', async () => {
     answer({ ok: true, keys: [{ ...claude, status: 'down', downReason: 'rejected', downSince: new Date().toISOString(), ifDown: 'stop' }] });
     render(<AiKeysCard />);
