@@ -72,7 +72,13 @@ describe('/api/me/activity', () => {
     const response = await getActivity(request('activity'));
     expect(response.status).toBe(200);
     expect((await response.json()).events).toHaveLength(1);
-    expect(loadActivity).toHaveBeenCalledWith('user-a');
+    expect(loadActivity).toHaveBeenCalledWith('user-a', { all: false });
+  });
+
+  it('gives everything recent to the Your activity page', async () => {
+    (loadActivity as jest.Mock).mockResolvedValue([]);
+    await getActivity(request('activity?all=1'));
+    expect(loadActivity).toHaveBeenCalledWith('user-a', { all: true });
   });
 
   it('wants someone signed in, and the right origin', async () => {

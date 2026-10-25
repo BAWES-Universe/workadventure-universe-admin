@@ -5,6 +5,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import AdminShell from '@/app/admin/admin-shell';
 import { WorkAdventureContext } from '@/app/admin/workadventure-context';
 import { useReplacePage } from '@/app/admin/orbit-frame-context';
+import { useBootstrapFresh } from '@/app/admin/admin-bootstrap-context';
 
 let mockPathname = '/admin';
 let mockSearch = '';
@@ -194,6 +195,49 @@ describe('AdminShell', () => {
     });
     await waitFor(() => expect(mockAuthenticatedFetch).toHaveBeenCalledTimes(3));
     expect(secondSignal.aborted).toBe(true);
+  });
+
+  it('says the numbers are from an earlier visit while coming back to Orbit, until this visit’s arrive', async () => {
+    function Fresh() {
+      return <div>{useBootstrapFresh() ? 'fresh numbers' : 'earlier numbers'}</div>;
+    }
+    const at = (pathname: string, view: ReturnType<typeof render>) =>
+      act(() => {
+        mockPathname = pathname;
+        view.rerender(
+          <AdminShell>
+            <Fresh />
+          </AdminShell>,
+        );
+      });
+    mockPathname = '/admin';
+    const view = render(
+      <AdminShell>
+        <Fresh />
+      </AdminShell>,
+    );
+    await waitFor(() => expect(mockAuthenticatedFetch).toHaveBeenCalledTimes(1));
+    await act(async () => answerLast());
+    expect(await screen.findByText('fresh numbers')).toBeTruthy();
+
+    // Elsewhere only the session is checked, and nothing newer is on the way.
+    at('/admin/bots', view);
+    await waitFor(() => expect(mockAuthenticatedFetch).toHaveBeenCalledTimes(2));
+    await act(async () => answerLast({ user: bootstrap.user }));
+    expect(screen.getByText('fresh numbers')).toBeTruthy();
+
+    // Back on Orbit: the last visit's numbers until this visit's arrive.
+    at('/admin', view);
+    expect(screen.getByText('earlier numbers')).toBeTruthy();
+    await waitFor(() => expect(mockAuthenticatedFetch).toHaveBeenCalledTimes(3));
+    expect(mockAuthenticatedFetch.mock.calls[2][0]).toBe('/api/admin/bootstrap');
+    await act(async () => answerLast());
+    expect(await screen.findByText('fresh numbers')).toBeTruthy();
+
+    // A refresh from the game within the visit keeps them current while newer ones load.
+    act(() => mockOnRefresh?.());
+    await waitFor(() => expect(mockAuthenticatedFetch).toHaveBeenCalledTimes(4));
+    expect(screen.getByText('fresh numbers')).toBeTruthy();
   });
 
   it('gives every page a Back that names where it goes, and roots the wordmark', async () => {

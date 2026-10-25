@@ -11,13 +11,17 @@ export async function OPTIONS(request: NextRequest) {
   return respond(request, {}, request.headers.get('origin') && meOriginAllowed(request) ? 204 : 403);
 }
 
-/** GET /api/me/activity - what happened to the caller lately: invitations, memberships, stars, what they made. Only theirs. */
+/**
+ * GET /api/me/activity - what happened to the caller lately: invitations, memberships, stars, what they made. Only
+ * theirs. The latest few; `?all=1` for the Your activity page.
+ */
 export async function GET(request: NextRequest) {
   if (!meOriginAllowed(request)) return respond(request, { error: 'Origin not allowed' }, 403);
   const user = await getSessionUser(request);
   if (!user) return respond(request, { error: 'Unauthorized' }, 401);
   try {
-    return respond(request, { events: await loadActivity(user.id) });
+    const all = request.nextUrl.searchParams.get('all') === '1';
+    return respond(request, { events: await loadActivity(user.id, { all }) });
   } catch (error) {
     console.error('[Activity] Load failed:', error);
     return respond(request, { error: 'Internal server error' }, 500);

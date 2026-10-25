@@ -1,15 +1,14 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, type CSSProperties } from 'react';
+import type { CSSProperties } from 'react';
 import { ArrowUpRight, Check } from 'lucide-react';
 import { universeColour } from '@/lib/universe-colour';
-import { useAdminBootstrap } from '../admin-bootstrap-context';
-import { isNamed, isRecord, useCollection } from '../hooks/use-collection';
 import { NameGlyph, StatLine, StatusPill, countPlace, hueStyle } from './ds';
-import { deriveProgress, getStartedSteps, type GetStartedProgress } from './get-started-steps';
+import { getStartedSteps, type GetStartedProgress } from './get-started-steps';
 import styles from './yours.module.css';
 
+/** A universe you own, as the universes list gives it. */
 export interface MyUniverse {
   id: string;
   name: string;
@@ -17,58 +16,6 @@ export interface MyUniverse {
   isPublic: boolean;
   featured?: boolean;
   _count?: { worlds?: number; rooms?: number };
-}
-interface MyMembership {
-  id: string;
-  tags: string[];
-  isUniverseOwner?: boolean;
-  world: { id: string; name: string; universe: { id?: string; name: string }; _count?: { rooms?: number; members?: number } };
-}
-interface StarredRoom {
-  id: string;
-  name: string;
-  world: { name: string; universe: { id?: string; name: string } };
-}
-
-const SHOWN = 4;
-
-const isUniverse = (value: unknown): value is MyUniverse => isNamed(value) && typeof value.isPublic === 'boolean';
-const isMembership = (value: unknown): value is MyMembership =>
-  isRecord(value) && typeof value.id === 'string' && Array.isArray(value.tags) && isNamed(value.world) && isRecord(value.world.universe);
-const isStar = (value: unknown): value is StarredRoom =>
-  isNamed(value) && isRecord(value.world) && typeof value.world.name === 'string' && isRecord(value.world.universe);
-
-/**
- * Get started on You, for someone new: the steps are ticked by what you have (universes, worlds you're a member of,
- * stars). Your universes, memberships and stars themselves are rows on Orbit. Finding new places is Space's job.
- */
-export default function Yours({
-  profileComplete,
-  getStarted,
-}: {
-  profileComplete: boolean | null;
-  /** Whether Get started was hidden, and how to hide it. You keeps this, so its settings can show it again. */
-  getStarted: { hidden: boolean | null; hide: () => void; onAllDone?: (allDone: boolean | null) => void };
-}) {
-  const { mine } = useAdminBootstrap();
-  const universes = useCollection(`/api/admin/universes?scope=my&limit=${SHOWN}`, 'universes', isUniverse);
-  const memberships = useCollection('/api/memberships/my', 'memberships', isMembership);
-  const stars = useCollection('/api/admin/stars/rooms', 'rooms', isStar);
-
-  const progress = deriveProgress({ mine, profileComplete, universes: universes.result, memberships: memberships.result, stars: stars.result });
-  const allDone = getStartedSteps(progress).every((step) => step.done);
-  const { hidden, hide, onAllDone } = getStarted;
-  // Unknown (null) until the profile answer is in, so the page doesn't show or hide its Settings row on a guess.
-  const allDoneKnown = profileComplete === null ? null : allDone;
-  useEffect(() => {
-    onAllDone?.(allDoneKnown);
-  }, [allDoneKnown, onAllDone]);
-
-  return (
-    <div className={styles.yours} data-testid="yours">
-      {!allDone && hidden === false && <GetStarted progress={progress} onHide={hide} />}
-    </div>
-  );
 }
 
 /** A universe as a planet in its own colour, with how many people are there now. The whole card opens it. */

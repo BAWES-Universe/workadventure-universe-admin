@@ -1,7 +1,5 @@
-/* Get started on You, and the universe planet card Orbit's Your universes row uses (see yours.tsx). Colour comes only
-   from kinds and each universe's own colour. */
-.yours { display: grid; gap: 30px; min-width: 0; }
-.yours > section { min-width: 0; }
+/* Get started, and the universe planet card Orbit's Your universes row uses (see yours.tsx). Colour comes only from
+   kinds and each universe's own colour. */
 
 .getStarted { display: grid; gap: 12px; padding: 18px; border: 1px solid hsl(var(--border)); border-radius: 20px; background: linear-gradient(160deg, rgb(134 41 252 / 0.1), transparent 45%), hsl(var(--card)); }
 .getStartedHead { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
@@ -49,7 +47,7 @@ li[data-done] .stepText strong { text-decoration: line-through; text-decoration-
   .celestial { right: 7px; top: 15px; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .yours *, .yours *::before, .yours *::after, .universe, .universe * { transition: none !important; }
+  .getStarted *, .getStarted *::before, .getStarted *::after, .universe, .universe * { transition: none !important; }
   .universe:hover, .universe:hover .celestial, .universe:hover .cardArrow { transform: none; }
 }
 
