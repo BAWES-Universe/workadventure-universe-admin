@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { EVERYONE_KEY, MEMBER_KEY, syncWorldMembers } from '@/lib/roles';
 import { allows, isAdministratorRole, ranksAbove, reachOf, scopeChange, type Access } from '@/lib/role-access';
 import { badRequest, checkScope, failed, needs, scopeSchema, universeContext } from '@/lib/universe-route';
+import { notifyRoleGiven } from '@/lib/push-messages';
 
 type Params = { params: Promise<{ id: string; userId: string; roleId: string }> };
 
@@ -63,6 +64,8 @@ export async function PUT(request: NextRequest, { params }: Params) {
       });
       await syncWorldMembers(tx, id, userId);
     });
+    // A new role for someone else; changing where a role works, or your own roles, says nothing
+    if (!given && userId !== user.id) notifyRoleGiven({ id: userId }, universe, role.name);
     return NextResponse.json({ given: { roleId, ...scope } });
   } catch (error) {
     return failed(error, 'give role');

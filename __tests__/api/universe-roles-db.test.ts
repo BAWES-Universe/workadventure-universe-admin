@@ -9,6 +9,7 @@ import { NextRequest } from 'next/server';
 
 jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn() }));
 jest.mock('@/lib/woka-avatar', () => ({ withWokas: jest.fn(async (records: unknown[]) => records) }));
+jest.mock('@/lib/push-messages', () => ({ notifyInvitation: jest.fn(), notifyRoleGiven: jest.fn() }));
 jest.mock('@/lib/friends', () => ({
   ...jest.requireActual('@/lib/friends'),
   listFriends: jest.fn(async () => ({ friends: [], incoming: [], outgoing: [], blocked: [] })),
@@ -16,6 +17,7 @@ jest.mock('@/lib/friends', () => ({
 }));
 
 import { prisma } from '@/lib/db';
+import { notifyInvitation, notifyRoleGiven } from '@/lib/push-messages';
 import { getSessionUser } from '@/lib/auth-session';
 import { flag, fromKeys } from '@/lib/permissions';
 import { ensureBuiltInRoles } from '@/lib/roles';
@@ -139,8 +141,12 @@ run('universe roles and people routes (real database)', () => {
   });
 
   it('gives a role only in the worlds where the giver may, and only where the person is a member', async () => {
+    (notifyRoleGiven as jest.Mock).mockClear();
     const inA = await as('mod', givenRoute.PUT, { userId: people.plain, roleId: role.helper }, { allWorlds: false, worldIds: [worldA] });
     expect(inA.status).toBe(200);
+    // A new role notifies the person given it; refused ones below never do
+    expect(notifyRoleGiven).toHaveBeenCalledTimes(1);
+    expect(notifyRoleGiven).toHaveBeenCalledWith({ id: people.plain }, expect.objectContaining({ id: universeId, name: 'Roles test' }), expect.stringMatching(/^Helper/));
     expect(await tagsOf('plain', worldA)).toEqual(['helper', 'member']);
     expect(await tagsOf('plain', worldB)).toEqual(['member']);
 
@@ -155,6 +161,7 @@ run('universe roles and people routes (real database)', () => {
 
     const ownRank = await as('mod', givenRoute.PUT, { userId: people.plain, roleId: role.moderator }, { allWorlds: false, worldIds: [worldA] });
     expect(ownRank.status).toBe(403);
+    expect(notifyRoleGiven).toHaveBeenCalledTimes(1);
   });
 
   describe('"All worlds" on someone limited to some worlds', () => {
@@ -316,15 +323,18 @@ run('universe roles and people routes (real database)', () => {
     const everywhere = await as('mod', inviteRoute.POST, {}, { userId: people.outsider, roleIds: [], worlds: { allWorlds: true } });
     expect(everywhere.status).toBe(403);
 
+    (notifyInvitation as jest.Mock).mockClear();
     const invited = await as('mod', inviteRoute.POST, {}, {
       userId: people.outsider,
       roleIds: [role.helper],
       worlds: { allWorlds: false, worldIds: [worldA] },
     });
     expect(invited.status).toBe(201);
+    expect(notifyInvitation).toHaveBeenCalledWith(expect.objectContaining({ id: people.outsider }), expect.objectContaining({ id: universeId, name: 'Roles test' }));
 
     const again = await as('admin', inviteRoute.POST, {}, { userId: people.outsider, roleIds: [], worlds: { allWorlds: true } });
     expect(again.status).toBe(400);
+    expect(notifyInvitation).toHaveBeenCalledTimes(1);
 
     session.mockResolvedValue({ id: people.outsider, uuid: 'outsider', email: null, name: 'outsider', tags: [], isSuperAdmin: false });
     const accepted = await accept(new NextRequest('http://localhost/api', { method: 'POST' }), {
@@ -368,8 +378,10 @@ run('universe roles and people routes (real database)', () => {
         worldIds: [worldB],
       },
     });
+    (notifyInvitation as jest.Mock).mockClear();
     const resent = await as('owner', worldMembersRoute.POST, { id: worldB }, { userId: people.returning, tags: ['member'] });
     expect(resent.status).toBeLessThan(300);
+    expect(notifyInvitation).toHaveBeenCalledWith({ id: people.returning }, expect.objectContaining({ id: universeId, name: 'Roles test' }));
     expect((await prisma.membershipInvitation.findUniqueOrThrow({ where: { id: old.id } })).roleIds).toEqual([]);
 
     session.mockResolvedValue({ id: people.returning, uuid: 'returning', email: null, name: 'returning', tags: [], isSuperAdmin: false });
@@ -644,6 +656,17 @@ run('universe roles and people routes (real database)', () => {
     const keen = await prisma.user.create({ data: { uuid: `keen-${tag}`, email: `keen-${tag}@example.test`, name: 'keen' } });
     const sent = await as('owner', worldMembersRoute.POST, { id: worldB }, { userId: keen.id, tags: ['admin'] });
     expect(sent.status).toBe(201);
+  });
+
+  it('notifies someone invited from their profile, and not when the invitation is refused', async () => {
+    const asked = await prisma.user.create({ data: { uuid: `asked-${tag}`, email: `asked-${tag}@example.test`, name: 'asked' } });
+    (notifyInvitation as jest.Mock).mockClear();
+    const sent = await as('owner', userInviteRoute.POST, { id: asked.id }, { worldId: worldB, tags: ['member'] });
+    expect(sent.status).toBe(201);
+    expect(notifyInvitation).toHaveBeenCalledWith({ id: asked.id }, expect.objectContaining({ id: universeId, name: 'Roles test' }));
+    const twice = await as('owner', userInviteRoute.POST, { id: asked.id }, { worldId: worldB, tags: ['member'] });
+    expect(twice.status).toBeGreaterThanOrEqual(400);
+    expect(notifyInvitation).toHaveBeenCalledTimes(1);
   });
 
   it('makes the owner an Admin of the first world of a new universe', async () => {
