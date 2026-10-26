@@ -20,6 +20,8 @@ interface Face {
   name: string | null;
   email: string | null;
   isOwner: boolean;
+  /** False only for an owner who never joined: everyone in the members list joined. */
+  joined?: boolean;
   woka?: string[];
   worlds: Worlds;
   roles: { roleId: string; allWorlds: boolean; worldIds: string[] }[];
@@ -53,7 +55,7 @@ export default function UniverseMembersRow({ universeId, className }: { universe
     const { members, owner } = answer.value;
     const others = members.filter((member) => !member.isOwner);
     const ownerFace: Face[] = owner
-      ? [members.find((member) => member.isOwner) ?? { userId: owner.userId, name: owner.name, email: owner.email, isOwner: true, woka: owner.woka, worlds: { allWorlds: true, worldIds: [] }, roles: [] }]
+      ? [members.find((member) => member.isOwner) ?? { userId: owner.userId, name: owner.name, email: owner.email, isOwner: true, joined: owner.joined, woka: owner.woka, worlds: { allWorlds: true, worldIds: [] }, roles: [] }]
       : [];
     // The server lists the highest roles first; the owner leads
     return [...ownerFace, ...others].slice(0, SHOWN);
@@ -130,16 +132,18 @@ export default function UniverseMembersRow({ universeId, className }: { universe
   );
 }
 
-/** Everything behind a "+N": the owner mark, then every role they were given, in full. */
+/** Everything behind a "+N": the owner mark, every role they were given, in full, then Member for everyone who joined. */
 function RolesSheet({ face, name, roles, worldNames, universeName, onClose }: {
   face: Face;
   name: string;
-  roles: ReadonlyMap<string, { id: string; name: string; color: string }>;
+  roles: ReadonlyMap<string, { id: string; key: string; name: string; color: string }>;
   worldNames: ReadonlyMap<string, string>;
   universeName: string;
   onClose: () => void;
 }) {
   const given = face.roles.filter((role) => roles.has(role.roleId));
+  const member = [...roles.values()].find((role) => role.key === 'member');
+  const memberWhere = worldsLabel(face.worlds, worldNames);
   return (
     <FormSheet open onOpenChange={(open) => !open && onClose()} title={`${name}’s roles`}>
       <ul className="m-0 grid list-none p-0" data-testid="roles-sheet">
@@ -165,8 +169,16 @@ function RolesSheet({ face, name, roles, worldNames, universeName, onClose }: {
             </li>
           );
         })}
+        {face.joined !== false && (
+          <li className="flex min-h-12 items-center gap-3 border-b border-foreground/10 py-1 text-[15px] font-semibold last:border-b-0">
+            <i aria-hidden="true" className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: member?.color ?? '#A78BFA' }} />
+            <span className="min-w-0 [overflow-wrap:anywhere]">
+              {member?.name ?? 'Member'}
+              {memberWhere && <span className="block text-[13px] font-normal text-muted-foreground">{memberWhere}</span>}
+            </span>
+          </li>
+        )}
       </ul>
-      <p className="m-0 text-sm text-muted-foreground">Everyone who joined is also a Member.</p>
       <Button type="button" variant="outline" className="h-11" onClick={onClose}>
         Close
       </Button>
