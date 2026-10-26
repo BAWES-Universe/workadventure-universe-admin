@@ -58,6 +58,15 @@ describe('applyEdits', () => {
     expect(codeOf(() => applyEdits('abc', [{ old: '', new: 'x' }]))).toBe('edit_empty');
   });
 
+  it('refuses an edit that would grow the file past the limit, before building it', () => {
+    const big = 'a'.repeat(MAX_ARTIFACT_BYTES - 10);
+    // One short piece, very many places, a long replacement: the result would be gigabytes
+    expect(codeOf(() => applyEdits(big, [{ old: 'a', new: 'b'.repeat(100_000), all: true }]))).toBe('too_large');
+    expect(codeOf(() => applyEdits('abc', [{ old: 'b', new: 'x'.repeat(MAX_ARTIFACT_BYTES + 1) }]))).toBe('too_large');
+    // An edit that stays within the limit is fine, and so is one that shrinks a file
+    expect(applyEdits(big, [{ old: 'aa', new: 'a', all: true }]).length).toBeLessThan(big.length);
+  });
+
   it('puts $ patterns in the new text as they are', () => {
     expect(applyEdits('price', [{ old: 'price', new: '$& $1 $$' }])).toBe('$& $1 $$');
   });

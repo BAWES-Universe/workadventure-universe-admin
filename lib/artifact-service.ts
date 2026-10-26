@@ -525,16 +525,34 @@ const PRUNE_BATCH = 25;
 const PRUNE_MAX_BATCHES = 8;
 /** Reading an artifact also tidies up, but not more often than this. */
 const PRUNE_EVERY_MS = 60_000;
+/** How many files a pass keeps to try again, so a bucket that is down for long cannot fill the memory. */
+const MAX_UNREMOVED_KEYS = 5000;
 let lastPruneAt = 0;
 
 /** For tests: forget when the last tidy-up ran. */
 export function resetPruneClock(): void {
   lastPruneAt = 0;
+  unremovedKeys = [];
+}
+
+/** Files whose rows are already gone but that the bucket would not remove; the next pass tries them again. */
+let unremovedKeys: string[] = [];
+
+async function removeFiles(ctx: Context, keys: string[]): Promise<void> {
+  const all = [...unremovedKeys, ...keys];
+  unremovedKeys = [];
+  try {
+    await ctx.files.remove(all);
+  } catch (error) {
+    unremovedKeys = all.slice(0, MAX_UNREMOVED_KEYS);
+    console.error('Could not remove the files of expired artifacts, will try again:', error);
+  }
 }
 
 /** Clears what guests asked for and the day is over for, with its files. Runs whenever something is made. */
 export async function pruneExpired(ctx: Context = defaultContext()): Promise<number> {
   let cleared = 0;
+  if (unremovedKeys.length > 0) await removeFiles(ctx, []);
   for (let batch = 0; batch < PRUNE_MAX_BATCHES; batch++) {
     const expired = await prisma.artifact.findMany({
       where: { expiresAt: { lte: ctx.now } },
@@ -548,7 +566,7 @@ export async function pruneExpired(ctx: Context = defaultContext()): Promise<num
     const { count } = await prisma.artifact.deleteMany({ where: { id: { in: ids }, expiresAt: { lte: ctx.now } } });
     const kept = new Set(count === ids.length ? [] : (await prisma.artifact.findMany({ where: { id: { in: ids } }, select: { id: true } })).map((row) => row.id));
     const keys = expired.filter((artifact) => !kept.has(artifact.id)).flatMap((artifact) => artifact.versions.map((version) => version.fileKey));
-    await ctx.files.remove(keys).catch((error) => console.error('Could not remove the files of expired artifacts:', error));
+    await removeFiles(ctx, keys);
     cleared += count;
     if (expired.length < PRUNE_BATCH) break;
   }

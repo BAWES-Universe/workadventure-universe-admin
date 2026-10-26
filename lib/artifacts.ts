@@ -73,6 +73,11 @@ export interface ArtifactEdit {
   all?: boolean;
 }
 
+/** A file of this many characters is over the limit in bytes too (a character is at least one byte). */
+function tooLargeAfter(characters: number): void {
+  if (characters > MAX_ARTIFACT_BYTES) throw new ArtifactError('too_large', 413, `An artifact can hold up to ${MAX_ARTIFACT_BYTES / 1024} KB.`);
+}
+
 /**
  * The file after the edits, applied in order, each on the result of the one before. An edit that finds nothing, or
  * finds a piece that is not unique and was not asked for everywhere, stops the whole change: nothing is half applied.
@@ -86,12 +91,16 @@ export function applyEdits(content: string, edits: readonly ArtifactEdit[]): str
     if (first === -1) throw new ArtifactError('edit_not_found', 422, `Edit ${index + 1}: the text to replace is not in the file.`);
     const second = result.indexOf(edit.old, first + edit.old.length);
     if (edit.all) {
-      result = result.split(edit.old).join(edit.new);
+      const parts = result.split(edit.old);
+      // A short piece replaced by a long one in many places can grow far past the limit: refuse before building it
+      tooLargeAfter(result.length + (parts.length - 1) * (edit.new.length - edit.old.length));
+      result = parts.join(edit.new);
       return;
     }
     if (second !== -1) {
       throw new ArtifactError('edit_ambiguous', 422, `Edit ${index + 1}: the text to replace appears more than once. Add more around it, or replace all of them.`);
     }
+    tooLargeAfter(result.length + edit.new.length - edit.old.length);
     result = result.slice(0, first) + edit.new + result.slice(first + edit.old.length);
   });
   return result;

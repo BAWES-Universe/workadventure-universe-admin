@@ -554,6 +554,20 @@ describe('artifacts', () => {
       expect(bucketKeys()).toHaveLength(1);
     });
 
+    it('tries again with the files the bucket would not remove', async () => {
+      const gone = await makeApp(guest);
+      db.artifacts.find((a) => a.id === gone.artifact.id)!.expiresAt = new Date(Date.now() - 1000);
+      jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      const failing = jest.spyOn(fakeFiles, 'remove').mockRejectedValueOnce(new Error('bucket down'));
+      expect(await pruneExpired({ files: fakeFiles, now: new Date() })).toBe(1);
+      expect(db.artifacts.map((a) => a.id)).not.toContain(gone.artifact.id);
+      expect(bucketKeys()).toHaveLength(1);
+      failing.mockRestore();
+      // The next pass has nothing new to clear but still removes what was left behind
+      await pruneExpired({ files: fakeFiles, now: new Date() });
+      expect(bucketKeys()).toHaveLength(0);
+    });
+
     it('clears nothing when nothing has run out', async () => {
       await makeApp(guest);
       expect(await pruneExpired({ files: fakeFiles, now: new Date() })).toBe(0);
