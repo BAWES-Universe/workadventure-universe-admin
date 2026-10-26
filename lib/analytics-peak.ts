@@ -62,12 +62,12 @@ export function formatPeak(peakTimes: unknown, now?: Date): string | null {
   return hour === null ? null : formatHour(hour);
 }
 
-/** The StatLine items for a place's activity: "1,284 accesses", "Peak 4 PM". */
+/** The StatLine items for a place's activity: "1,284 accesses", "Busiest hour 4 PM". */
 export function activityStats(summary: { totalAccesses: number | null; peakHour: number | null } | null | undefined): (string | null)[] {
   if (!summary) return [];
   const total = summary.totalAccesses;
   return [
     typeof total === 'number' ? `${total.toLocaleString()} ${total === 1 ? 'access' : 'accesses'}` : null,
-    summary.peakHour !== null ? `Peak ${formatHour(summary.peakHour)}` : null,
+    summary.peakHour !== null ? `Busiest hour ${formatHour(summary.peakHour)}` : null,
   ];
 }

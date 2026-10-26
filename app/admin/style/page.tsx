@@ -178,7 +178,7 @@ export default function StylePage() {
             description="Whiteboards and quiet corners for design reviews."
             meta={
               <>
-                <StatLine items={[count(1284, 'access', 'accesses'), 'Peak 4 PM']} />
+                <StatLine items={[count(1284, 'access', 'accesses'), 'Busiest hour 4 PM']} />
                 <VisitLine you={minutesAgo(40)} youWereLast />
               </>
             }
