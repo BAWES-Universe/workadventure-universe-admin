@@ -131,6 +131,33 @@ async function newestVisitsOf(
   return byPerson;
 }
 
+/**
+ * Each person's newest visit that carries a name or an email, for the people whose shown visits carry neither: a person
+ * who came back many times before naming themselves still has their name on an older visit, past the visits shown.
+ */
+async function newestNamedVisitOf(
+  viewer: Viewer | null,
+  detail: AccessDetail,
+  scope: AccessScope,
+  visits: Prisma.Sql,
+  keys: string[],
+): Promise<Map<string, VisitRow>> {
+  const allowed = keys.filter((key) => visitsWhere(viewer, detail, key) !== null);
+  const named = new Map<string, VisitRow>();
+  if (allowed.length === 0) return named;
+  const ids = await prisma.$queryRaw<Array<{ id: string; person: string }>>`
+    SELECT DISTINCT ON (v.person) v.id, v.person
+    FROM (${visits}) AS v
+    JOIN room_accesses a ON a.id = v.id
+    WHERE v.person IN (${Prisma.join(allowed)}) AND COALESCE(NULLIF(BTRIM(a.user_name), ''), NULLIF(BTRIM(a.user_email), '')) IS NOT NULL
+    ORDER BY v.person, v.accessed_at DESC, v.id DESC`;
+  if (ids.length === 0) return named;
+  const personOf = new Map(ids.map((row) => [row.id, row.person]));
+  const rows = await prisma.roomAccess.findMany({ where: { AND: [scope, { id: { in: [...personOf.keys()] } }] }, select: VISIT_SELECT });
+  for (const row of rows) named.set(personOf.get(row.id) ?? '', row);
+  return named;
+}
+
 /** The rooms and worlds on these visits that the viewer may not see, by the same rules as their own pages. */
 async function hiddenPlaces(viewer: Viewer | null, scope: AccessScope, rows: VisitRow[]) {
   const hidden = { rooms: new Set<string>(), worlds: new Set<string>() };
@@ -213,6 +240,13 @@ export async function loadVisitorPeople(
   );
   // Each person's visits as the viewer may see them, to find a name on: the newest visit with one, not only the newest.
   const seenRows = rows.map((personVisits) => personVisits.map((row) => redactAccess(row, detailForRecord(viewer, row, detail))));
+  // A name past the newest visits shown: looked up only for the people whose shown visits have none.
+  const unnamed = groups.filter((group, index) => rows[index].length > 0 && visitorName(seenRows[index]) === 'Guest').map((group) => group.person);
+  const olderNamed = await newestNamedVisitOf(viewer, detail, scope, visits, unnamed);
+  groups.forEach((group, index) => {
+    const older = olderNamed.get(group.person);
+    if (older) seenRows[index].push(redactAccess(older, detailForRecord(viewer, older, detail)));
+  });
   const shown = await toVisits(viewer, detail, scope, rows.flat());
   const visitById = new Map(shown.map((visit) => [visit.id, visit]));
   const people = groups.flatMap((group, index): VisitorPerson[] => {

@@ -42,11 +42,13 @@ const visit = (id: string, userId: string | null, minutesAgo: number, extra: Rec
 /**
  * The grouped page, the total, and which visits are each person's newest, the way the three queries are sent. `newest`
  * maps a visit id to the person it belongs to; by default every visit findMany returns belongs to the first person.
+ * `olderNamed` is the same for the older visit that has a name, looked up when the shown visits have none.
  */
-function groups(rows: { person: string; visits: number; ips: number }[], total = rows.length, newest?: Record<string, string>) {
+function groups(rows: { person: string; visits: number; ips: number }[], total = rows.length, newest?: Record<string, string>, olderNamed: Record<string, string> = {}) {
   queryRaw.mockImplementation(async (strings: TemplateStringsArray) => {
     const sql = strings.join('');
     if (sql.includes('COUNT(DISTINCT person)')) return [{ total: BigInt(total) }];
+    if (sql.includes('DISTINCT ON')) return Object.entries(olderNamed).map(([id, person]) => ({ id, person }));
     if (sql.includes('ROW_NUMBER()')) return Object.entries(newest ?? {}).map(([id, person]) => ({ id, person }));
     return rows.map((row) => ({ ...row, visits: BigInt(row.visits), ips: BigInt(row.ips) }));
   });
@@ -122,6 +124,26 @@ describe('loadVisitorPeople', () => {
     ]);
     const { people } = await loadVisitorPeople(viewer, room);
     expect(people[0].name).toBe('Yousef');
+  });
+
+  it('finds a name on a visit older than the ones shown, so a person with many nameless visits is not "Guest"', async () => {
+    const uuid = '5b522f38-d7d2-4e37-be94-2476cb1efdfe';
+    const shown = Array.from({ length: VISITS_SHOWN }, (_, index) => `n${index}`);
+    groups([{ person: `g:${uuid}`, visits: VISITS_SHOWN + 1, ips: 1 }], 1, Object.fromEntries(shown.map((id) => [id, `g:${uuid}`])), { old: `g:${uuid}` });
+    findMany
+      .mockResolvedValueOnce(shown.map((id, index) => visit(id, null, index + 1, { userName: null, userUuid: uuid })))
+      .mockResolvedValueOnce([visit('old', null, 500, { userName: 'Yousef', userUuid: uuid })]);
+    const { people } = await loadVisitorPeople(viewer, room);
+    expect(people[0].name).toBe('Yousef');
+    expect(people[0].visits).toHaveLength(VISITS_SHOWN);
+    expect(people[0].visits.map((v) => v.id)).not.toContain('old');
+  });
+
+  it('does not look for an older name when a shown visit already has one', async () => {
+    groups([{ person: 'u:fawaz', visits: 2, ips: 1 }], 1, { a1: 'u:fawaz' });
+    findMany.mockResolvedValue([visit('a1', 'fawaz', 1)]);
+    await loadVisitorPeople(viewer, room);
+    expect(queryRaw.mock.calls.some(([strings]) => strings.join('').includes('DISTINCT ON'))).toBe(false);
   });
 
   it('calls a person with no name on any visit "Guest", never by their id', async () => {
