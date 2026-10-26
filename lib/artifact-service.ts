@@ -134,15 +134,23 @@ export interface VersionView {
   url: string;
 }
 
-function versionView(row: { number: number; summary: string | null; askedByName: string | null; sizeBytes: number; createdAt: Date; fileKey: string }, files: ArtifactFiles): VersionView {
+type VersionRow = { number: number; summary: string | null; askedByName: string | null; sizeBytes: number; createdAt: Date; fileKey: string };
+
+/** What a bot is told about a version: the same, without the file's address (only the game opens the file). */
+export type BotVersionView = Omit<VersionView, 'url'>;
+
+function botVersionView(row: VersionRow): BotVersionView {
   return {
     number: row.number,
     summary: row.summary,
     askedByName: row.askedByName,
     sizeBytes: row.sizeBytes,
     createdAt: row.createdAt.toISOString(),
-    url: files.urlFor(row.fileKey),
   };
+}
+
+function versionView(row: VersionRow, files: ArtifactFiles): VersionView {
+  return { ...botVersionView(row), url: files.urlFor(row.fileKey) };
 }
 
 /** What the person who is looking may do, for the buttons the game shows. */
@@ -226,7 +234,7 @@ export interface MakeInput extends BotCall {
 
 export interface Made {
   artifact: ArtifactView;
-  version: VersionView;
+  version: BotVersionView;
   hidden: boolean;
 }
 
@@ -285,7 +293,7 @@ export async function makeArtifact(input: MakeInput, ctx: Context = defaultConte
     }),
   );
   await pruneExpired(ctx).catch((error) => console.error('Could not clear expired artifacts:', error));
-  return { artifact: viewOf(artifact), version: versionView(artifact.versions[0], files), hidden };
+  return { artifact: viewOf(artifact), version: botVersionView(artifact.versions[0]), hidden };
 }
 
 export interface ChangeInput extends BotCall {
@@ -353,7 +361,7 @@ export async function changeArtifact(input: ChangeInput, ctx: Context = defaultC
     }),
   );
   const fresh = await loadArtifact(artifact.id, now);
-  return { artifact: viewOf(fresh), version: versionView(row, files), hidden };
+  return { artifact: viewOf(fresh), version: botVersionView(row), hidden };
 }
 
 export interface ReadInput extends BotCall {
@@ -374,7 +382,7 @@ export async function readArtifact(input: ReadInput, ctx: Context = defaultConte
   requireBotMayUse(artifact, input.botId, who);
   requireOpen(artifact, { ...who, inChat: inThisChat(artifact, input.chat) }, now);
   const row = await findVersion(artifact, input.version);
-  return { artifact: viewOf(artifact), version: versionView(row, files), content: await files.get(row.fileKey), hidden };
+  return { artifact: viewOf(artifact), version: botVersionView(row), content: await files.get(row.fileKey), hidden };
 }
 
 /**

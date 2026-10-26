@@ -106,7 +106,8 @@ describe('artifacts', () => {
       expect(made.version).toMatchObject({ number: 1, summary: 'First version', askedByName: 'owner', sizeBytes: Buffer.byteLength(APP) });
       expect(made.hidden).toBe(false);
       expect(db.files.get(bucketKeys()[0])).toBe(APP);
-      expect(made.version.url).toBe(`https://files.example.test/${bucketKeys()[0]}`);
+      // A bot is never told where the file is served from; only the game's open route says
+      expect(made.version).not.toHaveProperty('url');
       expect(db.artifacts[0].ownerId).toBe('owner');
     });
 
@@ -189,6 +190,7 @@ describe('artifacts', () => {
       expect(res.status).toBe(200);
       expect(res.body.artifact.version).toBe(2);
       expect(res.body.version).toMatchObject({ number: 2, summary: 'Bigger buttons', askedByName: 'owner' });
+      expect(res.body.version).not.toHaveProperty('url');
       const list = await call(versions, { viewer: viewer(person('owner')) }, { id: made.artifact.id, ...asGame });
       expect(list.body.versions.map((v: { number: number }) => v.number)).toEqual([2, 1]);
       const v1 = await call(code, { viewer: viewer(person('owner')) }, { id: made.artifact.id, number: '1', ...asGame });
@@ -342,6 +344,7 @@ describe('artifacts', () => {
       const first = await call(read, { botId: 'bot1', person: person('owner'), chat: NEARBY, version: 1 }, { id: made.artifact.id });
       expect(latest.body).toMatchObject({ content: '<p>2</p>', version: { number: 2 } });
       expect(first.body).toMatchObject({ content: APP, version: { number: 1 } });
+      expect(first.body.version).not.toHaveProperty('url');
       expect((await call(read, { botId: 'bot1', person: person('owner'), chat: NEARBY, version: 9 }, { id: made.artifact.id })).body.error).toBe('version_not_found');
     });
 
