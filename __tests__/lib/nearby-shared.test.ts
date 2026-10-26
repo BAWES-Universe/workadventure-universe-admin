@@ -1,7 +1,7 @@
 import { parseNearbySharedItem } from '@/lib/nearby-shared';
 
 const now = new Date('2026-10-26T10:00:00.000Z');
-const FILE = '0b5c1a6e-3f2d-4c8b-9a71-2e4f6d8c0a1b.pdf';
+const FILE = 'user-refs/0b5c1a6e-3f2d-4c8b-9a71-2e4f6d8c0a1b.pdf';
 
 const file = {
   itemKey: 'msg-1',
@@ -65,6 +65,8 @@ describe('an item shared in a nearby chat', () => {
 
   it('turns down a file id that is not an uploader id, and a link that is not a web link', () => {
     expect(parseNearbySharedItem({ ...file, fileId: '../../etc/passwd' }, now)).toBeNull();
+    expect(parseNearbySharedItem({ ...file, fileId: '0b5c1a6e-3f2d-4c8b-9a71-2e4f6d8c0a1b.pdf' }, now)).toBeNull();
+    expect(parseNearbySharedItem({ ...file, fileId: 'user-refs/../0b5c1a6e-3f2d-4c8b-9a71-2e4f6d8c0a1b.pdf' }, now)).toBeNull();
     expect(parseNearbySharedItem({ ...file, fileId: null, link: 'javascript:alert(1)' }, now)).toBeNull();
     expect(parseNearbySharedItem({ ...file, fileId: null, link: 'not a url' }, now)).toBeNull();
   });

@@ -26,8 +26,9 @@ export interface NearbySharedItemInput {
 
 // A sentAt more than this far ahead of the server's clock is someone else's clock gone wrong.
 const FUTURE_SLACK_MS = 5 * 60 * 1000;
-// An uploader file id: its UUID, with the file's extension kept.
-const FILE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(\.[a-z0-9]{1,10})?$/i;
+// An uploader file: the bucket it is kept in, then its id (a UUID, with the file's extension kept).
+const FILE_ID =
+  /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(\.[a-z0-9]{1,10})?$/i;
 
 function text(value: unknown, max: number): string | null {
   if (typeof value !== 'string') return null;
