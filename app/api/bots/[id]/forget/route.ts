@@ -25,7 +25,8 @@ export async function OPTIONS(request: NextRequest) {
  * The saved rows go now. The bot server also holds what it remembers in memory and saves a person again whenever they
  * talk to the bot, so a forget row is left too: the bot server hears it within 30 seconds (its privacy check, see
  * app/api/bots/[id]/privacy/route.ts) and drops these people, and a save that still carries one is skipped (see the
- * memory save in app/api/bots/memory/[id]/route.ts). The bot has truly forgotten within about 30 seconds.
+ * memory save in app/api/bots/memory/[id]/route.ts). The bot has truly forgotten within about 30 seconds. The row
+ * stays until the bot server reports it dropped these people (app/api/bots/memory/[id]/forgotten/route.ts, #493).
  *
  * Only for a bot that hides its conversations: a manager who can read them uses the usual cleanup.
  *

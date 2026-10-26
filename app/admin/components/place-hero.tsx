@@ -378,7 +378,7 @@ export function AlsoIn({ rooms }: { rooms: RoomCardData[] }) {
               {room.accesses !== null && (
                 <>
                   <br />
-                  {room.accesses} {room.accesses === 1 ? 'access' : 'accesses'}{room.peak ? ` · peak ${room.peak}` : ''}
+                  {room.accesses} {room.accesses === 1 ? 'access' : 'accesses'}{room.peak ? ` · busiest hour ${room.peak}` : ''}
                 </>
               )}
             </p>

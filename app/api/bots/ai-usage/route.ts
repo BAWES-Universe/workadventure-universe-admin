@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { requireServiceToken } from '@/lib/service-tokens';
 import { UNIVERSE_AI_REF, resolveUniverseAiProvider } from '@/lib/universe-ai';
+import { readUsagePriceFacts } from '@/lib/ai-usage-cost';
 
 /**
  * POST /api/bots/ai-usage
@@ -55,6 +56,10 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // What the reply cost and how that was worked out (game #1173). A bot server from before it sends only `cost`, and
+    // that row stays an old estimate: its `cost` is kept and no price facts are filled in.
+    const facts = readUsagePriceFacts(body);
+
     // Fire-and-forget: Don't await, just start the operation
     // This ensures bot operation isn't blocked if tracking fails
     prisma.botsAiUsage
@@ -65,7 +70,9 @@ export async function POST(request: NextRequest) {
           tokensUsed,
           apiCalls,
           durationSeconds,
-          cost: cost !== null ? cost : null,
+          // A row with price facts leaves the old column empty, so an old estimate and a real price are never both on one row
+          cost: facts ? null : cost !== null ? cost : null,
+          ...(facts ?? {}),
           latency,
           error,
           timestamp: timestamp ? new Date(timestamp) : new Date(),

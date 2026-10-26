@@ -218,7 +218,7 @@ describe('Home rooms keep their numbers', () => {
     }
   });
 
-  it("takes Peak from all visits (the server's hour buckets), on the viewer's clock", () => {
+  it("takes the busiest hour from all visits (the server's hour buckets), on the viewer's clock", () => {
     // 16:00 UTC is the busiest bucket; the card shows that hour in local time, whatever one page of visits says.
     const expected = localHourFromUtc(16);
     expect(localPeakHour([{ hour: 16, count: 40 }, { hour: 9, count: 2 }])).toBe(expected);

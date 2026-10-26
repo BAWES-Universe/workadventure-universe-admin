@@ -8,11 +8,16 @@ import { Label } from '@/components/ui/label';
 import { EntityRow, Figure, Figures, LoadError, LoadingRows, PageHeader, SectionHeader, StatLine, count } from '../../components/ds';
 import { providerTypeLabel } from '../components/provider-state';
 import { useReplacePage } from '@/app/admin/orbit-frame-context';
+import { formatUsd } from '@/lib/ai-usage-cost';
 
 interface UsageStats {
   totalCalls: number;
   totalTokens: number;
   totalCost: number;
+  /** Dollars from calls made before real prices were kept: a flat-rate guess, shown apart. */
+  oldEstimateCost: number;
+  /** Calls whose model has no known price; they add nothing to the cost. */
+  unknownCalls: number;
   totalDuration: number;
   errorCount: number;
   byProvider: Record<string, {
@@ -22,6 +27,8 @@ interface UsageStats {
     calls: number;
     tokens: number;
     cost: number;
+    oldEstimateCost: number;
+    unknownCalls: number;
     duration: number;
     errors: number;
   }>;
@@ -31,6 +38,8 @@ interface UsageStats {
     calls: number;
     tokens: number;
     cost: number;
+    oldEstimateCost: number;
+    unknownCalls: number;
     duration: number;
     errors: number;
   }>;
@@ -118,13 +127,6 @@ export default function AiUsagePage() {
     return new Intl.NumberFormat().format(num);
   }
 
-  function formatCurrency(amount: number): string {
-    return new Intl.NumberFormat('en-US', {
-      style: 'currency',
-      currency: 'USD',
-    }).format(amount);
-  }
-
   function formatDuration(seconds: number): string {
     const hours = Math.floor(seconds / 3600);
     const minutes = Math.floor((seconds % 3600) / 60);
@@ -137,6 +139,15 @@ export default function AiUsagePage() {
     } else {
       return `${secs}s`;
     }
+  }
+
+  /** The cost of a row as stat items: the price, then the old estimate and the unpriced calls when there are any. */
+  function costItems(row: { cost: number; oldEstimateCost: number; unknownCalls: number }) {
+    return [
+      formatUsd(row.cost),
+      row.oldEstimateCost > 0 && `${formatUsd(row.oldEstimateCost)} old estimate`,
+      row.unknownCalls > 0 && `${count(row.unknownCalls, 'call')} with no price`,
+    ];
   }
 
   const idFiltered = Boolean(filters.providerId || filters.botId);
@@ -154,7 +165,9 @@ export default function AiUsagePage() {
             <Figures>
               <Figure value={formatNumber(stats.totalCalls)} label="calls" />
               <Figure value={formatNumber(stats.totalTokens)} label="tokens" />
-              <Figure value={formatCurrency(stats.totalCost)} label="cost" />
+              <Figure value={formatUsd(stats.totalCost)} label="cost" />
+              {stats.oldEstimateCost > 0 && <Figure value={formatUsd(stats.oldEstimateCost)} label="old estimate" />}
+              {stats.unknownCalls > 0 && <Figure value={formatNumber(stats.unknownCalls)} label="calls with no price" />}
               <Figure value={formatDuration(stats.totalDuration)} label="duration" />
               <Figure
                 value={formatNumber(stats.errorCount)}
@@ -250,7 +263,7 @@ export default function AiUsagePage() {
                           items={[
                             count(provider.calls, 'call'),
                             count(provider.tokens, 'token'),
-                            formatCurrency(provider.cost),
+                            ...costItems(provider),
                             provider.errors > 0 && count(provider.errors, 'error'),
                           ]}
                         />
@@ -279,7 +292,7 @@ export default function AiUsagePage() {
                           items={[
                             count(bot.calls, 'call'),
                             count(bot.tokens, 'token'),
-                            formatCurrency(bot.cost),
+                            ...costItems(bot),
                             bot.errors > 0 && count(bot.errors, 'error'),
                           ]}
                         />

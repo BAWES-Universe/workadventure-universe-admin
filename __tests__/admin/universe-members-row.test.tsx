@@ -81,21 +81,51 @@ describe('Members row', () => {
     expect(omar.className).toContain('w-[128px]');
   });
 
-  it('opens every role in full from the pill, and closes with Close', async () => {
+  it('opens every role in full from the pill, Member last, and closes with Close', async () => {
     wrap(<UniverseMembersRow universeId="u1" />);
     fireEvent.click(within(await faceOf('Omar')).getByRole('button', { name: /Omar’s roles/ }));
     const list = await screen.findByTestId('roles-sheet');
-    expect(within(list).getAllByRole('listitem').map((item) => item.textContent)).toEqual(['Head of Customer Experience and Quality', 'Customer Service', 'Admin']);
-    expect(screen.getByText('Everyone who joined is also a Member.')).toBeTruthy();
+    expect(within(list).getAllByRole('listitem').map((item) => item.textContent)).toEqual(['Head of Customer Experience and Quality', 'Customer Service', 'Admin', 'Member']);
+    expect(screen.queryByText('Everyone who joined is also a Member.')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
     await waitFor(() => expect(screen.queryByTestId('roles-sheet')).toBeNull());
   });
 
-  it('lists Owner first for the owner, as created the universe, then the roles they were given', async () => {
+  it('lists Owner first for the owner, as created the universe, then the roles they were given and Member', async () => {
     wrap(<UniverseMembersRow universeId="u1" />);
     fireEvent.click(within(await faceOf('Khalid')).getByRole('button', { name: /Khalid’s roles/ }));
     const items = within(await screen.findByTestId('roles-sheet')).getAllByRole('listitem');
-    expect(items.map((item) => item.textContent)).toEqual(['OwnerCreated BAWES Universe', 'Admin']);
+    expect(items.map((item) => item.textContent)).toEqual(['OwnerCreated BAWES Universe', 'Admin', 'Member']);
+  });
+
+  it('gives no Member row to an owner who never joined', async () => {
+    const others = MEMBERS.filter((member) => !member.isOwner);
+    fetchMock.mockImplementation((url: string) => {
+      if (url.endsWith('/u1/roles')) return ok({ roles: ROLES });
+      if (url.endsWith('/u1/me')) return ok({ inviteWorlds: 'all' });
+      if (url === '/api/admin/universes/u1') return ok({ id: 'u1', name: 'BAWES Universe', ownerId: 'owner', worlds: [{ id: 'hq', name: 'HQ' }] });
+      if (url.includes('/u1/members?')) return ok({ members: others, total: 3, owner: { userId: 'owner', name: 'Khalid', email: null, woka: [], joined: false }, nextCursor: null });
+      return ok({});
+    });
+    wrap(<UniverseMembersRow universeId="u1" />);
+    fireEvent.click(within(await faceOf('Khalid')).getByRole('button', { name: /Khalid’s roles/ }));
+    const items = within(await screen.findByTestId('roles-sheet')).getAllByRole('listitem');
+    expect(items.map((item) => item.textContent)).toEqual(['OwnerCreated BAWES Universe']);
+  });
+
+  it('shows where Member works for someone limited to some worlds', async () => {
+    const limited = { ...face('hq', 'Huda', []), worlds: { allWorlds: false, worldIds: ['hq'] } };
+    fetchMock.mockImplementation((url: string) => {
+      if (url.endsWith('/u1/roles')) return ok({ roles: ROLES });
+      if (url.endsWith('/u1/me')) return ok({ inviteWorlds: 'all' });
+      if (url === '/api/admin/universes/u1') return ok({ id: 'u1', name: 'BAWES Universe', ownerId: 'owner', worlds: [{ id: 'hq', name: 'HQ' }] });
+      if (url.includes('/u1/members?')) return ok({ members: [KHALID, limited], total: 2, owner: { userId: 'owner', name: 'Khalid', email: null, woka: [], joined: true }, nextCursor: null });
+      return ok({});
+    });
+    wrap(<UniverseMembersRow universeId="u1" />);
+    fireEvent.click(within(await faceOf('Huda')).getByRole('button', { name: /Huda’s roles/ }));
+    const items = within(await screen.findByTestId('roles-sheet')).getAllByRole('listitem');
+    expect(items.map((item) => item.textContent)).toEqual(['MemberHQ only']);
   });
 });
 

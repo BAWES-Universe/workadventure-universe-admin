@@ -8,6 +8,7 @@ import { prisma } from '@/lib/db';
 import { resolveTextureUrls, resolveCompanionTexture } from '@/lib/avatar-catalog-validator';
 import { notifyRoomAccess } from '@/lib/discord';
 import { isBotIdentifier } from '@/lib/bot-visitor';
+import { isLinkableGuestId, linkGuestVisits } from '@/lib/guest-sign-in-link';
 import { currentOutfit, recordOutfitPick } from '@/lib/user-outfits';
 import { companionWearableHere, wearableHere } from '@/lib/woka-wearable';
 import { canSeeRoom } from '@/lib/room-visibility';
@@ -33,6 +34,8 @@ export async function GET(request: NextRequest) {
     const chatID = searchParams.get('chatID');
     // WorkAdventure may send name/username for guest users
     const name = searchParams.get('name') || searchParams.get('username');
+    // Sent once, right after someone signs in, when the game checked it is the guest id their device used before.
+    const previousGuestUuid = searchParams.get('previousGuestUuid');
     
     // Extract characterTextureIds - handle both characterTextureIds and characterTextureIds[]
     // WorkAdventure may send as characterTextureIds[]=value1&characterTextureIds[]=value2
@@ -195,6 +198,15 @@ export async function GET(request: NextRequest) {
       if (unverifiedAccount) {
         userName = name || null;
         userEmail = null;
+      }
+      // Someone who just signed in: the visits they made as a guest on this device join their account (#630). Only for
+      // an account whose token we verified, and a failure here never stops them getting in.
+      if (user && isAuthenticated && !user.isGuest && !unverifiedAccount && !isBotIdentifier(finalUuid) && isLinkableGuestId(previousGuestUuid, user.uuid)) {
+        try {
+          await linkGuestVisits(previousGuestUuid, { id: user.id, uuid: user.uuid, name: user.name, email: user.email });
+        } catch (error) {
+          Sentry.captureException(error);
+        }
       }
 
       // Find world and room
