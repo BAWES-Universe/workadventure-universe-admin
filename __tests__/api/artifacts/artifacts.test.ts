@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import { POST as make } from '@/app/api/artifacts/route';
 import { POST as mine } from '@/app/api/artifacts/mine/route';
+import { POST as inChat } from '@/app/api/artifacts/in-chat/route';
 import { POST as change } from '@/app/api/artifacts/[id]/change/route';
 import { POST as read } from '@/app/api/artifacts/[id]/read/route';
 import { POST as open } from '@/app/api/artifacts/[id]/open/route';
@@ -286,6 +287,31 @@ describe('artifacts', () => {
       const res = await call(change, { botId: 'bot1', person: person('owner'), chat: NEARBY, content: '<p>x</p>' }, { id: made.artifact.id });
       expect(res.status).toBe(500);
       expect(bucketKeys()).toHaveLength(1);
+    });
+  });
+
+  describe('in this chat', () => {
+    it('lists what was made in the chat, the most recently changed first, for people who may open it', async () => {
+      const first = await makeApp(person('owner'), NEARBY, { title: 'First' });
+      const second = await makeApp(person('owner'), NEARBY, { title: 'Second' });
+      await makeApp(person('owner'), DM, { title: 'Elsewhere' });
+      db.artifacts.find((a) => a.id === first.artifact.id)!.updatedAt = new Date(Date.now() + 5000);
+      const res = await call(inChat, { botId: 'bot1', person: person('friend'), chat: NEARBY });
+      expect(res.status).toBe(200);
+      expect(res.body.artifacts.map((a: { title: string }) => a.title)).toEqual(['First', 'Second']);
+      expect(res.body.artifacts[1].id).toBe(second.artifact.id);
+      expect(res.body.hidden).toBe(false);
+    });
+
+    it('leaves out what a guest asked for once its day is over', async () => {
+      await makeApp(guest);
+      db.artifacts[0].expiresAt = new Date(Date.now() - 1000);
+      expect((await call(inChat, { botId: 'bot1', person: guest, chat: NEARBY })).body.artifacts).toEqual([]);
+    });
+
+    it('goes through the same bot access check as the other bot calls', async () => {
+      (checkBotAccess as jest.Mock).mockResolvedValue({ allowed: false, code: 'not_allowed', reason: 'No.' });
+      expect((await call(inChat, { botId: 'bot1', person: person('friend'), chat: NEARBY })).status).toBe(403);
     });
   });
 

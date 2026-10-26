@@ -33,6 +33,7 @@ both use for that chat; a viewer is "in the chat" when the game says so for the 
 | `POST /api/artifacts` | `title`, `kind` (`app`, `page`, `markdown`, `svg`), `content`, `summary?` | `{ artifact, version, hidden }` |
 | `POST /api/artifacts/:id/change` | `edits: [{ old, new, all? }]` **or** `content`; `summary?`, `title?`, `baseVersion?` | `{ artifact, version, hidden }` |
 | `POST /api/artifacts/:id/read` | `version?` (the latest by default) | `{ artifact, version, content, hidden }` |
+| `POST /api/artifacts/in-chat` | none beyond the three above | `{ artifacts, hidden }`: what was made in this chat that the person may open, newest change first (up to 20) |
 
 Edits are applied in order, each on the result of the one before. An edit whose `old` is not in the file (`422
 edit_not_found`) or appears more than once without `all` (`422 edit_ambiguous`) changes nothing; the message names the

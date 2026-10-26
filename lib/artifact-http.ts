@@ -94,6 +94,8 @@ export const changeSchema = z
 
 export const readSchema = z.object({ ...botCall, version: z.number().int().min(1).nullish() }).strict();
 
+export const inChatSchema = z.object(botCall).strict();
+
 export const openSchema = z.object({ viewer: viewerSchema, version: z.number().int().min(1).nullish() }).strict();
 
 export const viewerOnlySchema = z.object({ viewer: viewerSchema }).strict();

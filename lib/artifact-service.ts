@@ -58,6 +58,9 @@ export interface Context {
   now: Date;
 }
 
+/** Most artifacts a bot is told about for one chat. */
+const LIST_IN_CHAT_LIMIT = 20;
+
 const defaultContext = (): Context => ({ files: artifactFiles, now: new Date() });
 
 interface Who extends Asker {
@@ -352,6 +355,23 @@ export async function readArtifact(input: ReadInput, ctx: Context = defaultConte
   requireOpen(artifact, { ...who, inChat: inThisChat(artifact, input.chat) }, now);
   const row = await findVersion(artifact, input.version);
   return { artifact: viewOf(artifact), version: versionView(row, files), content: await files.get(row.fileKey), hidden };
+}
+
+/**
+ * The artifacts made in this chat that the person may open, the most recently changed first: how a bot finds the one
+ * "make the buttons bigger" is about, in a later message or after a restart.
+ */
+export async function listArtifactsInChat(input: BotCall, ctx: Context = defaultContext()): Promise<{ artifacts: ArtifactView[]; hidden: boolean }> {
+  const { now } = ctx;
+  const { hidden } = await passBotGate(input);
+  const who = await resolvePerson(input.person, true);
+  const rows = await prisma.artifact.findMany({
+    where: { chatKind: input.chat.kind, chatRef: input.chat.ref },
+    include: ARTIFACT_INCLUDE,
+    orderBy: { updatedAt: 'desc' },
+    take: LIST_IN_CHAT_LIMIT,
+  });
+  return { artifacts: rows.filter((row) => canOpen(row, who, now)).map(viewOf), hidden };
 }
 
 async function findVersion(artifact: ArtifactRow, number?: number | null) {
