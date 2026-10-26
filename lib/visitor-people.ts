@@ -133,7 +133,8 @@ async function newestVisitsOf(
 
 /**
  * Each person's newest visit that carries a name or an email, for the people whose shown visits carry neither: a person
- * who came back many times before naming themselves still has their name on an older visit, past the visits shown.
+ * who came back many times before naming themselves still has their name on an older visit, past the visits shown. An
+ * email counts only for a viewer who may see emails, so one that would be stripped never stands in front of a name.
  */
 async function newestNamedVisitOf(
   viewer: Viewer | null,
@@ -149,7 +150,7 @@ async function newestNamedVisitOf(
     SELECT DISTINCT ON (v.person) v.id, v.person
     FROM (${visits}) AS v
     JOIN room_accesses a ON a.id = v.id
-    WHERE v.person IN (${Prisma.join(allowed)}) AND COALESCE(NULLIF(BTRIM(a.user_name), ''), NULLIF(BTRIM(a.user_email), '')) IS NOT NULL
+    WHERE v.person IN (${Prisma.join(allowed)}) AND ${detail === 'full' ? Prisma.sql`COALESCE(NULLIF(BTRIM(a.user_name), ''), NULLIF(BTRIM(a.user_email), ''))` : Prisma.sql`NULLIF(BTRIM(a.user_name), '')`} IS NOT NULL
     ORDER BY v.person, v.accessed_at DESC, v.id DESC`;
   if (ids.length === 0) return named;
   const personOf = new Map(ids.map((row) => [row.id, row.person]));

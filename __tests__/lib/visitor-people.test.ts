@@ -139,6 +139,21 @@ describe('loadVisitorPeople', () => {
     expect(people[0].visits.map((v) => v.id)).not.toContain('old');
   });
 
+  it('looks for an older email only for a viewer who may see emails, so a stripped email never hides a name', async () => {
+    const sqlOf = () => {
+      const call = queryRaw.mock.calls.find(([strings]) => strings.join('').includes('DISTINCT ON'))!;
+      return Prisma.sql(call[0] as string[], ...call.slice(1)).sql;
+    };
+    for (const [level, withEmail] of [['full', true], ['manager', false]] as const) {
+      jest.clearAllMocks();
+      detail.mockResolvedValue(level);
+      groups([{ person: 'g:browser-1', visits: 2, ips: 1 }], 1, { a1: 'g:browser-1' }, {});
+      findMany.mockResolvedValue([visit('a1', null, 1, { userName: null })]);
+      await loadVisitorPeople(viewer, room);
+      expect(sqlOf().includes('user_email')).toBe(withEmail);
+    }
+  });
+
   it('does not look for an older name when a shown visit already has one', async () => {
     groups([{ person: 'u:fawaz', visits: 2, ips: 1 }], 1, { a1: 'u:fawaz' });
     findMany.mockResolvedValue([visit('a1', 'fawaz', 1)]);
