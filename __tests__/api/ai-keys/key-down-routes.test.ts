@@ -220,13 +220,53 @@ describe('PATCH /api/me/ai-keys/:id (If this is down)', () => {
   });
 
   it('refuses anything else, and changes nothing', async () => {
-    for (const body of [{}, { ifDown: 'other' }, { ifDown: 1 }, { name: 'x' }]) expect((await patch(body)).status).toBe(400);
+    for (const body of [{}, { ifDown: 'other' }, { ifDown: 1 }, { ifDown: 'stop', name: 7 }]) expect((await patch(body)).status).toBe(400);
     expect(db.botsAiProvider.updateMany).not.toHaveBeenCalled();
   });
 
   it('says not found for someone else’s key or a server provider', async () => {
     db.botsAiProvider.updateMany.mockResolvedValue({ count: 0 });
     expect((await patch({ ifDown: 'stop' }, 'deepseek-flash')).status).toBe(404);
+  });
+
+  describe('renaming (#633)', () => {
+    it('saves a trimmed name for the owner and changes only the name', async () => {
+      db.botsAiProvider.updateMany.mockResolvedValue({ count: 1 });
+      const response = await patch({ name: '  OpenRouter · work  ' });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ status: 'saved', name: 'OpenRouter · work' });
+      expect(db.botsAiProvider.updateMany).toHaveBeenCalledWith({ where: { providerId: 'key-1', ownerId: 'maker' }, data: { name: 'OpenRouter · work' } });
+    });
+
+    it('takes a name together with the If this is down choice', async () => {
+      db.botsAiProvider.updateMany.mockResolvedValue({ count: 1 });
+      expect(await (await patch({ name: 'Work', ifDown: 'stop' })).json()).toEqual({ status: 'saved', ifDown: 'stop', name: 'Work' });
+      expect(db.botsAiProvider.updateMany).toHaveBeenCalledWith({ where: { providerId: 'key-1', ownerId: 'maker' }, data: { ifDown: 'stop', name: 'Work' } });
+    });
+
+    it('refuses an empty name and one over 60 characters, with a plain sentence, and saves nothing', async () => {
+      const empty = await patch({ name: '   ' });
+      expect(empty.status).toBe(400);
+      expect((await empty.json()).error).toBe('Give the key a name.');
+      const long = await patch({ name: 'x'.repeat(61) });
+      expect(long.status).toBe(400);
+      expect((await long.json()).error).toBe('Keep the name under 60 characters.');
+      expect(db.botsAiProvider.updateMany).not.toHaveBeenCalled();
+      // Exactly 60 is fine
+      db.botsAiProvider.updateMany.mockResolvedValue({ count: 1 });
+      expect((await patch({ name: 'x'.repeat(60) })).status).toBe(200);
+    });
+
+    it('says not found for someone else’s key or a server provider, so it can’t be probed', async () => {
+      db.botsAiProvider.updateMany.mockResolvedValue({ count: 0 });
+      expect((await patch({ name: 'Mine now' }, 'deepseek-flash')).status).toBe(404);
+    });
+
+    it('needs a signed-in user', async () => {
+      (getSessionUser as jest.Mock).mockResolvedValue(null);
+      expect((await patch({ name: 'Work' })).status).toBe(401);
+      expect(db.botsAiProvider.updateMany).not.toHaveBeenCalled();
+    });
   });
 
   it('needs a signed-in user', async () => {

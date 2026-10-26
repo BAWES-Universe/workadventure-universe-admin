@@ -19,6 +19,7 @@ import { ModelPicker } from '../../components/ds/model-picker';
 import { kindInfo } from '@/lib/ai-key-kinds';
 import { PickCard, Radio, Segmented } from '@/components/ui/choice';
 import { AiKeyFailure, aiKeyError, aiKeyFailureText, useAiKeys } from '../../hooks/use-ai-keys';
+import { RenameButton, RenameKey } from './rename-key';
 
 /** 880000 -> "880k", 1200000 -> "1.2M": a token count that fits a phone. */
 function compact(value: number): string {
@@ -142,6 +143,7 @@ export default function AiKeysPage() {
   const [pulling, setPulling] = useState<{ key: AiKeySummary; lent: Lent } | null>(null);
   const [checking, setChecking] = useState<string | null>(null);
   const [saving, setSaving] = useState<string | null>(null);
+  const [renaming, setRenaming] = useState<string | null>(null);
 
   async function revoke(key: AiKeySummary) {
     setBusy(true);
@@ -251,9 +253,24 @@ export default function AiKeysPage() {
         >
           <header className="grid gap-1">
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-              <ProviderLogo info={key.kind ? kindInfo(key.kind) : undefined} />
-              <h2 className="orbit-display text-lg font-bold [overflow-wrap:anywhere]">{key.name}</h2>
-              <StatusPill down={key.status === 'down'} />
+              {renaming === key.id ? (
+                <RenameKey
+                  keyItem={key}
+                  onCancel={() => setRenaming(null)}
+                  onRenamed={(name) => {
+                    update((list) => list.map((entry) => (entry.id === key.id ? { ...entry, name } : entry)));
+                    setRenaming(null);
+                    addToast({ description: `Renamed to ${name}`, variant: 'success', duration: 2500 });
+                  }}
+                />
+              ) : (
+                <>
+                  <ProviderLogo info={key.kind ? kindInfo(key.kind) : undefined} />
+                  <h2 className="orbit-display text-lg font-bold [overflow-wrap:anywhere]">{key.name}</h2>
+                  <RenameButton name={key.name} onClick={() => setRenaming(key.id)} />
+                  <StatusPill down={key.status === 'down'} />
+                </>
+              )}
             </div>
             <p className="text-sm text-muted-foreground [overflow-wrap:anywhere]">{describe(key)}</p>
           </header>
