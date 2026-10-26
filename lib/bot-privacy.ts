@@ -139,6 +139,10 @@ function isStaleLegacyForget(row: { reportedAt: Date | null }, now: number): boo
  * it dropped them (POST /api/bots/memory/:id/forgotten), however long Orbit was unreachable in between, so the bot can
  * never save them back before it has forgotten them. Reading changes nothing. The one exception is a row an older
  * Orbit had already stamped as told: it keeps its own minute and is removed after it, as it always was.
+ *
+ * There is deliberately no expiry for the others (#493: never on a timer, that is what let a person be saved back after
+ * Orbit was out of reach). A bot server older than the route never reports, so until it is updated a forgotten person
+ * who talks to the bot again is not saved; the game release that reports follows this one right away and clears the rows.
  */
 export async function takeForgets(botId: string): Promise<Forgetting> {
   const now = Date.now();
