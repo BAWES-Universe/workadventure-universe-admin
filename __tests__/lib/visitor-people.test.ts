@@ -11,7 +11,7 @@ jest.mock('@/lib/woka-avatar', () => ({
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { accessDetailFor, memberWorldIdsOf, type Viewer } from '@/lib/access-scope';
-import { loadPersonVisits, loadVisitorPeople, VISITS_SHOWN } from '@/lib/visitor-people';
+import { loadPersonVisits, loadVisitorPeople, visitorName, VISITS_SHOWN } from '@/lib/visitor-people';
 
 const queryRaw = prisma.$queryRaw as unknown as jest.Mock;
 const findMany = prisma.roomAccess.findMany as jest.Mock;
@@ -110,6 +110,26 @@ describe('loadVisitorPeople', () => {
     expect(newest.values).toEqual(expect.arrayContaining(['u:fawaz', 'g:browser-1', VISITS_SHOWN]));
     expect(findMany).toHaveBeenCalledTimes(1);
     expect(findMany.mock.calls[0][0]).toEqual(expect.objectContaining({ where: { AND: [room, { id: { in: ['a1', 'a2', 'a3'] } }] }, orderBy: [{ accessedAt: 'desc' }, { id: 'desc' }] }));
+  });
+
+  it('names a person by their newest visit that has a name, so a visit saved before they had one never shows an id', async () => {
+    const uuid = '5b522f38-d7d2-4e37-be94-2476cb1efdfe';
+    groups([{ person: `g:${uuid}`, visits: 3, ips: 1 }], 1, { a1: `g:${uuid}`, a2: `g:${uuid}`, a3: `g:${uuid}` });
+    findMany.mockResolvedValue([
+      visit('a1', null, 1, { userName: null, userUuid: uuid }),
+      visit('a2', null, 2, { userName: '  ', userUuid: uuid }),
+      visit('a3', null, 3, { userName: 'Yousef', userUuid: uuid }),
+    ]);
+    const { people } = await loadVisitorPeople(viewer, room);
+    expect(people[0].name).toBe('Yousef');
+  });
+
+  it('calls a person with no name on any visit "Guest", never by their id', async () => {
+    const hash = 'unverified-385369452cbf0239b18578ea4853e872';
+    groups([{ person: `g:${hash}`, visits: 1, ips: 1 }], 1, { a1: `g:${hash}` });
+    findMany.mockResolvedValue([visit('a1', null, 1, { userName: null, userUuid: hash })]);
+    const { people } = await loadVisitorPeople(viewer, room);
+    expect(people[0].name).toBe('Guest');
   });
 
   it('keeps IP addresses from people who manage the place without being super admins', async () => {
@@ -257,5 +277,14 @@ describe('loadPersonVisits', () => {
     expect(await loadPersonVisits(viewer, room, 'x:1')).toEqual([]);
     expect(await loadPersonVisits(viewer, room, 'u:')).toEqual([]);
     expect(findMany).not.toHaveBeenCalled();
+  });
+});
+
+describe('visitorName', () => {
+  it('takes the newest name, then the newest email, and is Guest with neither', () => {
+    expect(visitorName([{ userName: null, userEmail: null }, { userName: 'Nova', userEmail: 'n@x.io' }, { userName: 'Old' }])).toBe('Nova');
+    expect(visitorName([{ userName: ' ', userEmail: 'n@x.io' }])).toBe('n@x.io');
+    expect(visitorName([{}, { userName: '' }])).toBe('Guest');
+    expect(visitorName([])).toBe('Guest');
   });
 });

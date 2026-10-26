@@ -151,6 +151,19 @@ async function hiddenPlaces(viewer: Viewer | null, scope: AccessScope, rows: Vis
   return hidden;
 }
 
+/**
+ * What a person is called: the name on their newest visit that has one, else their email. Nobody is called by an id: a
+ * visit saved before the person had a name (the page-load check runs before a guest names themselves) never turns the
+ * card into a uuid, and a person who has no name on any visit is "Guest".
+ */
+export function visitorName(visits: Partial<Pick<VisitRow, 'userName' | 'userEmail'>>[]): string {
+  for (const visit of visits) {
+    const name = visit.userName?.trim() || visit.userEmail?.trim();
+    if (name) return name;
+  }
+  return 'Guest';
+}
+
 /** Visits as this viewer may see them: redacted per record, and with rooms and worlds they may not see left out. */
 async function toVisits(viewer: Viewer | null, detail: AccessDetail, scope: AccessScope, rows: VisitRow[]): Promise<PersonVisit[]> {
   const hidden = await hiddenPlaces(viewer, scope, rows);
@@ -198,6 +211,8 @@ export async function loadVisitorPeople(
     }),
     lookingFromWorldId,
   );
+  // Each person's visits as the viewer may see them, to find a name on: the newest visit with one, not only the newest.
+  const seenRows = rows.map((personVisits) => personVisits.map((row) => redactAccess(row, detailForRecord(viewer, row, detail))));
   const shown = await toVisits(viewer, detail, scope, rows.flat());
   const visitById = new Map(shown.map((visit) => [visit.id, visit]));
   const people = groups.flatMap((group, index): VisitorPerson[] => {
@@ -207,7 +222,7 @@ export async function loadVisitorPeople(
       {
         key: group.person,
         userId: latest.userId ?? null,
-        name: latest.userName || latest.userEmail || latest.userUuid || 'Guest',
+        name: visitorName(seenRows[index]),
         woka: latest.woka,
         roles: latest.hasMembership && latest.membershipTags?.length ? latest.membershipTags : [],
         visitCount: Number(group.visits),
