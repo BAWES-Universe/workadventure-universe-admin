@@ -60,6 +60,7 @@
     "recharts": "^3.6.0",
     "redis": "^5.10.0",
     "tailwind-merge": "^3.4.0",
+    "web-push": "^3.6.7",
     "zod": "^4.1.13"
   },
   "devDependencies": {
@@ -72,6 +73,7 @@
     "@types/pg": "^8.15.6",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@types/web-push": "^3.6.4",
     "@workadventure/iframe-api-typings": "^1.27.9",
     "dotenv": "^17.4.2",
     "eslint": "^9",

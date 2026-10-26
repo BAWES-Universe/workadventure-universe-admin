@@ -3,7 +3,7 @@
 import React from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import HerePanel from '@/app/admin/components/here-panel';
-import RecentlyVisited from '@/app/admin/components/recently-visited';
+import type { LiveView } from '@/lib/live-presence';
 import { WorkAdventureContext } from '@/app/admin/workadventure-context';
 import { AdminBootstrapProvider, type AdminBootstrap } from '@/app/admin/admin-bootstrap-context';
 import { localHourFromUtc, localPeakHour } from '@/lib/analytics-peak';
@@ -54,16 +54,20 @@ const responses: Record<string, unknown> = {
     rooms: [
       { roomId: 'r-hq', roomName: 'Headquarters', roomSlug: 'headquarters', roomDescription: null, roomFavorites: 9, worldName: 'Office', worldSlug: 'office', universeName: 'BAWES', universeSlug: 'bawes', accessedAt: minutesAgo(12) },
       { roomId: 'r-hub', roomName: 'Creative Hub', roomSlug: 'hub', roomDescription: null, roomFavorites: 3, worldName: 'Office', worldSlug: 'office', universeName: 'BAWES', universeSlug: 'bawes', accessedAt: minutesAgo(40) },
+      { roomId: 'r-cafe', roomName: 'Cafe', roomSlug: 'cafe', roomDescription: 'Coffee and long chats', roomFavorites: 1, worldName: 'Office', worldSlug: 'office', universeName: 'BAWES', universeSlug: 'bawes', accessedAt: minutesAgo(180) },
     ],
   },
 };
 
 /** Paths that answer 500 until cleared: a server failure, not a missing room. */
 const failing = new Set<string>();
+/** Paths that wait for their gate to open before answering. */
+const gates = new Map<string, Promise<void>>();
 
 jest.mock('@/lib/client-auth', () => ({
   authenticatedFetch: async (url: string) => {
     const path = url.split('?')[0];
+    await gates.get(path);
     if (failing.has(path)) return { ok: false, status: 500, json: async () => ({}) } as Response;
     const body = isSummariesUrl(url) ? summariesBody(url, (id) => analytics[id]) : responses[path];
     return { ok: body !== undefined, status: body ? 200 : 404, json: async () => body } as Response;
@@ -87,9 +91,8 @@ function inGame(children: React.ReactNode, ready = true) {
 }
 
 describe('Home rooms keep their numbers', () => {
-  it('shows where you are and where you were before, with stars, visits, peak and the latest visitor', async () => {
-    const onShown = jest.fn();
-    render(inGame(<HerePanel onShown={onShown} />));
+  it('shows where you are and where you were before, with stars, visits, busiest hour and the latest visitor', async () => {
+    render(inGame(<HerePanel />));
     const here = await screen.findByTestId('room-card-here');
     await waitFor(() => expect(here.textContent).toContain('1,204'));
     expect(here.textContent).toContain('Headquarters');
@@ -98,20 +101,20 @@ describe('Home rooms keep their numbers', () => {
     expect(here.textContent).toContain('9');
     expect(here.textContent).toMatch(/Last visited by you\s*12 minutes ago/);
     expect(here.textContent).toMatch(/Most recent visitor\s*3 minutes ago/);
+    expect(here.textContent).toContain('Busiest hour');
     // Visitors aren't named on the card, and the peak hour carries no time-zone label.
     expect(here.textContent).not.toContain('Imagine');
     expect(here.textContent).not.toContain('UTC');
     // No Visit on the room you're already in.
     expect(here.querySelector('button')).toBeNull();
 
-    const before = await screen.findByTestId('room-card-previous');
+    const [before] = await screen.findAllByTestId('room-card-previous');
     await waitFor(() => expect(before.textContent).toContain('233'));
     expect(before.textContent).toContain('Creative Hub');
     expect(before.textContent).toContain('You were the last visitor');
     // No small Visit button: the whole card opens the room's page, which has its details and Visit.
     expect(before.querySelector('button')).toBeNull();
     expect(before.querySelector('a')?.getAttribute('href')).toBe('/admin/rooms/r-hub');
-    expect(onShown).toHaveBeenLastCalledWith(['r-hq', 'r-hub']);
   });
 
   it('explains itself outside the game', () => {
@@ -119,27 +122,99 @@ describe('Home rooms keep their numbers', () => {
     expect(screen.getByRole('status').textContent).toMatch(/inside Universe/);
   });
 
-  it('leaves the rooms already shown under Where you are out of Recently visited', async () => {
-    render(inGame(<RecentlyVisited excludeRoomIds={['r-hq']} />));
-    const cards = await screen.findAllByTestId('room-card-trail');
-    expect(cards).toHaveLength(1);
-    expect(cards[0].textContent).toContain('Creative Hub');
+  it('lines up the rooms you were in lately after the room before this, each with when you were there', async () => {
+    render(inGame(<HerePanel />));
+    const timeline = await screen.findByTestId('here');
+    await waitFor(() => expect(screen.getAllByTestId('room-card-previous')).toHaveLength(2));
+    const cards = screen.getAllByTestId('room-card-previous');
+    // Where you are and the room before it are never repeated further back.
+    expect(cards.map((card) => card.querySelector('h3')?.textContent)).toEqual(['Creative Hub', 'Cafe']);
+    expect(cards[0].textContent).toContain('Before this');
+    expect(cards[1].textContent).not.toContain('Before this');
+    expect(cards[1].textContent).toContain('Coffee and long chats');
+    const times = Array.from(timeline.querySelectorAll('time')).map((time) => time.textContent);
+    expect(times).toEqual(expect.arrayContaining(['40 minutes ago', '3 hours ago']));
+    expect(timeline.textContent).toContain('Now');
   });
 
-  it('hides Recently visited when every room in it is already shown above', async () => {
-    const { container } = render(inGame(<RecentlyVisited excludeRoomIds={['r-hq', 'r-hub']} />));
-    await waitFor(() => expect(container.querySelector('[data-testid="recently-visited"]')).toBeNull());
-    expect(screen.queryByText('Rooms you visit will show up here.')).toBeNull();
+  it('waits for the room before this before lining up earlier rooms, so it never shows twice for a moment', async () => {
+    let open = () => {};
+    gates.set('/api/admin/rooms/previous', new Promise<void>((resolve) => (open = resolve)));
+    try {
+      render(inGame(<HerePanel />));
+      await screen.findByTestId('room-card-here');
+      await waitFor(() => expect(screen.getByTestId('here').textContent).toContain('Headquarters'));
+      expect(screen.queryAllByTestId('room-card-previous')).toHaveLength(0);
+      open();
+      await waitFor(() => expect(screen.getAllByTestId('room-card-previous')).toHaveLength(2));
+      expect(screen.getAllByTestId('room-card-previous').map((card) => card.querySelector('h3')?.textContent)).toEqual(['Creative Hub', 'Cafe']);
+    } finally {
+      gates.clear();
+    }
   });
 
-  it('still invites someone with no visits at all to discover rooms', async () => {
+  it('shows nothing under a name with no description', async () => {
+    render(inGame(<HerePanel />));
+    const [before] = await screen.findAllByTestId('room-card-previous');
+    expect(before.querySelector('p[class*="description"]')).toBeNull();
+    expect(before.textContent).not.toMatch(/description/i);
+  });
+
+  it('counts the people there now, leaving you out of the room you are in and never counting bots', async () => {
+    const place = (roomId: string, count: number, bots: number, here = false) =>
+      ({ roomId, name: roomId, world: { id: 'w-1', name: 'Office' }, universe: { id: 'u-1', name: 'BAWES' }, playPath: '/@/x', count, guests: 0, bots, here, people: [] });
+    const live: LiveView = { available: true, generatedAt: Date.now(), places: [place('r-hq', 3, 4, true), place('r-hub', 1, 2)], botRooms: [place('r-cafe', 0, 5)], people: [] };
+    render(inGame(<HerePanel live={live} />));
+    const here = await screen.findByTestId('room-card-here');
+    expect(here.textContent).toContain('You and 2 people here');
+    const cards = await waitFor(() => {
+      const found = screen.getAllByTestId('room-card-previous');
+      expect(found).toHaveLength(2);
+      return found;
+    });
+    expect(cards[0].textContent).toContain('1 here');
+    expect(cards[1].textContent).not.toContain(' here');
+    expect(document.body.textContent).not.toMatch(/bot/);
+  });
+
+  it('keeps "You are here" when nobody else is in the room', async () => {
+    const live: LiveView = {
+      available: true,
+      generatedAt: Date.now(),
+      places: [{ roomId: 'r-hq', name: 'Headquarters', world: { id: 'w-1', name: 'Office' }, universe: { id: 'u-1', name: 'BAWES' }, playPath: '/@/x', count: 1, guests: 0, bots: 21, here: true, people: [] }],
+      botRooms: [],
+      people: [],
+    };
+    render(inGame(<HerePanel live={live} />));
+    const here = await screen.findByTestId('room-card-here');
+    expect(here.textContent).toContain('You are here');
+    expect(here.textContent).not.toMatch(/\d+ here/);
+  });
+
+  it('still shows your rooms outside the game', async () => {
+    render(inGame(<HerePanel />, false));
+    expect(screen.getByRole('status').textContent).toMatch(/inside Universe/);
+    await waitFor(() => expect(screen.getAllByTestId('room-card-previous')).toHaveLength(3));
+  });
+
+  it('invites someone with no visits at all to discover rooms', async () => {
     const saved = responses['/api/admin/rooms/recent'];
     responses['/api/admin/rooms/recent'] = { rooms: [] };
     try {
-      render(inGame(<RecentlyVisited excludeRoomIds={[]} />));
+      render(inGame(<HerePanel />, false));
       expect(await screen.findByText('Rooms you visit will show up here.')).toBeTruthy();
     } finally {
       responses['/api/admin/rooms/recent'] = saved;
+    }
+  });
+
+  it('says when your recent rooms could not load', async () => {
+    failing.add('/api/admin/rooms/recent');
+    try {
+      render(inGame(<HerePanel />, false));
+      expect(await screen.findByText(/your recent rooms/)).toBeTruthy();
+    } finally {
+      failing.clear();
     }
   });
 
@@ -199,14 +274,13 @@ describe('Where you are: the start map and unlisted rooms', () => {
     expect(screen.queryByText('The start map')).toBeNull();
   });
 
-  it('still shows the room before this on a start map Orbit doesn’t know, and keeps it out of Recently visited', async () => {
+  it('still shows the room before this on a start map Orbit doesn’t know, without repeating it further back', async () => {
     responses['/api/admin/rooms/from-play-uri'] = undefined;
-    const onShown = jest.fn();
-    render(withStartRoom('@/bawes/office/headquarters', inGame(<HerePanel onShown={onShown} />)));
+    render(withStartRoom('@/bawes/office/headquarters', inGame(<HerePanel />)));
     expect(await screen.findByText('The start map')).toBeTruthy();
-    const before = await screen.findByTestId('room-card-previous');
-    expect(before.textContent).toContain('Creative Hub');
-    await waitFor(() => expect(onShown).toHaveBeenLastCalledWith(['r-hub']));
+    await waitFor(() => expect(screen.getAllByTestId('room-card-previous')).toHaveLength(3));
+    const names = screen.getAllByTestId('room-card-previous').map((card) => card.querySelector('h3')?.textContent);
+    expect(names).toEqual(['Creative Hub', 'Headquarters', 'Cafe']);
   });
 
   it('says a room isn’t listed, without naming its owner', async () => {

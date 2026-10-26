@@ -32,3 +32,18 @@
 .eventGlyph[data-kind='star'] { color: var(--kind-star-solid); }
 .page a:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 3px; }
 
+
+/* You's passport as others see it on the game card: three small stamps (profile/[uuid] draws the same), View all beside the heading. */
+.headRow { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; }
+.small { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; padding: 6px 4px 2px; }
+@media (min-width: 640px) { .small { max-width: 480px; } }
+.small .stamp { min-height: 96px; padding: 8px 6px; border-radius: 18px; }
+.small .stamp::after { inset: 4px; border-radius: 14px; }
+.small .glyph { width: 18px; height: 18px; }
+.small .stamp strong { width: 100%; margin-top: 2px; font-size: 13px; letter-spacing: 0.01em; overflow-wrap: anywhere; }
+.stamp strong[data-long='long'] { font-size: 16px; }
+.stamp strong[data-long='longer'] { font-size: 14px; letter-spacing: 0; }
+.small .stamp strong[data-long='long'] { font-size: 10px; letter-spacing: 0; }
+.small .stamp strong[data-long='longer'] { font-size: 9px; letter-spacing: 0; }
+.small .stamp em { margin-top: 0; font-size: 11px; }
+.cardNote { margin: 0; font-size: 12px; color: hsl(var(--muted-foreground)); }

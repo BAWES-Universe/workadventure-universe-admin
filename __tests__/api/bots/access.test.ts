@@ -50,6 +50,8 @@ describe('POST /api/bots/[id]/access', () => {
     ['no person', { action: 'chat' }],
     ['a signed-in person with no identifier', { action: 'dm', person: { signedIn: true } }],
     ['a signed-in person with an empty identifier', { action: 'dm', person: { signedIn: true, identifier: '  ' } }],
+    ['a chat ID for anything but a direct message', { action: 'chat', person: { signedIn: true, chatId: '@a:chat.example' } }],
+    ['a chat ID and an identifier together', { action: 'dm', person: { signedIn: true, identifier: 'a@example.com', chatId: '@a:chat.example' } }],
   ])('answers 400 for %s', async (_name, body) => {
     expect((await post(body)).status).toBe(400);
     expect(check).not.toHaveBeenCalled();
@@ -66,6 +68,13 @@ describe('POST /api/bots/[id]/access', () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ allowed: true, code: 'allowed', reason: null });
     expect(check).toHaveBeenCalledWith({ botId: 'bot-1', action: 'summon', person: { signedIn: true, identifier: 'sara@example.com' } });
+  });
+
+  it('passes a direct message’s chat ID on, and returns whose it is', async () => {
+    check.mockResolvedValue({ allowed: true, code: 'allowed', reason: null, person: { uuid: 'uuid-sara', name: 'Sara' } });
+    const response = await post({ action: 'dm', person: { signedIn: true, chatId: '@sara:chat.example' } });
+    expect(await response.json()).toEqual({ allowed: true, code: 'allowed', reason: null, person: { uuid: 'uuid-sara', name: 'Sara' } });
+    expect(check).toHaveBeenCalledWith({ botId: 'bot-1', action: 'dm', person: { signedIn: true, chatId: '@sara:chat.example' } });
   });
 
   it('a no is a 200 with the line to show', async () => {

@@ -12,7 +12,7 @@ jest.mock('@/lib/db', () => ({
 }));
 
 import { prisma } from '@/lib/db';
-import { loadActivity, MAX_EVENTS } from '@/lib/activity';
+import { ALL_EVENTS, loadActivity, MAX_EVENTS } from '@/lib/activity';
 
 const db = prisma as unknown as Record<string, { findMany: jest.Mock }>;
 const at = (iso: string) => new Date(iso);
@@ -97,5 +97,21 @@ describe('loadActivity', () => {
     const events = await loadActivity('me');
     expect(events).toHaveLength(MAX_EVENTS);
     expect(events[0].text).toBe('You starred Room 14');
+  });
+
+  it('gives the Your activity page everything recent, not just the latest few', async () => {
+    db.favorite.findMany.mockResolvedValue(
+      Array.from({ length: 15 }, (_, index) => ({
+        id: `s${index}`,
+        favoritedAt: at(`2026-09-${String(index + 1).padStart(2, '0')}T05:00:00Z`),
+        room: { id: `r${index}`, name: `Room ${index}` },
+        world: null,
+        universe: null,
+      })),
+    );
+    expect(await loadActivity('me', { all: true })).toHaveLength(15);
+    for (const model of ['membershipInvitation', 'worldMember', 'favorite', 'universe', 'world']) {
+      expect(db[model].findMany.mock.calls[0][0].take).toBe(ALL_EVENTS);
+    }
   });
 });

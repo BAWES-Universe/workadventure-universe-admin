@@ -1,0 +1,21 @@
+/* Your timeline (Orbit #606): one line through every stop, a dot on it above each card with when you were there.
+   Where you are is first and wider; every earlier room is the same size. */
+.stop { position: relative; display: grid; grid-template-rows: auto 1fr; gap: 10px; min-width: 0; width: min(272px, calc(100vw - 96px)); }
+.stop::before { content: ''; position: absolute; top: 7px; left: 0; right: -12px; border-top: 1px solid hsl(var(--border)); }
+.stop:last-child::before { right: auto; width: 24px; }
+.now { width: min(332px, calc(100vw - 56px)); }
+@media (min-width: 640px) {
+  .stop { width: 290px; }
+  .now { width: 420px; }
+}
+.card { display: grid; min-width: 0; container-type: inline-size; }
+.card > * { height: 100%; }
+.when { position: relative; display: inline-flex; align-items: center; gap: 8px; min-height: 14px; padding-left: 16px; color: hsl(var(--muted-foreground)); font-size: 11px; font-weight: 600; line-height: 1; }
+.when::before { content: ''; position: absolute; left: 0; top: 50%; width: 7px; height: 7px; margin-top: -3.5px; border-radius: 50%; background: hsl(var(--muted-foreground)); box-shadow: 0 0 0 4px hsl(var(--background)); }
+.now .when { padding-left: 0; color: hsl(var(--foreground)); }
+.now .when::before { display: none; }
+.nowDot { width: 8px; height: 8px; border-radius: 50%; background: hsl(var(--foreground)); box-shadow: 0 0 0 4px hsl(var(--background)); }
+.hintStop .when::before { background: hsl(var(--background)); box-shadow: 0 0 0 1px hsl(var(--muted-foreground)), 0 0 0 4px hsl(var(--background)); }
+.hint { display: grid; align-content: center; gap: 6px; min-height: 140px; padding: 18px; border: 1px dashed hsl(var(--foreground) / 0.18); border-radius: 18px; }
+.hint p { color: hsl(var(--muted-foreground)); font-size: 12px; line-height: 1.6; }
+.note { display: grid; align-content: center; }

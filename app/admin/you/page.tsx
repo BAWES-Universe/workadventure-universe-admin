@@ -1,21 +1,21 @@
 'use client';
 
-import { Suspense, useEffect, useRef, useState } from 'react';
-import Link from 'next/link';
+import { Suspense, useEffect } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { ChevronRight } from 'lucide-react';
 import { useAdminBootstrap } from '../admin-bootstrap-context';
 import { StatLine, count } from '../components/ds';
+import { AiKeysCard } from '../components/ai-keys-card';
 import { ActivitySection, PassportSection } from '../components/passport';
 import { ProfileCard } from '../components/profile-card';
-import { useAiKeys } from '../hooks/use-ai-keys';
-import { useGuidanceDismissed } from '../hooks/use-guidance-dismissed';
-import Yours from '../components/yours';
 import styles from './you.module.css';
 
+/** Your latest activity on You; View all opens the rest. */
+const ACTIVITY_SHOWN = 3;
+
 /**
- * You: your profile as others see it (edited in place), then what's yours (universes, memberships, stars), then
- * Settings: AI keys, and a row for bringing Get started back (Appearance, Sharing and Sign out live in the Orbit menu). Someone new gets first steps; finding new places is Space's job.
+ * You: your profile as others see it (edited in place), how your AI keys are doing, your passport, and your latest
+ * activity with View all (Appearance, Sharing and Sign out live in the Orbit menu). Get started, your stars, universes
+ * and memberships are on Orbit; finding new places is Space's job.
  */
 export default function YouPage() {
   return (
@@ -31,29 +31,16 @@ function You() {
   // edit; the menu's Profile just shows it.
   const editProfile = useSearchParams().get('edit') === 'profile';
   const router = useRouter();
-  const [profileComplete, setProfileComplete] = useState<boolean | null>(null);
   // The card keeps the form open once asked; the address drops the ask at once, so Back, a reload or a later visit
   // shows the profile, never the form you didn't ask for.
   useEffect(() => {
     if (editProfile) router.replace('/admin/you', { scroll: false });
   }, [editProfile, router]);
-  // Get started, once hidden, comes back from Settings (while any step is left), and the page scrolls up to it.
-  const [getStartedHidden, hideGetStarted, showGetStarted] = useGuidanceDismissed('getStarted');
-  const [stepsAllDone, setStepsAllDone] = useState<boolean | null>(null);
-  const scrollToSteps = useRef(false);
-  const { result: aiKeys } = useAiKeys();
-  const aiKeyCount = aiKeys.status === 'ready' ? aiKeys.items.length : 0;
-  useEffect(() => {
-    if (!scrollToSteps.current || getStartedHidden !== false) return;
-    scrollToSteps.current = false;
-    document.getElementById('get-started-heading')?.scrollIntoView({ block: 'center', behavior: 'smooth' });
-  }, [getStartedHidden]);
   return (
     <div className={styles.page}>
       <ProfileCard
         user={user}
         startEditing={editProfile}
-        onLoaded={setProfileComplete}
         stats={
           mine && (
             <StatLine
@@ -66,44 +53,9 @@ function You() {
           )
         }
       />
-      <PassportSection />
-      <ActivitySection />
-      <Yours
-        profileComplete={profileComplete}
-        getStarted={{ hidden: getStartedHidden, hide: hideGetStarted, onAllDone: setStepsAllDone }}
-      />
-      <section className={styles.settings} aria-labelledby="settings-heading">
-        <h2 id="settings-heading" className="orbit-display">
-          Settings
-        </h2>
-        <Link href="/admin/you/ai-keys" className={`orbit-press ${styles.settingRow} ${styles.settingLink}`} data-testid="ai-keys-row">
-          <span>
-            <strong>
-              AI keys {aiKeyCount > 0 && <span className={styles.settingCount}>{aiKeyCount}</span>}
-            </strong>
-            <span>{aiKeyCount > 0 ? 'Your own AI accounts for your bots.' : 'Use your own AI for bots you make.'}</span>
-          </span>
-          <ChevronRight size={20} aria-hidden="true" />
-        </Link>
-        {getStartedHidden === true && stepsAllDone === false && (
-          <div className={styles.settingRow}>
-            <span>
-              <strong>Get started</strong>
-              <span>Your first steps, hidden for now.</span>
-            </span>
-            <button
-              type="button"
-              className={`orbit-press ${styles.settingButton}`}
-              onClick={() => {
-                scrollToSteps.current = true;
-                showGetStarted();
-              }}
-            >
-              Show
-            </button>
-          </div>
-        )}
-      </section>
+      <AiKeysCard />
+      <PassportSection small />
+      <ActivitySection limit={ACTIVITY_SHOWN} />
     </div>
   );
 }

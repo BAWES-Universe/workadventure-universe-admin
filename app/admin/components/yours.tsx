@@ -1,32 +1,15 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
-import { ArrowUpRight, Check, Plus, X } from 'lucide-react';
-import { Button } from '@/components/ui/button';
-import { authenticatedFetch } from '@/lib/client-auth';
+import type { CSSProperties } from 'react';
+import { ArrowUpRight, Check } from 'lucide-react';
 import { universeColour } from '@/lib/universe-colour';
-import { useAdminBootstrap } from '../admin-bootstrap-context';
-import { isNamed, isRecord, useCollection, type Collection } from '../hooks/use-collection';
-import {
-  Context,
-  EmptyCard,
-  EntityRow,
-  LoadError,
-  LoadingRows,
-  NameGlyph,
-  Place,
-  RolePills,
-  SectionHeader,
-  StatLine,
-  StatusPill,
-  countPlace,
-  hueStyle,
-} from './ds';
-import { deriveProgress, getStartedSteps, type GetStartedProgress } from './get-started-steps';
+import { NameGlyph, StatLine, StatusPill, countPlace, hueStyle } from './ds';
+import { getStartedSteps, type GetStartedProgress } from './get-started-steps';
 import styles from './yours.module.css';
 
-interface MyUniverse {
+/** A universe you own, as the universes list gives it. */
+export interface MyUniverse {
   id: string;
   name: string;
   description?: string | null;
@@ -34,210 +17,9 @@ interface MyUniverse {
   featured?: boolean;
   _count?: { worlds?: number; rooms?: number };
 }
-interface MyMembership {
-  id: string;
-  tags: string[];
-  isUniverseOwner?: boolean;
-  world: { id: string; name: string; universe: { id?: string; name: string }; _count?: { rooms?: number; members?: number } };
-}
-interface Invitation {
-  id: string;
-  tags?: string[];
-  world: { id: string; name: string; universe: { id?: string; name: string } };
-  invitedBy?: { name: string | null; email: string | null } | null;
-}
-interface StarredRoom {
-  id: string;
-  name: string;
-  world: { name: string; universe: { id?: string; name: string } };
-}
 
-const SHOWN = 4;
-
-const isUniverse = (value: unknown): value is MyUniverse => isNamed(value) && typeof value.isPublic === 'boolean';
-const isMembership = (value: unknown): value is MyMembership =>
-  isRecord(value) && typeof value.id === 'string' && Array.isArray(value.tags) && isNamed(value.world) && isRecord(value.world.universe);
-const isInvitation = (value: unknown): value is Invitation =>
-  isRecord(value) && typeof value.id === 'string' && isNamed(value.world) && isRecord(value.world.universe);
-const isStar = (value: unknown): value is StarredRoom =>
-  isNamed(value) && isRecord(value.world) && typeof value.world.name === 'string' && isRecord(value.world.universe);
-
-function List<T>({ collection, label, empty, children }: { collection: { result: Collection<T>; retry: () => void }; label: string; empty: ReactNode; children: (items: T[]) => ReactNode }) {
-  const { result, retry } = collection;
-  if (result.status === 'loading') return <LoadingRows label={label} />;
-  if (result.status === 'error') return <LoadError label={label} retry={retry} />;
-  return <>{result.items.length ? children(result.items) : empty}</>;
-}
-
-/**
- * What's yours, on You: a first-steps guide for someone new, your universes, the worlds you're a member of (with any
- * invitation to answer right here), and the rooms you starred. Finding new places is Space's job, not this page's.
- */
-export default function Yours({
-  profileComplete,
-  getStarted,
-}: {
-  profileComplete: boolean | null;
-  /** Whether Get started was hidden, and how to hide it. You keeps this, so its settings can show it again. */
-  getStarted: { hidden: boolean | null; hide: () => void; onAllDone?: (allDone: boolean | null) => void };
-}) {
-  const { mine } = useAdminBootstrap();
-  const universes = useCollection(`/api/admin/universes?scope=my&limit=${SHOWN}`, 'universes', isUniverse);
-  const memberships = useCollection('/api/memberships/my', 'memberships', isMembership);
-  const invitations = useCollection('/api/memberships/invitations', 'invitations', isInvitation);
-  const stars = useCollection('/api/admin/stars/rooms', 'rooms', isStar);
-
-  const progress = deriveProgress({ mine, profileComplete, universes: universes.result, memberships: memberships.result, stars: stars.result });
-  const { ownsUniverse, hasStar } = progress;
-  const hasWorld = memberships.result.status === 'ready' ? memberships.result.items.length > 0 : (mine?.worlds ?? 0) > 0;
-  const universeTotal = mine?.universes ?? (universes.result.status === 'ready' ? universes.result.items.length : 0);
-  const { newWorldHref } = progress;
-  const allDone = getStartedSteps(progress).every((step) => step.done);
-  const { hidden, hide, onAllDone } = getStarted;
-  // Unknown (null) until the profile answer is in, so the page doesn't show or hide its Settings row on a guess.
-  const allDoneKnown = profileComplete === null ? null : allDone;
-  useEffect(() => {
-    onAllDone?.(allDoneKnown);
-  }, [allDoneKnown, onAllDone]);
-
-  return (
-    <div className={styles.yours} data-testid="yours">
-      {!allDone && hidden === false && (
-        <GetStarted progress={progress} onHide={hide} />
-      )}
-
-      <section aria-labelledby="universes-heading">
-        <SectionHeader
-          id="universes-heading"
-          title="Your universes"
-          count={universeTotal}
-          action={ownsUniverse ? { href: '/admin/universes/new', label: 'New universe', icon: Plus } : null}
-        />
-        <List
-          collection={universes}
-          label="your universes"
-          empty={
-            <EmptyCard
-              kind="universe"
-              title="Every universe starts with an idea."
-              text="A universe holds your worlds, and worlds hold rooms. It takes a minute, and you can shape it later."
-              href="/admin/universes/new"
-              action="Create your universe"
-              testId="empty-universes"
-            />
-          }
-        >
-          {(items) => (
-            <>
-              <div className={styles.universes}>
-                {items.slice(0, SHOWN).map((universe) => (
-                  <UniverseCard key={universe.id} universe={universe} />
-                ))}
-              </div>
-              {universeTotal > SHOWN && (
-                <Link href="/admin/universes" className={styles.more}>
-                  All {universeTotal} universes
-                  <ArrowUpRight size={14} aria-hidden="true" />
-                </Link>
-              )}
-            </>
-          )}
-        </List>
-      </section>
-
-      <section aria-labelledby="memberships-heading">
-        <SectionHeader
-          id="memberships-heading"
-          title="Memberships"
-          count={memberships.result.status === 'ready' ? memberships.result.items.length : undefined}
-          action={hasWorld ? { href: '/admin/memberships', label: 'Manage' } : null}
-        />
-        <Invitations collection={invitations} onAccepted={memberships.retry} />
-        <List
-          collection={memberships}
-          label="your memberships"
-          empty={
-            <EmptyCard
-              kind="world"
-              title="No memberships yet."
-              text={
-                ownsUniverse
-                  ? 'Create a world in your universe and you’re its admin. Then invite people as members, editors or admins.'
-                  : 'You become a member when someone invites you to their world, or when you create a world of your own.'
-              }
-              href={ownsUniverse ? newWorldHref : '/admin/universes/new?next=world'}
-              action={ownsUniverse ? 'Create a world' : 'Create a universe first'}
-              testId="empty-memberships"
-            />
-          }
-        >
-          {(items) => (
-            <div className={styles.rows}>
-              {items.slice(0, SHOWN).map((membership) => (
-                <EntityRow
-                  key={membership.id}
-                  href={`/admin/worlds/${membership.world.id}`}
-                  kind="world"
-                  title={membership.world.name}
-                  context={
-                    <StatLine
-                      items={[
-                        <Place key="u" kind="universe" label={membership.world.universe.name} />,
-                        countPlace('room', membership.world._count?.rooms, 'room'),
-                        countPlace('people', membership.world._count?.members, 'member'),
-                      ]}
-                    />
-                  }
-                  titleAside={<RolePills roles={[...(membership.isUniverseOwner ? ['owner'] : []), ...membership.tags]} />}
-                />
-              ))}
-            </div>
-          )}
-        </List>
-      </section>
-
-      <section aria-labelledby="stars-heading">
-        <SectionHeader
-          id="stars-heading"
-          title="Stars"
-          count={stars.result.status === 'ready' ? stars.result.items.length : undefined}
-          action={hasStar ? { href: '/admin/stars', label: 'View all' } : null}
-        />
-        <List
-          collection={stars}
-          label="your starred rooms"
-          empty={
-            <EmptyCard
-              kind="star"
-              title="Keep a way back to rooms you like."
-              text="Star a room from its page and it shows up here, one tap from a visit."
-              href="/admin/discover/rooms"
-              action="Find rooms"
-              testId="empty-stars"
-            />
-          }
-        >
-          {(items) => (
-            <div className={styles.rows}>
-              {items.slice(0, SHOWN).map((room) => (
-                <EntityRow
-                  key={room.id}
-                  href={`/admin/rooms/${room.id}`}
-                  kind="star"
-                  title={room.name}
-                  context={<Context parts={[{ label: room.world.universe.name, kind: 'universe' }, { label: room.world.name, kind: 'world' }]} />}
-                />
-              ))}
-            </div>
-          )}
-        </List>
-      </section>
-    </div>
-  );
-}
-
-/** A universe as a planet in its own colour. The whole card opens it. */
-function UniverseCard({ universe }: { universe: MyUniverse }) {
+/** A universe as a planet in its own colour, with how many people are there now. The whole card opens it. */
+export function UniverseCard({ universe, people = 0 }: { universe: MyUniverse; people?: number }) {
   return (
     <Link
       href={`/admin/universes/${universe.id}`}
@@ -251,6 +33,12 @@ function UniverseCard({ universe }: { universe: MyUniverse }) {
         <span className={styles.moon} />
       </div>
       <div className={styles.universeTop}>
+        {people > 0 && (
+          <span className={styles.peopleHere}>
+            <i aria-hidden="true" />
+            {people} here
+          </span>
+        )}
         <span className={styles.universePills}>
           <StatusPill status={universe.isPublic ? 'public' : 'private'} />
           {universe.featured && <StatusPill status="featured" />}
@@ -268,107 +56,6 @@ function UniverseCard({ universe }: { universe: MyUniverse }) {
         <ArrowUpRight className={styles.cardArrow} size={22} aria-hidden="true" />
       </div>
     </Link>
-  );
-}
-
-/**
- * Invitations to answer, right here: accepting makes you a member at once; declining asks first. Each invitation
- * opens its own page, with who invited you, the world and the role, when you want more before deciding.
- */
-function Invitations({
-  collection,
-  onAccepted,
-}: {
-  collection: { result: Collection<Invitation>; retry: () => void; update: (change: (items: Invitation[]) => Invitation[]) => void };
-  onAccepted: () => void;
-}) {
-  // One lock per invitation, so answering one never unlocks or blocks another.
-  const [pending, setPending] = useState<ReadonlySet<string>>(new Set());
-  const [confirmingDecline, setConfirmingDecline] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  if (collection.result.status === 'error') return <LoadError label="your invitations" retry={collection.retry} />;
-  if (collection.result.status !== 'ready' || collection.result.items.length === 0) return null;
-
-  async function answer(invitation: Invitation, choice: 'accept' | 'reject') {
-    if (pending.has(invitation.id)) return;
-    setPending((current) => new Set(current).add(invitation.id));
-    setError(null);
-    try {
-      const response = await authenticatedFetch(`/api/memberships/invitations/${invitation.id}/${choice}`, { method: 'POST' });
-      if (!response.ok) throw new Error('answer failed');
-      collection.update((items) => items.filter((item) => item.id !== invitation.id));
-      if (choice === 'accept') onAccepted();
-    } catch {
-      setError(`Couldn’t ${choice === 'accept' ? 'accept' : 'decline'} the invitation to ${invitation.world.name}. Try again.`);
-    } finally {
-      setPending((current) => {
-        const next = new Set(current);
-        next.delete(invitation.id);
-        return next;
-      });
-      setConfirmingDecline((current) => (current === invitation.id ? null : current));
-    }
-  }
-
-  return (
-    <div className={styles.invitations} data-testid="invitations">
-      {collection.result.items.map((invitation) => {
-        const from = invitation.invitedBy?.name || invitation.invitedBy?.email;
-        const busy = pending.has(invitation.id);
-        const confirming = confirmingDecline === invitation.id;
-        return (
-          <EntityRow
-            key={invitation.id}
-            href={`/admin/invitations/${invitation.id}`}
-            kind="world"
-            tone="waiting"
-            title={invitation.world.name}
-            titleAside={<StatusPill status="waiting" />}
-            context={
-              <span className={styles.invitationLine}>
-                <span>
-                  {from ? `${from} invited you` : 'You’re invited'}
-                  {invitation.tags?.length ? ` as ${invitation.tags.join(', ')}` : ''} · <Place kind="universe" label={invitation.world.universe.name} />
-                </span>
-              </span>
-            }
-            trailing={
-              confirming ? (
-                <>
-                  <Button variant="outline" className="h-11 px-4" disabled={busy} onClick={() => setConfirmingDecline(null)}>
-                    Keep
-                  </Button>
-                  <Button variant="destructive" className="h-11 px-4" disabled={busy} onClick={() => void answer(invitation, 'reject')}>
-                    Decline
-                  </Button>
-                </>
-              ) : (
-                <>
-                  <Button
-                    variant="outline"
-                    className="h-11 w-11 p-0"
-                    aria-label={`Decline the invitation to ${invitation.world.name}`}
-                    disabled={busy}
-                    onClick={() => setConfirmingDecline(invitation.id)}
-                  >
-                    <X size={16} aria-hidden="true" />
-                  </Button>
-                  <Button className="h-11 gap-1.5 px-4" disabled={busy} onClick={() => void answer(invitation, 'accept')}>
-                    <Check size={15} aria-hidden="true" />
-                    Accept
-                  </Button>
-                </>
-              )
-            }
-          />
-        );
-      })}
-      {error && (
-        <p className={styles.error} role="alert">
-          {error}
-        </p>
-      )}
-    </div>
   );
 }
 

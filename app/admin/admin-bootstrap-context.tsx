@@ -35,9 +35,20 @@ export type AdminBootstrap = {
 };
 
 const AdminBootstrapContext = createContext<AdminBootstrap | null>(null);
+const BootstrapFreshContext = createContext(true);
 
-export function AdminBootstrapProvider({ value, children }: { value: AdminBootstrap; children: React.ReactNode }) {
-  return <AdminBootstrapContext.Provider value={value}>{children}</AdminBootstrapContext.Provider>;
+/** `fresh` is false while the numbers are from an earlier load and newer ones are on the way. */
+export function AdminBootstrapProvider({ value, fresh = true, children }: { value: AdminBootstrap; fresh?: boolean; children: React.ReactNode }) {
+  return (
+    <AdminBootstrapContext.Provider value={value}>
+      <BootstrapFreshContext.Provider value={fresh}>{children}</BootstrapFreshContext.Provider>
+    </AdminBootstrapContext.Provider>
+  );
+}
+
+/** Whether `mine` and the other numbers are this visit's, not left from an earlier page while new ones load. */
+export function useBootstrapFresh(): boolean {
+  return useContext(BootstrapFreshContext);
 }
 
 export function useAdminBootstrap(): AdminBootstrap {

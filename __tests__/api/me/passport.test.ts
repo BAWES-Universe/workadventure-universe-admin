@@ -29,6 +29,21 @@ describe('/api/me/passport', () => {
     expect(loadPassport).toHaveBeenCalledWith('user-a', { owner: true });
   });
 
+  it('adds the stamps others see on their card: public worlds only, the top three', async () => {
+    const stamp = (worldId: string) => ({ worldId, world: worldId, universe: { id: 'u', name: 'U' }, visits: 1, since: '2026-01-12T00:00:00.000Z' });
+    (loadPassport as jest.Mock).mockImplementation(async (_id: string, { owner }: { owner: boolean }) => ({
+      stamps: owner ? ['hq', 'secret', 'lab', 'cafe', 'shop'].map(stamp) : ['hq', 'lab', 'cafe', 'shop'].map(stamp),
+      worlds: owner ? 5 : 4,
+      universes: 1,
+      since: null,
+      days: 0,
+    }));
+    const body = await (await getPassport(request('passport'))).json();
+    expect(body.passport.stamps).toHaveLength(5);
+    expect(body.card.map((item: { worldId: string }) => item.worldId)).toEqual(['hq', 'lab', 'cafe']);
+    expect(loadPassport).toHaveBeenCalledWith('user-a', { owner: false });
+  });
+
   it('says who they show it to', async () => {
     (loadPassport as jest.Mock).mockResolvedValue({ stamps: [], worlds: 0, universes: 0, since: null, days: 0 });
     (prisma.userPreference.findMany as jest.Mock).mockResolvedValue([{ key: 'people.sharePassport', value: 'friends' }]);
@@ -57,7 +72,13 @@ describe('/api/me/activity', () => {
     const response = await getActivity(request('activity'));
     expect(response.status).toBe(200);
     expect((await response.json()).events).toHaveLength(1);
-    expect(loadActivity).toHaveBeenCalledWith('user-a');
+    expect(loadActivity).toHaveBeenCalledWith('user-a', { all: false });
+  });
+
+  it('gives everything recent to the Your activity page', async () => {
+    (loadActivity as jest.Mock).mockResolvedValue([]);
+    await getActivity(request('activity?all=1'));
+    expect(loadActivity).toHaveBeenCalledWith('user-a', { all: true });
   });
 
   it('wants someone signed in, and the right origin', async () => {

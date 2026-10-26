@@ -21,7 +21,6 @@ jest.mock('@/app/admin/components/profile-card', () => ({
     return null;
   },
 }));
-jest.mock('@/app/admin/components/yours', () => ({ __esModule: true, default: () => null }));
 jest.mock('@/app/admin/components/shell/theme-choice', () => ({ ThemeChoice: () => null }));
 jest.mock('@/app/admin/logout-button', () => ({ __esModule: true, default: () => null }));
 jest.mock('@/app/admin/admin-bootstrap-context', () => ({ useAdminBootstrap: () => ({ user: { id: 'u', uuid: 'u', name: 'Me', email: null, tags: [], isSuperAdmin: false }, mine: null }) }));
