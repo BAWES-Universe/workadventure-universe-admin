@@ -207,6 +207,16 @@ function inThisChat(artifact: { chatKind: string | null; chatRef: string | null 
   return artifact.chatRef !== null && artifact.chatRef === chat.ref && artifact.chatKind === chat.kind;
 }
 
+/**
+ * A bot reads and changes only what it made for the person (or, for a copy the person made on purpose, whatever bot they
+ * bring it to). Another bot in the same chat hears "no such artifact", as for one that is not there.
+ */
+function requireBotMayUse(artifact: ArtifactRow, botId: string, who: Who): void {
+  const made = artifact.makerBotId === botId;
+  const theirCopy = artifact.copiedFromId !== null && isOwner(artifact, who);
+  if (!made && !theirCopy) throw new ArtifactError('not_found', 404, 'No such artifact.');
+}
+
 export interface MakeInput extends BotCall {
   title: string;
   kind: ArtifactKind;
@@ -297,6 +307,7 @@ export async function changeArtifact(input: ChangeInput, ctx: Context = defaultC
   const { hidden } = await passBotGate(input);
   const who = await resolvePerson(input.person, true);
   const artifact = await loadArtifact(input.artifactId, now);
+  requireBotMayUse(artifact, input.botId, who);
   if (!canAskForChange(artifact, who, inThisChat(artifact, input.chat), now)) {
     // Someone who cannot even open it hears the same as for an artifact that is not there
     if (!canOpen(artifact, { ...who, inChat: inThisChat(artifact, input.chat) }, now)) throw new ArtifactError('not_found', 404, 'No such artifact.');
@@ -360,13 +371,14 @@ export async function readArtifact(input: ReadInput, ctx: Context = defaultConte
   const { hidden } = await passBotGate(input);
   const who = await resolvePerson(input.person, true);
   const artifact = await loadArtifact(input.artifactId, now);
+  requireBotMayUse(artifact, input.botId, who);
   requireOpen(artifact, { ...who, inChat: inThisChat(artifact, input.chat) }, now);
   const row = await findVersion(artifact, input.version);
   return { artifact: viewOf(artifact), version: versionView(row, files), content: await files.get(row.fileKey), hidden };
 }
 
 /**
- * The artifacts made in this chat that the person may open, the most recently changed first: how a bot finds the one
+ * The artifacts this bot made in this chat that the person may open, the most recently changed first: how a bot finds the one
  * "make the buttons bigger" is about, in a later message or after a restart.
  */
 export async function listArtifactsInChat(input: BotCall, ctx: Context = defaultContext()): Promise<{ artifacts: ArtifactView[]; hidden: boolean }> {
@@ -375,7 +387,7 @@ export async function listArtifactsInChat(input: BotCall, ctx: Context = default
   const who = await resolvePerson(input.person, true);
   pruneSometimes(ctx);
   const rows = await prisma.artifact.findMany({
-    where: { chatKind: input.chat.kind, chatRef: input.chat.ref },
+    where: { chatKind: input.chat.kind, chatRef: input.chat.ref, makerBotId: input.botId },
     include: ARTIFACT_INCLUDE,
     orderBy: { updatedAt: 'desc' },
     take: LIST_IN_CHAT_LIMIT,
@@ -396,6 +408,18 @@ async function findVersion(artifact: ArtifactRow, number?: number | null) {
 export interface Viewer {
   person: Person;
   inChat: boolean;
+  /** The chat the game vouches for; `inChat` counts only when it is the chat the artifact was made in. */
+  chat?: Chat;
+}
+
+/** In the artifact's own chat: the chat the game named is the one it was made in, and the person is in it. Otherwise no. */
+function viewerIsInChat(artifact: { chatKind: string | null; chatRef: string | null }, viewer: Viewer): boolean {
+  return viewer.inChat && viewer.chat !== undefined && inThisChat(artifact, viewer.chat);
+}
+
+/** The person looking at this artifact: their account, and whether they are in the chat it was made in. */
+async function whoIsLooking(artifact: ArtifactRow, viewer: Viewer): Promise<Who> {
+  return resolvePerson(viewer.person, viewerIsInChat(artifact, viewer));
 }
 
 export interface Opened {
@@ -408,8 +432,8 @@ export interface Opened {
 export async function openArtifact(id: string, viewer: Viewer, version?: number | null, ctx: Context = defaultContext()): Promise<Opened> {
   const { files, now } = ctx;
   pruneSometimes(ctx);
-  const who = await resolvePerson(viewer.person, viewer.inChat);
   const artifact = await loadArtifact(id, now);
+  const who = await whoIsLooking(artifact, viewer);
   requireOpen(artifact, who, now);
   const row = await findVersion(artifact, version);
   return { artifact: viewOf(artifact), version: versionView(row, files), you: rightsOf(artifact, who, now) };
@@ -417,8 +441,8 @@ export async function openArtifact(id: string, viewer: Viewer, version?: number 
 
 export async function listVersions(id: string, viewer: Viewer, ctx: Context = defaultContext()): Promise<{ versions: VersionView[] }> {
   const { files, now } = ctx;
-  const who = await resolvePerson(viewer.person, viewer.inChat);
   const artifact = await loadArtifact(id, now);
+  const who = await whoIsLooking(artifact, viewer);
   requireOpen(artifact, who, now);
   const rows = await prisma.artifactVersion.findMany({ where: { artifactId: artifact.id }, orderBy: { number: 'desc' } });
   return { versions: rows.map((row) => versionView(row, files)) };
@@ -427,8 +451,8 @@ export async function listVersions(id: string, viewer: Viewer, ctx: Context = de
 /** The code of one version, for the Code view. */
 export async function readVersionCode(id: string, number: number, viewer: Viewer, ctx: Context = defaultContext()): Promise<{ version: VersionView; content: string }> {
   const { files, now } = ctx;
-  const who = await resolvePerson(viewer.person, viewer.inChat);
   const artifact = await loadArtifact(id, now);
+  const who = await whoIsLooking(artifact, viewer);
   requireOpen(artifact, who, now);
   const row = await findVersion(artifact, number);
   return { version: versionView(row, files), content: await files.get(row.fileKey) };
@@ -441,8 +465,8 @@ export interface SharingInput {
 
 export async function setSharing(id: string, viewer: Viewer, input: SharingInput, ctx: Context = defaultContext()): Promise<{ artifact: ArtifactView }> {
   const { now } = ctx;
-  const who = await resolvePerson(viewer.person, viewer.inChat);
   const artifact = await loadArtifact(id, now);
+  const who = await whoIsLooking(artifact, viewer);
   requireOpen(artifact, who, now);
   requireOwner(artifact, who);
   const data: { openScope?: OpenScope; changeScope?: ChangeScope } = {};
@@ -462,8 +486,8 @@ export async function setSharing(id: string, viewer: Viewer, input: SharingInput
 /** Restore makes a new version out of an older one; nothing is deleted, so restoring can itself be undone. */
 export async function restoreVersion(id: string, number: number, viewer: Viewer, ctx: Context = defaultContext()): Promise<Opened> {
   const { files, now } = ctx;
-  const who = await resolvePerson(viewer.person, viewer.inChat);
   const artifact = await loadArtifact(id, now);
+  const who = await whoIsLooking(artifact, viewer);
   requireOpen(artifact, who, now);
   requireOwner(artifact, who);
   if (artifact.latestVersion >= MAX_VERSIONS) throw new ArtifactError('too_many_versions', 409, `An artifact keeps up to ${MAX_VERSIONS} versions.`);
@@ -489,9 +513,10 @@ export async function restoreVersion(id: string, number: number, viewer: Viewer,
 /** Make a copy: the viewer's own artifact, from the version they pick (the latest by default), in no chat. */
 export async function copyArtifact(id: string, viewer: Viewer, version?: number | null, ctx: Context = defaultContext()): Promise<Opened> {
   const { files, now } = ctx;
-  const who = await resolvePerson(viewer.person, viewer.inChat);
-  if (!who.userId) throw new ArtifactError('sign_in_required', 403, 'Sign in to make a copy.');
+  // Signing in comes first, so the answer for a guest does not tell whether the artifact is there
+  if (!(await resolvePerson(viewer.person, false)).userId) throw new ArtifactError('sign_in_required', 403, 'Sign in to make a copy.');
   const source = await loadArtifact(id, now);
+  const who = await whoIsLooking(source, viewer);
   requireOpen(source, who, now);
   const row = await findVersion(source, version);
   const kind = source.kind as ArtifactKind;

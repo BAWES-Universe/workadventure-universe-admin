@@ -42,7 +42,7 @@ change made on the same version at the same moment.
 
 ## Game routes (`ADMIN_API_TOKEN`)
 
-Bodies carry `viewer: { person, inChat }`; `inChat` says the person is in the artifact's chat right now (the game vouches).
+Bodies carry `viewer: { person, inChat, chat }`: `inChat` says the person is in `chat` right now (the game vouches), and counts only when `chat` is the chat the artifact was made in. A bot reads, changes and lists only what it made (a copy the owner made goes to any bot they bring it to).
 
 | Route | Body | Answer |
 | --- | --- | --- |
