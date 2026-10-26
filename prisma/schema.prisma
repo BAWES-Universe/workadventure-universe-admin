@@ -55,6 +55,7 @@ model User {
   notices          UserNotice[]
   pushDevices      PushDevice[]
   pushActivity     PushActivity?
+  nearbySharedItems NearbySharedItem[]
 
   @@map("users")
 }
@@ -73,6 +74,35 @@ model UserPreference {
 
   @@unique([userId, key])
   @@map("user_preferences")
+}
+
+// An image, video, link or file shared in a nearby chat this person was in (game #1424). The nearby chat itself keeps
+// nothing once the tab closes: this list is what the person finds in that chat's "Media, links and files" afterwards.
+// `itemKey` is the game's own key for the item, so the same item seen twice is kept once. A file from the game's
+// uploader is kept by its file id (its link may expire); anything else by its link.
+model NearbySharedItem {
+  id         String   @id @default(uuid())
+  userId     String   @map("user_id")
+  itemKey    String   @map("item_key") @db.VarChar(300)
+  // "media" (an image or video), "link" or "file"
+  kind       String   @db.VarChar(10)
+  name       String   @db.VarChar(300)
+  link       String?  @db.VarChar(2000)
+  fileId     String?  @map("file_id") @db.VarChar(200)
+  mimeType   String?  @map("mime_type") @db.VarChar(150)
+  size       Int?
+  isVideo    Boolean  @default(false) @map("is_video")
+  senderName String   @map("sender_name") @db.VarChar(100)
+  // Sent by this person
+  mine       Boolean  @default(false)
+  sentAt     DateTime @map("sent_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, itemKey])
+  @@index([userId, sentAt])
+  @@map("nearby_shared_items")
 }
 
 // Something Orbit tells one person once, on Orbit home and in the attention count, until they dismiss it (#374: a key
