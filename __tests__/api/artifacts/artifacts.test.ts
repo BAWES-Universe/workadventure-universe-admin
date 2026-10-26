@@ -522,6 +522,28 @@ describe('artifacts', () => {
         expect((await call(change, { ...friend, content: '<p>x</p>' }, { id })).status).toBe(200);
       });
 
+      it("lets the owner's other bots reach it from their own chat (a direct message with another bot), by its id", async () => {
+        const made = await makeApp();
+        const id = made.artifact.id;
+        const inDm = { botId: 'bot2', person: person('owner'), chat: DM };
+        expect((await call(read, inDm, { id })).status).toBe(200);
+        expect((await call(change, { ...inDm, content: '<p>x</p>' }, { id })).status).toBe(200);
+        // It was made in the bubble, so a direct message does not list it
+        expect((await call(inChat, inDm)).body.artifacts).toEqual([]);
+      });
+
+      it("lets someone's bot read an artifact shared by link from any chat, but not change it", async () => {
+        const made = await makeApp();
+        const id = made.artifact.id;
+        const elsewhere = { botId: 'bot2', person: person('stranger'), chat: OTHER_BUBBLE };
+        expect((await call(read, elsewhere, { id })).status).toBe(404);
+        await sharing(id, { openScope: 'link', changeScope: 'openers' });
+        expect((await call(read, elsewhere, { id })).status).toBe(200);
+        // "People who can open it" may ask for changes only inside the chat it was made in
+        expect((await call(change, { ...elsewhere, content: '<p>x</p>' }, { id })).status).toBe(403);
+        expect(db.versions.filter((v) => v.artifactId === id)).toHaveLength(1);
+      });
+
       it("does not let a bot reach another person's artifact from a chat that is not its own", async () => {
         const made = await makeApp();
         const id = made.artifact.id;
