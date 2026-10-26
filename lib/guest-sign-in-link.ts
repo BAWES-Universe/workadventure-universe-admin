@@ -37,34 +37,37 @@ export async function linkGuestVisits(guestUuid: string, account: LinkedAccount)
       select: { id: true, userUuid: true, userId: true, userName: true, userEmail: true, isGuest: true },
     });
     if (visits.length === 0) return 0;
-    // Each visit is claimed first and logged only when this sign-in is the one that moved it, so two sign-ins sending the
-    // same guest id at once never log a move that did not happen.
-    let moved = 0;
-    for (const visit of visits) {
-      const claimed = await tx.roomAccess.updateMany({
-        where: { id: visit.id, userId: null },
-        data: {
-          userId: account.id,
-          userUuid: account.uuid,
-          isGuest: false,
-          ...(account.name ? { userName: account.name } : {}),
-          ...(account.email ? { userEmail: account.email } : {}),
-        },
-      });
-      if (claimed.count === 0) continue;
-      await tx.roomAccessRelink.create({
-        data: {
-          roomAccessId: visit.id,
-          userId: account.id,
-          oldUserUuid: visit.userUuid,
-          oldUserId: visit.userId,
-          oldUserName: visit.userName,
-          oldUserEmail: visit.userEmail,
-          oldIsGuest: visit.isGuest,
-        },
-      });
-      moved += claimed.count;
+    // The visits are claimed first, in one statement, and only those this sign-in moved are logged, so two sign-ins sending
+    // the same guest id at once never log a move that did not happen. A fixed number of queries, however many visits.
+    const ids = visits.map((visit) => visit.id);
+    const claimed = await tx.roomAccess.updateMany({
+      where: { id: { in: ids }, userId: null },
+      data: {
+        userId: account.id,
+        userUuid: account.uuid,
+        isGuest: false,
+        ...(account.name ? { userName: account.name } : {}),
+        ...(account.email ? { userEmail: account.email } : {}),
+      },
+    });
+    if (claimed.count === 0) return 0;
+    let moved = visits;
+    if (claimed.count < visits.length) {
+      // Another sign-in got some first: the ones that are now this account's are the ones this one moved.
+      const mine = new Set((await tx.roomAccess.findMany({ where: { id: { in: ids }, userId: account.id }, select: { id: true } })).map((visit) => visit.id));
+      moved = visits.filter((visit) => mine.has(visit.id));
     }
-    return moved;
+    await tx.roomAccessRelink.createMany({
+      data: moved.map((visit) => ({
+        roomAccessId: visit.id,
+        userId: account.id,
+        oldUserUuid: visit.userUuid,
+        oldUserId: visit.userId,
+        oldUserName: visit.userName,
+        oldUserEmail: visit.userEmail,
+        oldIsGuest: visit.isGuest,
+      })),
+    });
+    return claimed.count;
   });
 }

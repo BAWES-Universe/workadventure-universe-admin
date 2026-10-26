@@ -16,7 +16,7 @@ jest.mock('@/lib/db', () => {
     visitCard: { findUnique: jest.fn().mockResolvedValue(null) },
     bot: { findFirst: jest.fn().mockResolvedValue(null) },
     roomAccess: { create: jest.fn().mockResolvedValue({}), findMany: jest.fn(), updateMany: jest.fn() },
-    roomAccessRelink: { create: jest.fn() },
+    roomAccessRelink: { createMany: jest.fn() },
   };
   prisma.$transaction = jest.fn((callback: (tx: unknown) => unknown) => callback(prisma));
   return { prisma };
@@ -64,7 +64,7 @@ beforeEach(() => {
   db.user.update.mockImplementation(({ data }) => Promise.resolve({ ...ACCOUNT, ...data }));
   db.user.findUnique.mockResolvedValue(null);
   db.roomAccess.findMany.mockResolvedValue(OLD_VISITS);
-  db.roomAccess.updateMany.mockResolvedValue({ count: 1 });
+  db.roomAccess.updateMany.mockResolvedValue({ count: 2 });
 });
 
 describe('GET /api/room/access, a guest signing in (#630)', () => {
@@ -72,15 +72,17 @@ describe('GET /api/room/access, a guest signing in (#630)', () => {
     const body = await enter(`&previousGuestUuid=${GUEST}`);
     expect(body.status).toBe('ok');
     expect(db.roomAccess.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: { userUuid: GUEST, userId: null } }));
-    expect(db.roomAccessRelink.create.mock.calls).toEqual([
-      [{ data: { roomAccessId: 'v1', userId: 'u1', oldUserUuid: GUEST, oldUserId: null, oldUserName: 'el-j', oldUserEmail: null, oldIsGuest: true } }],
-      [{ data: { roomAccessId: 'v2', userId: 'u1', oldUserUuid: GUEST, oldUserId: null, oldUserName: null, oldUserEmail: null, oldIsGuest: true } }],
-    ]);
-    const claim = (id: string) => ({
-      where: { id, userId: null },
+    expect(db.roomAccessRelink.createMany).toHaveBeenCalledWith({
+      data: [
+        { roomAccessId: 'v1', userId: 'u1', oldUserUuid: GUEST, oldUserId: null, oldUserName: 'el-j', oldUserEmail: null, oldIsGuest: true },
+        { roomAccessId: 'v2', userId: 'u1', oldUserUuid: GUEST, oldUserId: null, oldUserName: null, oldUserEmail: null, oldIsGuest: true },
+      ],
+    });
+    expect(db.roomAccess.updateMany).toHaveBeenCalledTimes(1);
+    expect(db.roomAccess.updateMany).toHaveBeenCalledWith({
+      where: { id: { in: ['v1', 'v2'] }, userId: null },
       data: { userId: 'u1', userUuid: 'elj-uuid', isGuest: false, userName: 'el-j', userEmail: 'elj@example.test' },
     });
-    expect(db.roomAccess.updateMany.mock.calls).toEqual([[claim('v1')], [claim('v2')]]);
     // Nothing is marked signed in, so Visitors lists them as Guest inside the card
     expect(JSON.stringify(db.roomAccess.updateMany.mock.calls)).not.toContain('isAuthenticated');
   });
@@ -89,15 +91,22 @@ describe('GET /api/room/access, a guest signing in (#630)', () => {
     db.roomAccess.findMany.mockResolvedValue([]);
     const body = await enter(`&previousGuestUuid=${GUEST}`);
     expect(body.status).toBe('ok');
-    expect(db.roomAccessRelink.create).not.toHaveBeenCalled();
+    expect(db.roomAccessRelink.createMany).not.toHaveBeenCalled();
     expect(db.roomAccess.updateMany).not.toHaveBeenCalled();
   });
 
   it('logs only the visits this sign-in moved when another sign-in with the same guest id got some of them first', async () => {
-    db.roomAccess.updateMany.mockResolvedValueOnce({ count: 0 }).mockResolvedValueOnce({ count: 1 });
+    db.roomAccess.findMany.mockResolvedValueOnce(OLD_VISITS).mockResolvedValueOnce([{ id: 'v2' }]);
+    db.roomAccess.updateMany.mockResolvedValue({ count: 1 });
     await enter(`&previousGuestUuid=${GUEST}`);
-    expect(db.roomAccessRelink.create).toHaveBeenCalledTimes(1);
-    expect(db.roomAccessRelink.create).toHaveBeenCalledWith({ data: expect.objectContaining({ roomAccessId: 'v2' }) });
+    expect(db.roomAccessRelink.createMany).toHaveBeenCalledTimes(1);
+    expect(db.roomAccessRelink.createMany).toHaveBeenCalledWith({ data: [expect.objectContaining({ roomAccessId: 'v2' })] });
+  });
+
+  it('logs nothing when another sign-in with the same guest id got every visit first', async () => {
+    db.roomAccess.updateMany.mockResolvedValue({ count: 0 });
+    await enter(`&previousGuestUuid=${GUEST}`);
+    expect(db.roomAccessRelink.createMany).not.toHaveBeenCalled();
   });
 
   it("never hands over an id that is some account's own", async () => {
