@@ -802,10 +802,26 @@ model BotsAiUsage {
   tokensUsed      Int      @default(0) @map("tokens_used")
   apiCalls        Int      @default(1) @map("api_calls")
   durationSeconds Int?     @map("duration_seconds")
+  // The old estimate (4 decimals, a flat rate on most models). Rows made before the price facts below keep it as it was; new rows leave it empty.
   cost            Decimal? @db.Decimal(10, 4)
   latency         Int?
   error           Boolean  @default(false)
   timestamp       DateTime @default(now())
+  // What a reply cost and how that was worked out (game #1173). Empty on rows from before it, which are the "old estimates".
+  // Token counts never overlap: inputTokens is input that was neither read from nor written to a cache, outputTokens is
+  // answer text without the reasoning part, so the five add up to everything the provider billed.
+  inputTokens      Int?    @map("input_tokens")
+  cachedTokens     Int?    @map("cached_tokens")
+  cacheWriteTokens Int?    @map("cache_write_tokens")
+  outputTokens     Int?    @map("output_tokens")
+  reasoningTokens  Int?    @map("reasoning_tokens")
+  // Millionths of a dollar. Empty when the price is unknown (costBasis 'unknown'); 0 is a real zero (an own computer).
+  costMicros       Int?    @map("cost_micros")
+  // priced (from the price list), provider (the provider said what it cost), override (a super admin's own rate), own_computer, unknown
+  costBasis        String? @map("cost_basis") @db.VarChar(20)
+  // Where the prices came from (models.dev, openrouter, ...) and which version of that list, so a cost can be checked by hand later
+  priceSource      String? @map("price_source") @db.VarChar(60)
+  priceVersion     String? @map("price_version") @db.VarChar(60)
   // Who talked to the bot (#374): the person's id as the bot server knows it; null when it was not told or for older rows
   talkedUserId    String?  @map("talked_user_id") @db.VarChar(255)
   // Whose key paid, when it was a personal key; null for the server's own providers. Set by Orbit, never taken from a request.

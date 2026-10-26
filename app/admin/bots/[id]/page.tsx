@@ -37,6 +37,7 @@ import {
 import { Pager } from '../../discover/discover-ui';
 import { DateFilter, Detail, FilterRow, Panel, Pill } from '../bots-ui';
 import { useReplacePage } from '@/app/admin/orbit-frame-context';
+import { formatUsd } from '@/lib/ai-usage-cost';
 
 interface Bot {
   id: string;
@@ -84,6 +85,9 @@ interface UsageEntry {
   apiCalls: number;
   durationSeconds: number | null;
   cost: number | null;
+  /** Millionths of a dollar. Empty on a row from before real prices were kept (see `cost`) and on a call with no known price. */
+  costMicros: number | null;
+  costBasis: string | null;
   latency: number | null;
   error: boolean;
   timestamp: string;
@@ -98,6 +102,8 @@ interface UsageStats {
   totalCalls: number;
   totalTokens: number;
   totalCost: number;
+  oldEstimateCost: number;
+  unknownCalls: number;
   totalDuration: number;
   errorCount: number;
   byProvider: Record<string, {
@@ -107,6 +113,8 @@ interface UsageStats {
     calls: number;
     tokens: number;
     cost: number;
+    oldEstimateCost: number;
+    unknownCalls: number;
     duration: number;
     errors: number;
   }>;
@@ -512,11 +520,11 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
     return new Intl.NumberFormat().format(num);
   }
 
-  function formatCurrency(amount: number): string {
-    return new Intl.NumberFormat('en-US', {
-      style: 'currency',
-      currency: 'USD',
-    }).format(amount);
+  /** One reply's cost: its price, "No price" when nobody knows it, or the old flat-rate guess marked as one. */
+  function entryCost(entry: UsageEntry): string {
+    if (entry.costMicros !== null) return formatUsd(entry.costMicros / 1e6);
+    if (entry.costBasis === 'unknown') return 'No price';
+    return entry.cost ? `${formatUsd(entry.cost)} old estimate` : 'N/A';
   }
 
   function formatDuration(seconds: number): string {
@@ -738,7 +746,9 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
             <Figures>
               <Figure value={stats.totalCalls} label="API calls" />
               <Figure value={stats.totalTokens} label="tokens" />
-              <Figure value={formatCurrency(stats.totalCost)} label="cost" />
+              <Figure value={formatUsd(stats.totalCost)} label="cost" />
+              {stats.oldEstimateCost > 0 && <Figure value={formatUsd(stats.oldEstimateCost)} label="old estimate" />}
+              {stats.unknownCalls > 0 && <Figure value={stats.unknownCalls} label="calls with no price" />}
               <Figure value={formatDuration(stats.totalDuration)} label="duration" />
               <Figure
                 value={stats.errorCount}
@@ -767,7 +777,12 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
                         ]}
                       />
                     }
-                    aside={<strong className="text-sm">{formatCurrency(provider.cost)}</strong>}
+                    aside={
+                      <span className="grid justify-items-end">
+                        <strong className="text-sm">{formatUsd(provider.cost)}</strong>
+                        {provider.oldEstimateCost > 0 && <span className="text-xs text-muted-foreground">{formatUsd(provider.oldEstimateCost)} old estimate</span>}
+                      </span>
+                    }
                   />
                 ))}
               </div>
@@ -808,7 +823,7 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
                             </TableCell>
                             <TableCell>{formatNumber(entry.apiCalls)}</TableCell>
                             <TableCell>{formatNumber(entry.tokensUsed)}</TableCell>
-                            <TableCell>{entry.cost ? formatCurrency(entry.cost) : 'N/A'}</TableCell>
+                            <TableCell>{entryCost(entry)}</TableCell>
                             <TableCell>{entry.durationSeconds ? formatDuration(entry.durationSeconds) : 'N/A'}</TableCell>
                             <TableCell>{entry.latency ? `${entry.latency}ms` : 'N/A'}</TableCell>
                             <TableCell>

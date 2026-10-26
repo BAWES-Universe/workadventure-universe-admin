@@ -44,6 +44,7 @@ type ProviderStatRow = {
     apiCalls: number | null;
     tokensUsed: number | null;
     cost: number | null;
+    costMicros: number | null;
     durationSeconds: number | null;
   };
 };
@@ -126,6 +127,9 @@ export async function GET(
     let errorEntries: { id: number }[];
     let providerStats: ProviderStatRow[];
     let totalCount: number;
+    // Calls that could not be priced (game #1173), in all and by provider
+    let unknownTotal = 0;
+    let unknownByProvider = new Map<string, number>();
 
     try {
       [usageStats, errorEntries, totalCount] = await Promise.all([
@@ -136,6 +140,7 @@ export async function GET(
             apiCalls: true,
             tokensUsed: true,
             cost: true,
+            costMicros: true,
             durationSeconds: true,
           },
         }),
@@ -155,6 +160,14 @@ export async function GET(
         }),
       ]);
 
+      const unknownRows = await prisma.botsAiUsage.groupBy({
+        by: ['providerId'],
+        where: { ...usageWhere, costBasis: 'unknown' },
+        _sum: { apiCalls: true },
+      });
+      unknownByProvider = new Map(unknownRows.map((row) => [row.providerId, Number(row._sum?.apiCalls || 0)]));
+      unknownTotal = [...unknownByProvider.values()].reduce((sum, calls) => sum + calls, 0);
+
       // Group by provider for breakdown (can fail if no records, so handle separately)
       try {
         const rawProviderStats = await prisma.botsAiUsage.groupBy({
@@ -164,6 +177,7 @@ export async function GET(
             apiCalls: true,
             tokensUsed: true,
             cost: true,
+            costMicros: true,
             durationSeconds: true,
           },
         });
@@ -176,7 +190,7 @@ export async function GET(
       // If aggregation fails, use defaults (only _sum is used below)
       console.error('Error in usage aggregation:', aggError);
       usageStats = {
-        _sum: { apiCalls: null, tokensUsed: null, cost: null, durationSeconds: null },
+        _sum: { apiCalls: null, tokensUsed: null, cost: null, costMicros: null, durationSeconds: null },
         _count: { _all: 0 },
         _avg: { apiCalls: null, tokensUsed: null, cost: null, durationSeconds: null, latency: null },
         _min: { apiCalls: null, tokensUsed: null, cost: null, durationSeconds: null, latency: null },
@@ -191,7 +205,10 @@ export async function GET(
     const stats = {
       totalCalls: Number(usageStats._sum?.apiCalls || 0),
       totalTokens: Number(usageStats._sum?.tokensUsed || 0),
-      totalCost: usageStats._sum?.cost ? Number(usageStats._sum.cost) : 0,
+      // Real prices only. A row has either a price or an old estimate, never both, so the two sums never overlap (game #1173)
+      totalCost: Number(usageStats._sum?.costMicros || 0) / 1e6,
+      oldEstimateCost: usageStats._sum?.cost ? Number(usageStats._sum.cost) : 0,
+      unknownCalls: unknownTotal,
       totalDuration: Number(usageStats._sum?.durationSeconds || 0),
       errorCount: errorEntries.length,
       byProvider: {} as Record<string, any>,
@@ -220,7 +237,9 @@ export async function GET(
             providerType: provider?.type || 'unknown',
             calls: Number(providerStat._sum?.apiCalls || 0),
             tokens: Number(providerStat._sum?.tokensUsed || 0),
-            cost: providerStat._sum?.cost ? Number(providerStat._sum.cost) : 0,
+            cost: Number(providerStat._sum?.costMicros || 0) / 1e6,
+            oldEstimateCost: providerStat._sum?.cost ? Number(providerStat._sum.cost) : 0,
+            unknownCalls: unknownByProvider.get(providerStat.providerId) ?? 0,
             duration: Number(providerStat._sum?.durationSeconds || 0),
             errors: providerErrors,
           };
@@ -263,6 +282,8 @@ export async function GET(
         totalCalls: 0,
         totalTokens: 0,
         totalCost: 0,
+        oldEstimateCost: 0,
+        unknownCalls: 0,
         totalDuration: 0,
         errorCount: 0,
         byProvider: {},

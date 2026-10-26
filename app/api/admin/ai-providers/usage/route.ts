@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
+import { addCostRow, emptyCostTotals } from '@/lib/ai-usage-cost';
 
 /**
  * GET /api/admin/ai-providers/usage
@@ -102,12 +103,13 @@ export async function GET(request: NextRequest) {
       byBot: {} as Record<string, any>,
     };
 
+    // Real prices, old estimates and calls with no price stay apart (game #1173): a flat-rate guess added to a real price tells nothing
+    const totals = emptyCostTotals();
+
     usage.forEach((entry) => {
       stats.totalCalls += entry.apiCalls;
       stats.totalTokens += entry.tokensUsed;
-      if (entry.cost) {
-        stats.totalCost += Number(entry.cost);
-      }
+      addCostRow(totals, entry);
       if (entry.durationSeconds) {
         stats.totalDuration += entry.durationSeconds;
       }
@@ -123,16 +125,14 @@ export async function GET(request: NextRequest) {
           providerType: entry.provider.type,
           calls: 0,
           tokens: 0,
-          cost: 0,
+          ...emptyCostTotals(),
           duration: 0,
           errors: 0,
         };
       }
       stats.byProvider[entry.providerId].calls += entry.apiCalls;
       stats.byProvider[entry.providerId].tokens += entry.tokensUsed;
-      if (entry.cost) {
-        stats.byProvider[entry.providerId].cost += Number(entry.cost);
-      }
+      addCostRow(stats.byProvider[entry.providerId], entry);
       if (entry.durationSeconds) {
         stats.byProvider[entry.providerId].duration += entry.durationSeconds;
       }
@@ -147,16 +147,14 @@ export async function GET(request: NextRequest) {
           botName: botNameMap.get(entry.botId) || entry.botId, // Fallback to botId if not found
           calls: 0,
           tokens: 0,
-          cost: 0,
+          ...emptyCostTotals(),
           duration: 0,
           errors: 0,
         };
       }
       stats.byBot[entry.botId].calls += entry.apiCalls;
       stats.byBot[entry.botId].tokens += entry.tokensUsed;
-      if (entry.cost) {
-        stats.byBot[entry.botId].cost += Number(entry.cost);
-      }
+      addCostRow(stats.byBot[entry.botId], entry);
       if (entry.durationSeconds) {
         stats.byBot[entry.botId].duration += entry.durationSeconds;
       }
@@ -165,9 +163,11 @@ export async function GET(request: NextRequest) {
       }
     });
 
+    stats.totalCost = totals.cost;
+
     return NextResponse.json({
       usage,
-      stats,
+      stats: { ...stats, oldEstimateCost: totals.oldEstimateCost, unknownCalls: totals.unknownCalls },
       totalEntries: usage.length,
     });
   } catch (error) {
