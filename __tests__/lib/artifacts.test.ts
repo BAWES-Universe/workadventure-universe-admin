@@ -90,6 +90,17 @@ describe('cleanLine', () => {
     expect(cleanLine('abcdef', 3)).toBe('abc');
   });
 
+  it('keeps no control characters, which the database would turn down', () => {
+    expect(cleanLine('Quests\u0000board\u0007', 50)).toBe('Quests board');
+    expect(cleanLine('\u0000\u0001', 10)).toBeNull();
+  });
+
+  it('never leaves half an emoji, from a cut or from the start', () => {
+    expect(cleanLine('ab😀cd', 3)).toBe('ab');
+    expect(cleanLine('ab😀cd', 4)).toBe('ab😀');
+    expect(cleanLine('a\uD83Db\uDE00c', 10)).toBe('abc');
+  });
+
   it('gives null when nothing is left', () => {
     expect(cleanLine('   ', 10)).toBeNull();
     expect(cleanLine(null, 10)).toBeNull();
