@@ -219,6 +219,21 @@ export interface Made {
   hidden: boolean;
 }
 
+/**
+ * Stores the file, then runs the database write; the file goes again only if that write fails. Anything after the write
+ * (reading it back, clearing old artifacts) must stay outside, or an error there would delete the file of a version
+ * that is already committed.
+ */
+async function storing<T>(files: ArtifactFiles, fileKey: string, kind: ArtifactKind, content: string, write: () => Promise<T>): Promise<T> {
+  await files.put(fileKey, content, fileTypeOf(kind).contentType);
+  try {
+    return await write();
+  } catch (error) {
+    await files.remove([fileKey]).catch(() => undefined);
+    throw error;
+  }
+}
+
 export async function makeArtifact(input: MakeInput, ctx: Context = defaultContext()): Promise<Made> {
   const { files, now } = ctx;
   const title = cleanLine(input.title, MAX_TITLE_LENGTH);
@@ -230,9 +245,8 @@ export async function makeArtifact(input: MakeInput, ctx: Context = defaultConte
 
   const id = randomUUID();
   const fileKey = newFileKey(id, 1, input.kind);
-  await files.put(fileKey, input.content, fileTypeOf(input.kind).contentType);
-  try {
-    const artifact = await prisma.artifact.create({
+  const artifact = await storing(files, fileKey, input.kind, input.content, () =>
+    prisma.artifact.create({
       data: {
         id,
         ownerId: who.userId,
@@ -257,13 +271,10 @@ export async function makeArtifact(input: MakeInput, ctx: Context = defaultConte
         },
       },
       include: { ...ARTIFACT_INCLUDE, versions: true },
-    });
-    await pruneExpired(ctx).catch((error) => console.error('Could not clear expired artifacts:', error));
-    return { artifact: viewOf(artifact), version: versionView(artifact.versions[0], files), hidden };
-  } catch (error) {
-    await files.remove([fileKey]).catch(() => undefined);
-    throw error;
-  }
+    }),
+  );
+  await pruneExpired(ctx).catch((error) => console.error('Could not clear expired artifacts:', error));
+  return { artifact: viewOf(artifact), version: versionView(artifact.versions[0], files), hidden };
 }
 
 export interface ChangeInput extends BotCall {
@@ -303,10 +314,9 @@ export async function changeArtifact(input: ChangeInput, ctx: Context = defaultC
 
   const next = artifact.latestVersion + 1;
   const fileKey = newFileKey(artifact.id, next, kind);
-  await files.put(fileKey, content, fileTypeOf(kind).contentType);
-  try {
-    const title = cleanLine(input.title, MAX_TITLE_LENGTH);
-    const row = await prisma.$transaction(async (tx) => {
+  const title = cleanLine(input.title, MAX_TITLE_LENGTH);
+  const row = await storing(files, fileKey, kind, content, () =>
+    prisma.$transaction(async (tx) => {
       // The one who gets here first moves the version on; anyone who read the same version before fails here
       const moved = await tx.artifact.updateMany({
         where: { id: artifact.id, latestVersion: artifact.latestVersion },
@@ -328,13 +338,10 @@ export async function changeArtifact(input: ChangeInput, ctx: Context = defaultC
           sizeBytes: byteLength(content),
         },
       });
-    });
-    const fresh = await loadArtifact(artifact.id, now);
-    return { artifact: viewOf(fresh), version: versionView(row, files), hidden };
-  } catch (error) {
-    await files.remove([fileKey]).catch(() => undefined);
-    throw error;
-  }
+    }),
+  );
+  const fresh = await loadArtifact(artifact.id, now);
+  return { artifact: viewOf(fresh), version: versionView(row, files), hidden };
 }
 
 export interface ReadInput extends BotCall {
@@ -365,6 +372,7 @@ export async function listArtifactsInChat(input: BotCall, ctx: Context = default
   const { now } = ctx;
   const { hidden } = await passBotGate(input);
   const who = await resolvePerson(input.person, true);
+  pruneSometimes(ctx);
   const rows = await prisma.artifact.findMany({
     where: { chatKind: input.chat.kind, chatRef: input.chat.ref },
     include: ARTIFACT_INCLUDE,
@@ -398,6 +406,7 @@ export interface Opened {
 
 export async function openArtifact(id: string, viewer: Viewer, version?: number | null, ctx: Context = defaultContext()): Promise<Opened> {
   const { files, now } = ctx;
+  pruneSometimes(ctx);
   const who = await resolvePerson(viewer.person, viewer.inChat);
   const artifact = await loadArtifact(id, now);
   requireOpen(artifact, who, now);
@@ -463,21 +472,17 @@ export async function restoreVersion(id: string, number: number, viewer: Viewer,
   const content = await files.get(source.fileKey);
   const next = artifact.latestVersion + 1;
   const fileKey = newFileKey(artifact.id, next, kind);
-  await files.put(fileKey, content, fileTypeOf(kind).contentType);
-  try {
-    const row = await prisma.$transaction(async (tx) => {
+  const row = await storing(files, fileKey, kind, content, () =>
+    prisma.$transaction(async (tx) => {
       const moved = await tx.artifact.updateMany({ where: { id: artifact.id, latestVersion: artifact.latestVersion }, data: { latestVersion: next } });
       if (moved.count !== 1) throw new ArtifactError('stale_version', 409, 'It changed at the same moment; try again.');
       return tx.artifactVersion.create({
         data: { artifactId: artifact.id, number: next, summary: `Restored version ${source.number}`, askedById: who.userId, askedByName: who.name, fileKey, sizeBytes: source.sizeBytes },
       });
-    });
-    const fresh = await loadArtifact(artifact.id, now);
-    return { artifact: viewOf(fresh), version: versionView(row, files), you: rightsOf(fresh, who, now) };
-  } catch (error) {
-    await files.remove([fileKey]).catch(() => undefined);
-    throw error;
-  }
+    }),
+  );
+  const fresh = await loadArtifact(artifact.id, now);
+  return { artifact: viewOf(fresh), version: versionView(row, files), you: rightsOf(fresh, who, now) };
 }
 
 /** Make a copy: the viewer's own artifact, from the version they pick (the latest by default), in no chat. */
@@ -493,9 +498,8 @@ export async function copyArtifact(id: string, viewer: Viewer, version?: number 
 
   const copyId = randomUUID();
   const fileKey = newFileKey(copyId, 1, kind);
-  await files.put(fileKey, content, fileTypeOf(kind).contentType);
-  try {
-    const created = await prisma.artifact.create({
+  const created = await storing(files, fileKey, kind, content, () =>
+    prisma.artifact.create({
       data: {
         id: copyId,
         ownerId: who.userId,
@@ -509,30 +513,49 @@ export async function copyArtifact(id: string, viewer: Viewer, version?: number 
         },
       },
       include: { ...ARTIFACT_INCLUDE, versions: true },
-    });
-    return { artifact: viewOf(created), version: versionView(created.versions[0], files), you: rightsOf(created, who, now) };
-  } catch (error) {
-    await files.remove([fileKey]).catch(() => undefined);
-    throw error;
-  }
+    }),
+  );
+  return { artifact: viewOf(created), version: versionView(created.versions[0], files), you: rightsOf(created, who, now) };
 }
 
 // ---- Housekeeping -----------------------------------------------------------------------------------------------
 
-/** How many expired guest artifacts one pass clears. */
+/** How many expired guest artifacts one batch clears, and how many batches one pass runs. */
 const PRUNE_BATCH = 25;
+const PRUNE_MAX_BATCHES = 8;
+/** Reading an artifact also tidies up, but not more often than this. */
+const PRUNE_EVERY_MS = 60_000;
+let lastPruneAt = 0;
+
+/** For tests: forget when the last tidy-up ran. */
+export function resetPruneClock(): void {
+  lastPruneAt = 0;
+}
 
 /** Clears what guests asked for and the day is over for, with its files. Runs whenever something is made. */
 export async function pruneExpired(ctx: Context = defaultContext()): Promise<number> {
-  const expired = await prisma.artifact.findMany({
-    where: { expiresAt: { lte: ctx.now } },
-    take: PRUNE_BATCH,
-    select: { id: true, versions: { select: { fileKey: true } } },
-  });
-  if (expired.length === 0) return 0;
-  await ctx.files.remove(expired.flatMap((artifact) => artifact.versions.map((version) => version.fileKey)));
-  await prisma.artifact.deleteMany({ where: { id: { in: expired.map((artifact) => artifact.id) } } });
-  return expired.length;
+  let cleared = 0;
+  for (let batch = 0; batch < PRUNE_MAX_BATCHES; batch++) {
+    const expired = await prisma.artifact.findMany({
+      where: { expiresAt: { lte: ctx.now } },
+      take: PRUNE_BATCH,
+      select: { id: true, versions: { select: { fileKey: true } } },
+    });
+    if (expired.length === 0) break;
+    await ctx.files.remove(expired.flatMap((artifact) => artifact.versions.map((version) => version.fileKey)));
+    await prisma.artifact.deleteMany({ where: { id: { in: expired.map((artifact) => artifact.id) } } });
+    cleared += expired.length;
+    if (expired.length < PRUNE_BATCH) break;
+  }
+  return cleared;
+}
+
+/** The same tidy-up from the read paths, so guest files go even when nobody makes anything new; once a minute at most. */
+function pruneSometimes(ctx: Context): void {
+  const at = ctx.now.getTime();
+  if (at - lastPruneAt < PRUNE_EVERY_MS) return;
+  lastPruneAt = at;
+  void pruneExpired(ctx).catch((error) => console.error('Could not clear expired artifacts:', error));
 }
 
 /** The artifacts a signed-in person owns, the most recently changed first. A guest owns none. */

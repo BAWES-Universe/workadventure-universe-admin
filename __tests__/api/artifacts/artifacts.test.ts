@@ -13,8 +13,8 @@ import { POST as copy } from '@/app/api/artifacts/[id]/copy/route';
 import { checkBotAccess } from '@/lib/bot-access';
 import { loadBotPrivacy } from '@/lib/bot-privacy';
 import { MAX_ARTIFACT_BYTES, MAX_VERSIONS } from '@/lib/artifacts';
-import { pruneExpired } from '@/lib/artifact-service';
-import { addBot, addUser, db, fakeFiles } from '../../helpers/artifacts-db';
+import { pruneExpired, resetPruneClock } from '@/lib/artifact-service';
+import { addBot, addUser, db, fakeFiles, fakePrisma } from '../../helpers/artifacts-db';
 
 jest.mock('@/lib/db', () => ({ prisma: jest.requireActual('../../helpers/artifacts-db').fakePrisma }));
 jest.mock('@/lib/artifact-storage', () => ({ artifactFiles: jest.requireActual('../../helpers/artifacts-db').fakeFiles }));
@@ -65,6 +65,7 @@ describe('artifacts', () => {
   });
   beforeEach(() => {
     db.reset();
+    resetPruneClock();
     addUser('owner');
     addUser('friend');
     addUser('stranger');
@@ -290,6 +291,22 @@ describe('artifacts', () => {
     });
   });
 
+  describe('when something fails after the save', () => {
+    it('keeps the file of a version that is already saved', async () => {
+      const made = await makeApp();
+      const readAgain = fakePrisma.artifact.findUnique;
+      // The change reads the artifact once before it saves and once after; only the second read fails
+      const spy = jest.spyOn(fakePrisma.artifact, 'findUnique').mockImplementationOnce(readAgain).mockRejectedValueOnce(new Error('read back failed'));
+      jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      const res = await call(change, { botId: 'bot1', person: person('owner'), chat: NEARBY, content: '<p>2</p>' }, { id: made.artifact.id });
+      spy.mockRestore();
+      expect(res.status).toBe(500);
+      const saved = db.versions.find((v) => v.artifactId === made.artifact.id && v.number === 2);
+      expect(saved).toBeDefined();
+      expect(bucketKeys()).toContain(saved!.fileKey);
+    });
+  });
+
   describe('in this chat', () => {
     it('lists what was made in the chat, the most recently changed first, for people who may open it', async () => {
       const first = await makeApp(person('owner'), NEARBY, { title: 'First' });
@@ -493,6 +510,30 @@ describe('artifacts', () => {
       expect(db.artifacts.map((a) => a.id)).toContain(kept.artifact.id);
       expect(db.versions.filter((v) => v.artifactId === gone.artifact.id)).toHaveLength(0);
       expect(bucketKeys()).toHaveLength(2);
+    });
+
+    it('are also cleared when someone opens an artifact, at most once a minute', async () => {
+      const gone = await makeApp(guest);
+      const kept = await makeApp(person('owner'));
+      db.artifacts.find((a) => a.id === gone.artifact.id)!.expiresAt = new Date(Date.now() - 1000);
+      expect((await call(open, { viewer: viewer(person('owner')) }, { id: kept.artifact.id, ...asGame })).status).toBe(200);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(db.artifacts.map((a) => a.id)).not.toContain(gone.artifact.id);
+      expect(bucketKeys()).toHaveLength(1);
+
+      const second = await makeApp(guest);
+      db.artifacts.find((a) => a.id === second.artifact.id)!.expiresAt = new Date(Date.now() - 1000);
+      await call(open, { viewer: viewer(person('owner')) }, { id: kept.artifact.id, ...asGame });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(db.artifacts.map((a) => a.id)).toContain(second.artifact.id);
+    });
+
+    it('are cleared in batches, so a long backlog does not stay', async () => {
+      for (let i = 0; i < 60; i++) {
+        db.artifacts.push({ id: `old-${i}`, ownerId: null, expiresAt: new Date(Date.now() - 1000), versions: [] });
+      }
+      expect(await pruneExpired({ files: fakeFiles, now: new Date() })).toBe(60);
+      expect(db.artifacts.filter((a) => String(a.id).startsWith('old-'))).toHaveLength(0);
     });
 
     it('clears nothing when nothing has run out', async () => {
