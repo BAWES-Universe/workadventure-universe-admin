@@ -343,6 +343,14 @@ describe('artifacts', () => {
       expect((await call(read, { botId: 'bot1', person: person('owner'), chat: NEARBY, version: 9 }, { id: made.artifact.id })).body.error).toBe('version_not_found');
     });
 
+    it('turns down a version number the database could not hold, instead of failing there', async () => {
+      const made = await makeApp();
+      const tooBig = await call(read, { botId: 'bot1', person: person('owner'), chat: NEARBY, version: 2147483648 }, { id: made.artifact.id });
+      expect(tooBig.status).toBe(400);
+      const fromAddress = await call(code, { viewer: viewer(person('owner')) }, { ...asGame, id: made.artifact.id, number: '2147483648' });
+      expect(fromAddress).toMatchObject({ status: 404, body: { error: 'version_not_found' } });
+    });
+
     it('does not read it out to a bot in a chat whose people may not open it', async () => {
       const made = await makeApp();
       const res = await call(read, { botId: 'bot1', person: person('stranger'), chat: { kind: 'nearby', ref: 'elsewhere' } }, { id: made.artifact.id });
