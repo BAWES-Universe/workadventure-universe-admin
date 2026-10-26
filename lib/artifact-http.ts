@@ -63,7 +63,11 @@ export const personSchema = z
 
 export const chatSchema = z.object({ kind: z.enum(CHAT_KINDS), ref: z.string().trim().min(1).max(255) }).strict();
 
-export const viewerSchema = z.object({ person: personSchema, inChat: z.boolean() }).strict();
+/**
+ * `inChat` is the game's word that the person is in the chat it names in `chat` right now. Orbit counts it only when that
+ * is the chat the artifact was made in; with no `chat` it counts for nothing.
+ */
+export const viewerSchema = z.object({ person: personSchema, inChat: z.boolean(), chat: chatSchema.optional() }).strict();
 
 const botCall = { botId: z.string().trim().min(1).max(255), person: personSchema, chat: chatSchema };
 
