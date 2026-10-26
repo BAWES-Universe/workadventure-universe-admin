@@ -545,7 +545,8 @@ async function removeFiles(ctx: Context, keys: string[]): Promise<void> {
   try {
     await ctx.files.remove(all);
   } catch (error) {
-    unremovedKeys = all.slice(0, MAX_UNREMOVED_KEYS);
+    // Another pass may have failed meanwhile and left its own files here: keep both
+    unremovedKeys = [...new Set([...unremovedKeys, ...all])].slice(0, MAX_UNREMOVED_KEYS);
     console.error('Could not remove the files of expired artifacts, will try again:', error);
   }
 }

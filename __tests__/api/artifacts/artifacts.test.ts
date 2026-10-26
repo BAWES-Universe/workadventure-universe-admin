@@ -576,6 +576,29 @@ describe('artifacts', () => {
       expect(bucketKeys()).toHaveLength(0);
     });
 
+    it('keeps the files of two passes that both failed while they overlapped', async () => {
+      const first = await makeApp(guest);
+      db.artifacts.find((a) => a.id === first.artifact.id)!.expiresAt = new Date(Date.now() - 1000);
+      jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      let failFirst: (error: Error) => void = () => undefined;
+      const failing = jest
+        .spyOn(fakeFiles, 'remove')
+        .mockImplementationOnce(() => new Promise<void>((_, reject) => { failFirst = reject; }))
+        .mockRejectedValueOnce(new Error('bucket down'));
+      // The first pass waits on the bucket while a second one clears another artifact and fails too
+      const slow = pruneExpired({ files: fakeFiles, now: new Date() });
+      await new Promise((resolve) => setImmediate(resolve));
+      const second = await makeApp(guest);
+      db.artifacts.find((a) => a.id === second.artifact.id)!.expiresAt = new Date(Date.now() - 1000);
+      await pruneExpired({ files: fakeFiles, now: new Date() });
+      failFirst(new Error('bucket down'));
+      await slow;
+      failing.mockRestore();
+      expect(bucketKeys()).toHaveLength(2);
+      await pruneExpired({ files: fakeFiles, now: new Date() });
+      expect(bucketKeys()).toHaveLength(0);
+    });
+
     it('clears nothing when nothing has run out', async () => {
       await makeApp(guest);
       expect(await pruneExpired({ files: fakeFiles, now: new Date() })).toBe(0);
