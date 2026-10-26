@@ -7,6 +7,7 @@ jest.mock('@/lib/db', () => ({
     worldMember: { findMany: jest.fn() },
     user: { findMany: jest.fn() },
     friendship: { findMany: jest.fn() },
+    ban: { findMany: jest.fn() },
   },
 }));
 
@@ -67,6 +68,7 @@ beforeEach(() => {
   db.room.findMany.mockResolvedValue(ROOMS);
   db.worldMember.findMany.mockResolvedValue([]);
   db.friendship.findMany.mockResolvedValue([]);
+  db.ban.findMany.mockResolvedValue([]);
   db.user.findMany.mockImplementation(({ where }: { where: { uuid: { in: string[] } } }) =>
     Promise.resolve(
       [
@@ -84,6 +86,25 @@ describe('buildLiveView', () => {
     const view = await buildLiveView(snapshot(), viewer);
     expect(view.places.map((place) => place.name)).toEqual(['Lobby']);
     expect(view.people.map((person) => person.name)).toEqual(['Sara']);
+  });
+
+  it.each([
+    ['its world', { worldId: 'w-office', universeId: 'uni' }],
+    ['its whole universe', { worldId: null, universeId: 'uni' }],
+    ['everywhere', { worldId: null, universeId: null }],
+  ])('leaves out a room whose ban reaches it from %s, with its people, so Visit is never offered', async (_label, ban) => {
+    db.ban.findMany.mockResolvedValue([ban]);
+    const view = await buildLiveView(snapshot(), viewer);
+    expect(view.places).toEqual([]);
+    expect(view.people).toEqual([]);
+  });
+
+  it('keeps a room when the ban is for another world, and asks for the bans once for all rooms', async () => {
+    db.ban.findMany.mockResolvedValue([{ worldId: 'w-elsewhere', universeId: 'uni' }]);
+    const view = await buildLiveView(snapshot(), viewer);
+    expect(view.places.map((place) => place.name)).toEqual(['Lobby']);
+    expect(db.ban.findMany).toHaveBeenCalledTimes(1);
+    expect(db.ban.findMany.mock.calls[0][0].where.userId).toBe('u-me');
   });
 
   it('carries each person\'s account id, so their row can open their profile card', async () => {

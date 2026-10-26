@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { prisma } from '@/lib/db';
 import type { SessionUser } from '@/lib/auth-session';
 import { memberWorldIdsOf } from '@/lib/access-scope';
+import { bansCoveringWorld } from '@/lib/moderation';
 import { canSeeRoom } from '@/lib/room-visibility';
 import { parsePlayUri } from '@/lib/utils';
 import { HIDE_LOCATION_KEY, SHARING_KEYS, shareRoomFromRows } from '@/lib/people-settings';
@@ -150,6 +151,31 @@ function wokaLayers(layers: string[], base: string | null): string[] {
   return out;
 }
 
+/** The rooms whose world keeps this person out (a ban from the world, its universe or everywhere), so Visit is never offered into a refusal. One lookup for all of them. */
+async function bannedFromRooms(
+  viewerId: string | null | undefined,
+  rooms: { id: string; world: { id: string; universe: { id: string } } }[],
+): Promise<Set<string>> {
+  if (!viewerId || rooms.length === 0) return new Set();
+  const worlds = [...new Map(rooms.map((room) => [room.world.id, { id: room.world.id, universeId: room.world.universe.id }])).values()];
+  const bans = await prisma.ban.findMany({
+    where: { userId: viewerId, OR: worlds.map((world) => bansCoveringWorld(world)) },
+    select: { worldId: true, universeId: true },
+  });
+  if (bans.length === 0) return new Set();
+  return new Set(
+    rooms
+      .filter((room) =>
+        bans.some(
+          (ban) =>
+            ban.worldId === room.world.id ||
+            (ban.worldId === null && (ban.universeId === null || ban.universeId === room.world.universe.id)),
+        ),
+      )
+      .map((room) => room.id),
+  );
+}
+
 /** What this viewer may see of the snapshot. */
 export async function buildLiveView(snapshot: PresenceSnapshot, viewer: SessionUser): Promise<LiveView> {
   const base = playBase();
@@ -200,7 +226,8 @@ export async function buildLiveView(snapshot: PresenceSnapshot, viewer: SessionU
     },
   });
   const memberWorldIds = await memberWorldIdsOf(viewer.id, [...new Set(rooms.map((room) => room.world.id))]);
-  const visibleRooms = rooms.filter((room) => canSeeRoom(room, viewer, memberWorldIds));
+  const banned = await bannedFromRooms(viewer.id, rooms);
+  const visibleRooms = rooms.filter((room) => canSeeRoom(room, viewer, memberWorldIds) && !banned.has(room.id));
 
   // The people in those rooms, by name, minus anyone who doesn't share their room with you (you always see yourself).
   const uuids = new Set<string>();
