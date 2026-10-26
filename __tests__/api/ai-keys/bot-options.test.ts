@@ -149,14 +149,14 @@ describe('GET /api/me/bot-ai', () => {
     expect(body.keys[0]).toMatchObject({ status: 'down', ifDown: 'universe-ai' });
   });
 
-  it('keeps the server’s providers to super admins, who may still pin a bot to one', async () => {
+  it('offers nobody the server’s providers, a super admin included: a bot runs on Universe AI or a lent key (game #1446)', async () => {
     (getSessionUser as jest.Mock).mockResolvedValue({ ...mishari, isSuperAdmin: true });
-    db.botsAiProvider.findMany
-      .mockResolvedValueOnce([]) // their keys
-      .mockResolvedValueOnce([{ providerId: 'deepseek-flash', name: 'DeepSeek V4 Flash', type: 'openai', model: 'deepseek-v4-flash', enabled: true }]);
+    db.botsAiProvider.findMany.mockResolvedValueOnce([]); // their keys
     const body = await (await get('roomId=11111111-1111-1111-1111-111111111111')).json();
-    expect(body.providers).toEqual([{ id: 'deepseek-flash', name: 'DeepSeek V4 Flash', type: 'openai', model: 'deepseek-v4-flash', enabled: true }]);
-    expect(db.botsAiProvider.findMany.mock.calls[1][0].where).toEqual({ ownerId: null });
+    expect(body.providers).toBeNull();
+    // Only their own keys are looked up, never the server's providers
+    expect(db.botsAiProvider.findMany).toHaveBeenCalledTimes(1);
+    expect(db.botsAiProvider.findMany.mock.calls[0][0].where).not.toEqual({ ownerId: null });
   });
 
   it('refuses someone who cannot manage bots in the room, and says Universe AI is unavailable when it is', async () => {
