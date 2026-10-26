@@ -215,16 +215,6 @@ function inThisChat(artifact: { chatKind: string | null; chatRef: string | null 
   return artifact.chatRef !== null && artifact.chatRef === chat.ref && artifact.chatKind === chat.kind;
 }
 
-/**
- * A bot reads and changes only what it made for the person (or, for a copy the person made on purpose, whatever bot they
- * bring it to). Another bot in the same chat hears "no such artifact", as for one that is not there.
- */
-function requireBotMayUse(artifact: ArtifactRow, botId: string, who: Who): void {
-  const made = artifact.makerBotId === botId;
-  const theirCopy = artifact.copiedFromId !== null && isOwner(artifact, who);
-  if (!made && !theirCopy) throw new ArtifactError('not_found', 404, 'No such artifact.');
-}
-
 export interface MakeInput extends BotCall {
   title: string;
   kind: ArtifactKind;
@@ -315,7 +305,6 @@ export async function changeArtifact(input: ChangeInput, ctx: Context = defaultC
   const { hidden } = await passBotGate(input);
   const who = await resolvePerson(input.person, true);
   const artifact = await loadArtifact(input.artifactId, now);
-  requireBotMayUse(artifact, input.botId, who);
   if (!canAskForChange(artifact, who, inThisChat(artifact, input.chat), now)) {
     // Someone who cannot even open it hears the same as for an artifact that is not there
     if (!canOpen(artifact, { ...who, inChat: inThisChat(artifact, input.chat) }, now)) throw new ArtifactError('not_found', 404, 'No such artifact.');
@@ -379,15 +368,15 @@ export async function readArtifact(input: ReadInput, ctx: Context = defaultConte
   const { hidden } = await passBotGate(input);
   const who = await resolvePerson(input.person, true);
   const artifact = await loadArtifact(input.artifactId, now);
-  requireBotMayUse(artifact, input.botId, who);
   requireOpen(artifact, { ...who, inChat: inThisChat(artifact, input.chat) }, now);
   const row = await findVersion(artifact, input.version);
   return { artifact: viewOf(artifact), version: botVersionView(row), content: await files.get(row.fileKey), hidden };
 }
 
 /**
- * The artifacts this bot made in this chat that the person may open, the most recently changed first: how a bot finds the one
- * "make the buttons bigger" is about, in a later message or after a restart.
+ * The artifacts made in this chat (by any bot in it) that the person may open, the most recently changed first: how a bot finds
+ * the one "make the buttons bigger" is about, in a later message or after a restart. An artifact belongs to the person who
+ * asked, so what a bot may do with it is what that person may, not which bot made it.
  */
 export async function listArtifactsInChat(input: BotCall, ctx: Context = defaultContext()): Promise<{ artifacts: ArtifactView[]; hidden: boolean }> {
   const { now } = ctx;
@@ -395,7 +384,7 @@ export async function listArtifactsInChat(input: BotCall, ctx: Context = default
   const who = await resolvePerson(input.person, true);
   pruneSometimes(ctx);
   const rows = await prisma.artifact.findMany({
-    where: { chatKind: input.chat.kind, chatRef: input.chat.ref, makerBotId: input.botId },
+    where: { chatKind: input.chat.kind, chatRef: input.chat.ref },
     include: ARTIFACT_INCLUDE,
     orderBy: { updatedAt: 'desc' },
     take: LIST_IN_CHAT_LIMIT,

@@ -501,31 +501,31 @@ describe('artifacts', () => {
     describe('between bots', () => {
       beforeEach(() => addBot('bot2', 'Pixel'));
 
-      it('does not let another bot in the same chat read, change or list what a bot made', async () => {
+      it("lets any bot in the chat work on the owner's artifact when the owner asks it, whichever bot made it", async () => {
         const made = await makeApp();
         const id = made.artifact.id;
         const other = { botId: 'bot2', person: person('owner'), chat: NEARBY };
-        expect((await call(read, other, { id })).status).toBe(404);
-        expect((await call(change, { ...other, content: '<p>x</p>' }, { id })).status).toBe(404);
-        expect((await call(inChat, other)).body.artifacts).toEqual([]);
-        expect(db.versions.filter((v) => v.artifactId === id)).toHaveLength(1);
-        // The bot that made it still can
-        expect((await call(read, { ...other, botId: 'bot1' }, { id })).status).toBe(200);
-        expect((await call(inChat, { ...other, botId: 'bot1' })).body.artifacts).toHaveLength(1);
+        expect((await call(read, other, { id })).status).toBe(200);
+        expect((await call(inChat, other)).body.artifacts).toHaveLength(1);
+        expect((await call(change, { ...other, content: '<p>x</p>' }, { id })).status).toBe(200);
+        expect(db.versions.filter((v) => v.artifactId === id)).toHaveLength(2);
       });
 
-      it('does not let another bot read it even when the person shared the link', async () => {
+      it('follows the person asking, not the bot: someone else in the chat only gets what the owner allowed', async () => {
         const made = await makeApp();
-        await sharing(made.artifact.id, { openScope: 'link', changeScope: 'openers' });
-        const other = { botId: 'bot2', person: person('friend'), chat: NEARBY };
-        expect((await call(read, other, { id: made.artifact.id })).status).toBe(404);
-        expect((await call(change, { ...other, content: '<p>x</p>' }, { id: made.artifact.id })).status).toBe(404);
+        const id = made.artifact.id;
+        const friend = { botId: 'bot2', person: person('friend'), chat: NEARBY };
+        // In the chat they may open it, but changes are the owner's until the owner allows them
+        expect((await call(read, friend, { id })).status).toBe(200);
+        expect((await call(change, { ...friend, content: '<p>x</p>' }, { id })).status).toBe(403);
+        await sharing(id, { changeScope: 'openers' });
+        expect((await call(change, { ...friend, content: '<p>x</p>' }, { id })).status).toBe(200);
       });
 
       it("does not let a bot reach another person's artifact from a chat that is not its own", async () => {
         const made = await makeApp();
         const id = made.artifact.id;
-        const elsewhere = { botId: 'bot1', person: person('stranger'), chat: OTHER_BUBBLE };
+        const elsewhere = { botId: 'bot2', person: person('stranger'), chat: OTHER_BUBBLE };
         expect((await call(read, elsewhere, { id })).status).toBe(404);
         expect((await call(change, { ...elsewhere, content: '<p>x</p>' }, { id })).status).toBe(404);
         expect((await call(inChat, elsewhere)).body.artifacts).toEqual([]);
