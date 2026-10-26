@@ -781,6 +781,7 @@ export default function BotDetailPage({ params }: { params: Promise<{ id: string
                       <span className="grid justify-items-end">
                         <strong className="text-sm">{formatUsd(provider.cost)}</strong>
                         {provider.oldEstimateCost > 0 && <span className="text-xs text-muted-foreground">{formatUsd(provider.oldEstimateCost)} old estimate</span>}
+                        {provider.unknownCalls > 0 && <span className="text-xs text-muted-foreground">{count(provider.unknownCalls, 'call')} with no price</span>}
                       </span>
                     }
                   />

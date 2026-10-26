@@ -37,27 +37,34 @@ export async function linkGuestVisits(guestUuid: string, account: LinkedAccount)
       select: { id: true, userUuid: true, userId: true, userName: true, userEmail: true, isGuest: true },
     });
     if (visits.length === 0) return 0;
-    await tx.roomAccessRelink.createMany({
-      data: visits.map((visit) => ({
-        roomAccessId: visit.id,
-        userId: account.id,
-        oldUserUuid: visit.userUuid,
-        oldUserId: visit.userId,
-        oldUserName: visit.userName,
-        oldUserEmail: visit.userEmail,
-        oldIsGuest: visit.isGuest,
-      })),
-    });
-    const moved = await tx.roomAccess.updateMany({
-      where: { id: { in: visits.map((visit) => visit.id) }, userId: null },
-      data: {
-        userId: account.id,
-        userUuid: account.uuid,
-        isGuest: false,
-        ...(account.name ? { userName: account.name } : {}),
-        ...(account.email ? { userEmail: account.email } : {}),
-      },
-    });
-    return moved.count;
+    // Each visit is claimed first and logged only when this sign-in is the one that moved it, so two sign-ins sending the
+    // same guest id at once never log a move that did not happen.
+    let moved = 0;
+    for (const visit of visits) {
+      const claimed = await tx.roomAccess.updateMany({
+        where: { id: visit.id, userId: null },
+        data: {
+          userId: account.id,
+          userUuid: account.uuid,
+          isGuest: false,
+          ...(account.name ? { userName: account.name } : {}),
+          ...(account.email ? { userEmail: account.email } : {}),
+        },
+      });
+      if (claimed.count === 0) continue;
+      await tx.roomAccessRelink.create({
+        data: {
+          roomAccessId: visit.id,
+          userId: account.id,
+          oldUserUuid: visit.userUuid,
+          oldUserId: visit.userId,
+          oldUserName: visit.userName,
+          oldUserEmail: visit.userEmail,
+          oldIsGuest: visit.isGuest,
+        },
+      });
+      moved += claimed.count;
+    }
+    return moved;
   });
 }
