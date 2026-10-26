@@ -246,10 +246,12 @@ export function MembershipsRow({ live }: { live?: LiveView | null }) {
     });
   }
 
-  // Your memberships answered again after accepting: the accepted invitations make way for the memberships.
+  // Your memberships answered again after accepting: the accepted invitations make way for the memberships. Asking
+  // again always passes through loading (which is a new result when the last answer was an error), so loading is not
+  // an answer.
   useEffect(() => {
     const { ids, after } = joining.current;
-    if (ids.length === 0 || memberships.result === after) return;
+    if (ids.length === 0 || memberships.result === after || memberships.result.status === 'loading') return;
     joining.current = { ids: [], after: null };
     invitations.update((items) => items.filter((item) => !ids.includes(item.id)));
     unlock(ids);
