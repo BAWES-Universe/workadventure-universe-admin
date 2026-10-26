@@ -48,10 +48,18 @@ export function byteLength(content: string): number {
   return Buffer.byteLength(content, 'utf8');
 }
 
-/** A title or a name as one short line, or null when nothing is left. */
+/** Half an emoji on its own, which the database can't keep as text. */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
+/** A text cut to fit, never through the middle of an emoji. */
+export function clipText(value: string, max: number): string {
+  return value.slice(0, max).replace(/[\uD800-\uDBFF]$/, '');
+}
+
+/** A title or a name as one short line (no control characters, no lone halves of an emoji), or null when nothing is left. */
 export function cleanLine(value: unknown, max: number): string | null {
   if (typeof value !== 'string') return null;
-  const line = value.replace(/\s+/g, ' ').trim().slice(0, max).trim();
+  const line = clipText(value.replace(LONE_SURROGATE, '').replace(/[\s\u0000-\u001F\u007F]+/g, ' ').trim(), max).trim();
   return line.length > 0 ? line : null;
 }
 
