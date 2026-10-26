@@ -131,6 +131,34 @@ async function newestVisitsOf(
   return byPerson;
 }
 
+/**
+ * Each person's newest visit that carries a name or an email, for the people whose shown visits carry neither: a person
+ * who came back many times before naming themselves still has their name on an older visit, past the visits shown. An
+ * email counts only for a viewer who may see emails, so one that would be stripped never stands in front of a name.
+ */
+async function newestNamedVisitOf(
+  viewer: Viewer | null,
+  detail: AccessDetail,
+  scope: AccessScope,
+  visits: Prisma.Sql,
+  keys: string[],
+): Promise<Map<string, VisitRow>> {
+  const allowed = keys.filter((key) => visitsWhere(viewer, detail, key) !== null);
+  const named = new Map<string, VisitRow>();
+  if (allowed.length === 0) return named;
+  const ids = await prisma.$queryRaw<Array<{ id: string; person: string }>>`
+    SELECT DISTINCT ON (v.person) v.id, v.person
+    FROM (${visits}) AS v
+    JOIN room_accesses a ON a.id = v.id
+    WHERE v.person IN (${Prisma.join(allowed)}) AND ${detail === 'full' ? Prisma.sql`COALESCE(NULLIF(BTRIM(a.user_name), ''), NULLIF(BTRIM(a.user_email), ''))` : Prisma.sql`NULLIF(BTRIM(a.user_name), '')`} IS NOT NULL
+    ORDER BY v.person, v.accessed_at DESC, v.id DESC`;
+  if (ids.length === 0) return named;
+  const personOf = new Map(ids.map((row) => [row.id, row.person]));
+  const rows = await prisma.roomAccess.findMany({ where: { AND: [scope, { id: { in: [...personOf.keys()] } }] }, select: VISIT_SELECT });
+  for (const row of rows) named.set(personOf.get(row.id) ?? '', row);
+  return named;
+}
+
 /** The rooms and worlds on these visits that the viewer may not see, by the same rules as their own pages. */
 async function hiddenPlaces(viewer: Viewer | null, scope: AccessScope, rows: VisitRow[]) {
   const hidden = { rooms: new Set<string>(), worlds: new Set<string>() };
@@ -149,6 +177,19 @@ async function hiddenPlaces(viewer: Viewer | null, scope: AccessScope, rows: Vis
     if (!canSeeWorld(room.world, user, memberWorldIds)) hidden.worlds.add(room.world.id);
   }
   return hidden;
+}
+
+/**
+ * What a person is called: the name on their newest visit that has one, else their email. Nobody is called by an id: a
+ * visit saved before the person had a name (the page-load check runs before a guest names themselves) never turns the
+ * card into a uuid, and a person who has no name on any visit is "Guest".
+ */
+export function visitorName(visits: Partial<Pick<VisitRow, 'userName' | 'userEmail'>>[]): string {
+  for (const visit of visits) {
+    const name = visit.userName?.trim() || visit.userEmail?.trim();
+    if (name) return name;
+  }
+  return 'Guest';
 }
 
 /** Visits as this viewer may see them: redacted per record, and with rooms and worlds they may not see left out. */
@@ -198,6 +239,15 @@ export async function loadVisitorPeople(
     }),
     lookingFromWorldId,
   );
+  // Each person's visits as the viewer may see them, to find a name on: the newest visit with one, not only the newest.
+  const seenRows = rows.map((personVisits) => personVisits.map((row) => redactAccess(row, detailForRecord(viewer, row, detail))));
+  // A name past the newest visits shown: looked up only for the people whose shown visits have none.
+  const unnamed = groups.filter((group, index) => rows[index].length > 0 && visitorName(seenRows[index]) === 'Guest').map((group) => group.person);
+  const olderNamed = await newestNamedVisitOf(viewer, detail, scope, visits, unnamed);
+  groups.forEach((group, index) => {
+    const older = olderNamed.get(group.person);
+    if (older) seenRows[index].push(redactAccess(older, detailForRecord(viewer, older, detail)));
+  });
   const shown = await toVisits(viewer, detail, scope, rows.flat());
   const visitById = new Map(shown.map((visit) => [visit.id, visit]));
   const people = groups.flatMap((group, index): VisitorPerson[] => {
@@ -207,7 +257,7 @@ export async function loadVisitorPeople(
       {
         key: group.person,
         userId: latest.userId ?? null,
-        name: latest.userName || latest.userEmail || latest.userUuid || 'Guest',
+        name: visitorName(seenRows[index]),
         woka: latest.woka,
         roles: latest.hasMembership && latest.membershipTags?.length ? latest.membershipTags : [],
         visitCount: Number(group.visits),
