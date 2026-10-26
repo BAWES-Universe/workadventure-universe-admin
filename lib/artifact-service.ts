@@ -562,6 +562,42 @@ export async function copyArtifact(id: string, viewer: Viewer, version?: number 
   return { artifact: viewOf(created), version: versionView(created.versions[0], files), you: rightsOf(created, who, now) };
 }
 
+// ---- The public link page ---------------------------------------------------------------------------------------
+
+/** What the page for "anyone with the link" shows: the latest version, nothing about who may do what. */
+export interface PublicView {
+  title: string;
+  kind: ArtifactKind;
+  makerName: string;
+  version: number;
+  /** Where the file is served from, for the locked box. */
+  url: string;
+  /** A document is drawn from its text (the page cannot show a Markdown file itself). */
+  content: string | null;
+}
+
+/**
+ * Opens an artifact for anyone who has its address, without an account: only when the owner shared it by link, and
+ * only the latest version. One answer for every other case (not there, run out, shared only with its chat), so the page
+ * tells nobody which of them it is.
+ */
+export async function openByLink(id: string, ctx: Context = defaultContext()): Promise<PublicView> {
+  const { files, now } = ctx;
+  pruneSometimes(ctx);
+  const artifact = await loadArtifact(id, now);
+  if (artifact.openScope !== 'link') throw new ArtifactError('not_found', 404, 'No such artifact.');
+  const row = await findVersion(artifact, artifact.latestVersion);
+  const kind = artifact.kind as ArtifactKind;
+  return {
+    title: artifact.title,
+    kind,
+    makerName: artifact.makerName,
+    version: row.number,
+    url: files.urlFor(row.fileKey),
+    content: kind === 'markdown' ? await files.get(row.fileKey) : null,
+  };
+}
+
 // ---- Housekeeping -----------------------------------------------------------------------------------------------
 
 /** How many expired guest artifacts one batch clears, and how many batches one pass runs. */
