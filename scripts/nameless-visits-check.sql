@@ -8,6 +8,7 @@
 --   - it has no account on it (user_id is empty), no name and no email;
 --   - its id is a raw uuid or `unverified-` and 32 hex characters, nothing else;
 --   - no other visit with the same id has a name, an email or an account (that person's history stays whole);
+--   - the visit has no record in room_access_relinks (deleting it would delete that record too);
 --   - the id is not an account's own id, and is not the `unverified-` id of an account's email or uuid: those visits
 --     belong to that account and scripts/unverified-visits-relink.sql moves them onto it, they are never deleted.
 -- Visits with a name, with an account, or with any other kind of id are never touched.
@@ -20,15 +21,16 @@ WITH claims AS (
   WHERE c.claim IS NOT NULL
 ), nameless AS (
   SELECT a.id, a.user_uuid, a.accessed_at, a.is_authenticated,
-    a.user_uuid ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' AS raw_uuid,
-    a.user_uuid ~ '^unverified-[0-9a-f]{32}$' AS unverified,
+    coalesce(a.user_uuid ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', false) AS raw_uuid,
+    coalesce(a.user_uuid ~ '^unverified-[0-9a-f]{32}$', false) AS unverified,
     EXISTS (
       SELECT 1 FROM room_accesses b
       WHERE b.user_uuid = a.user_uuid AND b.id <> a.id
         AND (b.user_id IS NOT NULL OR nullif(btrim(coalesce(b.user_name, '')), '') IS NOT NULL OR nullif(btrim(coalesce(b.user_email, '')), '') IS NOT NULL)
     ) AS id_has_a_named_visit,
     EXISTS (SELECT 1 FROM users u WHERE u.uuid = a.user_uuid)
-      OR EXISTS (SELECT 1 FROM claims c WHERE c.visitor_id = a.user_uuid) AS id_is_an_account
+      OR EXISTS (SELECT 1 FROM claims c WHERE c.visitor_id = a.user_uuid) AS id_is_an_account,
+    EXISTS (SELECT 1 FROM room_access_relinks r WHERE r.room_access_id = a.id) AS has_a_relink_record
   FROM room_accesses a
   WHERE a.user_id IS NULL
     AND nullif(btrim(coalesce(a.user_name, '')), '') IS NULL
@@ -39,6 +41,7 @@ WITH claims AS (
       WHEN NOT (raw_uuid OR unverified) THEN 'other_id'
       WHEN id_is_an_account THEN 'belongs_to_an_account'
       WHEN id_has_a_named_visit THEN 'same_id_has_a_named_visit'
+      WHEN has_a_relink_record THEN 'has_a_relink_record'
       WHEN unverified THEN 'delete_unverified'
       ELSE 'delete_raw_uuid'
     END AS kind

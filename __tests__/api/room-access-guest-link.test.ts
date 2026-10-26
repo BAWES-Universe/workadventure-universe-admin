@@ -78,6 +78,7 @@ describe('GET /api/room/access, a guest signing in (#630)', () => {
         { roomAccessId: 'v2', userId: 'u1', oldUserUuid: GUEST, oldUserId: null, oldUserName: null, oldUserEmail: null, oldIsGuest: true },
       ],
     });
+    expect(db.roomAccess.updateMany).toHaveBeenCalledTimes(1);
     expect(db.roomAccess.updateMany).toHaveBeenCalledWith({
       where: { id: { in: ['v1', 'v2'] }, userId: null },
       data: { userId: 'u1', userUuid: 'elj-uuid', isGuest: false, userName: 'el-j', userEmail: 'elj@example.test' },
@@ -92,6 +93,20 @@ describe('GET /api/room/access, a guest signing in (#630)', () => {
     expect(body.status).toBe('ok');
     expect(db.roomAccessRelink.createMany).not.toHaveBeenCalled();
     expect(db.roomAccess.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('logs only the visits this sign-in moved when another sign-in with the same guest id got some of them first', async () => {
+    db.roomAccess.findMany.mockResolvedValueOnce(OLD_VISITS).mockResolvedValueOnce([{ id: 'v2' }]);
+    db.roomAccess.updateMany.mockResolvedValue({ count: 1 });
+    await enter(`&previousGuestUuid=${GUEST}`);
+    expect(db.roomAccessRelink.createMany).toHaveBeenCalledTimes(1);
+    expect(db.roomAccessRelink.createMany).toHaveBeenCalledWith({ data: [expect.objectContaining({ roomAccessId: 'v2' })] });
+  });
+
+  it('logs nothing when another sign-in with the same guest id got every visit first', async () => {
+    db.roomAccess.updateMany.mockResolvedValue({ count: 0 });
+    await enter(`&previousGuestUuid=${GUEST}`);
+    expect(db.roomAccessRelink.createMany).not.toHaveBeenCalled();
   });
 
   it("never hands over an id that is some account's own", async () => {

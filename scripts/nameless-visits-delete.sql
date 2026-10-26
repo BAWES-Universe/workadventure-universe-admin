@@ -4,7 +4,7 @@
 --   psql "${DATABASE_URL%%\?*}" -X -q -At -v ON_ERROR_STOP=1 -v expected=<rows in the backup file> -f scripts/nameless-visits-delete.sql
 --
 -- A visit is deleted only if it has no account, name or email; its id is a raw uuid or `unverified-` and 32 hex
--- characters; no named visit has the same id; and the id is not an account's. One transaction: if the number that pass
+-- characters; no named visit has the same id; it has no record in room_access_relinks; and the id is not an account's. One transaction: if the number that pass
 -- the test is not exactly `expected`, or the visits of anyone with a name or account would change in number, nothing is
 -- deleted. It prints one line of JSON with the counts.
 \if :{?expected}
@@ -35,10 +35,11 @@ WHERE a.user_id IS NULL
       AND (b.user_id IS NOT NULL OR nullif(btrim(coalesce(b.user_name, '')), '') IS NOT NULL OR nullif(btrim(coalesce(b.user_email, '')), '') IS NOT NULL)
   )
   AND NOT EXISTS (SELECT 1 FROM users u WHERE u.uuid = a.user_uuid)
-  AND NOT EXISTS (SELECT 1 FROM claims c WHERE c.visitor_id = a.user_uuid);
+  AND NOT EXISTS (SELECT 1 FROM claims c WHERE c.visitor_id = a.user_uuid)
+  AND NOT EXISTS (SELECT 1 FROM room_access_relinks r WHERE r.room_access_id = a.id);
 
 -- Stops the whole thing, deleting nothing, when the backup and today's data disagree.
-SELECT set_config('nameless.expected', :'expected', true);
+SELECT set_config('nameless.expected', :'expected', true) AS _ \gset
 DO $$
 BEGIN
   IF (SELECT count(*) FROM gone) <> current_setting('nameless.expected')::bigint THEN
