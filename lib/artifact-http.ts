@@ -78,10 +78,14 @@ export const makeSchema = z
   })
   .strict();
 
+/** A version number fits the database's 32-bit column, so a bigger one is turned down here instead of failing there. */
+const MAX_VERSION_NUMBER = 2147483647;
+const versionNumber = z.number().int().min(1).max(MAX_VERSION_NUMBER);
+
 export const changeSchema = z
   .object({
     ...botCall,
-    baseVersion: z.number().int().min(1).nullish(),
+    baseVersion: versionNumber.nullish(),
     edits: z
       .array(z.object({ old: text(MAX_ARTIFACT_BYTES), new: text(MAX_ARTIFACT_BYTES), all: z.boolean().optional() }).strict())
       .max(50)
@@ -92,23 +96,23 @@ export const changeSchema = z
   })
   .strict();
 
-export const readSchema = z.object({ ...botCall, version: z.number().int().min(1).nullish() }).strict();
+export const readSchema = z.object({ ...botCall, version: versionNumber.nullish() }).strict();
 
 export const inChatSchema = z.object(botCall).strict();
 
-export const openSchema = z.object({ viewer: viewerSchema, version: z.number().int().min(1).nullish() }).strict();
+export const openSchema = z.object({ viewer: viewerSchema, version: versionNumber.nullish() }).strict();
 
 export const viewerOnlySchema = z.object({ viewer: viewerSchema }).strict();
 
 export const shareSchema = z.object({ viewer: viewerSchema, openScope: z.string().optional(), changeScope: z.string().optional() }).strict();
 
-export const restoreSchema = z.object({ viewer: viewerSchema, number: z.number().int().min(1) }).strict();
+export const restoreSchema = z.object({ viewer: viewerSchema, number: versionNumber }).strict();
 
 export const mineSchema = z.object({ person: personSchema }).strict();
 
 /** A version number from the address, or a 404: there is no version "abc". */
 export function versionParam(value: string | undefined): number {
   const number = Number(value);
-  if (!Number.isInteger(number) || number < 1) throw new ArtifactError('version_not_found', 404, 'No such version.');
+  if (!Number.isInteger(number) || number < 1 || number > MAX_VERSION_NUMBER) throw new ArtifactError('version_not_found', 404, 'No such version.');
   return number;
 }

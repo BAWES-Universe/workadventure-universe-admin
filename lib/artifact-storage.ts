@@ -59,7 +59,9 @@ export const artifactFiles: ArtifactFiles = {
     const { s3: s3Client, bucket } = s3();
     // One request holds up to 1000 keys; a chat never comes near it
     for (let start = 0; start < keys.length; start += 1000) {
-      await s3Client.send(new DeleteObjectsCommand({ Bucket: bucket, Delete: { Objects: keys.slice(start, start + 1000).map((Key) => ({ Key })), Quiet: true } }));
+      const result = await s3Client.send(new DeleteObjectsCommand({ Bucket: bucket, Delete: { Objects: keys.slice(start, start + 1000).map((Key) => ({ Key })), Quiet: true } }));
+      // A delete that only partly worked still answers 200, with the files it could not remove listed
+      if (result.Errors?.length) throw new Error(`The bucket would not remove ${result.Errors.length} file(s), first: ${result.Errors[0].Key}: ${result.Errors[0].Code}`);
     }
   },
   urlFor(key) {
