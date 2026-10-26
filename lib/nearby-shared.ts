@@ -32,7 +32,8 @@ const FILE_ID =
 
 function text(value: unknown, max: number): string | null {
   if (typeof value !== 'string') return null;
-  const trimmed = value.trim();
+  // Postgres can't keep a NUL, and no name or link needs a control character.
+  const trimmed = value.replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
   return trimmed.length > 0 && trimmed.length <= max ? trimmed : null;
 }
 

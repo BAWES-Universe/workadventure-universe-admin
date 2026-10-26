@@ -51,6 +51,14 @@ describe('an item shared in a nearby chat', () => {
     expect(parseNearbySharedItem({ ...file, kind: 'media', isVideo: true }, now)?.isVideo).toBe(true);
   });
 
+  it('keeps no control characters, which Postgres would refuse', () => {
+    expect(parseNearbySharedItem({ ...file, name: 'Lobby\u0000 plan.pdf\n', senderName: '\u0000Sara' }, now)).toEqual(
+      expect.objectContaining({ name: 'Lobby  plan.pdf', senderName: 'Sara' }),
+    );
+    expect(parseNearbySharedItem({ ...file, name: '\u0000' }, now)).toBeNull();
+    expect(parseNearbySharedItem({ ...file, fileId: null, link: 'https://bawes.net/\u0000x' }, now)?.link).not.toContain('\u0000');
+  });
+
   it('turns down an item that is missing something or has the wrong shape', () => {
     expect(parseNearbySharedItem(null, now)).toBeNull();
     expect(parseNearbySharedItem([], now)).toBeNull();
