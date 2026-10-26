@@ -110,6 +110,8 @@ export const viewerOnlySchema = z.object({ viewer: viewerSchema }).strict();
 
 export const shareSchema = z.object({ viewer: viewerSchema, openScope: z.string().optional(), changeScope: z.string().optional() }).strict();
 
+export const deleteSchema = z.object({ viewer: viewerSchema }).strict();
+
 export const restoreSchema = z.object({ viewer: viewerSchema, number: versionNumber }).strict();
 
 export const mineSchema = z.object({ person: personSchema }).strict();

@@ -2,7 +2,7 @@
 
 Bots make mini apps, pages, Markdown documents and SVG drawings for the person who asked. Orbit keeps the list, every
 version and who may open or change each one. This page is the contract for the bot server (make, change, read) and the
-game (open, versions, code, share, restore, copy).
+game (open, versions, code, share, restore, copy, delete).
 
 ## Rules
 
@@ -53,6 +53,7 @@ Bodies carry `viewer: { person, inChat, chat }`: `inChat` says the person is in 
 | `PUT /api/artifacts/:id/share` | `viewer`, `openScope?`, `changeScope?` | `{ artifact }`; owner only (`403` for others who can open it) |
 | `POST /api/artifacts/:id/restore` | `viewer`, `number` | `{ artifact, version, you }`; owner only |
 | `POST /api/artifacts/:id/copy` | `viewer`, `version?` | `{ artifact, version, you }`; `403 sign_in_required` for a guest |
+| `DELETE /api/artifacts/:id` | `viewer` | `{ deleted: true }`; owner only. Removes every version and file; a copy keeps its own files |
 
 `you` is `{ owner, change, manage, copy }`: whether to show Ask-to-change, Share and Restore, and Make a copy.
 `version.url` is where the file is served from, for the locked box.

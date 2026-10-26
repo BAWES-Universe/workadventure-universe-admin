@@ -10,6 +10,7 @@ import { POST as code } from '@/app/api/artifacts/[id]/versions/[number]/route';
 import { PUT as share } from '@/app/api/artifacts/[id]/share/route';
 import { POST as restore } from '@/app/api/artifacts/[id]/restore/route';
 import { POST as copy } from '@/app/api/artifacts/[id]/copy/route';
+import { DELETE as remove } from '@/app/api/artifacts/[id]/route';
 import { checkBotAccess } from '@/lib/bot-access';
 import { loadBotPrivacy } from '@/lib/bot-privacy';
 import { MAX_ARTIFACT_BYTES, MAX_VERSIONS } from '@/lib/artifacts';
@@ -653,6 +654,87 @@ describe('artifacts', () => {
       const made = await makeApp();
       expect(await call(copy, { viewer: viewer(guest) }, { id: made.artifact.id, ...asGame })).toMatchObject({ status: 403, body: { error: 'sign_in_required' } });
       expect((await call(copy, { viewer: viewer(person('stranger'), false) }, { id: made.artifact.id, ...asGame })).status).toBe(404);
+    });
+  });
+
+  describe('delete', () => {
+    const opening = (id: string, who: Who, inChat: boolean, chat: object | null) => call(open, { viewer: viewer(who, inChat, chat) }, { id, ...asGame });
+    const sharing = (id: string, body: object) => call(share, { viewer: viewer(person('owner'), false, null), ...body }, { id, method: 'PUT', ...asGame });
+    const removing = (id: string, who: Who = person('owner'), extra: { inChat?: boolean; token?: string } = {}) =>
+      call(remove, { viewer: viewer(who, extra.inChat ?? true) }, { id, method: 'DELETE', token: extra.token ?? ADMIN_TOKEN });
+
+    it('removes the artifact, every version and every file, and the link and card then answer "no such artifact"', async () => {
+      const made = await makeApp();
+      const id = made.artifact.id;
+      await call(change, { botId: 'bot1', person: person('owner'), chat: NEARBY, content: '<p>2</p>' }, { id });
+      await sharing(id, { openScope: 'link' });
+      expect(bucketKeys()).toHaveLength(2);
+      expect(await removing(id)).toMatchObject({ status: 200, body: { deleted: true } });
+      expect(db.artifacts).toHaveLength(0);
+      expect(db.versions).toHaveLength(0);
+      expect(bucketKeys()).toHaveLength(0);
+      expect((await opening(id, person('owner'), false, null)).status).toBe(404);
+      expect((await opening(id, person('stranger'), false, null)).status).toBe(404);
+      expect((await call(versions, { viewer: viewer(person('owner')) }, { id, ...asGame })).status).toBe(404);
+      expect((await call(read, { botId: 'bot1', person: person('owner'), chat: NEARBY }, { id })).status).toBe(404);
+      expect((await removing(id)).status).toBe(404);
+    });
+
+    it('leaves a copy made earlier whole, with its own file', async () => {
+      const made = await makeApp();
+      const copied = await call(copy, { viewer: viewer(person('friend')) }, { id: made.artifact.id, ...asGame });
+      await removing(made.artifact.id);
+      expect(bucketKeys()).toHaveLength(1);
+      const reopened = await opening(copied.body.artifact.id, person('friend'), false, null);
+      expect(reopened.status).toBe(200);
+      expect((await call(code, { viewer: viewer(person('friend')) }, { id: copied.body.artifact.id, number: '1', ...asGame })).body.content).toBe(APP);
+    });
+
+    it('is the owner only: someone who can open it hears 403, someone who cannot hears 404, and nothing is removed', async () => {
+      const made = await makeApp();
+      const id = made.artifact.id;
+      expect((await removing(id, person('friend'))).status).toBe(403);
+      expect((await removing(id, person('stranger'), { inChat: false })).status).toBe(404);
+      await sharing(id, { openScope: 'link', changeScope: 'openers' });
+      expect((await removing(id, person('stranger'), { inChat: false })).status).toBe(403);
+      expect((await removing(id, guest)).status).toBe(403);
+      expect(db.artifacts).toHaveLength(1);
+      expect(bucketKeys()).toHaveLength(1);
+    });
+
+    it('is for the game only, and a guest artifact has no owner to delete it', async () => {
+      const made = await makeApp(guest);
+      expect((await removing(made.artifact.id, guest, { token: BOT_TOKEN })).status).toBe(401);
+      expect((await removing(made.artifact.id, guest)).status).toBe(403);
+      expect(db.artifacts).toHaveLength(1);
+    });
+
+    it('is done once the rows are gone, and the files the bucket would not remove go with the next clean-up', async () => {
+      const made = await makeApp();
+      jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      const failing = jest.spyOn(fakeFiles, 'remove').mockRejectedValueOnce(new Error('bucket down'));
+      expect((await removing(made.artifact.id)).status).toBe(200);
+      failing.mockRestore();
+      expect(db.artifacts).toHaveLength(0);
+      expect(bucketKeys()).toHaveLength(1);
+      await pruneExpired({ files: fakeFiles, now: new Date() });
+      expect(bucketKeys()).toHaveLength(0);
+    });
+
+    it('does not leave a file behind when a change lands while it is deleting', async () => {
+      const made = await makeApp();
+      const id = made.artifact.id;
+      const findMany = fakePrisma.artifactVersion.findMany;
+      const spy = jest.spyOn(fakePrisma.artifactVersion, 'findMany').mockImplementationOnce(async (args: unknown) => {
+        const found = await findMany(args as never);
+        await call(change, { botId: 'bot1', person: person('owner'), chat: NEARBY, content: '<p>2</p>' }, { id });
+        return found;
+      });
+      expect((await removing(id)).status).toBe(200);
+      spy.mockRestore();
+      expect(db.artifacts).toHaveLength(0);
+      expect(db.versions).toHaveLength(0);
+      expect(bucketKeys()).toHaveLength(0);
     });
   });
 

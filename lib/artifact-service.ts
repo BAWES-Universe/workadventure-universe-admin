@@ -507,6 +507,27 @@ export async function restoreVersion(id: string, number: number, viewer: Viewer,
   return { artifact: viewOf(fresh), version: versionView(row, files), you: rightsOf(fresh, who, now) };
 }
 
+/**
+ * The owner takes it back: the rows go first (every version with them), then the files, with the same retry for files the
+ * bucket would not remove as the guest clean-up. A copy someone made keeps its own files. The delete only goes through for the
+ * version it read, so a change that lands meanwhile is not left with a file nobody lists: it asks again.
+ */
+export async function deleteArtifact(id: string, viewer: Viewer, ctx: Context = defaultContext()): Promise<{ deleted: true }> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const artifact = await loadArtifact(id, ctx.now);
+    const who = await whoIsLooking(artifact, viewer);
+    requireOpen(artifact, who, ctx.now);
+    requireOwner(artifact, who);
+    const versions = await prisma.artifactVersion.findMany({ where: { artifactId: artifact.id } });
+    const { count } = await prisma.artifact.deleteMany({ where: { id: artifact.id, latestVersion: artifact.latestVersion } });
+    if (count === 1) {
+      await removeFiles(ctx, versions.map((version) => version.fileKey));
+      return { deleted: true };
+    }
+  }
+  throw new ArtifactError('stale_version', 409, 'It changed at the same moment; try again.');
+}
+
 /** Make a copy: the viewer's own artifact, from the version they pick (the latest by default), in no chat. */
 export async function copyArtifact(id: string, viewer: Viewer, version?: number | null, ctx: Context = defaultContext()): Promise<Opened> {
   const { files, now } = ctx;
