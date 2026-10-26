@@ -7,6 +7,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { AlertCircle, Loader2, TestTube, Pencil } from 'lucide-react';
 import AuthLink from '@/app/admin/auth-link';
 import { isVisionCapableModel, resolveVisionSupport } from '@/lib/vision-models';
+import { ModelCaps } from '../../components/ds/model-caps';
 import { Context, EmptyCard, EntityRow, LoadError, LoadingRows, PageHeader, SectionHeader, StatLine } from '../../components/ds';
 import { EnabledPill, providerTypeLabel } from '../components/provider-state';
 import { useReplacePage } from '@/app/admin/orbit-frame-context';
@@ -207,7 +208,7 @@ export default function ProviderDetailPage({ params }: { params: Promise<{ id: s
             {provider.maxTokens !== null && <Field label="Max tokens">{provider.maxTokens}</Field>}
             <Field label="Streaming">{provider.supportsStreaming ? 'Yes' : 'No'}</Field>
             <Field label="Vision">
-              {seesImages ? 'Vision-capable' : 'Text-only'}
+              {seesImages ? <ModelCaps facts={{ vision: true }} inline /> : 'Text only'}
               <span className="text-xs text-muted-foreground">
                 {provider.supportsVision === null
                   ? ` (auto${provider.model && isVisionCapableModel(provider.model) ? ' — detected from model name' : ''})`
