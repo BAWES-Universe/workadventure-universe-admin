@@ -83,6 +83,16 @@ const nextConfig: NextConfig = {
         ],
       },
       {
+        // The public page of a shared artifact (Orbit #650): never kept, never listed, never framed
+        source: '/a/:path*',
+        headers: [
+          { key: 'X-Robots-Tag', value: 'noindex, nofollow' },
+          { key: 'Cache-Control', value: 'no-store' },
+          { key: 'Referrer-Policy', value: 'no-referrer' },
+          { key: 'Content-Security-Policy', value: "frame-ancestors 'none';" },
+        ],
+      },
+      {
         // Public images the game loads cross-origin: the tab favicon is redrawn on a canvas (red dot while in a
         // proximity bubble), which needs CORS headers or the canvas is tainted.
         source: '/assets/:path*',

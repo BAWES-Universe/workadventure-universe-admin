@@ -14,7 +14,7 @@ import { DELETE as remove } from '@/app/api/artifacts/[id]/route';
 import { checkBotAccess } from '@/lib/bot-access';
 import { loadBotPrivacy } from '@/lib/bot-privacy';
 import { MAX_ARTIFACT_BYTES, MAX_VERSIONS } from '@/lib/artifacts';
-import { pruneExpired, resetPruneClock } from '@/lib/artifact-service';
+import { openByLink, pruneExpired, resetPruneClock } from '@/lib/artifact-service';
 import { addBot, addUser, db, fakeFiles, fakePrisma } from '../../helpers/artifacts-db';
 
 jest.mock('@/lib/db', () => ({ prisma: jest.requireActual('../../helpers/artifacts-db').fakePrisma }));
@@ -735,6 +735,49 @@ describe('artifacts', () => {
       expect(db.artifacts).toHaveLength(0);
       expect(db.versions).toHaveLength(0);
       expect(bucketKeys()).toHaveLength(0);
+    });
+  });
+
+  describe('the public link page', () => {
+    const sharing = (id: string, body: object) => call(share, { viewer: viewer(person('owner'), false, null), ...body }, { id, method: 'PUT', ...asGame });
+    const page = (id: string) => openByLink(id, { files: fakeFiles, now: new Date() });
+
+    it('shows the latest version of what the owner shared by link, and nothing about the people', async () => {
+      const made = await makeApp();
+      const id = made.artifact.id;
+      await call(change, { botId: 'bot1', person: person('owner'), chat: NEARBY, content: '<p>2</p>' }, { id });
+      await sharing(id, { openScope: 'link' });
+      const view = await page(id);
+      expect(view).toMatchObject({ title: 'Quests board', kind: 'app', makerName: 'Scout', version: 2, content: null });
+      expect(view.url).toContain(db.versions.find((v) => v.artifactId === id && v.number === 2)!.fileKey);
+      expect(Object.keys(view).sort()).toEqual(['content', 'kind', 'makerName', 'title', 'url', 'version']);
+    });
+
+    it('says the same for what is not shared by link, what is switched off again, what is deleted and what is not there', async () => {
+      const made = await makeApp();
+      const id = made.artifact.id;
+      await expect(page(id)).rejects.toMatchObject({ code: 'not_found', status: 404 });
+      await sharing(id, { openScope: 'link' });
+      await expect(page(id)).resolves.toBeDefined();
+      await sharing(id, { openScope: 'chat' });
+      await expect(page(id)).rejects.toMatchObject({ code: 'not_found' });
+      await sharing(id, { openScope: 'link' });
+      await call(remove, { viewer: viewer(person('owner')) }, { id, method: 'DELETE', token: ADMIN_TOKEN });
+      await expect(page(id)).rejects.toMatchObject({ code: 'not_found' });
+      await expect(page('00000000-0000-4000-8000-000000000000')).rejects.toMatchObject({ code: 'not_found' });
+    });
+
+    it('does not show a guest artifact that has run out', async () => {
+      const made = await makeApp(guest);
+      db.artifacts.find((a) => a.id === made.artifact.id)!.openScope = 'link';
+      db.artifacts.find((a) => a.id === made.artifact.id)!.expiresAt = new Date(Date.now() - 1000);
+      await expect(page(made.artifact.id)).rejects.toMatchObject({ code: 'not_found' });
+    });
+
+    it('gives a document its text, to be drawn on the page', async () => {
+      const made = await makeApp(person('owner'), NEARBY, { kind: 'markdown', content: '# Notes\n\nHello' });
+      await sharing(made.artifact.id, { openScope: 'link' });
+      expect(await page(made.artifact.id)).toMatchObject({ kind: 'markdown', content: '# Notes\n\nHello' });
     });
   });
 
