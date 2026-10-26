@@ -40,7 +40,8 @@ function text(value: unknown, max: number): string | null {
 /** Like text(), but a longer value is cut to fit instead of turned down: a name or a key, never a link. */
 function clippedText(value: unknown, max: number): string | null {
   const whole = text(value, Number.MAX_SAFE_INTEGER);
-  return whole ? whole.slice(0, max).trim() || null : null;
+  // Never through the middle of an emoji: a lone half can't be saved as text.
+  return whole ? whole.slice(0, max).replace(/[\uD800-\uDBFF]$/, '').trim() || null : null;
 }
 
 function optionalText(value: unknown, max: number): string | null | undefined {

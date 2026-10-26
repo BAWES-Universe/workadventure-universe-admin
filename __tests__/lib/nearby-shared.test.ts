@@ -71,6 +71,13 @@ describe('an item shared in a nearby chat', () => {
     expect(parsed?.link).toBe(link);
   });
 
+  it('never cuts an emoji in half at the limit', () => {
+    const name = `${'x'.repeat(299)}🚪 door`;
+    const parsed = parseNearbySharedItem({ ...file, itemKey: name, name }, now);
+    expect(parsed?.itemKey).toBe('x'.repeat(299));
+    expect(parsed?.name).toBe('x'.repeat(299));
+  });
+
   it('turns down an item that is missing something or has the wrong shape', () => {
     expect(parseNearbySharedItem(null, now)).toBeNull();
     expect(parseNearbySharedItem([], now)).toBeNull();
