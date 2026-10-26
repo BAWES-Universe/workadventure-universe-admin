@@ -614,7 +614,7 @@ export function RoomDetailPage({ view = 'details' }: { view?: 'details' | 'visit
         stats={[
           { value: hereKnown ? here.count : '–', label: 'here now', live: true },
           { value: visits ?? 0, label: visits === 1 ? 'access' : 'accesses', href: `/admin/rooms/${id}/visitors` },
-          { value: peakHour !== null ? formatHour(peakHour) : '–', label: 'peak' },
+          { value: peakHour !== null ? formatHour(peakHour) : '–', label: 'busiest hour' },
           { value: lastVisit ? timeAgoShort(new Date(lastVisit)) : '–', label: 'since last visit' },
         ]}
         here={here}

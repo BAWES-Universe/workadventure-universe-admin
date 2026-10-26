@@ -177,7 +177,7 @@ describe('Discover search', () => {
     at.setUTCHours(16, 0, 0, 0);
     const hour = at.getHours();
     const label = `${hour % 12 || 12} ${hour < 12 ? 'AM' : 'PM'}`;
-    await waitFor(() => expect(document.body.textContent).toContain(`1,284 accesses · Peak ${label}`));
+    await waitFor(() => expect(document.body.textContent).toContain(`1,284 accesses · Busiest hour ${label}`));
     expect(document.body.textContent).not.toMatch(/UTC|visits|busiest/);
     expect(document.body.textContent).not.toContain('You were the last visitor');
   });

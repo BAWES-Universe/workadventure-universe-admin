@@ -133,7 +133,7 @@ function RoomRow({ room, analytics }: { room: Room; analytics?: RoomAnalytics })
             <StatLine
               items={[
                 count(analytics.totalAccesses, 'access', 'accesses'),
-                analytics.peakHour !== null && `Peak ${formatHourTo12Hour(analytics.peakHour)}`,
+                analytics.peakHour !== null && `Busiest hour ${formatHourTo12Hour(analytics.peakHour)}`,
               ]}
             />
             {you || latest ? (
