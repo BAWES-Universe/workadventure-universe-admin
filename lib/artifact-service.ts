@@ -542,9 +542,14 @@ export async function pruneExpired(ctx: Context = defaultContext()): Promise<num
       select: { id: true, versions: { select: { fileKey: true } } },
     });
     if (expired.length === 0) break;
-    await ctx.files.remove(expired.flatMap((artifact) => artifact.versions.map((version) => version.fileKey)));
-    await prisma.artifact.deleteMany({ where: { id: { in: expired.map((artifact) => artifact.id) } } });
-    cleared += expired.length;
+    const ids = expired.map((artifact) => artifact.id);
+    // The rows go first, and only while they are still expired: a guest who asked for a change a moment ago has pushed
+    // the end further, and that artifact stays with all of its files
+    const { count } = await prisma.artifact.deleteMany({ where: { id: { in: ids }, expiresAt: { lte: ctx.now } } });
+    const kept = new Set(count === ids.length ? [] : (await prisma.artifact.findMany({ where: { id: { in: ids } }, select: { id: true } })).map((row) => row.id));
+    const keys = expired.filter((artifact) => !kept.has(artifact.id)).flatMap((artifact) => artifact.versions.map((version) => version.fileKey));
+    await ctx.files.remove(keys).catch((error) => console.error('Could not remove the files of expired artifacts:', error));
+    cleared += count;
     if (expired.length < PRUNE_BATCH) break;
   }
   return cleared;

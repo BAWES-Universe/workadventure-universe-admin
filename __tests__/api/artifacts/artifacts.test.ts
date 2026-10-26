@@ -536,6 +536,24 @@ describe('artifacts', () => {
       expect(db.artifacts.filter((a) => String(a.id).startsWith('old-'))).toHaveLength(0);
     });
 
+    it('keeps one, with its files, that was changed while the clearing ran', async () => {
+      const busy = await makeApp(guest);
+      const gone = await makeApp(guest);
+      for (const made of [busy, gone]) db.artifacts.find((a) => a.id === made.artifact.id)!.expiresAt = new Date(Date.now() - 1000);
+      const findMany = fakePrisma.artifact.findMany;
+      // Between finding the expired ones and deleting them, a change pushes the end of one of them further
+      const spy = jest.spyOn(fakePrisma.artifact, 'findMany').mockImplementationOnce(async (args: unknown) => {
+        const found = await findMany(args as never);
+        db.artifacts.find((a) => a.id === busy.artifact.id)!.expiresAt = new Date(Date.now() + 60_000);
+        return found;
+      });
+      expect(await pruneExpired({ files: fakeFiles, now: new Date() })).toBe(1);
+      spy.mockRestore();
+      expect(db.artifacts.map((a) => a.id)).toEqual([busy.artifact.id]);
+      expect(db.versions.filter((v) => v.artifactId === busy.artifact.id).map((v) => v.fileKey).every((key) => bucketKeys().includes(key))).toBe(true);
+      expect(bucketKeys()).toHaveLength(1);
+    });
+
     it('clears nothing when nothing has run out', async () => {
       await makeApp(guest);
       expect(await pruneExpired({ files: fakeFiles, now: new Date() })).toBe(0);
