@@ -120,27 +120,38 @@ export interface Forgetting {
   rows: { id: string; userUuid: string | null }[];
 }
 
-/** How long a forget stays after the bot server was told, in case the answer was lost on the way. */
+/**
+ * How long a Forget made before #493 stays after the bot server was told. Those rows were stamped with `reportedAt`
+ * when first sent and removed a minute later. A Forget made now is never stamped and never removed by time: it stays
+ * until the bot server says it dropped it (see acknowledgeForgets), so an Orbit that could not be reached for a while
+ * cannot lose it.
+ */
 export const FORGET_GRACE_MS = 60_000;
 
+/** A row stamped by an older Orbit whose minute is over. Rows without a stamp are never old. */
+function isStaleLegacyForget(row: { reportedAt: Date | null }, now: number): boolean {
+  return !!row.reportedAt && now - row.reportedAt.getTime() > FORGET_GRACE_MS;
+}
+
 /**
- * The people this bot has been asked to forget (#435), and marks them as told to the bot server. The bot server asks
- * every 30 seconds (the privacy answer) and hears it again with its next memory save. A row stays a minute after the
- * bot server was first told, so an answer that got lost is told again and a save in that minute still skips them;
- * after that it is removed, and what the bot learns about the person from then on is saved as usual.
+ * The people this bot has been asked to forget (#435). The bot server asks every 30 seconds (the privacy answer) and
+ * hears it again with each memory save, and every save skips these people. A row stays until the bot server reports
+ * it dropped them (POST /api/bots/memory/:id/forgotten), however long Orbit was unreachable in between, so the bot can
+ * never save them back before it has forgotten them. Reading changes nothing. The one exception is a row an older
+ * Orbit had already stamped as told: it keeps its own minute and is removed after it, as it always was.
+ *
+ * There is deliberately no expiry for the others (#493: never on a timer, that is what let a person be saved back after
+ * Orbit was out of reach). A bot server older than the route never reports, so until it is updated a forgotten person
+ * who talks to the bot again is not saved; the game release that reports follows this one right away and clears the rows.
  */
 export async function takeForgets(botId: string): Promise<Forgetting> {
-  const now = new Date();
+  const now = Date.now();
   const rows = await prisma.botMemoryForget.findMany({ where: { botId }, select: { id: true, userUuid: true, reportedAt: true } });
-  const expired = rows.filter((row) => row.reportedAt && now.getTime() - row.reportedAt.getTime() > FORGET_GRACE_MS);
-  const live = rows.filter((row) => !expired.includes(row));
-  if (expired.length > 0) {
-    await prisma.botMemoryForget.deleteMany({ where: { id: { in: expired.map((row) => row.id) } } });
+  const stale = rows.filter((row) => isStaleLegacyForget(row, now));
+  if (stale.length > 0) {
+    await prisma.botMemoryForget.deleteMany({ where: { id: { in: stale.map((row) => row.id) } } });
   }
-  const fresh = live.filter((row) => !row.reportedAt);
-  if (fresh.length > 0) {
-    await prisma.botMemoryForget.updateMany({ where: { id: { in: fresh.map((row) => row.id) } }, data: { reportedAt: now } });
-  }
+  const live = rows.filter((row) => !stale.includes(row));
   return {
     everyone: live.some((row) => row.userUuid === null),
     userUuids: new Set(live.flatMap((row) => (row.userUuid === null ? [] : [row.userUuid]))),
@@ -149,15 +160,25 @@ export async function takeForgets(botId: string): Promise<Forgetting> {
 }
 
 /**
+ * The bot server reports the Forgets it dropped from memory, by row id. Only then is a row removed. Ids of other bots
+ * or rows that are already gone are ignored, so a repeated report is harmless. Returns how many rows it removed.
+ */
+export async function acknowledgeForgets(botId: string, ids: string[]): Promise<number> {
+  if (ids.length === 0) return 0;
+  const { count } = await prisma.botMemoryForget.deleteMany({ where: { botId, id: { in: ids } } });
+  return count;
+}
+
+/**
  * Takes out of the saved memory the people a Forget asked for after a save had checked, among the ones that save just
  * wrote. The save checks who was forgotten once and then writes people one by one, so a Forget pressed in between
- * would be written back. Reads the rows as they are and marks nothing as told. Returns how many people it removed.
+ * would be written back. Reads the rows as they are. Returns how many people it removed.
  */
 export async function dropForgottenFrom(botId: string, written: string[]): Promise<number> {
   if (written.length === 0) return 0;
   const now = Date.now();
   const rows = await prisma.botMemoryForget.findMany({ where: { botId }, select: { userUuid: true, reportedAt: true } });
-  const live = rows.filter((row) => !row.reportedAt || now - row.reportedAt.getTime() <= FORGET_GRACE_MS);
+  const live = rows.filter((row) => !isStaleLegacyForget(row, now));
   const everyone = live.some((row) => row.userUuid === null);
   const forgotten = new Set(live.flatMap((row) => (row.userUuid === null ? [] : [row.userUuid])));
   const drop = written.filter((userUuid) => everyone || forgotten.has(userUuid));
@@ -168,8 +189,8 @@ export async function dropForgottenFrom(botId: string, written: string[]): Promi
 
 /**
  * What the bot server is told to forget, or nothing when nobody was. Each row comes with its id: the same Forget is
- * repeated for a minute, so the bot server applies a row once by its id, and a second Forget of the same person within
- * that minute is a new row it still applies (`userUuid` null is everyone).
+ * repeated until the bot server reports it dropped (see acknowledgeForgets), so the bot server applies a row once by
+ * its id, and a second Forget of the same person is a new row it still applies (`userUuid` null is everyone).
  */
 export function forgetNotice(forgetting: Forgetting): { everyone: boolean; userUuids: string[]; rows: Forgetting['rows'] } | undefined {
   if (!forgetting.everyone && forgetting.userUuids.size === 0) return undefined;

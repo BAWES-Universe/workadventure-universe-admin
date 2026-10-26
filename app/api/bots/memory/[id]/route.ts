@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { requireServiceToken, validateServiceToken } from '@/lib/service-tokens';
-import { botContentReadDenied, getViewer } from '@/lib/access-scope';
+import { botContentReadDenied } from '@/lib/access-scope';
 import { corsHeaders } from '@/lib/cors';
 import { dropForgottenFrom, forgetNotice, isBotHidden, memoryTally, takeForgets } from '@/lib/bot-privacy';
 
@@ -19,7 +19,8 @@ export async function OPTIONS() {
  * GET /api/bots/memory/:botId
  * Return all memory entries for a bot (for restore on startup).
  *
- * Auth: BOT_SERVICE_TOKEN or ADMIN_API_TOKEN / session
+ * Auth: BOT_SERVICE_TOKEN (the bot server), or ADMIN_API_TOKEN / super admin session. The latter two get only the tally
+ * for a bot that hides its conversations.
  *
  * Query params (optional):
  * - userUuid: return only memory for this user
@@ -37,9 +38,10 @@ export async function GET(
     if (!isServiceToken) {
       const denied = await botContentReadDenied(request, corsHeaders());
       if (denied) return denied;
-      // Hide bot conversations (#435): a person gets the tally, never the contents. The bot server reads everything
-      // back as always, with its service token or, when it has none, the admin token it falls back to.
-      if ((await getViewer(request))?.kind === 'user' && (await isBotHidden(botId))) {
+      // Hide bot conversations (#435): whoever is not the bot server gets the tally, never the contents: a person,
+      // a super admin, and the deployment admin token alike (#444). The bot server reads everything back with its
+      // own service token.
+      if (await isBotHidden(botId)) {
         return NextResponse.json({ memories: [], private: true, ...(await memoryTally(botId)) }, { status: 200, headers: corsHeaders() });
       }
     }
