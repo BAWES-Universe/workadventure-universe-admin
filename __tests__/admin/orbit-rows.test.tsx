@@ -1,7 +1,7 @@
 /** @jest-environment jsdom */
 
 import React from 'react';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MembershipsRow, StarsRow, UniversesRow } from '@/app/admin/components/orbit/rows';
 import { AdminBootstrapProvider, type AdminBootstrap } from '@/app/admin/admin-bootstrap-context';
 import type { LiveView, LivePlace } from '@/lib/live-presence';
@@ -299,6 +299,31 @@ describe('Your memberships on Orbit', () => {
     finishFirst();
     await waitFor(() => expect(screen.queryAllByTestId('invitation')).toHaveLength(0));
     expect(await screen.findByTestId('empty-memberships')).toBeTruthy();
+  });
+
+  it('keeps an accepted invitation while memberships that failed to load are asked again', async () => {
+    let joined = false;
+    let answerMemberships: () => void = () => undefined;
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        joined = true;
+        return ok({});
+      }
+      if (url.startsWith('/api/memberships/my/universes')) {
+        if (!joined) return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}) });
+        return new Promise((resolve) => (answerMemberships = () => resolve({ ok: true, json: () => Promise.resolve({ universes: [membership('u9', 'Plugn')] }) })));
+      }
+      return ok({ invitations: [{ id: 'i1', tags: [], world: { id: 'w3', name: 'Studio', universe: { name: 'Plugn' } }, invitedBy: null }] });
+    });
+    render(<MembershipsRow />);
+    fireEvent.click(within(await screen.findByTestId('invitation')).getByRole('button', { name: 'Accept' }));
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([url]) => String(url).startsWith('/api/memberships/my/universes'))).toHaveLength(2));
+    await act(async () => undefined);
+    expect(screen.getByTestId('invitation')).toBeTruthy();
+    expect((within(screen.getByTestId('invitation')).getByRole('button', { name: 'Accept' }) as HTMLButtonElement).disabled).toBe(true);
+    answerMemberships();
+    await waitFor(() => expect(screen.queryByTestId('invitation')).toBeNull());
+    expect(screen.getByText('Plugn')).toBeTruthy();
   });
 
   it('keeps invitations you can answer when your memberships cannot load', async () => {
