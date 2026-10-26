@@ -12,6 +12,7 @@ import { checkConfigVision } from '@/lib/bot-vision';
 import { toolTimeoutSecondsSchema } from '@/lib/bot-tool-timeout';
 import { maxReplyTokensSchema, maxStepsSchema } from '@/lib/bot-limits';
 import { mustStayPrivateAfterMove } from '@/lib/bot-privacy';
+import { clearBotRunsOnNotices } from '@/lib/notices';
 import { z } from 'zod';
 import { corsHeaders } from '@/lib/cors';
 
@@ -549,6 +550,8 @@ export async function POST(request: NextRequest) {
         },
       });
       statusCode = 200;
+      // What the bot runs on changed: the notices that said where it was are out of date
+      if (moveOffModel) await clearBotRunsOnNotices(validatedData.botId);
     } else {
       // Create new bot
       bot = await prisma.bot.create({

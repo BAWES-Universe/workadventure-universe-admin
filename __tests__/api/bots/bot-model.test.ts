@@ -3,6 +3,7 @@ import { PUT } from '@/app/api/bots/[id]/route';
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { checkAiProviderRef, checkBotModel } from '@/lib/ai-provider-ref';
+import { clearBotRunsOnNotices } from '@/lib/notices';
 
 /** A bot's own model on its maker's key is saved with the bot (#575), and belongs to that one key. */
 
@@ -16,6 +17,7 @@ jest.mock('@/lib/auth-session', () => ({ getSessionUser: jest.fn(async () => nul
 jest.mock('@/lib/auth', () => ({ requireAuth: jest.fn() }));
 jest.mock('@/lib/bot-permissions', () => ({ canManageBots: jest.fn(async () => true), canManageThisBot: jest.fn(async () => true) }));
 jest.mock('@/lib/oidc', () => ({ validateAccessToken: jest.fn(async () => null) }));
+jest.mock('@/lib/notices', () => ({ clearBotRunsOnNotices: jest.fn(async () => undefined) }));
 jest.mock('@/lib/ai-provider-ref', () => ({ checkAiProviderRef: jest.fn(async () => null), checkBotModel: jest.fn(async () => null) }));
 
 const stored = { id: 'bot-1', roomId: 'room-123', behaviorConfig: {}, aiProviderRef: 'key-1', aiModel: 'claude-sonnet-5-5', createdById: 'maker' };
@@ -79,5 +81,23 @@ describe('PUT /api/bots/:id with aiModel', () => {
   it('refuses an empty or overlong model name', async () => {
     expect((await save({ aiModel: '' })).status).toBe(400);
     expect((await save({ aiModel: 'x'.repeat(256) })).status).toBe(400);
+  });
+});
+
+describe('PUT /api/bots/:id and the notices about where the bot runs (#643)', () => {
+  it('hides them when the save moves the bot to another key or to Universe AI', async () => {
+    await save({ aiProviderRef: 'universe-ai' });
+    expect(clearBotRunsOnNotices).toHaveBeenCalledWith('bot-1');
+  });
+
+  it('hides them when the save picks another model on the same key', async () => {
+    await save({ aiModel: 'claude-haiku-5-5' });
+    expect(clearBotRunsOnNotices).toHaveBeenCalledWith('bot-1');
+  });
+
+  it('leaves them when what the bot runs on is unchanged, or not in the save', async () => {
+    await save({ name: 'Guide' });
+    await save({ aiProviderRef: 'key-1', aiModel: 'claude-sonnet-5-5', name: 'Guide' });
+    expect(clearBotRunsOnNotices).not.toHaveBeenCalled();
   });
 });

@@ -4,6 +4,7 @@ import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { canManageBots, canManageThisBot } from '@/lib/bot-permissions';
 import { transformBotToServerFormat } from '@/lib/bot-config-helpers';
+import { clearBotRunsOnNotices } from '@/lib/notices';
 
 jest.mock('@/lib/db', () => ({
   prisma: {
@@ -24,6 +25,8 @@ jest.mock('@/lib/db', () => ({
     },
   },
 }));
+
+jest.mock('@/lib/notices', () => ({ clearBotRunsOnNotices: jest.fn(async () => undefined) }));
 
 // Force the admin-token auth path (getSessionUser returns null)
 jest.mock('@/lib/auth-session', () => ({
@@ -184,6 +187,17 @@ describe('/api/bots/configuration', () => {
       await POST(configRequest({ ...validBody, botId: '00000000-0000-4000-8000-000000000001' }));
 
       for (const call of (prisma.bot.update as jest.Mock).mock.calls) expect('aiModel' in call[0].data).toBe(false);
+    });
+
+    it('hides the notices about where the bot runs when the save moves it to another provider, and only then (#643)', async () => {
+      const botId = '00000000-0000-4000-8000-000000000001';
+      (prisma.bot.findUnique as jest.Mock).mockResolvedValue({ aiProviderRef: 'openai', behaviorConfig: null });
+
+      await POST(configRequest({ ...validBody, botId, aiProviderRef: 'openai' }));
+      expect(clearBotRunsOnNotices).not.toHaveBeenCalled();
+
+      await POST(configRequest({ ...validBody, botId, aiProviderRef: 'deepseek' }));
+      expect(clearBotRunsOnNotices).toHaveBeenCalledWith(botId);
     });
   });
 
