@@ -78,6 +78,12 @@ describe('an item shared in a nearby chat', () => {
     expect(parsed?.name).toBe('x'.repeat(299));
   });
 
+  it('takes an empty type as no type, as a browser sends for a file it does not know', () => {
+    const parsed = parseNearbySharedItem({ ...file, mimeType: '' }, now);
+    expect(parsed?.mimeType).toBeNull();
+    expect(parsed?.fileId).toBe(FILE);
+  });
+
   it('swaps a lone half of an emoji for a stand-in character', () => {
     const parsed = parseNearbySharedItem({ ...file, name: 'door \uD83D plan' }, now);
     expect(parsed?.name).toBe('door \uFFFD plan');

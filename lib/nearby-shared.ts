@@ -47,13 +47,18 @@ function clippedText(value: unknown, max: number): string | null {
   return whole ? whole.slice(0, max).replace(/[\uD800-\uDBFF]$/, '').trim() || null : null;
 }
 
+// Left empty counts as not given: a browser gives "" as the type of a file it doesn't know.
+function isBlank(value: unknown): boolean {
+  return value === undefined || value === null || (typeof value === 'string' && value.trim() === '');
+}
+
 function optionalText(value: unknown, max: number): string | null | undefined {
-  if (value === undefined || value === null) return null;
+  if (isBlank(value)) return null;
   return text(value, max) ?? undefined;
 }
 
 function httpLink(value: unknown): string | null | undefined {
-  if (value === undefined || value === null) return null;
+  if (isBlank(value)) return null;
   const link = text(value, 2000);
   if (!link) return undefined;
   try {
