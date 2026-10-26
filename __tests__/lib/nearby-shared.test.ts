@@ -59,13 +59,24 @@ describe('an item shared in a nearby chat', () => {
     expect(parseNearbySharedItem({ ...file, fileId: null, link: 'https://bawes.net/\u0000x' }, now)?.link).not.toContain('\u0000');
   });
 
+  it('cuts a long name, key or sender to fit, as the game does', () => {
+    const link = `https://bawes.net/${'x'.repeat(500)}`;
+    const parsed = parseNearbySharedItem(
+      { itemKey: `msg-9 ${link}`, kind: 'link', name: link, link, senderName: 'S'.repeat(150), sentAt: file.sentAt },
+      now,
+    );
+    expect(parsed?.itemKey).toHaveLength(300);
+    expect(parsed?.name).toHaveLength(300);
+    expect(parsed?.senderName).toHaveLength(100);
+    expect(parsed?.link).toBe(link);
+  });
+
   it('turns down an item that is missing something or has the wrong shape', () => {
     expect(parseNearbySharedItem(null, now)).toBeNull();
     expect(parseNearbySharedItem([], now)).toBeNull();
     expect(parseNearbySharedItem({ ...file, itemKey: '' }, now)).toBeNull();
     expect(parseNearbySharedItem({ ...file, kind: 'voice' }, now)).toBeNull();
     expect(parseNearbySharedItem({ ...file, senderName: undefined }, now)).toBeNull();
-    expect(parseNearbySharedItem({ ...file, name: 'x'.repeat(301) }, now)).toBeNull();
     expect(parseNearbySharedItem({ ...file, size: -1 }, now)).toBeNull();
     expect(parseNearbySharedItem({ ...file, size: 1.5 }, now)).toBeNull();
     expect(parseNearbySharedItem({ ...file, mine: 'yes' }, now)).toBeNull();

@@ -37,6 +37,12 @@ function text(value: unknown, max: number): string | null {
   return trimmed.length > 0 && trimmed.length <= max ? trimmed : null;
 }
 
+/** Like text(), but a longer value is cut to fit instead of turned down: a name or a key, never a link. */
+function clippedText(value: unknown, max: number): string | null {
+  const whole = text(value, Number.MAX_SAFE_INTEGER);
+  return whole ? whole.slice(0, max).trim() || null : null;
+}
+
 function optionalText(value: unknown, max: number): string | null | undefined {
   if (value === undefined || value === null) return null;
   return text(value, max) ?? undefined;
@@ -59,10 +65,10 @@ export function parseNearbySharedItem(value: unknown, now: Date = new Date()): N
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
   const item = value as Record<string, unknown>;
 
-  const itemKey = text(item.itemKey, 300);
+  const itemKey = clippedText(item.itemKey, 300);
   const kind = NEARBY_SHARED_KINDS.find((known) => known === item.kind);
-  const name = text(item.name, 300);
-  const senderName = text(item.senderName, 100);
+  const name = clippedText(item.name, 300);
+  const senderName = clippedText(item.senderName, 100);
   const link = httpLink(item.link);
   const fileId = optionalText(item.fileId, 200);
   const mimeType = optionalText(item.mimeType, 150);
