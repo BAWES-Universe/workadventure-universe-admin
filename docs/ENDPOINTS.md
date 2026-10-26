@@ -12,6 +12,7 @@ Complete reference for all Admin API endpoints required for WorkAdventure integr
 - [OAuth & Authentication Endpoints](#oauth--authentication-endpoints)
 - [Room API Endpoints](#room-api-endpoints)
 - [Bot Server AI Provider Endpoints](#bot-server-ai-provider-endpoints)
+- [Live Artifacts Endpoints](#live-artifacts-endpoints)
 - [Optional Endpoints](#optional-endpoints)
 
 ## Authentication
@@ -1001,6 +1002,16 @@ These endpoints are for bot servers to fetch AI provider credentials and track u
 **Authentication:** All endpoints require `Authorization: Bearer {BOT_SERVICE_TOKEN}` header.
 
 **Note:** See [docs/bots/AI_PROVIDERS.md](./bots/AI_PROVIDERS.md) for complete integration guide.
+
+---
+
+## Live Artifacts Endpoints
+
+What bots make for people (mini apps, pages, Markdown, SVG), with every version and who may open or change each one. The
+bot server uses `BOT_SERVICE_TOKEN` for make, change and read; the game's server uses `ADMIN_API_TOKEN` for open,
+versions, share, restore and copy.
+
+**Note:** See [docs/bots/ARTIFACTS.md](./bots/ARTIFACTS.md) for the rules, every route and the storage setup.
 
 ---
 

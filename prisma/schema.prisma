@@ -55,6 +55,8 @@ model User {
   notices          UserNotice[]
   pushDevices      PushDevice[]
   pushActivity     PushActivity?
+  artifacts        Artifact[]        @relation("ArtifactOwner")
+  artifactAsks     ArtifactVersion[] @relation("ArtifactAsker")
 
   @@map("users")
 }
@@ -139,6 +141,64 @@ model PushActivity {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("push_activity")
+}
+
+// A live artifact a bot made for a person (game #1422, Orbit #622): a mini app, a page, a Markdown document or an SVG
+// drawing. The person who asked owns it and the bot is its maker. A guest owns nothing: what a guest asks for is kept
+// for a day (expiresAt) and is gone after that. Who may open it and who may ask for changes are the two scopes below.
+// Each change is one ArtifactVersion; the file of each version sits in the artifacts bucket under its fileKey.
+model Artifact {
+  id            String    @id @default(uuid())
+  // The person who asked for it; null for a guest
+  ownerId       String?   @map("owner_id")
+  // The bot that made it, by id (kept when the bot is deleted) and the name it had
+  makerBotId    String    @map("maker_bot_id") @db.VarChar(255)
+  makerName     String    @map("maker_name") @db.VarChar(100)
+  title         String    @db.VarChar(120)
+  // app | page | markdown | svg
+  kind          String    @db.VarChar(20)
+  // The chat it was made in: nearby | dm, and the id the bot server and the game both use for that chat. A copy has none.
+  chatKind      String?   @map("chat_kind") @db.VarChar(20)
+  chatRef       String?   @map("chat_ref") @db.VarChar(255)
+  // Who can open it: chat (people in that chat) | link (anyone with the link)
+  openScope     String    @default("chat") @map("open_scope") @db.VarChar(20)
+  // Who can ask for changes: owner (only the owner) | openers (everyone who can open it, in its chat)
+  changeScope   String    @default("owner") @map("change_scope") @db.VarChar(20)
+  latestVersion Int       @default(1) @map("latest_version")
+  copiedFromId  String?   @map("copied_from_id")
+  expiresAt     DateTime? @map("expires_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  owner    User?             @relation("ArtifactOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  versions ArtifactVersion[]
+
+  @@index([ownerId, updatedAt])
+  @@index([makerBotId])
+  @@index([expiresAt])
+  @@map("artifacts")
+}
+
+model ArtifactVersion {
+  id           String   @id @default(uuid())
+  artifactId   String   @map("artifact_id")
+  number       Int
+  // What changed, in a line
+  summary      String?  @db.VarChar(300)
+  // Who asked for this version: the person (null for a guest) and the name they had then
+  askedById    String?  @map("asked_by_id")
+  askedByName  String?  @map("asked_by_name") @db.VarChar(100)
+  // The file of this version in the artifacts bucket. Unguessable: it carries a random part.
+  fileKey      String   @map("file_key") @db.VarChar(255)
+  sizeBytes    Int      @map("size_bytes")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  artifact Artifact @relation(fields: [artifactId], references: [id], onDelete: Cascade)
+  askedBy  User?    @relation("ArtifactAsker", fields: [askedById], references: [id], onDelete: SetNull)
+
+  @@unique([artifactId, number])
+  @@index([askedById])
+  @@map("artifact_versions")
 }
 
 // Universes
