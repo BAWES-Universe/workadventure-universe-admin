@@ -30,10 +30,13 @@ const FUTURE_SLACK_MS = 5 * 60 * 1000;
 const FILE_ID =
   /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(\.[a-z0-9]{1,10})?$/i;
 
+// Half of an emoji's pair with no other half next to it.
+const LONE_HALF = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
 function text(value: unknown, max: number): string | null {
   if (typeof value !== 'string') return null;
-  // Postgres can't keep a NUL, and no name or link needs a control character.
-  const trimmed = value.replace(/[\u0000-\u001f\u007f]/g, ' ').trim();
+  // Postgres can't keep a NUL, and no name or link needs a control character or half an emoji.
+  const trimmed = value.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(LONE_HALF, '\uFFFD').trim();
   return trimmed.length > 0 && trimmed.length <= max ? trimmed : null;
 }
 
