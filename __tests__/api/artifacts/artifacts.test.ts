@@ -13,7 +13,6 @@ import { POST as copy } from '@/app/api/artifacts/[id]/copy/route';
 import { DELETE as remove } from '@/app/api/artifacts/[id]/route';
 import { checkBotAccess } from '@/lib/bot-access';
 import { loadBotPrivacy } from '@/lib/bot-privacy';
-import { MAX_ARTIFACT_BYTES, MAX_VERSIONS } from '@/lib/artifacts';
 import { openByLink, pruneExpired, resetPruneClock } from '@/lib/artifact-service';
 import { addBot, addUser, db, fakeFiles, fakePrisma } from '../../helpers/artifacts-db';
 
@@ -166,10 +165,20 @@ describe('artifacts', () => {
     it('refuses a blank title, a blank file and a file over the cap', async () => {
       expect((await call(make, { botId: 'bot1', person: person('owner'), chat: NEARBY, title: '   ', kind: 'app', content: APP })).body.error).toBe('title_required');
       expect((await call(make, { botId: 'bot1', person: person('owner'), chat: NEARBY, title: 'T', kind: 'app', content: ' ' })).body.error).toBe('empty_content');
-      const big = await call(make, { botId: 'bot1', person: person('owner'), chat: NEARBY, title: 'T', kind: 'app', content: 'a'.repeat(MAX_ARTIFACT_BYTES + 1) });
-      expect(big).toMatchObject({ status: 413, body: { error: 'too_large' } });
+      // 2 MB until a super admin changes it (#666)
+      const big = await call(make, { botId: 'bot1', person: person('owner'), chat: NEARBY, title: 'T', kind: 'app', content: 'a'.repeat(2 * 1024 * 1024 + 1) });
+      expect(big).toMatchObject({ status: 413, body: { error: 'too_large', message: 'An artifact can hold up to 2 MB.' } });
       expect(db.artifacts).toHaveLength(0);
       expect(bucketKeys()).toHaveLength(0);
+    });
+
+    it('follows the size a super admin set', async () => {
+      db.settings.set('bot-limits', { artifacts: { size: 0.5 } });
+      const big = await call(make, { botId: 'bot1', person: person('owner'), chat: NEARBY, title: 'T', kind: 'app', content: 'a'.repeat(512 * 1024 + 1) });
+      expect(big).toMatchObject({ status: 413, body: { error: 'too_large', message: 'An artifact can hold up to 512 KB.' } });
+      db.settings.set('bot-limits', { artifacts: { size: 10 } });
+      const fits = await call(make, { botId: 'bot1', person: person('owner'), chat: NEARBY, title: 'T', kind: 'app', content: 'a'.repeat(5 * 1024 * 1024) });
+      expect(fits.status).toBe(200);
     });
 
     it('leaves no file behind when the database fails', async () => {
@@ -181,6 +190,56 @@ describe('artifacts', () => {
       db.artifacts.push = original;
       expect(res.status).toBe(500);
       expect(bucketKeys()).toHaveLength(0);
+    });
+  });
+
+  describe('the size of one request (Orbit #669 review)', () => {
+    /** Four times the size of one version, at the smallest size a super admin can set (0.1 MB). */
+    const ROOM = Math.round(0.1 * 1024 * 1024) * 4;
+    const tooLargeAnswer = { status: 413, body: { error: 'too_large', message: 'An artifact can hold up to 102 KB.' } };
+
+    it('lets a change name the whole of a full-size file, old and new', async () => {
+      db.settings.set('bot-limits', { artifacts: { size: 0.5 } });
+      const full = 'a'.repeat(512 * 1024);
+      const made = await makeApp(person('owner'), NEARBY, { content: full });
+      const res = await call(change, { botId: 'bot1', person: person('owner'), chat: NEARBY, edits: [{ old: full, new: 'b'.repeat(512 * 1024) }] }, { id: made.artifact.id });
+      expect(res.status).toBe(200);
+      expect(res.body.artifact.version).toBe(2);
+    });
+
+    it('turns away a body over four times the size before reading it as JSON', async () => {
+      db.settings.set('bot-limits', { artifacts: { size: 0.1 } });
+      // Not JSON either way: the size answers first when it is over, the parser when it is not
+      expect(await call(make, 'x'.repeat(ROOM + 1))).toMatchObject(tooLargeAnswer);
+      expect((await call(make, 'x'.repeat(ROOM))).status).toBe(400);
+      expect(db.artifacts).toHaveLength(0);
+    });
+
+    it('believes a length the caller states, and stops a body that runs past it', async () => {
+      db.settings.set('bot-limits', { artifacts: { size: 0.1 } });
+      const stated = new NextRequest('http://localhost:3333/api/artifacts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': String(ROOM + 1), Authorization: `Bearer ${BOT_TOKEN}` },
+        body: '{}',
+      });
+      const first = await (make as Handler)(stated, { params: Promise.resolve({}) });
+      expect({ status: first.status, body: await first.json() }).toMatchObject(tooLargeAnswer);
+      let cancelled = false;
+      const endless = new ReadableStream<Uint8Array>({
+        pull: (controller) => controller.enqueue(new Uint8Array(64 * 1024).fill(120)),
+        cancel: () => {
+          cancelled = true;
+        },
+      });
+      const streamed = new NextRequest('http://localhost:3333/api/artifacts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${BOT_TOKEN}` },
+        body: endless,
+        duplex: 'half',
+      } as ConstructorParameters<typeof NextRequest>[1]);
+      const second = await (make as Handler)(streamed, { params: Promise.resolve({}) });
+      expect({ status: second.status, body: await second.json() }).toMatchObject(tooLargeAnswer);
+      expect(cancelled).toBe(true);
     });
   });
 
@@ -280,10 +339,13 @@ describe('artifacts', () => {
       expect(new Date(res.body.artifact.expiresAt).getTime()).toBeGreaterThanOrEqual(new Date(made.artifact.expiresAt).getTime());
     });
 
-    it('stops at the version cap', async () => {
+    it('keeps every version until a super admin sets a number, then stops there', async () => {
       const made = await makeApp();
-      db.artifacts[0].latestVersion = MAX_VERSIONS;
-      const res = await call(change, { botId: 'bot1', person: person('owner'), chat: NEARBY, content: '<p>x</p>' }, { id: made.artifact.id });
+      db.artifacts[0].latestVersion = 5000;
+      db.versions[0].number = 5000;
+      expect((await call(change, { botId: 'bot1', person: person('owner'), chat: NEARBY, content: '<p>x</p>' }, { id: made.artifact.id })).status).toBe(200);
+      db.settings.set('bot-limits', { artifacts: { versions: 200 } });
+      const res = await call(change, { botId: 'bot1', person: person('owner'), chat: NEARBY, content: '<p>y</p>' }, { id: made.artifact.id });
       expect(res).toMatchObject({ status: 409, body: { error: 'too_many_versions' } });
     });
 
@@ -625,6 +687,18 @@ describe('artifacts', () => {
       expect(bucketKeys()).toHaveLength(3);
     });
 
+    it('refuses a version that is over the size limit as it is now, and still restores a smaller one', async () => {
+      const made = await makeApp();
+      const id = made.artifact.id;
+      await call(change, { botId: 'bot1', person: person('owner'), chat: NEARBY, content: 'a'.repeat(400 * 1024) }, { id });
+      await call(change, { botId: 'bot1', person: person('owner'), chat: NEARBY, content: '<p>3</p>' }, { id });
+      db.settings.set('bot-limits', { artifacts: { size: 0.25 } });
+      const over = await call(restore, { viewer: viewer(person('owner')), number: 2 }, { id, ...asGame });
+      expect(over).toMatchObject({ status: 413, body: { error: 'too_large' } });
+      expect(db.artifacts.find((a) => a.id === id)?.latestVersion).toBe(3);
+      expect((await call(restore, { viewer: viewer(person('owner')), number: 1 }, { id, ...asGame })).status).toBe(200);
+    });
+
     it('refuses to restore the latest, a missing version, and anyone but the owner', async () => {
       const made = await makeApp();
       const id = made.artifact.id;
@@ -647,6 +721,15 @@ describe('artifacts', () => {
       expect((await call(mine, { person: person('stranger') }, asGame)).body.artifacts.map((a: { id: string }) => a.id)).toEqual([copyId]);
       expect((await call(open, { viewer: viewer(person('friend')) }, { id: copyId, ...asGame })).status).toBe(404);
       expect((await call(open, { viewer: viewer(person('stranger'), false) }, { id: copyId, ...asGame })).status).toBe(200);
+    });
+
+    it('does not copy a version that is over the size limit as it is now', async () => {
+      const made = await makeApp();
+      await call(change, { botId: 'bot1', person: person('owner'), chat: NEARBY, content: 'a'.repeat(400 * 1024) }, { id: made.artifact.id });
+      db.settings.set('bot-limits', { artifacts: { size: 0.25 } });
+      const res = await call(copy, { viewer: viewer(person('friend')) }, { id: made.artifact.id, ...asGame });
+      expect(res).toMatchObject({ status: 413, body: { error: 'too_large' } });
+      expect(db.artifacts).toHaveLength(1);
     });
 
     it('is the copier\'s to change with any bot they talk to, and the original is untouched', async () => {

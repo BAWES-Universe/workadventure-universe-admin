@@ -313,6 +313,7 @@ export default function EditProviderPage({ params }: { params: Promise<{ id: str
                 value={formData.maxTokens}
                 onChange={(e) => setFormData({ ...formData, maxTokens: e.target.value })}
               />
+              <p className="text-xs text-muted-foreground">For image descriptions and checks. Bot replies follow Limits on the Universe AI page.</p>
             </div>
           </div>
 

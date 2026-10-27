@@ -4,7 +4,7 @@ import React from 'react';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 
 const mockFetch = jest.fn();
-let mockPeople: { uuid: string }[] = [];
+let mockPeople: { uuid: string; place?: unknown }[] = [];
 let mockCapabilities: string[] = [];
 let mockId = 'u-ali';
 let mockSearch = new URLSearchParams();
@@ -68,10 +68,10 @@ function json(body: unknown, ok = true) {
   return Promise.resolve({ ok, status: ok ? 200 : 400, json: async () => body });
 }
 
-function serve({ me = 'u-sara', connect, universes = [], taken = [], friend = false, guest = false }: { me?: string; connect?: unknown; universes?: unknown[]; taken?: unknown[]; friend?: boolean; guest?: boolean }) {
+function serve({ me = 'u-sara', connect, universes = [], taken = [], friend = false, guest = false, visitCard = null }: { me?: string; connect?: unknown; universes?: unknown[]; taken?: unknown[]; friend?: boolean; guest?: boolean; visitCard?: unknown }) {
   mockFetch.mockImplementation((url: string, options?: RequestInit) => {
     if (url === '/api/auth/me') return json({ user: { id: me } });
-    if (url === '/api/admin/users/u-ali') return json({ ...ali, isGuest: guest });
+    if (url === '/api/admin/users/u-ali') return json({ ...ali, isGuest: guest, visitCard });
     if (url === '/api/admin/users/u-ali/connect') {
       if (options?.method === 'POST') return json({ relationship: 'request_sent' });
       return json(connect ?? { available: false });
@@ -119,6 +119,21 @@ describe('Someone’s profile buttons', () => {
     expect(mockInvite).toHaveBeenCalledWith('uuid-ali', 'Ali');
     fireEvent.click(screen.getByRole('button', { name: 'Message' }));
     expect(mockMessage).toHaveBeenCalledWith('uuid-ali', 'Ali', '@ali:chat');
+  });
+
+  it('shows their bio and links, then where they are now, then the buttons', async () => {
+    const place = { roomId: 'r-hq', name: 'Headquarters', world: { name: 'BAWES World' }, universe: { name: 'BAWES Universe' }, playPath: '/@/bawes/bawes/hq' };
+    mockPeople = [{ uuid: 'uuid-ali', place }];
+    serve({ connect: { available: true, relationship: 'none', chatId: '@ali:chat' }, visitCard: { bio: 'Hello, I’m Ali!', links: [{ label: 'About', url: 'https://example.com' }] } });
+    await open();
+    const nowIn = await screen.findByTestId('now-in');
+    const bio = screen.getByText('Hello, I’m Ali!');
+    const about = screen.getByRole('link', { name: /About/ });
+    expect(bio.compareDocumentPosition(nowIn) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(about.compareDocumentPosition(nowIn) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // Read and tabbed to in the order drawn on a phone: the buttons come after the card's contents
+    const addFriend = await screen.findByRole('button', { name: 'Add friend' });
+    expect(nowIn.compareDocumentPosition(addFriend) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it('opens the invite sheet with this person picked when Give membership is tapped', async () => {

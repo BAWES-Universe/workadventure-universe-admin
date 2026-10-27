@@ -23,8 +23,8 @@ const bodySchema = z
  * OPTIONS /api/bots/:botId/access
  * Handle CORS preflight
  */
-export async function OPTIONS() {
-  return NextResponse.json({}, { headers: corsHeaders() });
+export async function OPTIONS(request: NextRequest) {
+  return NextResponse.json({}, { headers: corsHeaders(request) });
 }
 
 /**
@@ -49,7 +49,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const { id } = await params;
     const parsed = bodySchema.safeParse(await request.json().catch(() => null));
     if (!parsed.success) {
-      return NextResponse.json({ error: 'Invalid request data', details: parsed.error.issues }, { status: 400, headers: corsHeaders() });
+      return NextResponse.json({ error: 'Invalid request data', details: parsed.error.issues }, { status: 400, headers: corsHeaders(request) });
     }
 
     const answer = await checkBotAccess({
@@ -58,15 +58,15 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       person: parsed.data.person,
     });
     if (!answer) {
-      return NextResponse.json({ error: 'Bot not found' }, { status: 404, headers: corsHeaders() });
+      return NextResponse.json({ error: 'Bot not found' }, { status: 404, headers: corsHeaders(request) });
     }
-    return NextResponse.json(answer, { headers: corsHeaders() });
+    return NextResponse.json(answer, { headers: corsHeaders(request) });
   } catch (error) {
     if (error instanceof Error && error.message === 'Unauthorized: Invalid service token') {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401, headers: corsHeaders() });
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401, headers: corsHeaders(request) });
     }
     Sentry.captureException(error, { tags: { area: 'bot-access' } });
     console.error('Error checking bot access:', error);
-    return NextResponse.json({ error: 'Failed to check bot access' }, { status: 500, headers: corsHeaders() });
+    return NextResponse.json({ error: 'Failed to check bot access' }, { status: 500, headers: corsHeaders(request) });
   }
 }

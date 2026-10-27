@@ -407,6 +407,8 @@ function checkPolicyMatch(
   return policies.some((p) => {
     if (!p.isActive) return false
     if (p.action !== ctx.action && p.action !== 'manage') return false
+    // A policy for one world only counts in that world
+    if (p.worldId && p.worldId !== ctx.worldId) return false
     switch (p.subjectType) {
       case 'everyone':
         return true

@@ -58,6 +58,7 @@ model User {
   artifacts        Artifact[]        @relation("ArtifactOwner")
   artifactAsks     ArtifactVersion[] @relation("ArtifactAsker")
   nearbySharedItems NearbySharedItem[]
+  botUsageTalked   BotsAiUsage[]     @relation("UsageTalkedPerson")
 
   @@map("users")
 }
@@ -730,6 +731,17 @@ model RoomTemplateMap {
   @@map("room_template_maps")
 }
 
+// Settings for the whole server that a super admin changes in Orbit (#666), one JSON value per key. "bot-limits": the
+// reply limits on Universe AI, the artifact limits, the "Say when nothing was saved" switch and fair usage (lib/bot-limits.ts).
+model AppSetting {
+  key         String   @id @db.VarChar(100)
+  value       Json
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  updatedById String?  @map("updated_by_id")
+
+  @@map("app_settings")
+}
+
 // Bots
 model Bot {
   id                  String   @id @default(uuid())
@@ -756,6 +768,10 @@ model Bot {
   refusalReply        String?  @map("refusal_reply") @db.VarChar(500)
   // Replies each person may get from this bot in a day; null = no limit. Stored here; nothing reads it yet (#1159).
   dailyReplyCap       Int?     @map("daily_reply_cap")
+  // A bot's own reply limits (#666), never above its key's (or Universe AI's): the longest reply in tokens and the tool
+  // steps in one reply. Null = follow the key.
+  maxReplyTokens      Int?     @map("max_reply_tokens")
+  maxSteps            Int?     @map("max_steps")
   // Hide bot conversations (#435) for this bot alone. null = follow the universe (default), true = Private, false = Normal.
   // A universe that hides them wins: a bot cannot be loosened below it.
   hideConversations   Boolean? @map("hide_conversations")
@@ -769,6 +785,7 @@ model Bot {
   updatedBy User? @relation("BotUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
   mcpServers BotMcpServer[]
   accessRules BotAccessRule[]
+  replyLimitHits BotReplyLimitHit[]
 
   @@index([roomId])
   @@map("bots")
@@ -853,6 +870,9 @@ model BotsAiProvider {
   failedReplies     Int      @default(0) @map("failed_replies")
   healthCheckedAt   DateTime? @map("health_checked_at")
   ifDown            String   @default("universe-ai") @map("if_down") @db.VarChar(20)
+  // A personal key's reply limits (#666), set by its owner: only the ones they changed (lib/bot-limits.ts fills in the
+  // rest with the recommended values). A server provider has none: Universe AI's are saved in app_settings.
+  replyLimits       Json?    @map("reply_limits")
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")
 
@@ -916,14 +936,57 @@ model BotsAiUsage {
   talkedUserId    String?  @map("talked_user_id") @db.VarChar(255)
   // Whose key paid, when it was a personal key; null for the server's own providers. Set by Orbit, never taken from a request.
   keyOwnerId      String?  @map("key_owner_id")
+  // Where the reply was given (Orbit #491): "dm" (direct messages) or "nearby" (nearby chat). Null on rows from before
+  // it, which the bot page shows as "Not split".
+  channel         String?  @db.VarChar(10)
+  // The signed-in person who talked, worked out by Orbit from talkedUserId (Orbit #491, game #1159). Null for a guest,
+  // for someone Orbit does not know and for older rows.
+  talkedPersonId  String?  @map("talked_person_id")
+  // True when a guest talked, false for a signed-in person; null when the bot server did not say (older rows)
+  talkedGuest     Boolean? @map("talked_guest")
 
   provider        BotsAiProvider @relation(fields: [providerId], references: [providerId], onDelete: Cascade)
+  talkedPerson    User?          @relation("UsageTalkedPerson", fields: [talkedPersonId], references: [id], onDelete: SetNull)
 
   @@index([botId])
   @@index([providerId])
   @@index([timestamp])
   @@index([botId, providerId, timestamp])
+  @@index([talkedPersonId, timestamp])
+  @@index([talkedUserId, timestamp])
   @@map("bots_ai_usage")
+}
+
+// A reply limit's window (game #1159): when it started for one person, or for all guests on one bot. A window starts at
+// the first reply asked for once the last one has ended, and lasts 5 hours (Universe AI) or 24 hours (a bot's own limit).
+// The replies in it are counted from usage rows; this only remembers where it starts.
+model ReplyWindow {
+  // "ua:person:<user id>", "ua:guest:<their id>", "ua:guests:<bot id>" or "bot:<bot id>:<person or guest>"
+  key       String   @id @db.VarChar(320)
+  startedAt DateTime @map("started_at")
+
+  @@map("reply_windows")
+}
+
+// Someone reached a reply limit on a bot (game #1159, Orbit #491): once per person, limit and window. The bot page counts
+// these as "people ran out"; who they were is never shown for them.
+model BotReplyLimitHit {
+  id           String   @id @default(uuid())
+  botId        String   @map("bot_id")
+  // "universe-ai" (signed in), "guest" (a guest's own 10), "guests" (the bot's shared guest pool) or "bot" (its own limit)
+  kind         String   @db.VarChar(20)
+  // The person or guest as the bot server knows them
+  talkedUserId String   @map("talked_user_id") @db.VarChar(255)
+  windowEndsAt DateTime @map("window_ends_at")
+  // When they tapped "Ask <bot>'s maker" on the limit card (game #1159 step 3); the maker sees how many asked, never who
+  askedAt      DateTime? @map("asked_at")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
+
+  @@unique([botId, kind, talkedUserId, windowEndsAt])
+  @@index([botId, createdAt])
+  @@map("bot_reply_limit_hits")
 }
 
 // Bot Metrics

@@ -78,6 +78,7 @@ describe('GET /api/me/ai-keys', () => {
       id: 'key-1', name: 'My DeepSeek', kind: 'deepseek', kindLabel: 'DeepSeek', model: 'deepseek-v4-flash', modelCount: null, caps: {}, address: null,
       last4: '4f2a', month: { replies: 12, tokens: 3400 }, lentTo: [], createdAt: '2026-10-19T00:00:00.000Z',
       status: 'working', downSince: null, downReason: null, ifDown: 'universe-ai',
+      limits: { reply: 32000, steps: 30, continue: 2, memory: 20, read: 50000, wait: 60 },
     }]);
     expect(JSON.stringify(body)).not.toContain('secret');
   });
@@ -99,7 +100,7 @@ describe('GET /api/me/ai-keys', () => {
     const [key] = (await (await list()).json()).keys;
     expect(key.lentTo).toEqual([
       // A bot with no model of its own replies with the key's check model; a lend with a list says which models it allows (#575)
-      { universeId: 'bawes', universeName: 'BAWES Universe', ownedByYou: false, models: null, bots: [{ id: 'b1', name: 'Sam', replies: 1240, model: row.model }] },
+      { universeId: 'bawes', universeName: 'BAWES Universe', ownedByYou: false, models: null, bots: [{ id: 'b1', name: 'Sam', replies: 1240, model: row.model, output: null }] },
       { universeId: 'sandbox', universeName: 'Sandbox Universe', ownedByYou: true, models: ['deepseek-v4-pro'], bots: [] },
     ]);
     // Only this key's lends and bots are read

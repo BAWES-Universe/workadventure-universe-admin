@@ -141,6 +141,25 @@ describe('companionWearableHere', () => {
   });
 });
 
+describe('a policy for one world', () => {
+  it('counts only in that world', async () => {
+    addSet({
+      id: 'vip',
+      visibility: 'restricted',
+      layers: [part('vip-1')],
+      policies: [{ subjectType: 'membership_tag', subjectValue: 'vip', worldId: 'wC' }],
+    });
+    const vip = { ...inC, membershipTags: ['vip'] };
+    expect((await wearableHere(['vip-1'], vip)).wearable).toBe(true);
+    expect((await wearableHere(['vip-1'], { ...vip, worldId: 'wD' })).wearable).toBe(false);
+  });
+
+  it('still counts everywhere the set is scoped when it names no world', async () => {
+    addSet({ id: 'vip', visibility: 'restricted', layers: [part('vip-1')], policies: [{ subjectType: 'membership_tag', subjectValue: 'vip' }] });
+    expect((await wearableHere(['vip-1'], { ...inD, membershipTags: ['vip'] })).wearable).toBe(true);
+  });
+});
+
 describe('resolvePickerSets, direct grants', () => {
   it('does not offer a granted set that is scoped to another world', async () => {
     addSet({ id: 'here', visibility: 'hidden', layers: [part('here-1')], scopes: [{ scopeType: 'world', scopeId: 'wC' }] });

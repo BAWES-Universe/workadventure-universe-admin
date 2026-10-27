@@ -9,8 +9,8 @@ export const runtime = 'nodejs';
  * OPTIONS /api/bots/database/stats
  * Handle CORS preflight
  */
-export async function OPTIONS() {
-  return NextResponse.json({}, { headers: corsHeaders() });
+export async function OPTIONS(request: NextRequest) {
+  return NextResponse.json({}, { headers: corsHeaders(request) });
 }
 
 /**
@@ -24,10 +24,10 @@ export async function GET(request: NextRequest) {
     // Operates on every bot's data: admin token or super admin only.
     const viewer = await getViewer(request);
     if (!viewer) {
-      return unauthorizedResponse(corsHeaders());
+      return unauthorizedResponse(corsHeaders(request));
     }
     if (!isPrivileged(viewer)) {
-      return forbiddenResponse(corsHeaders());
+      return forbiddenResponse(corsHeaders(request));
     }
 
     // Query table stats using raw SQL
@@ -136,19 +136,19 @@ export async function GET(request: NextRequest) {
       recommendations,
     };
 
-    return NextResponse.json(response, { headers: corsHeaders() });
+    return NextResponse.json(response, { headers: corsHeaders(request) });
   } catch (error: any) {
     if (error.message === 'Unauthorized: Admin authentication required') {
       return NextResponse.json(
         { error: 'Unauthorized' },
-        { status: 401, headers: corsHeaders() }
+        { status: 401, headers: corsHeaders(request) }
       );
     }
 
     console.error('Error getting database stats:', error);
     return NextResponse.json(
       { error: 'Internal server error' },
-      { status: 500, headers: corsHeaders() }
+      { status: 500, headers: corsHeaders(request) }
     );
   }
 }

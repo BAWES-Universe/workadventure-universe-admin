@@ -10,6 +10,7 @@ import { FormSheet } from '../components/form-sheet';
 import { EnabledPill, providerTypeLabel } from './components/provider-state';
 import { useReplacePage } from '@/app/admin/orbit-frame-context';
 import { useToast } from '@/components/ui/toast';
+import { UniverseAiLimits } from '../components/limits';
 
 interface AiProvider {
   providerId: string;
@@ -241,6 +242,8 @@ export default function AiProvidersPage() {
           ))}
         </div>
       )}
+
+      <UniverseAiLimits />
 
       <FormSheet
         open={makingDefault !== null}

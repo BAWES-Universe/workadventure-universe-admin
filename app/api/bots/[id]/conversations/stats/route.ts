@@ -10,8 +10,8 @@ export const runtime = 'nodejs';
  * OPTIONS /api/bots/:botId/conversations/stats
  * Handle CORS preflight
  */
-export async function OPTIONS() {
-  return NextResponse.json({}, { headers: corsHeaders() });
+export async function OPTIONS(request: NextRequest) {
+  return NextResponse.json({}, { headers: corsHeaders(request) });
 }
 
 /**
@@ -26,12 +26,12 @@ export async function GET(
 ) {
   try {
     const { id: botId } = await params;
-    const denied = await botReadDenied(request, botId, corsHeaders());
+    const denied = await botReadDenied(request, botId, corsHeaders(request));
     if (denied) return denied;
 
     // Hide bot conversations (#435): the saved transcripts are hidden, counts and dates included.
     if (await isBotHidden(botId)) {
-      return NextResponse.json({ botId, private: true }, { headers: corsHeaders() });
+      return NextResponse.json({ botId, private: true }, { headers: corsHeaders(request) });
     }
 
     // Get stats
@@ -67,20 +67,20 @@ export async function GET(
         newestConversation: newest?.endedAt.getTime() || null,
         totalSize: sizeResult._sum.messageCount || 0,
       },
-      { headers: corsHeaders() }
+      { headers: corsHeaders(request) }
     );
   } catch (error: any) {
     if (error.message === 'Unauthorized: Admin authentication required') {
       return NextResponse.json(
         { error: 'Unauthorized' },
-        { status: 401, headers: corsHeaders() }
+        { status: 401, headers: corsHeaders(request) }
       );
     }
 
     console.error('Error getting conversation stats:', error);
     return NextResponse.json(
       { error: 'Internal server error' },
-      { status: 500, headers: corsHeaders() }
+      { status: 500, headers: corsHeaders(request) }
     );
   }
 }

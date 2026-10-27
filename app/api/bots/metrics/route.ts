@@ -9,8 +9,8 @@ export const runtime = 'nodejs';
  * OPTIONS /api/bots/metrics
  * Handle CORS preflight
  */
-export async function OPTIONS() {
-  return NextResponse.json({}, { headers: corsHeaders() });
+export async function OPTIONS(request: NextRequest) {
+  return NextResponse.json({}, { headers: corsHeaders(request) });
 }
 
 /**
@@ -52,7 +52,7 @@ export async function POST(request: NextRequest) {
     if (!Array.isArray(metrics)) {
       return NextResponse.json(
         { error: 'metrics must be an array' },
-        { status: 400, headers: corsHeaders() }
+        { status: 400, headers: corsHeaders(request) }
       );
     }
 
@@ -197,13 +197,13 @@ export async function POST(request: NextRequest) {
     // Return immediately (fire-and-forget)
     return NextResponse.json(
       { saved: rowsToInsert.length },
-      { headers: corsHeaders() }
+      { headers: corsHeaders(request) }
     );
   } catch (error: any) {
     if (error.message === 'Unauthorized: Invalid service token') {
       return NextResponse.json(
         { error: 'Unauthorized' },
-        { status: 401, headers: corsHeaders() }
+        { status: 401, headers: corsHeaders(request) }
       );
     }
 
@@ -212,7 +212,7 @@ export async function POST(request: NextRequest) {
     console.error('Error in metrics endpoint:', error);
     return NextResponse.json(
       { saved: 0 }, // Return success even on error (fire-and-forget)
-      { headers: corsHeaders() }
+      { headers: corsHeaders(request) }
     );
   }
 }

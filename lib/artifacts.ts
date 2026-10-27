@@ -18,10 +18,11 @@ export type ChangeScope = (typeof CHANGE_SCOPES)[number];
 export const CHAT_KINDS = ['nearby', 'dm'] as const;
 export type ChatKind = (typeof CHAT_KINDS)[number];
 
-/** The most one version can hold. A page or mini app is one file; this is far above a few thousand lines. */
-export const MAX_ARTIFACT_BYTES = 512 * 1024;
-/** Versions one artifact keeps. After that a change is refused, so one chat cannot fill the bucket. */
-export const MAX_VERSIONS = 200;
+/**
+ * How big one version can be and how many versions one artifact keeps are a super admin's limits (#666, lib/bot-limits.ts),
+ * passed in by the service. This is only the largest size that can be set, which the request parser allows for.
+ */
+export const LARGEST_ARTIFACT_BYTES = 100 * 1024 * 1024;
 export const MAX_TITLE_LENGTH = 120;
 export const MAX_SUMMARY_LENGTH = 300;
 export const MAX_NAME_LENGTH = 100;
@@ -81,9 +82,19 @@ export interface ArtifactEdit {
   all?: boolean;
 }
 
-/** A file of this many characters is over the limit in bytes too (a character is at least one byte). */
-function tooLargeAfter(characters: number): void {
-  if (characters > MAX_ARTIFACT_BYTES) throw new ArtifactError('too_large', 413, `An artifact can hold up to ${MAX_ARTIFACT_BYTES / 1024} KB.`);
+/** "512 KB", "2 MB": the size limit as a person reads it. */
+export function sizeLabel(bytes: number): string {
+  const mb = bytes / (1024 * 1024);
+  return mb >= 1 ? `${Number(mb.toFixed(1)).toLocaleString('en')} MB` : `${Math.round(bytes / 1024).toLocaleString('en')} KB`;
+}
+
+export function tooLarge(maxBytes: number): ArtifactError {
+  return new ArtifactError('too_large', 413, `An artifact can hold up to ${sizeLabel(maxBytes)}.`);
+}
+
+/** The file would be this many bytes after an edit: over the limit is refused before anything is built. */
+function tooLargeAfter(bytes: number, maxBytes: number): void {
+  if (bytes > maxBytes) throw tooLarge(maxBytes);
 }
 
 /**
@@ -91,34 +102,47 @@ function tooLargeAfter(characters: number): void {
  * finds a piece that is not unique and was not asked for everywhere, stops the whole change: nothing is half applied.
  * The message says which edit and why, so the bot can fix that edit and send it again.
  */
-export function applyEdits(content: string, edits: readonly ArtifactEdit[]): string {
+export function applyEdits(content: string, edits: readonly ArtifactEdit[], maxBytes: number): string {
   let result = content;
   edits.forEach((edit, index) => {
     if (edit.old === '') throw new ArtifactError('edit_empty', 422, `Edit ${index + 1} has nothing to find.`);
+    // Half of an emoji (a surrogate pair cut at either end) would match inside characters and grow them past the size
+    // the check below counts, so the text to find must start and end on whole characters
+    if (/^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/.test(edit.old)) {
+      throw new ArtifactError('edit_split_character', 422, `Edit ${index + 1}: the text to replace starts or ends in the middle of a character. Include the whole character.`);
+    }
     const first = result.indexOf(edit.old);
     if (first === -1) throw new ArtifactError('edit_not_found', 422, `Edit ${index + 1}: the text to replace is not in the file.`);
     const second = result.indexOf(edit.old, first + edit.old.length);
     if (edit.all) {
-      const parts = result.split(edit.old);
-      // A short piece replaced by a long one in many places can grow far past the limit: refuse before building it
-      tooLargeAfter(result.length + (parts.length - 1) * (edit.new.length - edit.old.length));
-      result = parts.join(edit.new);
+      // A short piece replaced by a long one in many places can grow far past the limit: count the places and refuse
+      // before building anything (splitting a big file on one character would build a part for each)
+      let places = 0;
+      for (let at = first; at !== -1; at = result.indexOf(edit.old, at + edit.old.length)) places++;
+      // Bytes, not characters: replacing "a" with "界" is three times the size
+      tooLargeAfter(byteLength(result) + places * (byteLength(edit.new) - byteLength(edit.old)), maxBytes);
+      result = result.split(edit.old).join(edit.new);
       return;
     }
     if (second !== -1) {
       throw new ArtifactError('edit_ambiguous', 422, `Edit ${index + 1}: the text to replace appears more than once. Add more around it, or replace all of them.`);
     }
-    tooLargeAfter(result.length + edit.new.length - edit.old.length);
+    tooLargeAfter(byteLength(result) + byteLength(edit.new) - byteLength(edit.old), maxBytes);
     result = result.slice(0, first) + edit.new + result.slice(first + edit.old.length);
   });
   return result;
 }
 
 /** The size check every new version goes through, before anything is stored. */
-export function checkContent(content: string): void {
+export function checkContent(content: string, maxBytes: number): void {
   if (content.trim() === '') throw new ArtifactError('empty_content', 422, 'An artifact cannot be empty.');
-  if (byteLength(content) > MAX_ARTIFACT_BYTES) {
-    throw new ArtifactError('too_large', 413, `An artifact can hold up to ${MAX_ARTIFACT_BYTES / 1024} KB.`);
+  if (byteLength(content) > maxBytes) throw tooLarge(maxBytes);
+}
+
+/** A new version is refused once an artifact keeps as many as it may (0: it keeps them all). */
+export function checkVersionRoom(latestVersion: number, maxVersions: number): void {
+  if (maxVersions > 0 && latestVersion >= maxVersions) {
+    throw new ArtifactError('too_many_versions', 409, `An artifact keeps up to ${maxVersions.toLocaleString('en')} versions.`);
   }
 }
 

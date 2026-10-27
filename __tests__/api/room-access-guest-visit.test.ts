@@ -19,6 +19,11 @@ jest.mock('@/lib/db', () => ({
   },
 }));
 jest.mock('@/lib/oidc', () => ({ authenticateRequest: jest.fn().mockResolvedValue({ isAuthenticated: false }) }));
+// Who may wear what is covered in room-access-wearing-wins.test.ts
+jest.mock('@/lib/woka-wearable', () => ({
+  wearableHere: jest.fn().mockResolvedValue({ wearable: true }),
+  companionWearableHere: jest.fn().mockResolvedValue({ wearable: true }),
+}));
 jest.mock('@/lib/discord', () => ({ notifyRoomAccess: jest.fn().mockResolvedValue(undefined) }));
 jest.mock('@/lib/avatar-catalog-validator', () => ({
   resolveTextureUrls: jest.fn(async (_prisma: unknown, ids: string[]) => ({ valid: ids.every((id) => id !== 'bad'), textures: ids.map((id) => ({ id })) })),

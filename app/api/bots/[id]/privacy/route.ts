@@ -5,7 +5,7 @@ import { prisma } from '@/lib/db';
 import { authorizeBotManager, json } from '@/lib/bot-access-api';
 import { BOT_PRIVACY_CHOICES, forgetNotice, loadBotPrivacy, memoryTally, storedFor, takeForgets, type BotPrivacyChoice } from '@/lib/bot-privacy';
 import { validateServiceToken } from '@/lib/service-tokens';
-import { trustedCorsHeaders } from '@/lib/cors';
+import { corsHeaders } from '@/lib/cors';
 
 export const runtime = 'nodejs';
 
@@ -22,7 +22,7 @@ function hasAdminToken(request: NextRequest): boolean {
 const bodySchema = z.object({ choice: z.enum(BOT_PRIVACY_CHOICES as [BotPrivacyChoice, ...BotPrivacyChoice[]]) }).strict();
 
 export async function OPTIONS(request: NextRequest) {
-  return NextResponse.json({}, { headers: trustedCorsHeaders(request) });
+  return NextResponse.json({}, { headers: corsHeaders(request) });
 }
 
 /**

@@ -9,8 +9,8 @@ export const runtime = 'nodejs';
  * OPTIONS /api/bots/test/results
  * Handle CORS preflight
  */
-export async function OPTIONS() {
-  return NextResponse.json({}, { headers: corsHeaders() });
+export async function OPTIONS(request: NextRequest) {
+  return NextResponse.json({}, { headers: corsHeaders(request) });
 }
 
 /**
@@ -36,7 +36,7 @@ export async function POST(request: NextRequest) {
     if (!testId || !results || passed === undefined) {
       return NextResponse.json(
         { error: 'testId, results, and passed are required' },
-        { status: 400, headers: corsHeaders() }
+        { status: 400, headers: corsHeaders(request) }
       );
     }
 
@@ -60,20 +60,20 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json(
       { status: 'stored' },
-      { headers: corsHeaders() }
+      { headers: corsHeaders(request) }
     );
   } catch (error: any) {
     if (error.message === 'Unauthorized: Invalid service token') {
       return NextResponse.json(
         { error: 'Unauthorized' },
-        { status: 401, headers: corsHeaders() }
+        { status: 401, headers: corsHeaders(request) }
       );
     }
 
     console.error('Error storing test result:', error);
     return NextResponse.json(
       { error: 'Internal server error' },
-      { status: 500, headers: corsHeaders() }
+      { status: 500, headers: corsHeaders(request) }
     );
   }
 }
