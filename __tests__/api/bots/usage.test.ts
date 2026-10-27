@@ -17,6 +17,7 @@ jest.mock('@/lib/bot-access-settings', () => ({ ...jest.requireActual('@/lib/bot
 jest.mock('@/lib/db', () => ({
   prisma: {
     $queryRaw: jest.fn(),
+    appSetting: { findUnique: jest.fn() },
     bot: { findUnique: jest.fn() },
     user: { findMany: jest.fn() },
     botsAiUsage: { findFirst: jest.fn() },
@@ -27,6 +28,7 @@ jest.mock('@/lib/db', () => ({
 
 const db = prisma as unknown as {
   $queryRaw: jest.Mock;
+  appSetting: { findUnique: jest.Mock };
   bot: { findUnique: jest.Mock };
   user: { findMany: jest.Mock };
   botsAiUsage: { findFirst: jest.Mock };
@@ -47,6 +49,7 @@ const get = (query = '') =>
   GET(new NextRequest(`http://localhost:3333/api/bots/bot-1/usage${query}`), { params: Promise.resolve({ id: 'bot-1' }) });
 
 beforeEach(() => {
+  db.appSetting.findUnique.mockReset().mockResolvedValue(null);
   session.mockReset().mockResolvedValue({ id: 'u-maker', email: 'maker@example.com' });
   manages.mockReset().mockResolvedValue(true);
   place.mockReset().mockResolvedValue({ id: 'bot-1', createdById: 'u-maker', roomId: 'room-1', universeId: 'uni', universeOwnerId: 'u-owner' });
@@ -168,6 +171,12 @@ describe('what it shows', () => {
     const body = await (await get()).json();
     expect(body.keyProblem).toEqual({ name: 'My OpenAI', downSince: '2026-10-23T18:14:00.000Z', meanwhile: 'universe-ai' });
     expect(body.limits).toMatchObject({ botLimit: 20, botLimitWindowHours: 24, universeAi: { signedIn: 30, guest: 10, guestPool: 200, windowHours: 5 } });
+  });
+
+  it('the Universe AI numbers a super admin saved', async () => {
+    db.appSetting.findUnique.mockResolvedValue({ key: 'bot-limits', value: { fairUsage: { signedIn: 50, guest: 5, guestPool: 100 } } });
+    const body = await (await get()).json();
+    expect(body.limits.universeAi).toEqual({ signedIn: 50, guest: 5, guestPool: 100, windowHours: 5 });
   });
 
   it('how many people ran out, each counted once, inside the range only', async () => {
