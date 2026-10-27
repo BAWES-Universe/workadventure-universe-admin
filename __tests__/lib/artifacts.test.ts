@@ -74,6 +74,14 @@ describe('applyEdits', () => {
     expect(applyEdits('xaax', [{ old: 'a', new: 'bb', all: true }], MAX)).toBe('xbbbbx');
   });
 
+  it('counts the size in bytes: one short character replaced by a wider one in many places is refused', () => {
+    const file = 'a'.repeat(1000);
+    // 1,000 characters become 3,000 bytes
+    expect(codeOf(() => applyEdits(file, [{ old: 'a', new: '界', all: true }], 2000))).toBe('too_large');
+    expect(applyEdits(file, [{ old: 'a', new: '界', all: true }], 3000)).toBe('界'.repeat(1000));
+    expect(codeOf(() => applyEdits('abc', [{ old: 'b', new: '界'.repeat(400) }], 1000))).toBe('too_large');
+  });
+
   it('puts $ patterns in the new text as they are', () => {
     expect(applyEdits('price', [{ old: 'price', new: '$& $1 $$' }], MAX)).toBe('$& $1 $$');
   });
