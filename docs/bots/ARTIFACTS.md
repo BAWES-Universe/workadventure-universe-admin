@@ -2,7 +2,7 @@
 
 Bots make mini apps, pages, Markdown documents and SVG drawings for the person who asked. Orbit keeps the list, every
 version and who may open or change each one. This page is the contract for the bot server (make, change, read) and the
-game (open, versions, code, share, restore, copy).
+game (open, versions, code, share, restore, copy, delete).
 
 ## Rules
 
@@ -42,7 +42,7 @@ change made on the same version at the same moment.
 
 ## Game routes (`ADMIN_API_TOKEN`)
 
-Bodies carry `viewer: { person, inChat }`; `inChat` says the person is in the artifact's chat right now (the game vouches).
+Bodies carry `viewer: { person, inChat, chat }`: `inChat` says the person is in `chat` right now (the game vouches), and counts only when `chat` is the chat the artifact was made in. An artifact belongs to the person who asked, and a bot acts for the person talking to it: any bot in the chat may read or change it for the owner, or for someone in that chat when the owner allowed it, whichever bot made it. A bot never acts on its own across people or chats.
 
 | Route | Body | Answer |
 | --- | --- | --- |
@@ -53,6 +53,7 @@ Bodies carry `viewer: { person, inChat }`; `inChat` says the person is in the ar
 | `PUT /api/artifacts/:id/share` | `viewer`, `openScope?`, `changeScope?` | `{ artifact }`; owner only (`403` for others who can open it) |
 | `POST /api/artifacts/:id/restore` | `viewer`, `number` | `{ artifact, version, you }`; owner only |
 | `POST /api/artifacts/:id/copy` | `viewer`, `version?` | `{ artifact, version, you }`; `403 sign_in_required` for a guest |
+| `DELETE /api/artifacts/:id` | `viewer` | `{ deleted: true }`; owner only. Removes every version and file; a copy keeps its own files |
 
 `you` is `{ owner, change, manage, copy }`: whether to show Ask-to-change, Share and Restore, and Make a copy.
 `version.url` is where the file is served from, for the locked box.

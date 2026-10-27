@@ -134,15 +134,23 @@ export interface VersionView {
   url: string;
 }
 
-function versionView(row: { number: number; summary: string | null; askedByName: string | null; sizeBytes: number; createdAt: Date; fileKey: string }, files: ArtifactFiles): VersionView {
+type VersionRow = { number: number; summary: string | null; askedByName: string | null; sizeBytes: number; createdAt: Date; fileKey: string };
+
+/** What a bot is told about a version: the same, without the file's address (only the game opens the file). */
+export type BotVersionView = Omit<VersionView, 'url'>;
+
+function botVersionView(row: VersionRow): BotVersionView {
   return {
     number: row.number,
     summary: row.summary,
     askedByName: row.askedByName,
     sizeBytes: row.sizeBytes,
     createdAt: row.createdAt.toISOString(),
-    url: files.urlFor(row.fileKey),
   };
+}
+
+function versionView(row: VersionRow, files: ArtifactFiles): VersionView {
+  return { ...botVersionView(row), url: files.urlFor(row.fileKey) };
 }
 
 /** What the person who is looking may do, for the buttons the game shows. */
@@ -216,7 +224,7 @@ export interface MakeInput extends BotCall {
 
 export interface Made {
   artifact: ArtifactView;
-  version: VersionView;
+  version: BotVersionView;
   hidden: boolean;
 }
 
@@ -275,7 +283,7 @@ export async function makeArtifact(input: MakeInput, ctx: Context = defaultConte
     }),
   );
   await pruneExpired(ctx).catch((error) => console.error('Could not clear expired artifacts:', error));
-  return { artifact: viewOf(artifact), version: versionView(artifact.versions[0], files), hidden };
+  return { artifact: viewOf(artifact), version: botVersionView(artifact.versions[0]), hidden };
 }
 
 export interface ChangeInput extends BotCall {
@@ -342,7 +350,7 @@ export async function changeArtifact(input: ChangeInput, ctx: Context = defaultC
     }),
   );
   const fresh = await loadArtifact(artifact.id, now);
-  return { artifact: viewOf(fresh), version: versionView(row, files), hidden };
+  return { artifact: viewOf(fresh), version: botVersionView(row), hidden };
 }
 
 export interface ReadInput extends BotCall {
@@ -362,12 +370,13 @@ export async function readArtifact(input: ReadInput, ctx: Context = defaultConte
   const artifact = await loadArtifact(input.artifactId, now);
   requireOpen(artifact, { ...who, inChat: inThisChat(artifact, input.chat) }, now);
   const row = await findVersion(artifact, input.version);
-  return { artifact: viewOf(artifact), version: versionView(row, files), content: await files.get(row.fileKey), hidden };
+  return { artifact: viewOf(artifact), version: botVersionView(row), content: await files.get(row.fileKey), hidden };
 }
 
 /**
- * The artifacts made in this chat that the person may open, the most recently changed first: how a bot finds the one
- * "make the buttons bigger" is about, in a later message or after a restart.
+ * The artifacts made in this chat (by any bot in it) that the person may open, the most recently changed first: how a bot finds
+ * the one "make the buttons bigger" is about, in a later message or after a restart. An artifact belongs to the person who
+ * asked, so what a bot may do with it is what that person may, not which bot made it.
  */
 export async function listArtifactsInChat(input: BotCall, ctx: Context = defaultContext()): Promise<{ artifacts: ArtifactView[]; hidden: boolean }> {
   const { now } = ctx;
@@ -396,6 +405,18 @@ async function findVersion(artifact: ArtifactRow, number?: number | null) {
 export interface Viewer {
   person: Person;
   inChat: boolean;
+  /** The chat the game vouches for; `inChat` counts only when it is the chat the artifact was made in. */
+  chat?: Chat;
+}
+
+/** In the artifact's own chat: the chat the game named is the one it was made in, and the person is in it. Otherwise no. */
+function viewerIsInChat(artifact: { chatKind: string | null; chatRef: string | null }, viewer: Viewer): boolean {
+  return viewer.inChat && viewer.chat !== undefined && inThisChat(artifact, viewer.chat);
+}
+
+/** The person looking at this artifact: their account, and whether they are in the chat it was made in. */
+async function whoIsLooking(artifact: ArtifactRow, viewer: Viewer): Promise<Who> {
+  return resolvePerson(viewer.person, viewerIsInChat(artifact, viewer));
 }
 
 export interface Opened {
@@ -408,8 +429,8 @@ export interface Opened {
 export async function openArtifact(id: string, viewer: Viewer, version?: number | null, ctx: Context = defaultContext()): Promise<Opened> {
   const { files, now } = ctx;
   pruneSometimes(ctx);
-  const who = await resolvePerson(viewer.person, viewer.inChat);
   const artifact = await loadArtifact(id, now);
+  const who = await whoIsLooking(artifact, viewer);
   requireOpen(artifact, who, now);
   const row = await findVersion(artifact, version);
   return { artifact: viewOf(artifact), version: versionView(row, files), you: rightsOf(artifact, who, now) };
@@ -417,8 +438,8 @@ export async function openArtifact(id: string, viewer: Viewer, version?: number 
 
 export async function listVersions(id: string, viewer: Viewer, ctx: Context = defaultContext()): Promise<{ versions: VersionView[] }> {
   const { files, now } = ctx;
-  const who = await resolvePerson(viewer.person, viewer.inChat);
   const artifact = await loadArtifact(id, now);
+  const who = await whoIsLooking(artifact, viewer);
   requireOpen(artifact, who, now);
   const rows = await prisma.artifactVersion.findMany({ where: { artifactId: artifact.id }, orderBy: { number: 'desc' } });
   return { versions: rows.map((row) => versionView(row, files)) };
@@ -427,8 +448,8 @@ export async function listVersions(id: string, viewer: Viewer, ctx: Context = de
 /** The code of one version, for the Code view. */
 export async function readVersionCode(id: string, number: number, viewer: Viewer, ctx: Context = defaultContext()): Promise<{ version: VersionView; content: string }> {
   const { files, now } = ctx;
-  const who = await resolvePerson(viewer.person, viewer.inChat);
   const artifact = await loadArtifact(id, now);
+  const who = await whoIsLooking(artifact, viewer);
   requireOpen(artifact, who, now);
   const row = await findVersion(artifact, number);
   return { version: versionView(row, files), content: await files.get(row.fileKey) };
@@ -441,8 +462,8 @@ export interface SharingInput {
 
 export async function setSharing(id: string, viewer: Viewer, input: SharingInput, ctx: Context = defaultContext()): Promise<{ artifact: ArtifactView }> {
   const { now } = ctx;
-  const who = await resolvePerson(viewer.person, viewer.inChat);
   const artifact = await loadArtifact(id, now);
+  const who = await whoIsLooking(artifact, viewer);
   requireOpen(artifact, who, now);
   requireOwner(artifact, who);
   const data: { openScope?: OpenScope; changeScope?: ChangeScope } = {};
@@ -462,8 +483,8 @@ export async function setSharing(id: string, viewer: Viewer, input: SharingInput
 /** Restore makes a new version out of an older one; nothing is deleted, so restoring can itself be undone. */
 export async function restoreVersion(id: string, number: number, viewer: Viewer, ctx: Context = defaultContext()): Promise<Opened> {
   const { files, now } = ctx;
-  const who = await resolvePerson(viewer.person, viewer.inChat);
   const artifact = await loadArtifact(id, now);
+  const who = await whoIsLooking(artifact, viewer);
   requireOpen(artifact, who, now);
   requireOwner(artifact, who);
   if (artifact.latestVersion >= MAX_VERSIONS) throw new ArtifactError('too_many_versions', 409, `An artifact keeps up to ${MAX_VERSIONS} versions.`);
@@ -486,12 +507,34 @@ export async function restoreVersion(id: string, number: number, viewer: Viewer,
   return { artifact: viewOf(fresh), version: versionView(row, files), you: rightsOf(fresh, who, now) };
 }
 
+/**
+ * The owner takes it back: the rows go first (every version with them), then the files, with the same retry for files the
+ * bucket would not remove as the guest clean-up. A copy someone made keeps its own files. The delete only goes through for the
+ * version it read, so a change that lands meanwhile is not left with a file nobody lists: it asks again.
+ */
+export async function deleteArtifact(id: string, viewer: Viewer, ctx: Context = defaultContext()): Promise<{ deleted: true }> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const artifact = await loadArtifact(id, ctx.now);
+    const who = await whoIsLooking(artifact, viewer);
+    requireOpen(artifact, who, ctx.now);
+    requireOwner(artifact, who);
+    const versions = await prisma.artifactVersion.findMany({ where: { artifactId: artifact.id } });
+    const { count } = await prisma.artifact.deleteMany({ where: { id: artifact.id, latestVersion: artifact.latestVersion } });
+    if (count === 1) {
+      await removeFiles(ctx, versions.map((version) => version.fileKey));
+      return { deleted: true };
+    }
+  }
+  throw new ArtifactError('stale_version', 409, 'It changed at the same moment; try again.');
+}
+
 /** Make a copy: the viewer's own artifact, from the version they pick (the latest by default), in no chat. */
 export async function copyArtifact(id: string, viewer: Viewer, version?: number | null, ctx: Context = defaultContext()): Promise<Opened> {
   const { files, now } = ctx;
-  const who = await resolvePerson(viewer.person, viewer.inChat);
-  if (!who.userId) throw new ArtifactError('sign_in_required', 403, 'Sign in to make a copy.');
+  // Signing in comes first, so the answer for a guest does not tell whether the artifact is there
+  if (!(await resolvePerson(viewer.person, false)).userId) throw new ArtifactError('sign_in_required', 403, 'Sign in to make a copy.');
   const source = await loadArtifact(id, now);
+  const who = await whoIsLooking(source, viewer);
   requireOpen(source, who, now);
   const row = await findVersion(source, version);
   const kind = source.kind as ArtifactKind;
@@ -517,6 +560,42 @@ export async function copyArtifact(id: string, viewer: Viewer, version?: number 
     }),
   );
   return { artifact: viewOf(created), version: versionView(created.versions[0], files), you: rightsOf(created, who, now) };
+}
+
+// ---- The public link page ---------------------------------------------------------------------------------------
+
+/** What the page for "anyone with the link" shows: the latest version, nothing about who may do what. */
+export interface PublicView {
+  title: string;
+  kind: ArtifactKind;
+  makerName: string;
+  version: number;
+  /** Where the file is served from, for the locked box. */
+  url: string;
+  /** A document is drawn from its text (the page cannot show a Markdown file itself). */
+  content: string | null;
+}
+
+/**
+ * Opens an artifact for anyone who has its address, without an account: only when the owner shared it by link, and
+ * only the latest version. One answer for every other case (not there, run out, shared only with its chat), so the page
+ * tells nobody which of them it is.
+ */
+export async function openByLink(id: string, ctx: Context = defaultContext()): Promise<PublicView> {
+  const { files, now } = ctx;
+  pruneSometimes(ctx);
+  const artifact = await loadArtifact(id, now);
+  if (artifact.openScope !== 'link') throw new ArtifactError('not_found', 404, 'No such artifact.');
+  const row = await findVersion(artifact, artifact.latestVersion);
+  const kind = artifact.kind as ArtifactKind;
+  return {
+    title: artifact.title,
+    kind,
+    makerName: artifact.makerName,
+    version: row.number,
+    url: files.urlFor(row.fileKey),
+    content: kind === 'markdown' ? await files.get(row.fileKey) : null,
+  };
 }
 
 // ---- Housekeeping -----------------------------------------------------------------------------------------------

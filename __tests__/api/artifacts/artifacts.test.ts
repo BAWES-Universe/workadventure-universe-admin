@@ -10,10 +10,11 @@ import { POST as code } from '@/app/api/artifacts/[id]/versions/[number]/route';
 import { PUT as share } from '@/app/api/artifacts/[id]/share/route';
 import { POST as restore } from '@/app/api/artifacts/[id]/restore/route';
 import { POST as copy } from '@/app/api/artifacts/[id]/copy/route';
+import { DELETE as remove } from '@/app/api/artifacts/[id]/route';
 import { checkBotAccess } from '@/lib/bot-access';
 import { loadBotPrivacy } from '@/lib/bot-privacy';
 import { MAX_ARTIFACT_BYTES, MAX_VERSIONS } from '@/lib/artifacts';
-import { pruneExpired, resetPruneClock } from '@/lib/artifact-service';
+import { openByLink, pruneExpired, resetPruneClock } from '@/lib/artifact-service';
 import { addBot, addUser, db, fakeFiles, fakePrisma } from '../../helpers/artifacts-db';
 
 jest.mock('@/lib/db', () => ({ prisma: jest.requireActual('../../helpers/artifacts-db').fakePrisma }));
@@ -43,7 +44,9 @@ async function call(handler: unknown, body: unknown, options: { id?: string; num
 const asGame = { token: ADMIN_TOKEN };
 const person = (id: string) => ({ signedIn: true, identifier: `uuid-${id}`, name: id });
 const guest = { signedIn: false, name: 'Visitor' };
-const viewer = (who: ReturnType<typeof person> | typeof guest, inChat = true) => ({ person: who, inChat });
+type Who = ReturnType<typeof person> | typeof guest;
+/** The game's word about a person: in a chat or not, and which chat (none by default is the bubble the artifacts are made in). */
+const viewer = (who: Who, inChat = true, chat: object | null = NEARBY) => ({ person: who, inChat, ...(chat ? { chat } : {}) });
 
 async function makeApp(who: ReturnType<typeof person> | typeof guest = person('owner'), chat: object = NEARBY, extra: object = {}) {
   const res = await call(make, { botId: 'bot1', person: who, chat, title: 'Quests board', kind: 'app', content: APP, ...extra });
@@ -104,7 +107,8 @@ describe('artifacts', () => {
       expect(made.version).toMatchObject({ number: 1, summary: 'First version', askedByName: 'owner', sizeBytes: Buffer.byteLength(APP) });
       expect(made.hidden).toBe(false);
       expect(db.files.get(bucketKeys()[0])).toBe(APP);
-      expect(made.version.url).toBe(`https://files.example.test/${bucketKeys()[0]}`);
+      // A bot is never told where the file is served from; only the game's open route says
+      expect(made.version).not.toHaveProperty('url');
       expect(db.artifacts[0].ownerId).toBe('owner');
     });
 
@@ -187,6 +191,7 @@ describe('artifacts', () => {
       expect(res.status).toBe(200);
       expect(res.body.artifact.version).toBe(2);
       expect(res.body.version).toMatchObject({ number: 2, summary: 'Bigger buttons', askedByName: 'owner' });
+      expect(res.body.version).not.toHaveProperty('url');
       const list = await call(versions, { viewer: viewer(person('owner')) }, { id: made.artifact.id, ...asGame });
       expect(list.body.versions.map((v: { number: number }) => v.number)).toEqual([2, 1]);
       const v1 = await call(code, { viewer: viewer(person('owner')) }, { id: made.artifact.id, number: '1', ...asGame });
@@ -340,6 +345,7 @@ describe('artifacts', () => {
       const first = await call(read, { botId: 'bot1', person: person('owner'), chat: NEARBY, version: 1 }, { id: made.artifact.id });
       expect(latest.body).toMatchObject({ content: '<p>2</p>', version: { number: 2 } });
       expect(first.body).toMatchObject({ content: APP, version: { number: 1 } });
+      expect(first.body.version).not.toHaveProperty('url');
       expect((await call(read, { botId: 'bot1', person: person('owner'), chat: NEARBY, version: 9 }, { id: made.artifact.id })).body.error).toBe('version_not_found');
     });
 
@@ -412,6 +418,151 @@ describe('artifacts', () => {
       const made = await makeApp(guest);
       db.artifacts[0].expiresAt = new Date(Date.now() - 1000);
       expect((await call(open, { viewer: viewer(guest) }, { id: made.artifact.id, ...asGame })).status).toBe(404);
+    });
+  });
+
+  describe('who can reach an artifact (nothing leaks between people, chats or bots)', () => {
+    const OTHER_BUBBLE = { kind: 'nearby', ref: 'bubble-2' };
+    const opening = (id: string, who: Who, inChat: boolean, chat: object | null) => call(open, { viewer: viewer(who, inChat, chat) }, { id, ...asGame });
+    const sharing = (id: string, body: object) => call(share, { viewer: viewer(person('owner'), false, null), ...body }, { id, method: 'PUT', ...asGame });
+
+    it('opens for the owner from anywhere, with or without the game vouching for a chat', async () => {
+      const made = await makeApp();
+      expect((await opening(made.artifact.id, person('owner'), false, null)).status).toBe(200);
+      expect((await opening(made.artifact.id, person('owner'), true, OTHER_BUBBLE)).status).toBe(200);
+    });
+
+    it('opens for a person who is in the chat it was made in, and for nobody who is only in another chat', async () => {
+      const made = await makeApp();
+      expect((await opening(made.artifact.id, person('friend'), true, NEARBY)).status).toBe(200);
+      expect((await opening(made.artifact.id, person('stranger'), true, OTHER_BUBBLE)).status).toBe(404);
+    });
+
+    it('does not take "in a chat" for "in this chat": the chat the game names has to be the one it was made in', async () => {
+      const made = await makeApp();
+      const id = made.artifact.id;
+      // Another bubble; the bubble name but another kind of chat; no chat named at all; named but not vouched for
+      expect((await opening(id, person('stranger'), true, OTHER_BUBBLE)).status).toBe(404);
+      expect((await opening(id, person('stranger'), true, { kind: 'dm', ref: NEARBY.ref })).status).toBe(404);
+      expect((await opening(id, person('stranger'), true, null)).status).toBe(404);
+      expect((await opening(id, person('stranger'), false, NEARBY)).status).toBe(404);
+    });
+
+    it('applies the same chat check to the versions, the code, copying and the rights shown', async () => {
+      const made = await makeApp();
+      const id = made.artifact.id;
+      const wrong = { viewer: viewer(person('stranger'), true, OTHER_BUBBLE) };
+      expect((await call(versions, wrong, { id, ...asGame })).status).toBe(404);
+      expect((await call(code, wrong, { id, number: '1', ...asGame })).status).toBe(404);
+      expect((await call(copy, wrong, { id, ...asGame })).status).toBe(404);
+      expect((await opening(id, person('friend'), true, OTHER_BUBBLE)).status).toBe(404);
+      const right = await opening(id, person('friend'), true, NEARBY);
+      expect(right.body.you).toEqual({ owner: false, change: false, manage: false, copy: true });
+    });
+
+    it('keeps a direct message artifact to its owner, whoever else is in some chat', async () => {
+      const made = await makeApp(person('owner'), DM);
+      expect((await opening(made.artifact.id, person('owner'), false, null)).status).toBe(200);
+      expect((await opening(made.artifact.id, person('friend'), true, NEARBY)).status).toBe(404);
+      expect((await opening(made.artifact.id, person('friend'), true, DM)).status).toBe(200);
+    });
+
+    it('lets a signed-out guest open only what was made in the chat they are in, or what is shared by link', async () => {
+      const made = await makeApp();
+      expect((await opening(made.artifact.id, guest, true, OTHER_BUBBLE)).status).toBe(404);
+      expect((await opening(made.artifact.id, guest, true, NEARBY)).status).toBe(200);
+      await sharing(made.artifact.id, { openScope: 'link' });
+      expect((await opening(made.artifact.id, guest, false, null)).status).toBe(200);
+    });
+
+    it('opens by link for anyone, and closes again the moment the owner takes the link back', async () => {
+      const made = await makeApp();
+      const id = made.artifact.id;
+      await sharing(id, { openScope: 'link' });
+      expect((await opening(id, person('stranger'), false, null)).status).toBe(200);
+      await sharing(id, { openScope: 'chat' });
+      expect((await opening(id, person('stranger'), false, null)).status).toBe(404);
+    });
+
+    it('does not let anyone but the owner share or restore, even from inside the chat', async () => {
+      const made = await makeApp();
+      const id = made.artifact.id;
+      await call(change, { botId: 'bot1', person: person('owner'), chat: NEARBY, content: '<p>2</p>' }, { id });
+      expect((await call(share, { viewer: viewer(person('friend')), openScope: 'link' }, { id, method: 'PUT', ...asGame })).status).toBe(403);
+      expect((await call(restore, { viewer: viewer(person('friend')), number: 1 }, { id, ...asGame })).status).toBe(403);
+      expect((await call(share, { viewer: viewer(person('stranger'), true, OTHER_BUBBLE), openScope: 'link' }, { id, method: 'PUT', ...asGame })).status).toBe(404);
+    });
+
+    it("does not show one person's artifacts in another person's list", async () => {
+      await makeApp();
+      expect((await call(mine, { person: person('friend') }, asGame)).body.artifacts).toEqual([]);
+      expect((await call(mine, { person: guest }, asGame)).body.artifacts).toEqual([]);
+    });
+
+    describe('between bots', () => {
+      beforeEach(() => addBot('bot2', 'Pixel'));
+
+      it("lets any bot in the chat work on the owner's artifact when the owner asks it, whichever bot made it", async () => {
+        const made = await makeApp();
+        const id = made.artifact.id;
+        const other = { botId: 'bot2', person: person('owner'), chat: NEARBY };
+        expect((await call(read, other, { id })).status).toBe(200);
+        expect((await call(inChat, other)).body.artifacts).toHaveLength(1);
+        expect((await call(change, { ...other, content: '<p>x</p>' }, { id })).status).toBe(200);
+        expect(db.versions.filter((v) => v.artifactId === id)).toHaveLength(2);
+      });
+
+      it('follows the person asking, not the bot: someone else in the chat only gets what the owner allowed', async () => {
+        const made = await makeApp();
+        const id = made.artifact.id;
+        const friend = { botId: 'bot2', person: person('friend'), chat: NEARBY };
+        // In the chat they may open it, but changes are the owner's until the owner allows them
+        expect((await call(read, friend, { id })).status).toBe(200);
+        expect((await call(change, { ...friend, content: '<p>x</p>' }, { id })).status).toBe(403);
+        await sharing(id, { changeScope: 'openers' });
+        expect((await call(change, { ...friend, content: '<p>x</p>' }, { id })).status).toBe(200);
+      });
+
+      it("lets the owner's other bots reach it from their own chat (a direct message with another bot), by its id", async () => {
+        const made = await makeApp();
+        const id = made.artifact.id;
+        const inDm = { botId: 'bot2', person: person('owner'), chat: DM };
+        expect((await call(read, inDm, { id })).status).toBe(200);
+        expect((await call(change, { ...inDm, content: '<p>x</p>' }, { id })).status).toBe(200);
+        // It was made in the bubble, so a direct message does not list it
+        expect((await call(inChat, inDm)).body.artifacts).toEqual([]);
+      });
+
+      it("lets someone's bot read an artifact shared by link from any chat, but not change it", async () => {
+        const made = await makeApp();
+        const id = made.artifact.id;
+        const elsewhere = { botId: 'bot2', person: person('stranger'), chat: OTHER_BUBBLE };
+        expect((await call(read, elsewhere, { id })).status).toBe(404);
+        await sharing(id, { openScope: 'link', changeScope: 'openers' });
+        expect((await call(read, elsewhere, { id })).status).toBe(200);
+        // "People who can open it" may ask for changes only inside the chat it was made in
+        expect((await call(change, { ...elsewhere, content: '<p>x</p>' }, { id })).status).toBe(403);
+        expect(db.versions.filter((v) => v.artifactId === id)).toHaveLength(1);
+      });
+
+      it("does not let a bot reach another person's artifact from a chat that is not its own", async () => {
+        const made = await makeApp();
+        const id = made.artifact.id;
+        const elsewhere = { botId: 'bot2', person: person('stranger'), chat: OTHER_BUBBLE };
+        expect((await call(read, elsewhere, { id })).status).toBe(404);
+        expect((await call(change, { ...elsewhere, content: '<p>x</p>' }, { id })).status).toBe(404);
+        expect((await call(inChat, elsewhere)).body.artifacts).toEqual([]);
+      });
+
+      it('lets the owner take a copy they made to any bot, and nobody else', async () => {
+        const made = await makeApp();
+        const copied = await call(copy, { viewer: viewer(person('friend')) }, { id: made.artifact.id, ...asGame });
+        const copyId = copied.body.artifact.id;
+        const asOwner = { botId: 'bot2', person: person('friend'), chat: DM };
+        expect((await call(read, asOwner, { id: copyId })).status).toBe(200);
+        expect((await call(change, { ...asOwner, content: '<p>mine</p>' }, { id: copyId })).status).toBe(200);
+        expect((await call(read, { ...asOwner, person: person('owner') }, { id: copyId })).status).toBe(404);
+      });
     });
   });
 
@@ -503,6 +654,130 @@ describe('artifacts', () => {
       const made = await makeApp();
       expect(await call(copy, { viewer: viewer(guest) }, { id: made.artifact.id, ...asGame })).toMatchObject({ status: 403, body: { error: 'sign_in_required' } });
       expect((await call(copy, { viewer: viewer(person('stranger'), false) }, { id: made.artifact.id, ...asGame })).status).toBe(404);
+    });
+  });
+
+  describe('delete', () => {
+    const opening = (id: string, who: Who, inChat: boolean, chat: object | null) => call(open, { viewer: viewer(who, inChat, chat) }, { id, ...asGame });
+    const sharing = (id: string, body: object) => call(share, { viewer: viewer(person('owner'), false, null), ...body }, { id, method: 'PUT', ...asGame });
+    const removing = (id: string, who: Who = person('owner'), extra: { inChat?: boolean; token?: string } = {}) =>
+      call(remove, { viewer: viewer(who, extra.inChat ?? true) }, { id, method: 'DELETE', token: extra.token ?? ADMIN_TOKEN });
+
+    it('removes the artifact, every version and every file, and the link and card then answer "no such artifact"', async () => {
+      const made = await makeApp();
+      const id = made.artifact.id;
+      await call(change, { botId: 'bot1', person: person('owner'), chat: NEARBY, content: '<p>2</p>' }, { id });
+      await sharing(id, { openScope: 'link' });
+      expect(bucketKeys()).toHaveLength(2);
+      expect(await removing(id)).toMatchObject({ status: 200, body: { deleted: true } });
+      expect(db.artifacts).toHaveLength(0);
+      expect(db.versions).toHaveLength(0);
+      expect(bucketKeys()).toHaveLength(0);
+      expect((await opening(id, person('owner'), false, null)).status).toBe(404);
+      expect((await opening(id, person('stranger'), false, null)).status).toBe(404);
+      expect((await call(versions, { viewer: viewer(person('owner')) }, { id, ...asGame })).status).toBe(404);
+      expect((await call(read, { botId: 'bot1', person: person('owner'), chat: NEARBY }, { id })).status).toBe(404);
+      expect((await removing(id)).status).toBe(404);
+    });
+
+    it('leaves a copy made earlier whole, with its own file', async () => {
+      const made = await makeApp();
+      const copied = await call(copy, { viewer: viewer(person('friend')) }, { id: made.artifact.id, ...asGame });
+      await removing(made.artifact.id);
+      expect(bucketKeys()).toHaveLength(1);
+      const reopened = await opening(copied.body.artifact.id, person('friend'), false, null);
+      expect(reopened.status).toBe(200);
+      expect((await call(code, { viewer: viewer(person('friend')) }, { id: copied.body.artifact.id, number: '1', ...asGame })).body.content).toBe(APP);
+    });
+
+    it('is the owner only: someone who can open it hears 403, someone who cannot hears 404, and nothing is removed', async () => {
+      const made = await makeApp();
+      const id = made.artifact.id;
+      expect((await removing(id, person('friend'))).status).toBe(403);
+      expect((await removing(id, person('stranger'), { inChat: false })).status).toBe(404);
+      await sharing(id, { openScope: 'link', changeScope: 'openers' });
+      expect((await removing(id, person('stranger'), { inChat: false })).status).toBe(403);
+      expect((await removing(id, guest)).status).toBe(403);
+      expect(db.artifacts).toHaveLength(1);
+      expect(bucketKeys()).toHaveLength(1);
+    });
+
+    it('is for the game only, and a guest artifact has no owner to delete it', async () => {
+      const made = await makeApp(guest);
+      expect((await removing(made.artifact.id, guest, { token: BOT_TOKEN })).status).toBe(401);
+      expect((await removing(made.artifact.id, guest)).status).toBe(403);
+      expect(db.artifacts).toHaveLength(1);
+    });
+
+    it('is done once the rows are gone, and the files the bucket would not remove go with the next clean-up', async () => {
+      const made = await makeApp();
+      jest.spyOn(console, 'error').mockImplementation(() => undefined);
+      const failing = jest.spyOn(fakeFiles, 'remove').mockRejectedValueOnce(new Error('bucket down'));
+      expect((await removing(made.artifact.id)).status).toBe(200);
+      failing.mockRestore();
+      expect(db.artifacts).toHaveLength(0);
+      expect(bucketKeys()).toHaveLength(1);
+      await pruneExpired({ files: fakeFiles, now: new Date() });
+      expect(bucketKeys()).toHaveLength(0);
+    });
+
+    it('does not leave a file behind when a change lands while it is deleting', async () => {
+      const made = await makeApp();
+      const id = made.artifact.id;
+      const findMany = fakePrisma.artifactVersion.findMany;
+      const spy = jest.spyOn(fakePrisma.artifactVersion, 'findMany').mockImplementationOnce(async (args: unknown) => {
+        const found = await findMany(args as never);
+        await call(change, { botId: 'bot1', person: person('owner'), chat: NEARBY, content: '<p>2</p>' }, { id });
+        return found;
+      });
+      expect((await removing(id)).status).toBe(200);
+      spy.mockRestore();
+      expect(db.artifacts).toHaveLength(0);
+      expect(db.versions).toHaveLength(0);
+      expect(bucketKeys()).toHaveLength(0);
+    });
+  });
+
+  describe('the public link page', () => {
+    const sharing = (id: string, body: object) => call(share, { viewer: viewer(person('owner'), false, null), ...body }, { id, method: 'PUT', ...asGame });
+    const page = (id: string) => openByLink(id, { files: fakeFiles, now: new Date() });
+
+    it('shows the latest version of what the owner shared by link, and nothing about the people', async () => {
+      const made = await makeApp();
+      const id = made.artifact.id;
+      await call(change, { botId: 'bot1', person: person('owner'), chat: NEARBY, content: '<p>2</p>' }, { id });
+      await sharing(id, { openScope: 'link' });
+      const view = await page(id);
+      expect(view).toMatchObject({ title: 'Quests board', kind: 'app', makerName: 'Scout', version: 2, content: null });
+      expect(view.url).toContain(db.versions.find((v) => v.artifactId === id && v.number === 2)!.fileKey);
+      expect(Object.keys(view).sort()).toEqual(['content', 'kind', 'makerName', 'title', 'url', 'version']);
+    });
+
+    it('says the same for what is not shared by link, what is switched off again, what is deleted and what is not there', async () => {
+      const made = await makeApp();
+      const id = made.artifact.id;
+      await expect(page(id)).rejects.toMatchObject({ code: 'not_found', status: 404 });
+      await sharing(id, { openScope: 'link' });
+      await expect(page(id)).resolves.toBeDefined();
+      await sharing(id, { openScope: 'chat' });
+      await expect(page(id)).rejects.toMatchObject({ code: 'not_found' });
+      await sharing(id, { openScope: 'link' });
+      await call(remove, { viewer: viewer(person('owner')) }, { id, method: 'DELETE', token: ADMIN_TOKEN });
+      await expect(page(id)).rejects.toMatchObject({ code: 'not_found' });
+      await expect(page('00000000-0000-4000-8000-000000000000')).rejects.toMatchObject({ code: 'not_found' });
+    });
+
+    it('does not show a guest artifact that has run out', async () => {
+      const made = await makeApp(guest);
+      db.artifacts.find((a) => a.id === made.artifact.id)!.openScope = 'link';
+      db.artifacts.find((a) => a.id === made.artifact.id)!.expiresAt = new Date(Date.now() - 1000);
+      await expect(page(made.artifact.id)).rejects.toMatchObject({ code: 'not_found' });
+    });
+
+    it('gives a document its text, to be drawn on the page', async () => {
+      const made = await makeApp(person('owner'), NEARBY, { kind: 'markdown', content: '# Notes\n\nHello' });
+      await sharing(made.artifact.id, { openScope: 'link' });
+      expect(await page(made.artifact.id)).toMatchObject({ kind: 'markdown', content: '# Notes\n\nHello' });
     });
   });
 
