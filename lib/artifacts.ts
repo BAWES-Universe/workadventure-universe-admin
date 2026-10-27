@@ -106,6 +106,11 @@ export function applyEdits(content: string, edits: readonly ArtifactEdit[], maxB
   let result = content;
   edits.forEach((edit, index) => {
     if (edit.old === '') throw new ArtifactError('edit_empty', 422, `Edit ${index + 1} has nothing to find.`);
+    // Half of an emoji (a surrogate pair cut at either end) would match inside characters and grow them past the size
+    // the check below counts, so the text to find must start and end on whole characters
+    if (/^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/.test(edit.old)) {
+      throw new ArtifactError('edit_split_character', 422, `Edit ${index + 1}: the text to replace starts or ends in the middle of a character. Include the whole character.`);
+    }
     const first = result.indexOf(edit.old);
     if (first === -1) throw new ArtifactError('edit_not_found', 422, `Edit ${index + 1}: the text to replace is not in the file.`);
     const second = result.indexOf(edit.old, first + edit.old.length);

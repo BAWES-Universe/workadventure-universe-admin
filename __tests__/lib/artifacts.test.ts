@@ -82,6 +82,17 @@ describe('applyEdits', () => {
     expect(codeOf(() => applyEdits('abc', [{ old: 'b', new: '界'.repeat(400) }], 1000))).toBe('too_large');
   });
 
+  it('refuses text that starts or ends in the middle of an emoji, so all-occurrence edits cannot outgrow the check', () => {
+    const file = '😀'.repeat(100);
+    const high = '😀'[0];
+    const low = '😀'[1];
+    expect(codeOf(() => applyEdits(file, [{ old: high, new: '界', all: true }], 1000000))).toBe('edit_split_character');
+    expect(codeOf(() => applyEdits(file, [{ old: low, new: '界', all: true }], 1000000))).toBe('edit_split_character');
+    expect(codeOf(() => applyEdits('a😀', [{ old: 'a' + high, new: 'x' }], 1000000))).toBe('edit_split_character');
+    // Whole emoji are fine
+    expect(applyEdits('a😀b', [{ old: '😀', new: 'x' }], 1000000)).toBe('axb');
+  });
+
   it('puts $ patterns in the new text as they are', () => {
     expect(applyEdits('price', [{ old: 'price', new: '$& $1 $$' }], MAX)).toBe('$& $1 $$');
   });
