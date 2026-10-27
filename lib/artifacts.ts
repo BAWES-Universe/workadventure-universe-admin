@@ -18,10 +18,11 @@ export type ChangeScope = (typeof CHANGE_SCOPES)[number];
 export const CHAT_KINDS = ['nearby', 'dm'] as const;
 export type ChatKind = (typeof CHAT_KINDS)[number];
 
-/** The most one version can hold. A page or mini app is one file; this is far above a few thousand lines. */
-export const MAX_ARTIFACT_BYTES = 512 * 1024;
-/** Versions one artifact keeps. After that a change is refused, so one chat cannot fill the bucket. */
-export const MAX_VERSIONS = 200;
+/**
+ * How big one version can be and how many versions one artifact keeps are a super admin's limits (#666, lib/bot-limits.ts),
+ * passed in by the service. This is only the largest size that can be set, which the request parser allows for.
+ */
+export const LARGEST_ARTIFACT_BYTES = 100 * 1024 * 1024;
 export const MAX_TITLE_LENGTH = 120;
 export const MAX_SUMMARY_LENGTH = 300;
 export const MAX_NAME_LENGTH = 100;
@@ -81,9 +82,19 @@ export interface ArtifactEdit {
   all?: boolean;
 }
 
+/** "512 KB", "2 MB": the size limit as a person reads it. */
+export function sizeLabel(bytes: number): string {
+  const mb = bytes / (1024 * 1024);
+  return mb >= 1 ? `${Number(mb.toFixed(1)).toLocaleString('en')} MB` : `${Math.round(bytes / 1024).toLocaleString('en')} KB`;
+}
+
+function tooLarge(maxBytes: number): ArtifactError {
+  return new ArtifactError('too_large', 413, `An artifact can hold up to ${sizeLabel(maxBytes)}.`);
+}
+
 /** A file of this many characters is over the limit in bytes too (a character is at least one byte). */
-function tooLargeAfter(characters: number): void {
-  if (characters > MAX_ARTIFACT_BYTES) throw new ArtifactError('too_large', 413, `An artifact can hold up to ${MAX_ARTIFACT_BYTES / 1024} KB.`);
+function tooLargeAfter(characters: number, maxBytes: number): void {
+  if (characters > maxBytes) throw tooLarge(maxBytes);
 }
 
 /**
@@ -91,7 +102,7 @@ function tooLargeAfter(characters: number): void {
  * finds a piece that is not unique and was not asked for everywhere, stops the whole change: nothing is half applied.
  * The message says which edit and why, so the bot can fix that edit and send it again.
  */
-export function applyEdits(content: string, edits: readonly ArtifactEdit[]): string {
+export function applyEdits(content: string, edits: readonly ArtifactEdit[], maxBytes: number): string {
   let result = content;
   edits.forEach((edit, index) => {
     if (edit.old === '') throw new ArtifactError('edit_empty', 422, `Edit ${index + 1} has nothing to find.`);
@@ -101,24 +112,29 @@ export function applyEdits(content: string, edits: readonly ArtifactEdit[]): str
     if (edit.all) {
       const parts = result.split(edit.old);
       // A short piece replaced by a long one in many places can grow far past the limit: refuse before building it
-      tooLargeAfter(result.length + (parts.length - 1) * (edit.new.length - edit.old.length));
+      tooLargeAfter(result.length + (parts.length - 1) * (edit.new.length - edit.old.length), maxBytes);
       result = parts.join(edit.new);
       return;
     }
     if (second !== -1) {
       throw new ArtifactError('edit_ambiguous', 422, `Edit ${index + 1}: the text to replace appears more than once. Add more around it, or replace all of them.`);
     }
-    tooLargeAfter(result.length + edit.new.length - edit.old.length);
+    tooLargeAfter(result.length + edit.new.length - edit.old.length, maxBytes);
     result = result.slice(0, first) + edit.new + result.slice(first + edit.old.length);
   });
   return result;
 }
 
 /** The size check every new version goes through, before anything is stored. */
-export function checkContent(content: string): void {
+export function checkContent(content: string, maxBytes: number): void {
   if (content.trim() === '') throw new ArtifactError('empty_content', 422, 'An artifact cannot be empty.');
-  if (byteLength(content) > MAX_ARTIFACT_BYTES) {
-    throw new ArtifactError('too_large', 413, `An artifact can hold up to ${MAX_ARTIFACT_BYTES / 1024} KB.`);
+  if (byteLength(content) > maxBytes) throw tooLarge(maxBytes);
+}
+
+/** A new version is refused once an artifact keeps as many as it may (0: it keeps them all). */
+export function checkVersionRoom(latestVersion: number, maxVersions: number): void {
+  if (maxVersions > 0 && latestVersion >= maxVersions) {
+    throw new ArtifactError('too_many_versions', 409, `An artifact keeps up to ${maxVersions.toLocaleString('en')} versions.`);
   }
 }
 

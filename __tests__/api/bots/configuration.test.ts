@@ -461,6 +461,33 @@ describe('/api/bots/configuration', () => {
     });
   });
 
+  describe('longest reply and steps (#666)', () => {
+    const botId = '00000000-0000-4000-8000-000000000001';
+
+    it('saves them on create, and null (its key’s) when none is given', async () => {
+      await POST(configRequest({ ...validBody, maxReplyTokens: 8000, maxSteps: 10 }));
+      expect((prisma.bot.create as jest.Mock).mock.calls[0][0].data).toMatchObject({ maxReplyTokens: 8000, maxSteps: 10 });
+
+      await POST(configRequest(validBody));
+      expect((prisma.bot.create as jest.Mock).mock.calls[1][0].data).toMatchObject({ maxReplyTokens: null, maxSteps: null });
+    });
+
+    it('keeps them when an update leaves them out, and clears them with null', async () => {
+      await POST(configRequest({ ...validBody, botId }));
+      const kept = (prisma.bot.update as jest.Mock).mock.calls[0][0].data;
+      expect(kept.maxReplyTokens).toBeUndefined();
+      expect(kept.maxSteps).toBeUndefined();
+
+      await POST(configRequest({ ...validBody, botId, maxReplyTokens: null, maxSteps: 20 }));
+      expect((prisma.bot.update as jest.Mock).mock.calls[1][0].data).toMatchObject({ maxReplyTokens: null, maxSteps: 20 });
+    });
+
+    it.each([{ maxReplyTokens: 100 }, { maxSteps: 0 }, { maxSteps: 2.5 }])('turns down %p', async (value) => {
+      expect((await POST(configRequest({ ...validBody, ...value }))).status).toBe(400);
+      expect(prisma.bot.create).not.toHaveBeenCalled();
+    });
+  });
+
   describe('companion', () => {
     const botId = '00000000-0000-4000-8000-000000000001';
 

@@ -1,16 +1,18 @@
 import {
   ArtifactError,
-  MAX_ARTIFACT_BYTES,
   applyEdits,
   canAskForChange,
   canOpen,
   checkContent,
+  checkVersionRoom,
+  sizeLabel,
   cleanLine,
   fileTypeOf,
   newFileKey,
   type ArtifactRules,
 } from '@/lib/artifacts';
 
+const MAX = 512 * 1024;
 const NOW = new Date('2026-10-26T10:00:00Z');
 const base: ArtifactRules = { ownerId: 'owner', chatRef: 'chat-1', openScope: 'chat', changeScope: 'owner', expiresAt: null };
 const owner = { userId: 'owner', inChat: false };
@@ -29,58 +31,74 @@ function codeOf(run: () => unknown): string | undefined {
 
 describe('applyEdits', () => {
   it('replaces a piece that appears once', () => {
-    expect(applyEdits('<h1>Quests</h1><p>Todo</p>', [{ old: 'Quests', new: 'Quest board' }])).toBe('<h1>Quest board</h1><p>Todo</p>');
+    expect(applyEdits('<h1>Quests</h1><p>Todo</p>', [{ old: 'Quests', new: 'Quest board' }], MAX)).toBe('<h1>Quest board</h1><p>Todo</p>');
   });
 
   it('applies the edits in order, each on the result of the one before', () => {
-    expect(applyEdits('a b', [{ old: 'a', new: 'x' }, { old: 'x b', new: 'done' }])).toBe('done');
+    expect(applyEdits('a b', [{ old: 'a', new: 'x' }, { old: 'x b', new: 'done' }], MAX)).toBe('done');
   });
 
   it('replaces every place when asked to', () => {
-    expect(applyEdits('btn btn btn', [{ old: 'btn', new: 'button', all: true }])).toBe('button button button');
+    expect(applyEdits('btn btn btn', [{ old: 'btn', new: 'button', all: true }], MAX)).toBe('button button button');
   });
 
   it('stops on a piece that is not there, and says which edit', () => {
-    expect(codeOf(() => applyEdits('abc', [{ old: 'b', new: 'x' }, { old: 'zzz', new: 'y' }]))).toBe('edit_not_found');
-    expect(() => applyEdits('abc', [{ old: 'b', new: 'x' }, { old: 'zzz', new: 'y' }])).toThrow('Edit 2');
+    expect(codeOf(() => applyEdits('abc', [{ old: 'b', new: 'x' }, { old: 'zzz', new: 'y' }], MAX))).toBe('edit_not_found');
+    expect(() => applyEdits('abc', [{ old: 'b', new: 'x' }, { old: 'zzz', new: 'y' }], MAX)).toThrow('Edit 2');
   });
 
   it('stops on a piece that appears more than once unless all is asked for', () => {
-    expect(codeOf(() => applyEdits('aa', [{ old: 'a', new: 'b' }]))).toBe('edit_ambiguous');
+    expect(codeOf(() => applyEdits('aa', [{ old: 'a', new: 'b' }], MAX))).toBe('edit_ambiguous');
   });
 
   it('does not treat an overlapping repeat as a second place', () => {
     // "aa" appears once in "aaa" when the second search starts after the first match
-    expect(applyEdits('aaa', [{ old: 'aa', new: 'b' }])).toBe('ba');
+    expect(applyEdits('aaa', [{ old: 'aa', new: 'b' }], MAX)).toBe('ba');
   });
 
   it('stops on an edit with nothing to find', () => {
-    expect(codeOf(() => applyEdits('abc', [{ old: '', new: 'x' }]))).toBe('edit_empty');
+    expect(codeOf(() => applyEdits('abc', [{ old: '', new: 'x' }], MAX))).toBe('edit_empty');
   });
 
   it('refuses an edit that would grow the file past the limit, before building it', () => {
-    const big = 'a'.repeat(MAX_ARTIFACT_BYTES - 10);
+    const big = 'a'.repeat(MAX - 10);
     // One short piece, very many places, a long replacement: the result would be gigabytes
-    expect(codeOf(() => applyEdits(big, [{ old: 'a', new: 'b'.repeat(100_000), all: true }]))).toBe('too_large');
-    expect(codeOf(() => applyEdits('abc', [{ old: 'b', new: 'x'.repeat(MAX_ARTIFACT_BYTES + 1) }]))).toBe('too_large');
+    expect(codeOf(() => applyEdits(big, [{ old: 'a', new: 'b'.repeat(100_000), all: true }], MAX))).toBe('too_large');
+    expect(codeOf(() => applyEdits('abc', [{ old: 'b', new: 'x'.repeat(MAX + 1) }], MAX))).toBe('too_large');
     // An edit that stays within the limit is fine, and so is one that shrinks a file
-    expect(applyEdits(big, [{ old: 'aa', new: 'a', all: true }]).length).toBeLessThan(big.length);
+    expect(applyEdits(big, [{ old: 'aa', new: 'a', all: true }], MAX).length).toBeLessThan(big.length);
   });
 
   it('puts $ patterns in the new text as they are', () => {
-    expect(applyEdits('price', [{ old: 'price', new: '$& $1 $$' }])).toBe('$& $1 $$');
+    expect(applyEdits('price', [{ old: 'price', new: '$& $1 $$' }], MAX)).toBe('$& $1 $$');
   });
 });
 
 describe('checkContent', () => {
   it('refuses nothing, and blanks', () => {
-    expect(codeOf(() => checkContent('   \n'))).toBe('empty_content');
+    expect(codeOf(() => checkContent('   \n', MAX))).toBe('empty_content');
   });
 
   it('refuses a file over the cap, counting bytes not letters', () => {
-    expect(() => checkContent('a'.repeat(MAX_ARTIFACT_BYTES))).not.toThrow();
-    expect(codeOf(() => checkContent('a'.repeat(MAX_ARTIFACT_BYTES + 1)))).toBe('too_large');
-    expect(codeOf(() => checkContent('é'.repeat(MAX_ARTIFACT_BYTES / 2 + 1)))).toBe('too_large');
+    expect(() => checkContent('a'.repeat(MAX), MAX)).not.toThrow();
+    expect(codeOf(() => checkContent('a'.repeat(MAX + 1), MAX))).toBe('too_large');
+    expect(codeOf(() => checkContent('é'.repeat(MAX / 2 + 1), MAX))).toBe('too_large');
+  });
+});
+
+describe('checkVersionRoom', () => {
+  it('keeps every version at 0, and stops at a number', () => {
+    expect(() => checkVersionRoom(100_000, 0)).not.toThrow();
+    expect(() => checkVersionRoom(199, 200)).not.toThrow();
+    expect(codeOf(() => checkVersionRoom(200, 200))).toBe('too_many_versions');
+  });
+});
+
+describe('sizeLabel', () => {
+  it('says KB below a megabyte and MB from there', () => {
+    expect(sizeLabel(512 * 1024)).toBe('512 KB');
+    expect(sizeLabel(2 * 1024 * 1024)).toBe('2 MB');
+    expect(sizeLabel(1.5 * 1024 * 1024)).toBe('1.5 MB');
   });
 });
 

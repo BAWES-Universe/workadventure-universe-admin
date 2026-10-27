@@ -60,6 +60,8 @@ function transformBot(bot: any) {
     aiProviderRef: bot.aiProviderRef,
     aiModel: bot.aiModel ?? null,
     toolTimeoutSeconds: bot.toolTimeoutSeconds ?? null,
+    maxReplyTokens: bot.maxReplyTokens ?? null,
+    maxSteps: bot.maxSteps ?? null,
     companionTextureId: bot.companionTextureId ?? null,
     createdAt: bot.createdAt,
     updatedAt: bot.updatedAt,

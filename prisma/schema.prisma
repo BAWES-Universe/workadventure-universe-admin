@@ -731,6 +731,17 @@ model RoomTemplateMap {
   @@map("room_template_maps")
 }
 
+// Settings for the whole server that a super admin changes in Orbit (#666), one JSON value per key. "bot-limits": the
+// reply limits on Universe AI, the artifact limits, the "Say when nothing was saved" switch and fair usage (lib/bot-limits.ts).
+model AppSetting {
+  key         String   @id @db.VarChar(100)
+  value       Json
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  updatedById String?  @map("updated_by_id")
+
+  @@map("app_settings")
+}
+
 // Bots
 model Bot {
   id                  String   @id @default(uuid())
@@ -757,6 +768,10 @@ model Bot {
   refusalReply        String?  @map("refusal_reply") @db.VarChar(500)
   // Replies each person may get from this bot in a day; null = no limit. Stored here; nothing reads it yet (#1159).
   dailyReplyCap       Int?     @map("daily_reply_cap")
+  // A bot's own reply limits (#666), never above its key's (or Universe AI's): the longest reply in tokens and the tool
+  // steps in one reply. Null = follow the key.
+  maxReplyTokens      Int?     @map("max_reply_tokens")
+  maxSteps            Int?     @map("max_steps")
   // Hide bot conversations (#435) for this bot alone. null = follow the universe (default), true = Private, false = Normal.
   // A universe that hides them wins: a bot cannot be loosened below it.
   hideConversations   Boolean? @map("hide_conversations")
@@ -854,6 +869,9 @@ model BotsAiProvider {
   failedReplies     Int      @default(0) @map("failed_replies")
   healthCheckedAt   DateTime? @map("health_checked_at")
   ifDown            String   @default("universe-ai") @map("if_down") @db.VarChar(20)
+  // A personal key's reply limits (#666), set by its owner: only the ones they changed (lib/bot-limits.ts fills in the
+  // rest with the recommended values). A server provider has none: Universe AI's are saved in app_settings.
+  replyLimits       Json?    @map("reply_limits")
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")
 

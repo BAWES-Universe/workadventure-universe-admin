@@ -9,6 +9,7 @@ import { RESTING_LINE, recheckIfDue } from '@/lib/ai-key-health';
 import { autoVision, keyVisionModels, readVisionPick, usableVisionKey, type VisionPick } from '@/lib/bot-vision';
 import { resolveVisionSupport } from '@/lib/vision-models';
 import { lendModels, modelFactsOf, modelSupportsVision, servedModel } from '@/lib/ai-key-model-list';
+import { getServerLimits, keyReplyLimits, servedLimits, type ServedLimits } from '@/lib/bot-limits';
 
 /**
  * What the bot server gets when it asks how a bot talks to its AI, by bot id (#374). The bot's own `aiProviderRef` decides:
@@ -26,13 +27,23 @@ import { lendModels, modelFactsOf, modelSupportsVision, servedModel } from '@/li
  * A bot served from Universe AI or a person's own key also carries `vision` when its images are not left to its own model
  * (see lib/bot-vision.ts): "this" (its own model, or only the link when that can't see), "universe-ai", or "another" with the
  * credentials of the Vision model on the maker's key to describe them. No `vision` means: as it always was.
+ *
+ * Every answer with a provider also carries `limits` (#666): the reply limits of the key it runs on (Universe AI's for a
+ * bot on Universe AI, or standing in for a key that is down), lowered by the bot's own, and the artifact limits. The
+ * longest reply is also its `maxTokens`.
  */
 export type VisionPlan =
   | { choice: 'this'; problem?: 'key' }
   | { choice: 'universe-ai' }
   | { choice: 'another'; credentials: ReturnType<typeof providerPayload> & OwnKeyFacts };
 
-type ServedProvider = ReturnType<typeof providerPayload> & { source: 'provider' | 'universe-ai' | 'own-key'; movedFromKey?: string; standingInFor?: string; vision?: VisionPlan } & Partial<OwnKeyFacts>;
+type ServedProvider = ReturnType<typeof providerPayload> & {
+  source: 'provider' | 'universe-ai' | 'own-key';
+  movedFromKey?: string;
+  standingInFor?: string;
+  vision?: VisionPlan;
+  limits?: ServedLimits;
+} & Partial<OwnKeyFacts>;
 
 export type BotAiCredentials =
   | { status: 200; body: ServedProvider }
@@ -74,6 +85,8 @@ const loadBot = (botId: string) =>
       behaviorConfig: true,
       createdById: true,
       roomId: true,
+      maxReplyTokens: true,
+      maxSteps: true,
       room: { select: { world: { select: { universe: { select: { id: true, name: true, ownerId: true } } } } } },
     },
   });
@@ -81,11 +94,23 @@ const loadBot = (botId: string) =>
 export async function credentialsForBot(botId: string): Promise<BotAiCredentials> {
   const bot = await loadBot(botId);
   if (!bot) return { status: 404, error: 'Bot not found' };
-  const answer = await mainCredentials(bot);
+  const main = await mainCredentials(bot);
+  if (main.status !== 200 || main.body.source === 'resting') return main;
+  const answer = { status: 200 as const, body: await withLimits(bot, main.body) };
   // Only a bot on Universe AI or a person's own key has its images decided here; a pinned server provider stays as it was
-  if (answer.status !== 200 || answer.body.source === 'resting' || answer.body.source === 'provider') return answer;
+  if (answer.body.source === 'provider') return answer;
   const vision = await visionPlan(bot, answer.body);
   return vision ? { status: 200, body: { ...answer.body, vision } } : answer;
+}
+
+/** The bot's limits (#666) on the provider it was given: the key's own on a person's key, Universe AI's on anything else. */
+async function withLimits(bot: BotForCredentials, body: ServedProvider): Promise<ServedProvider> {
+  const [server, key] = await Promise.all([
+    getServerLimits(),
+    body.source === 'own-key' ? prisma.botsAiProvider.findUnique({ where: { providerId: body.providerId }, select: { replyLimits: true } }) : null,
+  ]);
+  const limits = servedLimits(key ? keyReplyLimits(key) : server.universeAi, server, bot);
+  return { ...body, maxTokens: limits.replyTokens, limits };
 }
 
 /**
