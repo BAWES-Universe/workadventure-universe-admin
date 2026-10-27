@@ -480,6 +480,18 @@ export async function GET(request: NextRequest) {
         }
       }
 
+      // A guest is held to the same rule with nobody's access: only what anyone may wear here (public sets, sets
+      // whose policy is for everyone, and the game's own list). The textures above were only checked against the
+      // catalog, so a crafted id from a set kept for members or granted to someone would otherwise pass.
+      // Bots keep the logic above as it was.
+      const guestWearing = !ownCompanion && !isBotIdentifier(finalUuid)
+        ? { worldId: worldData.id, universeId: worldData.universeId, userId: null, membershipTags: [] }
+        : null;
+      if (guestWearing && isTexturesValid && !(await wearableHere(finalTextures.map(t => t.id), guestWearing)).wearable) {
+        finalTextures = [];
+        isTexturesValid = false;
+      }
+
       // Extract texture IDs for front-end cross-device sync. A signed-in person's are the Woka their account says they
       // wear, also when this world can't show it: the game keeps them on the device, and the picker and popup name them.
       const characterTextureIds = accountTextureIds ?? finalTextures.map(t => t.id);
@@ -502,6 +514,11 @@ export async function GET(request: NextRequest) {
         }
       }
       
+      if (guestWearing && finalCompanionTexture && !(await companionWearableHere(finalCompanionTexture.id, guestWearing)).wearable) {
+        finalCompanionTexture = null;
+        isCompanionValid = false;
+      }
+
       // Log room access to analytics (for all users, authenticated and unauthenticated)
       // Extract membership tags - ensure we get them from the membership object
       const membershipTags = (membership && 'tags' in membership && Array.isArray(membership.tags)) 
