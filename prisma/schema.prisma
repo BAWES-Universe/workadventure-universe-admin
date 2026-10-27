@@ -58,6 +58,7 @@ model User {
   artifacts        Artifact[]        @relation("ArtifactOwner")
   artifactAsks     ArtifactVersion[] @relation("ArtifactAsker")
   nearbySharedItems NearbySharedItem[]
+  botUsageTalked   BotsAiUsage[]     @relation("UsageTalkedPerson")
 
   @@map("users")
 }
@@ -916,13 +917,24 @@ model BotsAiUsage {
   talkedUserId    String?  @map("talked_user_id") @db.VarChar(255)
   // Whose key paid, when it was a personal key; null for the server's own providers. Set by Orbit, never taken from a request.
   keyOwnerId      String?  @map("key_owner_id")
+  // Where the reply was given (Orbit #491): "dm" (direct messages) or "nearby" (nearby chat). Null on rows from before
+  // it, which the bot page shows as "Not split".
+  channel         String?  @db.VarChar(10)
+  // The signed-in person who talked, worked out by Orbit from talkedUserId (Orbit #491, game #1159). Null for a guest,
+  // for someone Orbit does not know and for older rows.
+  talkedPersonId  String?  @map("talked_person_id")
+  // True when a guest talked, false for a signed-in person; null when the bot server did not say (older rows)
+  talkedGuest     Boolean? @map("talked_guest")
 
   provider        BotsAiProvider @relation(fields: [providerId], references: [providerId], onDelete: Cascade)
+  talkedPerson    User?          @relation("UsageTalkedPerson", fields: [talkedPersonId], references: [id], onDelete: SetNull)
 
   @@index([botId])
   @@index([providerId])
   @@index([timestamp])
   @@index([botId, providerId, timestamp])
+  @@index([talkedPersonId, timestamp])
+  @@index([talkedUserId, timestamp])
   @@map("bots_ai_usage")
 }
 
