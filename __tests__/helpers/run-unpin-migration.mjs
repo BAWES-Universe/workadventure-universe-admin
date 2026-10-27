@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { PGlite } from '@electric-sql/pglite';
 
 const MIGRATIONS = path.join(path.dirname(fileURLToPath(import.meta.url)), '../../prisma/migrations');
-const TARGET = '20261026110000_unpin_bots_from_providers';
+const TARGET = '20261027200000_unpin_bots_from_providers';
 
 const db = new PGlite();
 const names = fs
