@@ -12,6 +12,9 @@ import type { Prisma } from '@prisma/client';
 
 export const runtime = 'nodejs';
 
+/** The longest a key's name may be, as when it is added. */
+const MAX_KEY_NAME = 60;
+
 const respond = (request: NextRequest, body: unknown, status = 200) => meRespond(request, body, status, 'PATCH, DELETE, OPTIONS');
 
 export async function OPTIONS(request: NextRequest) {
@@ -19,7 +22,9 @@ export async function OPTIONS(request: NextRequest) {
 }
 
 /**
- * PATCH /api/me/ai-keys/:id { ifDown?, address?, model?, limits? } - change a key you own (#374).
+ * PATCH /api/me/ai-keys/:id { name?, ifDown?, address?, model?, limits? } - change a key you own (#374).
+ *   - `name`: what the key is called (1 to 60 characters). Only the name changes: the key keeps its id, so its lends and
+ *     the bots on it stay, and nobody is told (#633).
  *   - `ifDown` ("universe-ai" | "stop"): what the bots on this key do while it is down.
  *   - `limits` (#666): the reply limits of bots on this key, only the ones that change, e.g. { reply: 16000 }. Answers
  *     with all six as saved.
@@ -40,10 +45,16 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     return respond(request, { error: 'Invalid JSON body' }, 400);
   }
   if (typeof body !== 'object' || body === null || Array.isArray(body)) return respond(request, { error: 'Expected an object' }, 400);
-  const input = body as { ifDown?: unknown; address?: unknown; model?: unknown; limits?: unknown };
+  const input = body as { name?: unknown; ifDown?: unknown; address?: unknown; model?: unknown; limits?: unknown };
   const changesWhere = input.address !== undefined || input.model !== undefined;
   if (input.ifDown !== undefined && !isIfDown(input.ifDown)) return respond(request, { error: 'ifDown must be "universe-ai" or "stop"' }, 400);
-  if (input.ifDown === undefined && !changesWhere && input.limits === undefined) return respond(request, { error: 'ifDown must be "universe-ai" or "stop"' }, 400);
+  if (input.ifDown === undefined && input.name === undefined && !changesWhere && input.limits === undefined) return respond(request, { error: 'ifDown must be "universe-ai" or "stop"' }, 400);
+  let name: string | undefined;
+  if (input.name !== undefined) {
+    name = typeof input.name === 'string' ? input.name.trim() : '';
+    if (!name) return respond(request, { error: 'Give the key a name.' }, 400);
+    if (name.length > MAX_KEY_NAME) return respond(request, { error: `Keep the name under ${MAX_KEY_NAME} characters.` }, 400);
+  }
   const limits = input.limits === undefined ? null : checkReplyLimits(input.limits);
   if (limits && !limits.ok) return respond(request, { error: limits.error }, 400);
   try {
@@ -52,8 +63,11 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       const edited = await editSavedKey(user.id, id, input);
       if (!edited.ok) return respond(request, { error: edited.message, ...(edited.code ? { code: edited.code } : {}) }, edited.status);
     }
-    if (isIfDown(input.ifDown)) {
-      const result = await prisma.botsAiProvider.updateMany({ where: { providerId: id, ownerId: user.id }, data: { ifDown: input.ifDown } });
+    if (isIfDown(input.ifDown) || name !== undefined) {
+      const result = await prisma.botsAiProvider.updateMany({
+        where: { providerId: id, ownerId: user.id },
+        data: { ...(isIfDown(input.ifDown) ? { ifDown: input.ifDown } : {}), ...(name !== undefined ? { name } : {}) },
+      });
       if (result.count === 0) return respond(request, { error: 'Key not found' }, 404);
     }
     let savedLimits = null;
@@ -66,7 +80,7 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       await prisma.botsAiProvider.updateMany({ where: { providerId: id, ownerId: user.id }, data: { replyLimits: next as Prisma.InputJsonValue } });
       savedLimits = readReplyLimits(next);
     }
-    return respond(request, { status: 'saved', ...(isIfDown(input.ifDown) ? { ifDown: input.ifDown } : {}), ...(savedLimits ? { limits: savedLimits } : {}) });
+    return respond(request, { status: 'saved', ...(isIfDown(input.ifDown) ? { ifDown: input.ifDown } : {}), ...(name !== undefined ? { name } : {}), ...(savedLimits ? { limits: savedLimits } : {}) });
   } catch (error) {
     console.error('[AiKeys] Save failed:', error instanceof Error ? error.message : 'unknown');
     return respond(request, { error: 'Internal server error' }, 500);
