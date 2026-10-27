@@ -101,6 +101,23 @@ describe('Rename a key', () => {
     expect(patches()).toHaveLength(0);
   });
 
+  it('stays open on Escape while the name is saving, then shows the saved name', async () => {
+    let answer: (value: unknown) => void = () => undefined;
+    fetchMock.mockImplementation((_url: string, init?: RequestInit) =>
+      init?.method === 'PATCH'
+        ? new Promise((resolve) => (answer = resolve))
+        : Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ keys: [openRouter] }) }),
+    );
+    const input = await openEditor();
+    fireEvent.change(input, { target: { value: 'Work' } });
+    fireEvent.click(screen.getByTestId('ai-key-rename-save'));
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    fireEvent.keyDown(screen.getByLabelText('Key name'), { key: 'Escape' });
+    expect(screen.getByTestId('ai-key-rename-form')).toBeTruthy();
+    answer({ ok: true, status: 200, json: () => Promise.resolve({ status: 'saved', name: 'Work' }) });
+    expect(await screen.findByRole('heading', { name: 'Work' })).toBeTruthy();
+  });
+
   it('closes without a request when the name is unchanged', async () => {
     serve();
     await openEditor();
