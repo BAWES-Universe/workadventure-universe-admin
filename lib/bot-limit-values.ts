@@ -129,7 +129,8 @@ function checkGroup<T extends object>(input: unknown, ranges: Record<keyof T, Ra
   if (!isRecord(input)) return { ok: false, error: `${group} must be an object` };
   const out: Partial<T> = {};
   for (const [key, value] of Object.entries(input)) {
-    const range = (ranges as Record<string, Range | undefined>)[key];
+    // Only the limits' own names: `constructor` and `toString` are on every object and are not limits
+    const range = Object.prototype.hasOwnProperty.call(ranges, key) ? (ranges as Record<string, Range | undefined>)[key] : undefined;
     if (!range) return { ok: false, error: `Unknown limit: ${group}.${key}` };
     if (!fits(value, range)) {
       return { ok: false, error: `${group}.${key} must be ${range.whole ? 'a whole number ' : ''}from ${range.min.toLocaleString('en')} to ${range.max.toLocaleString('en')}` };

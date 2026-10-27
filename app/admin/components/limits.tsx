@@ -109,14 +109,15 @@ export function LimitChoices({ limit, onDone, onCancel }: { limit: Limit; onDone
           />
         ))}
         {!limit.fixedSteps && (
-          <PickCard role="radio" picked={picked === 'other'} onClick={() => setPicked('other')} indicator={<Radio checked={picked === 'other'} />} title="Other">
+          <>
+            <PickCard role="radio" picked={picked === 'other'} onClick={() => setPicked('other')} indicator={<Radio checked={picked === 'other'} />} title="Other" />
             {picked === 'other' && (
-              <span className="mt-2 flex items-center gap-2" onClick={(event) => event.stopPropagation()}>
+              <span className="flex items-center gap-2 px-3.5">
                 <Input inputMode="decimal" value={other} onChange={(event) => setOther(event.target.value)} className="h-11 w-36" aria-label={`${limit.label}, in ${limit.unit}`} />
                 <span className="text-sm text-muted-foreground">{limit.unit}</span>
               </span>
             )}
-          </PickCard>
+          </>
         )}
       </div>
       {limit.note && <p className="text-sm text-muted-foreground">{limit.note}</p>}

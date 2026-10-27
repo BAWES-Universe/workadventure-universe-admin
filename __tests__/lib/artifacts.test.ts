@@ -69,6 +69,11 @@ describe('applyEdits', () => {
     expect(applyEdits(big, [{ old: 'aa', new: 'a', all: true }], MAX).length).toBeLessThan(big.length);
   });
 
+  it('counts the places the way a replace does: a repeat that overlaps is one place', () => {
+    expect(applyEdits('aaaaa', [{ old: 'aa', new: 'b', all: true }], MAX)).toBe('bba');
+    expect(applyEdits('xaax', [{ old: 'a', new: 'bb', all: true }], MAX)).toBe('xbbbbx');
+  });
+
   it('puts $ patterns in the new text as they are', () => {
     expect(applyEdits('price', [{ old: 'price', new: '$& $1 $$' }], MAX)).toBe('$& $1 $$');
   });

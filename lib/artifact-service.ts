@@ -499,11 +499,14 @@ export async function restoreVersion(id: string, number: number, viewer: Viewer,
   const who = await whoIsLooking(artifact, viewer);
   requireOpen(artifact, who, now);
   requireOwner(artifact, who);
-  checkVersionRoom(artifact.latestVersion, (await limitsOf(ctx)).maxVersions);
+  const { maxBytes, maxVersions } = await limitsOf(ctx);
+  checkVersionRoom(artifact.latestVersion, maxVersions);
   const source = await findVersion(artifact, number);
   if (source.number === artifact.latestVersion) throw new ArtifactError('already_latest', 409, 'That is the latest version already.');
   const kind = artifact.kind as ArtifactKind;
   const content = await files.get(source.fileKey);
+  // The size limit may have been lowered since this version was saved: a restore is a new version like any other
+  checkContent(content, maxBytes);
   const next = artifact.latestVersion + 1;
   const fileKey = newFileKey(artifact.id, next, kind);
   const row = await storing(files, fileKey, kind, content, () =>
@@ -551,6 +554,7 @@ export async function copyArtifact(id: string, viewer: Viewer, version?: number 
   const row = await findVersion(source, version);
   const kind = source.kind as ArtifactKind;
   const content = await files.get(row.fileKey);
+  checkContent(content, (await limitsOf(ctx)).maxBytes);
 
   const copyId = randomUUID();
   const fileKey = newFileKey(copyId, 1, kind);
