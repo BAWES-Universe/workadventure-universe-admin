@@ -222,6 +222,9 @@ model ArtifactVersion {
   // The file of this version in the artifacts bucket. Unguessable: it carries a random part.
   fileKey      String   @map("file_key") @db.VarChar(255)
   sizeBytes    Int      @map("size_bytes")
+  // The songs, images and videos this version carries (#1510), beside its file in the same folder:
+  // [{ name, contentType, sizeBytes, key }]. Empty for most versions.
+  media        Json     @default("[]")
   createdAt    DateTime @default(now()) @map("created_at")
 
   artifact Artifact @relation(fields: [artifactId], references: [id], onDelete: Cascade)

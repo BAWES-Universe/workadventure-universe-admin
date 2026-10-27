@@ -31,6 +31,8 @@ export interface ArtifactLimits {
   versions: number;
   /** Seconds saving a version may take before the bot is told it failed. */
   save: number;
+  /** Songs, images and videos one version carries beside its file, all together, in MB (#1510); 0 lets none in. */
+  media: number;
 }
 
 /** Universe AI fair usage (#1159): replies one person (or all guests on one bot) get every few hours. */
@@ -50,7 +52,7 @@ export interface ServerLimits {
 }
 
 export const REPLY_LIMITS_RECOMMENDED: ReplyLimits = { reply: 32000, steps: 30, continue: 2, memory: 20, read: 50000, wait: 60 };
-export const ARTIFACT_LIMITS_RECOMMENDED: ArtifactLimits = { size: 2, versions: 0, save: 30 };
+export const ARTIFACT_LIMITS_RECOMMENDED: ArtifactLimits = { size: 2, versions: 0, save: 30, media: 50 };
 export const FAIR_USAGE_RECOMMENDED: FairUsage = { signedIn: 30, guest: 10, guestPool: 200 };
 /** The fair usage window. Shown on the rows ("every 5 hours"), not a row of its own. */
 export const FAIR_USAGE_WINDOW_HOURS = 5;
@@ -69,7 +71,7 @@ export const SERVER_LIMITS_RECOMMENDED: ServerLimits = {
 interface Range {
   min: number;
   max: number;
-  /** Whole numbers only (everything but the artifact size in MB). */
+  /** Whole numbers only (everything but the artifact sizes in MB). */
   whole?: boolean;
 }
 
@@ -86,6 +88,7 @@ const ARTIFACT_RANGES: Record<keyof ArtifactLimits, Range> = {
   size: { min: 0.1, max: 100 },
   versions: { min: 0, max: 1_000_000, whole: true },
   save: { min: 5, max: 600, whole: true },
+  media: { min: 0, max: 1_000 },
 };
 
 const FAIR_USAGE_RANGES: Record<keyof FairUsage, Range> = {
@@ -180,3 +183,6 @@ export function limitsForBot(base: ReplyLimits, bot: { maxReplyTokens?: number |
 
 /** Bytes in one artifact version. */
 export const artifactBytes = (limits: ArtifactLimits): number => Math.round(limits.size * 1024 * 1024);
+
+/** Bytes of media one artifact version may carry (#1510). */
+export const artifactMediaBytes = (limits: ArtifactLimits): number => Math.round(limits.media * 1024 * 1024);

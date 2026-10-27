@@ -1,8 +1,9 @@
-import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectsCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectsCommand, CopyObjectCommand } from '@aws-sdk/client-s3';
 import { ArtifactError } from '@/lib/artifacts';
 
 /**
- * The files of live artifacts (game #1422): one small file per version, in a bucket of their own. The bucket is served
+ * The files of live artifacts (game #1422): one small file per version, in a bucket of their own, with the songs, images
+ * and videos it carries beside it (#1510). The bucket is served
  * from an address that is not bawes.net (ARTIFACTS_PUBLIC_URL), so a page that runs from it can never reach the
  * sign-in or the game. Orbit is the only one that writes to it; the bot server and the game go through Orbit's routes.
  *
@@ -11,8 +12,10 @@ import { ArtifactError } from '@/lib/artifacts';
  * Without them every route answers 503, and nothing else in Orbit notices.
  */
 export interface ArtifactFiles {
-  put(key: string, body: string, contentType: string): Promise<void>;
+  put(key: string, body: string | Uint8Array, contentType: string): Promise<void>;
   get(key: string): Promise<string>;
+  /** A copy inside the bucket, for media a new version keeps from an older one; nothing passes through Orbit. */
+  copy(fromKey: string, toKey: string): Promise<void>;
   remove(keys: string[]): Promise<void>;
   /** The address a file is served from (opens in the locked box). */
   urlFor(key: string): string;
@@ -53,6 +56,11 @@ export const artifactFiles: ArtifactFiles = {
     const found = await s3Client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
     if (!found.Body) throw new ArtifactError('file_missing', 502, 'The file of this version could not be read.');
     return found.Body.transformToString('utf-8');
+  },
+  async copy(fromKey, toKey) {
+    const { s3: s3Client, bucket } = s3();
+    // The type and caching headers come with it. The keys only hold letters, digits and . _ - /, so nothing to escape
+    await s3Client.send(new CopyObjectCommand({ Bucket: bucket, Key: toKey, CopySource: `${bucket}/${fromKey}` }));
   },
   async remove(keys) {
     if (keys.length === 0) return;
