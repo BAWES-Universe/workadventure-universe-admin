@@ -35,7 +35,12 @@ export async function GET(request: NextRequest) {
         },
         orderBy: { joinedAt: 'desc' },
       }),
-      prisma.universe.findMany({ where: { ownerId: sessionUser.id, ...notHidden }, select: universeSelect, orderBy: { createdAt: 'desc' } }),
+      // Both conditions on ownerId, so the hidden filter never replaces "owned by you" (spread into one object, it did)
+      prisma.universe.findMany({
+        where: { AND: [{ ownerId: sessionUser.id }, notHidden] },
+        select: universeSelect,
+        orderBy: { createdAt: 'desc' },
+      }),
     ]);
 
     // Only the worlds this person may see, as the universe page lists them: a private world is named only to its owner,
