@@ -25,6 +25,20 @@ function mappedIpv4(ip: string): string | null {
   return `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`;
 }
 
+/**
+ * IPv4 addresses that are not private in the RFC 1918 sense but are not the public internet either:
+ * 0.0.0.0/8, 100.64.0.0/10 (shared address space; some providers' metadata address, 100.100.100.200, is in it),
+ * 192.0.0.0/24 and 198.18.0.0/15. The documentation ranges 198.51.100.0/24 and 203.0.113.0/24 stay allowed.
+ */
+function isSharedOrReservedIpv4(ip: string): boolean {
+  return (
+    /^0\./.test(ip) ||
+    /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(ip) ||
+    /^192\.0\.0\./.test(ip) ||
+    /^198\.1[89]\./.test(ip)
+  );
+}
+
 // Reject MCP server URLs that point to internal infrastructure (SSRF prevention)
 export function isAllowedServerUrl(url: string): boolean {
   try {
@@ -46,12 +60,14 @@ export function isAllowedServerUrl(url: string): boolean {
       if (/^127\.\d+\.\d+\.\d+$/.test(ipv4) || ipv4 === '0.0.0.0') return false;
       if (/^10\.\d+\.\d+\.\d+$/.test(ipv4) || /^172\.(1[6-9]|2\d|3[01])\.\d+\.\d+$/.test(ipv4)) return false;
       if (/^192\.168\.\d+\.\d+$/.test(ipv4) || /^169\.254\.\d+\.\d+$/.test(ipv4)) return false;
+      if (isSharedOrReservedIpv4(ipv4)) return false;
     }
     // Reject private IP ranges
     if (/^10\.\d+\.\d+\.\d+$/.test(cleanHostname)) return false;
     if (/^172\.(1[6-9]|2\d|3[01])\.\d+\.\d+$/.test(cleanHostname)) return false;
     if (/^192\.168\.\d+\.\d+$/.test(cleanHostname)) return false;
     if (/^169\.254\.\d+\.\d+$/.test(cleanHostname)) return false;
+    if (isSharedOrReservedIpv4(cleanHostname)) return false;
 
     // Reject private IPv6 ranges (unique-local, link-local, loopback)
     if (/^f[cd][0-9a-f]{0,3}:/i.test(cleanHostname)) return false; // fc00::/7 unique-local
@@ -112,6 +128,12 @@ export async function isAllowedServerIp(serverUrl: string): Promise<{ allowed: b
         if (/^169\.254\./.test(ipv4)) {
           return { allowed: false, error: `Server resolves to link-local via IPv4-mapped IPv6 (${hostname})` };
         }
+        if (isSharedOrReservedIpv4(ipv4)) {
+          return { allowed: false, error: `Server resolves to a shared or reserved address via IPv4-mapped IPv6 (${hostname})` };
+        }
+      }
+      if (isSharedOrReservedIpv4(hostname)) {
+        return { allowed: false, error: `Server uses a shared or reserved IP address (${hostname})` };
       }
       if (/^10\./.test(hostname) || /^172\.(1[6-9]|2\d|3[01])\./.test(hostname) ||
           /^192\.168\./.test(hostname) || /^169\.254\./.test(hostname)) {
@@ -148,6 +170,9 @@ export async function isAllowedServerIp(serverUrl: string): Promise<{ allowed: b
       if (/^169\.254\./.test(ip)) {
         return { allowed: false, error: `Server resolves to link-local address (169.254.x.x)` };
       }
+      if (isSharedOrReservedIpv4(ip)) {
+        return { allowed: false, error: `Server resolves to a shared or reserved address (${ip})` };
+      }
       // Handle IPv4-mapped IPv6 in DNS results
       if (/^::ffff:/i.test(ip)) {
         const ipv4 = mappedIpv4(ip);
@@ -162,6 +187,9 @@ export async function isAllowedServerIp(serverUrl: string): Promise<{ allowed: b
         }
         if (/^192\.168\./.test(ipv4) || /^169\.254\./.test(ipv4)) {
           return { allowed: false, error: `Server resolves to private/link-local via IPv4-mapped IPv6 (${ip})` };
+        }
+        if (isSharedOrReservedIpv4(ipv4)) {
+          return { allowed: false, error: `Server resolves to a shared or reserved address via IPv4-mapped IPv6 (${ip})` };
         }
       }
       if (addr.family === 6) {
