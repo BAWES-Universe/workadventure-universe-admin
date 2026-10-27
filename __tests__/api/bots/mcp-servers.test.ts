@@ -392,6 +392,21 @@ describe('/api/bots/[id]/mcp-servers', () => {
       expect(data.error).toContain('Maximum of 5');
     });
 
+    it.each(['https://[fd00::1]/mcp', 'https://[fe80::1]/mcp', 'https://[::]/mcp', 'https://foo.internal/mcp', 'https://[::ffff:7f00:1]/mcp'])(
+      'refuses to save a server at %s, which the old copy of the check let through (#196)',
+      async (serverUrl) => {
+        (prisma.botMcpServer.count as jest.Mock).mockResolvedValue(0);
+        const request = new NextRequest(`http://localhost:3333/api/bots/${MOCK_BOT_ID}/mcp-servers`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: 'Inside', serverUrl, authType: 'none' }),
+        });
+        const response = await POST(request, { params: Promise.resolve({ id: MOCK_BOT_ID }) });
+        expect(response.status).toBe(400);
+        expect(prisma.botMcpServer.create).not.toHaveBeenCalled();
+      }
+    );
+
     it('should return 400 for invalid body (missing name)', async () => {
       (prisma.botMcpServer.count as jest.Mock).mockResolvedValue(0);
 
@@ -575,6 +590,28 @@ describe('/api/bots/[id]/mcp-servers', () => {
         })
       );
     });
+
+    it.each(['https://[fd00::1]/mcp', 'https://[fe80::1]/mcp', 'https://foo.internal/mcp'])(
+      'refuses to move a server to %s (#196)',
+      async (serverUrl) => {
+        (prisma.botMcpServer.findUnique as jest.Mock).mockResolvedValue({
+          id: MOCK_SERVER_ID,
+          botId: MOCK_BOT_ID,
+          name: 'Old Name',
+          serverUrl: 'https://old.example.com',
+          authType: 'none',
+          enabled: true,
+        });
+        const request = new NextRequest(`http://localhost:3333/api/bots/${MOCK_BOT_ID}/mcp-servers/${MOCK_SERVER_ID}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ serverUrl }),
+        });
+        const response = await PATCH(request, { params: Promise.resolve({ id: MOCK_BOT_ID, serverId: MOCK_SERVER_ID }) });
+        expect(response.status).toBe(400);
+        expect(prisma.botMcpServer.update).not.toHaveBeenCalled();
+      }
+    );
 
     it('should return 404 if server not found', async () => {
       (prisma.botMcpServer.findUnique as jest.Mock).mockResolvedValue(null);

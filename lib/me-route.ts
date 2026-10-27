@@ -1,22 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { resolveExpectedLoginOrigin } from '@/lib/auth';
-import { getPlayOrigin, requestOrigin } from '@/lib/origin-policy';
+import { allowedOrigins } from '@/lib/cors';
+import { requestOrigin } from '@/lib/origin-policy';
 
-/**
- * For `/api/me/*` routes the game calls too: Orbit's own origin and the game's exact origin may call, never `*`.
- */
-function allowedOrigins(request: NextRequest): string[] {
-  const origins: string[] = [];
-  const own = resolveExpectedLoginOrigin(process.env.NEXT_PUBLIC_API_URL || process.env.ADMIN_API_URL, '');
-  if (own) origins.push(own);
-  else if (process.env.NODE_ENV !== 'production') origins.push(request.nextUrl.origin);
-  try {
-    origins.push(getPlayOrigin());
-  } catch {
-    // Missing play origin in production: only Orbit itself may call.
-  }
-  return origins;
-}
+// `/api/me/*` routes the game calls too use the same list as every other cross-origin route (lib/cors.ts).
 
 /** No Origin header (same-origin GET) is allowed; a present Origin must be on the list. */
 export function meOriginAllowed(request: NextRequest): boolean {

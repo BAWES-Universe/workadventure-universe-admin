@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { prisma } from '@/lib/db';
 import { authorizeBotManager, json } from '@/lib/bot-access-api';
 import { isBotHidden } from '@/lib/bot-privacy';
-import { trustedCorsHeaders } from '@/lib/cors';
+import { corsHeaders } from '@/lib/cors';
 
 export const runtime = 'nodejs';
 
@@ -15,7 +15,7 @@ const bodySchema = z.union([
 ]);
 
 export async function OPTIONS(request: NextRequest) {
-  return NextResponse.json({}, { headers: trustedCorsHeaders(request) });
+  return NextResponse.json({}, { headers: corsHeaders(request) });
 }
 
 /**

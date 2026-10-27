@@ -12,6 +12,7 @@ jest.mock('@/lib/system-user', () => ({ hiddenSystemOwnerId: jest.fn().mockResol
 
 import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
+import { hiddenSystemOwnerId } from '@/lib/system-user';
 import { GET } from '@/app/api/memberships/my/universes/route';
 
 const db = prisma as unknown as Record<string, Record<string, jest.Mock>>;
@@ -72,6 +73,14 @@ it('lists an owned universe once when you also joined it', async () => {
   const body = await (await call()).json();
   expect(body.universes).toHaveLength(1);
   expect(body.universes[0].isOwner).toBe(true);
+});
+
+it('lists as yours only the universes you own while System\'s spaces are hidden, not every universe', async () => {
+  (hiddenSystemOwnerId as jest.Mock).mockResolvedValueOnce('system');
+  await call();
+  const { where } = db.universe.findMany.mock.calls[0][0];
+  expect(where).toEqual({ AND: [{ ownerId: 'me' }, { ownerId: { not: 'system' } }] });
+  expect(db.universeMember.findMany.mock.calls[0][0].where).toEqual({ userId: 'me', universe: { ownerId: { not: 'system' } } });
 });
 
 describe('private worlds', () => {

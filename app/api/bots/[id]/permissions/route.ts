@@ -2,12 +2,12 @@ import { NextRequest, NextResponse } from 'next/server';
 import * as Sentry from '@sentry/nextjs';
 import { authorizeBotManager, json } from '@/lib/bot-access-api';
 import { BotSettingsError, readBotSettings, saveBotSettings, settingsSchema } from '@/lib/bot-access-settings';
-import { trustedCorsHeaders } from '@/lib/cors';
+import { corsHeaders } from '@/lib/cors';
 
 export const runtime = 'nodejs';
 
 export async function OPTIONS(request: NextRequest) {
-  return NextResponse.json({}, { headers: trustedCorsHeaders(request) });
+  return NextResponse.json({}, { headers: corsHeaders(request) });
 }
 
 /**

@@ -12,8 +12,8 @@ const MAX_IDS = 500;
 
 const bodySchema = z.object({ ids: z.array(z.string().min(1).max(100)).min(1).max(MAX_IDS) }).strict();
 
-export async function OPTIONS() {
-  return NextResponse.json({}, { headers: corsHeaders() });
+export async function OPTIONS(request: NextRequest) {
+  return NextResponse.json({}, { headers: corsHeaders(request) });
 }
 
 /**
@@ -33,17 +33,17 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const { id: botId } = await params;
     const parsed = bodySchema.safeParse(await request.json().catch(() => null));
     if (!parsed.success) {
-      return NextResponse.json({ error: 'Invalid request data', details: parsed.error.issues }, { status: 400, headers: corsHeaders() });
+      return NextResponse.json({ error: 'Invalid request data', details: parsed.error.issues }, { status: 400, headers: corsHeaders(request) });
     }
 
     const acknowledged = await acknowledgeForgets(botId, parsed.data.ids);
-    return NextResponse.json({ acknowledged }, { headers: corsHeaders() });
+    return NextResponse.json({ acknowledged }, { headers: corsHeaders(request) });
   } catch (error: unknown) {
     if (error instanceof Error && error.message === 'Unauthorized: Invalid service token') {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401, headers: corsHeaders() });
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401, headers: corsHeaders(request) });
     }
     Sentry.captureException(error, { tags: { area: 'bot-privacy' } });
     console.error('Error saving that a Forget was dropped:', error instanceof Error ? error.message : 'unknown error');
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500, headers: corsHeaders() });
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500, headers: corsHeaders(request) });
   }
 }

@@ -21,7 +21,7 @@ export interface FakeSet {
   layers?: { textureId: string; layer?: string; name?: string | null; url?: string; isActive?: boolean }[];
   companions?: { textureId: string; name?: string | null; url?: string; isActive?: boolean }[];
   scopes?: { scopeType: string; scopeId?: string }[];
-  policies?: { subjectType: string; subjectValue?: string | null; action?: string; isActive?: boolean }[];
+  policies?: { subjectType: string; subjectValue?: string | null; action?: string; worldId?: string | null; isActive?: boolean }[];
 }
 
 export const state = {
@@ -73,7 +73,7 @@ export function addSet(set: FakeSet) {
       ...companion,
     })),
     scopes: (set.scopes ?? [{ scopeType: 'platform' }]).map((scope) => ({ scopeId: '', ...scope })),
-    policies: (set.policies ?? []).map((policy) => ({ subjectValue: null, action: 'select', isActive: true, ...policy })),
+    policies: (set.policies ?? []).map((policy) => ({ subjectValue: null, action: 'select', worldId: null, isActive: true, ...policy })),
   };
   state.sets.push(row);
   return row;

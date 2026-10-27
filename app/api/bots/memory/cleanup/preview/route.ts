@@ -9,8 +9,8 @@ export const runtime = 'nodejs';
  * OPTIONS /api/bots/memory/cleanup/preview
  * Handle CORS preflight
  */
-export async function OPTIONS() {
-  return NextResponse.json({}, { headers: corsHeaders() });
+export async function OPTIONS(request: NextRequest) {
+  return NextResponse.json({}, { headers: corsHeaders(request) });
 }
 
 /**
@@ -28,10 +28,10 @@ export async function GET(request: NextRequest) {
     // Operates on every bot's data: admin token or super admin only.
     const viewer = await getViewer(request);
     if (!viewer) {
-      return unauthorizedResponse(corsHeaders());
+      return unauthorizedResponse(corsHeaders(request));
     }
     if (!isPrivileged(viewer)) {
-      return forbiddenResponse(corsHeaders());
+      return forbiddenResponse(corsHeaders(request));
     }
 
     const { searchParams } = new URL(request.url);
@@ -42,7 +42,7 @@ export async function GET(request: NextRequest) {
     if (!deleteAll && !olderThanDays) {
       return NextResponse.json(
         { error: 'Must provide either deleteAll or olderThanDays' },
-        { status: 400, headers: corsHeaders() }
+        { status: 400, headers: corsHeaders(request) }
       );
     }
 
@@ -75,7 +75,7 @@ export async function GET(request: NextRequest) {
             newestKept: null,
           },
         },
-        { headers: corsHeaders() }
+        { headers: corsHeaders(request) }
       );
     } else if (olderThanDays) {
       cleanupType = 'olderThanDays';
@@ -142,20 +142,20 @@ export async function GET(request: NextRequest) {
           newestKept: willKeepNewest?.createdAt.getTime() || null,
         },
       },
-      { headers: corsHeaders() }
+      { headers: corsHeaders(request) }
     );
   } catch (error: any) {
     if (error.message === 'Unauthorized: Admin authentication required') {
       return NextResponse.json(
         { error: 'Unauthorized' },
-        { status: 401, headers: corsHeaders() }
+        { status: 401, headers: corsHeaders(request) }
       );
     }
 
     console.error('Error previewing memory cleanup:', error);
     return NextResponse.json(
       { error: 'Internal server error' },
-      { status: 500, headers: corsHeaders() }
+      { status: 500, headers: corsHeaders(request) }
     );
   }
 }
