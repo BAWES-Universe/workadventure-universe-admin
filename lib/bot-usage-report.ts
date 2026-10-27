@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
-import { BOT_LIMIT_WINDOW_HOURS, universeAiLimits } from '@/lib/reply-limits';
+import { getUniverseAiReplyLimits } from '@/lib/bot-limits';
+import { BOT_LIMIT_WINDOW_HOURS } from '@/lib/reply-limits';
 
 /**
  * A bot's usage for the people who manage it (Orbit #491, mock v4 approved 20 Oct 2026): replies a day split into direct
@@ -170,7 +171,7 @@ export async function botUsageReport(
   }
 
   const current = currentKeyRef ? keyOf.get(currentKeyRef) : undefined;
-  const limits = universeAiLimits();
+  const limits = await getUniverseAiReplyLimits();
 
   return {
     range,

@@ -4,13 +4,14 @@
  */
 import { NextRequest } from 'next/server';
 import { prisma } from '@/lib/db';
-import { checkReplyAllowance, universeAiLimits } from '@/lib/reply-limits';
+import { checkReplyAllowance } from '@/lib/reply-limits';
 import { POST } from '@/app/api/bots/[id]/reply-allowance/route';
 
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
 jest.mock('@/lib/db', () => ({
   prisma: {
     $queryRaw: jest.fn(),
+    appSetting: { findUnique: jest.fn() },
     bot: { findUnique: jest.fn() },
     user: { findUnique: jest.fn() },
     botsAiUsage: { count: jest.fn() },
@@ -20,6 +21,7 @@ jest.mock('@/lib/db', () => ({
 
 const db = prisma as unknown as {
   $queryRaw: jest.Mock;
+  appSetting: { findUnique: jest.Mock };
   bot: { findUnique: jest.Mock };
   user: { findUnique: jest.Mock };
   botsAiUsage: { count: jest.Mock };
@@ -38,7 +40,7 @@ function counts(...used: number[]) {
 }
 
 beforeEach(() => {
-  for (const env of ['UNIVERSE_AI_REPLIES_SIGNED_IN', 'UNIVERSE_AI_REPLIES_GUEST', 'UNIVERSE_AI_GUEST_POOL']) delete process.env[env];
+  db.appSetting.findUnique.mockReset().mockResolvedValue(null);
   db.$queryRaw.mockReset().mockResolvedValue([{ started_at: STARTED }]);
   db.bot.findUnique.mockReset().mockResolvedValue({ ...BOT });
   db.user.findUnique.mockReset().mockImplementation(async ({ where }: { where: { uuid?: string } }) =>
@@ -49,14 +51,28 @@ beforeEach(() => {
 });
 
 describe('the numbers', () => {
-  it('are 30, 10 and 200 over 5 hours unless changed', () => {
-    expect(universeAiLimits()).toEqual({ signedIn: 30, guest: 10, guestPool: 200, windowHours: 5 });
+  const ask = (person: typeof SARA) => checkReplyAllowance('bot-1', { ...person, source: 'universe-ai' }, NOW);
+
+  it('are what a super admin saved on the Universe AI page', async () => {
+    db.appSetting.findUnique.mockResolvedValue({ key: 'bot-limits', value: { fairUsage: { signedIn: 5, guest: 2 } } });
+    counts(4);
+    expect(await ask(SARA)).toEqual({ allowed: true });
+    counts(5);
+    expect(await ask(SARA)).toMatchObject({ allowed: false, limit: 'universe-ai' });
+    counts(2);
+    expect(await ask(GUEST)).toMatchObject({ allowed: false, limit: 'guest' });
   });
 
-  it('can be changed without a release, and a bad value keeps the default', () => {
-    process.env.UNIVERSE_AI_REPLIES_SIGNED_IN = '50';
-    process.env.UNIVERSE_AI_REPLIES_GUEST = 'lots';
-    expect(universeAiLimits()).toMatchObject({ signedIn: 50, guest: 10 });
+  it('are 30 and 10 when nothing is saved or the saved limits cannot be read', async () => {
+    counts(29);
+    expect(await ask(SARA)).toEqual({ allowed: true });
+    db.appSetting.findUnique.mockRejectedValue(new Error('down'));
+    const logged = jest.spyOn(console, 'error').mockImplementation(() => {});
+    counts(30);
+    expect(await ask(SARA)).toMatchObject({ allowed: false, limit: 'universe-ai' });
+    counts(9);
+    expect(await ask(GUEST)).toEqual({ allowed: true });
+    logged.mockRestore();
   });
 });
 
