@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { requireServiceToken } from '@/lib/service-tokens';
 import { UNIVERSE_AI_REF, resolveUniverseAiProvider } from '@/lib/universe-ai';
 import { readUsagePriceFacts } from '@/lib/ai-usage-cost';
+import { readUsageChannel, resolveUsagePerson } from '@/lib/usage-person';
 
 /**
  * POST /api/bots/ai-usage
@@ -20,6 +21,8 @@ export async function POST(request: NextRequest) {
     const {
       botId,
       userId: talkedUserId = null,
+      isGuest = null,
+      channel = null,
       providerId: sentProviderId,
       tokensUsed = 0,
       apiCalls = 1,
@@ -60,6 +63,10 @@ export async function POST(request: NextRequest) {
     // that row stays an old estimate: its `cost` is kept and no price facts are filled in.
     const facts = readUsagePriceFacts(body);
 
+    // Who talked, matched to their Orbit account so the bot page can name them (#491); a guest is only counted
+    const talked = typeof talkedUserId === 'string' && talkedUserId ? talkedUserId.slice(0, 255) : null;
+    const person = await resolveUsagePerson(talked, isGuest);
+
     // Fire-and-forget: Don't await, just start the operation
     // This ensures bot operation isn't blocked if tracking fails
     prisma.botsAiUsage
@@ -77,8 +84,12 @@ export async function POST(request: NextRequest) {
           error,
           timestamp: timestamp ? new Date(timestamp) : new Date(),
           // Who talked (as the bot server knows them) and whose key paid; the key's owner comes from the provider row, never from the request
-          talkedUserId: typeof talkedUserId === 'string' && talkedUserId ? talkedUserId.slice(0, 255) : null,
+          talkedUserId: talked,
           keyOwnerId: provider.ownerId ?? null,
+          // Direct messages or nearby chat, and the person as Orbit knows them (#491, #1159 step 6)
+          channel: readUsageChannel(channel),
+          talkedPersonId: person.personId,
+          talkedGuest: person.guest,
         },
       })
       .catch((err) => {
