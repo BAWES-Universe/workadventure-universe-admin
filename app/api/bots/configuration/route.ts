@@ -12,26 +12,17 @@ import { checkConfigVision } from '@/lib/bot-vision';
 import { toolTimeoutSecondsSchema } from '@/lib/bot-tool-timeout';
 import { mustStayPrivateAfterMove } from '@/lib/bot-privacy';
 import { z } from 'zod';
+import { corsHeaders } from '@/lib/cors';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Prisma
 export const runtime = 'nodejs';
-
-// CORS headers helper
-function corsHeaders() {
-  return {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, PUT, DELETE',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-    'Access-Control-Allow-Credentials': 'true',
-  };
-}
 
 /**
  * OPTIONS /api/bots/configuration
  * Handle CORS preflight
  */
-export async function OPTIONS() {
-  return NextResponse.json({}, { headers: corsHeaders() });
+export async function OPTIONS(request: NextRequest) {
+  return NextResponse.json({}, { headers: corsHeaders(request) });
 }
 
 // Validation schema for creating/updating bot configuration
@@ -134,7 +125,7 @@ export async function GET(request: NextRequest) {
         { error: userId ? 'Forbidden' : 'Unauthorized' },
         { status: userId ? 403 : 401 }
       );
-      Object.entries(corsHeaders()).forEach(([key, value]) => {
+      Object.entries(corsHeaders(request)).forEach(([key, value]) => {
         response.headers.set(key, value);
       });
       return response;
@@ -165,7 +156,7 @@ export async function GET(request: NextRequest) {
       } catch (error) {
         // Invalid roomUrl - return empty array (not error)
         const response = NextResponse.json([]);
-        Object.entries(corsHeaders()).forEach(([key, value]) => {
+        Object.entries(corsHeaders(request)).forEach(([key, value]) => {
           response.headers.set(key, value);
         });
         return response;
@@ -187,7 +178,7 @@ export async function GET(request: NextRequest) {
         } catch (error) {
           // Invalid worldUrl - return empty array
           const response = NextResponse.json([]);
-          Object.entries(corsHeaders()).forEach(([key, value]) => {
+          Object.entries(corsHeaders(request)).forEach(([key, value]) => {
             response.headers.set(key, value);
           });
           return response;
@@ -202,7 +193,7 @@ export async function GET(request: NextRequest) {
         } catch (error) {
           // Invalid universeUrl - return empty array
           const response = NextResponse.json([]);
-          Object.entries(corsHeaders()).forEach(([key, value]) => {
+          Object.entries(corsHeaders(request)).forEach(([key, value]) => {
             response.headers.set(key, value);
           });
           return response;
@@ -273,7 +264,7 @@ export async function GET(request: NextRequest) {
 
     // Always return array (even if empty)
     const response = NextResponse.json(transformedBots);
-    Object.entries(corsHeaders()).forEach(([key, value]) => {
+    Object.entries(corsHeaders(request)).forEach(([key, value]) => {
       response.headers.set(key, value);
     });
     return response;
@@ -283,7 +274,7 @@ export async function GET(request: NextRequest) {
       { error: 'Internal server error' },
       { status: 500 }
     );
-    Object.entries(corsHeaders()).forEach(([key, value]) => {
+    Object.entries(corsHeaders(request)).forEach(([key, value]) => {
       response.headers.set(key, value);
     });
     return response;
@@ -302,7 +293,7 @@ export async function POST(request: NextRequest) {
         { error: 'Unauthorized' },
         { status: 401 }
       );
-      Object.entries(corsHeaders()).forEach(([key, value]) => {
+      Object.entries(corsHeaders(request)).forEach(([key, value]) => {
         response.headers.set(key, value);
       });
       return response;
@@ -323,7 +314,7 @@ export async function POST(request: NextRequest) {
         { error: 'Missing required fields: name, roomUrl, behaviorType' },
         { status: 400 }
       );
-      Object.entries(corsHeaders()).forEach(([key, value]) => {
+      Object.entries(corsHeaders(request)).forEach(([key, value]) => {
         response.headers.set(key, value);
       });
       return response;
@@ -339,7 +330,7 @@ export async function POST(request: NextRequest) {
         { error: `Invalid roomUrl: ${errorMessage}` },
         { status: 400 }
       );
-      Object.entries(corsHeaders()).forEach(([key, value]) => {
+      Object.entries(corsHeaders(request)).forEach(([key, value]) => {
         response.headers.set(key, value);
       });
       return response;
@@ -363,7 +354,7 @@ export async function POST(request: NextRequest) {
           { error: 'You do not have permission to manage bots in this room' },
           { status: 403 }
         );
-        Object.entries(corsHeaders()).forEach(([key, value]) => {
+        Object.entries(corsHeaders(request)).forEach(([key, value]) => {
           response.headers.set(key, value);
         });
         return response;
@@ -380,7 +371,7 @@ export async function POST(request: NextRequest) {
             { error: 'Bot not found' },
             { status: 404 }
           );
-          Object.entries(corsHeaders()).forEach(([key, value]) => {
+          Object.entries(corsHeaders(request)).forEach(([key, value]) => {
             response.headers.set(key, value);
           });
           return response;
@@ -391,7 +382,7 @@ export async function POST(request: NextRequest) {
             { error: 'You do not have permission to manage this bot' },
             { status: 403 }
           );
-          Object.entries(corsHeaders()).forEach(([key, value]) => {
+          Object.entries(corsHeaders(request)).forEach(([key, value]) => {
             response.headers.set(key, value);
           });
           return response;
@@ -418,7 +409,7 @@ export async function POST(request: NextRequest) {
         { error: providerError },
         { status: 400 }
       );
-      Object.entries(corsHeaders()).forEach(([key, value]) => {
+      Object.entries(corsHeaders(request)).forEach(([key, value]) => {
         response.headers.set(key, value);
       });
       return response;
@@ -438,7 +429,7 @@ export async function POST(request: NextRequest) {
       });
       if (visionError) {
         const response = NextResponse.json({ error: visionError }, { status: 400 });
-        Object.entries(corsHeaders()).forEach(([key, value]) => {
+        Object.entries(corsHeaders(request)).forEach(([key, value]) => {
           response.headers.set(key, value);
         });
         return response;
@@ -582,7 +573,7 @@ export async function POST(request: NextRequest) {
     const transformedBot = await transformBotToServerFormat(bot, true, hasPermission);
 
     const response = NextResponse.json(transformedBot, { status: statusCode });
-    Object.entries(corsHeaders()).forEach(([key, value]) => {
+    Object.entries(corsHeaders(request)).forEach(([key, value]) => {
       response.headers.set(key, value);
     });
     return response;
@@ -595,7 +586,7 @@ export async function POST(request: NextRequest) {
         },
         { status: 400 }
       );
-      Object.entries(corsHeaders()).forEach(([key, value]) => {
+      Object.entries(corsHeaders(request)).forEach(([key, value]) => {
         response.headers.set(key, value);
       });
       return response;
@@ -605,7 +596,7 @@ export async function POST(request: NextRequest) {
         { error: 'Unauthorized' },
         { status: 401 }
       );
-      Object.entries(corsHeaders()).forEach(([key, value]) => {
+      Object.entries(corsHeaders(request)).forEach(([key, value]) => {
         response.headers.set(key, value);
       });
       return response;
@@ -615,7 +606,7 @@ export async function POST(request: NextRequest) {
       { error: 'Internal server error' },
       { status: 500 }
     );
-    Object.entries(corsHeaders()).forEach(([key, value]) => {
+    Object.entries(corsHeaders(request)).forEach(([key, value]) => {
       response.headers.set(key, value);
     });
     return response;

@@ -21,7 +21,7 @@ export async function GET(
 ) {
   try {
     const { id: botId } = await params;
-    const denied = await botReadDenied(request, botId, corsHeaders());
+    const denied = await botReadDenied(request, botId, corsHeaders(request));
     if (denied) return denied;
     const { searchParams } = new URL(request.url);
 
@@ -96,19 +96,19 @@ export async function GET(
       repetitionCount,
       totalRows: allRows.length,
       availableMetricTypes: Array.from(metricTypes),
-    }, { headers: corsHeaders() });
+    }, { headers: corsHeaders(request) });
   } catch (error: any) {
     if (error.message === 'Unauthorized: Admin authentication required') {
       return NextResponse.json(
         { error: 'Unauthorized' },
-        { status: 401, headers: corsHeaders() }
+        { status: 401, headers: corsHeaders(request) }
       );
     }
 
     console.error('Error getting metrics stats:', error);
     return NextResponse.json(
       { error: 'Internal server error' },
-      { status: 500, headers: corsHeaders() }
+      { status: 500, headers: corsHeaders(request) }
     );
   }
 }
