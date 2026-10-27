@@ -14,7 +14,7 @@ export const json = (request: NextRequest, body: unknown, status = 200) =>
  */
 export type BotManagerAccess =
   | { response: NextResponse; place?: undefined }
-  | { response?: undefined; place: BotPlace & { roomId: string } };
+  | { response?: undefined; place: BotPlace & { roomId: string }; viewerId?: string };
 
 export async function authorizeBotManager(request: NextRequest, botId: string, options: { adminTokenReads: boolean }): Promise<BotManagerAccess> {
   const sessionUser = await getSessionUser(request);
@@ -40,5 +40,5 @@ export async function authorizeBotManager(request: NextRequest, botId: string, o
   ) {
     return { response: json(request, { error: 'Bot not found' }, 404) };
   }
-  return { place };
+  return { place, viewerId: sessionUser.id };
 }
