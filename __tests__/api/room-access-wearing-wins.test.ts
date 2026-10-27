@@ -325,20 +325,50 @@ describe('GET /api/room/access, your Woka stays yours', () => {
     });
   });
 
-  it('leaves guests as they were', async () => {
+  it('lets a guest wear what the game sent when anyone may wear it here, without looking up an account', async () => {
     state.users.length = 0;
     addOutfit('u1', ['std-x'], minutesAgo(30));
-    const body = await enter('guest-uuid', { signedIn: false });
-    expect(ids(body)).toEqual(['sent1']);
+    const body = await enter('guest-uuid', { signedIn: false, sent: ['std-y'], companion: 'dog1' });
+    expect(ids(body)).toEqual(['std-y']);
+    expect(body.isCharacterTexturesValid).toBe(true);
+    expect(body.companionTexture?.id).toBe('dog1');
     expect(fakeDb.userOutfit.findFirst).not.toHaveBeenCalled();
   });
 
-  it('leaves a name that has not signed in as it was, even when it names a real person', async () => {
+  it('leaves a name that has not signed in as a guest, even when it names a real person', async () => {
     addOutfit('u1', ['std-x'], minutesAgo(30));
-    const body = await enter(PERSON.uuid, { signedIn: false });
+    const body = await enter(PERSON.uuid, { signedIn: false, sent: ['std-y'] });
     expect(fakeDb.userOutfit.findFirst).not.toHaveBeenCalled();
     expect(body.status).toBe('ok');
-    expect(ids(body)).toEqual(['sent1']);
+    expect(ids(body)).toEqual(['std-y']);
+  });
+
+  it('says not valid when a guest sends a part kept for members, granted to someone, or from another world', async () => {
+    state.users.length = 0;
+    addSet({
+      id: 'vip',
+      visibility: 'restricted',
+      layers: [{ textureId: 'vip-1' }],
+      companions: [{ textureId: 'vip-pet' }],
+      policies: [{ subjectType: 'membership_tag', subjectValue: 'vip' }],
+    });
+    addSet({ id: 'gift', visibility: 'assigned_only', layers: [{ textureId: 'gift-1' }] });
+    for (const sent of [['vip-1'], ['gift-1'], ['std-y', 'cost-c1']]) {
+      const body = await enter('guest-uuid', { signedIn: false, sent, world: 'world-b' });
+      expect(body.isCharacterTexturesValid).toBe(false);
+      expect(body.characterTextures).toEqual([]);
+    }
+    const pet = await enter('guest-uuid', { signedIn: false, sent: ['std-y'], companion: 'vip-pet' });
+    expect(pet.isCompanionTextureValid).toBe(false);
+    expect(pet.companionTexture).toBeNull();
+    expect(pet.isCharacterTexturesValid).toBe(true);
+  });
+
+  it("lets a guest wear a world's own costume in that world, and a set whose policy is for everyone", async () => {
+    state.users.length = 0;
+    addSet({ id: 'open', visibility: 'restricted', layers: [{ textureId: 'open-1' }], policies: [{ subjectType: 'everyone' }] });
+    expect((await enter('guest-uuid', { signedIn: false, sent: ['cost-c1'], world: 'world-c' })).isCharacterTexturesValid).toBe(true);
+    expect((await enter('guest-uuid', { signedIn: false, sent: ['open-1'] })).isCharacterTexturesValid).toBe(true);
   });
 
   it('never wears a Woka saved for a world when the account could not be verified: it asks instead of silently giving an old or default one', async () => {

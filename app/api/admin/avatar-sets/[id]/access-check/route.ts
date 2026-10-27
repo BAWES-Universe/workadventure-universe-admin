@@ -100,6 +100,7 @@ export async function GET(req: NextRequest, { params }: Params) {
   } else if (set.visibility === 'restricted') {
     const policyMatch = set.policies.some((p) => {
       if (p.action !== 'select' && p.action !== 'manage') return false
+      if (p.worldId && p.worldId !== worldId) return false
       if (p.subjectType === 'everyone') return true
       if (p.subjectType === 'membership_tag') return !!p.subjectValue && membershipTags.includes(p.subjectValue)
       if (p.subjectType === 'user') return p.subjectValue === userId
