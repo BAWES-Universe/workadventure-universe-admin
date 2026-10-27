@@ -121,7 +121,7 @@ describe('Someone’s profile buttons', () => {
     expect(mockMessage).toHaveBeenCalledWith('uuid-ali', 'Ali', '@ali:chat');
   });
 
-  it('shows their bio and links before where they are now', async () => {
+  it('shows their bio and links, then where they are now, then the buttons', async () => {
     const place = { roomId: 'r-hq', name: 'Headquarters', world: { name: 'BAWES World' }, universe: { name: 'BAWES Universe' }, playPath: '/@/bawes/bawes/hq' };
     mockPeople = [{ uuid: 'uuid-ali', place }];
     serve({ connect: { available: true, relationship: 'none', chatId: '@ali:chat' }, visitCard: { bio: 'Hello, I’m Ali!', links: [{ label: 'About', url: 'https://example.com' }] } });
@@ -131,6 +131,9 @@ describe('Someone’s profile buttons', () => {
     const about = screen.getByRole('link', { name: /About/ });
     expect(bio.compareDocumentPosition(nowIn) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(about.compareDocumentPosition(nowIn) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // Read and tabbed to in the order drawn on a phone: the buttons come after the card's contents
+    const addFriend = await screen.findByRole('button', { name: 'Add friend' });
+    expect(nowIn.compareDocumentPosition(addFriend) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it('opens the invite sheet with this person picked when Give membership is tapped', async () => {

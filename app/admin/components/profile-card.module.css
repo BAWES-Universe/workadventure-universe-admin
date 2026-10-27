@@ -11,18 +11,21 @@
 /* The name stays under the Woka however many rows the buttons take. */
 .identity > .who { grid-column: 1; display: grid; gap: 4px; align-self: start; }
 .identity > button { grid-column: 2; }
-/* Pill buttons (Invite over, Message, Add friend, Give membership): a wrapping row beside the name. */
-.identity > .pills { grid-column: 2; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; max-width: 36rem; }
-/* On a phone, person buttons share a row and move down when their words don't fit; the universe invite has its own row. */
+/* Pill buttons (Invite over, Message, Add friend, Give membership): drawn after the card's contents, so they are read
+   and tabbed to last, and placed in a wrapping row beside the name on a wide screen. */
+.card[data-actions] { grid-template-columns: minmax(0, 1fr) auto; column-gap: 14px; }
+.card[data-actions] > * { grid-column: 1 / -1; }
+.card[data-actions] > .identity { grid-column: 1; grid-row: 2; grid-template-columns: minmax(0, 1fr); }
+.pills { align-self: end; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; max-width: 36rem; }
+.card[data-actions] > .pills { grid-column: 2; grid-row: 2; }
+/* On a phone they come last on the card, under the bio and "Now in": person buttons share a row and move down when
+   their words don't fit; the universe invite has its own row. */
 @media (max-width: 640px) {
-  .identity > .pills { grid-column: 1 / -1; max-width: none; }
-  .identity > .pills > * { flex: 1 1 0; min-width: max-content; }
-  .identity > .pills > [data-wide] { flex-basis: 100%; min-width: 0; }
-  /* A person's buttons go last on the card, under their bio and "Now in"; the Woka and name keep their spacing. */
-  .identity:has(> .pills) { display: contents; }
-  .identity:has(> .pills) > .avatar { margin-top: -40px; }
-  .identity:has(> .pills) > .who { margin-top: -4px; }
-  .identity > .pills { order: 1; }
+  .card[data-actions] { grid-template-columns: minmax(0, 1fr); }
+  .card[data-actions] > .identity, .card[data-actions] > .pills { grid-column: 1; grid-row: auto; }
+  .card > .pills { max-width: none; }
+  .card > .pills > * { flex: 1 1 0; min-width: max-content; }
+  .card > .pills > [data-wide] { flex-basis: 100%; min-width: 0; }
 }
 @media (max-width: 400px) {
   .identity { grid-template-columns: minmax(0, 1fr); }

@@ -701,9 +701,9 @@ export default function UserDetailPage() {
             ]}
           />
         }
-        action={pills.length > 0 ? <ProfileActions count={pills.length}>{pills}</ProfileActions> : undefined}
+        actions={pills.length > 0 ? <ProfileActions count={pills.length}>{pills}</ProfileActions> : undefined}
       >
-        {/* Who they are first, then where they are; on a phone the buttons come last, under these. */}
+        {/* Who they are first, then where they are; the buttons come after these. */}
         {(bio || links.length > 0) && (
           <div className="grid min-w-0 gap-3">
             {bio && <p className="whitespace-pre-line text-sm leading-relaxed [overflow-wrap:anywhere]">{bio}</p>}
