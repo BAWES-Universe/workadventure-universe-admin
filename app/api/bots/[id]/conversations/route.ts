@@ -12,8 +12,8 @@ export const runtime = 'nodejs';
  * OPTIONS /api/bots/:botId/conversations
  * Handle CORS preflight
  */
-export async function OPTIONS() {
-  return NextResponse.json({}, { headers: corsHeaders() });
+export async function OPTIONS(request: NextRequest) {
+  return NextResponse.json({}, { headers: corsHeaders(request) });
 }
 
 /**
@@ -51,7 +51,7 @@ export async function POST(
     if (!userUuid || !messages || !Array.isArray(messages) || !startedAt) {
       return NextResponse.json(
         { error: 'Missing required fields: userUuid, messages, startedAt' },
-        { status: 400, headers: corsHeaders() }
+        { status: 400, headers: corsHeaders(request) }
       );
     }
 
@@ -146,7 +146,7 @@ export async function POST(
           conversationId: conversation.id.toString(), 
           status: 'created' as const 
         },
-        { headers: corsHeaders() }
+        { headers: corsHeaders(request) }
       );
       
     } catch (error: any) {
@@ -199,7 +199,7 @@ export async function POST(
                 conversationId: existingConversation.id.toString(), 
                 status: 'updated' as const 
               },
-              { headers: corsHeaders() }
+              { headers: corsHeaders(request) }
             );
           } else {
             console.warn(`Unique constraint violation but no active conversation found for bot ${botId}, user ${userUuid}`);
@@ -224,7 +224,7 @@ export async function POST(
                   conversationId: anyRecentConversation.id.toString(), 
                   status: 'updated' as const 
                 },
-                { headers: corsHeaders() }
+                { headers: corsHeaders(request) }
               );
             }
           }
@@ -241,14 +241,14 @@ export async function POST(
     if (error.message === 'Unauthorized: Invalid service token') {
       return NextResponse.json(
         { error: 'Unauthorized' },
-        { status: 401, headers: corsHeaders() }
+        { status: 401, headers: corsHeaders(request) }
       );
     }
 
     console.error('Error in conversation storage endpoint:', error?.message || 'Unknown error');
     return NextResponse.json(
       { error: 'Internal server error' },
-      { status: 500, headers: corsHeaders() }
+      { status: 500, headers: corsHeaders(request) }
     );
   }
 }
@@ -273,13 +273,13 @@ export async function GET(
 ) {
   try {
     const { id: botId } = await params;
-    const denied = await botContentReadDenied(request, corsHeaders());
+    const denied = await botContentReadDenied(request, corsHeaders(request));
     if (denied) return denied;
     // Hide bot conversations (#435): no transcript for anyone, super admins included. The count comes from usage rows.
     if (await isBotHidden(botId)) {
       return NextResponse.json(
         { botId, private: true, conversations: [], count: 0, replies: await prisma.botsAiUsage.count({ where: { botId } }) },
-        { headers: corsHeaders() }
+        { headers: corsHeaders(request) }
       );
     }
     // Visitors' emails are only for super admins, as in access logs; room managers see names
@@ -346,20 +346,20 @@ export async function GET(
         })),
         count: totalCount,
       },
-      { headers: corsHeaders() }
+      { headers: corsHeaders(request) }
     );
   } catch (error: any) {
     if (error.message === 'Unauthorized: Admin authentication required') {
       return NextResponse.json(
         { error: 'Unauthorized' },
-        { status: 401, headers: corsHeaders() }
+        { status: 401, headers: corsHeaders(request) }
       );
     }
 
     console.error('Error querying conversations:', error);
     return NextResponse.json(
       { error: 'Internal server error' },
-      { status: 500, headers: corsHeaders() }
+      { status: 500, headers: corsHeaders(request) }
     );
   }
 }

@@ -2,10 +2,10 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getSessionUser } from '@/lib/auth-session';
 import { canManageThisBot } from '@/lib/bot-permissions';
 import { loadBotPlace, type BotPlace } from '@/lib/bot-access-settings';
-import { trustedCorsHeaders } from '@/lib/cors';
+import { corsHeaders } from '@/lib/cors';
 
 export const json = (request: NextRequest, body: unknown, status = 200) =>
-  NextResponse.json(body, { status, headers: trustedCorsHeaders(request) });
+  NextResponse.json(body, { status, headers: corsHeaders(request) });
 
 /**
  * Who may read and change one bot's rules (#427): whoever manages the bot (see canManageThisBot: its creator, the

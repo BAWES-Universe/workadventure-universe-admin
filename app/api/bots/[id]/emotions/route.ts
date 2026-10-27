@@ -11,8 +11,8 @@ export const runtime = 'nodejs';
  * OPTIONS /api/bots/:botId/emotions
  * Handle CORS preflight
  */
-export async function OPTIONS() {
-  return NextResponse.json({}, { headers: corsHeaders() });
+export async function OPTIONS(request: NextRequest) {
+  return NextResponse.json({}, { headers: corsHeaders(request) });
 }
 
 /**
@@ -27,10 +27,10 @@ export async function GET(
 ) {
   try {
     const { id: botId } = await params;
-    const denied = await botContentReadDenied(request, corsHeaders());
+    const denied = await botContentReadDenied(request, corsHeaders(request));
     if (denied) return denied;
     // Hide bot conversations (#435): what the bot remembers about people, emotions included, is for the bot alone.
-    if (await isBotHidden(botId)) return NextResponse.json([], { headers: corsHeaders() });
+    if (await isBotHidden(botId)) return NextResponse.json([], { headers: corsHeaders(request) });
     // Visitors' emails are only for super admins, as in access logs; room managers see names
     const showEmails = isPrivileged(await getViewer(request));
 
@@ -66,19 +66,19 @@ export async function GET(
       lastEmotionUpdate: m.lastEmotionUpdate?.getTime() || null,
     }));
 
-    return NextResponse.json(emotions, { headers: corsHeaders() });
+    return NextResponse.json(emotions, { headers: corsHeaders(request) });
   } catch (error: any) {
     if (error.message === 'Unauthorized: Admin authentication required') {
       return NextResponse.json(
         { error: 'Unauthorized' },
-        { status: 401, headers: corsHeaders() }
+        { status: 401, headers: corsHeaders(request) }
       );
     }
 
     console.error('Error getting emotions:', error);
     return NextResponse.json(
       { error: 'Internal server error' },
-      { status: 500, headers: corsHeaders() }
+      { status: 500, headers: corsHeaders(request) }
     );
   }
 }
