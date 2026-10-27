@@ -81,7 +81,7 @@ export interface AiKeyKindInfo {
   /** The model the Add a key page picks first, when the provider lists it (the one that gets a person started fastest). */
   suggestedModel?: string;
   /** What the provider's docs say about a model when its list says nothing (DeepSeek's list holds ids only). A fact the list does give wins. */
-  knownFacts?: Record<string, { tools?: boolean; vision?: boolean; context?: number }>;
+  knownFacts?: Record<string, { tools?: boolean; vision?: boolean; context?: number; output?: number }>;
 }
 
 type Defaulted = 'protocol' | 'auth' | 'typedEndpointSuffix' | 'keyCheck' | 'modelId' | 'tier';

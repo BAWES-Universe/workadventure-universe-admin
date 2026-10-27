@@ -375,6 +375,15 @@ describe('model facts', () => {
     expect(factsOf({ id: 'a/c', architecture: { input_modalities: ['text'] }, supported_parameters: ['temperature'] })).toEqual({ tools: false, vision: false });
   });
 
+  it('reads the longest reply where a list says it (#673)', () => {
+    expect(factsOf({ id: 'openai/gpt-4o-mini', context_length: 128000, top_provider: { max_completion_tokens: 16384 } })).toEqual({ context: 128000, output: 16384 });
+    expect(factsOf({ id: 'llama-3.3-70b-versatile', context_window: 131072, max_completion_tokens: 32768 })).toEqual({ context: 131072, output: 32768 });
+    expect(factsOf({ id: 'claude-haiku', max_input_tokens: 200000, max_tokens: 64000 })).toEqual({ context: 200000, output: 64000 });
+    expect(factsOf({ id: 'gemini', outputTokenLimit: 8192 })).toEqual({ output: 8192 });
+    // OpenRouter says null for a model whose providers don't say
+    expect(factsOf({ id: 'x/y', top_provider: { max_completion_tokens: null } })).toEqual({});
+  });
+
   it('reads Mistral’s capabilities and Groq’s context window', () => {
     expect(factsOf({ id: 'mistral-large', capabilities: { function_calling: true, vision: false }, max_context_length: 131072 })).toEqual({ tools: true, vision: false, context: 131072 });
     expect(factsOf({ id: 'llama', context_window: 8192 })).toEqual({ context: 8192 });
