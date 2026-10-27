@@ -24,7 +24,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const auth = await authorizeBotManager(request, id, { adminTokenReads: false });
     if (auth.response) return auth.response;
     const asked = request.nextUrl.searchParams.get('range') ?? '7d';
-    if (!(asked in USAGE_RANGES)) return json(request, { error: 'range must be today, 7d or 30d' }, 400);
+    if (!Object.hasOwn(USAGE_RANGES, asked)) return json(request, { error: 'range must be today, 7d or 30d' }, 400);
     const report = await botUsageReport(
       { id: auth.place.id, createdById: auth.place.createdById ?? null },
       { range: asked as UsageRange, timeZone: readTimeZone(request.nextUrl.searchParams.get('tz')), viewerId: auth.viewerId },

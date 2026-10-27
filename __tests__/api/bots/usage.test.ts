@@ -92,6 +92,8 @@ describe('the range', () => {
     expect((await (await get('?range=30d')).json()).days).toHaveLength(30);
     expect((await (await get('?range=today')).json()).days).toHaveLength(1);
     expect((await get('?range=year')).status).toBe(400);
+    // Names every object has are not ranges either
+    expect((await get('?range=constructor')).status).toBe(400);
   });
 
   it("uses the viewer's own days, and ignores a time zone that does not exist", () => {
