@@ -2,7 +2,7 @@ import { prisma } from '@/lib/db';
 import { kindInfo, type AiKeyKind } from '@/lib/ai-key-kinds';
 import { isIfDown, type DownReason } from '@/lib/ai-key-health';
 import type { ModelFacts } from '@/lib/ai-key-models';
-import { lendModels, servedModel } from '@/lib/ai-key-model-list';
+import { cleanFacts, lendModels, modelFactsOf, servedModel } from '@/lib/ai-key-model-list';
 import { readReplyLimits, type ReplyLimits } from '@/lib/bot-limit-values';
 
 export type { AiKeyKind };
@@ -38,8 +38,11 @@ export interface AiKeySummary {
     ownedByYou: boolean;
     /** Which of the key's models bots there may use (#575): null for all of them. */
     models: string[] | null;
-    /** Each bot with the model it replies with (its own pick, else the key's check model, kept to what the lend allows). */
-    bots: { id: string; name: string; replies: number; model: string | null }[];
+    /**
+     * Each bot with the model it replies with (its own pick, else the key's check model, kept to what the lend allows), and
+     * the longest reply that model can write when its provider says (#673).
+     */
+    bots: { id: string; name: string; replies: number; model: string | null; output: number | null }[];
   }[];
   /** "working", or "down" with when it went down (ISO) and why. */
   status: 'working' | 'down';
@@ -56,14 +59,7 @@ const asDownReason = (value: string | null): DownReason => (value === 'rejected'
 
 /** The model facts saved on a key (`settings.caps`): only the ones that are well-formed. */
 function capsOf(settings: unknown): ModelFacts {
-  const caps = typeof settings === 'object' && settings !== null ? (settings as { caps?: unknown }).caps : null;
-  if (typeof caps !== 'object' || caps === null) return {};
-  const { tools, vision, context } = caps as Record<string, unknown>;
-  return {
-    ...(typeof tools === 'boolean' ? { tools } : {}),
-    ...(typeof vision === 'boolean' ? { vision } : {}),
-    ...(typeof context === 'number' && context > 0 ? { context } : {}),
-  };
+  return cleanFacts(typeof settings === 'object' && settings !== null ? (settings as { caps?: unknown }).caps : null);
 }
 
 function hostOf(endpoint: string | null): string | null {
@@ -140,7 +136,10 @@ export async function listAiKeys(ownerId: string): Promise<AiKeySummary[]> {
             models,
             bots: bots
               .filter((bot) => bot.aiProviderRef === row.providerId && bot.room.world.universeId === lend.universe.id)
-              .map((bot) => ({ id: bot.id, name: bot.name, replies: repliesOf.get(`${row.providerId}:${bot.id}`) ?? 0, model: servedModel(bot, row, models) })),
+              .map((bot) => {
+                const model = servedModel(bot, row, models);
+                return { id: bot.id, name: bot.name, replies: repliesOf.get(`${row.providerId}:${bot.id}`) ?? 0, model, output: model ? modelFactsOf(row, model).output ?? null : null };
+              }),
           };
         }),
       status: row.downSince ? 'down' : 'working',

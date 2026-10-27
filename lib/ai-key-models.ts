@@ -80,11 +80,12 @@ export type LoadModelsResult = { ok: true; models: string[]; facts: ModelFactsBy
  * the key, the way a reply's 400 is not counted against it), or something else.
  */
 export type ProbeFailure = 'unreachable' | 'rejected' | 'busy' | 'credit' | 'gone' | 'request' | 'other';
-/** What a provider says about one model in its list, when it says: can it call tools, take images, how much can it read. */
+/** What a provider says about one model in its list, when it says: can it call tools, take images, how much can it read, and how much can it write in one reply (#673). */
 export type ModelFacts = {
   tools?: boolean;
   vision?: boolean;
   context?: number;
+  output?: number;
 };
 export type ModelFactsById = Record<string, ModelFacts>;
 export type ProbeModelsResult = { ok: true; models: string[]; facts: ModelFactsById } | { ok: false; message: string; reason: ProbeFailure; noList?: true };
@@ -141,6 +142,8 @@ const asBoolean = (value: unknown) => (typeof value === 'boolean' ? value : unde
  * What one entry of a provider's model list says about the model. A fact the provider leaves out is unknown, never "no":
  * OpenRouter names the parameters and input kinds a model takes, Mistral lists `capabilities`, Together `context_length`,
  * Groq `context_window`, Claude `capabilities.image_input` and `max_input_tokens`. A list that names parameters but not `tools` is saying the model cannot call tools.
+ * The longest reply (#673): OpenRouter `top_provider.max_completion_tokens`, Groq `max_completion_tokens`, Claude `max_tokens`,
+ * Gemini `outputTokenLimit`. OpenAI, DeepSeek, Mistral and Together don't say it.
  */
 export function factsOf(entry: unknown): ModelFacts {
   if (!isRecord(entry)) return {};
@@ -152,10 +155,14 @@ export function factsOf(entry: unknown): ModelFacts {
   const vision = nonEmptyList(architecture.input_modalities) ? architecture.input_modalities.includes('image') : (asBoolean(capabilities.vision) ?? imageInput);
   const rawContext = entry.context_length ?? entry.max_context_length ?? entry.context_window ?? entry.max_input_tokens;
   const context = typeof rawContext === 'number' && Number.isFinite(rawContext) && rawContext > 0 ? Math.round(rawContext) : undefined;
+  const topProvider = isRecord(entry.top_provider) ? entry.top_provider : {};
+  const rawOutput = topProvider.max_completion_tokens ?? entry.max_completion_tokens ?? entry.max_tokens ?? entry.outputTokenLimit;
+  const output = typeof rawOutput === 'number' && Number.isFinite(rawOutput) && rawOutput > 0 ? Math.round(rawOutput) : undefined;
   const facts: ModelFacts = {};
   if (tools !== undefined) facts.tools = tools;
   if (vision !== undefined) facts.vision = vision;
   if (context !== undefined) facts.context = context;
+  if (output !== undefined) facts.output = output;
   return facts;
 }
 

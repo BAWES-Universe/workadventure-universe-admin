@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { Bot, Globe, KeyRound, Plus, RefreshCw, Trash2, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { LimitGroup, keyLimitsLine, replyLimits, useSaveKeyLimit } from '../../components/limits';
+import { LimitGroup, keyLimitsLine, modelCapOf, replyLimits, useSaveKeyLimit } from '../../components/limits';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { useToast } from '@/components/ui/toast';
@@ -367,7 +367,11 @@ export default function AiKeysPage() {
             {key && (
               <LimitGroup
                 title="Replies"
-                limits={replyLimits(key.limits)}
+                limits={replyLimits(key.limits).map((row) => {
+                  // A bot whose model stops sooner gets what its model can write (#673): said where the longest reply is set
+                  const cap = row.id === 'reply' ? modelCapOf(key.lentTo.flatMap((lend) => lend.bots), row.value) : null;
+                  return cap ? { ...row, cap } : row;
+                })}
                 onChange={async (id, value) => {
                   const saved = await saveKeyLimit(key.id, id, value);
                   if (saved) update((all) => all.map((entry) => (entry.id === key.id ? { ...entry, limits: saved } : entry)));

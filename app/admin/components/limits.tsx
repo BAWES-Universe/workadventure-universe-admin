@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { ChevronRight, Loader2 } from 'lucide-react';
+import { ChevronRight, Info, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { PickCard, Radio } from '@/components/ui/choice';
@@ -37,6 +37,14 @@ export interface Limit {
   note?: string;
   /** No "Other" box (a choice between fixed steps). */
   fixedSteps?: boolean;
+  /** A model that stops below this value (#673): where it stops, the line that says so, and the words on each choice above it. */
+  cap?: ModelCap;
+}
+
+export interface ModelCap {
+  at: number;
+  line: string;
+  short: string;
 }
 
 export function shown(limit: Limit, value = limit.value): string {
@@ -66,6 +74,12 @@ export function LimitRow({ limit, onOpen }: { limit: Limit; onOpen: () => void }
       <span className="grid min-w-0 flex-1 gap-0.5">
         <strong className="text-sm font-semibold">{limit.label}</strong>
         <span className="text-xs leading-snug text-muted-foreground">{limit.hint}</span>
+        {limit.cap && (
+          <span className="mt-1 flex items-start gap-1.5 text-xs leading-snug text-foreground/85" data-testid={`limit-${limit.id}-cap`}>
+            <Info size={14} aria-hidden="true" className="mt-px shrink-0 text-muted-foreground" />
+            {limit.cap.line}
+          </span>
+        )}
         <span className="mt-1.5 flex flex-wrap items-center gap-2 sm:hidden">
           <span className="text-sm font-bold">{shown(limit)}</span>
           {isRecommended ? <RecommendedPill /> : <span className="text-[11px] text-muted-foreground">Recommended: {shown(limit, limit.recommended)}</span>}
@@ -91,6 +105,12 @@ export function LimitChoices({ limit, onDone, onCancel }: { limit: Limit; onDone
   const ready = picked === 'other' ? value > 0 : true;
   return (
     <div className="grid gap-4">
+      {limit.cap && (
+        <p className="flex items-start gap-2 rounded-xl bg-foreground/[.04] px-3.5 py-2.5 text-sm">
+          <Info size={16} aria-hidden="true" className="mt-0.5 shrink-0 text-muted-foreground" />
+          {limit.cap.line}
+        </p>
+      )}
       <div role="radiogroup" aria-label={limit.label} className="grid gap-2">
         {limit.options.map((option) => (
           <PickCard
@@ -105,7 +125,7 @@ export function LimitChoices({ limit, onDone, onCancel }: { limit: Limit; onDone
                 {option.value === limit.recommended && <RecommendedPill />}
               </span>
             }
-            description={option.meaning}
+            description={limit.cap && option.value > limit.cap.at ? `${option.meaning} ${limit.cap.short}` : option.meaning}
           />
         ))}
         {!limit.fixedSteps && (
@@ -361,6 +381,41 @@ export function fairUsageLimits(values: FairUsage): Limit[] {
 }
 
 /** The key card's one line: "Recommended: replies up to 32,000 tokens, 30 steps", or "Yours: …" once changed. */
+/** The id without its maker's prefix: "openai/gpt-4o-mini" is "gpt-4o-mini". */
+const shortModel = (id: string) => (id.includes('/') ? id.slice(id.indexOf('/') + 1) : id);
+const listOf = (names: string[]) => new Intl.ListFormat('en', { style: 'long', type: 'conjunction' }).format(names);
+
+/**
+ * Where the models of a key's bots stop below its longest reply (#673), from what their providers say: null when none
+ * does, or none is known. "Scout runs on gpt-4o-mini, which stops at 16,384 tokens. Scout gets 16,384; your other bots
+ * get the full limit."
+ */
+export function modelCapOf(bots: { id: string; name: string; model: string | null; output: number | null }[], reply: number): ModelCap | null {
+  const byModel = new Map<string, { output: number; names: string[] }>();
+  const capped = new Set<string>();
+  for (const bot of bots) {
+    if (!bot.model || bot.output === null || bot.output >= reply) continue;
+    const entry = byModel.get(bot.model) ?? { output: bot.output, names: [] };
+    if (!entry.names.includes(bot.name)) entry.names.push(bot.name);
+    capped.add(bot.id);
+    byModel.set(bot.model, entry);
+  }
+  if (byModel.size === 0) return null;
+  const groups = [...byModel.entries()].map(([model, entry]) => ({ model: shortModel(model), ...entry })).sort((a, b) => a.output - b.output);
+  const others = bots.some((bot) => !capped.has(bot.id));
+  const said = groups.map((group) => `${listOf(group.names)} ${group.names.length === 1 ? 'runs' : 'run'} on ${group.model}, which stops at ${group.output.toLocaleString('en')} tokens.`);
+  const only = groups.length === 1 ? groups[0] : null;
+  const gets = only
+    ? `${listOf(only.names)} ${only.names.length === 1 ? 'gets' : 'get'} ${only.output.toLocaleString('en')}`
+    : 'Each gets what its model allows';
+  const lowest = groups[0];
+  return {
+    at: lowest.output,
+    line: `${said.join(' ')} ${gets}${others ? '; your other bots get the full limit.' : '.'}`,
+    short: `${lowest.model} stops at ${lowest.output.toLocaleString('en')} (${listOf(lowest.names)}).`,
+  };
+}
+
 export function keyLimitsLine(values: ReplyLimits): string {
   const rows = replyLimits(values);
   const changed = rows.some((row) => row.value !== row.recommended);
