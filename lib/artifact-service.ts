@@ -59,7 +59,7 @@ export interface Context {
   now: Date;
 }
 
-/** Most artifacts a bot is told about for one chat. */
+/** Most artifacts a bot is told about at once. */
 const LIST_IN_CHAT_LIMIT = 20;
 
 const defaultContext = (): Context => ({ files: artifactFiles, now: new Date() });
@@ -383,8 +383,11 @@ export async function listArtifactsInChat(input: BotCall, ctx: Context = default
   const { hidden } = await passBotGate(input);
   const who = await resolvePerson(input.person, true);
   pruneSometimes(ctx);
+  // What was made in this chat, and the asking person's own from any other chat, so a bot in a direct message finds what
+  // they started in nearby chat and the other way round. Only their own: nobody else's artifact is listed outside its chat.
+  const here = { chatKind: input.chat.kind, chatRef: input.chat.ref };
   const rows = await prisma.artifact.findMany({
-    where: { chatKind: input.chat.kind, chatRef: input.chat.ref },
+    where: who.userId ? { OR: [here, { ownerId: who.userId }] } : here,
     include: ARTIFACT_INCLUDE,
     orderBy: { updatedAt: 'desc' },
     take: LIST_IN_CHAT_LIMIT,
