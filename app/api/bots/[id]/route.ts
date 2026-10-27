@@ -10,7 +10,6 @@ import { parsePlayUri } from '@/lib/utils';
 import { z } from 'zod';
 import { checkAiProviderRef, checkBotModel } from '@/lib/ai-provider-ref';
 import { toolTimeoutSecondsSchema } from '@/lib/bot-tool-timeout';
-import { limitsOnRef } from '@/lib/bot-limits';
 import { keepToolCallSetting, keepVisionPick } from '@/lib/bot-config-helpers';
 import { checkConfigVision } from '@/lib/bot-vision';
 import { corsHeaders } from '@/lib/cors';
@@ -256,8 +255,7 @@ export async function GET(
     }
 
     // Transform to camelCase, with the longest reply and steps of what it runs on (#666), for its own to stay under
-    const keyLimits = await limitsOnRef(bot.aiProviderRef);
-    const transformedBot = { ...transformBot(bot), keyLimits: { reply: keyLimits.reply, steps: keyLimits.steps } };
+    const transformedBot = transformBot(bot);
 
     const response = NextResponse.json(transformedBot);
     Object.entries(corsHeaders(request)).forEach(([key, value]) => {
@@ -564,8 +562,7 @@ export async function PUT(
     });
 
     // Transform to camelCase
-    const keyLimits = await limitsOnRef(bot.aiProviderRef);
-    const transformedBot = { ...transformBot(bot), keyLimits: { reply: keyLimits.reply, steps: keyLimits.steps } };
+    const transformedBot = transformBot(bot);
 
     const response = NextResponse.json(transformedBot);
     Object.entries(corsHeaders(request)).forEach(([key, value]) => {

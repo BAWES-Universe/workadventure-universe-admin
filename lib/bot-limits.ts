@@ -101,19 +101,3 @@ export function servedLimits(reply: ReplyLimits, server: ServerLimits, bot: { ma
     guard: server.guard,
   };
 }
-
-/**
- * The reply limits of what a bot is set to run on, for the bot page: a person's key's own, Universe AI's for anything
- * else. A bot's editors can lower the longest reply and the steps below these, never raise them.
- */
-export async function limitsOnRef(ref: string | null): Promise<ReplyLimits> {
-  if (ref?.startsWith('key-')) {
-    try {
-      const key = await prisma.botsAiProvider.findFirst({ where: { providerId: ref, ownerId: { not: null } }, select: { replyLimits: true } });
-      if (key) return keyReplyLimits(key);
-    } catch (error) {
-      console.error('[BotLimits] Could not read the key limits:', error instanceof Error ? error.message : 'unknown');
-    }
-  }
-  return (await getServerLimits()).universeAi;
-}

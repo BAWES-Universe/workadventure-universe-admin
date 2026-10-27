@@ -18,6 +18,7 @@ jest.mock('@/lib/db', () => ({
     room: { findUnique: jest.fn() },
     user: { findUnique: jest.fn() },
     botsAiProvider: { findUnique: jest.fn(), findFirst: jest.fn(), findMany: jest.fn() },
+    appSetting: { findUnique: jest.fn() },
   },
 }));
 
@@ -26,6 +27,7 @@ const db = prisma as unknown as {
   room: Record<'findUnique', jest.Mock>;
   user: Record<'findUnique', jest.Mock>;
   botsAiProvider: Record<'findUnique' | 'findFirst' | 'findMany', jest.Mock>;
+  appSetting: Record<'findUnique', jest.Mock>;
 };
 const mishari = { id: 'mishari', uuid: 'u', email: 'm@example.com', name: 'Mishari', tags: [], isSuperAdmin: false };
 const sandbox = { world: { universe: { id: 'sandbox', name: 'Sandbox Universe' } } };
@@ -44,6 +46,7 @@ beforeEach(() => {
   db.botsAiProvider.findFirst.mockResolvedValue({ providerId: 'deepseek-flash', enabled: true, model: 'deepseek-v4-flash', supportsVision: null });
   db.botsAiProvider.findMany.mockResolvedValue([]);
   db.botsAiProvider.findUnique.mockResolvedValue(null);
+  db.appSetting.findUnique.mockResolvedValue(null);
   (keyModels as jest.Mock).mockResolvedValue({ ok: true, models: DEEPSEEK_MODELS.map((model) => model.id), facts: {}, listed: true });
 });
 
@@ -63,10 +66,10 @@ describe('GET /api/me/bot-ai', () => {
     expect(await response.json()).toEqual({
       current: null,
       currentModel: null,
-      universeAi: { available: true, model: 'deepseek-v4-flash', supportsVision: null },
+      universeAi: { available: true, model: 'deepseek-v4-flash', supportsVision: null, limits: { reply: 32000, steps: 30 } },
       maker: { id: 'mishari', name: 'Mishari' },
       viewerIsMaker: true,
-      keys: [{ id: 'key-1', name: 'My DeepSeek', kind: 'deepseek', kindLabel: 'DeepSeek', logo: 'deepseek', plainIcon: null, group: 'hosted', universeName: 'Sandbox Universe', status: 'working', ifDown: 'universe-ai', model: 'deepseek-v4-flash', supportsVision: false, visionModels: ['deepseek-v4-flash-vision-exp'], models: DEEPSEEK_MODELS, modelsProblem: null, limited: false }],
+      keys: [{ id: 'key-1', name: 'My DeepSeek', kind: 'deepseek', kindLabel: 'DeepSeek', logo: 'deepseek', plainIcon: null, group: 'hosted', universeName: 'Sandbox Universe', status: 'working', ifDown: 'universe-ai', model: 'deepseek-v4-flash', supportsVision: false, visionModels: ['deepseek-v4-flash-vision-exp'], models: DEEPSEEK_MODELS, modelsProblem: null, limited: false, limits: { reply: 32000, steps: 30 } }],
       currentKey: null,
       vision: { saved: null, savedKey: null },
       providers: null,
@@ -117,7 +120,7 @@ describe('GET /api/me/bot-ai', () => {
     db.botsAiProvider.findUnique.mockResolvedValue({ providerId: 'key-1', name: 'My DeepSeek', ownerId: 'mishari', settings: { kind: 'deepseek' }, model: 'deepseek-v4-flash', supportsVision: false, lends: [] });
     db.botsAiProvider.findMany.mockResolvedValueOnce([myKey]);
     const body = await (await get('botId=guide')).json();
-    expect(body.currentKey).toEqual({ id: 'key-1', name: 'My DeepSeek', ownerName: 'Mishari', mine: true, status: 'working', ifDown: 'universe-ai', logo: 'deepseek', plainIcon: null, group: 'hosted', model: 'deepseek-v4-flash', supportsVision: false, visionModels: ['deepseek-v4-flash-vision-exp'] });
+    expect(body.currentKey).toEqual({ id: 'key-1', name: 'My DeepSeek', ownerName: 'Mishari', mine: true, status: 'working', ifDown: 'universe-ai', logo: 'deepseek', plainIcon: null, group: 'hosted', model: 'deepseek-v4-flash', supportsVision: false, visionModels: ['deepseek-v4-flash-vision-exp'], limits: { reply: 32000, steps: 30 } });
     expect(body.viewerIsMaker).toBe(true);
   });
 
@@ -153,7 +156,7 @@ describe('GET /api/me/bot-ai', () => {
     expect((await get('roomId=11111111-1111-1111-1111-111111111111')).status).toBe(403);
     (canManageBots as jest.Mock).mockResolvedValue(true);
     db.botsAiProvider.findFirst.mockResolvedValue(null);
-    expect((await (await get('roomId=11111111-1111-1111-1111-111111111111')).json()).universeAi).toEqual({ available: false, model: null, supportsVision: null });
+    expect((await (await get('roomId=11111111-1111-1111-1111-111111111111')).json()).universeAi).toEqual({ available: false, model: null, supportsVision: null, limits: { reply: 32000, steps: 30 } });
   });
 
   it('holds a bot to its own Manage rules: room-level Manage bots alone does not show whose key it runs on', async () => {
@@ -172,6 +175,23 @@ describe('GET /api/me/bot-ai', () => {
     expect((await get('botId=nope')).status).toBe(404);
     db.room.findUnique.mockResolvedValue(null);
     expect((await get('roomId=11111111-1111-1111-1111-111111111111')).status).toBe(404);
+  });
+});
+
+describe('GET /api/me/bot-ai: longest reply and steps (#666)', () => {
+  it('says each choice’s longest reply and steps: Universe AI’s from the super admin, a key’s from its owner', async () => {
+    db.appSetting.findUnique.mockResolvedValue({ key: 'bot-limits', value: { universeAi: { reply: 16000, steps: 20 } } });
+    db.botsAiProvider.findMany.mockResolvedValueOnce([{ ...myKey, replyLimits: { reply: 64000 } }]);
+    const body = await (await get('roomId=11111111-1111-1111-1111-111111111111')).json();
+    expect(body.universeAi.limits).toEqual({ reply: 16000, steps: 20 });
+    expect(body.keys[0].limits).toEqual({ reply: 64000, steps: 30 });
+  });
+
+  it('says the limits of someone else’s key the bot is on, so its page offers only lower ones', async () => {
+    db.bot.findUnique.mockResolvedValue({ id: 'b1', roomId: 'r1', aiProviderRef: 'key-9', aiModel: null, behaviorConfig: {}, createdById: 'khalid', createdBy: { id: 'khalid', name: 'Khalid' } });
+    db.botsAiProvider.findUnique.mockResolvedValue({ providerId: 'key-9', name: 'Khalid key', ownerId: 'khalid', settings: {}, model: 'm', supportsVision: false, downSince: null, ifDown: null, replyLimits: { steps: 8 }, lends: [] });
+    const body = await (await get('botId=b1')).json();
+    expect(body.currentKey.limits).toEqual({ reply: 32000, steps: 8 });
   });
 });
 
