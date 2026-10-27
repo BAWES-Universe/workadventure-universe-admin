@@ -703,17 +703,18 @@ export default function UserDetailPage() {
         }
         action={pills.length > 0 ? <ProfileActions count={pills.length}>{pills}</ProfileActions> : undefined}
       >
-        {friendError && (
-          <p className="text-sm text-muted-foreground" role="alert">
-            {friendError}
-          </p>
-        )}
-        {!isSelf && <NowIn live={live} uuid={user.uuid} />}
+        {/* Who they are first, then where they are; on a phone the buttons come last, under these. */}
         {(bio || links.length > 0) && (
           <div className="grid min-w-0 gap-3">
             {bio && <p className="whitespace-pre-line text-sm leading-relaxed [overflow-wrap:anywhere]">{bio}</p>}
             <ProfileLinks links={links} />
           </div>
+        )}
+        {!isSelf && <NowIn live={live} uuid={user.uuid} />}
+        {friendError && (
+          <p className="text-sm text-muted-foreground" role="alert">
+            {friendError}
+          </p>
         )}
       </ProfileFrame>
 

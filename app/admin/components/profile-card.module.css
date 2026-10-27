@@ -18,6 +18,11 @@
   .identity > .pills { grid-column: 1 / -1; max-width: none; }
   .identity > .pills > * { flex: 1 1 0; min-width: max-content; }
   .identity > .pills > [data-wide] { flex-basis: 100%; min-width: 0; }
+  /* A person's buttons go last on the card, under their bio and "Now in"; the Woka and name keep their spacing. */
+  .identity:has(> .pills) { display: contents; }
+  .identity:has(> .pills) > .avatar { margin-top: -40px; }
+  .identity:has(> .pills) > .who { margin-top: -4px; }
+  .identity > .pills { order: 1; }
 }
 @media (max-width: 400px) {
   .identity { grid-template-columns: minmax(0, 1fr); }

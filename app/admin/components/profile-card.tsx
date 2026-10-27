@@ -499,7 +499,7 @@ export function ProfileFrame({
   );
 }
 
-/** Pill buttons on a profile card (pass as the card's `action`): in a row beside the name, two by two on a phone. */
+/** Pill buttons on a profile card (pass as the card's `action`): in a row beside the name, last on the card on a phone. */
 export function ProfileActions({ count, children }: { count: number; children: ReactNode }) {
   return (
     <div className={styles.pills} data-count={count}>
