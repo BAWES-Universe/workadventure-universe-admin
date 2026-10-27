@@ -1,4 +1,5 @@
 import type { Prisma } from '@prisma/client';
+import { z } from 'zod';
 import { prisma } from '@/lib/db';
 import {
   FAIR_USAGE_WINDOW_HOURS,
@@ -101,3 +102,7 @@ export function servedLimits(reply: ReplyLimits, server: ServerLimits, bot: { ma
     guard: server.guard,
   };
 }
+
+/** A bot's own longest reply and steps (#666), as its pages save them: null follows its key, a higher one is kept but never used. */
+export const maxReplyTokensSchema = z.number().int('maxReplyTokens must be a whole number').min(256, 'maxReplyTokens must be at least 256').max(1_000_000).optional().nullable();
+export const maxStepsSchema = z.number().int('maxSteps must be a whole number').min(1, 'maxSteps must be at least 1').max(500).optional().nullable();

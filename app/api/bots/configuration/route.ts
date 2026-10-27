@@ -10,6 +10,7 @@ import { resolveRoomIdFromPlayUri, transformBotToServerFormat } from '@/lib/bot-
 import { checkAiProviderRef } from '@/lib/ai-provider-ref';
 import { checkConfigVision } from '@/lib/bot-vision';
 import { toolTimeoutSecondsSchema } from '@/lib/bot-tool-timeout';
+import { maxReplyTokensSchema, maxStepsSchema } from '@/lib/bot-limits';
 import { mustStayPrivateAfterMove } from '@/lib/bot-privacy';
 import { z } from 'zod';
 import { corsHeaders } from '@/lib/cors';
@@ -41,6 +42,9 @@ const botConfigSchema = z.object({
   movementInstructions: z.string().optional().nullable(),
   aiProviderRef: z.string().max(100, 'aiProviderRef must be at most 100 characters').optional().nullable(),
   toolTimeoutSeconds: toolTimeoutSecondsSchema,
+  // The bot's own longest reply and steps (#666); null = its key's
+  maxReplyTokens: maxReplyTokensSchema,
+  maxSteps: maxStepsSchema,
   companionTextureId: z.string().max(100, 'companionTextureId must be at most 100 characters').optional().nullable(),
 });
 
@@ -459,6 +463,8 @@ export async function POST(request: NextRequest) {
       movementInstructions: validatedData.movementInstructions ?? null,
       aiProviderRef: validatedData.aiProviderRef ?? null,
       toolTimeoutSeconds: validatedData.toolTimeoutSeconds ?? null,
+      maxReplyTokens: validatedData.maxReplyTokens ?? null,
+      maxSteps: validatedData.maxSteps ?? null,
       companionTextureId: validatedData.companionTextureId ?? null,
       updatedById: userId ?? null,
     };
@@ -487,6 +493,8 @@ export async function POST(request: NextRequest) {
         aiProviderRef: 'aiProviderRef' in body ? data.aiProviderRef : undefined,
         toolTimeoutSeconds:
           'toolTimeoutSeconds' in body ? data.toolTimeoutSeconds : undefined,
+        maxReplyTokens: 'maxReplyTokens' in body ? data.maxReplyTokens : undefined,
+        maxSteps: 'maxSteps' in body ? data.maxSteps : undefined,
         companionTextureId:
           'companionTextureId' in body ? data.companionTextureId : undefined,
       };

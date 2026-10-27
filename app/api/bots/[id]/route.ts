@@ -10,6 +10,7 @@ import { parsePlayUri } from '@/lib/utils';
 import { z } from 'zod';
 import { checkAiProviderRef, checkBotModel } from '@/lib/ai-provider-ref';
 import { toolTimeoutSecondsSchema } from '@/lib/bot-tool-timeout';
+import { maxReplyTokensSchema, maxStepsSchema } from '@/lib/bot-limits';
 import { keepToolCallSetting, keepVisionPick } from '@/lib/bot-config-helpers';
 import { checkConfigVision } from '@/lib/bot-vision';
 import { corsHeaders } from '@/lib/cors';
@@ -105,9 +106,9 @@ const updateBotSchema = z.object({
   // The bot's model on a person's key (#575); null = the key's check model
   aiModel: z.string().trim().min(1, 'aiModel cannot be empty').max(255, 'aiModel must be at most 255 characters').optional().nullable(),
   toolTimeoutSeconds: toolTimeoutSecondsSchema,
-  // The bot's own longest reply and steps (#666); null = its key's. Higher than the key's is kept but never used.
-  maxReplyTokens: z.number().int('maxReplyTokens must be a whole number').min(256, 'maxReplyTokens must be at least 256').max(1_000_000).optional().nullable(),
-  maxSteps: z.number().int('maxSteps must be a whole number').min(1, 'maxSteps must be at least 1').max(500).optional().nullable(),
+  // The bot's own longest reply and steps (#666); null = its key's
+  maxReplyTokens: maxReplyTokensSchema,
+  maxSteps: maxStepsSchema,
   companionTextureId: z.string().max(100, 'companionTextureId must be at most 100 characters').optional().nullable(),
 });
 
