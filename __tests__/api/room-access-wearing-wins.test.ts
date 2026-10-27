@@ -364,6 +364,17 @@ describe('GET /api/room/access, your Woka stays yours', () => {
     expect(pet.isCharacterTexturesValid).toBe(true);
   });
 
+  it('holds a guest to the same rule when the identifier they send only looks like a bot', async () => {
+    state.users.length = 0;
+    fakeDb.bot.findFirst.mockResolvedValue(null);
+    addSet({ id: 'gift', visibility: 'assigned_only', layers: [{ textureId: 'gift-1' }], companions: [{ textureId: 'gift-pet' }] });
+    const body = await enter(BOT, { signedIn: false, sent: ['gift-1'], companion: 'gift-pet' });
+    expect(body.isCharacterTexturesValid).toBe(false);
+    expect(body.characterTextures).toEqual([]);
+    expect(body.isCompanionTextureValid).toBe(false);
+    expect(fakeDb.bot.findFirst).toHaveBeenCalledWith({ where: { id: BOT.slice(4), roomId: 'r' }, select: { id: true } });
+  });
+
   it("lets a guest wear a world's own costume in that world, and a set whose policy is for everyone", async () => {
     state.users.length = 0;
     addSet({ id: 'open', visibility: 'restricted', layers: [{ textureId: 'open-1' }], policies: [{ subjectType: 'everyone' }] });

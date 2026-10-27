@@ -298,17 +298,19 @@ export async function GET(request: NextRequest) {
       // Otherwise only the universe owner, the world's members, super admins and the room's own bots get in.
       // Who somebody is counts only once they have signed in: the identifier in the address is whatever the caller
       // sent, and a member's id is not a secret.
+      // A bot is whoever has a bot of this room under that id: an identifier shaped like one is only what the caller sent.
+      const verifiedBot = isBotIdentifier(finalUuid)
+        ? !!(await prisma.bot.findFirst({
+            where: { id: finalUuid.slice('bot-'.length), roomId: roomData.id },
+            select: { id: true },
+          }))
+        : false;
       const canEnter =
         canSeeRoom(
           { isPublic: roomData.isPublic, world: worldData },
           isAuthenticated && user ? { id: user.id, isSuperAdmin: isSuperAdmin(user.email) } : null,
           new Set(isAuthenticated && membership ? [worldData.id] : []),
-        ) ||
-        (isBotIdentifier(finalUuid) &&
-          !!(await prisma.bot.findFirst({
-            where: { id: finalUuid.slice('bot-'.length), roomId: roomData.id },
-            select: { id: true },
-          })));
+        ) || verifiedBot;
       if (!canEnter) {
         // Answered with 200 so the game shows this screen (it only reads error bodies on success)
         const error: ErrorApiData = {
@@ -484,7 +486,7 @@ export async function GET(request: NextRequest) {
       // whose policy is for everyone, and the game's own list). The textures above were only checked against the
       // catalog, so a crafted id from a set kept for members or granted to someone would otherwise pass.
       // Bots keep the logic above as it was.
-      const guestWearing = !ownCompanion && !isBotIdentifier(finalUuid)
+      const guestWearing = !ownCompanion && !verifiedBot
         ? { worldId: worldData.id, universeId: worldData.universeId, userId: null, membershipTags: [] }
         : null;
       if (guestWearing && isTexturesValid && !(await wearableHere(finalTextures.map(t => t.id), guestWearing)).wearable) {

@@ -35,6 +35,8 @@ export async function resolveUsagePerson(talkedUserId: unknown, isGuest: unknown
     if (user && !user.isGuest) return { personId: user.id, guest: false };
   } catch (err) {
     console.error('Error looking up who talked to a bot:', err);
+    // Nothing was learned: the bot server's own word stands, never a guess that they are a guest
+    return { personId: null, guest: typeof isGuest === 'boolean' ? isGuest : null };
   }
   return { personId: null, guest: true };
 }
