@@ -467,6 +467,7 @@ export function ProfileFrame({
   name,
   stats,
   action,
+  actions,
   testId,
   children,
 }: {
@@ -478,11 +479,13 @@ export function ProfileFrame({
   name: string;
   stats?: ReactNode;
   action?: ReactNode;
+  /** A person's buttons (`ProfileActions`): after everything else, shown beside the name on a wide screen. */
+  actions?: ReactNode;
   testId?: string;
   children?: ReactNode;
 }) {
   return (
-    <section ref={frameRef} className={styles.card} aria-labelledby={headingId} data-testid={testId}>
+    <section ref={frameRef} className={styles.card} aria-labelledby={headingId} data-testid={testId} data-actions={actions ? '' : undefined}>
       <div className={styles.banner} aria-hidden="true" />
       <div className={styles.identity}>
         <WokaAvatar layers={layers} name={name} pending={wokaPending} />
@@ -495,11 +498,12 @@ export function ProfileFrame({
         {action}
       </div>
       {children}
+      {actions}
     </section>
   );
 }
 
-/** Pill buttons on a profile card (pass as the card's `action`): in a row beside the name, two by two on a phone. */
+/** Pill buttons on a profile card (pass as the card's `actions`): in a row beside the name, last on the card on a phone. */
 export function ProfileActions({ count, children }: { count: number; children: ReactNode }) {
   return (
     <div className={styles.pills} data-count={count}>
