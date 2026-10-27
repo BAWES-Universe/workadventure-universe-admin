@@ -612,6 +612,18 @@ describe('artifacts', () => {
       expect(bucketKeys()).toHaveLength(3);
     });
 
+    it('refuses a version that is over the size limit as it is now, and still restores a smaller one', async () => {
+      const made = await makeApp();
+      const id = made.artifact.id;
+      await call(change, { botId: 'bot1', person: person('owner'), chat: NEARBY, content: 'a'.repeat(400 * 1024) }, { id });
+      await call(change, { botId: 'bot1', person: person('owner'), chat: NEARBY, content: '<p>3</p>' }, { id });
+      db.settings.set('bot-limits', { artifacts: { size: 0.25 } });
+      const over = await call(restore, { viewer: viewer(person('owner')), number: 2 }, { id, ...asGame });
+      expect(over).toMatchObject({ status: 413, body: { error: 'too_large' } });
+      expect(db.artifacts.find((a) => a.id === id)?.latestVersion).toBe(3);
+      expect((await call(restore, { viewer: viewer(person('owner')), number: 1 }, { id, ...asGame })).status).toBe(200);
+    });
+
     it('refuses to restore the latest, a missing version, and anyone but the owner', async () => {
       const made = await makeApp();
       const id = made.artifact.id;
@@ -634,6 +646,15 @@ describe('artifacts', () => {
       expect((await call(mine, { person: person('stranger') }, asGame)).body.artifacts.map((a: { id: string }) => a.id)).toEqual([copyId]);
       expect((await call(open, { viewer: viewer(person('friend')) }, { id: copyId, ...asGame })).status).toBe(404);
       expect((await call(open, { viewer: viewer(person('stranger'), false) }, { id: copyId, ...asGame })).status).toBe(200);
+    });
+
+    it('does not copy a version that is over the size limit as it is now', async () => {
+      const made = await makeApp();
+      await call(change, { botId: 'bot1', person: person('owner'), chat: NEARBY, content: 'a'.repeat(400 * 1024) }, { id: made.artifact.id });
+      db.settings.set('bot-limits', { artifacts: { size: 0.25 } });
+      const res = await call(copy, { viewer: viewer(person('friend')) }, { id: made.artifact.id, ...asGame });
+      expect(res).toMatchObject({ status: 413, body: { error: 'too_large' } });
+      expect(db.artifacts).toHaveLength(1);
     });
 
     it('is the copier\'s to change with any bot they talk to, and the original is untouched', async () => {

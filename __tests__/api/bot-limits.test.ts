@@ -65,6 +65,9 @@ describe('the values', () => {
     expect(checkServerLimits({ universeAi: { reply: 0 } })).toMatchObject({ ok: false, error: expect.stringContaining('universeAi.reply') });
     expect(checkServerLimits({ universeAi: { steps: 2.5 } })).toMatchObject({ ok: false });
     expect(checkServerLimits({ artifacts: { colour: 1 } })).toMatchObject({ ok: false, error: 'Unknown limit: artifacts.colour' });
+    // Names every object has are not limits, and answer as unknown rather than failing
+    expect(checkServerLimits({ universeAi: { constructor: 1 } })).toMatchObject({ ok: false, error: 'Unknown limit: universeAi.constructor' });
+    expect(checkServerLimits({ fairUsage: { toString: 1 } })).toMatchObject({ ok: false, error: 'Unknown limit: fairUsage.toString' });
     expect(checkServerLimits({ guard: 'yes' })).toMatchObject({ ok: false });
     expect(checkServerLimits({ universeAi: { continue: 0 }, artifacts: { versions: 0, size: 0.5 } })).toEqual({ ok: true, value: { universeAi: { continue: 0 }, artifacts: { versions: 0, size: 0.5 } } });
   });

@@ -65,6 +65,18 @@ describe('Universe AI limits', () => {
     expect(JSON.parse(patch?.[1].body)).toEqual({ artifacts: { size: 10 } });
   });
 
+  it('types a value of its own in a field that sits beside the Other choice, not inside its button', async () => {
+    answer();
+    render(<UniverseAiLimits />);
+    fireEvent.click(await screen.findByTestId('limit-size'));
+    fireEvent.click(await screen.findByRole('radio', { name: /Other/ }));
+    const field = await screen.findByLabelText(/Size of one version, in/);
+    expect(field.closest('button')).toBeNull();
+    fireEvent.change(field, { target: { value: '7' } });
+    fireEvent.click(screen.getByRole('button', { name: /Save/ }));
+    await waitFor(() => expect(JSON.parse(String(fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH')?.[1]?.body))).toEqual({ artifacts: { size: 7 } }));
+  });
+
   it('saves the switch', async () => {
     answer();
     render(<UniverseAiLimits />);

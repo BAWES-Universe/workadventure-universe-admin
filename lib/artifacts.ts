@@ -110,10 +110,12 @@ export function applyEdits(content: string, edits: readonly ArtifactEdit[], maxB
     if (first === -1) throw new ArtifactError('edit_not_found', 422, `Edit ${index + 1}: the text to replace is not in the file.`);
     const second = result.indexOf(edit.old, first + edit.old.length);
     if (edit.all) {
-      const parts = result.split(edit.old);
-      // A short piece replaced by a long one in many places can grow far past the limit: refuse before building it
-      tooLargeAfter(result.length + (parts.length - 1) * (edit.new.length - edit.old.length), maxBytes);
-      result = parts.join(edit.new);
+      // A short piece replaced by a long one in many places can grow far past the limit: count the places and refuse
+      // before building anything (splitting a big file on one character would build a part for each)
+      let places = 0;
+      for (let at = first; at !== -1; at = result.indexOf(edit.old, at + edit.old.length)) places++;
+      tooLargeAfter(result.length + places * (edit.new.length - edit.old.length), maxBytes);
+      result = result.split(edit.old).join(edit.new);
       return;
     }
     if (second !== -1) {
