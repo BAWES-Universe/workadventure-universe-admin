@@ -278,11 +278,14 @@ function placeMedia(fileKey: string, merged: { keep: MediaFile[]; add: MediaUplo
  */
 async function storing<T>(files: ArtifactFiles, fileKey: string, kind: ArtifactKind, content: string, media: PlacedMedia, write: () => Promise<T>): Promise<T> {
   try {
-    await Promise.all([
+    // Every write settles before anything is cleared: one that lands after the clean-up would stay in the bucket for good
+    const stored = await Promise.allSettled([
       files.put(fileKey, content, fileTypeOf(kind).contentType),
       ...media.copies.map((copy) => files.copy(copy.from, copy.to)),
       ...media.uploads.map((upload) => files.put(upload.key, upload.body, upload.contentType)),
     ]);
+    const failed = stored.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+    if (failed) throw failed.reason;
     return await write();
   } catch (error) {
     await files.remove([fileKey, ...media.files.map((file) => file.key)]).catch(() => undefined);

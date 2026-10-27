@@ -22,5 +22,7 @@ export function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ['/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)'],
+  // Not the artifact routes: they are called by servers, never a browser, and a song or video sent to them (#1510) is
+  // larger than the body Next lets through a middleware (10 MB, cut off past that)
+  matcher: ['/((?!_next/static|_next/image|favicon.ico|api/artifacts(?:/|$)|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)'],
 };
