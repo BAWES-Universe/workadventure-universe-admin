@@ -770,6 +770,7 @@ model Bot {
   updatedBy User? @relation("BotUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
   mcpServers BotMcpServer[]
   accessRules BotAccessRule[]
+  replyLimitHits BotReplyLimitHit[]
 
   @@index([roomId])
   @@map("bots")
@@ -936,6 +937,38 @@ model BotsAiUsage {
   @@index([talkedPersonId, timestamp])
   @@index([talkedUserId, timestamp])
   @@map("bots_ai_usage")
+}
+
+// A reply limit's window (game #1159): when it started for one person, or for all guests on one bot. A window starts at
+// the first reply asked for once the last one has ended, and lasts 5 hours (Universe AI) or 24 hours (a bot's own limit).
+// The replies in it are counted from usage rows; this only remembers where it starts.
+model ReplyWindow {
+  // "ua:person:<user id>", "ua:guest:<their id>", "ua:guests:<bot id>" or "bot:<bot id>:<person or guest>"
+  key       String   @id @db.VarChar(320)
+  startedAt DateTime @map("started_at")
+
+  @@map("reply_windows")
+}
+
+// Someone reached a reply limit on a bot (game #1159, Orbit #491): once per person, limit and window. The bot page counts
+// these as "people ran out"; who they were is never shown for them.
+model BotReplyLimitHit {
+  id           String   @id @default(uuid())
+  botId        String   @map("bot_id")
+  // "universe-ai" (signed in), "guest" (a guest's own 10), "guests" (the bot's shared guest pool) or "bot" (its own limit)
+  kind         String   @db.VarChar(20)
+  // The person or guest as the bot server knows them
+  talkedUserId String   @map("talked_user_id") @db.VarChar(255)
+  windowEndsAt DateTime @map("window_ends_at")
+  // When they tapped "Ask <bot>'s maker" on the limit card (game #1159 step 3); the maker sees how many asked, never who
+  askedAt      DateTime? @map("asked_at")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
+
+  @@unique([botId, kind, talkedUserId, windowEndsAt])
+  @@index([botId, createdAt])
+  @@map("bot_reply_limit_hits")
 }
 
 // Bot Metrics
