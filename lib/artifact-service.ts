@@ -385,14 +385,15 @@ export async function listArtifactsInChat(input: BotCall, ctx: Context = default
   pruneSometimes(ctx);
   // What was made in this chat, and the asking person's own from any other chat, so a bot in a direct message finds what
   // they started in nearby chat and the other way round. Only their own: nobody else's artifact is listed outside its chat.
-  const here = { chatKind: input.chat.kind, chatRef: input.chat.ref };
-  const rows = await prisma.artifact.findMany({
-    where: who.userId ? { OR: [here, { ownerId: who.userId }] } : here,
-    include: ARTIFACT_INCLUDE,
-    orderBy: { updatedAt: 'desc' },
-    take: LIST_IN_CHAT_LIMIT,
-  });
-  return { artifacts: rows.filter((row) => canOpen(row, who, now)).map(viewOf), hidden };
+  // This chat's come first, so a person with many artifacts elsewhere never pushes the chat's own out of the list.
+  const include = ARTIFACT_INCLUDE;
+  const orderBy = { updatedAt: 'desc' } as const;
+  const take = LIST_IN_CHAT_LIMIT;
+  const inChat = await prisma.artifact.findMany({ where: { chatKind: input.chat.kind, chatRef: input.chat.ref }, include, orderBy, take });
+  const own = who.userId ? await prisma.artifact.findMany({ where: { ownerId: who.userId }, include, orderBy, take }) : [];
+  const seen = new Set(inChat.map((row) => row.id));
+  const rows = [...inChat, ...own.filter((row) => !seen.has(row.id))];
+  return { artifacts: rows.filter((row) => canOpen(row, who, now)).slice(0, LIST_IN_CHAT_LIMIT).map(viewOf), hidden };
 }
 
 async function findVersion(artifact: ArtifactRow, number?: number | null) {

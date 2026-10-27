@@ -341,6 +341,15 @@ describe('artifacts', () => {
       expect(await titles(guest, OTHER_BUBBLE)).toEqual(['Friends']);
     });
 
+    it("keeps this chat's artifacts in the list when the person has many more elsewhere", async () => {
+      const here = await makeApp(person('owner'), NEARBY, { title: 'Here' });
+      for (let i = 0; i < 25; i++) await makeApp(person('owner'), DM, { title: `Elsewhere ${i}` });
+      db.artifacts.find((a) => a.id === here.artifact.id)!.updatedAt = new Date(Date.now() - 60000);
+      const res = await call(inChat, { botId: 'bot1', person: person('owner'), chat: NEARBY });
+      expect(res.body.artifacts).toHaveLength(20);
+      expect(res.body.artifacts[0].id).toBe(here.artifact.id);
+    });
+
     it('leaves out what a guest asked for once its day is over', async () => {
       await makeApp(guest);
       db.artifacts[0].expiresAt = new Date(Date.now() - 1000);
