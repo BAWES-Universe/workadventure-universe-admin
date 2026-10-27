@@ -92,9 +92,9 @@ function tooLarge(maxBytes: number): ArtifactError {
   return new ArtifactError('too_large', 413, `An artifact can hold up to ${sizeLabel(maxBytes)}.`);
 }
 
-/** A file of this many characters is over the limit in bytes too (a character is at least one byte). */
-function tooLargeAfter(characters: number, maxBytes: number): void {
-  if (characters > maxBytes) throw tooLarge(maxBytes);
+/** The file would be this many bytes after an edit: over the limit is refused before anything is built. */
+function tooLargeAfter(bytes: number, maxBytes: number): void {
+  if (bytes > maxBytes) throw tooLarge(maxBytes);
 }
 
 /**
@@ -114,14 +114,15 @@ export function applyEdits(content: string, edits: readonly ArtifactEdit[], maxB
       // before building anything (splitting a big file on one character would build a part for each)
       let places = 0;
       for (let at = first; at !== -1; at = result.indexOf(edit.old, at + edit.old.length)) places++;
-      tooLargeAfter(result.length + places * (edit.new.length - edit.old.length), maxBytes);
+      // Bytes, not characters: replacing "a" with "界" is three times the size
+      tooLargeAfter(byteLength(result) + places * (byteLength(edit.new) - byteLength(edit.old)), maxBytes);
       result = result.split(edit.old).join(edit.new);
       return;
     }
     if (second !== -1) {
       throw new ArtifactError('edit_ambiguous', 422, `Edit ${index + 1}: the text to replace appears more than once. Add more around it, or replace all of them.`);
     }
-    tooLargeAfter(result.length + edit.new.length - edit.old.length, maxBytes);
+    tooLargeAfter(byteLength(result) + byteLength(edit.new) - byteLength(edit.old), maxBytes);
     result = result.slice(0, first) + edit.new + result.slice(first + edit.old.length);
   });
   return result;
