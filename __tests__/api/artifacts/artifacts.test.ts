@@ -193,6 +193,56 @@ describe('artifacts', () => {
     });
   });
 
+  describe('the size of one request (Orbit #669 review)', () => {
+    /** Four times the size of one version, at the smallest size a super admin can set (0.1 MB). */
+    const ROOM = Math.round(0.1 * 1024 * 1024) * 4;
+    const tooLargeAnswer = { status: 413, body: { error: 'too_large', message: 'An artifact can hold up to 102 KB.' } };
+
+    it('lets a change name the whole of a full-size file, old and new', async () => {
+      db.settings.set('bot-limits', { artifacts: { size: 0.5 } });
+      const full = 'a'.repeat(512 * 1024);
+      const made = await makeApp(person('owner'), NEARBY, { content: full });
+      const res = await call(change, { botId: 'bot1', person: person('owner'), chat: NEARBY, edits: [{ old: full, new: 'b'.repeat(512 * 1024) }] }, { id: made.artifact.id });
+      expect(res.status).toBe(200);
+      expect(res.body.artifact.version).toBe(2);
+    });
+
+    it('turns away a body over four times the size before reading it as JSON', async () => {
+      db.settings.set('bot-limits', { artifacts: { size: 0.1 } });
+      // Not JSON either way: the size answers first when it is over, the parser when it is not
+      expect(await call(make, 'x'.repeat(ROOM + 1))).toMatchObject(tooLargeAnswer);
+      expect((await call(make, 'x'.repeat(ROOM))).status).toBe(400);
+      expect(db.artifacts).toHaveLength(0);
+    });
+
+    it('believes a length the caller states, and stops a body that runs past it', async () => {
+      db.settings.set('bot-limits', { artifacts: { size: 0.1 } });
+      const stated = new NextRequest('http://localhost:3333/api/artifacts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': String(ROOM + 1), Authorization: `Bearer ${BOT_TOKEN}` },
+        body: '{}',
+      });
+      const first = await (make as Handler)(stated, { params: Promise.resolve({}) });
+      expect({ status: first.status, body: await first.json() }).toMatchObject(tooLargeAnswer);
+      let cancelled = false;
+      const endless = new ReadableStream<Uint8Array>({
+        pull: (controller) => controller.enqueue(new Uint8Array(64 * 1024).fill(120)),
+        cancel: () => {
+          cancelled = true;
+        },
+      });
+      const streamed = new NextRequest('http://localhost:3333/api/artifacts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${BOT_TOKEN}` },
+        body: endless,
+        duplex: 'half',
+      } as ConstructorParameters<typeof NextRequest>[1]);
+      const second = await (make as Handler)(streamed, { params: Promise.resolve({}) });
+      expect({ status: second.status, body: await second.json() }).toMatchObject(tooLargeAnswer);
+      expect(cancelled).toBe(true);
+    });
+  });
+
   describe('change', () => {
     it('applies small edits as a new version and keeps the old one', async () => {
       const made = await makeApp();
