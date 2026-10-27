@@ -118,6 +118,26 @@ describe('Rename a key', () => {
     expect(await screen.findByRole('heading', { name: 'Work' })).toBeTruthy();
   });
 
+  it('keeps another key’s editor open when this key’s name is saved after it was opened', async () => {
+    let answer: (value: unknown) => void = () => undefined;
+    const other = { ...openRouter, id: 'key-2', name: 'Groq' };
+    fetchMock.mockImplementation((_url: string, init?: RequestInit) =>
+      init?.method === 'PATCH'
+        ? new Promise((resolve) => (answer = resolve))
+        : Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ keys: [openRouter, other] }) }),
+    );
+    const input = await openEditor();
+    fireEvent.change(input, { target: { value: 'Work' } });
+    fireEvent.click(screen.getByTestId('ai-key-rename-save'));
+    await waitFor(() => expect(patches()).toHaveLength(1));
+    fireEvent.click(screen.getByRole('button', { name: 'Rename Groq' }));
+    fireEvent.change(screen.getByLabelText('Key name'), { target: { value: 'Groq · fast' } });
+    answer({ ok: true, status: 200, json: () => Promise.resolve({ status: 'saved', name: 'Work' }) });
+    await waitFor(() => expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ description: 'Renamed to Work' })));
+    expect(screen.getByRole('heading', { name: 'Work' })).toBeTruthy();
+    expect((screen.getByLabelText('Key name') as HTMLInputElement).value).toBe('Groq · fast');
+  });
+
   it('closes without a request when the name is unchanged', async () => {
     serve();
     await openEditor();
