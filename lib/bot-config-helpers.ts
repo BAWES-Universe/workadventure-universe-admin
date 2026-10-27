@@ -161,6 +161,8 @@ export async function transformBotToServerFormat(
     chatInstructions: bot.chatInstructions || null,
     movementInstructions: bot.movementInstructions || null,
     toolTimeoutSeconds: bot.toolTimeoutSeconds ?? null,
+    maxReplyTokens: bot.maxReplyTokens ?? null,
+    maxSteps: bot.maxSteps ?? null,
     companionTextureId: bot.companionTextureId ?? null,
   };
   

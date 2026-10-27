@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
 import { validateServiceToken } from '@/lib/service-tokens';
-import { ARTIFACT_KINDS, ArtifactError, CHAT_KINDS, MAX_ARTIFACT_BYTES, type ArtifactKind } from '@/lib/artifacts';
+import { ARTIFACT_KINDS, ArtifactError, CHAT_KINDS, LARGEST_ARTIFACT_BYTES, type ArtifactKind } from '@/lib/artifacts';
 
 /**
  * The routes of live artifacts (game #1422, Orbit #622) are called by servers, never by a browser: the bot server
@@ -77,7 +77,7 @@ export const makeSchema = z
     title: text(500),
     kind: z.enum(ARTIFACT_KINDS as unknown as [ArtifactKind, ...ArtifactKind[]]),
     // A little above the cap so the size rule, not the parser, gives the answer
-    content: text(MAX_ARTIFACT_BYTES * 2),
+    content: text(LARGEST_ARTIFACT_BYTES * 2),
     summary: text(1000).nullish(),
   })
   .strict();
@@ -91,10 +91,10 @@ export const changeSchema = z
     ...botCall,
     baseVersion: versionNumber.nullish(),
     edits: z
-      .array(z.object({ old: text(MAX_ARTIFACT_BYTES), new: text(MAX_ARTIFACT_BYTES), all: z.boolean().optional() }).strict())
+      .array(z.object({ old: text(LARGEST_ARTIFACT_BYTES), new: text(LARGEST_ARTIFACT_BYTES), all: z.boolean().optional() }).strict())
       .max(50)
       .nullish(),
-    content: text(MAX_ARTIFACT_BYTES * 2).nullish(),
+    content: text(LARGEST_ARTIFACT_BYTES * 2).nullish(),
     summary: text(1000).nullish(),
     title: text(500).nullish(),
   })

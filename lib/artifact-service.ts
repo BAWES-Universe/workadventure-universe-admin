@@ -5,6 +5,8 @@ import { checkBotAccess } from '@/lib/bot-access';
 import { loadBotPrivacy } from '@/lib/bot-privacy';
 import { findUserByIdentifier } from '@/lib/user-identifier';
 import { artifactFiles, type ArtifactFiles } from '@/lib/artifact-storage';
+import { getServerLimits } from '@/lib/bot-limits';
+import { artifactBytes, type ArtifactLimits } from '@/lib/bot-limit-values';
 import {
   ARTIFACT_KINDS,
   ArtifactError,
@@ -13,13 +15,13 @@ import {
   MAX_NAME_LENGTH,
   MAX_SUMMARY_LENGTH,
   MAX_TITLE_LENGTH,
-  MAX_VERSIONS,
   OPEN_SCOPES,
   applyEdits,
   byteLength,
   canAskForChange,
   canOpen,
   checkContent,
+  checkVersionRoom,
   cleanLine,
   clipText,
   fileTypeOf,
@@ -57,6 +59,14 @@ export interface Chat {
 export interface Context {
   files: ArtifactFiles;
   now: Date;
+  /** The artifact limits to apply (#666); read from the super admin's settings when not given. */
+  limits?: ArtifactLimits;
+}
+
+/** The size and version limits a super admin set (#666). */
+async function limitsOf(ctx: Context): Promise<{ maxBytes: number; maxVersions: number }> {
+  const limits = ctx.limits ?? (await getServerLimits()).artifacts;
+  return { maxBytes: artifactBytes(limits), maxVersions: limits.versions };
 }
 
 /** Most artifacts a bot is told about for one chat. */
@@ -248,7 +258,8 @@ export async function makeArtifact(input: MakeInput, ctx: Context = defaultConte
   const title = cleanLine(input.title, MAX_TITLE_LENGTH);
   if (!title) throw new ArtifactError('title_required', 422, 'An artifact needs a title.');
   if (!isOneOf(ARTIFACT_KINDS, input.kind)) throw new ArtifactError('invalid_kind', 422, 'Unknown kind of artifact.');
-  checkContent(input.content);
+  const { maxBytes } = await limitsOf(ctx);
+  checkContent(input.content, maxBytes);
   const { botName, hidden } = await passBotGate(input);
   const who = await resolvePerson(input.person, true);
 
@@ -310,7 +321,8 @@ export async function changeArtifact(input: ChangeInput, ctx: Context = defaultC
     if (!canOpen(artifact, { ...who, inChat: inThisChat(artifact, input.chat) }, now)) throw new ArtifactError('not_found', 404, 'No such artifact.');
     throw new ArtifactError('change_not_allowed', 403, 'The owner has not allowed changes from this person.');
   }
-  if (artifact.latestVersion >= MAX_VERSIONS) throw new ArtifactError('too_many_versions', 409, `An artifact keeps up to ${MAX_VERSIONS} versions.`);
+  const { maxBytes, maxVersions } = await limitsOf(ctx);
+  checkVersionRoom(artifact.latestVersion, maxVersions);
   if (input.baseVersion != null && input.baseVersion !== artifact.latestVersion) {
     throw new ArtifactError('stale_version', 409, `It is on version ${artifact.latestVersion} now; read it again and send the change on that.`);
   }
@@ -318,8 +330,8 @@ export async function changeArtifact(input: ChangeInput, ctx: Context = defaultC
   const kind = artifact.kind as ArtifactKind;
   const latest = await prisma.artifactVersion.findUnique({ where: { artifactId_number: { artifactId: artifact.id, number: artifact.latestVersion } } });
   if (!latest) throw new ArtifactError('file_missing', 502, 'The latest version could not be found.');
-  const content = hasEdits ? applyEdits(await files.get(latest.fileKey), input.edits as ArtifactEdit[]) : (input.content as string);
-  checkContent(content);
+  const content = hasEdits ? applyEdits(await files.get(latest.fileKey), input.edits as ArtifactEdit[], maxBytes) : (input.content as string);
+  checkContent(content, maxBytes);
 
   const next = artifact.latestVersion + 1;
   const fileKey = newFileKey(artifact.id, next, kind);
@@ -487,11 +499,14 @@ export async function restoreVersion(id: string, number: number, viewer: Viewer,
   const who = await whoIsLooking(artifact, viewer);
   requireOpen(artifact, who, now);
   requireOwner(artifact, who);
-  if (artifact.latestVersion >= MAX_VERSIONS) throw new ArtifactError('too_many_versions', 409, `An artifact keeps up to ${MAX_VERSIONS} versions.`);
+  const { maxBytes, maxVersions } = await limitsOf(ctx);
+  checkVersionRoom(artifact.latestVersion, maxVersions);
   const source = await findVersion(artifact, number);
   if (source.number === artifact.latestVersion) throw new ArtifactError('already_latest', 409, 'That is the latest version already.');
   const kind = artifact.kind as ArtifactKind;
   const content = await files.get(source.fileKey);
+  // The size limit may have been lowered since this version was saved: a restore is a new version like any other
+  checkContent(content, maxBytes);
   const next = artifact.latestVersion + 1;
   const fileKey = newFileKey(artifact.id, next, kind);
   const row = await storing(files, fileKey, kind, content, () =>
@@ -539,6 +554,7 @@ export async function copyArtifact(id: string, viewer: Viewer, version?: number 
   const row = await findVersion(source, version);
   const kind = source.kind as ArtifactKind;
   const content = await files.get(row.fileKey);
+  checkContent(content, (await limitsOf(ctx)).maxBytes);
 
   const copyId = randomUUID();
   const fileKey = newFileKey(copyId, 1, kind);

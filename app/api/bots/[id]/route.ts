@@ -10,6 +10,7 @@ import { parsePlayUri } from '@/lib/utils';
 import { z } from 'zod';
 import { checkAiProviderRef, checkBotModel } from '@/lib/ai-provider-ref';
 import { toolTimeoutSecondsSchema } from '@/lib/bot-tool-timeout';
+import { maxReplyTokensSchema, maxStepsSchema } from '@/lib/bot-limits';
 import { keepToolCallSetting, keepVisionPick } from '@/lib/bot-config-helpers';
 import { checkConfigVision } from '@/lib/bot-vision';
 import { corsHeaders } from '@/lib/cors';
@@ -105,6 +106,9 @@ const updateBotSchema = z.object({
   // The bot's model on a person's key (#575); null = the key's check model
   aiModel: z.string().trim().min(1, 'aiModel cannot be empty').max(255, 'aiModel must be at most 255 characters').optional().nullable(),
   toolTimeoutSeconds: toolTimeoutSecondsSchema,
+  // The bot's own longest reply and steps (#666); null = its key's
+  maxReplyTokens: maxReplyTokensSchema,
+  maxSteps: maxStepsSchema,
   companionTextureId: z.string().max(100, 'companionTextureId must be at most 100 characters').optional().nullable(),
 });
 
@@ -124,6 +128,8 @@ function transformBot(bot: any) {
     aiProviderRef: bot.aiProviderRef,
     aiModel: bot.aiModel ?? null,
     toolTimeoutSeconds: bot.toolTimeoutSeconds ?? null,
+    maxReplyTokens: bot.maxReplyTokens ?? null,
+    maxSteps: bot.maxSteps ?? null,
     companionTextureId: bot.companionTextureId ?? null,
     createdAt: bot.createdAt,
     updatedAt: bot.updatedAt,
@@ -249,7 +255,7 @@ export async function GET(
       return response;
     }
 
-    // Transform to camelCase
+    // Transform to camelCase, with the longest reply and steps of what it runs on (#666), for its own to stay under
     const transformedBot = transformBot(bot);
 
     const response = NextResponse.json(transformedBot);
@@ -513,6 +519,8 @@ export async function PUT(
     if (validatedData.aiModel !== undefined) updateData.aiModel = validatedData.aiModel;
     else if (nextRef !== existingBot.aiProviderRef) updateData.aiModel = null;
     if (validatedData.toolTimeoutSeconds !== undefined) updateData.toolTimeoutSeconds = validatedData.toolTimeoutSeconds;
+    if (validatedData.maxReplyTokens !== undefined) updateData.maxReplyTokens = validatedData.maxReplyTokens;
+    if (validatedData.maxSteps !== undefined) updateData.maxSteps = validatedData.maxSteps;
     if (validatedData.companionTextureId !== undefined) updateData.companionTextureId = validatedData.companionTextureId;
 
     // Update bot (updatedAt is automatically updated by Prisma)

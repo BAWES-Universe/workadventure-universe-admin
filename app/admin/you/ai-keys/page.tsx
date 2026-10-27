@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { Bot, Globe, KeyRound, Plus, RefreshCw, Trash2, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { LimitGroup, keyLimitsLine, replyLimits, useSaveKeyLimit } from '../../components/limits';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { useToast } from '@/components/ui/toast';
@@ -129,6 +130,9 @@ function ifDownHelp(key: AiKeySummary): string {
  */
 export default function AiKeysPage() {
   const { result, retry, update } = useAiKeys();
+  // The key whose limits sheet is open (#666), by id, so the sheet shows its limits as just saved
+  const [limitsFor, setLimitsFor] = useState<string | null>(null);
+  const saveKeyLimit = useSaveKeyLimit();
   const { addToast } = useToast();
   const [revoking, setRevoking] = useState<AiKeySummary | null>(null);
   const [busy, setBusy] = useState(false);
@@ -311,6 +315,17 @@ export default function AiKeysPage() {
               </div>
             ))}
           </div>
+          <div className="grid gap-2" data-testid="ai-key-limits">
+            <h3 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Limits</h3>
+            <div className="flex items-center gap-2 rounded-xl bg-foreground/[.04] py-1 pl-3 pr-1">
+              <span className="min-w-0 flex-1 text-[13px] [overflow-wrap:anywhere]">
+                {keyLimitsLine(key.limits)}
+              </span>
+              <Button variant="outline" className="h-11 shrink-0 px-4" onClick={() => setLimitsFor(key.id)} data-testid="ai-key-limits-change">
+                Change
+              </Button>
+            </div>
+          </div>
           <div className="grid gap-2">
             <h3 id={`if-down-${key.id}`} className="text-xs font-bold uppercase tracking-wider text-muted-foreground">If this is down</h3>
             <Segmented
@@ -344,6 +359,30 @@ export default function AiKeysPage() {
           </div>
         </article>
       ))}
+
+      {(() => {
+        const key = keys.find((entry) => entry.id === limitsFor) ?? null;
+        return (
+          <FormSheet open={key !== null} onOpenChange={(open) => !open && setLimitsFor(null)} title={key ? `Limits for ${key.name}` : 'Limits'} description="For bots that run on this key. Each bot’s editors can lower them for that bot.">
+            {key && (
+              <LimitGroup
+                title="Replies"
+                limits={replyLimits(key.limits)}
+                onChange={async (id, value) => {
+                  const saved = await saveKeyLimit(key.id, id, value);
+                  if (saved) update((all) => all.map((entry) => (entry.id === key.id ? { ...entry, limits: saved } : entry)));
+                  return saved !== null;
+                }}
+              />
+            )}
+            <div className="flex justify-end">
+              <Button className="h-11 px-5" onClick={() => setLimitsFor(null)}>
+                Done
+              </Button>
+            </div>
+          </FormSheet>
+        );
+      })()}
 
       {keys.length > 0 && (
         <section className="grid gap-3 border-t border-foreground/10 pt-6" aria-labelledby="ai-keys-danger">
