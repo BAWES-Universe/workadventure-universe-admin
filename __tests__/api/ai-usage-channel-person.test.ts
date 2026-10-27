@@ -85,7 +85,15 @@ describe('who it was for', () => {
     const response = await track({ userId: 'wa-uuid-sara', isGuest: false });
     spy.mockRestore();
     expect(response.status).toBe(200);
-    expect(saved()).toMatchObject({ botId: 'b1', talkedPersonId: null });
+    expect(saved()).toMatchObject({ botId: 'b1', talkedPersonId: null, talkedGuest: false });
+  });
+
+  it('keeps what the bot server said about the speaker when the lookup fails, and says nothing when it told nothing', async () => {
+    users.findUnique.mockRejectedValue(new Error('db down'));
+    const spy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    await track({ userId: 'wa-uuid-sara' });
+    spy.mockRestore();
+    expect(saved()).toMatchObject({ talkedPersonId: null, talkedGuest: null });
   });
 
   it('never takes a person id from the request', async () => {
