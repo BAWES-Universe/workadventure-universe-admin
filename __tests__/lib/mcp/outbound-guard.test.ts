@@ -90,4 +90,11 @@ describe('shared and reserved IPv4 ranges (100.64.0.0/10, 0.0.0.0/8, 192.0.0.0/2
   it.each(allowed)('still allows the public address %s next to those ranges', (ip) => {
     expect(isAllowedServerUrl(`https://${ip}/`)).toBe(true);
   });
+
+  it.each(['0.tcp.ngrok.io', '100.64.example.com', '198.18.example.org', '192.0.0.example.net'])(
+    'does not mistake the hostname %s for an address',
+    (host) => {
+      expect(isAllowedServerUrl(`https://${host}/mcp`)).toBe(true);
+    },
+  );
 });
