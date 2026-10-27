@@ -38,7 +38,7 @@ async function send(handler: unknown, body: unknown, media: Media[] = [], option
   if (media.length > 0) {
     const form = new FormData();
     form.append('request', JSON.stringify(body));
-    for (const file of media) form.append('media', new Blob([typeof file.bytes === 'number' ? bytes(file.bytes) : file.bytes], { type: file.type }), file.name);
+    for (const file of media) form.append('media', new Blob([(typeof file.bytes === 'number' ? bytes(file.bytes) : file.bytes) as Uint8Array<ArrayBuffer>], { type: file.type }), file.name);
     payload = form;
   } else {
     headers['Content-Type'] = 'application/json';
