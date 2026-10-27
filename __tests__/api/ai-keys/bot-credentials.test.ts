@@ -19,6 +19,7 @@ jest.mock('@/lib/db', () => ({
     botsAiProvider: { findUnique: jest.fn(), findFirst: jest.fn() },
     aiKeyLend: { findUnique: jest.fn(async () => null) },
     botsAiUsage: { create: jest.fn(async () => ({})) },
+    appSetting: { findUnique: jest.fn(async () => null) },
   },
 }));
 jest.mock('@/lib/service-tokens', () => ({ requireServiceToken: jest.fn() }));
@@ -28,6 +29,7 @@ jest.mock('@/lib/notices', () => ({ addNotice: jest.fn() }));
 const bot = prisma.bot as unknown as Record<'findUnique' | 'updateMany', jest.Mock>;
 const provider = prisma.botsAiProvider as unknown as Record<'findUnique' | 'findFirst', jest.Mock>;
 const usage = prisma.botsAiUsage as unknown as { create: jest.Mock };
+const settings = prisma.appSetting as unknown as { findUnique: jest.Mock };
 const verdict = checkKeyForBot as jest.Mock;
 
 const deepseek = {
@@ -50,6 +52,7 @@ const ask = (id = 'b1') => GET(new NextRequest(`http://localhost:3333/api/bots/$
 beforeEach(() => {
   for (const fn of [...Object.values(bot), ...Object.values(provider), usage.create, verdict, addNotice as jest.Mock, requireServiceToken as jest.Mock]) fn.mockReset();
   usage.create.mockResolvedValue({});
+  settings.findUnique.mockReset().mockResolvedValue(null);
 });
 
 describe('GET /api/bots/:id/ai-credentials', () => {
@@ -61,11 +64,11 @@ describe('GET /api/bots/:id/ai-credentials', () => {
     expect(bot.findUnique).not.toHaveBeenCalled();
   });
 
-  it('serves a bot pinned to DeepSeek on the openai type exactly the fields it always got, plus where it came from', async () => {
+  it('serves a bot pinned to DeepSeek on the openai type exactly the fields it always got, plus where it came from and its limits', async () => {
     bot.findUnique.mockResolvedValue(botOn('deepseek-flash'));
     provider.findUnique.mockResolvedValue(deepseek);
     const body = await (await ask()).json();
-    expect(Object.keys(body).sort()).toEqual([...FIELDS, 'source'].sort());
+    expect(Object.keys(body).sort()).toEqual([...FIELDS, 'source', 'limits'].sort());
     expect(body).toMatchObject({ providerId: 'deepseek-flash', type: 'openai', endpoint: 'https://api.deepseek.com', apiKeyEncrypted: 'enc:sk-secret', source: 'provider' });
   });
 
@@ -87,6 +90,35 @@ describe('GET /api/bots/:id/ai-credentials', () => {
     expect(await (await ask()).json()).toMatchObject({ providerId: 'lmstudio-local', source: 'universe-ai' });
     provider.findFirst.mockResolvedValueOnce(deepseek);
     expect(await (await ask()).json()).toMatchObject({ providerId: 'deepseek-flash', source: 'universe-ai' });
+  });
+
+  it('serves the limits (#666): the recommended ones when nothing is saved, the longest reply as maxTokens too', async () => {
+    bot.findUnique.mockResolvedValue(botOn('universe-ai'));
+    provider.findFirst.mockResolvedValue(deepseek);
+    const body = await (await ask()).json();
+    expect(body.maxTokens).toBe(32000);
+    expect(body.limits).toEqual({
+      replyTokens: 32000, steps: 30, continuations: 2, messages: 20, readChars: 50000, waitSeconds: 60,
+      artifactBytes: 2 * 1024 * 1024, artifactVersions: 0, artifactSaveSeconds: 30, guard: true,
+    });
+  });
+
+  it('serves Universe AI’s saved limits, lowered (never raised) by the bot’s own', async () => {
+    settings.findUnique.mockResolvedValue({ key: 'bot-limits', value: { universeAi: { reply: 16000, steps: 20, memory: 8 }, artifacts: { size: 1, versions: 200 }, guard: false } });
+    provider.findFirst.mockResolvedValue(deepseek);
+    bot.findUnique.mockResolvedValue(botOn('universe-ai', { maxReplyTokens: 8000, maxSteps: 50 }));
+    const body = await (await ask()).json();
+    expect(body.maxTokens).toBe(8000);
+    expect(body.limits).toMatchObject({ replyTokens: 8000, steps: 20, messages: 8, artifactBytes: 1024 * 1024, artifactVersions: 200, guard: false });
+  });
+
+  it('serves a personal key’s own limits, not Universe AI’s', async () => {
+    settings.findUnique.mockResolvedValue({ key: 'bot-limits', value: { universeAi: { reply: 4000 } } });
+    bot.findUnique.mockResolvedValue(botOn('key-1'));
+    provider.findUnique.mockResolvedValue({ ...ownKey, replyLimits: { reply: 64000, wait: 120 } });
+    verdict.mockResolvedValue({ ok: true });
+    const body = await (await ask()).json();
+    expect(body).toMatchObject({ source: 'own-key', maxTokens: 64000, limits: { replyTokens: 64000, waitSeconds: 120, steps: 30 } });
   });
 
   it('says Universe AI is unavailable (503) when no provider is enabled', async () => {

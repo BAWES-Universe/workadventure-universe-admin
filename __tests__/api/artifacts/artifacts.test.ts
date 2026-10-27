@@ -13,7 +13,6 @@ import { POST as copy } from '@/app/api/artifacts/[id]/copy/route';
 import { DELETE as remove } from '@/app/api/artifacts/[id]/route';
 import { checkBotAccess } from '@/lib/bot-access';
 import { loadBotPrivacy } from '@/lib/bot-privacy';
-import { MAX_ARTIFACT_BYTES, MAX_VERSIONS } from '@/lib/artifacts';
 import { openByLink, pruneExpired, resetPruneClock } from '@/lib/artifact-service';
 import { addBot, addUser, db, fakeFiles, fakePrisma } from '../../helpers/artifacts-db';
 
@@ -166,10 +165,20 @@ describe('artifacts', () => {
     it('refuses a blank title, a blank file and a file over the cap', async () => {
       expect((await call(make, { botId: 'bot1', person: person('owner'), chat: NEARBY, title: '   ', kind: 'app', content: APP })).body.error).toBe('title_required');
       expect((await call(make, { botId: 'bot1', person: person('owner'), chat: NEARBY, title: 'T', kind: 'app', content: ' ' })).body.error).toBe('empty_content');
-      const big = await call(make, { botId: 'bot1', person: person('owner'), chat: NEARBY, title: 'T', kind: 'app', content: 'a'.repeat(MAX_ARTIFACT_BYTES + 1) });
-      expect(big).toMatchObject({ status: 413, body: { error: 'too_large' } });
+      // 2 MB until a super admin changes it (#666)
+      const big = await call(make, { botId: 'bot1', person: person('owner'), chat: NEARBY, title: 'T', kind: 'app', content: 'a'.repeat(2 * 1024 * 1024 + 1) });
+      expect(big).toMatchObject({ status: 413, body: { error: 'too_large', message: 'An artifact can hold up to 2 MB.' } });
       expect(db.artifacts).toHaveLength(0);
       expect(bucketKeys()).toHaveLength(0);
+    });
+
+    it('follows the size a super admin set', async () => {
+      db.settings.set('bot-limits', { artifacts: { size: 0.5 } });
+      const big = await call(make, { botId: 'bot1', person: person('owner'), chat: NEARBY, title: 'T', kind: 'app', content: 'a'.repeat(512 * 1024 + 1) });
+      expect(big).toMatchObject({ status: 413, body: { error: 'too_large', message: 'An artifact can hold up to 512 KB.' } });
+      db.settings.set('bot-limits', { artifacts: { size: 10 } });
+      const fits = await call(make, { botId: 'bot1', person: person('owner'), chat: NEARBY, title: 'T', kind: 'app', content: 'a'.repeat(5 * 1024 * 1024) });
+      expect(fits.status).toBe(200);
     });
 
     it('leaves no file behind when the database fails', async () => {
@@ -280,10 +289,13 @@ describe('artifacts', () => {
       expect(new Date(res.body.artifact.expiresAt).getTime()).toBeGreaterThanOrEqual(new Date(made.artifact.expiresAt).getTime());
     });
 
-    it('stops at the version cap', async () => {
+    it('keeps every version until a super admin sets a number, then stops there', async () => {
       const made = await makeApp();
-      db.artifacts[0].latestVersion = MAX_VERSIONS;
-      const res = await call(change, { botId: 'bot1', person: person('owner'), chat: NEARBY, content: '<p>x</p>' }, { id: made.artifact.id });
+      db.artifacts[0].latestVersion = 5000;
+      db.versions[0].number = 5000;
+      expect((await call(change, { botId: 'bot1', person: person('owner'), chat: NEARBY, content: '<p>x</p>' }, { id: made.artifact.id })).status).toBe(200);
+      db.settings.set('bot-limits', { artifacts: { versions: 200 } });
+      const res = await call(change, { botId: 'bot1', person: person('owner'), chat: NEARBY, content: '<p>y</p>' }, { id: made.artifact.id });
       expect(res).toMatchObject({ status: 409, body: { error: 'too_many_versions' } });
     });
 

@@ -17,7 +17,10 @@ export const db = {
   files: new Map<string, string>(),
   /** Make the next version insert fail, to see that its file does not stay behind. */
   failNextVersionCreate: false,
+  /** app_settings rows (#666): the super admin's limits, saved under "bot-limits". */
+  settings: new Map<string, unknown>(),
   reset() {
+    this.settings.clear();
     this.users.length = 0;
     this.bots.length = 0;
     this.artifacts.length = 0;
@@ -85,6 +88,9 @@ const client: Row = {
     findFirst: async ({ where }: Row) => db.users.find((user) => where.OR.some((cond: Row) => cond.uuid === user.uuid || cond.email === user.email)) ?? null,
   },
   bot: { findUnique: async ({ where }: Row) => db.bots.find((bot) => bot.id === where.id) ?? null },
+  appSetting: {
+    findUnique: async ({ where }: Row) => (db.settings.has(where.key) ? { key: where.key, value: db.settings.get(where.key) } : null),
+  },
   artifact: {
     create: async ({ data, include }: Row) => {
       const { versions, ...fields } = data;

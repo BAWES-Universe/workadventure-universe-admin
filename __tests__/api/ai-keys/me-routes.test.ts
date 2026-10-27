@@ -78,6 +78,7 @@ describe('GET /api/me/ai-keys', () => {
       id: 'key-1', name: 'My DeepSeek', kind: 'deepseek', kindLabel: 'DeepSeek', model: 'deepseek-v4-flash', modelCount: null, caps: {}, address: null,
       last4: '4f2a', month: { replies: 12, tokens: 3400 }, lentTo: [], createdAt: '2026-10-19T00:00:00.000Z',
       status: 'working', downSince: null, downReason: null, ifDown: 'universe-ai',
+      limits: { reply: 32000, steps: 30, continue: 2, memory: 20, read: 50000, wait: 60 },
     }]);
     expect(JSON.stringify(body)).not.toContain('secret');
   });

@@ -3,6 +3,7 @@ import { kindInfo, type AiKeyKind } from '@/lib/ai-key-kinds';
 import { isIfDown, type DownReason } from '@/lib/ai-key-health';
 import type { ModelFacts } from '@/lib/ai-key-models';
 import { lendModels, servedModel } from '@/lib/ai-key-model-list';
+import { readReplyLimits, type ReplyLimits } from '@/lib/bot-limit-values';
 
 export type { AiKeyKind };
 
@@ -46,6 +47,8 @@ export interface AiKeySummary {
   downReason: DownReason | null;
   /** What its bots do while it is down. */
   ifDown: 'universe-ai' | 'stop';
+  /** The reply limits of bots on this key (#666), the recommended value for any its owner never changed. */
+  limits: ReplyLimits;
   createdAt: string;
 }
 
@@ -81,7 +84,7 @@ export async function listAiKeys(ownerId: string): Promise<AiKeySummary[]> {
   const rows = await prisma.botsAiProvider.findMany({
     where: { ownerId },
     orderBy: { createdAt: 'asc' },
-    select: { providerId: true, name: true, model: true, endpoint: true, apiKeyLast4: true, settings: true, createdAt: true, downSince: true, downReason: true, ifDown: true },
+    select: { providerId: true, name: true, model: true, endpoint: true, apiKeyLast4: true, settings: true, createdAt: true, downSince: true, downReason: true, ifDown: true, replyLimits: true },
   });
   if (rows.length === 0) return [];
   const usage = await prisma.botsAiUsage.groupBy({
@@ -144,6 +147,7 @@ export async function listAiKeys(ownerId: string): Promise<AiKeySummary[]> {
       downSince: row.downSince ? row.downSince.toISOString() : null,
       downReason: row.downSince ? asDownReason(row.downReason) : null,
       ifDown: isIfDown(row.ifDown) ? row.ifDown : 'universe-ai',
+      limits: readReplyLimits(row.replyLimits),
       createdAt: row.createdAt.toISOString(),
     };
   });

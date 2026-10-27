@@ -7,6 +7,8 @@ import { clearDownNotice, isIfDown } from '@/lib/ai-key-health';
 import { allowKeyAttempt } from '@/lib/ai-key-models';
 import { editSavedKey } from '@/lib/ai-key-edit';
 import { forgetKeyModels } from '@/lib/ai-key-model-list';
+import { checkReplyLimits, readReplyLimits } from '@/lib/bot-limit-values';
+import type { Prisma } from '@prisma/client';
 
 export const runtime = 'nodejs';
 
@@ -17,8 +19,10 @@ export async function OPTIONS(request: NextRequest) {
 }
 
 /**
- * PATCH /api/me/ai-keys/:id { ifDown?, address?, model? } - change a key you own (#374).
+ * PATCH /api/me/ai-keys/:id { ifDown?, address?, model?, limits? } - change a key you own (#374).
  *   - `ifDown` ("universe-ai" | "stop"): what the bots on this key do while it is down.
+ *   - `limits` (#666): the reply limits of bots on this key, only the ones that change, e.g. { reply: 16000 }. Answers
+ *     with all six as saved.
  *   - `address` / `model`: where an own-computer key points, or which model it uses. The new address and model are
  *     checked first (model list, then one tiny chat reply), and nothing is saved unless they answer. The key keeps its
  *     id, so it stays lent and its bots stay on it. A key that was Down and answers is Working again.
@@ -36,10 +40,12 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
     return respond(request, { error: 'Invalid JSON body' }, 400);
   }
   if (typeof body !== 'object' || body === null || Array.isArray(body)) return respond(request, { error: 'Expected an object' }, 400);
-  const input = body as { ifDown?: unknown; address?: unknown; model?: unknown };
+  const input = body as { ifDown?: unknown; address?: unknown; model?: unknown; limits?: unknown };
   const changesWhere = input.address !== undefined || input.model !== undefined;
   if (input.ifDown !== undefined && !isIfDown(input.ifDown)) return respond(request, { error: 'ifDown must be "universe-ai" or "stop"' }, 400);
-  if (input.ifDown === undefined && !changesWhere) return respond(request, { error: 'ifDown must be "universe-ai" or "stop"' }, 400);
+  if (input.ifDown === undefined && !changesWhere && input.limits === undefined) return respond(request, { error: 'ifDown must be "universe-ai" or "stop"' }, 400);
+  const limits = input.limits === undefined ? null : checkReplyLimits(input.limits);
+  if (limits && !limits.ok) return respond(request, { error: limits.error }, 400);
   try {
     if (changesWhere) {
       if (!allowKeyAttempt(user.id)) return respond(request, { error: 'Too many tries. Wait a minute and try again.' }, 429);
@@ -50,7 +56,17 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       const result = await prisma.botsAiProvider.updateMany({ where: { providerId: id, ownerId: user.id }, data: { ifDown: input.ifDown } });
       if (result.count === 0) return respond(request, { error: 'Key not found' }, 404);
     }
-    return respond(request, { status: 'saved', ...(isIfDown(input.ifDown) ? { ifDown: input.ifDown } : {}) });
+    let savedLimits = null;
+    if (limits?.ok) {
+      const key = await prisma.botsAiProvider.findFirst({ where: { providerId: id, ownerId: user.id }, select: { replyLimits: true } });
+      if (!key) return respond(request, { error: 'Key not found' }, 404);
+      const saved = key.replyLimits && typeof key.replyLimits === 'object' && !Array.isArray(key.replyLimits) ? (key.replyLimits as Record<string, unknown>) : {};
+      // Only what the owner changed is kept, so a value they never touched follows the recommended one
+      const next = { ...saved, ...limits.value };
+      await prisma.botsAiProvider.updateMany({ where: { providerId: id, ownerId: user.id }, data: { replyLimits: next as Prisma.InputJsonValue } });
+      savedLimits = readReplyLimits(next);
+    }
+    return respond(request, { status: 'saved', ...(isIfDown(input.ifDown) ? { ifDown: input.ifDown } : {}), ...(savedLimits ? { limits: savedLimits } : {}) });
   } catch (error) {
     console.error('[AiKeys] Save failed:', error instanceof Error ? error.message : 'unknown');
     return respond(request, { error: 'Internal server error' }, 500);

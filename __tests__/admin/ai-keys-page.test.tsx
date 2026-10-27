@@ -28,6 +28,7 @@ const lmStudio = {
   downSince: null,
   downReason: null,
   ifDown: 'universe-ai',
+  limits: { reply: 32000, steps: 30, continue: 2, memory: 20, read: 50000, wait: 60 },
   createdAt: '2026-10-19T00:00:00.000Z',
 };
 const deepseek = {
@@ -45,6 +46,7 @@ const deepseek = {
   downSince: null,
   downReason: null,
   ifDown: 'universe-ai',
+  limits: { reply: 32000, steps: 30, continue: 2, memory: 20, read: 50000, wait: 60 },
   createdAt: '2026-10-19T00:00:00.000Z',
 };
 
@@ -140,6 +142,49 @@ function serve(keys: unknown[], universes: unknown[] = [], models: unknown = { o
   });
 }
 const calls = (method: string) => fetchMock.mock.calls.filter(([, init]) => init?.method === method);
+
+describe('Limits (#666)', () => {
+  it('says the key’s longest reply and steps on its card, recommended until changed', async () => {
+    answer([lmStudio, { ...deepseek, limits: { ...deepseek.limits, reply: 64000 } }]);
+    render(<AiKeysPage />);
+    expect(await screen.findByText('Recommended: replies up to 32,000 tokens, 30 steps')).toBeTruthy();
+    expect(screen.getByText('Yours: replies up to 64,000 tokens, 30 steps')).toBeTruthy();
+  });
+
+  it('saves a picked limit on the key and shows it at once', async () => {
+    answer([lmStudio]);
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByTestId('ai-key-limits-change'));
+    expect(await screen.findByText('Limits for My LM Studio')).toBeTruthy();
+    fireEvent.click(screen.getByTestId('limit-reply'));
+    fireEvent.click(await screen.findByRole('radio', { name: /16,000 tokens/ }));
+    fetchMock.mockImplementation((url: string, init?: RequestInit) =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(init?.method === 'PATCH' ? { status: 'saved', limits: { ...lmStudio.limits, reply: 16000 } } : { keys: [lmStudio] }),
+      }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(screen.getByText('Yours: replies up to 16,000 tokens, 30 steps')).toBeTruthy());
+    const patch = fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH');
+    expect(patch?.[0]).toBe('/api/me/ai-keys/key-1');
+    expect(JSON.parse(patch?.[1].body)).toEqual({ limits: { reply: 16000 } });
+  });
+
+  it('keeps the choices open and says why when a value is turned down', async () => {
+    answer([lmStudio]);
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByTestId('ai-key-limits-change'));
+    fireEvent.click(await screen.findByTestId('limit-steps'));
+    fireEvent.click(await screen.findByRole('radio', { name: /Other/ }));
+    fireEvent.change(screen.getByLabelText('Steps in one reply, in steps'), { target: { value: '9999' } });
+    fetchMock.mockImplementation(() => Promise.resolve({ ok: false, status: 400, json: () => Promise.resolve({ error: 'limits.steps must be a whole number from 1 to 500' }) }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ description: 'limits.steps must be a whole number from 1 to 500', variant: 'error' })));
+    expect(screen.getByRole('button', { name: 'Save' })).toBeTruthy();
+  });
+});
 
 describe('Lent to', () => {
   it('names each universe a key is lent to, the bots on it there and their replies', async () => {
