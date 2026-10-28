@@ -3,7 +3,7 @@ import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
 import { validateServiceToken } from '@/lib/service-tokens';
 import { CHAT_KINDS } from '@/lib/artifacts';
-import { BotFileError, FILE_KINDS, FILE_LIMITS_RECOMMENDED, FILE_SOURCES, MAX_FILE_NAME_LENGTH } from '@/lib/bot-files';
+import { BotFileError, FILE_KINDS, FILE_LIMITS_RECOMMENDED, FILE_SOURCES, MAX_FILE_NAME_LENGTH, MAX_PROMPT_LENGTH } from '@/lib/bot-files';
 
 /**
  * The routes of files in bot chats (game #1508) are called only by the bot server (BOT_SERVICE_TOKEN, or the admin token
@@ -93,6 +93,10 @@ export const addSchema = z
     sizeBytes: z.number().int().min(0).max(2147483647).nullish(),
     store: storeSchema,
     line: z.string().max(2000).nullish(),
+    madeWith: z.string().max(400).nullish(),
+    madePrompt: z.string().max(MAX_PROMPT_LENGTH * 2).nullish(),
+    lengthSeconds: z.number().int().min(0).max(2147483647).nullish(),
+    pages: z.number().int().min(0).max(2147483647).nullish(),
   })
   .strict();
 

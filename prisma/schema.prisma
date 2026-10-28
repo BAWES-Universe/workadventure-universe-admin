@@ -1091,6 +1091,12 @@ model BotFile {
   url       String?   @db.VarChar(2048)
   // One line about it, for the bot's notes and for search
   line      String?   @db.VarChar(300)
+  // For a file a bot made: the tool it used and what it asked that tool for, so it can make one like it again
+  madeWith  String?   @map("made_with") @db.VarChar(100)
+  madePrompt String?  @map("made_prompt")
+  // How long a song, voice note or video is, and how many pages a document has, when known
+  lengthSeconds Int?  @map("length_seconds")
+  pages     Int?
   // The chat it came in: nearby | dm, and the id the bot server uses for it
   chatKind  String    @map("chat_kind") @db.VarChar(20)
   chatRef   String    @map("chat_ref") @db.VarChar(255)
