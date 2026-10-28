@@ -33,6 +33,7 @@ CREATE TABLE "bot_file_parts" (
     "number" INTEGER NOT NULL,
     "start" INTEGER NOT NULL,
     "text" TEXT NOT NULL,
+    "words" tsvector GENERATED ALWAYS AS (to_tsvector('simple'::regconfig, text)) STORED,
 
     CONSTRAINT "bot_file_parts_pkey" PRIMARY KEY ("bot_file_id","number")
 );
@@ -74,7 +75,8 @@ ALTER TABLE "bot_file_counters" ADD CONSTRAINT "bot_file_counters_bot_id_fkey" F
 
 
 -- Search by words (game #1508), with Postgres's own word index in 'simple' mode: no extension, and words in any language
--- (Arabic, or a name like "yazoghal") are kept as they are. Prisma's schema cannot name an index on an expression, so it
--- lives only here. Queries must use the same expression to use it.
-CREATE INDEX "bot_file_parts_words_idx" ON "bot_file_parts" USING GIN (to_tsvector('simple', "text"));
+-- (Arabic, or a name like "yazoghal") are kept as they are. A part's words are worked out once, when it is saved, so a
+-- search never reads the text again. The index on a file's name and line is on an expression, which Prisma's schema
+-- cannot name, so it lives only here; queries must use the same expression to use it.
+CREATE INDEX "bot_file_parts_words_idx" ON "bot_file_parts" USING GIN ("words");
 CREATE INDEX "bot_files_words_idx" ON "bot_files" USING GIN (to_tsvector('simple', "name" || ' ' || coalesce("line", '')));

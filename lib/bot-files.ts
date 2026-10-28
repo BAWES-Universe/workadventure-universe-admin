@@ -1,6 +1,6 @@
 import { prisma } from '@/lib/db';
 import { checkBotAccess } from '@/lib/bot-access';
-import { loadBotPrivacy } from '@/lib/bot-privacy';
+import { loadBotPrivacy, takeForgets } from '@/lib/bot-privacy';
 import { findUserByIdentifier } from '@/lib/user-identifier';
 import { GUEST_KEEP_MS, cleanLine, clipText, type ChatKind } from '@/lib/artifacts';
 
@@ -113,6 +113,18 @@ async function passBotGate(call: BotCall): Promise<{ hidden: boolean }> {
   const privacy = await loadBotPrivacy(call.botId);
   return { hidden: privacy?.hidden === true };
 }
+
+/**
+ * Files are added after the reply, so a Forget pressed while a reply runs would see its file written back a moment
+ * later. While a Forget names this person (or everyone) and the bot server has not yet reported it dropped them, as for
+ * the memory save (#495), nothing is kept for them: the bot server hears 409 `forgotten` and lets it go quietly.
+ */
+async function isForgotten(botId: string, who: Who): Promise<boolean> {
+  const forgetting = await takeForgets(botId);
+  return forgetting.everyone || (who.personRef !== null && forgetting.userUuids.has(who.personRef));
+}
+
+const forgotten = () => new BotFileError('forgotten', 409, 'The bot was asked to forget this person.');
 
 export function shortIdOf(number: number): string {
   return `f${number}`;
@@ -251,6 +263,7 @@ export async function addFile(input: AddInput, ctx: Context = defaultContext()):
   const store = checkStore(input.store);
   const { hidden } = await passBotGate(input);
   const who = await resolvePerson(input.person);
+  if (await isForgotten(input.botId, who)) throw forgotten();
 
   const counter = await prisma.botFileCounter.upsert({
     where: { botId: input.botId },
@@ -278,6 +291,11 @@ export async function addFile(input: AddInput, ctx: Context = defaultContext()):
       createdAt: ctx.now,
     },
   });
+  // A Forget pressed between the check and the write: take the file out again
+  if (await isForgotten(input.botId, who)) {
+    await prisma.botFile.deleteMany({ where: { id: row.id } });
+    throw forgotten();
+  }
   pruneSometimes(ctx);
   return { file: viewOf(row, who, input.chat), hidden };
 }
@@ -321,17 +339,25 @@ export async function keepFileText(input: KeepTextInput, ctx: Context = defaultC
   const { hidden } = await passBotGate(input);
   const who = await resolvePerson(input.person);
   const row = await loadUsable(input, who, ctx);
+  if (await isForgotten(input.botId, who)) throw forgotten();
   // The null character can't be kept as text in Postgres
   const text = hasText ? clipText((input.text as string).replace(/\u0000/g, ''), limitsOf(ctx).text) : '';
   const parts = splitText(text);
-  const [, , updated] = await prisma.$transaction([
-    prisma.botFilePart.deleteMany({ where: { botFileId: row.id } }),
-    prisma.botFilePart.createMany({ data: parts.map((part) => ({ botFileId: row.id, ...part })) }),
-    prisma.botFile.update({
-      where: { id: row.id },
-      data: { textState: hasText ? (text.length > 0 ? 'kept' : 'none') : 'failed', textChars: text.length },
-    }),
-  ]);
+  let updated: FileRow;
+  try {
+    [, , updated] = await prisma.$transaction([
+      prisma.botFilePart.deleteMany({ where: { botFileId: row.id } }),
+      prisma.botFilePart.createMany({ data: parts.map((part) => ({ botFileId: row.id, ...part })) }),
+      prisma.botFile.update({
+        where: { id: row.id },
+        data: { textState: hasText ? (text.length > 0 ? 'kept' : 'none') : 'failed', textChars: text.length },
+      }),
+    ]);
+  } catch (error) {
+    // Forgotten or gone in the meantime: the same answer as a file that is not there
+    if (!(await prisma.botFile.findUnique({ where: { botId_number: { botId: row.botId, number: row.number } } }))) throw notFound();
+    throw error;
+  }
   return { file: viewOf(updated, who, input.chat), hidden };
 }
 

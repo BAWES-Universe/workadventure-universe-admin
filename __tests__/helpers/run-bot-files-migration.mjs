@@ -71,7 +71,7 @@ const counted = [await count('bot1'), await count('bot1'), await count('bot2'), 
 
 // The word index: Postgres's own, in 'simple' mode, keeps a made-up name and Arabic words as they are
 const search = async (words) =>
-  (await db.query(`SELECT DISTINCT bot_file_id FROM bot_file_parts WHERE to_tsvector('simple', text) @@ plainto_tsquery('simple', $1) ORDER BY bot_file_id`, [words])).rows.map((row) => row.bot_file_id);
+  (await db.query(`SELECT DISTINCT bot_file_id FROM bot_file_parts WHERE words @@ plainto_tsquery('simple', $1) ORDER BY bot_file_id`, [words])).rows.map((row) => row.bot_file_id);
 const words = {
   name: await search('yazoghal'),
   arabic: await search('بالجميع'),
@@ -80,6 +80,7 @@ const words = {
   byLine: (await db.query(`SELECT id FROM bot_files WHERE to_tsvector('simple', name || ' ' || coalesce(line, '')) @@ plainto_tsquery('simple', 'yazoghal')`)).rows.map((row) => row.id),
 };
 const indexes = (await db.query(`SELECT indexname, indexdef FROM pg_indexes WHERE indexname IN ('bot_file_parts_words_idx', 'bot_files_words_idx') ORDER BY indexname`)).rows;
+const wordsOfAPart = (await db.query(`SELECT words::text AS words FROM bot_file_parts WHERE bot_file_id = 'f2'`)).rows[0].words;
 const extensions = (await db.query(`SELECT extname FROM pg_extension ORDER BY extname`)).rows.map((row) => row.extname);
 
 // A bot that goes takes its files and their text; a person who leaves takes theirs; a guest's stays until its day
@@ -92,4 +93,4 @@ const afterOwnerLeft = {
   parts: (await db.query('SELECT bot_file_id FROM bot_file_parts ORDER BY bot_file_id')).rows.map((row) => row.bot_file_id),
 };
 
-console.log(JSON.stringify({ before, after, defaults, duplicateNumber, otherBotSameNumber, orphanFile, orphanPart, counted, words, indexes, extensions, afterBotDeleted, counterAfterBotDeleted, afterOwnerLeft }));
+console.log(JSON.stringify({ before, after, defaults, duplicateNumber, otherBotSameNumber, orphanFile, orphanPart, counted, words, indexes, wordsOfAPart, extensions, afterBotDeleted, counterAfterBotDeleted, afterOwnerLeft }));

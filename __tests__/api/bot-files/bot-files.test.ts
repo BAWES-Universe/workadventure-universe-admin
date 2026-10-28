@@ -4,13 +4,13 @@ import { POST as add } from '@/app/api/bot-files/route';
 import { POST as get } from '@/app/api/bot-files/get/route';
 import { POST as keepText } from '@/app/api/bot-files/text/route';
 import { checkBotAccess } from '@/lib/bot-access';
-import { loadBotPrivacy } from '@/lib/bot-privacy';
+import { loadBotPrivacy, takeForgets } from '@/lib/bot-privacy';
 import { TEXT_PART_CHARS, addFile, forgetFilesWhere, getFile, pruneGoneFiles, resetFilePruneClock, splitText } from '@/lib/bot-files';
 import { addUser, db, fakePrisma } from '../../helpers/bot-files-db';
 
 jest.mock('@/lib/db', () => ({ prisma: jest.requireActual('../../helpers/bot-files-db').fakePrisma }));
 jest.mock('@/lib/bot-access', () => ({ checkBotAccess: jest.fn() }));
-jest.mock('@/lib/bot-privacy', () => ({ loadBotPrivacy: jest.fn() }));
+jest.mock('@/lib/bot-privacy', () => ({ loadBotPrivacy: jest.fn(), takeForgets: jest.fn() }));
 jest.mock('@sentry/nextjs', () => ({ captureException: jest.fn() }));
 
 const BOT_TOKEN = 'test-bot-token';
@@ -59,6 +59,14 @@ async function addSong(who: object = person('owner'), chat: object = BUBBLE, ext
   return res.body.file.ref as string;
 }
 
+/** The Forgets the bot server has not yet reported it dropped (lib/bot-privacy.ts takeForgets). */
+function forgetting(options: { everyone?: boolean; uuids?: string[]; afterCalls?: number } = {}) {
+  const answer = { everyone: options.everyone ?? false, userUuids: new Set(options.uuids ?? []), rows: [] };
+  const none = { everyone: false, userUuids: new Set<string>(), rows: [] };
+  let calls = 0;
+  (takeForgets as jest.Mock).mockReset().mockImplementation(async () => (calls++ >= (options.afterCalls ?? 0) ? answer : none));
+}
+
 const open = (ref: string, who: object, chat: object, botId = 'bot1') => call(get, { botId, person: who, chat, ref });
 
 describe('files in bot chats (game #1508)', () => {
@@ -78,6 +86,7 @@ describe('files in bot chats (game #1508)', () => {
     addUser('friend');
     (checkBotAccess as jest.Mock).mockReset().mockResolvedValue({ allowed: true });
     (loadBotPrivacy as jest.Mock).mockReset().mockResolvedValue({ hidden: false });
+    forgetting();
     (Sentry.captureException as jest.Mock).mockReset();
   });
 
@@ -331,6 +340,49 @@ describe('files in bot chats (game #1508)', () => {
   });
 
   describe('forget', () => {
+    it('keeps nothing for a person while a Forget for them is still going, and still adds for anyone else', async () => {
+      forgetting({ uuids: ['uuid-owner'] });
+      const res = await call(add, song(person('owner')));
+      expect(res.status).toBe(409);
+      expect(res.body.error).toBe('forgotten');
+      expect(db.files).toHaveLength(0);
+      expect((await call(add, song(person('friend')))).status).toBe(200);
+      forgetting({ everyone: true });
+      expect((await call(add, song(person('friend')))).status).toBe(409);
+      expect((await call(add, song(guest))).status).toBe(409);
+      expect(db.files).toHaveLength(1);
+    });
+
+    it('takes a file out again when Forget was pressed while it was being written', async () => {
+      // The first check passes; the Forget lands before the second
+      forgetting({ uuids: ['uuid-owner'], afterCalls: 1 });
+      const res = await call(add, song(person('owner')));
+      expect(res.status).toBe(409);
+      expect(db.files).toHaveLength(0);
+    });
+
+    it('keeps no text for a person being forgotten', async () => {
+      const ref = await addSong(person('owner'), DM);
+      forgetting({ uuids: ['uuid-owner'] });
+      const res = await call(keepText, { botId: 'bot1', person: person('owner'), chat: DM, ref, text: 'kept words' });
+      expect(res.status).toBe(409);
+      expect(db.parts).toHaveLength(0);
+    });
+
+    it('answers "not found" when the file went while its text was being kept', async () => {
+      const ref = await addSong(person('owner'), DM);
+      const createMany = fakePrisma.botFilePart.createMany;
+      fakePrisma.botFilePart.createMany = async () => {
+        db.files.length = 0;
+        throw new Error('foreign key');
+      };
+      try {
+        expect((await call(keepText, { botId: 'bot1', person: person('owner'), chat: DM, ref, text: 'kept words' })).status).toBe(404);
+      } finally {
+        fakePrisma.botFilePart.createMany = createMany;
+      }
+    });
+
     it('one person: by the id the bot server named them by and by their account, never the whole bot', () => {
       expect(forgetFilesWhere('bot1', { userUuid: 'uuid-owner', userId: 'owner' })).toEqual({
         botId: 'bot1',

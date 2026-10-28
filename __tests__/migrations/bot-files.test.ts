@@ -38,7 +38,10 @@ describe('bot files migration', () => {
   it('finds words with Postgres\'s own index, a made-up name and Arabic as they are, with no extension added', () => {
     expect(result.words).toEqual({ name: ['f1'], arabic: ['f1'], twoWords: ['f1'], none: [], byLine: ['f1'] });
     expect(result.indexes.map((index: { indexname: string }) => index.indexname)).toEqual(['bot_file_parts_words_idx', 'bot_files_words_idx']);
-    for (const index of result.indexes) expect(index.indexdef).toMatch(/USING gin \(to_tsvector\('simple'::regconfig/);
+    expect(result.indexes[0].indexdef).toMatch(/USING gin \(words\)/);
+    expect(result.indexes[1].indexdef).toMatch(/USING gin \(to_tsvector\('simple'::regconfig/);
+    // A part's words are worked out by Postgres when it is saved, so a search never reads the text again
+    expect(result.wordsOfAPart).toBe("'about':2 'here':4 'nothing':1 'songs':3");
     expect(result.extensions).toEqual(['plpgsql']);
   });
 
