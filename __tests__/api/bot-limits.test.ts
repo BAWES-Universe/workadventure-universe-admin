@@ -185,6 +185,13 @@ describe('PATCH /api/me/ai-keys/:id { limits }', () => {
     expect((await (await save('key-1', { limits: { read: 4000 } })).json()).limits).toMatchObject({ read: 4000, part: 4000 });
   });
 
+  it('saves nothing else either when the limits are turned down with a new name or if-down', async () => {
+    provider.findFirst.mockResolvedValue({ replyLimits: { read: 10000 } });
+    const response = await save('key-1', { name: 'New name', ifDown: 'stop', limits: { part: 20000 } });
+    expect(response.status).toBe(400);
+    expect(provider.updateMany).not.toHaveBeenCalled();
+  });
+
   it('turns down a value that can’t be saved', async () => {
     expect((await save('key-1', { limits: { steps: -1 } })).status).toBe(400);
     expect((await save('key-1', { limits: { colour: 1 } })).status).toBe(400);
