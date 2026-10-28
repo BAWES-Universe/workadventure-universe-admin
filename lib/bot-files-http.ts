@@ -3,7 +3,9 @@ import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
 import { validateServiceToken } from '@/lib/service-tokens';
 import { CHAT_KINDS } from '@/lib/artifacts';
-import { BotFileError, FILE_KINDS, FILE_SOURCES, MAX_FILE_NAME_LENGTH, TEXT_PIECE_CHARS } from '@/lib/bot-files';
+import { BotFileError, FILE_KINDS, FILE_SOURCES, MAX_FILE_NAME_LENGTH, TEXT_PIECE_CHARS, type Context } from '@/lib/bot-files';
+import { getServerLimits } from '@/lib/bot-limits';
+import { LIMIT_RANGES } from '@/lib/bot-limit-values';
 
 /**
  * The routes of files in bot chats (game #1508) are called only by the bot server (BOT_SERVICE_TOKEN, or the admin token
@@ -47,16 +49,18 @@ async function readBody(request: NextRequest): Promise<unknown> {
 }
 
 /** Wraps one route: the bot server's token, the JSON body, and the answer for each way it can end. */
-export function botFileRoute<B extends z.ZodType>(name: string, bodySchema: B, handler: (body: z.infer<B>) => Promise<unknown>) {
+export function botFileRoute<B extends z.ZodType>(name: string, bodySchema: B, handler: (body: z.infer<B>, ctx: Context) => Promise<unknown>) {
   return async (request: NextRequest) => {
     try {
       if (!validateServiceToken(request) && !hasAdminToken(request)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      // The super admin's "Files in chats", read once for the call
+      const ctx: Context = { now: new Date(), limits: (await getServerLimits()).files };
       const parsed = bodySchema.safeParse(await readBody(request));
       if (!parsed.success) {
         // Where the body is wrong, never what it held
         return NextResponse.json({ error: 'Invalid request data', details: parsed.error.issues.map((issue) => ({ path: issue.path, message: issue.message })) }, { status: 400 });
       }
-      const answer = await handler(parsed.data);
+      const answer = await handler(parsed.data, ctx);
       return NextResponse.json(answer, { headers: { 'Cache-Control': 'no-store' } });
     } catch (error) {
       if (error instanceof BotFileError) return NextResponse.json({ error: error.code, message: error.message }, { status: error.status });
@@ -132,7 +136,7 @@ export const findSchema = z
     until: day,
     page: z.number().int().min(1).max(100_000).nullish(),
     // The "Files found in one search" setting's range
-    limit: z.number().int().min(1).max(100),
+    limit: z.number().int().min(LIMIT_RANGES.reply.results.min).max(LIMIT_RANGES.reply.results.max),
   })
   .strict();
 
@@ -141,7 +145,7 @@ export const readSchema = z
     ...botCall,
     ref: shortId,
     at: z.number().int().min(0).max(2147483647).nullish(),
-    // The "Reads from a kept file" setting's range
-    chars: z.number().int().min(1).max(5_000_000),
+    // The "Reads from an earlier file" setting's range
+    chars: z.number().int().min(1).max(LIMIT_RANGES.reply.part.max),
   })
   .strict();

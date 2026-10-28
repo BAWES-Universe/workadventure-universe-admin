@@ -11,4 +11,4 @@ export const runtime = 'nodejs';
  * Auth: BOT_SERVICE_TOKEN (the admin token also works). Body: { botId, person, chat, ref, at?, chars }
  * Response: { file, text, at, end, next, hidden }
  */
-export const POST = botFileRoute('POST /api/bot-files/read', readSchema, (body) => readFileText(body));
+export const POST = botFileRoute('POST /api/bot-files/read', readSchema, (body, ctx) => readFileText(body, ctx));

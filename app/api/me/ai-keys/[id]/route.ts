@@ -7,7 +7,7 @@ import { clearDownNotice, isIfDown } from '@/lib/ai-key-health';
 import { allowKeyAttempt } from '@/lib/ai-key-models';
 import { editSavedKey } from '@/lib/ai-key-edit';
 import { forgetKeyModels } from '@/lib/ai-key-model-list';
-import { checkReplyLimits, readReplyLimits } from '@/lib/bot-limit-values';
+import { checkReplyLimits, readReplyLimits, replyLimitsProblem } from '@/lib/bot-limit-values';
 import type { Prisma } from '@prisma/client';
 
 export const runtime = 'nodejs';
@@ -58,6 +58,18 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
   const limits = input.limits === undefined ? null : checkReplyLimits(input.limits);
   if (limits && !limits.ok) return respond(request, { error: limits.error }, 400);
   try {
+    // Reply limits are checked against what is saved before anything is written, so a turned-down change saves nothing
+    let nextLimits: Record<string, unknown> | null = null;
+    if (limits?.ok) {
+      const key = await prisma.botsAiProvider.findFirst({ where: { providerId: id, ownerId: user.id }, select: { replyLimits: true } });
+      if (!key) return respond(request, { error: 'Key not found' }, 404);
+      const saved = key.replyLimits && typeof key.replyLimits === 'object' && !Array.isArray(key.replyLimits) ? (key.replyLimits as Record<string, unknown>) : {};
+      // Only what the owner changed is kept, so a value they never touched follows the recommended one
+      nextLimits = { ...saved, ...limits.value };
+      // Turned down with the reason, never cut quietly to fit
+      const problem = replyLimitsProblem(readReplyLimits(nextLimits), limits.value);
+      if (problem) return respond(request, { error: problem }, 400);
+    }
     if (changesWhere) {
       if (!allowKeyAttempt(user.id)) return respond(request, { error: 'Too many tries. Wait a minute and try again.' }, 429);
       const edited = await editSavedKey(user.id, id, input);
@@ -71,14 +83,9 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       if (result.count === 0) return respond(request, { error: 'Key not found' }, 404);
     }
     let savedLimits = null;
-    if (limits?.ok) {
-      const key = await prisma.botsAiProvider.findFirst({ where: { providerId: id, ownerId: user.id }, select: { replyLimits: true } });
-      if (!key) return respond(request, { error: 'Key not found' }, 404);
-      const saved = key.replyLimits && typeof key.replyLimits === 'object' && !Array.isArray(key.replyLimits) ? (key.replyLimits as Record<string, unknown>) : {};
-      // Only what the owner changed is kept, so a value they never touched follows the recommended one
-      const next = { ...saved, ...limits.value };
-      await prisma.botsAiProvider.updateMany({ where: { providerId: id, ownerId: user.id }, data: { replyLimits: next as Prisma.InputJsonValue } });
-      savedLimits = readReplyLimits(next);
+    if (nextLimits) {
+      await prisma.botsAiProvider.updateMany({ where: { providerId: id, ownerId: user.id }, data: { replyLimits: nextLimits as Prisma.InputJsonValue } });
+      savedLimits = readReplyLimits(nextLimits);
     }
     return respond(request, { status: 'saved', ...(isIfDown(input.ifDown) ? { ifDown: input.ifDown } : {}), ...(name !== undefined ? { name } : {}), ...(savedLimits ? { limits: savedLimits } : {}) });
   } catch (error) {

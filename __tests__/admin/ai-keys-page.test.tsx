@@ -29,7 +29,7 @@ const lmStudio = {
   downSince: null,
   downReason: null,
   ifDown: 'universe-ai',
-  limits: { reply: 32000, steps: 30, continue: 2, memory: 20, read: 50000, wait: 60 },
+  limits: { reply: 32000, steps: 30, continue: 2, memory: 20, read: 50000, wait: 60, recentFiles: 5, results: 10, part: 8000, room: 80000 },
   createdAt: '2026-10-19T00:00:00.000Z',
 };
 const deepseek = {
@@ -47,7 +47,7 @@ const deepseek = {
   downSince: null,
   downReason: null,
   ifDown: 'universe-ai',
-  limits: { reply: 32000, steps: 30, continue: 2, memory: 20, read: 50000, wait: 60 },
+  limits: { reply: 32000, steps: 30, continue: 2, memory: 20, read: 50000, wait: 60, recentFiles: 5, results: 10, part: 8000, room: 80000 },
   createdAt: '2026-10-19T00:00:00.000Z',
 };
 
@@ -179,7 +179,11 @@ describe('Limits (#666)', () => {
     fireEvent.click(await screen.findByTestId('ai-key-limits-change'));
     fireEvent.click(await screen.findByTestId('limit-steps'));
     fireEvent.click(await screen.findByRole('radio', { name: /Other/ }));
+    // Outside what can be saved, the sheet says so and nothing is sent
     fireEvent.change(screen.getByLabelText('Steps in one reply, in steps'), { target: { value: '9999' } });
+    expect(screen.getByRole('alert').textContent).toBe('Between 1 and 500 steps.');
+    expect((screen.getByRole('button', { name: 'Save' }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText('Steps in one reply, in steps'), { target: { value: '400' } });
     fetchMock.mockImplementation(() => Promise.resolve({ ok: false, status: 400, json: () => Promise.resolve({ error: 'limits.steps must be a whole number from 1 to 500' }) }));
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ description: 'limits.steps must be a whole number from 1 to 500', variant: 'error' })));

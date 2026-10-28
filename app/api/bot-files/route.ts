@@ -12,4 +12,4 @@ export const runtime = 'nodejs';
  * sizeBytes?, store: { bucket, fileId } | { url }, line? }
  * Response: { file, hidden }
  */
-export const POST = botFileRoute('POST /api/bot-files', addSchema, (body) => addFile(body));
+export const POST = botFileRoute('POST /api/bot-files', addSchema, (body, ctx) => addFile(body, ctx));

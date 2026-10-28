@@ -1,6 +1,7 @@
 import { prisma } from '@/lib/db';
 import { clipText } from '@/lib/artifacts';
 import {
+  DAY_MS,
   FILE_KINDS,
   TEXT_PART_CHARS,
   defaultContext,
@@ -198,7 +199,7 @@ export async function findFiles(input: FindInput, ctx: SearchContext = defaultCo
         chatKind: input.chat.kind,
         chatRef: input.chat.ref,
         now: ctx.now,
-        findableSince: findable > 0 ? new Date(ctx.now.getTime() - findable * 24 * 60 * 60 * 1000) : null,
+        findableSince: findable > 0 ? new Date(ctx.now.getTime() - findable * DAY_MS) : null,
       },
       { query, every: mode === 'all' && words.length > 1 ? words : null, kinds: fileKinds, source: input.source ?? null, since: dateOf(input.since), until: dateOf(input.until) },
       { offset: 0, limit: offset + limit },
