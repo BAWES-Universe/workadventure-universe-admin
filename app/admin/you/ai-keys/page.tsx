@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { Bot, Globe, KeyRound, Plus, RefreshCw, Trash2, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { LimitGroup, keyLimitsLine, replyLimits, useSaveKeyLimit } from '../../components/limits';
+import { LimitGroup, keyLimitsLine, modelCapOf, replyLimits, useSaveKeyLimit } from '../../components/limits';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { useToast } from '@/components/ui/toast';
@@ -19,6 +19,7 @@ import { ModelPicker } from '../../components/ds/model-picker';
 import { kindInfo } from '@/lib/ai-key-kinds';
 import { PickCard, Radio, Segmented } from '@/components/ui/choice';
 import { AiKeyFailure, aiKeyError, aiKeyFailureText, useAiKeys } from '../../hooks/use-ai-keys';
+import { RenameButton, RenameKey } from './rename-key';
 
 /** 880000 -> "880k", 1200000 -> "1.2M": a token count that fits a phone. */
 function compact(value: number): string {
@@ -142,6 +143,7 @@ export default function AiKeysPage() {
   const [pulling, setPulling] = useState<{ key: AiKeySummary; lent: Lent } | null>(null);
   const [checking, setChecking] = useState<string | null>(null);
   const [saving, setSaving] = useState<string | null>(null);
+  const [renaming, setRenaming] = useState<string | null>(null);
 
   async function revoke(key: AiKeySummary) {
     setBusy(true);
@@ -251,9 +253,25 @@ export default function AiKeysPage() {
         >
           <header className="grid gap-1">
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-              <ProviderLogo info={key.kind ? kindInfo(key.kind) : undefined} />
-              <h2 className="orbit-display text-lg font-bold [overflow-wrap:anywhere]">{key.name}</h2>
-              <StatusPill down={key.status === 'down'} />
+              {renaming === key.id ? (
+                <RenameKey
+                  keyItem={key}
+                  onCancel={() => setRenaming(null)}
+                  onRenamed={(name) => {
+                    update((list) => list.map((entry) => (entry.id === key.id ? { ...entry, name } : entry)));
+                    // Another key's editor may have opened while this one saved: that one stays open
+                    setRenaming((open) => (open === key.id ? null : open));
+                    addToast({ description: `Renamed to ${name}`, variant: 'success', duration: 2500 });
+                  }}
+                />
+              ) : (
+                <>
+                  <ProviderLogo info={key.kind ? kindInfo(key.kind) : undefined} />
+                  <h2 className="orbit-display text-lg font-bold [overflow-wrap:anywhere]">{key.name}</h2>
+                  <RenameButton name={key.name} onClick={() => setRenaming(key.id)} />
+                  <StatusPill down={key.status === 'down'} />
+                </>
+              )}
             </div>
             <p className="text-sm text-muted-foreground [overflow-wrap:anywhere]">{describe(key)}</p>
           </header>
@@ -367,7 +385,11 @@ export default function AiKeysPage() {
             {key && (
               <LimitGroup
                 title="Replies"
-                limits={replyLimits(key.limits)}
+                limits={replyLimits(key.limits).map((row) => {
+                  // A bot whose model stops sooner gets what its model can write (#673): said where the longest reply is set
+                  const cap = row.id === 'reply' ? modelCapOf(key.lentTo.flatMap((lend) => lend.bots), row.value) : null;
+                  return cap ? { ...row, cap } : row;
+                })}
                 onChange={async (id, value) => {
                   const saved = await saveKeyLimit(key.id, id, value);
                   if (saved) update((all) => all.map((entry) => (entry.id === key.id ? { ...entry, limits: saved } : entry)));

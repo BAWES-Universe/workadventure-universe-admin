@@ -88,7 +88,7 @@ export function sizeLabel(bytes: number): string {
   return mb >= 1 ? `${Number(mb.toFixed(1)).toLocaleString('en')} MB` : `${Math.round(bytes / 1024).toLocaleString('en')} KB`;
 }
 
-function tooLarge(maxBytes: number): ArtifactError {
+export function tooLarge(maxBytes: number): ArtifactError {
   return new ArtifactError('too_large', 413, `An artifact can hold up to ${sizeLabel(maxBytes)}.`);
 }
 

@@ -69,7 +69,7 @@ describe('GET /api/me/bot-ai', () => {
       universeAi: { available: true, model: 'deepseek-v4-flash', supportsVision: null, limits: { reply: 32000, steps: 30 } },
       maker: { id: 'mishari', name: 'Mishari' },
       viewerIsMaker: true,
-      keys: [{ id: 'key-1', name: 'My DeepSeek', kind: 'deepseek', kindLabel: 'DeepSeek', logo: 'deepseek', plainIcon: null, group: 'hosted', universeName: 'Sandbox Universe', status: 'working', ifDown: 'universe-ai', model: 'deepseek-v4-flash', supportsVision: false, visionModels: ['deepseek-v4-flash-vision-exp'], models: DEEPSEEK_MODELS, modelsProblem: null, limited: false, limits: { reply: 32000, steps: 30 } }],
+      keys: [{ id: 'key-1', name: 'My DeepSeek', kind: 'deepseek', kindLabel: 'DeepSeek', logo: 'deepseek', plainIcon: null, group: 'hosted', universeName: 'Sandbox Universe', status: 'working', ifDown: 'universe-ai', model: 'deepseek-v4-flash', output: null, supportsVision: false, visionModels: ['deepseek-v4-flash-vision-exp'], models: DEEPSEEK_MODELS, modelsProblem: null, limited: false, limits: { reply: 32000, steps: 30 } }],
       currentKey: null,
       vision: { saved: null, savedKey: null },
       providers: null,
@@ -115,12 +115,20 @@ describe('GET /api/me/bot-ai', () => {
     expect(await iconOf({})).toEqual({ logo: null, plainIcon: 'chip' });
   });
 
+  it('says the longest reply the bot’s model can write, when its provider said (#673)', async () => {
+    db.bot.findUnique.mockResolvedValue({ id: 'guide', roomId: 'room-1', aiProviderRef: 'key-9', aiModel: 'openai/gpt-4o-mini', createdBy: { id: 'mishari', name: 'Mishari' } });
+    db.botsAiProvider.findUnique.mockResolvedValue({ providerId: 'key-9', name: 'My OpenRouter', ownerId: 'mishari', settings: { kind: 'openrouter', modelFacts: { 'openai/gpt-4o-mini': { tools: true, output: 16384 } } }, model: 'deepseek/deepseek-v4-flash', supportsVision: false, lends: [] });
+    db.botsAiProvider.findMany.mockResolvedValueOnce([]);
+    const body = await (await get('botId=guide')).json();
+    expect(body.currentKey).toMatchObject({ model: 'openai/gpt-4o-mini', output: 16384 });
+  });
+
   it('says the key is the viewer’s when it is, for the maker’s own bot', async () => {
     db.bot.findUnique.mockResolvedValue({ id: 'guide', roomId: 'room-1', aiProviderRef: 'key-1', createdBy: { id: 'mishari', name: 'Mishari' } });
     db.botsAiProvider.findUnique.mockResolvedValue({ providerId: 'key-1', name: 'My DeepSeek', ownerId: 'mishari', settings: { kind: 'deepseek' }, model: 'deepseek-v4-flash', supportsVision: false, lends: [] });
     db.botsAiProvider.findMany.mockResolvedValueOnce([myKey]);
     const body = await (await get('botId=guide')).json();
-    expect(body.currentKey).toEqual({ id: 'key-1', name: 'My DeepSeek', ownerName: 'Mishari', mine: true, status: 'working', ifDown: 'universe-ai', logo: 'deepseek', plainIcon: null, group: 'hosted', model: 'deepseek-v4-flash', supportsVision: false, visionModels: ['deepseek-v4-flash-vision-exp'], limits: { reply: 32000, steps: 30 } });
+    expect(body.currentKey).toEqual({ id: 'key-1', name: 'My DeepSeek', ownerName: 'Mishari', mine: true, status: 'working', ifDown: 'universe-ai', logo: 'deepseek', plainIcon: null, group: 'hosted', model: 'deepseek-v4-flash', output: null, supportsVision: false, visionModels: ['deepseek-v4-flash-vision-exp'], limits: { reply: 32000, steps: 30 } });
     expect(body.viewerIsMaker).toBe(true);
   });
 
@@ -141,14 +149,14 @@ describe('GET /api/me/bot-ai', () => {
     expect(body.keys[0]).toMatchObject({ status: 'down', ifDown: 'universe-ai' });
   });
 
-  it('keeps the server’s providers to super admins, who may still pin a bot to one', async () => {
+  it('offers nobody the server’s providers, a super admin included: a bot runs on Universe AI or a lent key (game #1446)', async () => {
     (getSessionUser as jest.Mock).mockResolvedValue({ ...mishari, isSuperAdmin: true });
-    db.botsAiProvider.findMany
-      .mockResolvedValueOnce([]) // their keys
-      .mockResolvedValueOnce([{ providerId: 'deepseek-flash', name: 'DeepSeek V4 Flash', type: 'openai', model: 'deepseek-v4-flash', enabled: true }]);
+    db.botsAiProvider.findMany.mockResolvedValueOnce([]); // their keys
     const body = await (await get('roomId=11111111-1111-1111-1111-111111111111')).json();
-    expect(body.providers).toEqual([{ id: 'deepseek-flash', name: 'DeepSeek V4 Flash', type: 'openai', model: 'deepseek-v4-flash', enabled: true }]);
-    expect(db.botsAiProvider.findMany.mock.calls[1][0].where).toEqual({ ownerId: null });
+    expect(body.providers).toBeNull();
+    // Only their own keys are looked up, never the server's providers
+    expect(db.botsAiProvider.findMany).toHaveBeenCalledTimes(1);
+    expect(db.botsAiProvider.findMany.mock.calls[0][0].where).not.toEqual({ ownerId: null });
   });
 
   it('refuses someone who cannot manage bots in the room, and says Universe AI is unavailable when it is', async () => {

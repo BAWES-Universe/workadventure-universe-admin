@@ -13,7 +13,8 @@ import { keyVisionModels, readVisionPick, usableVisionKey, type AnotherProblem, 
  * choices are Universe AI, and the viewer's own keys lent to this bot's universe (only when the viewer made the bot).
  * Someone else's key is never offered; if the bot is on one, it is shown as it is and only Universe AI can replace it.
  * Each key says if it is Working or Down and what its bots do then, so the picker can say that Universe AI answers until it's back.
- * A super admin also gets the server's providers, to pin a bot to one as before.
+ * Nobody, super admins included, is offered the server's providers any more: a bot runs on Universe AI, which follows the
+ * Default, or on a lent key. A bot still pinned to a provider is shown as it is, and Universe AI can replace it.
  *
  * The page's Vision row (where the bot's images go) is worked out from the same facts, so each key and Universe AI say which
  * model they run and whether it sees images, and each key which models with Vision it could look at images with.
@@ -22,6 +23,7 @@ import { keyVisionModels, readVisionPick, usableVisionKey, type AnotherProblem, 
  * the provider says about each (Tools, Vision), and the bot's own pick comes back as `currentModel`.
  *
  * Since #666 Universe AI and each key also say their longest reply and steps, so the bot page can offer only lower ones.
+ * Since #673 each model also says the longest reply it can write, when its provider says, so the page can show where it stops.
  */
 
 /** A key's (or Universe AI's) longest reply in tokens and steps in one reply: a bot on it can lower them, never raise them. */
@@ -32,6 +34,9 @@ export interface KeyModelOption {
   id: string;
   tools?: boolean;
   vision?: boolean;
+  context?: number;
+  /** The longest reply it can write, in tokens (#673). */
+  output?: number;
 }
 
 export interface BotAiOptions {
@@ -44,13 +49,13 @@ export interface BotAiOptions {
   maker: { id: string; name: string | null } | null;
   viewerIsMaker: boolean;
   /** The viewer's own keys lent to this bot's universe; empty unless the viewer made the bot. */
-  keys: { id: string; name: string; kind: string | null; kindLabel: string; /** The provider's logo file in `public/ai-providers/` (without `.svg`), or what is drawn instead. */ logo: string | null; plainIcon: 'plug' | 'chip' | null; group: 'own-computer' | 'hosted' | null; universeName: string; status: 'working' | 'down'; ifDown: 'universe-ai' | 'stop'; model: string | null; supportsVision: boolean | null; visionModels: string[]; /** The models the lend here allows (null when the provider's list could not be loaded, with why). */ models: KeyModelOption[] | null; modelsProblem: string | null; /** The lend here allows only some models. */ limited: boolean; limits: BotLimitCeiling }[];
+  keys: { id: string; name: string; kind: string | null; kindLabel: string; /** The provider's logo file in `public/ai-providers/` (without `.svg`), or what is drawn instead. */ logo: string | null; plainIcon: 'plug' | 'chip' | null; group: 'own-computer' | 'hosted' | null; universeName: string; status: 'working' | 'down'; ifDown: 'universe-ai' | 'stop'; model: string | null; /** The longest reply its check model can write, when known (#673). */ output: number | null; supportsVision: boolean | null; visionModels: string[]; /** The models the lend here allows (null when the provider's list could not be loaded, with why). */ models: KeyModelOption[] | null; modelsProblem: string | null; /** The lend here allows only some models. */ limited: boolean; limits: BotLimitCeiling }[];
   /** The key the bot is on now, when it is a personal key: whose it is and what it is called. */
-  currentKey: { id: string; name: string; ownerName: string | null; mine: boolean; status: 'working' | 'down'; ifDown: 'universe-ai' | 'stop'; logo: string | null; plainIcon: 'plug' | 'chip' | null; group: 'own-computer' | 'hosted' | null; model: string | null; supportsVision: boolean | null; visionModels: string[]; limits: BotLimitCeiling } | null;
+  currentKey: { id: string; name: string; ownerName: string | null; mine: boolean; status: 'working' | 'down'; ifDown: 'universe-ai' | 'stop'; logo: string | null; plainIcon: 'plug' | 'chip' | null; group: 'own-computer' | 'hosted' | null; model: string | null; /** The longest reply the bot's model can write, when known (#673). */ output: number | null; supportsVision: boolean | null; visionModels: string[]; limits: BotLimitCeiling } | null;
   /** What the owner picked for the bot's images (null = nothing picked), and, for "Another model", the key picked and whether it can be used now. */
   vision: { saved: VisionPick | null; savedKey: { name: string; problem: AnotherProblem | null } | null };
-  /** Only for a super admin: the server's own providers, to pin a bot to one. */
-  providers: { id: string; name: string; type: string; model: string | null; enabled: boolean }[] | null;
+  /** Always null now. The field stays so a game build that still reads it shows no pin choice. */
+  providers: null;
 }
 
 export type BotAiOptionsResult = { ok: true; options: BotAiOptions } | { ok: false; status: 403 | 404; error: string };
@@ -90,7 +95,7 @@ export async function botAiOptions(input: {
   const maker = bot ? bot.createdBy : viewer;
   const viewerIsMaker = !!maker && maker.id === input.viewer.id;
 
-  const [universeAi, ownKeys, current, providers, serverLimits] = await Promise.all([
+  const [universeAi, ownKeys, current, serverLimits] = await Promise.all([
     resolveUniverseAiProvider(),
     viewerIsMaker
       ? prisma.botsAiProvider.findMany({
@@ -101,13 +106,6 @@ export async function botAiOptions(input: {
       : Promise.resolve([]),
     bot?.aiProviderRef && bot.aiProviderRef !== UNIVERSE_AI_REF
       ? prisma.botsAiProvider.findUnique({ where: { providerId: bot.aiProviderRef }, select: { providerId: true, name: true, ownerId: true, settings: true, model: true, supportsVision: true, downSince: true, ifDown: true, replyLimits: true, lends: { where: { universeId: universe.id }, select: { models: true } } } })
-      : Promise.resolve(null),
-    input.viewer.isSuperAdmin
-      ? prisma.botsAiProvider.findMany({
-          where: { ownerId: null },
-          orderBy: { name: 'asc' },
-          select: { providerId: true, name: true, type: true, model: true, enabled: true },
-        })
       : Promise.resolve(null),
     getServerLimits(),
   ]);
@@ -138,15 +136,15 @@ export async function botAiOptions(input: {
       keys: ownKeys.map((key, index) => {
         const info = kindInfo((key.settings as { kind?: unknown } | null)?.kind);
         const { lend, models, problem } = keyLists[index];
-        return { id: key.providerId, name: key.name, kind: info?.kind ?? null, kindLabel: info?.label ?? 'AI', logo: info?.logo ?? null, plainIcon: info?.logo ? null : info?.plainIcon ?? 'chip', group: info?.group ?? null, universeName: universe.name, status: key.downSince ? 'down' : 'working', ifDown: isIfDown(key.ifDown) ? key.ifDown : 'universe-ai', model: key.model, supportsVision: key.supportsVision, visionModels: keyVisionModels(key).filter((model) => !lend || lend.includes(model)), models, modelsProblem: problem, limited: !!lend, limits: ceilingOf(keyReplyLimits(key)) };
+        return { id: key.providerId, name: key.name, kind: info?.kind ?? null, kindLabel: info?.label ?? 'AI', logo: info?.logo ?? null, plainIcon: info?.logo ? null : info?.plainIcon ?? 'chip', group: info?.group ?? null, universeName: universe.name, status: key.downSince ? 'down' : 'working', ifDown: isIfDown(key.ifDown) ? key.ifDown : 'universe-ai', model: key.model, output: key.model ? modelFactsOf(key, key.model).output ?? null : null, supportsVision: key.supportsVision, visionModels: keyVisionModels(key).filter((model) => !lend || lend.includes(model)), models, modelsProblem: problem, limited: !!lend, limits: ceilingOf(keyReplyLimits(key)) };
       }),
       // The model the bot is served, and the key's own Vision models, as the server reads them when it picks one for images
       currentKey:
         current && current.ownerId
-          ? { id: current.providerId, name: current.name, ownerName: maker?.id === current.ownerId ? maker.name : null, mine: current.ownerId === input.viewer.id, status: current.downSince ? 'down' : 'working', ifDown: isIfDown(current.ifDown) ? current.ifDown : 'universe-ai', ...currentIcon(current.settings), group: kindInfo((current.settings as { kind?: unknown } | null)?.kind)?.group ?? null, model: currentModel ?? current.model, supportsVision: currentModel ? modelSupportsVision(current, currentModel) : current.supportsVision, visionModels: keyVisionModels(current).filter((model) => !currentLend || currentLend.includes(model)), limits: ceilingOf(keyReplyLimits(current)) }
+          ? { id: current.providerId, name: current.name, ownerName: maker?.id === current.ownerId ? maker.name : null, mine: current.ownerId === input.viewer.id, status: current.downSince ? 'down' : 'working', ifDown: isIfDown(current.ifDown) ? current.ifDown : 'universe-ai', ...currentIcon(current.settings), group: kindInfo((current.settings as { kind?: unknown } | null)?.kind)?.group ?? null, model: currentModel ?? current.model, output: (currentModel ?? current.model) ? modelFactsOf(current, (currentModel ?? current.model) as string).output ?? null : null, supportsVision: currentModel ? modelSupportsVision(current, currentModel) : current.supportsVision, visionModels: keyVisionModels(current).filter((model) => !currentLend || currentLend.includes(model)), limits: ceilingOf(keyReplyLimits(current)) }
           : null,
       vision: { saved, savedKey },
-      providers: providers ? providers.map((provider) => ({ id: provider.providerId, name: provider.name, type: provider.type, model: provider.model, enabled: provider.enabled })) : null,
+      providers: null,
     },
   };
 }

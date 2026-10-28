@@ -100,7 +100,7 @@ describe('GET /api/me/ai-keys', () => {
     const [key] = (await (await list()).json()).keys;
     expect(key.lentTo).toEqual([
       // A bot with no model of its own replies with the key's check model; a lend with a list says which models it allows (#575)
-      { universeId: 'bawes', universeName: 'BAWES Universe', ownedByYou: false, models: null, bots: [{ id: 'b1', name: 'Sam', replies: 1240, model: row.model }] },
+      { universeId: 'bawes', universeName: 'BAWES Universe', ownedByYou: false, models: null, bots: [{ id: 'b1', name: 'Sam', replies: 1240, model: row.model, output: null }] },
       { universeId: 'sandbox', universeName: 'Sandbox Universe', ownedByYou: true, models: ['deepseek-v4-pro'], bots: [] },
     ]);
     // Only this key's lends and bots are read

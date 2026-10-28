@@ -98,6 +98,7 @@ export function cleanFacts(fact: unknown): ModelFacts {
     ...(typeof fact.tools === 'boolean' ? { tools: fact.tools } : {}),
     ...(typeof fact.vision === 'boolean' ? { vision: fact.vision } : {}),
     ...(typeof fact.context === 'number' && Number.isFinite(fact.context) && fact.context > 0 ? { context: fact.context } : {}),
+    ...(typeof fact.output === 'number' && Number.isFinite(fact.output) && fact.output > 0 ? { output: fact.output } : {}),
   };
 }
 

@@ -11,6 +11,7 @@ const mockAddToast = jest.fn();
 jest.mock('@/components/ui/toast', () => ({ useToast: () => ({ addToast: mockAddToast }) }));
 
 import AiKeysPage from '@/app/admin/you/ai-keys/page';
+import { modelCapOf } from '@/app/admin/components/limits';
 
 const lmStudio = {
   id: 'key-1',
@@ -183,6 +184,77 @@ describe('Limits (#666)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(mockAddToast).toHaveBeenCalledWith(expect.objectContaining({ description: 'limits.steps must be a whole number from 1 to 500', variant: 'error' })));
     expect(screen.getByRole('button', { name: 'Save' })).toBeTruthy();
+  });
+});
+
+describe('A model that stops sooner (#673)', () => {
+  const capped = (bots: unknown[]) => ({ ...deepseek, lentTo: [{ universeId: 'bawes', universeName: 'BAWES Universe', ownedByYou: false, models: null, bots }] });
+
+  it('names the bot and where its model stops, on the row and in its choices', async () => {
+    answer([
+      capped([
+        { ...sam, model: 'openai/gpt-4o-mini', output: 16384 },
+        { id: 'b2', name: 'Tinyfish', replies: 3, model: 'deepseek/deepseek-v4-flash', output: null },
+        { id: 'b3', name: 'Big', replies: 0, model: 'x/big', output: 64000 },
+      ]),
+    ]);
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByTestId('ai-key-limits-change'));
+    const line = 'Sam runs on gpt-4o-mini, which stops at 16,384 tokens. Sam gets 16,384; your other bots get the full limit.';
+    expect((await screen.findByTestId('limit-reply-cap')).textContent).toBe(line);
+    expect(screen.queryByTestId('limit-steps-cap')).toBeNull();
+    fireEvent.click(screen.getByTestId('limit-reply'));
+    expect(await screen.findByRole('radio', { name: /32,000 tokens.*gpt-4o-mini stops at 16,384 \(Sam\)\./ })).toBeTruthy();
+    expect(screen.getByRole('radio', { name: /^16,000 tokens/ }).textContent).not.toContain('stops at');
+  });
+
+  it('still marks the choices above where a model stops when the longest reply set now is under it', async () => {
+    answer([{ ...capped([{ ...sam, model: 'openai/gpt-4o-mini', output: 16384 }]), limits: { ...deepseek.limits, reply: 8000 } }]);
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByTestId('ai-key-limits-change'));
+    fireEvent.click(await screen.findByTestId('limit-reply'));
+    expect(screen.queryByTestId('limit-reply-cap')).toBeNull();
+    expect(await screen.findByRole('radio', { name: /32,000 tokens.*gpt-4o-mini stops at 16,384 \(Sam\)\./ })).toBeTruthy();
+    expect(screen.getByRole('radio', { name: /64,000 tokens.*gpt-4o-mini stops at 16,384 \(Sam\)\./ })).toBeTruthy();
+    expect(screen.getByRole('radio', { name: /^16,000 tokens/ }).textContent).not.toContain('stops at');
+  });
+
+  it('says nothing when no model is known to stop sooner', async () => {
+    answer([capped([{ ...sam, model: 'deepseek-v4-flash', output: null }, { id: 'b2', name: 'Big', replies: 0, model: 'x/big', output: 64000 }])]);
+    render(<AiKeysPage />);
+    fireEvent.click(await screen.findByTestId('ai-key-limits-change'));
+    await screen.findByTestId('limit-reply');
+    expect(screen.queryByTestId('limit-reply-cap')).toBeNull();
+  });
+});
+
+describe('modelCapOf', () => {
+  it('groups bots by model, lowest first, and says when every bot is held back', () => {
+    const bots = [
+      { id: 'a', name: 'Ann', model: 'openai/gpt-4o-mini', output: 16384 },
+      { id: 'b', name: 'Bo', model: 'openai/gpt-4o-mini', output: 16384 },
+      { id: 'c', name: 'Cy', model: 'groq/llama', output: 8192 },
+    ];
+    expect(modelCapOf(bots, 32000)).toEqual({
+      at: 8192,
+      line: 'Cy runs on llama, which stops at 8,192 tokens. Ann and Bo run on gpt-4o-mini, which stops at 16,384 tokens. Each gets what its model allows.',
+      short: 'llama stops at 8,192 (Cy).',
+    });
+    // Under every model's limit: no line, but the choices above 8,192 still say where it stops
+    expect(modelCapOf(bots, 8000)).toEqual({ at: 8192, line: null, short: 'llama stops at 8,192 (Cy).' });
+    expect(modelCapOf([{ id: 'd', name: 'Dee', model: 'x/unlisted', output: null }], 32000)).toBeNull();
+  });
+
+  it('never promises the full limit to a bot whose model’s limit isn’t known', () => {
+    const bots = [
+      { id: 'a', name: 'Ann', model: 'openai/gpt-4o-mini', output: 16384 },
+      { id: 'b', name: 'Bo', model: 'x/unlisted', output: null },
+      { id: 'c', name: 'Cy', model: null, output: null },
+    ];
+    expect(modelCapOf(bots, 32000)?.line).toBe('Ann runs on gpt-4o-mini, which stops at 16,384 tokens. Ann gets 16,384.');
+    expect(modelCapOf([...bots, { id: 'd', name: 'Dee', model: 'x/big', output: 64000 }], 32000)?.line).toBe(
+      'Ann runs on gpt-4o-mini, which stops at 16,384 tokens. Ann gets 16,384; your other bots get the full limit.',
+    );
   });
 });
 

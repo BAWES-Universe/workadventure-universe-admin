@@ -2,7 +2,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
 import { validateServiceToken } from '@/lib/service-tokens';
-import { ARTIFACT_KINDS, ArtifactError, CHAT_KINDS, LARGEST_ARTIFACT_BYTES, type ArtifactKind } from '@/lib/artifacts';
+import { ARTIFACT_KINDS, ArtifactError, CHAT_KINDS, LARGEST_ARTIFACT_BYTES, tooLarge, type ArtifactKind } from '@/lib/artifacts';
+import { artifactBytes } from '@/lib/bot-limit-values';
+import { getServerLimits } from '@/lib/bot-limits';
 
 /**
  * The routes of live artifacts (game #1422, Orbit #622) are called by servers, never by a browser: the bot server
@@ -24,6 +26,39 @@ function authorised(request: NextRequest, caller: ArtifactCaller): boolean {
 
 type Params = Promise<Record<string, string>>;
 
+/**
+ * How many times the size of one version a request may carry (Orbit #669 review). A change can name the whole file as
+ * edits, old and new, with the JSON around it, so a real request stays well under it; a runaway one is turned down
+ * before it is read, with the same answer as a file over the size.
+ */
+const BODY_ROOM = 4;
+
+/** The JSON body, read only up to the room above; null when it is not JSON. */
+async function readBody(request: NextRequest): Promise<unknown> {
+  const maxBytes = artifactBytes((await getServerLimits()).artifacts);
+  const room = maxBytes * BODY_ROOM;
+  if (Number(request.headers.get('content-length')) > room) throw tooLarge(maxBytes);
+  if (!request.body) return null;
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let read = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    read += value.byteLength;
+    if (read > room) {
+      await reader.cancel();
+      throw tooLarge(maxBytes);
+    }
+    chunks.push(value);
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  } catch {
+    return null;
+  }
+}
+
 /** Wraps one artifact route: the caller's token, the JSON body, and the answer for each way it can end. */
 export function artifactRoute<B extends z.ZodType>(
   name: string,
@@ -34,7 +69,7 @@ export function artifactRoute<B extends z.ZodType>(
   return async (request: NextRequest, context?: { params: Params }) => {
     try {
       if (!authorised(request, caller)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-      const parsed = bodySchema.safeParse(await request.json().catch(() => null));
+      const parsed = bodySchema.safeParse(await readBody(request));
       if (!parsed.success) return NextResponse.json({ error: 'Invalid request data', details: parsed.error.issues.map((issue) => ({ path: issue.path, message: issue.message })) }, { status: 400 });
       const answer = await handler(parsed.data, context ? await context.params : {});
       return NextResponse.json(answer, { headers: { 'Cache-Control': 'no-store' } });
