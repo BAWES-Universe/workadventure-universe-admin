@@ -419,6 +419,10 @@ export async function keepFileText(input: KeepTextInput, ctx: Context = defaultC
   } catch (error) {
     // Forgotten or gone in the meantime: the same answer as a file that is not there
     if (!(await prisma.botFile.findUnique({ where: { botId_number: { botId: row.botId, number: row.number } } }))) throw notFound();
+    // Two pieces for the same place at once (a retry while the first is still going): the first one is kept
+    if ((error as { code?: unknown })?.code === 'P2002') {
+      throw new BotFileError('out_of_order', 409, 'Another piece for this place was kept at the same moment. Send the next piece from where the text ends.');
+    }
     throw error;
   }
   return { file: viewOf(updated, who, input.chat), hidden };
