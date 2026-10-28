@@ -63,3 +63,19 @@ export async function clearNotices(userId: string, kind: string, dedupePrefix: s
     data: { dismissedAt: new Date() },
   });
 }
+
+/**
+ * Hides the open "moved / now replies" notices that name this one bot, once a save has changed what it runs on: they said
+ * where it was, and that is no longer true. A notice naming several bots has no single bot to match and stays until dismissed.
+ */
+export async function clearBotRunsOnNotices(botId: string): Promise<void> {
+  try {
+    await prisma.userNotice.updateMany({
+      where: { kind: 'ai-key-moved', dedupeKey: { contains: `:${botId}:` }, dismissedAt: null },
+      data: { dismissedAt: new Date() },
+    });
+  } catch (error) {
+    // The save has gone through; a notice left showing is only out of date
+    console.error('[Notices] Could not hide the bot notices:', error instanceof Error ? error.message : 'unknown');
+  }
+}
