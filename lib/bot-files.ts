@@ -74,7 +74,7 @@ export interface Chat {
 /** Where a file can be opened again: a chat bucket and the uploader's id, or a link that lasts. */
 export type FileStore = { bucket: string; fileId: string } | { url: string };
 
-interface BotCall {
+export interface BotCall {
   botId: string;
   person: Person;
   chat: Chat;
@@ -85,24 +85,24 @@ export interface Context {
   limits?: FileLimits;
 }
 
-const defaultContext = (): Context => ({ now: new Date() });
-const limitsOf = (ctx: Context): FileLimits => ctx.limits ?? FILE_LIMITS_RECOMMENDED;
+export const defaultContext = (): Context => ({ now: new Date() });
+export const limitsOf = (ctx: Context): FileLimits => ctx.limits ?? FILE_LIMITS_RECOMMENDED;
 
-interface Who {
+export interface Who {
   /** Their Orbit account; null for a guest. */
   userId: string | null;
   /** The id the bot server named them by. */
   personRef: string | null;
 }
 
-async function resolvePerson(person: Person): Promise<Who> {
+export async function resolvePerson(person: Person): Promise<Who> {
   const identifier = person.identifier?.trim() || null;
   const user = person.signedIn && identifier ? await findUserByIdentifier(identifier) : null;
   return { userId: user && !user.isGuest ? user.id : null, personRef: identifier };
 }
 
 /** The same gate as artifacts: the bot exists, the person may use it this way, and the bot's chat telemetry switch. */
-async function passBotGate(call: BotCall): Promise<{ hidden: boolean }> {
+export async function passBotGate(call: BotCall): Promise<{ hidden: boolean }> {
   const access = await checkBotAccess({
     botId: call.botId,
     action: call.chat.kind === 'dm' ? 'dm' : 'chat',
@@ -159,7 +159,7 @@ export function checkStore(store: FileStore): FileStore {
   return { bucket: store.bucket, fileId: store.fileId };
 }
 
-interface FileRow {
+export interface FileRow {
   id: string;
   botId: string;
   number: number;
@@ -205,7 +205,7 @@ function inThisChat(row: Pick<FileRow, 'chatKind' | 'chatRef'>, chat: Chat): boo
   return row.chatKind === chat.kind && row.chatRef === chat.ref;
 }
 
-function viewOf(row: FileRow, who: Who, chat: Chat): BotFileView {
+export function viewOf(row: FileRow, who: Who, chat: Chat): BotFileView {
   return {
     ref: shortIdOf(row.number),
     name: row.name,
@@ -234,7 +234,7 @@ export function canUse(row: Pick<FileRow, 'ownerId' | 'chatKind' | 'chatRef'>, w
   return inThisChat(row, chat);
 }
 
-async function loadUsable(call: BotCall & { ref: string }, who: Who, ctx: Context): Promise<FileRow> {
+export async function loadUsable(call: BotCall & { ref: string }, who: Who, ctx: Context): Promise<FileRow> {
   const number = numberOfShortId(call.ref);
   if (number === null) throw notFound();
   const row = await prisma.botFile.findUnique({ where: { botId_number: { botId: call.botId, number } } });

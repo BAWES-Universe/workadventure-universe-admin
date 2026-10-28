@@ -11,7 +11,10 @@ export const db = {
   files: [] as Row[],
   parts: [] as Row[],
   counters: new Map<string, number>(),
+  /** Artifacts, for the search that also finds them (only read). */
+  artifacts: [] as Row[],
   reset() {
+    this.artifacts.length = 0;
     this.users.length = 0;
     this.files.length = 0;
     this.parts.length = 0;
@@ -30,9 +33,19 @@ export function addUser(id: string, extra: Row = {}) {
 function matches(row: Row, where: Row): boolean {
   return Object.entries(where).every(([key, expected]) => {
     if (key === 'OR') return (expected as Row[]).some((cond) => matches(row, cond));
+    if (key === 'AND') return (expected as Row[]).every((cond) => matches(row, cond));
     if (expected !== null && typeof expected === 'object' && !(expected instanceof Date)) {
-      if ('lte' in expected) return row[key] !== null && row[key] <= expected.lte;
-      if ('in' in expected) return expected.in.includes(row[key]);
+      const value = row[key];
+      const checks: Record<string, (operand: any) => boolean> = {
+        lte: (operand) => value !== null && value <= operand,
+        lt: (operand) => value !== null && value < operand,
+        gt: (operand) => value !== null && value > operand,
+        gte: (operand) => value !== null && value >= operand,
+        in: (operand) => operand.includes(value),
+        contains: (operand) => typeof value === 'string' && value.toLowerCase().includes(String(operand).toLowerCase()),
+        mode: () => true,
+      };
+      return Object.entries(expected).every(([op, operand]) => checks[op]?.(operand) ?? false);
     }
     return row[key] === expected;
   });
@@ -78,7 +91,20 @@ const client: Row = {
     },
     deleteMany: async ({ where }: Row) => ({ count: removeFiles(where) }),
   },
+  artifact: {
+    count: async ({ where }: Row) => db.artifacts.filter((row) => matches(row, where)).length,
+    findMany: async ({ where, take, select }: Row) =>
+      db.artifacts
+        .filter((row) => matches(row, where))
+        .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())
+        .slice(0, take ?? undefined)
+        .map((row) => Object.fromEntries(Object.keys(select).map((key) => [key, row[key]]))),
+  },
   botFilePart: {
+    findMany: async ({ where, orderBy }: Row) => {
+      const rows = db.parts.filter((part) => matches(part, where));
+      return orderBy?.number === 'asc' ? [...rows].sort((a, b) => a.number - b.number) : rows;
+    },
     deleteMany: async ({ where }: Row) => {
       const before = db.parts.length;
       db.parts = db.parts.filter((part) => !matches(part, where)) as typeof db.parts;
