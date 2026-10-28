@@ -85,6 +85,20 @@ describe('signing in when the game’s access token has run out', () => {
     expect(window.sessionStorage.getItem('orbit_session_v2')).toBeNull();
   });
 
+  it('keeps the room for Try again when it drops the stored session after a refusal', async () => {
+    window.sessionStorage.setItem('orbit_session_v2', SESSION);
+    window.sessionStorage.setItem('orbit_play_uri', 'http://play.test/@/uni/world/room');
+    fetchMock.mockImplementation(() => answer(401, { error: 'Invalid or expired access token' }));
+    render(<LoginPage />);
+    await waitFor(() => expect(postMessage).toHaveBeenCalledTimes(1));
+    gameSends('stale');
+    await waitFor(() => expect(postMessage).toHaveBeenCalledTimes(2));
+    gameSends('still-stale');
+    expect(await screen.findByText('Couldn’t sign you in')).toBeTruthy();
+    expect(window.sessionStorage.getItem('orbit_session_v2')).toBeNull();
+    expect(window.sessionStorage.getItem('orbit_play_uri')).toBe('http://play.test/@/uni/world/room');
+  });
+
   it('tries a renewal again when the person clicks Try again after a refusal', async () => {
     let renewedAvailable = false;
     fetchMock.mockImplementation((url, init) => {
@@ -198,6 +212,14 @@ describe('signing in while the connection is slow or down', () => {
     gameSays({ type: 'orbit-auth-failed-v2' });
     expect(screen.getByText('Couldn’t sign you in')).toBeTruthy();
     expect(window.sessionStorage.getItem('orbit_session_v2')).toBeNull();
+  });
+
+  it('keeps the room for Try again when the game says it cannot get a token', async () => {
+    window.sessionStorage.setItem('orbit_play_uri', 'http://play.test/@/uni/world/room');
+    await opened();
+    gameSays({ type: 'orbit-auth-failed-v2' });
+    expect(screen.getByText('Couldn’t sign you in')).toBeTruthy();
+    expect(window.sessionStorage.getItem('orbit_play_uri')).toBe('http://play.test/@/uni/world/room');
   });
 
   it('offers Try again when the game says it cannot get a token, and asks the game again on a tap', async () => {
