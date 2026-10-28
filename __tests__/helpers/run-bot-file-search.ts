@@ -41,6 +41,10 @@ async function main() {
       ('dm-plan', 2, 9100, 'Launch day is Thursday. We sing yazoghal at the gate. مرحبا بالجميع في الحفلة'),
       ('friend-notes', 1, 0, 'Bring the yazoghal drums.');
   `);
+  // Lyrics with Arabic short vowels (marhaban with fatha, sukun, tanween), and a name with them
+  const MARKED = '\u0645\u064e\u0631\u0652\u062d\u064e\u0628\u064b\u0627';
+  await db.query(`INSERT INTO bot_file_parts (bot_file_id, number, start, text) VALUES ('dm-song', 1, 0, $1)`, [`${MARKED} \u064a\u0627 \u0623\u0635\u062f\u0642\u0627\u0621`]);
+  await db.query(`UPDATE bot_files SET line = $1 WHERE id = 'bubble-pic'`, [`Photo of the north gate, ${MARKED}`]);
 
   const scope = (over: Partial<SearchScope> = {}): SearchScope => ({
     botId: 'bot1', userId: 'owner', chatKind: 'dm', chatRef: '!owner-dm', now: new Date('2026-10-24T12:00:00Z'), findableSince: null, ...over,
@@ -69,6 +73,8 @@ async function main() {
   result.wordStart = await ids(scope(), filters({ query: q('yazo') }));
   result.wordInLine = await ids(scope(), filters({ query: q('north gate') }));
   result.arabic = await ids(scope(), filters({ query: q('بالجميع') }));
+  result.markedTextUnmarkedQuery = await ids(scope(), filters({ query: q('مرحبا') }));
+  result.unmarkedTextMarkedQuery = await ids(scope(), filters({ query: q('\u0628\u0650\u0627\u0644\u0652\u062c\u064e\u0645\u0650\u064a\u0639') }));
   result.twoWordsInText = await ids(scope(), filters({ query: q('thursday launch') }));
   result.allMissing = await ids(scope(), filters({ query: q('thursday piano') }));
   result.anyWord = await ids(scope(), filters({ query: q('thursday piano', 'any') }));

@@ -11,11 +11,23 @@
 export const MAX_SEARCH_WORDS = 8;
 const MAX_WORD_LENGTH = 64;
 
+/**
+ * Arabic short vowels, shadda, sukun, Quranic marks and tatweel. Postgres keeps them inside its words, so they are left
+ * out of the stored words (the migration) and of the search words, and "مَرْحَبًا" and "مرحبا" find each other. The same
+ * class is in the migration's SQL; keep them the same.
+ */
+export const ARABIC_MARKS_CLASS = '[\\u0610-\\u061A\\u0640\\u064B-\\u065F\\u0670\\u06D6-\\u06ED]';
+const ARABIC_MARKS = /[\u0610-\u061A\u0640\u064B-\u065F\u0670\u06D6-\u06ED]/g;
+
 /** The words of a search, lowercased, letters and digits only, so they are safe inside a word query. */
 export function searchWords(words: string | null | undefined): string[] {
   if (!words) return [];
-  const found = words.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
-  return [...new Set(found.map((word) => word.slice(0, MAX_WORD_LENGTH)))].slice(0, MAX_SEARCH_WORDS);
+  // Marks belong to their word (an Arabic vowel, an accent typed apart), so they never split one
+  const found = words.normalize('NFC').toLowerCase().match(/[\p{L}\p{N}\p{M}]+/gu) ?? [];
+  const clean = found.map((word) => word.replace(ARABIC_MARKS, ''));
+  // Only letters and digits reach the query: any other mark left after NFC is dropped
+  const safe = clean.map((word) => word.replace(/[^\p{L}\p{N}]/gu, '').slice(0, MAX_WORD_LENGTH)).filter((word) => word.length > 0);
+  return [...new Set(safe)].slice(0, MAX_SEARCH_WORDS);
 }
 
 /** A word query: every word (`all`), or any of them (`any`), each as the start of a word. Null for no words. */
@@ -87,7 +99,7 @@ export function fileSearchSql(scope: SearchScope, filters: SearchFilters, page: 
         AND ($11::text IS NULL OR f.created_at < ${at(11)})
         AND (
           q.query IS NULL
-          OR to_tsvector('simple', f.name || ' ' || coalesce(f.line, '')) @@ q.query
+          OR to_tsvector('simple', regexp_replace(f.name || ' ' || coalesce(f.line, ''), '${ARABIC_MARKS_CLASS}', '', 'g')) @@ q.query
           OR EXISTS (SELECT 1 FROM bot_file_parts p WHERE p.bot_file_id = f.id AND p.words @@ q.query)
         )
     )`;
@@ -144,7 +156,9 @@ const SNIPPET_LENGTH = 200;
 export function hitOf(start: number, text: string, words: string[]): { at: number; snippet: string } {
   let index = -1;
   for (const word of words) {
-    const match = new RegExp(`(?<![\\p{L}\\p{N}])${word}`, 'iu').exec(text);
+    // The text may carry Arabic marks the word has not: let any follow each letter
+    const pattern = [...word].map((letter) => `${letter}${ARABIC_MARKS.source}*`).join('');
+    const match = new RegExp(`(?<![\\p{L}\\p{N}])${pattern}`, 'iu').exec(text);
     if (match && (index === -1 || match.index < index)) index = match.index;
   }
   const from = Math.max(0, (index === -1 ? 0 : index) - SNIPPET_BEFORE);

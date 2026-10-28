@@ -47,6 +47,9 @@ describe('bot file search on Postgres', () => {
     expect(rows('wordStart')).toEqual(['dm-plan', 'dm-song']);
     expect(rows('wordInLine')).toEqual(['bubble-pic']);
     expect(rows('arabic')).toEqual(['dm-plan']);
+    // Arabic with or without short vowels: lyrics with them (a part and a line) found by a word without, and the other way
+    expect(rows('markedTextUnmarkedQuery')).toEqual(['bubble-pic', 'dm-plan', 'dm-song']);
+    expect(rows('unmarkedTextMarkedQuery')).toEqual(['dm-plan']);
     expect(rows('twoWordsInText')).toEqual(['dm-plan']);
     expect(result.allMissing.total).toBe(0);
     expect(rows('anyWord')).toEqual(['dm-plan']);
