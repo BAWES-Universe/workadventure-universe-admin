@@ -135,6 +135,8 @@ export function mergeMedia(
   drop: readonly string[],
   kind: ArtifactKind,
   maxMediaBytes: number,
+  /** Files the version may hold in all (#696): given on a make or change, left out on a restore or copy. */
+  maxMediaFiles?: number,
 ): { keep: MediaFile[]; add: (MediaUpload & { contentType: string })[] } {
   const names = new Set<string>();
   const add = uploads.map((upload) => {
@@ -149,6 +151,15 @@ export function mergeMedia(
   }
   const keep = kept.filter((file) => !names.has(file.name) && !drop.includes(file.name));
   if (add.reduce((sum, file) => sum + file.body.byteLength, 0) > maxMediaBytes) throw tooMuchMedia(maxMediaBytes);
+  const files = keep.length + add.length;
+  // only a save that adds files is held to it: one already over a lowered limit can still be edited or drop files
+  if (maxMediaFiles !== undefined && add.length > 0 && files > maxMediaFiles) {
+    throw new ArtifactError(
+      'too_many_media_files',
+      422,
+      `This artifact can hold ${maxMediaFiles.toLocaleString('en')} files. This save would leave ${files.toLocaleString('en')}. Leave some out, or put the rest in a new artifact.`,
+    );
+  }
   return { keep, add };
 }
 

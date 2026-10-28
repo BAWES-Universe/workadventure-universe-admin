@@ -443,6 +443,19 @@ export function artifactLimits(values: ArtifactLimits): Limit[] {
         { value: 200, label: '200 MB', meaning: 'Longer videos.' },
       ],
     },
+    {
+      id: 'mediaFiles',
+      label: 'Files in one artifact',
+      hint: 'The most songs, images and videos one artifact can hold. If a save would leave more, nothing is saved and the bot is told the limit.',
+      unit: 'files',
+      value: values.mediaFiles,
+      recommended: recommended.mediaFiles,
+      options: [
+        { value: 20, label: '20 files', meaning: 'A playlist or a small gallery.' },
+        { value: 50, label: '50 files', meaning: 'An album, or a gallery of a trip.' },
+        { value: 200, label: '200 files', meaning: 'A big gallery or a music archive.' },
+      ],
+    },
   ], LIMIT_RANGES.artifacts);
 }
 
