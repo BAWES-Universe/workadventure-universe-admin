@@ -325,6 +325,13 @@ describe('artifacts', () => {
       expect(ownerElsewhere.status).toBe(200);
     });
 
+    it('lets the owner change what they made in a direct message from the nearby chat', async () => {
+      const made = await makeApp(person('owner'), DM, { title: 'Direct' });
+      const res = await call(change, { botId: 'bot1', person: person('owner'), chat: NEARBY, content: '<p>x</p>' }, { id: made.artifact.id });
+      expect(res.status).toBe(200);
+      expect(db.versions.filter((v) => v.artifactId === made.artifact.id)).toHaveLength(2);
+    });
+
     it('answers 404 to someone who may not even open it', async () => {
       const made = await makeApp();
       const res = await call(change, { botId: 'bot1', person: person('stranger'), chat: { kind: 'nearby', ref: 'other-bubble' }, content: '<p>x</p>' }, { id: made.artifact.id });
