@@ -63,6 +63,7 @@ function matches(row: Row, where: Row): boolean {
     if (key === 'OR') return (expected as Row[]).some((cond) => matches(row, cond));
     if (expected !== null && typeof expected === 'object' && !(expected instanceof Date)) {
       if ('lte' in expected) return row[key] !== null && row[key] <= expected.lte;
+      if ('gt' in expected) return row[key] !== null && row[key] > expected.gt;
       if ('in' in expected) return expected.in.includes(row[key]);
     }
     return row[key] === expected;

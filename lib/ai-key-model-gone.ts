@@ -128,7 +128,7 @@ async function decide(key: KeyForModels & { ownerId: string | null; name: string
         await addNotice({
           userId: key.ownerId,
           kind: 'ai-key-moved',
-          dedupeKey: `models-gone:${key.providerId}:${elsewhere.id}:${new Date().toISOString()}`,
+          dedupeKey: `models-gone:${key.providerId}:${elsewhere.id}:${names.length === 1 ? elsewhere.botIds[0] : 'many'}:${new Date().toISOString()}`,
           title: names.length === 1 ? `${names[0]} moved to Universe AI` : `${names.length} bots moved to Universe AI`,
           body: `${label} no longer has any of the models ${key.name} may use in ${elsewhere.name}, so ${
             names.length === 1 ? `${names[0]} now replies` : `the ${names.length} bots there now reply`

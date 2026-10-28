@@ -418,6 +418,17 @@ describe('artifacts', () => {
       expect((await call(inChat, { botId: 'bot1', person: guest, chat: NEARBY })).body.artifacts).toEqual([]);
     });
 
+    it("keeps this chat's live artifacts in the list when a guest's expired ones are newer and not yet pruned", async () => {
+      const live = await makeApp(guest, NEARBY, { title: 'Live' });
+      const liveRow = db.artifacts.find((a) => a.id === live.artifact.id)!;
+      liveRow.updatedAt = new Date(Date.now() - 60000);
+      // The first call prunes; the expired ones below arrive after it, so they are still there for the next call
+      await call(inChat, { botId: 'bot1', person: guest, chat: NEARBY });
+      for (let i = 0; i < 25; i++) db.artifacts.push({ ...liveRow, id: `gone-${i}`, title: `Gone ${i}`, updatedAt: new Date(), expiresAt: new Date(Date.now() - 1000) });
+      const res = await call(inChat, { botId: 'bot1', person: guest, chat: NEARBY });
+      expect(res.body.artifacts.map((a: { title: string }) => a.title)).toEqual(['Live']);
+    });
+
     it('goes through the same bot access check as the other bot calls', async () => {
       (checkBotAccess as jest.Mock).mockResolvedValue({ allowed: false, code: 'not_allowed', reason: 'No.' });
       expect((await call(inChat, { botId: 'bot1', person: person('friend'), chat: NEARBY })).status).toBe(403);
