@@ -106,6 +106,8 @@ const indexes = (await db.query(`SELECT indexname, indexdef FROM pg_indexes WHER
 const wordsOfAPart = (await db.query(`SELECT words::text AS words FROM bot_file_parts WHERE bot_file_id = 'f2' AND number = 1`)).rows[0].words;
 const marksKeptInText = (await db.query(`SELECT text = $1 AS kept FROM bot_file_parts WHERE bot_file_id = 'f2' AND number = 2`, [WITH_MARKS])).rows[0].kept;
 const extensions = (await db.query(`SELECT extname FROM pg_extension ORDER BY extname`)).rows.map((row) => row.extname);
+// The part's words as Postgres writes them out, which prisma/schema.prisma's dbgenerated must match (no drift)
+const generatedWords = (await db.query(`SELECT pg_get_expr(d.adbin, d.adrelid) AS expr FROM pg_attrdef d JOIN pg_attribute a ON a.attrelid = d.adrelid AND a.attnum = d.adnum WHERE d.adrelid = 'bot_file_parts'::regclass AND a.attname = 'words'`)).rows[0].expr;
 
 // A bot that goes takes its files and their text; a person who leaves takes theirs; a guest's stays until its day
 await db.exec(`DELETE FROM bots WHERE id = 'bot2'`);
@@ -117,4 +119,4 @@ const afterOwnerLeft = {
   parts: (await db.query('SELECT bot_file_id FROM bot_file_parts ORDER BY bot_file_id')).rows.map((row) => row.bot_file_id),
 };
 
-console.log(JSON.stringify({ before, after, defaults, duplicateNumber, otherBotSameNumber, orphanFile, orphanPart, counted, words, indexes, wordsOfAPart, marksKeptInText, extensions, afterBotDeleted, counterAfterBotDeleted, afterOwnerLeft }));
+console.log(JSON.stringify({ before, after, defaults, duplicateNumber, otherBotSameNumber, orphanFile, orphanPart, counted, words, indexes, wordsOfAPart, marksKeptInText, extensions, generatedWords, afterBotDeleted, counterAfterBotDeleted, afterOwnerLeft }));
