@@ -40,8 +40,12 @@ export const TEXT_PART_CHARS = 10_000;
 export const MAX_FILE_NAME_LENGTH = 255;
 export const MAX_FILE_LINE_LENGTH = 300;
 export const MAX_TOOL_NAME_LENGTH = 100;
-/** What a bot asked a tool for is kept whole up to this, enough for any prompt a tool takes. */
-export const MAX_PROMPT_LENGTH = 8_000;
+/**
+ * Search matches the words of this much of a made file's prompt, with its name and line: Postgres can't hold the words
+ * of a much longer text in one index entry (1 MB), and the insert would fail. The whole prompt is still kept and read
+ * back; only words past this are not searched. The same number is in the migration's index and the search SQL.
+ */
+export const PROMPT_SEARCH_CHARS = 20_000;
 
 /** What the uploader names a stored file: a UUID, with its extension kept (uploader MimeType.ts, up to 16 characters). */
 const UPLOADER_FILE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(\.[a-z0-9]{1,16})?$/i;
@@ -273,10 +277,13 @@ export interface AddInput extends BotCall {
   pages?: number | null;
 }
 
-/** A prompt as written (its lines kept), without the characters the database can't keep, or null when empty. */
-function cleanPrompt(value: string | null | undefined): string | null {
+/**
+ * A prompt as written (its lines kept), without the characters the database can't keep, or null when empty. It is kept
+ * up to the super admin's "Text kept from a file", like a document's text.
+ */
+function cleanPrompt(value: string | null | undefined, max: number): string | null {
   if (typeof value !== 'string') return null;
-  const prompt = clipText(value.replace(/\u0000/g, '').trim(), MAX_PROMPT_LENGTH).trim();
+  const prompt = clipText(value.replace(/\u0000/g, '').trim(), max).trim();
   return prompt.length > 0 ? prompt : null;
 }
 
@@ -313,7 +320,7 @@ export async function addFile(input: AddInput, ctx: Context = defaultContext()):
       fileId: 'fileId' in store ? store.fileId : null,
       url: 'url' in store ? store.url : null,
       line: cleanLine(input.line, MAX_FILE_LINE_LENGTH),
-      ...(madeWith ? { madeWith, madePrompt: cleanPrompt(input.madePrompt) } : {}),
+      ...(madeWith ? { madeWith, madePrompt: cleanPrompt(input.madePrompt, limitsOf(ctx).text) } : {}),
       lengthSeconds: input.lengthSeconds ?? null,
       pages: input.pages ?? null,
       chatKind: input.chat.kind,

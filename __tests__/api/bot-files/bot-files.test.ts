@@ -191,8 +191,9 @@ describe('files in bot chats (game #1508)', () => {
       const pdf = await call(add, song(person('owner'), BUBBLE, { source: 'person', kind: 'document', name: 'plan.pdf', pages: 41, madeWith: 'not mine' }));
       // Only what the bot sent was made by a tool
       expect(pdf.body.file).toMatchObject({ made: null, pages: 41 });
-      const long = await call(add, song(person('owner'), BUBBLE, { madeWith: 'generate_music', madePrompt: 'x'.repeat(9_000) }));
-      expect(long.body.file.made.prompt).toHaveLength(8_000);
+      // A long prompt is kept whole, up to "Text kept from a file", like a document's text
+      const long = await call(add, song(person('owner'), BUBBLE, { madeWith: 'generate_music', madePrompt: 'x'.repeat(50_000) }));
+      expect(long.body.file.made.prompt).toHaveLength(50_000);
       expect((await call(add, song(person('owner'), BUBBLE, { lengthSeconds: -1 }))).status).toBe(400);
     });
 

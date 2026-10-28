@@ -85,4 +85,4 @@ ALTER TABLE "bot_file_counters" ADD CONSTRAINT "bot_file_counters_bot_id_fkey" F
 -- which Prisma's schema cannot name, so it lives only here; queries must use the same expression to use it
 -- (lib/bot-file-search-sql.ts).
 CREATE INDEX "bot_file_parts_words_idx" ON "bot_file_parts" USING GIN ("words");
-CREATE INDEX "bot_files_words_idx" ON "bot_files" USING GIN (to_tsvector('simple', regexp_replace("name" || ' ' || coalesce("line", '') || ' ' || coalesce("made_prompt", ''), '[\u0610-\u061A\u0640\u064B-\u065F\u0670\u06D6-\u06ED]', '', 'g')));
+CREATE INDEX "bot_files_words_idx" ON "bot_files" USING GIN (to_tsvector('simple', regexp_replace("name" || ' ' || coalesce("line", '') || ' ' || left(coalesce("made_prompt", ''), 20000), '[\u0610-\u061A\u0640\u064B-\u065F\u0670\u06D6-\u06ED]', '', 'g')));
