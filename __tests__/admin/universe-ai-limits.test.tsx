@@ -92,6 +92,22 @@ describe('Universe AI limits', () => {
     await waitFor(() => expect(JSON.parse(String(fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH')?.[1]?.body))).toEqual({ universeAi: { results: 30 } }));
   });
 
+  it('turns down typed text that is not a plain number instead of saving a changed one', async () => {
+    answer();
+    render(<UniverseAiLimits />);
+    fireEvent.click(await screen.findByTestId('limit-results'));
+    fireEvent.click(await screen.findByRole('radio', { name: /Other/ }));
+    const field = screen.getByLabelText(/Files found in one search, in/);
+    for (const typed of ['-50', '1e2', '5-0']) {
+      fireEvent.change(field, { target: { value: typed } });
+      expect(screen.getByRole('alert').textContent).toBe('Between 1 and 100 files.');
+      expect((screen.getByRole('button', { name: /Save/ }) as HTMLButtonElement).disabled).toBe(true);
+    }
+    fireEvent.change(field, { target: { value: ' 3 0 ' } });
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect((screen.getByRole('button', { name: /Save/ }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it('turns down "Reads from an earlier file" above "Reads from a page or file" with the line that says why, never cutting it', async () => {
     answer({ ...SERVER_LIMITS_RECOMMENDED, universeAi: { ...SERVER_LIMITS_RECOMMENDED.universeAi, read: 10000 } });
     render(<UniverseAiLimits />);
