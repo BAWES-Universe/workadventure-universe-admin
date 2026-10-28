@@ -32,7 +32,7 @@ export const PUNCTUATION_CLASS =
  * the migration's, for a part's words and the index on a file's own words; keep them the same.
  */
 export function wordsOfSql(text: string): string {
-  return `to_tsvector('simple', regexp_replace(regexp_replace(${text}, '${ARABIC_MARKS_CLASS}', '', 'g'), '${PUNCTUATION_CLASS}', ' ', 'g'))`;
+  return `to_tsvector('simple', regexp_replace(regexp_replace(normalize(${text}, NFC), '${ARABIC_MARKS_CLASS}', '', 'g'), '${PUNCTUATION_CLASS}', ' ', 'g'))`;
 }
 const ARABIC_MARKS = /[\u0610-\u061A\u0640\u064B-\u065F\u0670\u06D6-\u06ED]/g;
 
@@ -215,6 +215,9 @@ const SNIPPET_LENGTH = 200;
  * Where in a matching part the first search word is, as a place in the file's text to open from, with a short piece of
  * text around it. The part is where Postgres found the words; this finds the first one inside it.
  */
+const isHighHalf = (code: number) => code >= 0xd800 && code <= 0xdbff;
+const isLowHalf = (code: number) => code >= 0xdc00 && code <= 0xdfff;
+
 export function hitOf(start: number, text: string, words: string[]): { at: number; snippet: string } {
   let index = -1;
   for (const word of words) {
@@ -223,7 +226,11 @@ export function hitOf(start: number, text: string, words: string[]): { at: numbe
     const match = new RegExp(`(?<![\\p{L}\\p{N}])${pattern}`, 'iu').exec(text);
     if (match && (index === -1 || match.index < index)) index = match.index;
   }
-  const from = Math.max(0, (index === -1 ? 0 : index) - SNIPPET_BEFORE);
-  const snippet = text.slice(from, from + SNIPPET_LENGTH).replace(/\s+/g, ' ').trim();
-  return { at: start + from, snippet: `${from > 0 ? '…' : ''}${snippet}${from + SNIPPET_LENGTH < text.length ? '…' : ''}` };
+  let from = Math.max(0, (index === -1 ? 0 : index) - SNIPPET_BEFORE);
+  // Never through the middle of an emoji, at either end
+  if (from > 0 && isLowHalf(text.charCodeAt(from)) && isHighHalf(text.charCodeAt(from - 1))) from -= 1;
+  let end = Math.min(text.length, from + SNIPPET_LENGTH);
+  if (end < text.length && isHighHalf(text.charCodeAt(end - 1)) && isLowHalf(text.charCodeAt(end))) end -= 1;
+  const snippet = text.slice(from, end).replace(/\s+/g, ' ').trim();
+  return { at: start + from, snippet: `${from > 0 ? '…' : ''}${snippet}${end < text.length ? '…' : ''}` };
 }

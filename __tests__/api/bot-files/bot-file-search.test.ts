@@ -113,6 +113,14 @@ describe('finding files in bot chats (game #1508)', () => {
       expect(hitOf(1000, `${'x '.repeat(100)}${marked}`, ['مرحبا']).at).toBe(1000 + 200 + 7 - 60);
       // A word inside another word is not a match
       expect(hitOf(0, 'notyazoghal yazoghal', ['yazoghal']).at).toBe(0);
+      // Never cut through an emoji at either end of the snippet
+      const half = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+      const before = hitOf(0, `a${'\u{1F600}'.repeat(50)} target`, ['target']);
+      expect(before.at).toBe(41);
+      expect(before.snippet).not.toMatch(half);
+      const after = hitOf(0, `target ${'\u{1F600}'.repeat(150)}`, ['target']);
+      expect(after.snippet).not.toMatch(half);
+      expect(after.snippet.endsWith('\u{1F600}…')).toBe(true);
     });
   });
 
