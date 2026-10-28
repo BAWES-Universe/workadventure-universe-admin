@@ -259,7 +259,8 @@ export default function AiKeysPage() {
                   onCancel={() => setRenaming(null)}
                   onRenamed={(name) => {
                     update((list) => list.map((entry) => (entry.id === key.id ? { ...entry, name } : entry)));
-                    setRenaming(null);
+                    // Another key's editor may have opened while this one saved: that one stays open
+                    setRenaming((open) => (open === key.id ? null : open));
                     addToast({ description: `Renamed to ${name}`, variant: 'success', duration: 2500 });
                   }}
                 />
