@@ -4,6 +4,7 @@ import { useEffect, useRef, useSyncExternalStore } from 'react';
 import { useRouter } from 'next/navigation';
 import { authenticatedFetch } from '@/lib/client-auth';
 import { PLAY_ORIGIN, isInsideFrame } from '@/lib/play-origin';
+import { trackOrbitHistory } from '@/lib/orbit-history';
 import {
   ORBIT_BRIDGE_CAPABILITIES,
   ORBIT_BRIDGE_VERSION,
@@ -15,6 +16,7 @@ import {
   type OrbitBridgeReady,
   type OrbitCheckLinks,
   type OrbitEventTopic,
+  type OrbitHistoryStep,
   type OrbitInvitePerson,
   type OrbitLinks,
   type OrbitMessagePerson,
@@ -52,7 +54,9 @@ export function useGameCapability(capability: string): boolean {
 }
 
 function postToGame(
-  build: (roomRevision: string) => OrbitInvitePerson | OrbitMessagePerson | OrbitCheckLinks | OrbitOpenLink,
+  build: (
+    roomRevision: string,
+  ) => OrbitInvitePerson | OrbitMessagePerson | OrbitCheckLinks | OrbitOpenLink | OrbitHistoryStep,
   capability: string,
 ): boolean {
   if (!gameVisit?.capabilities.includes(capability) || !isInsideFrame()) return false;
@@ -74,6 +78,11 @@ export function messageInGame(uuid: string, name: string, chatId: string): boole
     (roomRevision) => ({ type: 'orbit-message-person', version: ORBIT_BRIDGE_VERSION, roomRevision, uuid, name, chatId }),
     'message',
   );
+}
+
+/** Tells the game how many steps Orbit's pages have added to the tab's history, in a game that walks back over them. */
+function tellGameHistoryStep(step: number) {
+  postToGame((roomRevision) => ({ type: 'orbit-history', version: ORBIT_BRIDGE_VERSION, roomRevision, step }), 'history');
 }
 
 /** How long Orbit waits for the game to say which links it can show before leaving them to open a new tab. */
@@ -235,6 +244,9 @@ export default function OrbitBridge({
 
   useEffect(() => {
     if (!isInsideFrame()) return;
+    // Orbit's pages share the tab's history with the game: the game hears how many steps they add (#1556).
+    const history = trackOrbitHistory();
+    const stopHistory = history.subscribe(tellGameHistoryStep);
     const post = (message: OrbitBridgeReady | OrbitBridgeAck) => window.parent.postMessage(message, PLAY_ORIGIN);
     const ack = (requestId: string, revision: string, error?: OrbitBridgeAckError) =>
       post({
@@ -258,6 +270,7 @@ export default function OrbitBridge({
           maxNameLength: parsed.message.maxNameLength,
         });
         if (parsed.message.view) onViewRef.current?.(parsed.message.view);
+        tellGameHistoryStep(history.step);
         return;
       }
 
@@ -299,6 +312,7 @@ export default function OrbitBridge({
     post({ type: 'orbit-bridge-ready', version: ORBIT_BRIDGE_VERSION, capabilities: ORBIT_BRIDGE_CAPABILITIES });
     return () => {
       window.removeEventListener('message', onMessage);
+      stopHistory();
       setGameVisit(null);
     };
   }, [router]);
