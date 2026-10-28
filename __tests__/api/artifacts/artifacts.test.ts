@@ -387,6 +387,31 @@ describe('artifacts', () => {
       expect(res.body.hidden).toBe(false);
     });
 
+    it("also lists the asking person's own artifacts from their other chats, in both directions, and only theirs", async () => {
+      const OTHER_BUBBLE = { kind: 'nearby', ref: 'bubble-2' };
+      const FRIEND_DM = { kind: 'dm', ref: '!friend:chat.example' };
+      await makeApp(person('owner'), NEARBY, { title: 'Bubble' });
+      await makeApp(person('owner'), DM, { title: 'Direct' });
+      await makeApp(person('friend'), OTHER_BUBBLE, { title: 'Friends' });
+      const titles = async (who: Who, chat: object) => (await call(inChat, { botId: 'bot1', person: who, chat })).body.artifacts.map((a: { title: string }) => a.title).sort();
+      expect(await titles(person('owner'), DM)).toEqual(['Bubble', 'Direct']);
+      expect(await titles(person('owner'), NEARBY)).toEqual(['Bubble', 'Direct']);
+      // Someone else in the bubble gets the bubble's and their own, and never the owner's direct message
+      expect(await titles(person('friend'), NEARBY)).toEqual(['Bubble', 'Friends']);
+      expect(await titles(person('friend'), FRIEND_DM)).toEqual(['Friends']);
+      // A guest has no account, so nothing from elsewhere
+      expect(await titles(guest, OTHER_BUBBLE)).toEqual(['Friends']);
+    });
+
+    it("keeps this chat's artifacts in the list when the person has many more elsewhere", async () => {
+      const here = await makeApp(person('owner'), NEARBY, { title: 'Here' });
+      for (let i = 0; i < 25; i++) await makeApp(person('owner'), DM, { title: `Elsewhere ${i}` });
+      db.artifacts.find((a) => a.id === here.artifact.id)!.updatedAt = new Date(Date.now() - 60000);
+      const res = await call(inChat, { botId: 'bot1', person: person('owner'), chat: NEARBY });
+      expect(res.body.artifacts).toHaveLength(20);
+      expect(res.body.artifacts[0].id).toBe(here.artifact.id);
+    });
+
     it('leaves out what a guest asked for once its day is over', async () => {
       await makeApp(guest);
       db.artifacts[0].expiresAt = new Date(Date.now() - 1000);
@@ -591,8 +616,8 @@ describe('artifacts', () => {
         const inDm = { botId: 'bot2', person: person('owner'), chat: DM };
         expect((await call(read, inDm, { id })).status).toBe(200);
         expect((await call(change, { ...inDm, content: '<p>x</p>' }, { id })).status).toBe(200);
-        // It was made in the bubble, so a direct message does not list it
-        expect((await call(inChat, inDm)).body.artifacts).toEqual([]);
+        // It was made in the bubble, and it is the owner's, so their direct message lists it too
+        expect((await call(inChat, inDm)).body.artifacts.map((a: { id: string }) => a.id)).toEqual([id]);
       });
 
       it("lets someone's bot read an artifact shared by link from any chat, but not change it", async () => {
