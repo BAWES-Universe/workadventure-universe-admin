@@ -99,7 +99,8 @@ export function fileSearchSql(scope: SearchScope, filters: SearchFilters, page: 
         AND ($11::text IS NULL OR f.created_at < ${at(11)})
         AND (
           q.query IS NULL
-          OR to_tsvector('simple', regexp_replace(f.name || ' ' || coalesce(f.line, '') || ' ' || coalesce(f.made_prompt, ''), '${ARABIC_MARKS_CLASS}', '', 'g')) @@ q.query
+          -- The start of a made file's prompt only (PROMPT_SEARCH_CHARS): the same expression as the migration's index
+          OR to_tsvector('simple', regexp_replace(f.name || ' ' || coalesce(f.line, '') || ' ' || left(coalesce(f.made_prompt, ''), 20000), '${ARABIC_MARKS_CLASS}', '', 'g')) @@ q.query
           OR EXISTS (SELECT 1 FROM bot_file_parts p WHERE p.bot_file_id = f.id AND p.words @@ q.query)
         )
     )`;
