@@ -1100,7 +1100,7 @@ model BotFile {
   // The chat it came in: nearby | dm, and the id the bot server uses for it
   chatKind  String    @map("chat_kind") @db.VarChar(20)
   chatRef   String    @map("chat_ref") @db.VarChar(255)
-  // The text kept from it: none (not read, or nothing to read) | kept | failed
+  // The text kept from it: none (not read, or nothing to read) | reading (pieces still coming) | kept | failed
   textState String    @default("none") @map("text_state") @db.VarChar(10)
   textChars Int       @default(0) @map("text_chars")
   // Set for a guest's file: when it goes

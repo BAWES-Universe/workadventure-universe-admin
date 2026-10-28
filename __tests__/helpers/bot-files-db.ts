@@ -111,6 +111,7 @@ const client: Row = {
       const rows = db.parts.filter((part) => matches(part, where));
       return orderBy?.number === 'asc' ? [...rows].sort((a, b) => a.number - b.number) : rows;
     },
+    count: async ({ where }: Row) => db.parts.filter((part) => matches(part, where)).length,
     deleteMany: async ({ where }: Row) => {
       const before = db.parts.length;
       db.parts = db.parts.filter((part) => !matches(part, where)) as typeof db.parts;

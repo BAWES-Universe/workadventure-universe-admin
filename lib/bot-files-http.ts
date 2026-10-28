@@ -3,9 +3,9 @@ import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
 import { validateServiceToken } from '@/lib/service-tokens';
 import { CHAT_KINDS } from '@/lib/artifacts';
-import { BotFileError, FILE_KINDS, FILE_SOURCES, MAX_FILE_NAME_LENGTH, type Context } from '@/lib/bot-files';
+import { BotFileError, FILE_KINDS, FILE_SOURCES, MAX_FILE_NAME_LENGTH, TEXT_PIECE_CHARS, type Context } from '@/lib/bot-files';
 import { getServerLimits } from '@/lib/bot-limits';
-import { LIMIT_RANGES, type FileLimits } from '@/lib/bot-limit-values';
+import { LIMIT_RANGES } from '@/lib/bot-limit-values';
 
 /**
  * The routes of files in bot chats (game #1508) are called only by the bot server (BOT_SERVICE_TOKEN, or the admin token
@@ -18,12 +18,13 @@ function hasAdminToken(request: NextRequest): boolean {
 }
 
 /**
- * A file's whole text, up to the super admin's "Text kept from a file", in JSON: up to four bytes a character, with room
- * for escapes, the prompt a made file came from (kept to the same length) and the rest of the body.
+ * One piece of a file's text in JSON (text comes in pieces, so this is the same whatever is kept): up to four bytes a
+ * character, with room for escapes and the rest of the body. About 6 MB.
  */
-const bodyRoom = (limits: FileLimits) => limits.text * 12 + 64 * 1024;
+const bodyRoom = () => TEXT_PIECE_CHARS * 6 + 64 * 1024;
 
-async function readBody(request: NextRequest, room: number): Promise<unknown> {
+async function readBody(request: NextRequest): Promise<unknown> {
+  const room = bodyRoom();
   const tooLarge = () => new BotFileError('too_large', 413, 'The request is too large.');
   if (Number(request.headers.get('content-length')) > room) throw tooLarge();
   if (!request.body) return null;
@@ -54,7 +55,7 @@ export function botFileRoute<B extends z.ZodType>(name: string, bodySchema: B, h
       if (!validateServiceToken(request) && !hasAdminToken(request)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
       // The super admin's "Files in chats", read once for the call
       const ctx: Context = { now: new Date(), limits: (await getServerLimits()).files };
-      const parsed = bodySchema.safeParse(await readBody(request, bodyRoom(ctx.limits!)));
+      const parsed = bodySchema.safeParse(await readBody(request));
       if (!parsed.success) {
         // Where the body is wrong, never what it held
         return NextResponse.json({ error: 'Invalid request data', details: parsed.error.issues.map((issue) => ({ path: issue.path, message: issue.message })) }, { status: 400 });
@@ -100,8 +101,8 @@ export const addSchema = z
     store: storeSchema,
     line: z.string().max(2000).nullish(),
     madeWith: z.string().max(400).nullish(),
-    // Kept up to "Text kept from a file"; the body room above is what holds it to the setting
-    madePrompt: z.string().max(LIMIT_RANGES.files.text.max * 2).nullish(),
+    // Kept up to "Text kept from a file"; one request carries up to a piece of it
+    madePrompt: z.string().max(TEXT_PIECE_CHARS).nullish(),
     lengthSeconds: z.number().int().min(0).max(2147483647).nullish(),
     pages: z.number().int().min(0).max(2147483647).nullish(),
   })
@@ -115,7 +116,10 @@ export const keepTextSchema = z
   .object({
     ...botCall,
     ref: shortId,
-    text: z.string().max(LIMIT_RANGES.files.text.max * 2).nullish(),
+    // A piece over the size is answered 413 by keepFileText, so the bot server is told what to send
+    text: z.string().max(TEXT_PIECE_CHARS * 2).nullish(),
+    from: z.number().int().min(0).max(2147483647).nullish(),
+    last: z.boolean().nullish(),
     failed: z.boolean().optional(),
   })
   .strict();

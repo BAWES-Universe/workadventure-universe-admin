@@ -30,6 +30,13 @@ export { FILE_LIMITS_RECOMMENDED, type FileLimits };
 /** The text is kept in parts this long, so search points at a part and a long file is never read whole. */
 export const TEXT_PART_CHARS = 10_000;
 
+/**
+ * The bot server sends a long text in pieces of at most this many characters, so one request stays a few MB whatever
+ * "Text kept from a file" is set to. It is the size of one request, not of what is kept: any number of pieces add up
+ * to the setting.
+ */
+export const TEXT_PIECE_CHARS = 1_000_000;
+
 export const MAX_FILE_NAME_LENGTH = 255;
 export const MAX_FILE_LINE_LENGTH = 300;
 export const MAX_TOOL_NAME_LENGTH = 100;
@@ -356,35 +363,59 @@ export function splitText(text: string, size = TEXT_PART_CHARS): { number: numbe
 
 export interface KeepTextInput extends BotCall {
   ref: string;
-  /** The file's whole text, read by the bot server after the reply; or `failed` when it could not be read. */
+  /**
+   * One piece of the file's text (up to TEXT_PIECE_CHARS), read by the bot server after the reply; or `failed` when it
+   * could not be read.
+   */
   text?: string | null;
+  /** Where the piece starts in the whole text: 0 starts again in place of anything kept, more goes on from there. */
+  from?: number | null;
+  /** This piece ends the text. Without it the file reads as still being kept. */
+  last?: boolean | null;
   failed?: boolean;
 }
 
+const HIGH_HALF = /[\uD800-\uDBFF]$/;
+
 /**
- * Keeps a file's text, up to the super admin's limit, in place of any kept before. The bot server reads the whole file in
- * the background after the reply; a failure there marks the file and never touches the reply.
+ * Keeps a file's text, up to the super admin's limit, piece by piece. A piece from 0 replaces any text kept before; each
+ * next one starts where the last ended. The bot server reads the whole file in the background after the reply; a
+ * failure there marks the file and never touches the reply.
  */
 export async function keepFileText(input: KeepTextInput, ctx: Context = defaultContext()): Promise<{ file: BotFileView; hidden: boolean }> {
   const hasText = typeof input.text === 'string';
   if (hasText === (input.failed === true)) throw new BotFileError('text_or_failed', 422, 'Send the text, or that it failed, not both and not neither.');
+  const from = input.from ?? 0;
+  const last = input.last ?? true;
+  // The null character can't be kept as text in Postgres
+  const piece = hasText ? (input.text as string).replace(/\u0000/g, '') : '';
+  if (piece.length > TEXT_PIECE_CHARS) throw new BotFileError('piece_too_large', 413, `Send the text in pieces of up to ${TEXT_PIECE_CHARS.toLocaleString('en')} characters.`);
+  // Each piece is kept as text of its own, and half an emoji can't be
+  if (!last && HIGH_HALF.test(piece)) throw new BotFileError('split_emoji', 422, 'A piece may not end in the middle of an emoji.');
+  const limit = limitsOf(ctx).text;
+  if (from + piece.length > limit) {
+    throw new BotFileError('too_much_text', 413, `Text kept from a file is set to ${limit.toLocaleString('en')} characters.`);
+  }
   const { hidden } = await passBotGate(input);
   const who = await resolvePerson(input.person);
   const row = await loadUsable(input, who, ctx);
   if (await isForgotten(input.botId, who)) throw forgotten();
-  // The null character can't be kept as text in Postgres
-  const text = hasText ? clipText((input.text as string).replace(/\u0000/g, ''), limitsOf(ctx).text) : '';
-  const parts = splitText(text);
+  if (hasText && from > 0 && (row.textState !== 'reading' || from !== row.textChars)) {
+    throw new BotFileError('out_of_order', 409, `Send the pieces in order: the next one starts at ${row.textState === 'reading' ? row.textChars : 0}.`);
+  }
+  const starting = !hasText || from === 0;
+  const before = starting ? 0 : await prisma.botFilePart.count({ where: { botFileId: row.id } });
+  const parts = splitText(piece).map((part) => ({ ...part, number: before + part.number, start: from + part.start }));
+  const chars = hasText ? from + piece.length : 0;
+  const textState = !hasText ? 'failed' : !last ? 'reading' : chars > 0 ? 'kept' : 'none';
   let updated: FileRow;
   try {
-    [, , updated] = await prisma.$transaction([
-      prisma.botFilePart.deleteMany({ where: { botFileId: row.id } }),
+    const steps = [
+      ...(starting ? [prisma.botFilePart.deleteMany({ where: { botFileId: row.id } })] : []),
       prisma.botFilePart.createMany({ data: parts.map((part) => ({ botFileId: row.id, ...part })) }),
-      prisma.botFile.update({
-        where: { id: row.id },
-        data: { textState: hasText ? (text.length > 0 ? 'kept' : 'none') : 'failed', textChars: text.length },
-      }),
-    ]);
+      prisma.botFile.update({ where: { id: row.id }, data: { textState, textChars: chars } }),
+    ];
+    updated = (await prisma.$transaction(steps)).at(-1) as FileRow;
   } catch (error) {
     // Forgotten or gone in the meantime: the same answer as a file that is not there
     if (!(await prisma.botFile.findUnique({ where: { botId_number: { botId: row.botId, number: row.number } } }))) throw notFound();
