@@ -37,7 +37,7 @@ CREATE TABLE "bot_file_parts" (
     "number" INTEGER NOT NULL,
     "start" INTEGER NOT NULL,
     "text" TEXT NOT NULL,
-    "words" tsvector GENERATED ALWAYS AS (to_tsvector('simple'::regconfig, regexp_replace(text, '[\u0610-\u061A\u0640\u064B-\u065F\u0670\u06D6-\u06ED]', '', 'g'))) STORED,
+    "words" tsvector GENERATED ALWAYS AS (to_tsvector('simple'::regconfig, regexp_replace(regexp_replace(text, '[\u0610-\u061A\u0640\u064B-\u065F\u0670\u06D6-\u06ED]', '', 'g'), '[[:punct:]]', ' ', 'g'))) STORED,
 
     CONSTRAINT "bot_file_parts_pkey" PRIMARY KEY ("bot_file_id","number")
 );
@@ -80,9 +80,11 @@ ALTER TABLE "bot_file_counters" ADD CONSTRAINT "bot_file_counters_bot_id_fkey" F
 
 -- Search by words (game #1508), with Postgres's own word index in 'simple' mode: no extension, and words in any language
 -- (Arabic, or a name like "yazoghal") are kept as they are. Arabic short vowels, shadda, sukun and tatweel are left out of
--- the words, so "مَرْحَبًا" and "مرحبا" find each other; the text itself keeps them. A part's words are worked out once,
+-- the words, so "مَرْحَبًا" and "مرحبا" find each other; the text itself keeps them. Punctuation splits words, as it does
+-- in a search: "plan.pdf" is found by "pdf", and "2024-05-01" by "05" (Postgres alone keeps "plan.pdf" whole and
+-- "-05" signed). A part's words are worked out once,
 -- when it is saved, so a search never reads the text again. The index on a file's name, line and the prompt it was made with is on an expression,
 -- which Prisma's schema cannot name, so it lives only here; queries must use the same expression to use it
 -- (lib/bot-file-search-sql.ts).
 CREATE INDEX "bot_file_parts_words_idx" ON "bot_file_parts" USING GIN ("words");
-CREATE INDEX "bot_files_words_idx" ON "bot_files" USING GIN (to_tsvector('simple', regexp_replace("name" || ' ' || coalesce("line", '') || ' ' || left(coalesce("made_prompt", ''), 20000), '[\u0610-\u061A\u0640\u064B-\u065F\u0670\u06D6-\u06ED]', '', 'g')));
+CREATE INDEX "bot_files_words_idx" ON "bot_files" USING GIN (to_tsvector('simple', regexp_replace(regexp_replace("name" || ' ' || coalesce("line", '') || ' ' || left(coalesce("made_prompt", ''), 20000), '[\u0610-\u061A\u0640\u064B-\u065F\u0670\u06D6-\u06ED]', '', 'g'), '[[:punct:]]', ' ', 'g')));
