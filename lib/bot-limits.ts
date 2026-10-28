@@ -47,16 +47,22 @@ export async function saveServerLimits(change: ServerChange, userId: string): Pr
   return prisma.$transaction(async (tx) => {
     const row = await tx.appSetting.findUnique({ where: { key: SETTING_KEY } });
     const now = readServerLimits(row?.value);
-    const next: ServerLimits = {
-      universeAi: { ...now.universeAi, ...change.universeAi },
+    // Universe AI's: only what a super admin changed is kept, as on a key, so one never set follows the recommended
+    // value (an earlier file's reads keep following a page's) and is never checked as if it had been set
+    const saved = row?.value && typeof row.value === 'object' && !Array.isArray(row.value) ? (row.value as Record<string, unknown>) : {};
+    const savedAi = saved.universeAi && typeof saved.universeAi === 'object' && !Array.isArray(saved.universeAi) ? (saved.universeAi as Record<string, unknown>) : {};
+    const universeAi = { ...savedAi, ...change.universeAi };
+    const kept = {
+      universeAi,
       artifacts: { ...now.artifacts, ...change.artifacts },
       guard: change.guard ?? now.guard,
       fairUsage: { ...now.fairUsage, ...change.fairUsage },
       files: { ...now.files, ...change.files },
     };
+    const next = readServerLimits(kept);
     const problem = replyLimitsProblem(next.universeAi, change.universeAi);
     if (problem) throw new LimitsRefused(problem);
-    const value = next as unknown as Prisma.InputJsonValue;
+    const value = kept as unknown as Prisma.InputJsonValue;
     await tx.appSetting.upsert({
       where: { key: SETTING_KEY },
       create: { key: SETTING_KEY, value, updatedById: userId },

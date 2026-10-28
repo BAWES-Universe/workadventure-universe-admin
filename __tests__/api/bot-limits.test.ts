@@ -142,12 +142,26 @@ describe('/api/admin/bot-limits', () => {
     const above = await PATCH(request('/api/admin/bot-limits', 'PATCH', { universeAi: { part: 60000 } }));
     expect(above.status).toBe(400);
     expect((await above.json()).error).toBe("Reads from an earlier file can't be more than Reads from a page or file (50,000 characters).");
+    // Once an earlier file's reads were set, "Reads from a page or file" can't go below them
+    settings.findUnique.mockResolvedValue({ key: 'bot-limits', value: { universeAi: { part: 8000 } } });
     const below = await PATCH(request('/api/admin/bot-limits', 'PATCH', { universeAi: { read: 5000 } }));
     expect(below.status).toBe(400);
     expect((await below.json()).error).toBe("Reads from a page or file can't be less than Reads from an earlier file (8,000 characters). Lower that one first.");
     expect(settings.upsert).not.toHaveBeenCalled();
     // Both together, in the right order, are fine
     expect((await PATCH(request('/api/admin/bot-limits', 'PATCH', { universeAi: { read: 5000, part: 4000 } }))).status).toBe(200);
+  });
+
+  it('lets an earlier file\'s reads never set follow a lower "Reads from a page or file", and keeps them unset', async () => {
+    settings.findUnique.mockResolvedValue({ key: 'bot-limits', value: { universeAi: { reply: 16000 } } });
+    const lower = await PATCH(request('/api/admin/bot-limits', 'PATCH', { universeAi: { read: 5000 } }));
+    expect(lower.status).toBe(200);
+    expect((await lower.json()).limits.universeAi).toMatchObject({ read: 5000, part: 5000, reply: 16000 });
+    expect(settings.upsert.mock.calls[0][0].update.value.universeAi).toEqual({ reply: 16000, read: 5000 });
+    // An unrelated change keeps them unset too
+    settings.upsert.mockClear();
+    await PATCH(request('/api/admin/bot-limits', 'PATCH', { guard: false }));
+    expect(settings.upsert.mock.calls[0][0].update.value.universeAi).toEqual({ reply: 16000 });
   });
 });
 
