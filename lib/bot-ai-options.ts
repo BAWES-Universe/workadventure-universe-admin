@@ -122,7 +122,7 @@ export async function botAiOptions(input: {
   const currentModel = current && bot ? servedModel(bot, current, currentLend) : null;
 
   const saved = readVisionPick(bot?.behaviorConfig);
-  const savedKey = saved?.choice === 'another' && bot ? await savedVisionKey(saved, bot, current?.ownerId ?? null) : null;
+  const savedKey = saved?.choice === 'another' && bot ? await savedVisionKey(saved, bot, current?.ownerId ?? null, input.viewer.id) : null;
 
   return {
     ok: true,
@@ -152,10 +152,17 @@ export async function botAiOptions(input: {
 async function savedVisionKey(
   saved: Extract<VisionPick, { choice: 'another' }>,
   bot: { id: string; createdById: string | null; roomId: string },
-  mainKeyOwnerId: string | null
+  mainKeyOwnerId: string | null,
+  viewerId: string
 ): Promise<{ name: string; problem: AnotherProblem | null }> {
   const usable = await usableVisionKey(saved, bot, { mainKeyOwnerId });
-  return { name: (usable.key?.name ?? 'A key that was removed'), problem: usable.ok ? null : usable.problem };
+  const problem = usable.ok ? null : usable.problem;
+  if (!usable.key) return { name: 'A key that was removed', problem };
+  // Someone else's key is named by whose it is, as the key the bot runs on is (#709)
+  const owner = usable.key.ownerId && usable.key.ownerId !== viewerId
+    ? await prisma.user.findUnique({ where: { id: usable.key.ownerId }, select: { name: true } })
+    : null;
+  return { name: keyNameFor({ ...usable.key, owner }, viewerId), problem };
 }
 
 /** What a key's card draws before its name: its provider's logo, else a plug (any server) or a chip. */
