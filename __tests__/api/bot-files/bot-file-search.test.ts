@@ -28,7 +28,7 @@ const NOW = new Date('2026-10-28T10:00:00Z');
 function fileRow(n: number, created: string, extra: Record<string, unknown> = {}) {
   return {
     id: `file-${n}`, number: n, owner_id: 'owner', source: 'person', kind: 'document', name: `doc-${n}.pdf`, mime_type: 'application/pdf',
-    size_bytes: 10, line: null, chat_kind: 'dm', chat_ref: '!owner-dm', text_state: 'kept', text_chars: 100, created_at: new Date(created), ...extra,
+    size_bytes: 10, line: null, made_with: null, made_prompt: null, length_seconds: null, pages: null, chat_kind: 'dm', chat_ref: '!owner-dm', text_state: 'kept', text_chars: 100, created_at: new Date(created), ...extra,
   };
 }
 

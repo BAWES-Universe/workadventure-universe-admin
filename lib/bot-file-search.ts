@@ -59,6 +59,9 @@ export interface FoundFile {
   mimeType: string | null;
   sizeBytes: number | null;
   line: string | null;
+  made: { with: string; prompt: string | null } | null;
+  lengthSeconds: number | null;
+  pages: number | null;
   mine: boolean;
   inThisChat: boolean;
   text: { state: string; chars: number };
@@ -107,6 +110,9 @@ function foundFile(row: FileSearchRow, who: Who, input: FindInput): FoundFile {
     mimeType: row.mime_type,
     sizeBytes: row.size_bytes,
     line: row.line,
+    made: row.made_with ? { with: row.made_with, prompt: row.made_prompt } : null,
+    lengthSeconds: row.length_seconds,
+    pages: row.pages,
     mine: who.userId !== null && row.owner_id === who.userId,
     inThisChat: row.chat_kind === input.chat.kind && row.chat_ref === input.chat.ref,
     text: { state: row.text_state, chars: row.text_chars },

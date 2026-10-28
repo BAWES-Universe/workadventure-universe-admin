@@ -51,6 +51,8 @@ describe('bot file search on Postgres', () => {
     expect(rows('markedTextUnmarkedQuery')).toEqual(['bubble-pic', 'dm-plan', 'dm-song']);
     expect(rows('unmarkedTextMarkedQuery')).toEqual(['dm-plan']);
     expect(rows('twoWordsInText')).toEqual(['dm-plan']);
+    // And in what a made file was asked for
+    expect(rows('byPrompt')).toEqual(['dm-song']);
     expect(result.allMissing.total).toBe(0);
     expect(rows('anyWord')).toEqual(['dm-plan']);
   });

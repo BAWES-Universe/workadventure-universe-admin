@@ -62,7 +62,7 @@ export interface FileSearchSql {
   values: unknown[];
 }
 
-const FILE_COLUMNS = `id, number, owner_id, source, kind, name, mime_type, size_bytes, line, chat_kind, chat_ref, text_state, text_chars, created_at`;
+const FILE_COLUMNS = `id, number, owner_id, source, kind, name, mime_type, size_bytes, line, made_with, made_prompt, length_seconds, pages, chat_kind, chat_ref, text_state, text_chars, created_at`;
 
 /** The count of every match, and one page of them, newest first. */
 export function fileSearchSql(scope: SearchScope, filters: SearchFilters, page: { offset: number; limit: number }): FileSearchSql {
@@ -99,7 +99,7 @@ export function fileSearchSql(scope: SearchScope, filters: SearchFilters, page: 
         AND ($11::text IS NULL OR f.created_at < ${at(11)})
         AND (
           q.query IS NULL
-          OR to_tsvector('simple', regexp_replace(f.name || ' ' || coalesce(f.line, ''), '${ARABIC_MARKS_CLASS}', '', 'g')) @@ q.query
+          OR to_tsvector('simple', regexp_replace(f.name || ' ' || coalesce(f.line, '') || ' ' || coalesce(f.made_prompt, ''), '${ARABIC_MARKS_CLASS}', '', 'g')) @@ q.query
           OR EXISTS (SELECT 1 FROM bot_file_parts p WHERE p.bot_file_id = f.id AND p.words @@ q.query)
         )
     )`;
@@ -133,6 +133,10 @@ export interface FileSearchRow {
   mime_type: string | null;
   size_bytes: number | null;
   line: string | null;
+  made_with: string | null;
+  made_prompt: string | null;
+  length_seconds: number | null;
+  pages: number | null;
   chat_kind: string;
   chat_ref: string;
   text_state: string;

@@ -75,6 +75,8 @@ async function main() {
   result.arabic = await ids(scope(), filters({ query: q('بالجميع') }));
   result.markedTextUnmarkedQuery = await ids(scope(), filters({ query: q('مرحبا') }));
   result.unmarkedTextMarkedQuery = await ids(scope(), filters({ query: q('\u0628\u0650\u0627\u0644\u0652\u062c\u064e\u0645\u0650\u064a\u0639') }));
+  await db.exec(`UPDATE bot_files SET made_with = 'generate_music', made_prompt = 'A slow oud ballad about the gate' WHERE id = 'dm-song'`);
+  result.byPrompt = await ids(scope(), filters({ query: q('oud ballad') }));
   result.twoWordsInText = await ids(scope(), filters({ query: q('thursday launch') }));
   result.allMissing = await ids(scope(), filters({ query: q('thursday piano') }));
   result.anyWord = await ids(scope(), filters({ query: q('thursday piano', 'any') }));
