@@ -83,6 +83,12 @@ const words = {
   twoWords: await search('launch thursday'),
   none: await search('nothing here at all'),
   byLine: (await db.query(`SELECT id FROM bot_files WHERE to_tsvector('simple', name || ' ' || coalesce(line, '')) @@ plainto_tsquery('simple', 'yazoghal')`)).rows.map((row) => row.id),
+  // How a made file was made (#1508 D1) is searched with its name and line
+  byPrompt: await (async () => {
+    await db.exec(`UPDATE bot_files SET made_with = 'generate_music', made_prompt = 'A slow oud ballad', length_seconds = 150 WHERE id = 'f3'`);
+    const expression = `to_tsvector('simple', regexp_replace(name || ' ' || coalesce(line, '') || ' ' || coalesce(made_prompt, ''), '[\\u0610-\\u061A\\u0640\\u064B-\\u065F\\u0670\\u06D6-\\u06ED]', '', 'g'))`;
+    return (await db.query(`SELECT id FROM bot_files WHERE ${expression} @@ plainto_tsquery('simple', 'oud')`)).rows.map((row) => row.id);
+  })(),
 };
 const indexes = (await db.query(`SELECT indexname, indexdef FROM pg_indexes WHERE indexname IN ('bot_file_parts_words_idx', 'bot_files_words_idx') ORDER BY indexname`)).rows;
 const wordsOfAPart = (await db.query(`SELECT words::text AS words FROM bot_file_parts WHERE bot_file_id = 'f2' AND number = 1`)).rows[0].words;

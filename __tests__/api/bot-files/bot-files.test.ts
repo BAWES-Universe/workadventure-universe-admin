@@ -146,6 +146,9 @@ describe('files in bot chats (game #1508)', () => {
           mimeType: 'audio/mpeg',
           sizeBytes: 2_400_000,
           line: 'Song "yazoghal", made with the music tool',
+          made: null,
+          lengthSeconds: null,
+          pages: null,
           store: STORE,
           mine: true,
           inThisChat: true,
@@ -180,6 +183,17 @@ describe('files in bot chats (game #1508)', () => {
       expect(ok.status).toBe(200);
       const tooLong = await call(add, song(person('owner'), BUBBLE, { store: { bucket: 'user-refs', fileId: FILE_ID.replace('.mp3', '.abcdefghijklmnopq') } }));
       expect(tooLong.status).toBe(422);
+    });
+
+    it('keeps how a made file was made, and its length or pages, so the bot can make one like it again', async () => {
+      const res = await call(add, song(person('owner'), BUBBLE, { madeWith: 'generate_music', madePrompt: 'A slow oud song about the gate,\nin Kuwaiti dialect', lengthSeconds: 150 }));
+      expect(res.body.file).toMatchObject({ made: { with: 'generate_music', prompt: 'A slow oud song about the gate,\nin Kuwaiti dialect' }, lengthSeconds: 150, pages: null });
+      const pdf = await call(add, song(person('owner'), BUBBLE, { source: 'person', kind: 'document', name: 'plan.pdf', pages: 41, madeWith: 'not mine' }));
+      // Only what the bot sent was made by a tool
+      expect(pdf.body.file).toMatchObject({ made: null, pages: 41 });
+      const long = await call(add, song(person('owner'), BUBBLE, { madeWith: 'generate_music', madePrompt: 'x'.repeat(9_000) }));
+      expect(long.body.file.made.prompt).toHaveLength(8_000);
+      expect((await call(add, song(person('owner'), BUBBLE, { lengthSeconds: -1 }))).status).toBe(400);
     });
 
     it('cleans the name and the line to one short line, and needs a name', async () => {
@@ -414,7 +428,7 @@ describe('files in bot chats (game #1508)', () => {
       throw new Error('database is down');
     };
     try {
-      const res = await call(add, song(person('owner'), BUBBLE, { name: 'secret-plan.pdf', line: 'the secret plan' }));
+      const res = await call(add, song(person('owner'), BUBBLE, { name: 'secret-plan.pdf', line: 'the secret plan', madeWith: 'generate_music', madePrompt: 'a secret song' }));
       expect(res.status).toBe(500);
       const logged = JSON.stringify([spy.mock.calls, (Sentry.captureException as jest.Mock).mock.calls]);
       expect(logged).not.toContain('secret');

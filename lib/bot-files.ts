@@ -39,6 +39,9 @@ export const TEXT_PART_CHARS = 10_000;
 
 export const MAX_FILE_NAME_LENGTH = 255;
 export const MAX_FILE_LINE_LENGTH = 300;
+export const MAX_TOOL_NAME_LENGTH = 100;
+/** What a bot asked a tool for is kept whole up to this, enough for any prompt a tool takes. */
+export const MAX_PROMPT_LENGTH = 8_000;
 
 /** What the uploader names a stored file: a UUID, with its extension kept (uploader MimeType.ts, up to 16 characters). */
 const UPLOADER_FILE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(\.[a-z0-9]{1,16})?$/i;
@@ -174,6 +177,10 @@ export interface FileRow {
   fileId: string | null;
   url: string | null;
   line: string | null;
+  madeWith: string | null;
+  madePrompt: string | null;
+  lengthSeconds: number | null;
+  pages: number | null;
   chatKind: string;
   chatRef: string;
   textState: string;
@@ -191,6 +198,11 @@ export interface BotFileView {
   mimeType: string | null;
   sizeBytes: number | null;
   line: string | null;
+  /** For a file the bot made: the tool and what it asked that tool for, so it can make one like it again. */
+  made: { with: string; prompt: string | null } | null;
+  /** How long a song, voice note or video is, and how many pages a document has, when known. */
+  lengthSeconds: number | null;
+  pages: number | null;
   /** Where to open it again. */
   store: FileStore;
   /** It belongs to the person asking. */
@@ -214,6 +226,9 @@ export function viewOf(row: FileRow, who: Who, chat: Chat): BotFileView {
     mimeType: row.mimeType,
     sizeBytes: row.sizeBytes,
     line: row.line,
+    made: row.madeWith ? { with: row.madeWith, prompt: row.madePrompt } : null,
+    lengthSeconds: row.lengthSeconds,
+    pages: row.pages,
     store: row.bucket && row.fileId ? { bucket: row.bucket, fileId: row.fileId } : { url: row.url ?? '' },
     mine: who.userId !== null && row.ownerId === who.userId,
     inThisChat: inThisChat(row, chat),
@@ -251,6 +266,18 @@ export interface AddInput extends BotCall {
   sizeBytes?: number | null;
   store: FileStore;
   line?: string | null;
+  /** For a file the bot made: the tool it used and what it asked for. Kept only when the bot sent it. */
+  madeWith?: string | null;
+  madePrompt?: string | null;
+  lengthSeconds?: number | null;
+  pages?: number | null;
+}
+
+/** A prompt as written (its lines kept), without the characters the database can't keep, or null when empty. */
+function cleanPrompt(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') return null;
+  const prompt = clipText(value.replace(/\u0000/g, '').trim(), MAX_PROMPT_LENGTH).trim();
+  return prompt.length > 0 ? prompt : null;
 }
 
 /**
@@ -261,6 +288,7 @@ export async function addFile(input: AddInput, ctx: Context = defaultContext()):
   const name = cleanLine(input.name, MAX_FILE_NAME_LENGTH);
   if (!name) throw new BotFileError('name_required', 422, 'A file needs a name.');
   const store = checkStore(input.store);
+  const madeWith = input.source === 'bot' ? cleanLine(input.madeWith, MAX_TOOL_NAME_LENGTH) : null;
   const { hidden } = await passBotGate(input);
   const who = await resolvePerson(input.person);
   if (await isForgotten(input.botId, who)) throw forgotten();
@@ -285,6 +313,9 @@ export async function addFile(input: AddInput, ctx: Context = defaultContext()):
       fileId: 'fileId' in store ? store.fileId : null,
       url: 'url' in store ? store.url : null,
       line: cleanLine(input.line, MAX_FILE_LINE_LENGTH),
+      ...(madeWith ? { madeWith, madePrompt: cleanPrompt(input.madePrompt) } : {}),
+      lengthSeconds: input.lengthSeconds ?? null,
+      pages: input.pages ?? null,
       chatKind: input.chat.kind,
       chatRef: input.chat.ref,
       expiresAt: who.userId ? null : new Date(ctx.now.getTime() + GUEST_KEEP_MS),

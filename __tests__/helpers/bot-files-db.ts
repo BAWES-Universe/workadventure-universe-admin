@@ -73,7 +73,7 @@ const client: Row = {
   botFile: {
     create: async ({ data }: Row) => {
       if (db.files.some((file) => file.botId === data.botId && file.number === data.number)) throw new Error('unique violation');
-      const row = { id: `file-${++ids}`, ownerId: null, personRef: null, mimeType: null, sizeBytes: null, bucket: null, fileId: null, url: null, line: null, textState: 'none', textChars: 0, expiresAt: null, createdAt: new Date(), ...data };
+      const row = { id: `file-${++ids}`, ownerId: null, personRef: null, mimeType: null, sizeBytes: null, bucket: null, fileId: null, url: null, line: null, madeWith: null, madePrompt: null, lengthSeconds: null, pages: null, textState: 'none', textChars: 0, expiresAt: null, createdAt: new Date(), ...data };
       db.files.push(row);
       return { ...row };
     },
