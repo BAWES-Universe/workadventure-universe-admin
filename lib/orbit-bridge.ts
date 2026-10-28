@@ -4,7 +4,7 @@ import { z } from 'zod';
  * The Orbit bridge: the messages the game and Orbit exchange after the sign-in handshake (`orbit-auth-*-v2`).
  *
  * The game uses it to tell Orbit which page to show (`orbit-navigate`) and when something changed (`orbit-event`,
- * a refresh hint only). No message is ever proof of anything: every page is resolved and authorised by Orbit's own
+ * a refresh hint only). Orbit tells the game how many steps its pages added to the tab's history (`orbit-history`). No message is ever proof of anything: every page is resolved and authorised by Orbit's own
  * server. Orbit's actions on the game (closing, visiting a room) stay on the WorkAdventure scripting API (`WA.*`),
  * so the bridge has no message for them.
  *
@@ -150,6 +150,17 @@ export interface OrbitOpenLink {
   version: typeof ORBIT_BRIDGE_VERSION;
   roomRevision: string;
   url: string;
+}
+
+/**
+ * How many steps Orbit's pages have added to the tab's history above the game's own (needs "history"), so closing
+ * Orbit walks back over exactly those. Sent whenever it changes; never more than the real number (lib/orbit-history.ts).
+ */
+export interface OrbitHistoryStep {
+  type: 'orbit-history';
+  version: typeof ORBIT_BRIDGE_VERSION;
+  roomRevision: string;
+  step: number;
 }
 
 export interface OrbitBridgeAck {
