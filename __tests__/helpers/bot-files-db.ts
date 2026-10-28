@@ -13,7 +13,10 @@ export const db = {
   counters: new Map<string, number>(),
   /** Artifacts, for the search that also finds them (only read). */
   artifacts: [] as Row[],
+  /** The super admin's saved limits ("bot-limits"), or null for the recommended ones. */
+  limits: null as Row | null,
   reset() {
+    this.limits = null;
     this.artifacts.length = 0;
     this.users.length = 0;
     this.files.length = 0;
@@ -60,6 +63,9 @@ function removeFiles(where: Row): number {
 }
 
 const client: Row = {
+  appSetting: {
+    findUnique: async ({ where }: Row) => (where.key === 'bot-limits' && db.limits ? { key: 'bot-limits', value: db.limits } : null),
+  },
   user: {
     findFirst: async ({ where }: Row) => db.users.find((user) => where.OR.some((cond: Row) => cond.uuid === user.uuid || cond.email === user.email)) ?? null,
   },

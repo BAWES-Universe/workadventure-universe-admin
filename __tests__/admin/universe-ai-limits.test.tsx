@@ -27,6 +27,7 @@ function answer(limits = SERVER_LIMITS_RECOMMENDED) {
               artifacts: { ...limits.artifacts, ...change.artifacts },
               guard: change.guard ?? limits.guard,
               fairUsage: { ...limits.fairUsage, ...change.fairUsage },
+              files: { ...limits.files, ...change.files },
             },
           }),
       });
@@ -45,7 +46,7 @@ describe('Universe AI limits', () => {
     answer();
     render(<UniverseAiLimits />);
     expect(await screen.findByText('Replies on Universe AI')).toBeTruthy();
-    for (const label of ['Longest reply', 'Steps in one reply', 'Keep going when cut off', 'Messages it remembers', 'Reads from a page or file', 'Wait for the AI', 'Size of one version', 'Versions kept', 'Time to save', 'Replies for a signed-in person', 'Replies for a guest', 'Replies for all guests on one bot']) {
+    for (const label of ['Longest reply', 'Steps in one reply', 'Keep going when cut off', 'Messages it remembers', 'Reads from a page or file', 'Room to work in one reply', 'Newest files it sees', 'Files found in one search', 'Reads from an earlier file', 'Wait for the AI', 'Text kept from a file', 'Files bots can find again', 'Guests’ files', 'Size of one version', 'Versions kept', 'Time to save', 'Replies for a signed-in person', 'Replies for a guest', 'Replies for all guests on one bot']) {
       expect(screen.getByText(label)).toBeTruthy();
     }
     expect(screen.getAllByText('32,000 tokens').length).toBeGreaterThan(0);
@@ -75,6 +76,39 @@ describe('Universe AI limits', () => {
     fireEvent.change(field, { target: { value: '7' } });
     fireEvent.click(screen.getByRole('button', { name: /Save/ }));
     await waitFor(() => expect(JSON.parse(String(fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH')?.[1]?.body))).toEqual({ artifacts: { size: 7 } }));
+  });
+
+  it('says on the sheet what Other can be, and turns down a number outside it (#1508)', async () => {
+    answer();
+    render(<UniverseAiLimits />);
+    fireEvent.click(await screen.findByTestId('limit-results'));
+    fireEvent.click(await screen.findByRole('radio', { name: /Other/ }));
+    expect((await screen.findByTestId('limit-results-range')).textContent).toBe('Between 1 and 100 files.');
+    fireEvent.change(screen.getByLabelText(/Files found in one search, in/), { target: { value: '500' } });
+    expect(screen.getByRole('alert').textContent).toBe('Between 1 and 100 files.');
+    expect((screen.getByRole('button', { name: /Save/ }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText(/Files found in one search, in/), { target: { value: '30' } });
+    fireEvent.click(screen.getByRole('button', { name: /Save/ }));
+    await waitFor(() => expect(JSON.parse(String(fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH')?.[1]?.body))).toEqual({ universeAi: { results: 30 } }));
+  });
+
+  it('turns down "Reads from an earlier file" above "Reads from a page or file" with the line that says why, never cutting it', async () => {
+    answer({ ...SERVER_LIMITS_RECOMMENDED, universeAi: { ...SERVER_LIMITS_RECOMMENDED.universeAi, read: 10000 } });
+    render(<UniverseAiLimits />);
+    fireEvent.click(await screen.findByTestId('limit-part'));
+    fireEvent.click(await screen.findByRole('radio', { name: /20,000 characters/ }));
+    expect((await screen.findByTestId('limit-part-above')).textContent).toBe("Reads from an earlier file can't be more than Reads from a page or file (10,000 characters).");
+    expect((screen.getByRole('button', { name: /Save/ }) as HTMLButtonElement).disabled).toBe(true);
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === 'PATCH')).toBe(false);
+  });
+
+  it('saves what bots keep of the files in their chats, a guest\'s days included', async () => {
+    answer();
+    render(<UniverseAiLimits />);
+    fireEvent.click(await screen.findByTestId('limit-guestDays'));
+    fireEvent.click(await screen.findByRole('radio', { name: /7 days/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(JSON.parse(String(fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH')?.[1]?.body))).toEqual({ files: { guestDays: 7 } }));
   });
 
   it('saves the switch', async () => {

@@ -264,6 +264,24 @@ describe('files in bot chats (game #1508)', () => {
       await expect(getFile(call, { now: new Date('2026-10-29T10:00:01Z') })).rejects.toMatchObject({ status: 404 });
     });
 
+    it('a guest\'s files stay for the super admin\'s guest days, read from the saved settings', async () => {
+      db.limits = { files: { guestDays: 7 } };
+      const res = await call(add, song(guest));
+      expect(res.status).toBe(200);
+      const days = (db.files[0].expiresAt.getTime() - db.files[0].createdAt.getTime()) / (24 * 60 * 60 * 1000);
+      expect(days).toBeCloseTo(7, 2);
+    });
+
+    it('the text kept follows the saved "Text kept from a file", and a body past it is turned down', async () => {
+      db.limits = { files: { text: 10_000 } };
+      const made = await call(add, song(person('owner'), DM, { source: 'person', kind: 'document', name: 'notes.txt' }));
+      const kept = await call(keepText, { botId: 'bot1', person: person('owner'), chat: DM, ref: made.body.file.ref, text: 'y'.repeat(12_000) });
+      expect(kept.body.file.text.chars).toBe(10_000);
+      // Room for twelve times the setting: a body far past it never reaches the handler
+      const huge = await call(keepText, { botId: 'bot1', person: person('owner'), chat: DM, ref: made.body.file.ref, text: 'y'.repeat(200_000) });
+      expect(huge.status).toBe(413);
+    });
+
     it('a guest account in Orbit counts as a guest', async () => {
       addUser('visitor', { uuid: 'guest-uuid-1', isGuest: true });
       await addSong({ ...guest, signedIn: true });
@@ -290,7 +308,7 @@ describe('files in bot chats (game #1508)', () => {
     });
 
     it('for the days the super admin sets, and older ones are removed', async () => {
-      const limits = { text: 2_000_000, findable: 30 };
+      const limits = { text: 2_000_000, findable: 30, guestDays: 1 };
       const made = await addFile(song() as Parameters<typeof addFile>[0], { now: new Date('2026-09-01T00:00:00Z'), limits });
       const ref = { botId: 'bot1', person: person('owner'), chat: DM as never, ref: made.file.ref };
       await expect(getFile(ref, { now: new Date('2026-09-30T00:00:00Z'), limits })).resolves.toBeTruthy();
@@ -333,7 +351,7 @@ describe('files in bot chats (game #1508)', () => {
       const { keepFileText } = await import('@/lib/bot-files');
       const kept = await keepFileText(
         { botId: 'bot1', person: person('owner'), chat: BUBBLE as never, ref: made.file.ref, text: 'ab\u0000c'.repeat(100) },
-        { now: new Date(), limits: { text: 50, findable: 0 } },
+        { now: new Date(), limits: { text: 50, findable: 0, guestDays: 1 } },
       );
       expect(kept.file.text.chars).toBe(50);
       expect(db.parts.map((part) => part.text).join('')).not.toContain('\u0000');

@@ -7,7 +7,7 @@ import { clearDownNotice, isIfDown } from '@/lib/ai-key-health';
 import { allowKeyAttempt } from '@/lib/ai-key-models';
 import { editSavedKey } from '@/lib/ai-key-edit';
 import { forgetKeyModels } from '@/lib/ai-key-model-list';
-import { checkReplyLimits, readReplyLimits } from '@/lib/bot-limit-values';
+import { checkReplyLimits, readReplyLimits, replyLimitsProblem } from '@/lib/bot-limit-values';
 import type { Prisma } from '@prisma/client';
 
 export const runtime = 'nodejs';
@@ -77,6 +77,9 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
       const saved = key.replyLimits && typeof key.replyLimits === 'object' && !Array.isArray(key.replyLimits) ? (key.replyLimits as Record<string, unknown>) : {};
       // Only what the owner changed is kept, so a value they never touched follows the recommended one
       const next = { ...saved, ...limits.value };
+      // Turned down with the reason, never cut quietly to fit
+      const problem = replyLimitsProblem(readReplyLimits(next), limits.value);
+      if (problem) return respond(request, { error: problem }, 400);
       await prisma.botsAiProvider.updateMany({ where: { providerId: id, ownerId: user.id }, data: { replyLimits: next as Prisma.InputJsonValue } });
       savedLimits = readReplyLimits(next);
     }

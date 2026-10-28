@@ -7,6 +7,7 @@ import {
   limitsForBot,
   readReplyLimits,
   readServerLimits,
+  replyLimitsProblem,
   type ReplyLimits,
   type ServerLimits,
 } from '@/lib/bot-limit-values';
@@ -35,7 +36,13 @@ export async function getServerLimits(): Promise<ServerLimits> {
 
 type ServerChange = Partial<{ [K in keyof ServerLimits]: ServerLimits[K] extends object ? Partial<ServerLimits[K]> : ServerLimits[K] }>;
 
-/** Saves a super admin's change on top of what is saved (only the values it names change) and returns all of them. */
+/** Limits that can't be saved together, with the line that says why (shown as it is). */
+export class LimitsRefused extends Error {}
+
+/**
+ * Saves a super admin's change on top of what is saved (only the values it names change) and returns all of them. A
+ * change that leaves Universe AI's limits at odds with each other is turned down with LimitsRefused.
+ */
 export async function saveServerLimits(change: ServerChange, userId: string): Promise<ServerLimits> {
   return prisma.$transaction(async (tx) => {
     const row = await tx.appSetting.findUnique({ where: { key: SETTING_KEY } });
@@ -45,7 +52,10 @@ export async function saveServerLimits(change: ServerChange, userId: string): Pr
       artifacts: { ...now.artifacts, ...change.artifacts },
       guard: change.guard ?? now.guard,
       fairUsage: { ...now.fairUsage, ...change.fairUsage },
+      files: { ...now.files, ...change.files },
     };
+    const problem = replyLimitsProblem(next.universeAi, change.universeAi);
+    if (problem) throw new LimitsRefused(problem);
     const value = next as unknown as Prisma.InputJsonValue;
     await tx.appSetting.upsert({
       where: { key: SETTING_KEY },
@@ -85,6 +95,16 @@ export interface ServedLimits {
   artifactSaveSeconds: number;
   /** "Say when nothing was saved". */
   guard: boolean;
+  /** Files in bot chats (#1508): this person's newest files named before each reply (0 = none). */
+  recentFiles: number;
+  /** Files and artifacts one search gives back. */
+  findResults: number;
+  /** Characters one opening of a file from an earlier message gives back. */
+  partChars: number;
+  /** Characters of searches, reads and makes one reply keeps while it works; past this the oldest shrink to a line. */
+  roomChars: number;
+  /** Characters of a document's text kept to find and read again (Orbit clips to it; the bot server reads this much). */
+  fileTextChars: number;
 }
 
 export function servedLimits(reply: ReplyLimits, server: ServerLimits, bot: { maxReplyTokens?: number | null; maxSteps?: number | null }): ServedLimits {
@@ -100,6 +120,11 @@ export function servedLimits(reply: ReplyLimits, server: ServerLimits, bot: { ma
     artifactVersions: server.artifacts.versions,
     artifactSaveSeconds: server.artifacts.save,
     guard: server.guard,
+    recentFiles: own.recentFiles,
+    findResults: own.results,
+    partChars: Math.min(own.part, own.read),
+    roomChars: own.room,
+    fileTextChars: server.files.text,
   };
 }
 

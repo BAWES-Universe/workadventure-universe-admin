@@ -171,7 +171,7 @@ describe('finding files in bot chats (game #1508)', () => {
       const sql = fakeSql([]);
       await findFiles(
         { botId: 'bot1', person: owner, chat: DM, source: 'bot', since: '2026-10-01T00:00:00Z', until: 'not a date', limit: 10 },
-        { now: NOW, sql: sql.run, limits: { text: 2_000_000, findable: 30 } },
+        { now: NOW, sql: sql.run, limits: { text: 2_000_000, findable: 30, guestDays: 1 } },
       );
       const values = sql.asked[0].values;
       expect(values.slice(0, 5)).toEqual(['bot1', 'owner', 'dm', '!owner-dm', NOW.toISOString()]);

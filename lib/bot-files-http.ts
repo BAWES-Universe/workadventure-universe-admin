@@ -3,7 +3,9 @@ import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
 import { validateServiceToken } from '@/lib/service-tokens';
 import { CHAT_KINDS } from '@/lib/artifacts';
-import { BotFileError, FILE_KINDS, FILE_LIMITS_RECOMMENDED, FILE_SOURCES, MAX_FILE_NAME_LENGTH } from '@/lib/bot-files';
+import { BotFileError, FILE_KINDS, FILE_SOURCES, MAX_FILE_NAME_LENGTH, type Context } from '@/lib/bot-files';
+import { getServerLimits } from '@/lib/bot-limits';
+import { LIMIT_RANGES, type FileLimits } from '@/lib/bot-limit-values';
 
 /**
  * The routes of files in bot chats (game #1508) are called only by the bot server (BOT_SERVICE_TOKEN, or the admin token
@@ -15,11 +17,13 @@ function hasAdminToken(request: NextRequest): boolean {
   return !!token && !!expected && token === expected;
 }
 
-/** A file's whole text in JSON: up to four bytes a character, with room for escapes and the rest of the body. */
-const bodyRoom = () => FILE_LIMITS_RECOMMENDED.text * 6 + 64 * 1024;
+/**
+ * A file's whole text, up to the super admin's "Text kept from a file", in JSON: up to four bytes a character, with room
+ * for escapes, the prompt a made file came from (kept to the same length) and the rest of the body.
+ */
+const bodyRoom = (limits: FileLimits) => limits.text * 12 + 64 * 1024;
 
-async function readBody(request: NextRequest): Promise<unknown> {
-  const room = bodyRoom();
+async function readBody(request: NextRequest, room: number): Promise<unknown> {
   const tooLarge = () => new BotFileError('too_large', 413, 'The request is too large.');
   if (Number(request.headers.get('content-length')) > room) throw tooLarge();
   if (!request.body) return null;
@@ -44,16 +48,18 @@ async function readBody(request: NextRequest): Promise<unknown> {
 }
 
 /** Wraps one route: the bot server's token, the JSON body, and the answer for each way it can end. */
-export function botFileRoute<B extends z.ZodType>(name: string, bodySchema: B, handler: (body: z.infer<B>) => Promise<unknown>) {
+export function botFileRoute<B extends z.ZodType>(name: string, bodySchema: B, handler: (body: z.infer<B>, ctx: Context) => Promise<unknown>) {
   return async (request: NextRequest) => {
     try {
       if (!validateServiceToken(request) && !hasAdminToken(request)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-      const parsed = bodySchema.safeParse(await readBody(request));
+      // The super admin's "Files in chats", read once for the call
+      const ctx: Context = { now: new Date(), limits: (await getServerLimits()).files };
+      const parsed = bodySchema.safeParse(await readBody(request, bodyRoom(ctx.limits!)));
       if (!parsed.success) {
         // Where the body is wrong, never what it held
         return NextResponse.json({ error: 'Invalid request data', details: parsed.error.issues.map((issue) => ({ path: issue.path, message: issue.message })) }, { status: 400 });
       }
-      const answer = await handler(parsed.data);
+      const answer = await handler(parsed.data, ctx);
       return NextResponse.json(answer, { headers: { 'Cache-Control': 'no-store' } });
     } catch (error) {
       if (error instanceof BotFileError) return NextResponse.json({ error: error.code, message: error.message }, { status: error.status });
@@ -94,7 +100,8 @@ export const addSchema = z
     store: storeSchema,
     line: z.string().max(2000).nullish(),
     madeWith: z.string().max(400).nullish(),
-    madePrompt: z.string().max(FILE_LIMITS_RECOMMENDED.text * 2).nullish(),
+    // Kept up to "Text kept from a file"; the body room above is what holds it to the setting
+    madePrompt: z.string().max(LIMIT_RANGES.files.text.max * 2).nullish(),
     lengthSeconds: z.number().int().min(0).max(2147483647).nullish(),
     pages: z.number().int().min(0).max(2147483647).nullish(),
   })
@@ -108,7 +115,7 @@ export const keepTextSchema = z
   .object({
     ...botCall,
     ref: shortId,
-    text: z.string().max(FILE_LIMITS_RECOMMENDED.text * 2).nullish(),
+    text: z.string().max(LIMIT_RANGES.files.text.max * 2).nullish(),
     failed: z.boolean().optional(),
   })
   .strict();
@@ -125,7 +132,7 @@ export const findSchema = z
     until: day,
     page: z.number().int().min(1).max(100_000).nullish(),
     // The "Files found in one search" setting's range
-    limit: z.number().int().min(1).max(100),
+    limit: z.number().int().min(LIMIT_RANGES.reply.results.min).max(LIMIT_RANGES.reply.results.max),
   })
   .strict();
 
@@ -134,7 +141,7 @@ export const readSchema = z
     ...botCall,
     ref: shortId,
     at: z.number().int().min(0).max(2147483647).nullish(),
-    // The "Reads from a kept file" setting's range
-    chars: z.number().int().min(1).max(5_000_000),
+    // The "Reads from an earlier file" setting's range
+    chars: z.number().int().min(1).max(LIMIT_RANGES.reply.part.max),
   })
   .strict();

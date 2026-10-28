@@ -13,4 +13,4 @@ export const runtime = 'nodejs';
  * until?, page?, limit }
  * Response: { items, total, page, pages, matched, hidden }
  */
-export const POST = botFileRoute('POST /api/bot-files/find', findSchema, (body) => findFiles(body as FindInput));
+export const POST = botFileRoute('POST /api/bot-files/find', findSchema, (body, ctx) => findFiles(body as FindInput, ctx));

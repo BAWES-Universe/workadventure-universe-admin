@@ -2,7 +2,8 @@ import { prisma } from '@/lib/db';
 import { checkBotAccess } from '@/lib/bot-access';
 import { loadBotPrivacy, takeForgets } from '@/lib/bot-privacy';
 import { findUserByIdentifier } from '@/lib/user-identifier';
-import { GUEST_KEEP_MS, cleanLine, clipText, type ChatKind } from '@/lib/artifacts';
+import { cleanLine, clipText, type ChatKind } from '@/lib/artifacts';
+import { FILE_LIMITS_RECOMMENDED, type FileLimits } from '@/lib/bot-limit-values';
 
 /**
  * Files in bot chats (game #1508): what a person sent a bot and what a bot sent them, kept so the bot can find, read and
@@ -11,9 +12,9 @@ import { GUEST_KEEP_MS, cleanLine, clipText, type ChatKind } from '@/lib/artifac
  * bot finds them in their own tables.
  *
  * Who may use a file: the person it belongs to, from any chat with this bot; anyone else only while they are in the
- * chat it came in. A guest's file has no owner, so it is only for that chat, and it goes after a day like a guest's
- * artifact. Bot B never sees a file sent to bot A. Orbit logs no file names or text, and every answer carries the bot's
- * hidden flag so the bot server keeps them out of PostHog and Sentry when the bot's chats are hidden.
+ * chat it came in. A guest's file has no owner, so it is only for that chat, and it goes after the super admin's guest
+ * days (one by default). Bot B never sees a file sent to bot A. Orbit logs no file names or text, and every answer
+ * carries the bot's hidden flag so the bot server keeps them out of PostHog and Sentry when the bot's chats are hidden.
  */
 
 export const FILE_KINDS = ['image', 'audio', 'video', 'document', 'other'] as const;
@@ -23,16 +24,8 @@ export type FileKind = (typeof FILE_KINDS)[number];
 export const FILE_SOURCES = ['person', 'bot'] as const;
 export type FileSource = (typeof FILE_SOURCES)[number];
 
-/**
- * How long a file's text may be, and for how many days a file can be found again (0 = until the person asks the bot to
- * forget them). The super admin's settings for these come with the limits page (#1508 O3); until then these are used.
- */
-export interface FileLimits {
-  text: number;
-  findable: number;
-}
-
-export const FILE_LIMITS_RECOMMENDED: FileLimits = { text: 2_000_000, findable: 0 };
+/** How much text is kept, how long files can be found, and how long a guest's stay: the super admin's "Files in chats". */
+export { FILE_LIMITS_RECOMMENDED, type FileLimits };
 
 /** The text is kept in parts this long, so search points at a part and a long file is never read whole. */
 export const TEXT_PART_CHARS = 10_000;
@@ -66,7 +59,7 @@ export class BotFileError extends Error {
 
 const notFound = () => new BotFileError('not_found', 404, 'No such file.');
 
-/** A person as the bot server names them. A guest has no account: nothing is kept for them beyond a day. */
+/** A person as the bot server names them. A guest has no account: nothing is kept for them past the guest days. */
 export interface Person {
   signedIn: boolean;
   identifier?: string | null;
@@ -94,6 +87,7 @@ export interface Context {
 
 export const defaultContext = (): Context => ({ now: new Date() });
 export const limitsOf = (ctx: Context): FileLimits => ctx.limits ?? FILE_LIMITS_RECOMMENDED;
+export const DAY_MS = 24 * 60 * 60 * 1000;
 
 export interface Who {
   /** Their Orbit account; null for a guest. */
@@ -241,10 +235,10 @@ export function viewOf(row: FileRow, who: Who, chat: Chat): BotFileView {
   };
 }
 
-/** Gone for everyone: a guest's after a day, anyone's past the days the super admin keeps files findable. */
+/** Gone for everyone: a guest's after the guest days, anyone's past the days the super admin keeps files findable. */
 export function hasGone(row: Pick<FileRow, 'expiresAt' | 'createdAt'>, limits: FileLimits, now: Date): boolean {
   if (row.expiresAt && row.expiresAt.getTime() <= now.getTime()) return true;
-  return limits.findable > 0 && now.getTime() - row.createdAt.getTime() > limits.findable * 24 * 60 * 60 * 1000;
+  return limits.findable > 0 && now.getTime() - row.createdAt.getTime() > limits.findable * DAY_MS;
 }
 
 /** The person it belongs to, from any chat with this bot; anyone else only in the chat it came in. */
@@ -325,7 +319,7 @@ export async function addFile(input: AddInput, ctx: Context = defaultContext()):
       pages: input.pages ?? null,
       chatKind: input.chat.kind,
       chatRef: input.chat.ref,
-      expiresAt: who.userId ? null : new Date(ctx.now.getTime() + GUEST_KEEP_MS),
+      expiresAt: who.userId ? null : new Date(ctx.now.getTime() + limitsOf(ctx).guestDays * DAY_MS),
       createdAt: ctx.now,
     },
   });
@@ -426,7 +420,7 @@ export function resetFilePruneClock(): void {
 export async function pruneGoneFiles(ctx: Context = defaultContext()): Promise<number> {
   const { findable } = limitsOf(ctx);
   const gone: object[] = [{ expiresAt: { lte: ctx.now } }];
-  if (findable > 0) gone.push({ createdAt: { lte: new Date(ctx.now.getTime() - findable * 24 * 60 * 60 * 1000) } });
+  if (findable > 0) gone.push({ createdAt: { lte: new Date(ctx.now.getTime() - findable * DAY_MS) } });
   const rows = await prisma.botFile.findMany({ where: { OR: gone }, select: { id: true }, take: PRUNE_BATCH });
   if (rows.length === 0) return 0;
   const { count } = await prisma.botFile.deleteMany({ where: { id: { in: rows.map((row) => row.id) } } });

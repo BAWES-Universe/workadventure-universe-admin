@@ -3,11 +3,11 @@
  * so the Orbit pages read the same values the server does. Saving and reading them is lib/bot-limits.ts.
  *
  * Three people set them. A super admin sets Universe AI's reply limits, the artifact limits, the "Say when nothing was
- * saved" switch and fair usage. A key's owner sets the reply limits of bots on that key. A bot's editors can lower the
+ * saved" switch, fair usage and what bots keep of the files in their chats. A key's owner sets the reply limits of bots on that key. A bot's editors can lower the
  * longest reply and the steps for that one bot, never raise them above its key's.
  */
 
-/** The reply limits, the same six for Universe AI and for every key. */
+/** The reply limits, the same for Universe AI and for every key. */
 export interface ReplyLimits {
   /** Longest reply, in tokens: what the AI is told it may write in one go, an artifact and any thinking included. */
   reply: number;
@@ -21,6 +21,24 @@ export interface ReplyLimits {
   read: number;
   /** Seconds it waits when its AI goes quiet before it gives up. */
   wait: number;
+  /** This person's newest files it sees before each reply (#1508); 0 shows none. */
+  recentFiles: number;
+  /** Files and artifacts one search gives back (#1508). */
+  results: number;
+  /** Characters it opens of a file from an earlier message at once (#1508); never more than `read`. */
+  part: number;
+  /** Characters of its searches, reads and makes one reply keeps while it works (#1508); past this the oldest shrink to a line. */
+  room: number;
+}
+
+/** What bots keep of the files in their chats (#1508), for all bots. */
+export interface FileLimits {
+  /** Characters of a document's text, or of the prompt a bot made a file with, kept to find and read again. */
+  text: number;
+  /** Days a file stays findable; 0 keeps it until the person asks the bot to forget them. */
+  findable: number;
+  /** Days a guest's files stay, in the chat they came in. */
+  guestDays: number;
 }
 
 /** The artifact limits, for all bots. */
@@ -47,10 +65,12 @@ export interface ServerLimits {
   /** "Say when nothing was saved": a bot that claims an artifact it never saved tries once more, then the chat says so. */
   guard: boolean;
   fairUsage: FairUsage;
+  files: FileLimits;
 }
 
-export const REPLY_LIMITS_RECOMMENDED: ReplyLimits = { reply: 32000, steps: 30, continue: 2, memory: 20, read: 50000, wait: 60 };
+export const REPLY_LIMITS_RECOMMENDED: ReplyLimits = { reply: 32000, steps: 30, continue: 2, memory: 20, read: 50000, wait: 60, recentFiles: 5, results: 10, part: 8000, room: 80000 };
 export const ARTIFACT_LIMITS_RECOMMENDED: ArtifactLimits = { size: 2, versions: 0, save: 30 };
+export const FILE_LIMITS_RECOMMENDED: FileLimits = { text: 2_000_000, findable: 0, guestDays: 1 };
 export const FAIR_USAGE_RECOMMENDED: FairUsage = { signedIn: 30, guest: 10, guestPool: 200 };
 /** The fair usage window. Shown on the rows ("every 5 hours"), not a row of its own. */
 export const FAIR_USAGE_WINDOW_HOURS = 5;
@@ -60,13 +80,14 @@ export const SERVER_LIMITS_RECOMMENDED: ServerLimits = {
   artifacts: ARTIFACT_LIMITS_RECOMMENDED,
   guard: true,
   fairUsage: FAIR_USAGE_RECOMMENDED,
+  files: FILE_LIMITS_RECOMMENDED,
 };
 
 /**
  * The values that can be saved: anything a person might mean, nothing that would break a reply (no 0 tokens, no
  * negative wait). These are not limits on what bots make; the limits are the values people pick inside them.
  */
-interface Range {
+export interface Range {
   min: number;
   max: number;
   /** Whole numbers only (everything but the artifact size in MB). */
@@ -80,6 +101,16 @@ const REPLY_RANGES: Record<keyof ReplyLimits, Range> = {
   memory: { min: 1, max: 1_000, whole: true },
   read: { min: 1_000, max: 5_000_000, whole: true },
   wait: { min: 5, max: 3_600, whole: true },
+  recentFiles: { min: 0, max: 100, whole: true },
+  results: { min: 1, max: 100, whole: true },
+  part: { min: 1_000, max: 5_000_000, whole: true },
+  room: { min: 5_000, max: 5_000_000, whole: true },
+};
+
+const FILE_RANGES: Record<keyof FileLimits, Range> = {
+  text: { min: 10_000, max: 50_000_000, whole: true },
+  findable: { min: 0, max: 36_500, whole: true },
+  guestDays: { min: 1, max: 3_650, whole: true },
 };
 
 const ARTIFACT_RANGES: Record<keyof ArtifactLimits, Range> = {
@@ -93,6 +124,9 @@ const FAIR_USAGE_RANGES: Record<keyof FairUsage, Range> = {
   guest: { min: 1, max: 1_000_000, whole: true },
   guestPool: { min: 1, max: 1_000_000, whole: true },
 };
+
+/** The values each group can hold, for the pages to say ("Between 1 and 100 files") before anything is sent. */
+export const LIMIT_RANGES = { reply: REPLY_RANGES, artifacts: ARTIFACT_RANGES, fairUsage: FAIR_USAGE_RANGES, files: FILE_RANGES };
 
 const fits = (value: unknown, range: Range): value is number =>
   typeof value === 'number' && Number.isFinite(value) && value >= range.min && value <= range.max && (!range.whole || Number.isInteger(value));
@@ -110,7 +144,27 @@ function readGroup<T extends object>(saved: unknown, ranges: Record<keyof T, Ran
   return out;
 }
 
-export const readReplyLimits = (saved: unknown): ReplyLimits => readGroup(saved, REPLY_RANGES, REPLY_LIMITS_RECOMMENDED);
+/**
+ * A key's or Universe AI's reply limits as saved. "Reads from an earlier file" is never more than "Reads from a page or
+ * file": where only the second was ever saved, lower than 8,000, the first starts at the same value.
+ */
+export function readReplyLimits(saved: unknown): ReplyLimits {
+  const limits = readGroup(saved, REPLY_RANGES, REPLY_LIMITS_RECOMMENDED);
+  const partSaved = isRecord(saved) && fits(saved.part, REPLY_RANGES.part);
+  return !partSaved && limits.part > limits.read ? { ...limits, part: limits.read } : limits;
+}
+
+/**
+ * Why a set of reply limits can't be saved together, in the words the page shows, or null when it can. A value above
+ * "Reads from a page or file" is turned down, never cut quietly.
+ */
+export function replyLimitsProblem(limits: ReplyLimits, changed: Partial<ReplyLimits> = {}): string | null {
+  if (limits.part <= limits.read) return null;
+  if (changed.read !== undefined && changed.part === undefined) {
+    return `Reads from a page or file can't be less than Reads from an earlier file (${limits.part.toLocaleString('en')} characters). Lower that one first.`;
+  }
+  return `Reads from an earlier file can't be more than Reads from a page or file (${limits.read.toLocaleString('en')} characters).`;
+}
 
 export function readServerLimits(saved: unknown): ServerLimits {
   const all = isRecord(saved) ? saved : {};
@@ -119,6 +173,7 @@ export function readServerLimits(saved: unknown): ServerLimits {
     artifacts: readGroup(all.artifacts, ARTIFACT_RANGES, ARTIFACT_LIMITS_RECOMMENDED),
     guard: typeof all.guard === 'boolean' ? all.guard : SERVER_LIMITS_RECOMMENDED.guard,
     fairUsage: readGroup(all.fairUsage, FAIR_USAGE_RANGES, FAIR_USAGE_RECOMMENDED),
+    files: readGroup(all.files, FILE_RANGES, FILE_LIMITS_RECOMMENDED),
   };
 }
 
@@ -142,17 +197,17 @@ function checkGroup<T extends object>(input: unknown, ranges: Record<keyof T, Ra
 
 export const checkReplyLimits = (input: unknown, group = 'limits'): Checked<Partial<ReplyLimits>> => checkGroup(input, REPLY_RANGES, group);
 
-/** A super admin's change: any of the four parts, each checked. */
-export function checkServerLimits(input: unknown): Checked<Partial<{ universeAi: Partial<ReplyLimits>; artifacts: Partial<ArtifactLimits>; guard: boolean; fairUsage: Partial<FairUsage> }>> {
+/** A super admin's change: any of the five parts, each checked. */
+export function checkServerLimits(input: unknown): Checked<Partial<{ universeAi: Partial<ReplyLimits>; artifacts: Partial<ArtifactLimits>; guard: boolean; fairUsage: Partial<FairUsage>; files: Partial<FileLimits> }>> {
   if (!isRecord(input)) return { ok: false, error: 'Expected an object' };
-  const out: Partial<{ universeAi: Partial<ReplyLimits>; artifacts: Partial<ArtifactLimits>; guard: boolean; fairUsage: Partial<FairUsage> }> = {};
+  const out: Partial<{ universeAi: Partial<ReplyLimits>; artifacts: Partial<ArtifactLimits>; guard: boolean; fairUsage: Partial<FairUsage>; files: Partial<FileLimits> }> = {};
   for (const [key, value] of Object.entries(input)) {
     if (key === 'guard') {
       if (typeof value !== 'boolean') return { ok: false, error: 'guard must be true or false' };
       out.guard = value;
       continue;
     }
-    const ranges = key === 'universeAi' ? REPLY_RANGES : key === 'artifacts' ? ARTIFACT_RANGES : key === 'fairUsage' ? FAIR_USAGE_RANGES : null;
+    const ranges = key === 'universeAi' ? REPLY_RANGES : key === 'artifacts' ? ARTIFACT_RANGES : key === 'fairUsage' ? FAIR_USAGE_RANGES : key === 'files' ? FILE_RANGES : null;
     if (!ranges) return { ok: false, error: `Unknown setting: ${key}` };
     const checked = checkGroup(value, ranges as Record<string, Range>, key);
     if (!checked.ok) return checked;
