@@ -102,7 +102,7 @@ describe('artifact media (#1510)', () => {
     it('turns down media over the limit a super admin set, and stores nothing', async () => {
       db.settings.set('bot-limits', { artifacts: { media: 0.001 } });
       const res = await send(make, makeBody(), [{ ...SONG, bytes: 2000 }]);
-      expect(res).toMatchObject({ status: 413, body: { error: 'media_too_large', message: 'One version can carry up to 1 KB of songs, images and videos.' } });
+      expect(res).toMatchObject({ status: 413, body: { error: 'media_too_large', message: 'One save can add up to 1 KB of songs, images and videos.' } });
       expect(db.artifacts).toHaveLength(0);
       expect(db.files.size).toBe(0);
     });
@@ -202,12 +202,18 @@ describe('artifact media (#1510)', () => {
       expect(res).toMatchObject({ status: 422, body: { error: 'media_not_found' } });
     });
 
-    it('counts the media it keeps toward the limit', async () => {
+    it('counts only what one save adds toward the limit, not the media it keeps', async () => {
       const made = await makeWithSong([{ ...SONG, bytes: 800 }]);
       db.settings.set('bot-limits', { artifacts: { media: 0.001 } });
-      const res = await send(change, changeBody(), [{ name: 'two.mp3', type: 'audio/mpeg', bytes: 300 }], { id: made.artifact.id });
-      expect(res.body.error).toBe('media_too_large');
-      expect(db.versions).toHaveLength(1);
+      const added = await send(change, changeBody(), [{ name: 'two.mp3', type: 'audio/mpeg', bytes: 300 }], { id: made.artifact.id });
+      expect(added.status).toBe(200);
+      expect(added.body.version.media.map((file: { name: string }) => file.name).sort()).toEqual(['song.mp3', 'two.mp3']);
+      const tooMuch = await send(change, changeBody(), [
+        { name: 'three.mp3', type: 'audio/mpeg', bytes: 600 },
+        { name: 'four.mp3', type: 'audio/mpeg', bytes: 600 },
+      ], { id: made.artifact.id });
+      expect(tooMuch.body.error).toBe('media_too_large');
+      expect(db.versions).toHaveLength(2);
     });
 
     it('works on a version saved before media, with the old kind of key', async () => {

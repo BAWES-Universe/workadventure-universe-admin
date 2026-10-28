@@ -31,7 +31,7 @@ export interface ArtifactLimits {
   versions: number;
   /** Seconds saving a version may take before the bot is told it failed. */
   save: number;
-  /** Songs, images and videos one version carries beside its file, all together, in MB (#1510); 0 lets none in. */
+  /** Songs, images and videos a bot adds to an artifact in one save, all together, in MB (#1510); 0 lets none in. */
   media: number;
 }
 
@@ -184,5 +184,5 @@ export function limitsForBot(base: ReplyLimits, bot: { maxReplyTokens?: number |
 /** Bytes in one artifact version. */
 export const artifactBytes = (limits: ArtifactLimits): number => Math.round(limits.size * 1024 * 1024);
 
-/** Bytes of media one artifact version may carry (#1510). */
+/** Bytes of media one save may add to an artifact (#1510). */
 export const artifactMediaBytes = (limits: ArtifactLimits): number => Math.round(limits.media * 1024 * 1024);

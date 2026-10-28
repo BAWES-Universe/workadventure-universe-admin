@@ -12,7 +12,7 @@ export const runtime = 'nodejs';
  *   kind: "app" | "page" | "markdown" | "svg", content, summary? }
  * With songs, images or videos (#1510, pages and mini apps only): multipart/form-data, the same JSON in a `request` part
  * and one `media` part per file, named as the page uses it ("song.mp3"). They sit beside the page, so
- * `<audio src="song.mp3">` plays it. All of them together fit the "Media in one artifact" limit (413 media_too_large).
+ * `<audio src="song.mp3">` plays it. All of them together fit the "Media added in one save" limit (413 media_too_large).
  * Response: { artifact, version, hidden }. `hidden` is the Bot chat telemetry switch for this bot: when true the bot
  * server keeps the artifact's text out of PostHog and Sentry.
  *

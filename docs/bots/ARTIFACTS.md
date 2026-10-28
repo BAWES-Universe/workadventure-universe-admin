@@ -25,8 +25,9 @@ game (open, versions, code, share, restore, copy, delete).
 - **Media (game #1510):** a page or mini app can carry songs, images and videos from the chat. They sit beside the page
   in its folder, so the page names them as is (`<audio src="song.mp3" controls>`), and a shared link plays them too.
   Only audio, raster image and video types, under a plain name (letters, digits, `.`, `-`, `_`) whose ending matches the
-  type. All of one version's media together fit the super admin's "Media in one artifact" limit (`artifacts.media`, in
-  MB, recommended 50; 0 lets none in). A change keeps the media it had unless `dropMedia` names them; restore and copy
+  type. The files one save adds fit together in the super admin's "Media added in one save" limit (`artifacts.media`,
+  in MB, recommended 50; 0 lets none in). It keeps one upload from filling the bot server's or Orbit's memory; media a
+  version keeps from the one before doesn't count, since it is copied inside the bucket. A change keeps the media it had unless `dropMedia` names them; restore and copy
   bring the media of that version; delete and the guest clean-up remove them. The bot hears each version's
   `media: [{ name, contentType, sizeBytes }]`, never where they are stored.
 

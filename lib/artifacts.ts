@@ -120,13 +120,14 @@ export function checkMediaFile(name: string, contentType: string, kind: Artifact
 export function tooMuchMedia(maxMediaBytes: number): ArtifactError {
   return maxMediaBytes === 0
     ? new ArtifactError('media_off', 413, 'Artifacts cannot carry songs, images or videos on this server.')
-    : new ArtifactError('media_too_large', 413, `One version can carry up to ${sizeLabel(maxMediaBytes)} of songs, images and videos.`);
+    : new ArtifactError('media_too_large', 413, `One save can add up to ${sizeLabel(maxMediaBytes)} of songs, images and videos.`);
 }
 
 /**
  * The media of a new version: what it keeps from the version it is made from (`kept`, already in the bucket), minus the
- * names the bot dropped, with the new uploads on top (an upload with a kept name takes its place). Every name once, all
- * of it inside the media limit. Says which name is wrong, so the bot can fix it and send it again.
+ * names the bot dropped, with the new uploads on top (an upload with a kept name takes its place). Every name once, and
+ * the new uploads together inside the media limit: it is what one save brings in, so what the version keeps (copied
+ * inside the bucket, never sent again) doesn't count. Says which name is wrong, so the bot can fix it and send it again.
  */
 export function mergeMedia(
   kept: readonly MediaFile[],
@@ -147,8 +148,7 @@ export function mergeMedia(
     if (!kept.some((file) => file.name === name)) throw new ArtifactError('media_not_found', 422, `"${clipText(name, 60)}" is not in this artifact.`);
   }
   const keep = kept.filter((file) => !names.has(file.name) && !drop.includes(file.name));
-  const total = keep.reduce((sum, file) => sum + file.sizeBytes, 0) + add.reduce((sum, file) => sum + file.body.byteLength, 0);
-  if (total > maxMediaBytes) throw tooMuchMedia(maxMediaBytes);
+  if (add.reduce((sum, file) => sum + file.body.byteLength, 0) > maxMediaBytes) throw tooMuchMedia(maxMediaBytes);
   return { keep, add };
 }
 

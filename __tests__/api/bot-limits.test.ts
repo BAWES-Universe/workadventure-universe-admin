@@ -69,7 +69,8 @@ describe('the values', () => {
     expect(checkServerLimits({ universeAi: { constructor: 1 } })).toMatchObject({ ok: false, error: 'Unknown limit: universeAi.constructor' });
     expect(checkServerLimits({ fairUsage: { toString: 1 } })).toMatchObject({ ok: false, error: 'Unknown limit: fairUsage.toString' });
     expect(checkServerLimits({ guard: 'yes' })).toMatchObject({ ok: false });
-    expect(checkServerLimits({ universeAi: { continue: 0 }, artifacts: { versions: 0, size: 0.5 } })).toEqual({ ok: true, value: { universeAi: { continue: 0 }, artifacts: { versions: 0, size: 0.5 } } });    // Media in one artifact (#1510): 0 lets none in, up to 1,000 MB
+    expect(checkServerLimits({ universeAi: { continue: 0 }, artifacts: { versions: 0, size: 0.5 } })).toEqual({ ok: true, value: { universeAi: { continue: 0 }, artifacts: { versions: 0, size: 0.5 } } });
+    // Media added in one save (#1510): 0 lets none in, up to 1,000 MB
     expect(checkServerLimits({ artifacts: { media: 0 } })).toEqual({ ok: true, value: { artifacts: { media: 0 } } });
     expect(checkServerLimits({ artifacts: { media: 1001 } })).toMatchObject({ ok: false, error: 'artifacts.media must be from 0 to 1,000' });
   });
