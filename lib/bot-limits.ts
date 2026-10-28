@@ -102,6 +102,8 @@ export interface ServedLimits {
   artifactSaveSeconds: number;
   /** Songs, images and videos one version may carry (#1510); 0 lets none in. */
   artifactMediaBytes: number;
+  /** Songs, images and videos one artifact can hold after a save (#696). */
+  artifactMediaFiles: number;
   /** "Say when nothing was saved". */
   guard: boolean;
   /** Files in bot chats (#1508): this person's newest files named before each reply (0 = none). */
@@ -129,6 +131,7 @@ export function servedLimits(reply: ReplyLimits, server: ServerLimits, bot: { ma
     artifactVersions: server.artifacts.versions,
     artifactSaveSeconds: server.artifacts.save,
     artifactMediaBytes: artifactMediaBytes(server.artifacts),
+    artifactMediaFiles: server.artifacts.mediaFiles,
     guard: server.guard,
     recentFiles: own.recentFiles,
     findResults: own.results,

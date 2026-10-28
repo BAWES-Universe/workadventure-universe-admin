@@ -216,6 +216,39 @@ describe('artifact media (#1510)', () => {
       expect(db.versions).toHaveLength(2);
     });
 
+    it('holds an artifact to "Files in one artifact": a save that would leave more is turned down with both numbers (#696)', async () => {
+      db.settings.set('bot-limits', { artifacts: { mediaFiles: 2 } });
+      const tooMany = await send(make, makeBody(), [SONG, COVER, { name: 'clip.mp4', type: 'video/mp4', bytes: 300 }]);
+      expect(tooMany).toMatchObject({
+        status: 422,
+        body: { error: 'too_many_media_files', message: 'This artifact can hold 2 files. This save would leave 3. Leave some out, or put the rest in a new artifact.' },
+      });
+      expect(db.artifacts).toHaveLength(0);
+      expect(db.files.size).toBe(0);
+
+      const made = await makeWithSong([SONG, COVER]);
+      const added = await send(change, changeBody(), [{ name: 'two.mp3', type: 'audio/mpeg', bytes: 300 }], { id: made.artifact.id });
+      expect(added.body.error).toBe('too_many_media_files');
+      expect(db.versions).toHaveLength(1);
+      // A file sent under a name it already has takes its place, so it counts once
+      expect((await send(change, changeBody(), [{ ...SONG, bytes: 900 }], { id: made.artifact.id })).status).toBe(200);
+      // Dropping one makes room for another in the same save
+      expect((await send(change, changeBody({ dropMedia: ['cover.png'] }), [{ name: 'two.mp3', type: 'audio/mpeg', bytes: 300 }], { id: made.artifact.id })).status).toBe(200);
+    });
+
+    it('still lets an artifact over a lowered "Files in one artifact" be edited, replace or drop files, and be restored', async () => {
+      const made = await makeWithSong([SONG, COVER]);
+      db.settings.set('bot-limits', { artifacts: { mediaFiles: 1 } });
+      expect((await send(change, changeBody({ content: PAGE.replace('<body>', '<body><h1>Hi</h1>') }), [], { id: made.artifact.id })).status).toBe(200);
+      // Replacing a file, or dropping two for one, doesn't leave more than before
+      expect((await send(change, changeBody(), [{ ...SONG, bytes: 900 }], { id: made.artifact.id })).status).toBe(200);
+      expect((await send(change, changeBody({ dropMedia: ['song.mp3', 'cover.png'] }), [{ name: 'two.mp3', type: 'audio/mpeg', bytes: 300 }], { id: made.artifact.id })).status).toBe(200);
+      expect((await send(change, changeBody(), [{ name: 'three.mp3', type: 'audio/mpeg', bytes: 300 }], { id: made.artifact.id })).body.error).toBe('too_many_media_files');
+      expect((await send(change, changeBody({ dropMedia: ['two.mp3'] }), [], { id: made.artifact.id })).status).toBe(200);
+      expect((await send(restore, { viewer: asOwner, number: 1 }, [], { id: made.artifact.id, token: ADMIN_TOKEN })).status).toBe(200);
+      expect(versionRow(made.artifact.id, 6).media).toHaveLength(2);
+    });
+
     it('works on a version saved before media, with the old kind of key', async () => {
       const made = await makeWithSong([]);
       const v1 = versionRow(made.artifact.id, 1);

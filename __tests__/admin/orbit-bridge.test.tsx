@@ -57,6 +57,19 @@ describe('OrbitBridge', () => {
     expect(posted).toContainEqual({ type: 'orbit-bridge-ready', version: 1, capabilities: ['navigate', 'event', 'view'] });
   });
 
+  it("tells a game that walks back over Orbit's steps how many its pages added, and nothing to one that doesn't", () => {
+    window.history.replaceState(null, '', '/admin');
+    render(<OrbitBridge onRefresh={jest.fn()} />);
+    init();
+    act(() => window.history.pushState({}, '', '/admin/bots'));
+    expect(posted.filter((message) => (message as { type: string }).type === 'orbit-history')).toHaveLength(0);
+
+    fromGame({ type: 'orbit-bridge-init', version: 1, roomRevision: revision, capabilities: ['history'] });
+    expect(posted).toContainEqual({ type: 'orbit-history', version: 1, roomRevision: revision, step: 1 });
+    act(() => window.history.pushState({}, '', '/admin/bots/1'));
+    expect(posted).toContainEqual({ type: 'orbit-history', version: 1, roomRevision: revision, step: 2 });
+  });
+
   it('answers not-ready to a request before the game said which visit it is', () => {
     render(<OrbitBridge onRefresh={jest.fn()} />);
     fromGame({ type: 'orbit-navigate', version: 1, requestId: 'r1', roomRevision: revision, intent: 'new-universe' });

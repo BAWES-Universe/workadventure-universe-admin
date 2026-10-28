@@ -51,6 +51,8 @@ export interface ArtifactLimits {
   save: number;
   /** Songs, images and videos a bot adds to an artifact in one save, all together, in MB (#1510); 0 lets none in. */
   media: number;
+  /** Songs, images and videos one artifact can hold after a save (#696); a save that would leave more is refused. */
+  mediaFiles: number;
 }
 
 /** Universe AI fair usage (#1159): replies one person (or all guests on one bot) get every few hours. */
@@ -71,7 +73,7 @@ export interface ServerLimits {
 }
 
 export const REPLY_LIMITS_RECOMMENDED: ReplyLimits = { reply: 32000, steps: 30, continue: 2, memory: 20, read: 50000, wait: 60, recentFiles: 5, results: 10, part: 8000, room: 80000 };
-export const ARTIFACT_LIMITS_RECOMMENDED: ArtifactLimits = { size: 2, versions: 0, save: 30, media: 50 };
+export const ARTIFACT_LIMITS_RECOMMENDED: ArtifactLimits = { size: 2, versions: 0, save: 30, media: 50, mediaFiles: 50 };
 export const FILE_LIMITS_RECOMMENDED: FileLimits = { text: 2_000_000, findable: 0, guestDays: 1 };
 export const FAIR_USAGE_RECOMMENDED: FairUsage = { signedIn: 30, guest: 10, guestPool: 200 };
 /** The fair usage window. Shown on the rows ("every 5 hours"), not a row of its own. */
@@ -120,6 +122,7 @@ const ARTIFACT_RANGES: Record<keyof ArtifactLimits, Range> = {
   versions: { min: 0, max: 1_000_000, whole: true },
   save: { min: 5, max: 600, whole: true },
   media: { min: 0, max: 1_000 },
+  mediaFiles: { min: 1, max: 10_000, whole: true },
 };
 
 const FAIR_USAGE_RANGES: Record<keyof FairUsage, Range> = {

@@ -48,7 +48,7 @@ describe('the values', () => {
     expect(readServerLimits(null)).toEqual(SERVER_LIMITS_RECOMMENDED);
     expect(SERVER_LIMITS_RECOMMENDED).toEqual({
       universeAi: { reply: 32000, steps: 30, continue: 2, memory: 20, read: 50000, wait: 60, recentFiles: 5, results: 10, part: 8000, room: 80000 },
-      artifacts: { size: 2, versions: 0, save: 30, media: 50 },
+      artifacts: { size: 2, versions: 0, save: 30, media: 50, mediaFiles: 50 },
       guard: true,
       fairUsage: { signedIn: 30, guest: 10, guestPool: 200 },
       files: { text: 2_000_000, findable: 0, guestDays: 1 },
@@ -80,6 +80,11 @@ describe('the values', () => {
     // Media added in one save (#1510): 0 lets none in, up to 1,000 MB
     expect(checkServerLimits({ artifacts: { media: 0 } })).toEqual({ ok: true, value: { artifacts: { media: 0 } } });
     expect(checkServerLimits({ artifacts: { media: 1001 } })).toMatchObject({ ok: false, error: 'artifacts.media must be from 0 to 1,000' });
+    // Files in one artifact (#696): a whole number from 1 to 10,000
+    expect(checkServerLimits({ artifacts: { mediaFiles: 200 } })).toEqual({ ok: true, value: { artifacts: { mediaFiles: 200 } } });
+    for (const bad of [0, 10_001, 2.5]) {
+      expect(checkServerLimits({ artifacts: { mediaFiles: bad } })).toMatchObject({ ok: false, error: 'artifacts.mediaFiles must be a whole number from 1 to 10,000' });
+    }
   });
 
   it('lets a bot lower its key’s longest reply and steps, never raise them', () => {

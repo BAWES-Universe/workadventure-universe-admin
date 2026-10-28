@@ -99,7 +99,7 @@ describe('GET /api/bots/:id/ai-credentials', () => {
     expect(body.maxTokens).toBe(32000);
     expect(body.limits).toEqual({
       replyTokens: 32000, steps: 30, continuations: 2, messages: 20, readChars: 50000, waitSeconds: 60,
-      artifactBytes: 2 * 1024 * 1024, artifactVersions: 0, artifactSaveSeconds: 30, artifactMediaBytes: 50 * 1024 * 1024, guard: true,
+      artifactBytes: 2 * 1024 * 1024, artifactVersions: 0, artifactSaveSeconds: 30, artifactMediaBytes: 50 * 1024 * 1024, artifactMediaFiles: 50, guard: true,
       recentFiles: 5, findResults: 10, partChars: 8000, roomChars: 80000, fileTextChars: 2_000_000,
     });
   });

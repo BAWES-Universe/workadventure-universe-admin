@@ -68,10 +68,10 @@ export interface Context {
   limits?: ArtifactLimits;
 }
 
-/** The size, version and media limits a super admin set (#666, #1510). */
-async function limitsOf(ctx: Context): Promise<{ maxBytes: number; maxVersions: number; maxMediaBytes: number }> {
+/** The size, version and media limits a super admin set (#666, #1510, #696). */
+async function limitsOf(ctx: Context): Promise<{ maxBytes: number; maxVersions: number; maxMediaBytes: number; maxMediaFiles: number }> {
   const limits = ctx.limits ?? (await getServerLimits()).artifacts;
-  return { maxBytes: artifactBytes(limits), maxVersions: limits.versions, maxMediaBytes: artifactMediaBytes(limits) };
+  return { maxBytes: artifactBytes(limits), maxVersions: limits.versions, maxMediaBytes: artifactMediaBytes(limits), maxMediaFiles: limits.mediaFiles };
 }
 
 /** Most artifacts a bot is told about at once. */
@@ -301,9 +301,9 @@ export async function makeArtifact(input: MakeInput, ctx: Context = defaultConte
   const title = cleanLine(input.title, MAX_TITLE_LENGTH);
   if (!title) throw new ArtifactError('title_required', 422, 'An artifact needs a title.');
   if (!isOneOf(ARTIFACT_KINDS, input.kind)) throw new ArtifactError('invalid_kind', 422, 'Unknown kind of artifact.');
-  const { maxBytes, maxMediaBytes } = await limitsOf(ctx);
+  const { maxBytes, maxMediaBytes, maxMediaFiles } = await limitsOf(ctx);
   checkContent(input.content, maxBytes);
-  const merged = mergeMedia([], input.media ?? [], [], input.kind, maxMediaBytes);
+  const merged = mergeMedia([], input.media ?? [], [], input.kind, maxMediaBytes, maxMediaFiles);
   const { botName, hidden } = await passBotGate(input);
   const who = await resolvePerson(input.person, true);
 
@@ -373,7 +373,7 @@ export async function changeArtifact(input: ChangeInput, ctx: Context = defaultC
     if (!canOpen(artifact, { ...who, inChat: inThisChat(artifact, input.chat) }, now)) throw new ArtifactError('not_found', 404, 'No such artifact.');
     throw new ArtifactError('change_not_allowed', 403, 'The owner has not allowed changes from this person.');
   }
-  const { maxBytes, maxVersions, maxMediaBytes } = await limitsOf(ctx);
+  const { maxBytes, maxVersions, maxMediaBytes, maxMediaFiles } = await limitsOf(ctx);
   checkVersionRoom(artifact.latestVersion, maxVersions);
   if (input.baseVersion != null && input.baseVersion !== artifact.latestVersion) {
     throw new ArtifactError('stale_version', 409, `It is on version ${artifact.latestVersion} now; read it again and send the change on that.`);
@@ -384,7 +384,7 @@ export async function changeArtifact(input: ChangeInput, ctx: Context = defaultC
   if (!latest) throw new ArtifactError('file_missing', 502, 'The latest version could not be found.');
   const content = hasContent ? (input.content as string) : hasEdits ? applyEdits(await files.get(latest.fileKey), input.edits as ArtifactEdit[], maxBytes) : await files.get(latest.fileKey);
   checkContent(content, maxBytes);
-  const merged = mergeMedia(mediaOf(latest), input.media ?? [], input.dropMedia ?? [], kind, maxMediaBytes);
+  const merged = mergeMedia(mediaOf(latest), input.media ?? [], input.dropMedia ?? [], kind, maxMediaBytes, maxMediaFiles);
 
   const next = artifact.latestVersion + 1;
   const fileKey = newFileKey(artifact.id, next, kind);
