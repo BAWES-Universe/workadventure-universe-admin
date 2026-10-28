@@ -15,14 +15,7 @@ import {
   type VisionSupportMode,
 } from '@/lib/vision-models';
 import { useReplacePage } from '@/app/admin/orbit-frame-context';
-
-const PROVIDER_TYPES = [
-  { value: 'lmstudio', label: 'LMStudio' },
-  { value: 'openai', label: 'OpenAI' },
-  { value: 'anthropic', label: 'Anthropic' },
-  { value: 'ultravox', label: 'Ultravox' },
-  { value: 'gpt-voice', label: 'GPT Voice' },
-];
+import { PROVIDER_TYPES } from '../components/provider-state';
 
 export default function NewProviderPage() {
   const replacePage = useReplacePage();
