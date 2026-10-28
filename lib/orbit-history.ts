@@ -64,7 +64,8 @@ export function trackOrbitHistory(win: Window = window): OrbitHistory {
     unused: string,
     url?: string | URL | null,
   ) {
-    replace.call(this, marked(data, step), unused, url);
+    // A replaced step keeps its place: its own mark, when it has one, even before a popstate for it is heard.
+    replace.call(this, marked(data, stepOf(history.state) ?? step), unused, url);
   };
   const onPopState = (event: PopStateEvent) => set(stepOf(event.state) ?? 0);
   win.addEventListener('popstate', onPopState);

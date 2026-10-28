@@ -28,6 +28,17 @@ describe("Orbit's steps in the tab's history", () => {
     expect(window.history.state).toEqual({ __NA: true, tree: 'next', orbitStep: 1 });
   });
 
+  it('a step replaced before its popstate is heard keeps its own mark', () => {
+    const nativeReplace = History.prototype.replaceState;
+    trackOrbitHistory();
+    window.history.pushState({}, '', '/admin/a');
+    window.history.pushState({}, '', '/admin/b');
+    // Back has landed on step 1, and something replaces it before Orbit hears the popstate.
+    nativeReplace.call(window.history, { __NA: true, orbitStep: 1 }, '');
+    window.history.replaceState({ __NA: true, tree: 'next' }, '');
+    expect(window.history.state).toEqual({ __NA: true, tree: 'next', orbitStep: 1 });
+  });
+
   it('Back and Forward land on the step they reach', () => {
     const tracked = trackOrbitHistory();
     const heard: number[] = [];
