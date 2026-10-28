@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
-import { addNotice, clearNotices, countOpenNotices, dismissNotice, openNotices } from '@/lib/notices';
+import { addNotice, clearBotRunsOnNotices, clearNotices, countOpenNotices, dismissNotice, openNotices } from '@/lib/notices';
 
 jest.mock('@/lib/db', () => ({ prisma: { userNotice: { create: jest.fn(), findMany: jest.fn(), count: jest.fn(), updateMany: jest.fn() } } }));
 const notice = prisma.userNotice as unknown as Record<'create' | 'findMany' | 'count' | 'updateMany', jest.Mock>;
@@ -70,5 +70,22 @@ describe('migration: a new table and nothing else', () => {
     expect(sql).not.toMatch(/^\s*(UPDATE|DELETE|DROP|INSERT)\b/im);
     expect(sql).not.toMatch(/ALTER TABLE "(?!user_notices")/);
     expect(sql).toMatch(/UNIQUE INDEX "user_notices_user_id_dedupe_key_key"/);
+  });
+});
+
+describe('clearBotRunsOnNotices (#643)', () => {
+  it('dismisses the open moved / now-replies notices that name this bot, whoever they went to', async () => {
+    notice.updateMany.mockResolvedValue({ count: 1 });
+    await clearBotRunsOnNotices('bot-9');
+    const call = notice.updateMany.mock.calls[0][0];
+    expect(call.where).toEqual({ kind: 'ai-key-moved', dedupeKey: { contains: ':bot-9:' }, dismissedAt: null });
+    expect(call.data.dismissedAt).toBeInstanceOf(Date);
+  });
+
+  it('never fails the save it follows', async () => {
+    const log = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    notice.updateMany.mockRejectedValue(new Error('connection lost'));
+    await expect(clearBotRunsOnNotices('bot-9')).resolves.toBeUndefined();
+    log.mockRestore();
   });
 });
