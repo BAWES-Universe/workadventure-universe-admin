@@ -2,7 +2,7 @@ import { prisma } from '@/lib/db';
 import { checkBotAccess } from '@/lib/bot-access';
 import { loadBotPrivacy, takeForgets } from '@/lib/bot-privacy';
 import { findUserByIdentifier } from '@/lib/user-identifier';
-import { cleanLine, clipText, type ChatKind } from '@/lib/artifacts';
+import { LONE_SURROGATE, cleanLine, clipText, type ChatKind } from '@/lib/artifacts';
 import { FILE_LIMITS_RECOMMENDED, type FileLimits } from '@/lib/bot-limit-values';
 
 /**
@@ -287,7 +287,7 @@ export interface AddInput extends BotCall {
  */
 function cleanPrompt(value: string | null | undefined, max: number): string | null {
   if (typeof value !== 'string') return null;
-  const prompt = clipText(value.replace(/\u0000/g, '').trim(), max).trim();
+  const prompt = clipText(value.replace(LONE_SURROGATE, '').replace(/\u0000/g, '').trim(), max).trim();
   return prompt.length > 0 ? prompt : null;
 }
 
@@ -395,6 +395,9 @@ export async function keepFileText(input: KeepTextInput, ctx: Context = defaultC
   if (piece.length > TEXT_PIECE_CHARS) throw new BotFileError('piece_too_large', 413, `Send the text in pieces of up to ${TEXT_PIECE_CHARS.toLocaleString('en')} characters.`);
   // Each piece is kept as text of its own, and half an emoji can't be
   if (!last && HIGH_HALF.test(piece)) throw new BotFileError('split_emoji', 422, 'A piece may not end in the middle of an emoji.');
+  // Half an emoji anywhere else can't be kept as text either: one replacement character in its place keeps the length,
+  // so where the next piece starts is the same
+  const kept = piece.replace(LONE_SURROGATE, '\uFFFD');
   const limit = limitsOf(ctx).text;
   if (from + piece.length > limit) {
     throw new BotFileError('too_much_text', 413, `Text kept from a file is set to ${limit.toLocaleString('en')} characters.`);
@@ -408,7 +411,7 @@ export async function keepFileText(input: KeepTextInput, ctx: Context = defaultC
   }
   const starting = !hasText || from === 0;
   const before = starting ? 0 : await prisma.botFilePart.count({ where: { botFileId: row.id } });
-  const parts = splitText(piece).map((part) => ({ ...part, number: before + part.number, start: from + part.start }));
+  const parts = splitText(kept).map((part) => ({ ...part, number: before + part.number, start: from + part.start }));
   const chars = hasText ? from + piece.length : 0;
   const textState = !hasText ? 'failed' : !last ? 'reading' : chars > 0 ? 'kept' : 'none';
   let updated: FileRow;
