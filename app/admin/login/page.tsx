@@ -53,6 +53,13 @@ function getSafeRedirect(): string {
   return loginDestination(window.location.href, readResumePath());
 }
 
+/** Drops the stored account, keeping which room the game frame is in: Try again still needs it, and it is not the account's. */
+function purgeAccountStateKeepingRoom() {
+  const room = getRememberedPlayUri();
+  purgeAccountState();
+  rememberPlayUri(room, true);
+}
+
 export default function LoginPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -140,6 +147,8 @@ export default function LoginPage() {
       if (message.type === 'orbit-auth-failed-v2') {
         activeNonce.current = null;
         if (handshakeTimer.current) clearTimeout(handshakeTimer.current);
+        // The game could not say who is signed in, so a session stored in this tab must not stay usable.
+        purgeAccountStateKeepingRoom();
         setCannotSignIn(true);
         setLoading(false);
         return;
@@ -167,8 +176,10 @@ export default function LoginPage() {
           beginIframeHandshake(true);
           return;
         }
-        if (renewalTried.current && /expired/i.test(reason)) setCannotSignIn(true);
-        else setError(reason);
+        if (renewalTried.current && /expired/i.test(reason)) {
+          purgeAccountStateKeepingRoom();
+          setCannotSignIn(true);
+        } else setError(reason);
         setLoading(false);
       });
     };

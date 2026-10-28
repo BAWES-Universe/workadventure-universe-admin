@@ -17,7 +17,9 @@ hands Orbit a session through a `postMessage` handshake (`orbit-auth-ready-v2` /
   seconds between words at most). After 4 seconds the loader says "Still signing
   you in…", and while the browser is offline "Waiting for your connection…".
 - **The game can't get a token** (`orbit-auth-failed-v2`), or Orbit refuses the
-  renewed one: the page shows "Couldn't sign you in" with Try again.
+  renewed one: the page shows "Couldn't sign you in" with Try again. Nothing
+  could say who is signed in, so the session and caches stored in the tab are
+  dropped first, the same as when no game answers.
 - **Every open performs the handshake.** A session already stored in the tab is
   never reused on its own: the game may now be signed in as someone else. The
   handshake's token is exchanged for a fresh session, the old one is revoked, and
