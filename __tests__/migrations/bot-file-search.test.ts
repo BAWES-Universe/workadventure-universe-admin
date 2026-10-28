@@ -96,7 +96,7 @@ describe('bot file search on Postgres', () => {
     expect(kindAndPage).toMatchObject({ total: 3333, count: 10 });
     expect(everyWord).toMatchObject({ total: 1, first: 'bulk-4321' });
     // PGlite runs Postgres in WebAssembly, slower than the real one (about 500 ms at most here, for every word of a common and a rare one across 10,000 files); the
-    // margin keeps a slow CI machine from failing it
-    for (const run of [newest, rareWord, commonWord, everyWord, kindAndPage]) expect(run.ms).toBeLessThan(1000);
+    // margin keeps a slow CI machine from failing it (a busy runner took 1100 to 1150 ms)
+    for (const run of [newest, rareWord, commonWord, everyWord, kindAndPage]) expect(run.ms).toBeLessThan(3000);
   });
 });
