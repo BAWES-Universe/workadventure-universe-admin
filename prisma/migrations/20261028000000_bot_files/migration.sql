@@ -37,7 +37,7 @@ CREATE TABLE "bot_file_parts" (
     "number" INTEGER NOT NULL,
     "start" INTEGER NOT NULL,
     "text" TEXT NOT NULL,
-    "words" tsvector GENERATED ALWAYS AS (to_tsvector('simple'::regconfig, regexp_replace(regexp_replace(text, '[\u0610-\u061A\u0640\u064B-\u065F\u0670\u06D6-\u06ED]', '', 'g'), '[\u0021-\u002F\u003A-\u0040\u005B-\u0060\u007B-\u007E\u00A1\u00AB\u00B7\u00BB\u00BF\u060C\u061B\u061F\u066A-\u066C\u06D4\u2000-\u206F\u3000-\u3003\u3008-\u3011\u3014-\u301F\uFF01-\uFF0F\uFF1A-\uFF20\uFF3B-\uFF40\uFF5B-\uFF65]', ' ', 'g'))) STORED,
+    "words" tsvector GENERATED ALWAYS AS (to_tsvector('simple'::regconfig, regexp_replace(regexp_replace(normalize(text, NFC), '[\u0610-\u061A\u0640\u064B-\u065F\u0670\u06D6-\u06ED]', '', 'g'), '[\u0021-\u002F\u003A-\u0040\u005B-\u0060\u007B-\u007E\u00A1\u00AB\u00B7\u00BB\u00BF\u060C\u061B\u061F\u066A-\u066C\u06D4\u2000-\u206F\u3000-\u3003\u3008-\u3011\u3014-\u301F\uFF01-\uFF0F\uFF1A-\uFF20\uFF3B-\uFF40\uFF5B-\uFF65]', ' ', 'g'))) STORED,
 
     CONSTRAINT "bot_file_parts_pkey" PRIMARY KEY ("bot_file_id","number")
 );
@@ -84,9 +84,10 @@ ALTER TABLE "bot_file_counters" ADD CONSTRAINT "bot_file_counters_bot_id_fkey" F
 -- in a search: "plan.pdf" is found by "pdf", and "2024-05-01" by "05" (Postgres alone keeps "plan.pdf" whole and
 -- "-05" signed). The punctuation is listed (ASCII, Latin, Arabic, general, CJK and full-width punctuation) rather than
 -- [[:punct:]], whose meaning follows the server's locale and can take a Hindi vowel sign or virama for punctuation and
--- split the word. A part's words are worked out once,
+-- split the word. Text is put in its composed form (NFC) first, as a search is, so a name or PDF text with accents typed
+-- apart ("e" and an accent) is found by the accented letter. A part's words are worked out once,
 -- when it is saved, so a search never reads the text again. The index on a file's name, line and the prompt it was made with is on an expression,
 -- which Prisma's schema cannot name, so it lives only here; queries must use the same expression to use it
 -- (lib/bot-file-search-sql.ts).
 CREATE INDEX "bot_file_parts_words_idx" ON "bot_file_parts" USING GIN ("words");
-CREATE INDEX "bot_files_words_idx" ON "bot_files" USING GIN (to_tsvector('simple', regexp_replace(regexp_replace("name" || ' ' || coalesce("line", '') || ' ' || left(coalesce("made_prompt", ''), 20000), '[\u0610-\u061A\u0640\u064B-\u065F\u0670\u06D6-\u06ED]', '', 'g'), '[\u0021-\u002F\u003A-\u0040\u005B-\u0060\u007B-\u007E\u00A1\u00AB\u00B7\u00BB\u00BF\u060C\u061B\u061F\u066A-\u066C\u06D4\u2000-\u206F\u3000-\u3003\u3008-\u3011\u3014-\u301F\uFF01-\uFF0F\uFF1A-\uFF20\uFF3B-\uFF40\uFF5B-\uFF65]', ' ', 'g')));
+CREATE INDEX "bot_files_words_idx" ON "bot_files" USING GIN (to_tsvector('simple', regexp_replace(regexp_replace(normalize("name" || ' ' || coalesce("line", '') || ' ' || left(coalesce("made_prompt", ''), 20000), NFC), '[\u0610-\u061A\u0640\u064B-\u065F\u0670\u06D6-\u06ED]', '', 'g'), '[\u0021-\u002F\u003A-\u0040\u005B-\u0060\u007B-\u007E\u00A1\u00AB\u00B7\u00BB\u00BF\u060C\u061B\u061F\u066A-\u066C\u06D4\u2000-\u206F\u3000-\u3003\u3008-\u3011\u3014-\u301F\uFF01-\uFF0F\uFF1A-\uFF20\uFF3B-\uFF40\uFF5B-\uFF65]', ' ', 'g')));

@@ -50,7 +50,7 @@ export function byteLength(content: string): number {
 }
 
 /** Half an emoji on its own, which the database can't keep as text. */
-const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+export const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
 
 /** A text cut to fit, never through the middle of an emoji. */
 export function clipText(value: string, max: number): string {
