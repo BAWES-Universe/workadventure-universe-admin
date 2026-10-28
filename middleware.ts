@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
+import { isMobileOrigin } from '@/app/api/auth/redirect-uri';
 
 /** Admin pages are a non-sensitive client shell. Authentication is enforced by
  * every data API with an opaque Authorization credential. This is intentional:
@@ -8,6 +9,25 @@ export function middleware(request: NextRequest) {
   const response = NextResponse.next();
   response.headers.set('Referrer-Policy', 'no-referrer');
   response.headers.set('X-Content-Type-Options', 'nosniff');
+
+  // Allow mobile app deep-link / WebView origins to pass through with CORS headers and preflight support
+  const origin = request.headers.get('origin')?.trim();
+  if (origin && isMobileOrigin(origin) && request.nextUrl.pathname.startsWith('/api/auth')) {
+    const corsHeaders: Record<string, string> = {
+      'Access-Control-Allow-Origin': origin,
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      'Vary': 'Origin',
+      'Referrer-Policy': 'no-referrer',
+      'X-Content-Type-Options': 'nosniff',
+    };
+    if (request.method === 'OPTIONS') {
+      return new NextResponse(null, { status: 204, headers: corsHeaders });
+    }
+    for (const [key, value] of Object.entries(corsHeaders)) {
+      response.headers.set(key, value);
+    }
+  }
 
   // Never let old credential-bearing URLs become valid again.
   if (request.nextUrl.pathname.startsWith('/admin') &&
