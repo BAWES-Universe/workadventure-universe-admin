@@ -1129,7 +1129,7 @@ model BotFilePart {
   // Where this part starts in the file's text, in characters
   start     Int
   text      String
-  words     Unsupported("tsvector")? @default(dbgenerated("to_tsvector('simple'::regconfig, regexp_replace(regexp_replace(text, '[\\u0610-\\u061A\\u0640\\u064B-\\u065F\\u0670\\u06D6-\\u06ED]'::text, ''::text, 'g'::text), '[[:punct:]]'::text, ' '::text, 'g'::text))"))
+  words     Unsupported("tsvector")? @default(dbgenerated("to_tsvector('simple'::regconfig, regexp_replace(regexp_replace(text, '[\\u0610-\\u061A\\u0640\\u064B-\\u065F\\u0670\\u06D6-\\u06ED]'::text, ''::text, 'g'::text), '[\\u0021-\\u002F\\u003A-\\u0040\\u005B-\\u0060\\u007B-\\u007E\\u00A1\\u00AB\\u00B7\\u00BB\\u00BF\\u060C\\u061B\\u061F\\u066A-\\u066C\\u06D4\\u2000-\\u206F\\u3000-\\u3003\\u3008-\\u3011\\u3014-\\u301F\\uFF01-\\uFF0F\\uFF1A-\\uFF20\\uFF3B-\\uFF40\\uFF5B-\\uFF65]'::text, ' '::text, 'g'::text))"))
 
   file BotFile @relation(fields: [botFileId], references: [id], onDelete: Cascade)
 
