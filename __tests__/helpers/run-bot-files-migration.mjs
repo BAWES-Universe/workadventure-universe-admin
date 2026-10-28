@@ -56,6 +56,10 @@ await db.exec(`
     ('f1', 2, 54, 'مرحبا بالجميع في الحفلة'),
     ('f2', 1, 0, 'Nothing about songs here.');
 `);
+// Arabic with short vowels (marhaban with fatha, sukun, tanween) and without them
+const WITH_MARKS = '\u0645\u064e\u0631\u0652\u062d\u064e\u0628\u064b\u0627';
+const WITHOUT_MARKS = '\u0645\u0631\u062d\u0628\u0627';
+await db.query(`INSERT INTO bot_file_parts (bot_file_id, number, start, text) VALUES ('f2', 2, 25, $1)`, [WITH_MARKS]);
 const defaults = (await db.query(`SELECT text_state, text_chars, expires_at, created_at IS NOT NULL AS has_created FROM bot_files WHERE id = 'f2'`)).rows;
 
 // One short id per bot: the same number on the same bot is refused, on another bot it is fine
@@ -73,6 +77,7 @@ const counted = [await count('bot1'), await count('bot1'), await count('bot2'), 
 const search = async (words) =>
   (await db.query(`SELECT DISTINCT bot_file_id FROM bot_file_parts WHERE words @@ plainto_tsquery('simple', $1) ORDER BY bot_file_id`, [words])).rows.map((row) => row.bot_file_id);
 const words = {
+  marksInTextNotQuery: await search(WITHOUT_MARKS),
   name: await search('yazoghal'),
   arabic: await search('بالجميع'),
   twoWords: await search('launch thursday'),
@@ -80,7 +85,8 @@ const words = {
   byLine: (await db.query(`SELECT id FROM bot_files WHERE to_tsvector('simple', name || ' ' || coalesce(line, '')) @@ plainto_tsquery('simple', 'yazoghal')`)).rows.map((row) => row.id),
 };
 const indexes = (await db.query(`SELECT indexname, indexdef FROM pg_indexes WHERE indexname IN ('bot_file_parts_words_idx', 'bot_files_words_idx') ORDER BY indexname`)).rows;
-const wordsOfAPart = (await db.query(`SELECT words::text AS words FROM bot_file_parts WHERE bot_file_id = 'f2'`)).rows[0].words;
+const wordsOfAPart = (await db.query(`SELECT words::text AS words FROM bot_file_parts WHERE bot_file_id = 'f2' AND number = 1`)).rows[0].words;
+const marksKeptInText = (await db.query(`SELECT text = $1 AS kept FROM bot_file_parts WHERE bot_file_id = 'f2' AND number = 2`, [WITH_MARKS])).rows[0].kept;
 const extensions = (await db.query(`SELECT extname FROM pg_extension ORDER BY extname`)).rows.map((row) => row.extname);
 
 // A bot that goes takes its files and their text; a person who leaves takes theirs; a guest's stays until its day
@@ -93,4 +99,4 @@ const afterOwnerLeft = {
   parts: (await db.query('SELECT bot_file_id FROM bot_file_parts ORDER BY bot_file_id')).rows.map((row) => row.bot_file_id),
 };
 
-console.log(JSON.stringify({ before, after, defaults, duplicateNumber, otherBotSameNumber, orphanFile, orphanPart, counted, words, indexes, wordsOfAPart, extensions, afterBotDeleted, counterAfterBotDeleted, afterOwnerLeft }));
+console.log(JSON.stringify({ before, after, defaults, duplicateNumber, otherBotSameNumber, orphanFile, orphanPart, counted, words, indexes, wordsOfAPart, marksKeptInText, extensions, afterBotDeleted, counterAfterBotDeleted, afterOwnerLeft }));

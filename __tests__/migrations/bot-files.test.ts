@@ -36,7 +36,9 @@ describe('bot files migration', () => {
   });
 
   it('finds words with Postgres\'s own index, a made-up name and Arabic as they are, with no extension added', () => {
-    expect(result.words).toEqual({ name: ['f1'], arabic: ['f1'], twoWords: ['f1'], none: [], byLine: ['f1'] });
+    expect(result.words).toEqual({ marksInTextNotQuery: ['f1', 'f2'], name: ['f1'], arabic: ['f1'], twoWords: ['f1'], none: [], byLine: ['f1'] });
+    // A word without short vowels finds it in text without them (f1) and with them (f2); the text itself keeps them
+    expect(result.marksKeptInText).toBe(true);
     expect(result.indexes.map((index: { indexname: string }) => index.indexname)).toEqual(['bot_file_parts_words_idx', 'bot_files_words_idx']);
     expect(result.indexes[0].indexdef).toMatch(/USING gin \(words\)/);
     expect(result.indexes[1].indexdef).toMatch(/USING gin \(to_tsvector\('simple'::regconfig/);
@@ -51,6 +53,6 @@ describe('bot files migration', () => {
   });
 
   it('removes a person\'s files and their text when the person leaves, and keeps everyone else\'s', () => {
-    expect(result.afterOwnerLeft).toEqual({ files: ['f2', 'g1'], parts: ['f2'] });
+    expect(result.afterOwnerLeft).toEqual({ files: ['f2', 'g1'], parts: ['f2', 'f2'] });
   });
 });
