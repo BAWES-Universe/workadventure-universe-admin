@@ -43,7 +43,8 @@ export interface Limit {
 
 export interface ModelCap {
   at: number;
-  line: string;
+  /** Null when no bot stops below the value set now: the choices above `at` still say where it stops. */
+  line: string | null;
   short: string;
 }
 
@@ -74,7 +75,7 @@ export function LimitRow({ limit, onOpen }: { limit: Limit; onOpen: () => void }
       <span className="grid min-w-0 flex-1 gap-0.5">
         <strong className="text-sm font-semibold">{limit.label}</strong>
         <span className="text-xs leading-snug text-muted-foreground">{limit.hint}</span>
-        {limit.cap && (
+        {limit.cap?.line && (
           <span className="mt-1 flex items-start gap-1.5 text-xs leading-snug text-foreground/85" data-testid={`limit-${limit.id}-cap`}>
             <Info size={14} aria-hidden="true" className="mt-px shrink-0 text-muted-foreground" />
             {limit.cap.line}
@@ -105,7 +106,7 @@ export function LimitChoices({ limit, onDone, onCancel }: { limit: Limit; onDone
   const ready = picked === 'other' ? value > 0 : true;
   return (
     <div className="grid gap-4">
-      {limit.cap && (
+      {limit.cap?.line && (
         <p className="flex items-start gap-2 rounded-xl bg-foreground/[.04] px-3.5 py-2.5 text-sm">
           <Info size={16} aria-hidden="true" className="mt-0.5 shrink-0 text-muted-foreground" />
           {limit.cap.line}
@@ -380,42 +381,50 @@ export function fairUsageLimits(values: FairUsage): Limit[] {
   ];
 }
 
-/** The key card's one line: "Recommended: replies up to 32,000 tokens, 30 steps", or "Yours: …" once changed. */
 /** The id without its maker's prefix: "openai/gpt-4o-mini" is "gpt-4o-mini". */
 const shortModel = (id: string) => (id.includes('/') ? id.slice(id.indexOf('/') + 1) : id);
 const listOf = (names: string[]) => new Intl.ListFormat('en', { style: 'long', type: 'conjunction' }).format(names);
 
-/**
- * Where the models of a key's bots stop below its longest reply (#673), from what their providers say: null when none
- * does, or none is known. "Scout runs on gpt-4o-mini, which stops at 16,384 tokens. Scout gets 16,384; your other bots
- * get the full limit."
- */
-export function modelCapOf(bots: { id: string; name: string; model: string | null; output: number | null }[], reply: number): ModelCap | null {
-  const byModel = new Map<string, { output: number; names: string[] }>();
-  const capped = new Set<string>();
+type CapBot = { id: string; name: string; model: string | null; output: number | null };
+type KnownBot = CapBot & { model: string; output: number };
+
+/** Bots grouped by model, the model that stops soonest first. */
+function byModel(bots: KnownBot[]): { model: string; output: number; names: string[] }[] {
+  const groups = new Map<string, { output: number; names: string[] }>();
   for (const bot of bots) {
-    if (!bot.model || bot.output === null || bot.output >= reply) continue;
-    const entry = byModel.get(bot.model) ?? { output: bot.output, names: [] };
+    const entry = groups.get(bot.model) ?? { output: bot.output, names: [] };
     if (!entry.names.includes(bot.name)) entry.names.push(bot.name);
-    capped.add(bot.id);
-    byModel.set(bot.model, entry);
+    groups.set(bot.model, entry);
   }
-  if (byModel.size === 0) return null;
-  const groups = [...byModel.entries()].map(([model, entry]) => ({ model: shortModel(model), ...entry })).sort((a, b) => a.output - b.output);
-  const others = bots.some((bot) => !capped.has(bot.id));
+  return [...groups.entries()].map(([model, entry]) => ({ model: shortModel(model), ...entry })).sort((a, b) => a.output - b.output);
+}
+
+/**
+ * Where the models of a key's bots stop (#673), from what their providers say: null when no provider says. The line is
+ * there only when some bot stops below the longest reply set now: "Scout runs on gpt-4o-mini, which stops at 16,384
+ * tokens. Scout gets 16,384; your other bots get the full limit." The choices above where the soonest stops say so
+ * either way, so picking 32,000 with 8,000 set still warns. A bot whose model's limit isn't known is never promised the
+ * full limit.
+ */
+export function modelCapOf(bots: CapBot[], reply: number): ModelCap | null {
+  const known = bots.filter((bot): bot is KnownBot => bot.model !== null && bot.output !== null);
+  if (known.length === 0) return null;
+  const soonest = byModel(known)[0];
+  const groups = byModel(known.filter((bot) => bot.output < reply));
+  const others = known.some((bot) => bot.output >= reply);
   const said = groups.map((group) => `${listOf(group.names)} ${group.names.length === 1 ? 'runs' : 'run'} on ${group.model}, which stops at ${group.output.toLocaleString('en')} tokens.`);
   const only = groups.length === 1 ? groups[0] : null;
   const gets = only
     ? `${listOf(only.names)} ${only.names.length === 1 ? 'gets' : 'get'} ${only.output.toLocaleString('en')}`
     : 'Each gets what its model allows';
-  const lowest = groups[0];
   return {
-    at: lowest.output,
-    line: `${said.join(' ')} ${gets}${others ? '; your other bots get the full limit.' : '.'}`,
-    short: `${lowest.model} stops at ${lowest.output.toLocaleString('en')} (${listOf(lowest.names)}).`,
+    at: soonest.output,
+    line: groups.length > 0 ? `${said.join(' ')} ${gets}${others ? '; your other bots get the full limit.' : '.'}` : null,
+    short: `${soonest.model} stops at ${soonest.output.toLocaleString('en')} (${listOf(soonest.names)}).`,
   };
 }
 
+/** The key card's one line: "Recommended: replies up to 32,000 tokens, 30 steps", or "Yours: …" once changed. */
 export function keyLimitsLine(values: ReplyLimits): string {
   const rows = replyLimits(values);
   const changed = rows.some((row) => row.value !== row.recommended);

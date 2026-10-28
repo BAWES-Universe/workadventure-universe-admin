@@ -91,7 +91,8 @@ export function RenameKey({ keyItem, onRenamed, onCancel }: { keyItem: AiKeySumm
           setFailure(null);
         }}
         onKeyDown={(event) => {
-          if (event.key === 'Escape') onCancel();
+          // Like Cancel, not while the name is saving: a late answer would then close whichever key is open by then
+          if (event.key === 'Escape' && !saving) onCancel();
         }}
         className={`h-11 rounded-xl ${problem ? 'border-[#fb923c]' : 'border-[rgba(167,139,250,.7)] bg-[rgba(134,41,252,.14)]'}`}
       />
