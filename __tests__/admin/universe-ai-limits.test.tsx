@@ -46,7 +46,7 @@ describe('Universe AI limits', () => {
     answer();
     render(<UniverseAiLimits />);
     expect(await screen.findByText('Replies on Universe AI')).toBeTruthy();
-    for (const label of ['Longest reply', 'Steps in one reply', 'Keep going when cut off', 'Messages it remembers', 'Reads from a page or file', 'Room to work in one reply', 'Newest files it sees', 'Files found in one search', 'Reads from an earlier file', 'Wait for the AI', 'Text kept from a file', 'Files bots can find again', 'Guests’ files', 'Size of one version', 'Versions kept', 'Time to save', 'Media added in one save', 'Replies for a signed-in person', 'Replies for a guest', 'Replies for all guests on one bot']) {
+    for (const label of ['Longest reply', 'Steps in one reply', 'Keep going when cut off', 'Messages it remembers', 'Reads from a page or file', 'Room to work in one reply', 'Newest files it sees', 'Files found in one search', 'Reads from an earlier file', 'Wait for the AI', 'Text kept from a file', 'Files bots can find again', 'Guests’ files', 'Size of one version', 'Versions kept', 'Time to save', 'Media added in one save', 'Files in one artifact', 'Replies for a signed-in person', 'Replies for a guest', 'Replies for all guests on one bot']) {
       expect(screen.getByText(label)).toBeTruthy();
     }
     expect(screen.getAllByText('32,000 tokens').length).toBeGreaterThan(0);
