@@ -65,19 +65,35 @@ describe('bot file search on Postgres', () => {
     ]);
   });
 
+  it('splits words at punctuation as a search does, and finds every word anywhere in a file', () => {
+    expect(rows('extension')).toEqual(['dm-plan']);
+    expect(rows('dateNumber')).toEqual(['bubble-pic']);
+    expect(rows('acrossNameAndText')).toEqual(['dm-plan']);
+    expect(rows('acrossParts')).toEqual(['dm-plan']);
+    expect(result.acrossMissing.total).toBe(0);
+    // Where the words are: the first part with any of them, or the first with all of them when one has
+    expect(result.hitsAcross).toEqual([['dm-plan', 0]]);
+    expect(result.hitsBoth).toEqual([['dm-plan', 9100]]);
+  });
+
+  it('finds artifact titles with Arabic short vowels by the word without them, only in reach', () => {
+    expect(result.titles).toEqual({ marked: ['a-marked'], notAll: [], outOfReach: [], inChat: ['a-plain'] });
+  });
+
   it('a search can not reach outside its words', () => {
     expect(result.injection.total).toBe(0);
     expect(result.stillThere).toBe(8);
   });
 
   it('answers fast for one person with 10,000 files', () => {
-    const { newest, rareWord, commonWord, kindAndPage } = result.bulk;
+    const { newest, rareWord, commonWord, everyWord, kindAndPage } = result.bulk;
     expect(newest).toMatchObject({ total: 10000, first: 'bulk-10000', count: 10 });
     expect(rareWord).toMatchObject({ total: 1, first: 'bulk-4321' });
     expect(commonWord).toMatchObject({ total: 10000, count: 10 });
     expect(kindAndPage).toMatchObject({ total: 3333, count: 10 });
-    // PGlite runs Postgres in WebAssembly, slower than the real one (about 130 ms at most here, under 300 ms on dev); the
+    expect(everyWord).toMatchObject({ total: 1, first: 'bulk-4321' });
+    // PGlite runs Postgres in WebAssembly, slower than the real one (about 500 ms at most here, for every word of a common and a rare one across 10,000 files); the
     // margin keeps a slow CI machine from failing it
-    for (const run of [newest, rareWord, commonWord, kindAndPage]) expect(run.ms).toBeLessThan(1000);
+    for (const run of [newest, rareWord, commonWord, everyWord, kindAndPage]) expect(run.ms).toBeLessThan(1000);
   });
 });

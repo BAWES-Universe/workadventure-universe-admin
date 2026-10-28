@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { PGlite } from '@electric-sql/pglite';
-import { fileHitsSql, fileSearchSql, searchWords, wordQuery, type SearchFilters, type SearchScope } from '../../lib/bot-file-search-sql';
+import { artifactTitleSql, fileHitsSql, fileSearchSql, searchWords, wordQuery, type SearchFilters, type SearchScope } from '../../lib/bot-file-search-sql';
 
 const MIGRATIONS = path.join(__dirname, '../../prisma/migrations');
 
@@ -87,6 +87,38 @@ async function main() {
   result.hits = (await db.query<{ bot_file_id: string; start: number }>(hits.sql, hits.values)).rows.map((row) => [row.bot_file_id, row.start]);
   result.stillThere = (await db.query<{ n: number }>('SELECT count(*)::int AS n FROM bot_files')).rows[0].n;
 
+  // Punctuation splits words as it does a search: an extension, and each number of a date
+  result.extension = await ids(scope(), filters({ query: q('pdf') }));
+  await db.exec(`UPDATE bot_files SET line = line || ', taken 2024-05-01' WHERE id = 'bubble-pic'`);
+  result.dateNumber = await ids(scope(), filters({ query: q('05') }));
+  // Every word somewhere in the file: in its name and its text, or in two parts of its text
+  const every = (words: string) => filters({ query: q(words), every: searchWords(words) });
+  result.acrossNameAndText = await ids(scope(), every('plan thursday'));
+  result.acrossParts = await ids(scope(), every('intro thursday'));
+  result.acrossMissing = await ids(scope(), every('plan piano'));
+  const across = fileHitsSql(['dm-plan'], q('intro thursday') as string, q('intro thursday', 'any') as string);
+  result.hitsAcross = (await db.query<{ bot_file_id: string; start: number }>(across.sql, across.values)).rows.map((row) => [row.bot_file_id, row.start]);
+  const both = fileHitsSql(['dm-plan'], q('sing thursday') as string, q('sing thursday', 'any') as string);
+  result.hitsBoth = (await db.query<{ bot_file_id: string; start: number }>(both.sql, both.values)).rows.map((row) => [row.bot_file_id, row.start]);
+
+  // Artifact titles with Arabic short vowels, found by the word without them, only in reach
+  await db.query(
+    `INSERT INTO artifacts (id, owner_id, maker_bot_id, maker_name, title, kind, chat_kind, chat_ref, updated_at) VALUES
+      ('a-marked', 'owner', 'bot1', 'Scout', $1, 'app', 'nearby', 'room#2#200', now()),
+      ('a-plain', 'friend', 'bot1', 'Scout', 'Quests board', 'app', 'nearby', 'room#9#900', now())`,
+    [`Board ${MARKED}`],
+  );
+  const titles = async (words: string, mode: 'all' | 'any', who: { userId: string | null; chatKind: string; chatRef: string }) => {
+    const built = artifactTitleSql(who, searchWords(words), mode);
+    return (await db.query<{ id: string }>(built.sql, built.values)).rows.map((row) => row.id).sort();
+  };
+  result.titles = {
+    marked: await titles('مرحبا board', 'all', { userId: 'owner', chatKind: 'dm', chatRef: '!owner-dm' }),
+    notAll: await titles('مرحبا quests', 'all', { userId: 'owner', chatKind: 'dm', chatRef: '!owner-dm' }),
+    outOfReach: await titles('quests', 'any', { userId: 'owner', chatKind: 'dm', chatRef: '!owner-dm' }),
+    inChat: await titles('quests', 'any', { userId: null, chatKind: 'nearby', chatRef: 'room#9#900' }),
+  };
+
   // One person with 10,000 files with this bot, each with a part of text, and one with the word
   await db.exec(`
     INSERT INTO bot_files (id, bot_id, number, owner_id, source, kind, name, line, chat_kind, chat_ref, bucket, file_id, created_at)
@@ -109,6 +141,7 @@ async function main() {
     newest: await timed(filters()),
     rareWord: await timed(filters({ query: q('zanzibar') })),
     commonWord: await timed(filters({ query: q('ordinary plans') })),
+    everyWord: await timed(filters({ query: q('ordinary zanzibar'), every: searchWords('ordinary zanzibar') })),
     kindAndPage: await timed(filters({ kinds: ['image'] }), { offset: 50, limit: 10 }),
   };
   console.log(JSON.stringify(result));
