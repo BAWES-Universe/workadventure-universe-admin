@@ -401,10 +401,11 @@ export async function listArtifactsInChat(input: BotCall, ctx: Context = default
   const include = ARTIFACT_INCLUDE;
   const orderBy = { updatedAt: 'desc' } as const;
   const take = LIST_IN_CHAT_LIMIT;
-  // Expired guest artifacts are left out here, not after the limit, so they never crowd out the ones that are still there
+  // Expired guest artifacts and copies (which are in no chat) are left out here, not after the limit, so they never crowd out
+  // the ones that are still there
   const notExpired = { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] };
   const inChat = await prisma.artifact.findMany({ where: { chatKind: input.chat.kind, chatRef: input.chat.ref, ...notExpired }, include, orderBy, take });
-  const own = who.userId ? await prisma.artifact.findMany({ where: { ownerId: who.userId, ...notExpired }, include, orderBy, take }) : [];
+  const own = who.userId ? await prisma.artifact.findMany({ where: { ownerId: who.userId, chatRef: { not: null }, ...notExpired }, include, orderBy, take }) : [];
   const seen = new Set(inChat.map((row) => row.id));
   const rows = [...inChat, ...own.filter((row) => !seen.has(row.id))];
   return { artifacts: rows.filter((row) => canOpen(row, who, now)).slice(0, LIST_IN_CHAT_LIMIT).map(viewOf), hidden };
