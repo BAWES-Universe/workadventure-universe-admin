@@ -1,4 +1,5 @@
 import { prisma } from '@/lib/db';
+import { clipText } from '@/lib/artifacts';
 import {
   FILE_KINDS,
   TEXT_PART_CHARS,
@@ -59,7 +60,8 @@ export interface FoundFile {
   mimeType: string | null;
   sizeBytes: number | null;
   line: string | null;
-  made: { with: string; prompt: string | null } | null;
+  /** The prompt as one short line, with its whole length; the whole prompt comes when the file is opened. */
+  made: { with: string; prompt: string | null; promptChars: number } | null;
   lengthSeconds: number | null;
   pages: number | null;
   mine: boolean;
@@ -100,6 +102,18 @@ function dateOf(value: string | null | undefined): Date | null {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
+/** How much of a prompt a search page shows: a page of ten stays small however long the prompts are. */
+export const PROMPT_LINE_LENGTH = 200;
+
+/** A prompt as one line of at most PROMPT_LINE_LENGTH, cut on a word with "…" when longer. */
+export function promptLine(prompt: string): string {
+  const line = prompt.replace(/\s+/g, ' ').trim();
+  if (line.length <= PROMPT_LINE_LENGTH) return line;
+  const cut = clipText(line, PROMPT_LINE_LENGTH - 1);
+  const space = cut.lastIndexOf(' ');
+  return `${(space > PROMPT_LINE_LENGTH / 2 ? cut.slice(0, space) : cut).trimEnd()}…`;
+}
+
 function foundFile(row: FileSearchRow, who: Who, input: FindInput): FoundFile {
   return {
     type: 'file',
@@ -110,7 +124,7 @@ function foundFile(row: FileSearchRow, who: Who, input: FindInput): FoundFile {
     mimeType: row.mime_type,
     sizeBytes: row.size_bytes,
     line: row.line,
-    made: row.made_with ? { with: row.made_with, prompt: row.made_prompt } : null,
+    made: row.made_with ? { with: row.made_with, prompt: row.made_prompt ? promptLine(row.made_prompt) : null, promptChars: row.made_prompt?.length ?? 0 } : null,
     lengthSeconds: row.length_seconds,
     pages: row.pages,
     mine: who.userId !== null && row.owner_id === who.userId,

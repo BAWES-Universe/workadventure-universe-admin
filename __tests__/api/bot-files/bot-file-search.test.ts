@@ -108,6 +108,26 @@ describe('finding files in bot chats (game #1508)', () => {
       expect(sql.asked.at(-1)?.sql).toMatch(/LIMIT 6$/);
     });
 
+    it('shows how each file was made in one short line, so a page of long prompts stays small', async () => {
+      const longPrompt = `${'A slow oud ballad about the north gate at night, '.repeat(200)}`.slice(0, 8000);
+      const rows = Array.from({ length: 10 }, (_, i) => fileRow(10 - i, `2026-10-2${i % 8}T10:00:00Z`, { source: 'bot', kind: 'audio', made_with: 'generate_music', made_prompt: longPrompt }));
+      const page = await findFiles({ botId: 'bot1', person: owner, chat: DM, kinds: ['audio'], limit: 10 }, { now: NOW, sql: fakeSql(rows).run });
+      expect(page.items).toHaveLength(10);
+      const made = (page.items[0] as FoundFile).made;
+      expect(made).toMatchObject({ with: 'generate_music', promptChars: 8000 });
+      expect(made?.prompt?.length).toBeLessThanOrEqual(200);
+      expect(made?.prompt).toMatch(/ballad about\b.*…$/);
+      expect(made?.prompt).not.toMatch(/\s…$/);
+      // Ten whole prompts would be 80,000 characters
+      expect(JSON.stringify(page).length).toBeLessThan(6000);
+    });
+
+    it('keeps a short prompt whole, on one line', async () => {
+      const rows = [fileRow(1, '2026-10-27T10:00:00Z', { source: 'bot', made_with: 'generate_music', made_prompt: 'A slow\noud ballad' })];
+      const page = await findFiles({ botId: 'bot1', person: owner, chat: DM, kinds: ['audio'], limit: 10 }, { now: NOW, sql: fakeSql(rows).run });
+      expect((page.items[0] as FoundFile).made).toEqual({ with: 'generate_music', prompt: 'A slow oud ballad', promptChars: 17 });
+    });
+
     it('merge keeps the order stable when dates tie', () => {
       const file = { type: 'file', ref: 'f1', createdAt: '2026-10-01T00:00:00.000Z' } as FoundFile;
       const art = { type: 'artifact', id: 'a', updatedAt: '2026-10-01T00:00:00.000Z' } as FoundArtifact;
