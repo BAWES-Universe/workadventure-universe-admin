@@ -62,7 +62,7 @@ export async function lendableUniverses(userId: string): Promise<LendableUnivers
 export interface MovedBots {
   count: number;
   /** Per universe: who owns it and which bots moved, for the notice. */
-  universes: { id: string; name: string; ownerId: string; botNames: string[] }[];
+  universes: { id: string; name: string; ownerId: string; botNames: string[]; botIds: string[] }[];
 }
 
 /**
@@ -95,8 +95,9 @@ export async function moveBotsOffKey(
   const byUniverse = new Map<string, MovedBots['universes'][number]>();
   for (const bot of movedBots) {
     const universe = bot.room.world.universe;
-    const entry = byUniverse.get(universe.id) ?? { id: universe.id, name: universe.name, ownerId: universe.ownerId, botNames: [] };
+    const entry = byUniverse.get(universe.id) ?? { id: universe.id, name: universe.name, ownerId: universe.ownerId, botNames: [], botIds: [] };
     entry.botNames.push(bot.name);
+    entry.botIds.push(bot.id);
     byUniverse.set(universe.id, entry);
   }
   const universes = [...byUniverse.values()];
@@ -114,7 +115,7 @@ export async function moveBotsOffKey(
       await addNotice({
         userId: universe.ownerId,
         kind: 'ai-key-moved',
-        dedupeKey: `moved:${providerId}:${universe.id}:${moment}`,
+        dedupeKey: `moved:${providerId}:${universe.id}:${names.length === 1 ? universe.botIds[0] : 'many'}:${moment}`,
         title: names.length === 1 ? `${names[0]} moved to Universe AI` : `${names.length} bots moved to Universe AI`,
         body: `${
           options.why === 'models-gone'
@@ -193,7 +194,7 @@ export async function moveBotsToAllowedModel(
       await addNotice({
         userId: universe.ownerId,
         kind: 'ai-key-moved',
-        dedupeKey: `models:${key.providerId}:${universe.id}:${new Date().toISOString()}`,
+        dedupeKey: `models:${key.providerId}:${universe.id}:${moved.length === 1 ? moved[0].id : 'many'}:${new Date().toISOString()}`,
         title: names.length === 1 ? `${names[0]} now replies with ${options.firstAllowed}` : `${names.length} bots now reply with ${options.firstAllowed}`,
         body: `${options.actor.name || 'Someone'} changed which models of their AI key bots in ${universe.name} may use. ${
           names.length === 1 ? 'The bot was on one they took out, so it now replies' : `The ${names.length} bots were on ones they took out, so they now reply`

@@ -154,7 +154,7 @@ describe('files', () => {
   it('names a version file by its kind, with a part nobody can guess', () => {
     const a = newFileKey('art', 2, 'app');
     const b = newFileKey('art', 2, 'app');
-    expect(a).toMatch(/^artifacts\/art\/v2-[0-9a-f]{24}\.html$/);
+    expect(a).toMatch(/^artifacts\/art\/v2-[0-9a-f]{24}\/index\.html$/);
     expect(a).not.toBe(b);
     expect(newFileKey('art', 1, 'markdown')).toMatch(/\.md$/);
     expect(newFileKey('art', 1, 'svg')).toMatch(/\.svg$/);

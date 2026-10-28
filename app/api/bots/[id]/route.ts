@@ -14,6 +14,7 @@ import { maxReplyTokensSchema, maxStepsSchema } from '@/lib/bot-limits';
 import { keepToolCallSetting, keepVisionPick } from '@/lib/bot-config-helpers';
 import { checkConfigVision } from '@/lib/bot-vision';
 import { corsHeaders } from '@/lib/cors';
+import { clearBotRunsOnNotices } from '@/lib/notices';
 
 // Ensure this route runs in Node.js runtime (not Edge) to support Prisma
 export const runtime = 'nodejs';
@@ -561,6 +562,11 @@ export async function PUT(
         },
       },
     });
+
+    // What the bot runs on changed: the notices that said where it was are out of date
+    if (nextRef !== existingBot.aiProviderRef || (validatedData.aiModel !== undefined && validatedData.aiModel !== existingBot.aiModel)) {
+      await clearBotRunsOnNotices(id);
+    }
 
     // Transform to camelCase
     const transformedBot = transformBot(bot);
