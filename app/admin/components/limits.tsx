@@ -112,7 +112,9 @@ export function LimitChoices({ limit, onDone, onCancel }: { limit: Limit; onDone
   const [saving, setSaving] = useState(false);
   const value = picked === 'other' ? Number(other.replace(/[^0-9.]/g, '')) : picked;
   const range = limit.range;
-  const rangeLine = range ? `Between ${range.min.toLocaleString('en')} and ${range.max.toLocaleString('en')} ${limit.unit}.` : null;
+  // A row that can't go above another says the lower of the two as its most
+  const most = range ? Math.min(range.max, limit.atMost?.value ?? range.max) : 0;
+  const rangeLine = range ? `Between ${range.min.toLocaleString('en')} and ${most.toLocaleString('en')} ${limit.unit}.` : null;
   const outOfRange = picked === 'other' && other.trim() !== '' && !!range && (value < range.min || value > range.max || (!!range.whole && !Number.isInteger(value)));
   const aboveOther = !!limit.atMost && value > limit.atMost.value;
   // "Never" (0) is a choice of its own; an empty or 0 "Other" is not
