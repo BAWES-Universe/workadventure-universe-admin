@@ -59,6 +59,7 @@ model User {
   artifactAsks     ArtifactVersion[] @relation("ArtifactAsker")
   nearbySharedItems NearbySharedItem[]
   botUsageTalked   BotsAiUsage[]     @relation("UsageTalkedPerson")
+  botFiles         BotFile[]         @relation("BotFileOwner")
 
   @@map("users")
 }
@@ -789,6 +790,8 @@ model Bot {
   mcpServers BotMcpServer[]
   accessRules BotAccessRule[]
   replyLimitHits BotReplyLimitHit[]
+  files          BotFile[]
+  fileCounter    BotFileCounter?
 
   @@index([roomId])
   @@map("bots")
@@ -1061,6 +1064,91 @@ model BotMemoryForget {
 
   @@index([botId])
   @@map("bot_memory_forgets")
+}
+
+// Files in bot chats (game #1508): what a person sent a bot and what a bot sent them, so the bot can find, read and send
+// them again later instead of forgetting them once the message has passed. Artifacts are not copied here: they have their
+// own tables, and the bot finds them there. A file belongs to the person who sent it or who the bot made it for; others
+// may use it only while they are in the chat it came in. A guest's goes after a day, like a guest's artifact. No Orbit
+// page lists these: only the bot server reaches them.
+model BotFile {
+  id        String    @id @default(uuid())
+  botId     String    @map("bot_id")
+  // The bot's short id for it: f12 is number 12. One count per bot, so two people in a bubble never share an id.
+  number    Int
+  // The person it belongs to; null for a guest
+  ownerId   String?   @map("owner_id")
+  // The person as the bot server named them (their game uuid), so Forget also finds a guest's files
+  personRef String?   @map("person_ref") @db.VarChar(320)
+  // person (they sent it) | bot (the bot sent it)
+  source    String    @db.VarChar(10)
+  // image | audio | video | document | other
+  kind      String    @db.VarChar(20)
+  name      String    @db.VarChar(255)
+  mimeType  String?   @map("mime_type") @db.VarChar(255)
+  sizeBytes Int?      @map("size_bytes")
+  // How to open it again later. A chat bucket and the uploader's id (opened through the uploader's /chat-file link), or a
+  // link that lasts (the uploader's own /upload-file link, or a bucket's public link). Never a signed link: those expire.
+  bucket    String?   @db.VarChar(255)
+  fileId    String?   @map("file_id") @db.VarChar(255)
+  url       String?   @db.VarChar(2048)
+  // One line about it, for the bot's notes and for search
+  line      String?   @db.VarChar(300)
+  // For a file a bot made: the tool it used and what it asked that tool for, so it can make one like it again
+  madeWith  String?   @map("made_with") @db.VarChar(100)
+  madePrompt String?  @map("made_prompt")
+  // How long a song, voice note or video is, and how many pages a document has, when known
+  lengthSeconds Int?  @map("length_seconds")
+  pages     Int?
+  // The chat it came in: nearby | dm, and the id the bot server uses for it
+  chatKind  String    @map("chat_kind") @db.VarChar(20)
+  chatRef   String    @map("chat_ref") @db.VarChar(255)
+  // The text kept from it: none (not read, or nothing to read) | reading (pieces still coming) | kept | failed
+  textState String    @default("none") @map("text_state") @db.VarChar(10)
+  textChars Int       @default(0) @map("text_chars")
+  // Set for a guest's file: when it goes
+  expiresAt DateTime? @map("expires_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  bot   Bot           @relation(fields: [botId], references: [id], onDelete: Cascade)
+  owner User?         @relation("BotFileOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  parts BotFilePart[]
+
+  @@unique([botId, number])
+  @@index([botId, ownerId, createdAt])
+  @@index([botId, chatKind, chatRef])
+  @@index([botId, personRef])
+  @@index([expiresAt])
+  @@map("bot_files")
+}
+
+// The text kept from a file, in parts in order, so a long document is searched by its words and read a part at a time.
+// `words` is worked out by Postgres from the text when a part is saved (Postgres's own word index, no extension), with
+// text in its composed form (NFC) and Arabic short vowels and tatweel left out, so a search finds the words with or without
+// them or with accents typed apart, and split at punctuation as a search is. The same expression as the migration's; keep them the same.
+model BotFilePart {
+  botFileId String @map("bot_file_id")
+  number    Int
+  // Where this part starts in the file's text, in characters
+  start     Int
+  text      String
+  words     Unsupported("tsvector")? @default(dbgenerated("to_tsvector('simple'::regconfig, regexp_replace(regexp_replace(NORMALIZE(text, NFC), '[\\u0610-\\u061A\\u0640\\u064B-\\u065F\\u0670\\u06D6-\\u06ED]'::text, ''::text, 'g'::text), '[\\u0021-\\u002F\\u003A-\\u0040\\u005B-\\u0060\\u007B-\\u007E\\u00A1\\u00AB\\u00B7\\u00BB\\u00BF\\u060C\\u061B\\u061F\\u066A-\\u066C\\u06D4\\u2000-\\u206F\\u3000-\\u3003\\u3008-\\u3011\\u3014-\\u301F\\uFF01-\\uFF0F\\uFF1A-\\uFF20\\uFF3B-\\uFF40\\uFF5B-\\uFF65]'::text, ' '::text, 'g'::text))"))
+
+  file BotFile @relation(fields: [botFileId], references: [id], onDelete: Cascade)
+
+  @@id([botFileId, number])
+  @@index([words], map: "bot_file_parts_words_idx", type: Gin)
+  @@map("bot_file_parts")
+}
+
+// The last short id a bot gave a file, counted up in one statement so two files added at once never get the same one.
+model BotFileCounter {
+  botId String @id @map("bot_id")
+  last  Int    @default(0)
+
+  bot Bot @relation(fields: [botId], references: [id], onDelete: Cascade)
+
+  @@map("bot_file_counters")
 }
 
 // Bot Memory

@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { prisma } from '@/lib/db';
 import { authorizeBotManager, json } from '@/lib/bot-access-api';
 import { isBotHidden } from '@/lib/bot-privacy';
+import { forgetFilesWhere } from '@/lib/bot-files';
 import { corsHeaders } from '@/lib/cors';
 
 export const runtime = 'nodejs';
@@ -28,6 +29,9 @@ export async function OPTIONS(request: NextRequest) {
  * memory save in app/api/bots/memory/[id]/route.ts). The bot has truly forgotten within about 30 seconds. The row
  * stays until the bot server reports it dropped these people (app/api/bots/memory/[id]/forgotten/route.ts, #493).
  *
+ * The files the bot kept for these people go too (game #1508): what they sent it and what it sent them, with the text kept
+ * from them. Their artifacts stay: those have their own delete.
+ *
  * Only for a bot that hides its conversations: a manager who can read them uses the usual cleanup.
  *
  * Auth: whoever manages the bot.
@@ -49,16 +53,18 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       const [, deleted] = await prisma.$transaction([
         prisma.botMemoryForget.create({ data: { botId: id, userUuid: null } }),
         prisma.botsMemory.deleteMany({ where: { botId: id } }),
+        prisma.botFile.deleteMany({ where: forgetFilesWhere(id, 'everyone') }),
       ]);
       return json(request, { forgotten: deleted.count, everyone: true });
     }
 
-    const person = await prisma.botsMemory.findFirst({ where: { id: parsed.data.memoryId, botId: id }, select: { id: true, userUuid: true } });
+    const person = await prisma.botsMemory.findFirst({ where: { id: parsed.data.memoryId, botId: id }, select: { id: true, userUuid: true, userId: true } });
     if (!person) return json(request, { error: 'The bot does not remember that person.' }, 404);
     // deleteMany, not delete: two managers pressing Forget on the same person at once must both succeed.
     const [, deleted] = await prisma.$transaction([
       prisma.botMemoryForget.create({ data: { botId: id, userUuid: person.userUuid } }),
       prisma.botsMemory.deleteMany({ where: { id: person.id } }),
+      prisma.botFile.deleteMany({ where: forgetFilesWhere(id, { userUuid: person.userUuid, userId: person.userId }) }),
     ]);
     return json(request, { forgotten: deleted.count, everyone: false });
   } catch (error) {
