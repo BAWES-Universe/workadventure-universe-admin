@@ -218,11 +218,17 @@ const SNIPPET_LENGTH = 200;
 const isHighHalf = (code: number) => code >= 0xd800 && code <= 0xdbff;
 const isLowHalf = (code: number) => code >= 0xdc00 && code <= 0xdfff;
 
+function eitherForm(letter: string): string {
+  const decomposed = letter.normalize('NFD');
+  return decomposed === letter ? letter : `(?:${letter}|${decomposed})`;
+}
+
 export function hitOf(start: number, text: string, words: string[]): { at: number; snippet: string } {
   let index = -1;
   for (const word of words) {
-    // The text may carry Arabic marks the word has not: let any follow each letter
-    const pattern = [...word].map((letter) => `${letter}${ARABIC_MARKS.source}*`).join('');
+    // The text may carry Arabic marks the word has not: let any follow each letter. Its words were found in the composed
+    // form, but the text is kept as it was sent, so a letter may be there in either form
+    const pattern = [...word].map((letter) => `${eitherForm(letter)}${ARABIC_MARKS.source}*`).join('');
     const match = new RegExp(`(?<![\\p{L}\\p{N}])${pattern}`, 'iu').exec(text);
     if (match && (index === -1 || match.index < index)) index = match.index;
   }

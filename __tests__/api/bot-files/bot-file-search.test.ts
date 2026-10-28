@@ -111,6 +111,8 @@ describe('finding files in bot chats (game #1508)', () => {
       const marked = 'Intro. \u0645\u064e\u0631\u0652\u062d\u064e\u0628\u064b\u0627 friends';
       expect(hitOf(0, marked, ['مرحبا']).snippet).toBe(marked);
       expect(hitOf(1000, `${'x '.repeat(100)}${marked}`, ['مرحبا']).at).toBe(1000 + 200 + 7 - 60);
+      // Text kept with a letter in its decomposed form is found by the composed word its search words come in
+      expect(hitOf(1000, `${'x '.repeat(100)}cafe\u0301 opens`, ['caf\u00e9']).at).toBe(1000 + 200 - 60);
       // A word inside another word is not a match
       expect(hitOf(0, 'notyazoghal yazoghal', ['yazoghal']).at).toBe(0);
       // Never cut through an emoji at either end of the snippet
