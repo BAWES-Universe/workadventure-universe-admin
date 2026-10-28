@@ -19,23 +19,33 @@ const MAX_WORD_LENGTH = 64;
 export const ARABIC_MARKS_CLASS = '[\\u0610-\\u061A\\u0640\\u064B-\\u065F\\u0670\\u06D6-\\u06ED]';
 
 /**
+ * Punctuation, listed (ASCII, Latin, Arabic, general, CJK and full-width) rather than [[:punct:]], whose meaning follows
+ * the server's locale and can take a Hindi vowel sign or virama for punctuation. The same class is in the migration's
+ * SQL; keep them the same.
+ */
+export const PUNCTUATION_CLASS =
+  '[\\u0021-\\u002F\\u003A-\\u0040\\u005B-\\u0060\\u007B-\\u007E\\u00A1\\u00AB\\u00B7\\u00BB\\u00BF\\u060C\\u061B\\u061F\\u066A-\\u066C\\u06D4\\u2000-\\u206F\\u3000-\\u3003\\u3008-\\u3011\\u3014-\\u301F\\uFF01-\\uFF0F\\uFF1A-\\uFF20\\uFF3B-\\uFF40\\uFF5B-\\uFF65]';
+
+/**
  * The words Postgres keeps of some text: without Arabic marks, and split at punctuation as a search is ("plan.pdf" is
  * found by "pdf", "2024-05-01" by "05"; Postgres alone keeps "plan.pdf" whole and "-05" signed). The same expression as
  * the migration's, for a part's words and the index on a file's own words; keep them the same.
  */
 export function wordsOfSql(text: string): string {
-  return `to_tsvector('simple', regexp_replace(regexp_replace(${text}, '${ARABIC_MARKS_CLASS}', '', 'g'), '[[:punct:]]', ' ', 'g'))`;
+  return `to_tsvector('simple', regexp_replace(regexp_replace(${text}, '${ARABIC_MARKS_CLASS}', '', 'g'), '${PUNCTUATION_CLASS}', ' ', 'g'))`;
 }
 const ARABIC_MARKS = /[\u0610-\u061A\u0640\u064B-\u065F\u0670\u06D6-\u06ED]/g;
 
-/** The words of a search, lowercased, letters and digits only, so they are safe inside a word query. */
+/** The words of a search, lowercased, letters, digits and marks only, so they are safe inside a word query. */
 export function searchWords(words: string | null | undefined): string[] {
   if (!words) return [];
   // Marks belong to their word (an Arabic vowel, an accent typed apart), so they never split one
   const found = words.normalize('NFC').toLowerCase().match(/[\p{L}\p{N}\p{M}]+/gu) ?? [];
-  const clean = found.map((word) => word.replace(ARABIC_MARKS, ''));
-  // Only letters and digits reach the query: any other mark left after NFC is dropped
-  const safe = clean.map((word) => word.replace(/[^\p{L}\p{N}]/gu, '').slice(0, MAX_WORD_LENGTH)).filter((word) => word.length > 0);
+  // Arabic marks are left out as the stored words leave them out; any other mark stays, as Postgres keeps it in its word
+  // (a Hindi vowel sign or virama has no letter to join), so "नमस्ते" finds नमस्ते. Only letters, digits and marks reach
+  // the query, and a word needs a letter or digit
+  const clean = found.map((word) => word.replace(ARABIC_MARKS, '').slice(0, MAX_WORD_LENGTH));
+  const safe = clean.filter((word) => /[\p{L}\p{N}]/u.test(word));
   return [...new Set(safe)].slice(0, MAX_SEARCH_WORDS);
 }
 

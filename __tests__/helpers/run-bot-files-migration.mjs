@@ -86,13 +86,16 @@ const words = {
   // How a made file was made (#1508 D1) is searched with its name and line
   byPrompt: await (async () => {
     await db.exec(`UPDATE bot_files SET made_with = 'generate_music', made_prompt = 'A slow oud ballad', length_seconds = 150 WHERE id = 'f3'`);
-    const expression = `to_tsvector('simple', regexp_replace(regexp_replace(name || ' ' || coalesce(line, '') || ' ' || left(coalesce(made_prompt, ''), 20000), '[\\u0610-\\u061A\\u0640\\u064B-\\u065F\\u0670\\u06D6-\\u06ED]', '', 'g'), '[[:punct:]]', ' ', 'g'))`;
+    const expression = `to_tsvector('simple', regexp_replace(regexp_replace(name || ' ' || coalesce(line, '') || ' ' || left(coalesce(made_prompt, ''), 20000), '[\\u0610-\\u061A\\u0640\\u064B-\\u065F\\u0670\\u06D6-\\u06ED]', '', 'g'), '[\\u0021-\\u002F\\u003A-\\u0040\\u005B-\\u0060\\u007B-\\u007E\\u00A1\\u00AB\\u00B7\\u00BB\\u00BF\\u060C\\u061B\\u061F\\u066A-\\u066C\\u06D4\\u2000-\\u206F\\u3000-\\u3003\\u3008-\\u3011\\u3014-\\u301F\\uFF01-\\uFF0F\\uFF1A-\\uFF20\\uFF3B-\\uFF40\\uFF5B-\\uFF65]', ' ', 'g'))`;
     return (await db.query(`SELECT id FROM bot_files WHERE ${expression} @@ plainto_tsquery('simple', 'oud')`)).rows.map((row) => row.id);
   })(),
   // Punctuation splits words, as in a search: an extension, and each number of a date
   punctuation: await (async () => {
     await db.exec(`INSERT INTO bot_file_parts (bot_file_id, number, start, text) VALUES ('f2', 9, 900, 'See plan.pdf, due 2024-05-01.')`);
     const found = { pdf: await search('pdf'), month: await search('05') };
+    // Marks of other languages are not punctuation: Hindi keeps its vowel signs and virama in one word
+    await db.query(`UPDATE bot_file_parts SET text = $1 WHERE bot_file_id = 'f2' AND number = 9`, ['\u0928\u092e\u0938\u094d\u0924\u0947\u3001\u0926\u0941\u0928\u093f\u092f\u093e\u060c \u00abfin\u00bb']);
+    found.hindi = (await db.query(`SELECT words::text AS words FROM bot_file_parts WHERE bot_file_id = 'f2' AND number = 9`)).rows[0].words;
     await db.exec(`DELETE FROM bot_file_parts WHERE bot_file_id = 'f2' AND number = 9`);
     return found;
   })(),
@@ -106,6 +109,8 @@ const indexes = (await db.query(`SELECT indexname, indexdef FROM pg_indexes WHER
 const wordsOfAPart = (await db.query(`SELECT words::text AS words FROM bot_file_parts WHERE bot_file_id = 'f2' AND number = 1`)).rows[0].words;
 const marksKeptInText = (await db.query(`SELECT text = $1 AS kept FROM bot_file_parts WHERE bot_file_id = 'f2' AND number = 2`, [WITH_MARKS])).rows[0].kept;
 const extensions = (await db.query(`SELECT extname FROM pg_extension ORDER BY extname`)).rows.map((row) => row.extname);
+// The part's words as Postgres writes them out, which prisma/schema.prisma's dbgenerated must match (no drift)
+const generatedWords = (await db.query(`SELECT pg_get_expr(d.adbin, d.adrelid) AS expr FROM pg_attrdef d JOIN pg_attribute a ON a.attrelid = d.adrelid AND a.attnum = d.adnum WHERE d.adrelid = 'bot_file_parts'::regclass AND a.attname = 'words'`)).rows[0].expr;
 
 // A bot that goes takes its files and their text; a person who leaves takes theirs; a guest's stays until its day
 await db.exec(`DELETE FROM bots WHERE id = 'bot2'`);
@@ -117,4 +122,4 @@ const afterOwnerLeft = {
   parts: (await db.query('SELECT bot_file_id FROM bot_file_parts ORDER BY bot_file_id')).rows.map((row) => row.bot_file_id),
 };
 
-console.log(JSON.stringify({ before, after, defaults, duplicateNumber, otherBotSameNumber, orphanFile, orphanPart, counted, words, indexes, wordsOfAPart, marksKeptInText, extensions, afterBotDeleted, counterAfterBotDeleted, afterOwnerLeft }));
+console.log(JSON.stringify({ before, after, defaults, duplicateNumber, otherBotSameNumber, orphanFile, orphanPart, counted, words, indexes, wordsOfAPart, marksKeptInText, extensions, generatedWords, afterBotDeleted, counterAfterBotDeleted, afterOwnerLeft }));

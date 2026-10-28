@@ -1121,14 +1121,15 @@ model BotFile {
 
 // The text kept from a file, in parts in order, so a long document is searched by its words and read a part at a time.
 // `words` is worked out by Postgres from the text when a part is saved (Postgres's own word index, no extension), with
-// Arabic short vowels and tatweel left out so a search finds the words with or without them.
+// Arabic short vowels and tatweel left out so a search finds the words with or without them, and split at punctuation as
+// a search is. The same expression as the migration's; keep them the same.
 model BotFilePart {
   botFileId String @map("bot_file_id")
   number    Int
   // Where this part starts in the file's text, in characters
   start     Int
   text      String
-  words     Unsupported("tsvector")? @default(dbgenerated("to_tsvector('simple'::regconfig, regexp_replace(text, '[\\u0610-\\u061A\\u0640\\u064B-\\u065F\\u0670\\u06D6-\\u06ED]'::text, ''::text, 'g'::text))"))
+  words     Unsupported("tsvector")? @default(dbgenerated("to_tsvector('simple'::regconfig, regexp_replace(regexp_replace(text, '[\\u0610-\\u061A\\u0640\\u064B-\\u065F\\u0670\\u06D6-\\u06ED]'::text, ''::text, 'g'::text), '[\\u0021-\\u002F\\u003A-\\u0040\\u005B-\\u0060\\u007B-\\u007E\\u00A1\\u00AB\\u00B7\\u00BB\\u00BF\\u060C\\u061B\\u061F\\u066A-\\u066C\\u06D4\\u2000-\\u206F\\u3000-\\u3003\\u3008-\\u3011\\u3014-\\u301F\\uFF01-\\uFF0F\\uFF1A-\\uFF20\\uFF3B-\\uFF40\\uFF5B-\\uFF65]'::text, ' '::text, 'g'::text))"))
 
   file BotFile @relation(fields: [botFileId], references: [id], onDelete: Cascade)
 

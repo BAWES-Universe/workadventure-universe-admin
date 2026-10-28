@@ -4,6 +4,7 @@
  */
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 
 let result: Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -36,12 +37,16 @@ describe('bot files migration', () => {
   });
 
   it('finds words with Postgres\'s own index, a made-up name and Arabic as they are, with no extension added', () => {
-    expect(result.words).toEqual({ marksInTextNotQuery: ['f1', 'f2'], name: ['f1'], arabic: ['f1'], twoWords: ['f1'], none: [], byLine: ['f1'], byPrompt: ['f3'], punctuation: { pdf: ['f2'], month: ['f2'] }, longPromptSaves: true });
+    expect(result.words).toEqual({ marksInTextNotQuery: ['f1', 'f2'], name: ['f1'], arabic: ['f1'], twoWords: ['f1'], none: [], byLine: ['f1'], byPrompt: ['f3'], punctuation: { pdf: ['f2'], month: ['f2'], hindi: "'fin':3 'दुनिया':2 'नमस्ते':1" }, longPromptSaves: true });
     // A word without short vowels finds it in text without them (f1) and with them (f2); the text itself keeps them
     expect(result.marksKeptInText).toBe(true);
     expect(result.indexes.map((index: { indexname: string }) => index.indexname)).toEqual(['bot_file_parts_words_idx', 'bot_files_words_idx']);
     expect(result.indexes[0].indexdef).toMatch(/USING gin \(words\)/);
     expect(result.indexes[1].indexdef).toMatch(/USING gin \(to_tsvector\('simple'::regconfig/);
+    // prisma/schema.prisma says the same, so a migrate diff sees no drift
+    const schema = readFileSync(path.join(__dirname, '../../prisma/schema.prisma'), 'utf8');
+    const declared = schema.match(/words\s+Unsupported\("tsvector"\)\? @default\(dbgenerated\("(.*)"\)\)/)?.[1].replace(/\\\\/g, '\\');
+    expect(declared).toBe(result.generatedWords);
     // A part's words are worked out by Postgres when it is saved, so a search never reads the text again
     expect(result.wordsOfAPart).toBe("'about':2 'here':4 'nothing':1 'songs':3");
     expect(result.extensions).toEqual(['plpgsql']);

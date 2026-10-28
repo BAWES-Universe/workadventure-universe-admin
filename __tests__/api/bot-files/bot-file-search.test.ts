@@ -5,7 +5,9 @@ import { checkBotAccess } from '@/lib/bot-access';
 import { loadBotPrivacy, takeForgets } from '@/lib/bot-privacy';
 import { addFile, keepFileText, resetFilePruneClock } from '@/lib/bot-files';
 import { findFiles, mergePage, readFileText, type FoundArtifact, type FoundFile, type SqlRunner } from '@/lib/bot-file-search';
-import { hitOf, searchWords, wordQuery } from '@/lib/bot-file-search-sql';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { hitOf, searchWords, wordQuery, wordsOfSql } from '@/lib/bot-file-search-sql';
 import { addUser, db } from '../../helpers/bot-files-db';
 
 jest.mock('@/lib/db', () => ({ prisma: jest.requireActual('../../helpers/bot-files-db').fakePrisma }));
@@ -74,7 +76,14 @@ describe('finding files in bot chats (game #1508)', () => {
   });
 
   describe('the words of a search', () => {
-    it('keeps letters and digits of any language, lowercased, each as the start of a word, so nothing else reaches the query', () => {
+    it('works out a file\'s own words with the migration\'s index expression, so the index is used', () => {
+      const migration = readFileSync(path.join(__dirname, '../../../prisma/migrations/20261028000000_bot_files/migration.sql'), 'utf8');
+      const fileWords = wordsOfSql(`"name" || ' ' || coalesce("line", '') || ' ' || left(coalesce("made_prompt", ''), 20000)`);
+      expect(migration).toContain(`USING GIN (${fileWords})`);
+      expect(migration).toContain(wordsOfSql('text').replace("to_tsvector('simple',", "to_tsvector('simple'::regconfig,"));
+    });
+
+    it('keeps letters, digits and marks of any language, lowercased, each as the start of a word, so nothing else reaches the query', () => {
       expect(searchWords('The YAZOGHAL song, 2nd!')).toEqual(['the', 'yazoghal', 'song', '2nd']);
       expect(searchWords("x') OR 1=1; DROP TABLE --")).toEqual(['x', 'or', '1', 'drop', 'table']);
       expect(searchWords('مرحبا بالجميع')).toEqual(['مرحبا', 'بالجميع']);
@@ -83,6 +92,9 @@ describe('finding files in bot chats (game #1508)', () => {
       expect(searchWords('\u064e \u0652')).toEqual([]);
       // An accent typed apart joins its letter
       expect(searchWords('cafe\u0301')).toEqual(['café']);
+      // Other marks stay in their word, as Postgres keeps them: Hindi vowel signs and virama; a mark alone is no word
+      expect(searchWords('\u0928\u092e\u0938\u094d\u0924\u0947 \u0926\u0941\u0928\u093f\u092f\u093e')).toEqual(['\u0928\u092e\u0938\u094d\u0924\u0947', '\u0926\u0941\u0928\u093f\u092f\u093e']);
+      expect(searchWords('\u0301 \u094d')).toEqual([]);
       expect(searchWords('a b c d e f g h i j')).toHaveLength(8);
       expect(wordQuery(['yazo', 'song'], 'all')).toBe('yazo:* & song:*');
       expect(wordQuery(['yazo', 'song'], 'any')).toBe('yazo:* | song:*');
