@@ -198,6 +198,9 @@ describe('files in bot chats (game #1508)', () => {
       // A long prompt is kept whole, up to "Text kept from a file", like a document's text
       const long = await call(add, song(person('owner'), BUBBLE, { madeWith: 'generate_music', madePrompt: 'x'.repeat(50_000) }));
       expect(long.body.file.made.prompt).toHaveLength(50_000);
+      // Half an emoji in the middle can't be kept as text, so it is left out
+      const half = await call(add, song(person('owner'), BUBBLE, { madeWith: 'generate_music', madePrompt: 'oud \uD83C song \uDFB5 end' }));
+      expect(half.body.file.made.prompt).toBe('oud  song  end');
       expect((await call(add, song(person('owner'), BUBBLE, { lengthSeconds: -1 }))).status).toBe(400);
     });
 
@@ -351,6 +354,15 @@ describe('files in bot chats (game #1508)', () => {
       const next = await keep(ref, { text: 'def', from: 4, last: true });
       expect(next.status).toBe(200);
       expect(next.body.file.text).toEqual({ state: 'kept', chars: 7 });
+    });
+
+    it('keeps half an emoji in the middle of a piece as one replacement character, so where the next piece starts is the same', async () => {
+      const ref = await addSong(person('owner'), BUBBLE, { kind: 'document' });
+      expect((await keep(ref, { text: 'a\uD83Cb', from: 0, last: false })).status).toBe(200);
+      const next = await keep(ref, { text: 'cd', from: 3, last: true });
+      expect(next.status).toBe(200);
+      expect(next.body.file.text).toEqual({ state: 'kept', chars: 5 });
+      expect(db.parts.map((part) => part.text).join('')).toBe('a\uFFFDbcd');
     });
 
     describe('in pieces, so one request stays a few MB whatever the limit is', () => {
