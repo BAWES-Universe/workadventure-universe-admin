@@ -75,6 +75,12 @@ async function main() {
   result.arabic = await ids(scope(), filters({ query: q('بالجميع') }));
   result.markedTextUnmarkedQuery = await ids(scope(), filters({ query: q('مرحبا') }));
   result.unmarkedTextMarkedQuery = await ids(scope(), filters({ query: q('\u0628\u0650\u0627\u0644\u0652\u062c\u064e\u0645\u0650\u064a\u0639') }));
+  // Marks of other languages stay in the word on both sides: Hindi "namaste" with its vowel signs and virama, whole and
+  // as a start
+  await db.query(`INSERT INTO bot_file_parts (bot_file_id, number, start, text) VALUES ('dm-plan', 3, 9300, $1)`, ['\u0928\u092e\u0938\u094d\u0924\u0947 \u0926\u0941\u0928\u093f\u092f\u093e']);
+  result.hindi = await ids(scope(), filters({ query: q('\u0928\u092e\u0938\u094d\u0924\u0947') }));
+  result.hindiStart = await ids(scope(), filters({ query: q('\u0928\u092e\u0938\u094d') }));
+  await db.exec(`DELETE FROM bot_file_parts WHERE bot_file_id = 'dm-plan' AND number = 3`);
   await db.exec(`UPDATE bot_files SET made_with = 'generate_music', made_prompt = 'A slow oud ballad about the gate' WHERE id = 'dm-song'`);
   result.byPrompt = await ids(scope(), filters({ query: q('oud ballad') }));
   result.twoWordsInText = await ids(scope(), filters({ query: q('thursday launch') }));

@@ -50,6 +50,9 @@ describe('bot file search on Postgres', () => {
     // Arabic with or without short vowels: lyrics with them (a part and a line) found by a word without, and the other way
     expect(rows('markedTextUnmarkedQuery')).toEqual(['bubble-pic', 'dm-plan', 'dm-song']);
     expect(rows('unmarkedTextMarkedQuery')).toEqual(['dm-plan']);
+    // Marks of other languages stay in the word, in the text and the search: Hindi, whole and as a start
+    expect(rows('hindi')).toEqual(['dm-plan']);
+    expect(rows('hindiStart')).toEqual(['dm-plan']);
     expect(rows('twoWordsInText')).toEqual(['dm-plan']);
     // And in what a made file was asked for
     expect(rows('byPrompt')).toEqual(['dm-song']);
