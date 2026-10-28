@@ -386,6 +386,23 @@ describe('files in bot chats (game #1508)', () => {
         expect(db.parts.map((part) => part.text)).toEqual(['new']);
       });
 
+      it('answers 409, not an error, when two pieces for the same place are kept at once', async () => {
+        const ref = await addSong(person('owner'), BUBBLE, { kind: 'document' });
+        await keep(ref, { text: 'one ', from: 0, last: false });
+        const createMany = fakePrisma.botFilePart.createMany;
+        fakePrisma.botFilePart.createMany = async () => {
+          throw Object.assign(new Error('Unique constraint failed'), { code: 'P2002' });
+        };
+        try {
+          const res = await keep(ref, { text: 'two', from: 4, last: true });
+          expect(res.status).toBe(409);
+          expect(res.body.error).toBe('out_of_order');
+          expect(Sentry.captureException).not.toHaveBeenCalled();
+        } finally {
+          fakePrisma.botFilePart.createMany = createMany;
+        }
+      });
+
       it('turns down a piece that ends in half an emoji, since each piece is kept as text of its own', async () => {
         const ref = await addSong(person('owner'), BUBBLE, { kind: 'document' });
         const res = await keep(ref, { text: 'ab\uD83D', from: 0, last: false });
