@@ -12,7 +12,8 @@ import { checkAiProviderRef, checkBotModel } from '@/lib/ai-provider-ref';
 import { toolTimeoutSecondsSchema } from '@/lib/bot-tool-timeout';
 import { maxReplyTokensSchema, maxStepsSchema } from '@/lib/bot-limits';
 import { keepToolCallSetting, keepVisionPick } from '@/lib/bot-config-helpers';
-import { checkConfigVision } from '@/lib/bot-vision';
+import { checkConfigVision, dropOthersVisionKey } from '@/lib/bot-vision';
+import { tellKeyOwnerMovedOff } from '@/lib/ai-key-moved-off';
 import { corsHeaders } from '@/lib/cors';
 import { clearBotRunsOnNotices } from '@/lib/notices';
 
@@ -451,6 +452,7 @@ export async function PUT(
         actorId: userId ?? null,
         makerId: existingBot.createdById ?? null,
         roomId: resolvedRoomId ?? existingBot.roomId,
+        botId: id,
       });
       if (providerError) {
       const response = NextResponse.json(
@@ -474,6 +476,7 @@ export async function PUT(
         actorId: userId ?? null,
         makerId: existingBot.createdById ?? null,
         roomId: resolvedRoomId ?? existingBot.roomId,
+        botId: id,
       });
       if (modelError) {
         const response = NextResponse.json({ error: modelError }, { status: 400 });
@@ -484,13 +487,15 @@ export async function PUT(
       }
     }
 
-    // Where the bot's images go is checked like its provider: a key may only be picked by the person who made the bot
+    // Where the bot's images go is checked like its provider: a key may only be picked by its own owner (#709)
     {
       const visionError = await checkConfigVision(validatedData.behaviorConfig, {
         storedConfig: existingBot.behaviorConfig,
         actorId: userId ?? null,
         makerId: existingBot.createdById ?? null,
         roomId: resolvedRoomId ?? existingBot.roomId,
+        botId: id,
+        mainRef: nextRef ?? null,
       });
       if (visionError) {
         const response = NextResponse.json({ error: visionError }, { status: 400 });
@@ -523,6 +528,11 @@ export async function PUT(
     if (validatedData.maxReplyTokens !== undefined) updateData.maxReplyTokens = validatedData.maxReplyTokens;
     if (validatedData.maxSteps !== undefined) updateData.maxSteps = validatedData.maxSteps;
     if (validatedData.companionTextureId !== undefined) updateData.companionTextureId = validatedData.companionTextureId;
+    // Moving a bot off a key also moves its images off another person's key (#709)
+    if (nextRef !== existingBot.aiProviderRef) {
+      const withoutVision = await dropOthersVisionKey(updateData.behaviorConfig ?? existingBot.behaviorConfig, userId ?? null);
+      if (withoutVision) updateData.behaviorConfig = withoutVision;
+    }
 
     // Update bot (updatedAt is automatically updated by Prisma)
     // Always update updatedById when any field changes
@@ -566,6 +576,10 @@ export async function PUT(
     // What the bot runs on changed: the notices that said where it was are out of date
     if (nextRef !== existingBot.aiProviderRef || (validatedData.aiModel !== undefined && validatedData.aiModel !== existingBot.aiModel)) {
       await clearBotRunsOnNotices(id);
+    }
+    // The person whose key it left is told (#709)
+    if (nextRef !== existingBot.aiProviderRef) {
+      await tellKeyOwnerMovedOff({ bot: { id, name: bot.name }, fromRef: existingBot.aiProviderRef, toRef: nextRef ?? null, actorId: userId ?? null });
     }
 
     // Transform to camelCase

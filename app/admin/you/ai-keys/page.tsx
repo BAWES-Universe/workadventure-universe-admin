@@ -126,7 +126,7 @@ function ifDownHelp(key: AiKeySummary): string {
 }
 
 /**
- * AI keys (#374): the keys you added so your own bots can run on your own AI, hosted or on your own computer. The key
+ * AI keys (#374): the keys you added so bots you manage can run on your own AI, hosted or on your own computer. The key
  * itself is never shown, only its last four characters.
  */
 export default function AiKeysPage() {
@@ -226,7 +226,7 @@ export default function AiKeysPage() {
     <div className="grid gap-6" data-testid="ai-keys-page">
       <PageHeader icon={<KeyRound size={30} aria-hidden="true" />} title="AI keys">
         <p className="max-w-[60ch] text-[15px] text-muted-foreground">
-          Your own AI, hosted or on your own computer. Bots you make can run on it.
+          Your own AI, hosted or on your own computer. Bots you manage can run on it.
         </p>
         <Button asChild className="h-11 w-fit px-5">
           <Link href="/admin/you/ai-keys/new">
@@ -638,7 +638,7 @@ function LendSheet({
       {!editing && (
         <>
           <p className="text-sm text-muted-foreground">
-            Universes where you can manage bots. Lending moves no bot: in a bot you made there, pick this key under Runs on.
+            Universes where you can manage bots. Lending moves no bot: in a bot you manage there, pick this key under Runs on.
           </p>
           {universes === null && !loadFailed && <p className="text-sm text-muted-foreground">Loading your universes…</p>}
           {loadFailed && (

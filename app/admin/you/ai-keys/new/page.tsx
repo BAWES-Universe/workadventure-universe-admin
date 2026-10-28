@@ -219,7 +219,7 @@ export default function AddAiKeyPage() {
   return (
     <div className="grid gap-6" data-testid="add-ai-key-page">
       <PageHeader icon={<KeyRound size={30} aria-hidden="true" />} title="Add a key">
-        <p className="max-w-[60ch] text-[15px] text-muted-foreground">Your own AI, hosted or on your own computer. Only bots you make can use it.</p>
+        <p className="max-w-[60ch] text-[15px] text-muted-foreground">Your own AI, hosted or on your own computer. Only you can put a bot on it.</p>
       </PageHeader>
 
       {step === 'pick' || !info ? (

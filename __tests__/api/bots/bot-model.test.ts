@@ -46,7 +46,7 @@ describe('PUT /api/bots/:id with aiModel', () => {
   it('saves the model picked on the key the bot is on, and says it back', async () => {
     const response = await save({ aiModel: 'claude-haiku-5-5' });
     expect(response.status).toBe(200);
-    expect(checkBotModel).toHaveBeenCalledWith('claude-haiku-5-5', { ref: 'key-1', currentRef: 'key-1', currentModel: 'claude-sonnet-5-5', actorId: 'maker', makerId: 'maker', roomId: 'room-123' });
+    expect(checkBotModel).toHaveBeenCalledWith('claude-haiku-5-5', { ref: 'key-1', currentRef: 'key-1', currentModel: 'claude-sonnet-5-5', actorId: 'maker', makerId: 'maker', roomId: 'room-123', botId: 'bot-1' });
     expect(saved().aiModel).toBe('claude-haiku-5-5');
     expect((await response.json()).aiModel).toBe('claude-haiku-5-5');
   });

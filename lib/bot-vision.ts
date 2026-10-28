@@ -11,7 +11,7 @@ import { UNIVERSE_AI_MISSING, resolveUniverseAiProvider } from '@/lib/universe-a
  * says what looks at the pictures people send:
  *   - "this": the bot's own model. It sees them if it can; if it can't, it is told an image came and not what is in it;
  *   - "universe-ai": Universe AI describes them (the images leave the key the bot runs on);
- *   - "another": a model with Vision on one of the maker's own keys, lent to this universe.
+ *   - "another": a model with Vision on one of the own keys of whoever's key the bot runs on, lent to this universe (#709).
  * The pick is saved in the bot's behavior config under `vision`; nothing saved means the owner picked nothing (see `autoVision`).
  */
 export type VisionPick =
@@ -66,21 +66,23 @@ export function autoVision(main: { ownKeyId: string | null; sees: boolean; sameK
 }
 
 /** Why a key picked for images can't be used right now. */
-export type AnotherProblem = 'gone' | 'not-maker' | 'not-lent' | 'no-access' | 'no-room' | 'no-model' | 'down';
+export type AnotherProblem = 'gone' | 'no-owner' | 'other-owner' | 'not-lent' | 'no-access' | 'no-room' | 'no-model' | 'down';
 
 /**
- * Whether the key picked for "Another model" can look at images for this bot now: it is there, it is the maker's, it is lent
- * here, the maker can still manage bots in the room, the model is one with Vision on it, and the key isn't Down (`recheck`: a Down
- * key is asked to check itself again when it is due, as a main key is).
+ * Whether the key picked for "Another model" can look at images for this bot now: it is there, it may run this bot (lent here,
+ * its owner still manages the bot, see lib/ai-key-pay.ts), it belongs to the same person as the key the bot runs on when that is a
+ * person's key (#709: images follow whoever's key the bot is on), the model is one with Vision on it, and the key isn't Down
+ * (`recheck`: a Down key is asked to check itself again when it is due, as a main key is).
  */
 export async function usableVisionKey(
   pick: Extract<VisionPick, { choice: 'another' }>,
-  bot: { createdById: string | null; roomId: string },
-  options: { recheck?: boolean } = {}
+  bot: { id: string | null; createdById: string | null; roomId: string },
+  options: { recheck?: boolean; mainKeyOwnerId?: string | null } = {}
 ): Promise<{ ok: true; key: BotsAiProvider } | { ok: false; problem: AnotherProblem; key: BotsAiProvider | null }> {
   const key = await prisma.botsAiProvider.findUnique({ where: { providerId: pick.keyId } });
   if (!key || !key.ownerId) return { ok: false, problem: 'gone', key: null };
-  const verdict = await checkKeyForBot({ keyId: key.providerId, keyOwnerId: key.ownerId, makerId: bot.createdById, roomId: bot.roomId });
+  if (options.mainKeyOwnerId && options.mainKeyOwnerId !== key.ownerId) return { ok: false, problem: 'other-owner', key };
+  const verdict = await checkKeyForBot({ keyId: key.providerId, keyOwnerId: key.ownerId, bot });
   if (!verdict.ok) return { ok: false, problem: verdict.reason, key };
   // A model the lend there leaves out (#575) is not one this bot may use, for images either
   if (!keyVisionModels(key).includes(pick.model) || (verdict.lendModels && !verdict.lendModels.includes(pick.model))) return { ok: false, problem: 'no-model', key };
@@ -99,12 +101,12 @@ export async function usableVisionKey(
 
 /**
  * Checks a vision pick being saved with a bot. Nothing picked, the pick the bot already has, "this" and "universe-ai" (while it
- * has a provider to run on) are fine for anyone who may save the bot. "another" is a key, so only its owner, who made the bot,
- * may choose it, and only a model with Vision on a key lent to the bot's universe. Returns a message for a 400, or null.
+ * has a provider to run on) are fine for anyone who may save the bot. "another" is a key, so only its owner may choose it
+ * (#709), and only a model with Vision on a key lent to the bot's universe. Returns a message for a 400, or null.
  */
 export async function checkVisionPick(
   raw: unknown,
-  context: { current: VisionPick | null; actorId: string | null; makerId: string | null; roomId: string }
+  context: { current: VisionPick | null; actorId: string | null; makerId: string | null; roomId: string; botId: string | null; mainRef?: string | null }
 ): Promise<string | null> {
   if (raw === undefined || raw === null) return null;
   const pick = parseVisionPick(raw);
@@ -114,8 +116,12 @@ export async function checkVisionPick(
   if (pick.choice === 'universe-ai') return (await resolveUniverseAiProvider()) ? null : UNIVERSE_AI_MISSING;
   const key = await prisma.botsAiProvider.findUnique({ where: { providerId: pick.keyId }, select: { ownerId: true } });
   if (!key || !key.ownerId || key.ownerId !== context.actorId) return 'That key isn’t there.';
-  if (context.actorId !== context.makerId) return KEY_FOR_BOT_TEXT['not-maker'];
-  const usable = await usableVisionKey(pick, { createdById: context.makerId, roomId: context.roomId });
+  // Images follow whoever's key the bot runs on (#709): on someone else's key, they stay off yours
+  if (context.mainRef && context.mainRef !== pick.keyId) {
+    const main = await prisma.botsAiProvider.findUnique({ where: { providerId: context.mainRef }, select: { ownerId: true } });
+    if (main?.ownerId && main.ownerId !== context.actorId) return OTHER_OWNER_TEXT;
+  }
+  const usable = await usableVisionKey(pick, { id: context.botId, createdById: context.makerId, roomId: context.roomId });
   if (usable.ok) return null;
   switch (usable.problem) {
     case 'no-model':
@@ -124,15 +130,19 @@ export async function checkVisionPick(
       return 'That key is down right now. Pick it again when it’s back.';
     case 'gone':
       return 'That key isn’t there.';
+    case 'other-owner':
+      return OTHER_OWNER_TEXT;
     default:
       return KEY_FOR_BOT_TEXT[usable.problem];
   }
 }
 
+const OTHER_OWNER_TEXT = 'This bot runs on someone else’s key, so its images can’t go to your key. Move it to your key first.';
+
 /** The same check for a bot's whole behavior config as it arrives on a save: only a `vision` key in it is judged here. */
 export async function checkConfigVision(
   behaviorConfig: unknown,
-  context: { storedConfig: unknown; actorId: string | null; makerId: string | null; roomId: string }
+  context: { storedConfig: unknown; actorId: string | null; makerId: string | null; roomId: string; botId: string | null; mainRef?: string | null }
 ): Promise<string | null> {
   if (!behaviorConfig || typeof behaviorConfig !== 'object' || !('vision' in behaviorConfig)) return null;
   return checkVisionPick((behaviorConfig as Record<string, unknown>).vision, {
@@ -140,5 +150,22 @@ export async function checkConfigVision(
     actorId: context.actorId,
     makerId: context.makerId,
     roomId: context.roomId,
+    botId: context.botId,
+    mainRef: context.mainRef,
   });
+}
+
+/**
+ * A bot someone moves to another key or Universe AI (#709) stops sending images to a key picked for "Another model" that isn't
+ * theirs: the owner of that key no longer pays for this bot, and images go back to the default (the new key's own Vision model,
+ * else Universe AI). Returns the config without that pick, or null when nothing changes.
+ */
+export async function dropOthersVisionKey(config: unknown, actorId: string | null): Promise<Record<string, unknown> | null> {
+  const pick = readVisionPick(config);
+  if (pick?.choice !== 'another' || !config || typeof config !== 'object') return null;
+  const key = await prisma.botsAiProvider.findUnique({ where: { providerId: pick.keyId }, select: { ownerId: true } });
+  if (key?.ownerId && key.ownerId === actorId) return null;
+  const rest = { ...(config as Record<string, unknown>) };
+  delete rest.vision;
+  return rest;
 }

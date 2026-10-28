@@ -10,8 +10,9 @@ import { keyVisionModels, readVisionPick, usableVisionKey, type AnotherProblem, 
 
 /**
  * What the game's bot page offers under "Runs on" for one bot (#374). Nobody is shown the server's provider list: the
- * choices are Universe AI, and the viewer's own keys lent to this bot's universe (only when the viewer made the bot).
- * Someone else's key is never offered; if the bot is on one, it is shown as it is and only Universe AI can replace it.
+ * choices are Universe AI, and the viewer's own keys lent to this bot's universe: anyone who manages a bot may put it on
+ * their own key (#709). Someone else's key is never offered; if the bot is on one, it is shown with its owner's name and the
+ * provider (never the key's own name, which is the owner's), and the viewer can move the bot off it to Universe AI or a key of theirs.
  * Each key says if it is Working or Down and what its bots do then, so the picker can say that Universe AI answers until it's back.
  * Nobody, super admins included, is offered the server's providers any more: a bot runs on Universe AI, which follows the
  * Default, or on a lent key. A bot still pinned to a provider is shown as it is, and Universe AI can replace it.
@@ -48,9 +49,9 @@ export interface BotAiOptions {
   /** Who made the bot (the viewer, for a bot not made yet). */
   maker: { id: string; name: string | null } | null;
   viewerIsMaker: boolean;
-  /** The viewer's own keys lent to this bot's universe; empty unless the viewer made the bot. */
+  /** The viewer's own keys lent to this bot's universe. */
   keys: { id: string; name: string; kind: string | null; kindLabel: string; /** The provider's logo file in `public/ai-providers/` (without `.svg`), or what is drawn instead. */ logo: string | null; plainIcon: 'plug' | 'chip' | null; group: 'own-computer' | 'hosted' | null; universeName: string; status: 'working' | 'down'; ifDown: 'universe-ai' | 'stop'; model: string | null; /** The longest reply its check model can write, when known (#673). */ output: number | null; supportsVision: boolean | null; visionModels: string[]; /** The models the lend here allows (null when the provider's list could not be loaded, with why). */ models: KeyModelOption[] | null; modelsProblem: string | null; /** The lend here allows only some models. */ limited: boolean; limits: BotLimitCeiling }[];
-  /** The key the bot is on now, when it is a personal key: whose it is and what it is called. */
+  /** The key the bot is on now, when it is a personal key: whose it is and what it is called (its own name for the viewer's own key, "Sara’s DeepSeek" for anyone else's). */
   currentKey: { id: string; name: string; ownerName: string | null; mine: boolean; status: 'working' | 'down'; ifDown: 'universe-ai' | 'stop'; logo: string | null; plainIcon: 'plug' | 'chip' | null; group: 'own-computer' | 'hosted' | null; model: string | null; /** The longest reply the bot's model can write, when known (#673). */ output: number | null; supportsVision: boolean | null; visionModels: string[]; limits: BotLimitCeiling } | null;
   /** What the owner picked for the bot's images (null = nothing picked), and, for "Another model", the key picked and whether it can be used now. */
   vision: { saved: VisionPick | null; savedKey: { name: string; problem: AnotherProblem | null } | null };
@@ -97,15 +98,13 @@ export async function botAiOptions(input: {
 
   const [universeAi, ownKeys, current, serverLimits] = await Promise.all([
     resolveUniverseAiProvider(),
-    viewerIsMaker
-      ? prisma.botsAiProvider.findMany({
-          where: { ownerId: input.viewer.id, lends: { some: { universeId: universe.id } } },
-          orderBy: { createdAt: 'asc' },
-          select: { providerId: true, name: true, endpoint: true, apiKeyEncrypted: true, settings: true, model: true, supportsVision: true, downSince: true, ifDown: true, replyLimits: true, lends: { where: { universeId: universe.id }, select: { models: true } } },
-        })
-      : Promise.resolve([]),
+    prisma.botsAiProvider.findMany({
+      where: { ownerId: input.viewer.id, lends: { some: { universeId: universe.id } } },
+      orderBy: { createdAt: 'asc' },
+      select: { providerId: true, name: true, endpoint: true, apiKeyEncrypted: true, settings: true, model: true, supportsVision: true, downSince: true, ifDown: true, replyLimits: true, lends: { where: { universeId: universe.id }, select: { models: true } } },
+    }),
     bot?.aiProviderRef && bot.aiProviderRef !== UNIVERSE_AI_REF
-      ? prisma.botsAiProvider.findUnique({ where: { providerId: bot.aiProviderRef }, select: { providerId: true, name: true, ownerId: true, settings: true, model: true, supportsVision: true, downSince: true, ifDown: true, replyLimits: true, lends: { where: { universeId: universe.id }, select: { models: true } } } })
+      ? prisma.botsAiProvider.findUnique({ where: { providerId: bot.aiProviderRef }, select: { providerId: true, name: true, ownerId: true, owner: { select: { name: true } }, settings: true, model: true, supportsVision: true, downSince: true, ifDown: true, replyLimits: true, lends: { where: { universeId: universe.id }, select: { models: true } } } })
       : Promise.resolve(null),
     getServerLimits(),
   ]);
@@ -123,7 +122,7 @@ export async function botAiOptions(input: {
   const currentModel = current && bot ? servedModel(bot, current, currentLend) : null;
 
   const saved = readVisionPick(bot?.behaviorConfig);
-  const savedKey = saved?.choice === 'another' && bot ? await savedVisionKey(saved, bot) : null;
+  const savedKey = saved?.choice === 'another' && bot ? await savedVisionKey(saved, bot, current?.ownerId ?? null) : null;
 
   return {
     ok: true,
@@ -141,7 +140,7 @@ export async function botAiOptions(input: {
       // The model the bot is served, and the key's own Vision models, as the server reads them when it picks one for images
       currentKey:
         current && current.ownerId
-          ? { id: current.providerId, name: current.name, ownerName: maker?.id === current.ownerId ? maker.name : null, mine: current.ownerId === input.viewer.id, status: current.downSince ? 'down' : 'working', ifDown: isIfDown(current.ifDown) ? current.ifDown : 'universe-ai', ...currentIcon(current.settings), group: kindInfo((current.settings as { kind?: unknown } | null)?.kind)?.group ?? null, model: currentModel ?? current.model, output: (currentModel ?? current.model) ? modelFactsOf(current, (currentModel ?? current.model) as string).output ?? null : null, supportsVision: currentModel ? modelSupportsVision(current, currentModel) : current.supportsVision, visionModels: keyVisionModels(current).filter((model) => !currentLend || currentLend.includes(model)), limits: ceilingOf(keyReplyLimits(current)) }
+          ? { id: current.providerId, name: keyNameFor(current, input.viewer.id), ownerName: current.owner?.name ?? null, mine: current.ownerId === input.viewer.id, status: current.downSince ? 'down' : 'working', ifDown: isIfDown(current.ifDown) ? current.ifDown : 'universe-ai', ...currentIcon(current.settings), group: kindInfo((current.settings as { kind?: unknown } | null)?.kind)?.group ?? null, model: currentModel ?? current.model, output: (currentModel ?? current.model) ? modelFactsOf(current, (currentModel ?? current.model) as string).output ?? null : null, supportsVision: currentModel ? modelSupportsVision(current, currentModel) : current.supportsVision, visionModels: keyVisionModels(current).filter((model) => !currentLend || currentLend.includes(model)), limits: ceilingOf(keyReplyLimits(current)) }
           : null,
       vision: { saved, savedKey },
       providers: null,
@@ -152,9 +151,10 @@ export async function botAiOptions(input: {
 /** The key picked for "Another model", by name, and why it can't be used now (null when it can). */
 async function savedVisionKey(
   saved: Extract<VisionPick, { choice: 'another' }>,
-  bot: { createdById: string | null; roomId: string }
+  bot: { id: string; createdById: string | null; roomId: string },
+  mainKeyOwnerId: string | null
 ): Promise<{ name: string; problem: AnotherProblem | null }> {
-  const usable = await usableVisionKey(saved, bot);
+  const usable = await usableVisionKey(saved, bot, { mainKeyOwnerId });
   return { name: (usable.key?.name ?? 'A key that was removed'), problem: usable.ok ? null : usable.problem };
 }
 
@@ -162,4 +162,11 @@ async function savedVisionKey(
 function currentIcon(settings: unknown): { logo: string | null; plainIcon: 'plug' | 'chip' | null } {
   const info = kindInfo((settings as { kind?: unknown } | null)?.kind);
   return { logo: info?.logo ?? null, plainIcon: info?.logo ? null : info?.plainIcon ?? 'chip' };
+}
+
+/** A key as the viewer sees it on the bot page: their own by its name, anyone else's by whose it is and what it runs on. */
+function keyNameFor(key: { name: string; ownerId: string | null; owner: { name: string | null } | null; settings: unknown }, viewerId: string): string {
+  if (key.ownerId === viewerId) return key.name;
+  const label = kindInfo((key.settings as { kind?: unknown } | null)?.kind)?.label ?? 'AI';
+  return `${key.owner?.name ?? 'Someone'}’s ${label}`;
 }

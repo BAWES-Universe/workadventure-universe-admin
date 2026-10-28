@@ -16,6 +16,7 @@ import { requireServiceToken } from '@/lib/service-tokens';
 jest.mock('@/lib/db', () => ({
   prisma: {
     bot: { findUnique: jest.fn(), updateMany: jest.fn() },
+    user: { findUnique: jest.fn(async () => null) },
     botsAiProvider: { findUnique: jest.fn(), findFirst: jest.fn() },
     aiKeyLend: { findUnique: jest.fn(async () => null) },
     botsAiUsage: { create: jest.fn(async () => ({})) },
@@ -128,12 +129,12 @@ describe('GET /api/bots/:id/ai-credentials', () => {
     expect((await ask()).status).toBe(503);
   });
 
-  it('serves a personal key to the bot it may run: its maker’s, lent here', async () => {
+  it('serves a personal key to the bot it may run: lent here, its owner manages the bot (#709)', async () => {
     bot.findUnique.mockResolvedValue(botOn('key-1'));
     provider.findUnique.mockResolvedValue(ownKey);
     verdict.mockResolvedValue({ ok: true });
     const body = await (await ask()).json();
-    expect(verdict).toHaveBeenCalledWith({ keyId: 'key-1', keyOwnerId: 'maker', makerId: 'maker', roomId: 'room-1' });
+    expect(verdict).toHaveBeenCalledWith({ keyId: 'key-1', keyOwnerId: 'maker', bot: { id: 'b1', createdById: 'maker', roomId: 'room-1' } });
     expect(body).toMatchObject({ providerId: 'key-1', source: 'own-key', keyOwnerId: 'maker', keyKind: 'lmstudio', keyGroup: 'own-computer', keyAddressTyped: true, endpoint: 'https://lm.example.com' });
     expect(bot.updateMany).not.toHaveBeenCalled();
   });
@@ -177,8 +178,8 @@ describe('GET /api/bots/:id/ai-credentials', () => {
 
   it.each([
     ['not-lent', /no longer lent to this universe/],
-    ['no-access', /maker can no longer manage bots here/],
-    ['not-maker', /isn’t its maker’s/],
+    ['no-access', /key’s owner can no longer manage it here/],
+    ['no-owner', /isn’t anyone’s/],
   ])('when the key may no longer run the bot (%s): moves it to Universe AI, tells the universe owner once, serves Universe AI', async (reason, text) => {
     bot.findUnique.mockResolvedValue(botOn('key-1'));
     provider.findUnique.mockResolvedValue(ownKey);
@@ -194,6 +195,17 @@ describe('GET /api/bots/:id/ai-credentials', () => {
     expect(body).toMatchObject({ providerId: 'deepseek-flash', source: 'universe-ai', movedFromKey: 'key-1' });
     // The key itself never goes out
     expect(JSON.stringify(body)).not.toContain('lm.example.com');
+  });
+
+  it('names the key’s owner when they can no longer manage the bot it ran on (#709)', async () => {
+    bot.findUnique.mockResolvedValue(botOn('key-1', { createdById: 'sara' }));
+    provider.findUnique.mockResolvedValue({ ...ownKey, ownerId: 'khalid' });
+    provider.findFirst.mockResolvedValue(deepseek);
+    (prisma.user.findUnique as jest.Mock).mockResolvedValueOnce({ name: 'Khalid' });
+    verdict.mockResolvedValue({ ok: false, reason: 'no-access' });
+    bot.updateMany.mockResolvedValue({ count: 1 });
+    await ask();
+    expect((addNotice as jest.Mock).mock.calls[0][0].body).toBe('Khalid can no longer manage Sam, so it can’t run on Khalid’s key. It now replies on Universe AI.');
   });
 
   it('tells nobody when another request already moved the bot, and still serves Universe AI', async () => {
