@@ -29,7 +29,7 @@ game (open, versions, code, share, restore, copy, delete).
   in MB, recommended 50; 0 lets none in). It keeps one upload from filling the bot server's or Orbit's memory; media a
   version keeps from the one before doesn't count, since it is copied inside the bucket. A make or change that adds files
   may leave at most "Files in one artifact" (`artifacts.mediaFiles`, recommended 50, Orbit #696) on the version; one
-  already over a lowered limit can still be edited or drop files. A change keeps the media it had unless `dropMedia` names them; restore and copy
+  already over a lowered limit can still be edited, replace a file or drop some. A change keeps the media it had unless `dropMedia` names them; restore and copy
   bring the media of that version; delete and the guest clean-up remove them. The bot hears each version's
   `media: [{ name, contentType, sizeBytes }]`, never where they are stored.
 

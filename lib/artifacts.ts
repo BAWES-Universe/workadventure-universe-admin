@@ -152,8 +152,9 @@ export function mergeMedia(
   const keep = kept.filter((file) => !names.has(file.name) && !drop.includes(file.name));
   if (add.reduce((sum, file) => sum + file.body.byteLength, 0) > maxMediaBytes) throw tooMuchMedia(maxMediaBytes);
   const files = keep.length + add.length;
-  // only a save that adds files is held to it: one already over a lowered limit can still be edited or drop files
-  if (maxMediaFiles !== undefined && add.length > 0 && files > maxMediaFiles) {
+  // only a save that leaves more files than before is held to it: one already over a lowered limit can still be
+  // edited, replace a file or drop some
+  if (maxMediaFiles !== undefined && files > kept.length && files > maxMediaFiles) {
     throw new ArtifactError(
       'too_many_media_files',
       422,
