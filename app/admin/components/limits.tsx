@@ -12,9 +12,14 @@ import {
   ARTIFACT_LIMITS_RECOMMENDED,
   FAIR_USAGE_RECOMMENDED,
   FAIR_USAGE_WINDOW_HOURS,
+  FILE_LIMITS_RECOMMENDED,
+  LIMIT_RANGES,
   REPLY_LIMITS_RECOMMENDED,
+  replyLimitsProblem,
   type ArtifactLimits,
   type FairUsage,
+  type FileLimits,
+  type Range,
   type ReplyLimits,
   type ServerLimits,
 } from '@/lib/bot-limit-values';
@@ -39,6 +44,10 @@ export interface Limit {
   fixedSteps?: boolean;
   /** A model that stops below this value (#673): where it stops, the line that says so, and the words on each choice above it. */
   cap?: ModelCap;
+  /** The values it can be set to, said on its sheet; Other outside them is turned down there. */
+  range?: Range;
+  /** Another row it can't go above: a choice past it is turned down with this line, never cut to fit. */
+  atMost?: { value: number; line: string };
 }
 
 export interface ModelCap {
@@ -102,8 +111,14 @@ export function LimitChoices({ limit, onDone, onCancel }: { limit: Limit; onDone
   const [other, setOther] = useState(known ? '' : String(limit.value));
   const [saving, setSaving] = useState(false);
   const value = picked === 'other' ? Number(other.replace(/[^0-9.]/g, '')) : picked;
+  const range = limit.range;
+  // A row that can't go above another says the lower of the two as its most
+  const most = range ? Math.min(range.max, limit.atMost?.value ?? range.max) : 0;
+  const rangeLine = range ? `Between ${range.min.toLocaleString('en')} and ${most.toLocaleString('en')} ${limit.unit}.` : null;
+  const outOfRange = picked === 'other' && other.trim() !== '' && !!range && (value < range.min || value > range.max || (!!range.whole && !Number.isInteger(value)));
+  const aboveOther = !!limit.atMost && value > limit.atMost.value;
   // "Never" (0) is a choice of its own; an empty or 0 "Other" is not
-  const ready = picked === 'other' ? value > 0 : true;
+  const ready = (picked === 'other' ? value > 0 : true) && !outOfRange && !aboveOther;
   return (
     <div className="grid gap-4">
       {limit.cap?.line && (
@@ -133,14 +148,34 @@ export function LimitChoices({ limit, onDone, onCancel }: { limit: Limit; onDone
           <>
             <PickCard role="radio" picked={picked === 'other'} onClick={() => setPicked('other')} indicator={<Radio checked={picked === 'other'} />} title="Other" />
             {picked === 'other' && (
-              <span className="flex items-center gap-2 px-3.5">
-                <Input inputMode="decimal" value={other} onChange={(event) => setOther(event.target.value)} className="h-11 w-36" aria-label={`${limit.label}, in ${limit.unit}`} />
-                <span className="text-sm text-muted-foreground">{limit.unit}</span>
+              <span className="grid gap-1.5 px-3.5">
+                <span className="flex items-center gap-2">
+                  <Input
+                    inputMode="decimal"
+                    value={other}
+                    onChange={(event) => setOther(event.target.value)}
+                    className="h-11 w-36"
+                    aria-label={`${limit.label}, in ${limit.unit}`}
+                    aria-invalid={outOfRange || undefined}
+                    aria-describedby={rangeLine ? `limit-${limit.id}-range` : undefined}
+                  />
+                  <span className="text-sm text-muted-foreground">{limit.unit}</span>
+                </span>
+                {rangeLine && (
+                  <span id={`limit-${limit.id}-range`} role={outOfRange ? 'alert' : undefined} className={outOfRange ? 'text-sm text-destructive' : 'text-sm text-muted-foreground'} data-testid={`limit-${limit.id}-range`}>
+                    {rangeLine}
+                  </span>
+                )}
               </span>
             )}
           </>
         )}
       </div>
+      {aboveOther && (
+        <p role="alert" className="text-sm text-destructive" data-testid={`limit-${limit.id}-above`}>
+          {limit.atMost!.line}
+        </p>
+      )}
       {limit.note && <p className="text-sm text-muted-foreground">{limit.note}</p>}
       <div className="flex justify-end gap-2">
         <Button variant="outline" className="h-11 px-5" onClick={onCancel} disabled={saving}>
@@ -198,10 +233,15 @@ export function LimitGroup({ title, note, limits, onChange }: { title: string; n
 const TOKENS = 'tokens';
 const every = `Every ${FAIR_USAGE_WINDOW_HOURS} hours.`;
 
+/** Each row with the values it can be set to, said on its sheet. */
+const withRanges = (rows: Limit[], ranges: Record<string, Range>): Limit[] => rows.map((row) => (ranges[row.id] ? { ...row, range: ranges[row.id] } : row));
+
 /** The reply limits, with the recommended values. Universe AI and every key use the same rows. */
 export function replyLimits(values: ReplyLimits): Limit[] {
   const recommended = REPLY_LIMITS_RECOMMENDED;
-  return [
+  // The line the server answers with, so the sheet and a refused save say the same thing
+  const aboveRead = replyLimitsProblem({ ...values, part: values.read + 1 }) as string;
+  return withRanges([
     {
       id: 'reply',
       label: 'Longest reply',
@@ -231,6 +271,20 @@ export function replyLimits(values: ReplyLimits): Limit[] {
         { value: 30, label: '30 steps', meaning: 'Long research and building in parts.' },
         { value: 50, label: '50 steps', meaning: 'Very long jobs. Replies take longer.' },
       ],
+    },
+    {
+      id: 'room',
+      label: 'Room to work in one reply',
+      hint: 'What a bot keeps of its searches, reads and makes while it answers. Past this, the oldest shrink to one line.',
+      unit: 'characters',
+      value: values.room,
+      recommended: recommended.room,
+      options: [
+        { value: 40000, label: '40,000 characters', meaning: 'Small models. Older results shrink sooner.' },
+        { value: 80000, label: '80,000 characters', meaning: 'Research and building in one reply.' },
+        { value: 200000, label: '200,000 characters', meaning: 'Very long jobs on large models. Every step reads more.' },
+      ],
+      note: 'If a model still runs out of room, the older results shrink to their line and that step runs once more.',
     },
     {
       id: 'continue',
@@ -274,6 +328,47 @@ export function replyLimits(values: ReplyLimits): Limit[] {
       ],
     },
     {
+      id: 'recentFiles',
+      label: 'Newest files it sees',
+      hint: 'This person’s newest files a bot sees before each reply, so it can reuse them without searching.',
+      unit: 'files',
+      value: values.recentFiles,
+      recommended: recommended.recentFiles,
+      options: [
+        { value: 0, label: 'None', meaning: 'It searches for every file it needs.' },
+        { value: 5, label: 'Newest 5', meaning: 'Covers “that song” and “the doc I sent”.' },
+        { value: 10, label: 'Newest 10', meaning: 'Busy chats with many files.' },
+        { value: 20, label: 'Newest 20', meaning: 'Every reply reads a little more.' },
+      ],
+    },
+    {
+      id: 'results',
+      label: 'Files found in one search',
+      hint: 'How many files and artifacts a bot gets back each time it searches for one.',
+      unit: 'files',
+      value: values.results,
+      recommended: recommended.results,
+      options: [
+        { value: 5, label: '5 files', meaning: 'Small models. It asks for more when it needs to.' },
+        { value: 10, label: '10 files', meaning: 'Enough to pick the right one most times.' },
+        { value: 20, label: '20 files', meaning: 'Large libraries. Each search reads more.' },
+      ],
+    },
+    {
+      id: 'part',
+      label: 'Reads from an earlier file',
+      hint: 'How much of a file from an earlier message a bot opens at once. It reads on part by part.',
+      unit: 'characters',
+      value: values.part,
+      recommended: recommended.part,
+      options: [
+        { value: 4000, label: '4,000 characters', meaning: 'About a page. Small models.' },
+        { value: 8000, label: '8,000 characters', meaning: 'About 3 pages.' },
+        { value: 20000, label: '20,000 characters', meaning: 'A chapter at a time.' },
+      ],
+      atMost: { value: values.read, line: aboveRead },
+    },
+    {
       id: 'wait',
       label: 'Wait for the AI',
       hint: 'How long a bot waits when its AI goes quiet before it gives up.',
@@ -286,14 +381,14 @@ export function replyLimits(values: ReplyLimits): Limit[] {
         { value: 120, label: '2 minutes', meaning: 'Slow or own-computer models.' },
       ],
     },
-  ];
+  ], LIMIT_RANGES.reply);
 }
 
 /** The artifact limits: for all bots, set by a super admin. */
 export function artifactLimits(values: ArtifactLimits): Limit[] {
   const recommended = ARTIFACT_LIMITS_RECOMMENDED;
   const keepsUntil = 'Then changes stop until a new artifact is made.';
-  return [
+  return withRanges([
     {
       id: 'size',
       label: 'Size of one version',
@@ -334,13 +429,74 @@ export function artifactLimits(values: ArtifactLimits): Limit[] {
         { value: 60, label: '60 seconds', meaning: 'Files up to 10 MB.' },
       ],
     },
-  ];
+    {
+      id: 'media',
+      label: 'Media added in one save',
+      hint: 'The most songs, images and videos a bot can add to a page in one save. Files already on the page don’t count. If a bot goes over, nothing is saved and it is told the file doesn’t fit.',
+      unit: 'MB',
+      value: values.media,
+      recommended: recommended.media,
+      options: [
+        { value: 0, label: 'None', meaning: 'Pages can’t play songs or show images from the chat.' },
+        { value: 10, label: '10 MB', meaning: 'A few images, or one short song.' },
+        { value: 50, label: '50 MB', meaning: 'A few songs, or a short video.' },
+        { value: 200, label: '200 MB', meaning: 'Longer videos.' },
+      ],
+    },
+  ], LIMIT_RANGES.artifacts);
+}
+
+/** What bots keep of the files in their chats (#1508): for all bots, set by a super admin. */
+export function fileLimits(values: FileLimits): Limit[] {
+  const recommended = FILE_LIMITS_RECOMMENDED;
+  const notFound = 'Then the bot can’t find it, though it stays in the chat.';
+  return withRanges([
+    {
+      id: 'text',
+      label: 'Text kept from a file',
+      hint: 'How much of a document bots keep, to find and read again later. The prompt a bot made a file with is kept the same way.',
+      unit: 'characters',
+      value: values.text,
+      recommended: recommended.text,
+      options: [
+        { value: 500000, label: '500,000 characters', meaning: 'About 150 pages.' },
+        { value: 2000000, label: '2,000,000 characters', meaning: 'About 600 pages, a long book.' },
+        { value: 10000000, label: '10,000,000 characters', meaning: 'Very large files. Uses more storage.' },
+      ],
+    },
+    {
+      id: 'findable',
+      label: 'Files bots can find again',
+      hint: 'How long a file from a chat stays in the bot’s list. Asking a bot to forget you removes yours at once.',
+      unit: 'days',
+      value: values.findable,
+      recommended: recommended.findable,
+      options: [
+        { value: 30, label: '30 days', meaning: notFound },
+        { value: 365, label: '1 year', meaning: notFound },
+        { value: 0, label: 'Always', meaning: 'Until the person asks the bot to forget them.' },
+      ],
+    },
+    {
+      id: 'guestDays',
+      label: 'Guests’ files',
+      hint: 'How long the files of someone who isn’t signed in stay, only in the chat they came in.',
+      unit: 'days',
+      value: values.guestDays,
+      recommended: recommended.guestDays,
+      options: [
+        { value: 1, label: '1 day', meaning: 'The same as a guest’s artifacts.' },
+        { value: 7, label: '7 days', meaning: 'Guests who come back to the same bubble.' },
+        { value: 30, label: '30 days', meaning: 'Uses more storage.' },
+      ],
+    },
+  ], LIMIT_RANGES.files);
 }
 
 /** Universe AI fair usage (#1159): how many replies one person gets, set here instead of in the server's settings. */
 export function fairUsageLimits(values: FairUsage): Limit[] {
   const recommended = FAIR_USAGE_RECOMMENDED;
-  return [
+  return withRanges([
     {
       id: 'signedIn',
       label: 'Replies for a signed-in person',
@@ -378,7 +534,7 @@ export function fairUsageLimits(values: FairUsage): Limit[] {
         { value: 500, label: '500 replies', meaning: every },
       ],
     },
-  ];
+  ], LIMIT_RANGES.fairUsage);
 }
 
 /** The id without its maker's prefix: "openai/gpt-4o-mini" is "gpt-4o-mini". */
@@ -458,8 +614,8 @@ export function useSaveKeyLimit() {
 }
 
 /**
- * The Limits section of the Universe AI page (#666): Universe AI's reply limits, the artifact limits, the "Say when
- * nothing was saved" switch and fair usage. Each value is saved as soon as it is picked.
+ * The Limits section of the Universe AI page (#666): Universe AI's reply limits, the artifact limits, files in chats,
+ * the "Say when nothing was saved" switch and fair usage. Each value is saved as soon as it is picked.
  */
 export function UniverseAiLimits() {
   const { addToast } = useToast();
@@ -524,6 +680,7 @@ export function UniverseAiLimits() {
               }}
             />
           </Settings>
+          <LimitGroup title="Files in chats, for all bots" limits={fileLimits(limits.files)} onChange={(id, value) => save({ files: { [id]: value } })} />
           <LimitGroup title="Fair usage" limits={fairUsageLimits(limits.fairUsage)} onChange={(id, value) => save({ fairUsage: { [id]: value } })} />
         </>
       )}

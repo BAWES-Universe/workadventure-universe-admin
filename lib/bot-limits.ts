@@ -4,9 +4,11 @@ import { prisma } from '@/lib/db';
 import {
   FAIR_USAGE_WINDOW_HOURS,
   artifactBytes,
+  artifactMediaBytes,
   limitsForBot,
   readReplyLimits,
   readServerLimits,
+  replyLimitsProblem,
   type ReplyLimits,
   type ServerLimits,
 } from '@/lib/bot-limit-values';
@@ -35,18 +37,33 @@ export async function getServerLimits(): Promise<ServerLimits> {
 
 type ServerChange = Partial<{ [K in keyof ServerLimits]: ServerLimits[K] extends object ? Partial<ServerLimits[K]> : ServerLimits[K] }>;
 
-/** Saves a super admin's change on top of what is saved (only the values it names change) and returns all of them. */
+/** Limits that can't be saved together, with the line that says why (shown as it is). */
+export class LimitsRefused extends Error {}
+
+/**
+ * Saves a super admin's change on top of what is saved (only the values it names change) and returns all of them. A
+ * change that leaves Universe AI's limits at odds with each other is turned down with LimitsRefused.
+ */
 export async function saveServerLimits(change: ServerChange, userId: string): Promise<ServerLimits> {
   return prisma.$transaction(async (tx) => {
     const row = await tx.appSetting.findUnique({ where: { key: SETTING_KEY } });
     const now = readServerLimits(row?.value);
-    const next: ServerLimits = {
-      universeAi: { ...now.universeAi, ...change.universeAi },
+    // Universe AI's: only what a super admin changed is kept, as on a key, so one never set follows the recommended
+    // value (an earlier file's reads keep following a page's) and is never checked as if it had been set
+    const saved = row?.value && typeof row.value === 'object' && !Array.isArray(row.value) ? (row.value as Record<string, unknown>) : {};
+    const savedAi = saved.universeAi && typeof saved.universeAi === 'object' && !Array.isArray(saved.universeAi) ? (saved.universeAi as Record<string, unknown>) : {};
+    const universeAi = { ...savedAi, ...change.universeAi };
+    const kept = {
+      universeAi,
       artifacts: { ...now.artifacts, ...change.artifacts },
       guard: change.guard ?? now.guard,
       fairUsage: { ...now.fairUsage, ...change.fairUsage },
+      files: { ...now.files, ...change.files },
     };
-    const value = next as unknown as Prisma.InputJsonValue;
+    const next = readServerLimits(kept);
+    const problem = replyLimitsProblem(next.universeAi, change.universeAi);
+    if (problem) throw new LimitsRefused(problem);
+    const value = kept as unknown as Prisma.InputJsonValue;
     await tx.appSetting.upsert({
       where: { key: SETTING_KEY },
       create: { key: SETTING_KEY, value, updatedById: userId },
@@ -83,8 +100,20 @@ export interface ServedLimits {
   /** 0 keeps every version. */
   artifactVersions: number;
   artifactSaveSeconds: number;
+  /** Songs, images and videos one version may carry (#1510); 0 lets none in. */
+  artifactMediaBytes: number;
   /** "Say when nothing was saved". */
   guard: boolean;
+  /** Files in bot chats (#1508): this person's newest files named before each reply (0 = none). */
+  recentFiles: number;
+  /** Files and artifacts one search gives back. */
+  findResults: number;
+  /** Characters one opening of a file from an earlier message gives back. */
+  partChars: number;
+  /** Characters of searches, reads and makes one reply keeps while it works; past this the oldest shrink to a line. */
+  roomChars: number;
+  /** Characters of a document's text kept to find and read again (Orbit clips to it; the bot server reads this much). */
+  fileTextChars: number;
 }
 
 export function servedLimits(reply: ReplyLimits, server: ServerLimits, bot: { maxReplyTokens?: number | null; maxSteps?: number | null }): ServedLimits {
@@ -99,7 +128,13 @@ export function servedLimits(reply: ReplyLimits, server: ServerLimits, bot: { ma
     artifactBytes: artifactBytes(server.artifacts),
     artifactVersions: server.artifacts.versions,
     artifactSaveSeconds: server.artifacts.save,
+    artifactMediaBytes: artifactMediaBytes(server.artifacts),
     guard: server.guard,
+    recentFiles: own.recentFiles,
+    findResults: own.results,
+    partChars: Math.min(own.part, own.read),
+    roomChars: own.room,
+    fileTextChars: server.files.text,
   };
 }
 

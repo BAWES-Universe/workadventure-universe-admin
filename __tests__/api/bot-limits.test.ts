@@ -47,11 +47,18 @@ describe('the values', () => {
   it('reads nothing saved as the recommended values', () => {
     expect(readServerLimits(null)).toEqual(SERVER_LIMITS_RECOMMENDED);
     expect(SERVER_LIMITS_RECOMMENDED).toEqual({
-      universeAi: { reply: 32000, steps: 30, continue: 2, memory: 20, read: 50000, wait: 60 },
-      artifacts: { size: 2, versions: 0, save: 30 },
+      universeAi: { reply: 32000, steps: 30, continue: 2, memory: 20, read: 50000, wait: 60, recentFiles: 5, results: 10, part: 8000, room: 80000 },
+      artifacts: { size: 2, versions: 0, save: 30, media: 50 },
       guard: true,
       fairUsage: { signedIn: 30, guest: 10, guestPool: 200 },
+      files: { text: 2_000_000, findable: 0, guestDays: 1 },
     });
+  });
+
+  it('starts "Reads from an earlier file" at "Reads from a page or file" when that one was saved lower (#1508)', () => {
+    expect(readServerLimits({ universeAi: { read: 4000 } }).universeAi).toMatchObject({ read: 4000, part: 4000 });
+    // One that was saved is kept as saved, so a bad pair is seen and turned down, never cut
+    expect(readServerLimits({ universeAi: { read: 4000, part: 6000 } }).universeAi).toMatchObject({ read: 4000, part: 6000 });
   });
 
   it('keeps a saved value only when it can be saved, the recommended one otherwise', () => {
@@ -70,6 +77,9 @@ describe('the values', () => {
     expect(checkServerLimits({ fairUsage: { toString: 1 } })).toMatchObject({ ok: false, error: 'Unknown limit: fairUsage.toString' });
     expect(checkServerLimits({ guard: 'yes' })).toMatchObject({ ok: false });
     expect(checkServerLimits({ universeAi: { continue: 0 }, artifacts: { versions: 0, size: 0.5 } })).toEqual({ ok: true, value: { universeAi: { continue: 0 }, artifacts: { versions: 0, size: 0.5 } } });
+    // Media added in one save (#1510): 0 lets none in, up to 1,000 MB
+    expect(checkServerLimits({ artifacts: { media: 0 } })).toEqual({ ok: true, value: { artifacts: { media: 0 } } });
+    expect(checkServerLimits({ artifacts: { media: 1001 } })).toMatchObject({ ok: false, error: 'artifacts.media must be from 0 to 1,000' });
   });
 
   it('lets a bot lower its key’s longest reply and steps, never raise them', () => {
@@ -123,6 +133,39 @@ describe('/api/admin/bot-limits', () => {
     expect(response.status).toBe(400);
     expect(settings.upsert).not.toHaveBeenCalled();
   });
+
+  it('saves what bots keep of the files in their chats (#1508)', async () => {
+    const response = await PATCH(request('/api/admin/bot-limits', 'PATCH', { files: { guestDays: 7, findable: 365 } }));
+    expect(response.status).toBe(200);
+    expect((await response.json()).limits.files).toEqual({ text: 2_000_000, findable: 365, guestDays: 7 });
+    expect((await PATCH(request('/api/admin/bot-limits', 'PATCH', { files: { guestDays: 0 } }))).status).toBe(400);
+  });
+
+  it('turns down "Reads from an earlier file" above "Reads from a page or file", saying why, and saves nothing', async () => {
+    const above = await PATCH(request('/api/admin/bot-limits', 'PATCH', { universeAi: { part: 60000 } }));
+    expect(above.status).toBe(400);
+    expect((await above.json()).error).toBe("Reads from an earlier file can't be more than Reads from a page or file (50,000 characters).");
+    // Once an earlier file's reads were set, "Reads from a page or file" can't go below them
+    settings.findUnique.mockResolvedValue({ key: 'bot-limits', value: { universeAi: { part: 8000 } } });
+    const below = await PATCH(request('/api/admin/bot-limits', 'PATCH', { universeAi: { read: 5000 } }));
+    expect(below.status).toBe(400);
+    expect((await below.json()).error).toBe("Reads from a page or file can't be less than Reads from an earlier file (8,000 characters). Lower that one first.");
+    expect(settings.upsert).not.toHaveBeenCalled();
+    // Both together, in the right order, are fine
+    expect((await PATCH(request('/api/admin/bot-limits', 'PATCH', { universeAi: { read: 5000, part: 4000 } }))).status).toBe(200);
+  });
+
+  it('lets an earlier file\'s reads never set follow a lower "Reads from a page or file", and keeps them unset', async () => {
+    settings.findUnique.mockResolvedValue({ key: 'bot-limits', value: { universeAi: { reply: 16000 } } });
+    const lower = await PATCH(request('/api/admin/bot-limits', 'PATCH', { universeAi: { read: 5000 } }));
+    expect(lower.status).toBe(200);
+    expect((await lower.json()).limits.universeAi).toMatchObject({ read: 5000, part: 5000, reply: 16000 });
+    expect(settings.upsert.mock.calls[0][0].update.value.universeAi).toEqual({ reply: 16000, read: 5000 });
+    // An unrelated change keeps them unset too
+    settings.upsert.mockClear();
+    await PATCH(request('/api/admin/bot-limits', 'PATCH', { guard: false }));
+    expect(settings.upsert.mock.calls[0][0].update.value.universeAi).toEqual({ reply: 16000 });
+  });
 });
 
 describe('PATCH /api/me/ai-keys/:id { limits }', () => {
@@ -145,6 +188,24 @@ describe('PATCH /api/me/ai-keys/:id { limits }', () => {
   it('says "not found" for a key that isn’t yours', async () => {
     provider.findFirst.mockResolvedValue(null);
     expect((await save('key-2', { limits: { steps: 10 } })).status).toBe(404);
+    expect(provider.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('turns down "Reads from an earlier file" above the key\'s "Reads from a page or file", and saves nothing', async () => {
+    provider.findFirst.mockResolvedValue({ replyLimits: { read: 10000 } });
+    const response = await save('key-1', { limits: { part: 20000 } });
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toBe("Reads from an earlier file can't be more than Reads from a page or file (10,000 characters).");
+    expect(provider.updateMany).not.toHaveBeenCalled();
+    // Lowering "Reads from a page or file" carries an earlier file's reads along while they were never set
+    provider.findFirst.mockResolvedValue({ replyLimits: {} });
+    expect((await (await save('key-1', { limits: { read: 4000 } })).json()).limits).toMatchObject({ read: 4000, part: 4000 });
+  });
+
+  it('saves nothing else either when the limits are turned down with a new name or if-down', async () => {
+    provider.findFirst.mockResolvedValue({ replyLimits: { read: 10000 } });
+    const response = await save('key-1', { name: 'New name', ifDown: 'stop', limits: { part: 20000 } });
+    expect(response.status).toBe(400);
     expect(provider.updateMany).not.toHaveBeenCalled();
   });
 

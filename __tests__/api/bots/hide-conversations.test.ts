@@ -35,6 +35,7 @@ jest.mock('@/lib/db', () => ({
     botsMemory: { findMany: jest.fn(), findFirst: jest.fn(), count: jest.fn(), aggregate: jest.fn(), upsert: jest.fn(), delete: jest.fn(), deleteMany: jest.fn() },
     botsAiUsage: { count: jest.fn() },
     botMemoryForget: { findMany: jest.fn(), create: jest.fn(), deleteMany: jest.fn(), updateMany: jest.fn() },
+    botFile: { deleteMany: jest.fn() },
   },
 }));
 
@@ -379,6 +380,7 @@ describe('Forget', () => {
     expect(response.status).toBe(409);
     expect(db.botsMemory.deleteMany).not.toHaveBeenCalled();
     expect(db.botMemoryForget.create).not.toHaveBeenCalled();
+    expect(db.botFile.deleteMany).not.toHaveBeenCalled();
   });
 
   it('forgets everyone: deletes the saved rows and leaves a mark for the bot server', async () => {
@@ -389,15 +391,21 @@ describe('Forget', () => {
     expect(await response.json()).toEqual({ forgotten: 3, everyone: true });
     expect(db.botMemoryForget.create).toHaveBeenCalledWith({ data: { botId: 'bot-1', userUuid: null } });
     expect(db.botsMemory.deleteMany).toHaveBeenCalledWith({ where: { botId: 'bot-1' } });
+    // The files it kept for them go too (game #1508); artifacts are not touched
+    expect(db.botFile.deleteMany).toHaveBeenCalledWith({ where: { botId: 'bot-1' } });
   });
 
   it('forgets one person by the id the list gave, never by a player id from the caller', async () => {
     botIs(true);
-    db.botsMemory.findFirst.mockResolvedValue({ id: 5, userUuid: 'bob@example.com' });
+    db.botsMemory.findFirst.mockResolvedValue({ id: 5, userUuid: 'bob@example.com', userId: 'user-bob' });
     db.botsMemory.deleteMany.mockResolvedValue({ count: 1 });
     const response = await call(forget, 'POST', { body: { memoryId: 5 } });
     expect(await response.json()).toEqual({ forgotten: 1, everyone: false });
-    expect(db.botsMemory.findFirst).toHaveBeenCalledWith({ where: { id: 5, botId: 'bot-1' }, select: { id: true, userUuid: true } });
+    expect(db.botsMemory.findFirst).toHaveBeenCalledWith({ where: { id: 5, botId: 'bot-1' }, select: { id: true, userUuid: true, userId: true } });
+    // Their files with this bot, by the id the bot server named them by and by their account (game #1508)
+    expect(db.botFile.deleteMany).toHaveBeenCalledWith({
+      where: { botId: 'bot-1', OR: [{ personRef: 'bob@example.com' }, { ownerId: 'user-bob' }] },
+    });
     expect(db.botMemoryForget.create).toHaveBeenCalledWith({ data: { botId: 'bot-1', userUuid: 'bob@example.com' } });
     expect(db.botsMemory.deleteMany).toHaveBeenCalledWith({ where: { id: 5 } });
     expect((await call(forget, 'POST', { body: { userUuid: 'x' } })).status).toBe(400);
