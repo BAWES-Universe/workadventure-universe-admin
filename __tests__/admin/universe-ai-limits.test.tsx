@@ -45,7 +45,7 @@ describe('Universe AI limits', () => {
     answer();
     render(<UniverseAiLimits />);
     expect(await screen.findByText('Replies on Universe AI')).toBeTruthy();
-    for (const label of ['Longest reply', 'Steps in one reply', 'Keep going when cut off', 'Messages it remembers', 'Reads from a page or file', 'Wait for the AI', 'Size of one version', 'Versions kept', 'Time to save', 'Replies for a signed-in person', 'Replies for a guest', 'Replies for all guests on one bot']) {
+    for (const label of ['Longest reply', 'Steps in one reply', 'Keep going when cut off', 'Messages it remembers', 'Reads from a page or file', 'Wait for the AI', 'Size of one version', 'Versions kept', 'Time to save', 'Media added in one save', 'Replies for a signed-in person', 'Replies for a guest', 'Replies for all guests on one bot']) {
       expect(screen.getByText(label)).toBeTruthy();
     }
     expect(screen.getAllByText('32,000 tokens').length).toBeGreaterThan(0);
@@ -75,6 +75,15 @@ describe('Universe AI limits', () => {
     fireEvent.change(field, { target: { value: '7' } });
     fireEvent.click(screen.getByRole('button', { name: /Save/ }));
     await waitFor(() => expect(JSON.parse(String(fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH')?.[1]?.body))).toEqual({ artifacts: { size: 7 } }));
+  });
+
+  it('turns media in artifacts off with None (#1510)', async () => {
+    answer();
+    render(<UniverseAiLimits />);
+    fireEvent.click(await screen.findByTestId('limit-media'));
+    fireEvent.click(await screen.findByRole('radio', { name: /None/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(JSON.parse(String(fetchMock.mock.calls.find(([, init]) => init?.method === 'PATCH')?.[1]?.body))).toEqual({ artifacts: { media: 0 } }));
   });
 
   it('saves the switch', async () => {

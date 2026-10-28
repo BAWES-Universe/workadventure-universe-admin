@@ -13,8 +13,8 @@ export const db = {
   bots: [] as Row[],
   artifacts: [] as Row[],
   versions: [] as Row[],
-  /** The bucket: key to text. */
-  files: new Map<string, string>(),
+  /** The bucket: key to text (or bytes, for media). */
+  files: new Map<string, string | Uint8Array>(),
   /** Make the next version insert fail, to see that its file does not stay behind. */
   failNextVersionCreate: false,
   /** app_settings rows (#666): the super admin's limits, saved under "bot-limits". */
@@ -50,7 +50,12 @@ export const fakeFiles: ArtifactFiles = {
   async get(key) {
     const body = db.files.get(key);
     if (body === undefined) throw new Error(`no file ${key}`);
-    return body;
+    return typeof body === 'string' ? body : Buffer.from(body).toString('utf8');
+  },
+  async copy(fromKey, toKey) {
+    const body = db.files.get(fromKey);
+    if (body === undefined) throw new Error(`no file ${fromKey}`);
+    db.files.set(toKey, body);
   },
   async remove(keys) {
     keys.forEach((key) => db.files.delete(key));
@@ -63,6 +68,8 @@ function matches(row: Row, where: Row): boolean {
     if (key === 'OR') return (expected as Row[]).some((cond) => matches(row, cond));
     if (expected !== null && typeof expected === 'object' && !(expected instanceof Date)) {
       if ('lte' in expected) return row[key] !== null && row[key] <= expected.lte;
+      if ('gt' in expected) return row[key] !== null && row[key] > expected.gt;
+      if ('not' in expected) return row[key] !== expected.not;
       if ('in' in expected) return expected.in.includes(row[key]);
     }
     return row[key] === expected;
@@ -78,7 +85,7 @@ function withOwner(artifact: Row, include?: Row) {
 
 function createVersion(data: Row) {
   if (db.versions.some((v) => v.artifactId === data.artifactId && v.number === data.number)) throw new Error('unique violation');
-  const row = { id: nextId(), summary: null, askedById: null, askedByName: null, createdAt: new Date(), ...data };
+  const row = { id: nextId(), summary: null, askedById: null, askedByName: null, media: [], createdAt: new Date(), ...data };
   db.versions.push(row);
   return row;
 }
@@ -109,7 +116,7 @@ const client: Row = {
       if (orderBy?.updatedAt === 'desc') rows = [...rows].sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
       if (take) rows = rows.slice(0, take);
       return rows.map((row) => {
-        if (select) return { id: row.id, versions: db.versions.filter((v) => v.artifactId === row.id).map((v) => ({ fileKey: v.fileKey })) };
+        if (select) return { id: row.id, versions: db.versions.filter((v) => v.artifactId === row.id).map((v) => ({ fileKey: v.fileKey, media: v.media })) };
         return withOwner(row, include);
       });
     },

@@ -48,7 +48,7 @@ describe('the values', () => {
     expect(readServerLimits(null)).toEqual(SERVER_LIMITS_RECOMMENDED);
     expect(SERVER_LIMITS_RECOMMENDED).toEqual({
       universeAi: { reply: 32000, steps: 30, continue: 2, memory: 20, read: 50000, wait: 60 },
-      artifacts: { size: 2, versions: 0, save: 30 },
+      artifacts: { size: 2, versions: 0, save: 30, media: 50 },
       guard: true,
       fairUsage: { signedIn: 30, guest: 10, guestPool: 200 },
     });
@@ -70,6 +70,9 @@ describe('the values', () => {
     expect(checkServerLimits({ fairUsage: { toString: 1 } })).toMatchObject({ ok: false, error: 'Unknown limit: fairUsage.toString' });
     expect(checkServerLimits({ guard: 'yes' })).toMatchObject({ ok: false });
     expect(checkServerLimits({ universeAi: { continue: 0 }, artifacts: { versions: 0, size: 0.5 } })).toEqual({ ok: true, value: { universeAi: { continue: 0 }, artifacts: { versions: 0, size: 0.5 } } });
+    // Media added in one save (#1510): 0 lets none in, up to 1,000 MB
+    expect(checkServerLimits({ artifacts: { media: 0 } })).toEqual({ ok: true, value: { artifacts: { media: 0 } } });
+    expect(checkServerLimits({ artifacts: { media: 1001 } })).toMatchObject({ ok: false, error: 'artifacts.media must be from 0 to 1,000' });
   });
 
   it('lets a bot lower its key’s longest reply and steps, never raise them', () => {

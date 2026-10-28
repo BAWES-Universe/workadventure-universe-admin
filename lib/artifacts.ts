@@ -40,9 +40,121 @@ export function fileTypeOf(kind: ArtifactKind): { extension: string; contentType
   return FILE_TYPES[kind];
 }
 
-/** Where a version's file sits in the bucket. The random part keeps it unguessable without Orbit's say. */
+/**
+ * Where a version's file sits in the bucket: a folder of its own, so the songs and images it carries sit beside it and
+ * the page names them as "song.mp3" (#1510). The random part keeps it unguessable without Orbit's say. Versions saved
+ * before #1510 keep the key they have (`v1-<random>.html`, no folder); they carry no media.
+ */
 export function newFileKey(artifactId: string, number: number, kind: ArtifactKind): string {
-  return `artifacts/${artifactId}/v${number}-${randomBytes(12).toString('hex')}.${FILE_TYPES[kind].extension}`;
+  return `artifacts/${artifactId}/v${number}-${randomBytes(12).toString('hex')}/index.${FILE_TYPES[kind].extension}`;
+}
+
+/** Where a media file of the version whose file is `fileKey` sits: in the same folder. */
+export function mediaKeyFor(fileKey: string, name: string): string {
+  return `${fileKey.slice(0, fileKey.lastIndexOf('/'))}/${name}`;
+}
+
+/**
+ * The media a version can carry (#1510): songs, images and videos, by the type they are served with. Only types a
+ * browser plays or shows and never runs, so a media file opened on its own is never a page. SVG is left out on purpose
+ * (it can hold a script); a bot draws one inside the page instead.
+ */
+export const MEDIA_TYPES: Record<string, string[]> = {
+  'audio/mpeg': ['mp3'],
+  'audio/mp4': ['m4a', 'mp4'],
+  'audio/aac': ['aac'],
+  'audio/ogg': ['ogg', 'oga', 'opus'],
+  'audio/wav': ['wav'],
+  'audio/x-wav': ['wav'],
+  'audio/webm': ['weba', 'webm'],
+  'audio/flac': ['flac'],
+  'image/png': ['png'],
+  'image/jpeg': ['jpg', 'jpeg'],
+  'image/gif': ['gif'],
+  'image/webp': ['webp'],
+  'image/avif': ['avif'],
+  'video/mp4': ['mp4', 'm4v'],
+  'video/webm': ['webm'],
+  'video/ogg': ['ogv', 'ogg'],
+  'video/quicktime': ['mov'],
+};
+
+/** Only pages and mini apps carry media: Orbit draws a document from its text, and an SVG drawing has no page around it. */
+export const MEDIA_KINDS: readonly ArtifactKind[] = ['app', 'page'];
+
+/** A media file a version carries, as the version row keeps it. */
+export interface MediaFile {
+  name: string;
+  contentType: string;
+  sizeBytes: number;
+  key: string;
+}
+
+/** A media file the bot sends with a make or a change. */
+export interface MediaUpload {
+  name: string;
+  contentType: string;
+  body: Uint8Array;
+}
+
+/** A media name is one plain file name the page can use as is: letters, digits, dot, dash and underscore. */
+const MEDIA_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const MAX_MEDIA_NAME_LENGTH = 100;
+
+/** The type a media file is served with, without parameters; checked against its name so a page never gets a surprise. */
+export function checkMediaFile(name: string, contentType: string, kind: ArtifactKind): string {
+  if (!MEDIA_NAME.test(name) || name.length > MAX_MEDIA_NAME_LENGTH || name.includes('..')) {
+    throw new ArtifactError('invalid_media_name', 422, `"${clipText(name, 60)}" cannot be a media name: use letters, digits, ".", "-" and "_", like song.mp3.`);
+  }
+  if (name.toLowerCase().startsWith('index.')) throw new ArtifactError('invalid_media_name', 422, `"${name}" is the page's own name: pick another.`);
+  const type = contentType.split(';')[0].trim().toLowerCase();
+  const extensions = MEDIA_TYPES[type];
+  if (!extensions) throw new ArtifactError('media_type_not_allowed', 422, `"${name}" is ${type || 'of no type'}: an artifact can carry songs, images and videos only.`);
+  const extension = name.slice(name.lastIndexOf('.') + 1).toLowerCase();
+  if (!extensions.includes(extension)) throw new ArtifactError('media_type_mismatch', 422, `"${name}" is ${type}: name it .${extensions[0]}.`);
+  if (!MEDIA_KINDS.includes(kind)) throw new ArtifactError('media_not_allowed', 422, 'Only pages and mini apps can carry songs, images and videos.');
+  return type;
+}
+
+/** "An artifact can carry up to 50 MB of media", or that it can carry none. */
+export function tooMuchMedia(maxMediaBytes: number): ArtifactError {
+  return maxMediaBytes === 0
+    ? new ArtifactError('media_off', 413, 'Artifacts cannot carry songs, images or videos on this server.')
+    : new ArtifactError('media_too_large', 413, `One save can add up to ${sizeLabel(maxMediaBytes)} of songs, images and videos.`);
+}
+
+/**
+ * The media of a new version: what it keeps from the version it is made from (`kept`, already in the bucket), minus the
+ * names the bot dropped, with the new uploads on top (an upload with a kept name takes its place). Every name once, and
+ * the new uploads together inside the media limit: it is what one save brings in, so what the version keeps (copied
+ * inside the bucket, never sent again) doesn't count. Says which name is wrong, so the bot can fix it and send it again.
+ */
+export function mergeMedia(
+  kept: readonly MediaFile[],
+  uploads: readonly MediaUpload[],
+  drop: readonly string[],
+  kind: ArtifactKind,
+  maxMediaBytes: number,
+): { keep: MediaFile[]; add: (MediaUpload & { contentType: string })[] } {
+  const names = new Set<string>();
+  const add = uploads.map((upload) => {
+    if (names.has(upload.name)) throw new ArtifactError('duplicate_media', 422, `"${upload.name}" was sent twice.`);
+    names.add(upload.name);
+    const contentType = checkMediaFile(upload.name, upload.contentType, kind);
+    if (upload.body.byteLength === 0) throw new ArtifactError('empty_media', 422, `"${upload.name}" is empty.`);
+    return { ...upload, contentType };
+  });
+  for (const name of drop) {
+    if (!kept.some((file) => file.name === name)) throw new ArtifactError('media_not_found', 422, `"${clipText(name, 60)}" is not in this artifact.`);
+  }
+  const keep = kept.filter((file) => !names.has(file.name) && !drop.includes(file.name));
+  if (add.reduce((sum, file) => sum + file.body.byteLength, 0) > maxMediaBytes) throw tooMuchMedia(maxMediaBytes);
+  return { keep, add };
+}
+
+/** A version row's media list, as it was saved (an old row has none). */
+export function mediaOf(row: { media?: unknown }): MediaFile[] {
+  return Array.isArray(row.media) ? (row.media as MediaFile[]) : [];
 }
 
 export function byteLength(content: string): number {

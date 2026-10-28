@@ -96,6 +96,9 @@ describe('moveBotsOffKey', () => {
     expect(notice).toHaveBeenCalledTimes(2);
     expect(notice.mock.calls[0][0]).toMatchObject({ userId: 'owner-bawes', kind: 'ai-key-moved', title: 'Sam moved to Universe AI', href: '/admin/universes/bawes' });
     expect(notice.mock.calls[0][0].body).toBe('Mishari revoked their AI key. The bot now replies on Universe AI.');
+    // A notice naming one bot carries its id (it hides when that bot's Runs on changes, #643); one naming several carries none
+    expect(notice.mock.calls[0][0].dedupeKey).toMatch(/^moved:key-1:bawes:b1:/);
+    expect(notice.mock.calls[1][0].dedupeKey).toMatch(/^moved:key-1:sandbox:many:/);
     expect(notice.mock.calls[1][0]).toMatchObject({ userId: 'owner-sandbox', title: '2 bots moved to Universe AI' });
     expect(notice.mock.calls[1][0].body).toBe('Mishari revoked their AI key. The 2 bots now reply on Universe AI.');
   });
@@ -207,6 +210,13 @@ describe('a lend that allows only some models (#575)', () => {
     expect(notice).toHaveBeenCalledTimes(1);
     expect(notice.mock.calls[0][0]).toMatchObject({ userId: 'owner', kind: 'ai-key-moved', title: '2 bots now reply with claude-haiku-5-5', href: '/admin/universes/uni-1' });
     expect(notice.mock.calls[0][0].body).toBe('Mishari changed which models of their AI key bots in Sandbox Universe may use. The 2 bots were on ones they took out, so they now reply with claude-haiku-5-5.');
+    expect(notice.mock.calls[0][0].dedupeKey).toMatch(/^models:key-1:uni-1:many:/);
+  });
+
+  it('names the bot in the notice key when only one bot moved, so the notice can hide when that bot’s Runs on changes (#643)', async () => {
+    db.bot.findMany.mockResolvedValue([{ id: 'b1', name: 'Guide', aiModel: 'claude-opus-5-5', room: sandbox }]);
+    await moveBotsToAllowedModel(key, { universeId: 'uni-1', allowed: ['claude-haiku-5-5'], firstAllowed: 'claude-haiku-5-5', actor: { id: 'maker', name: 'Mishari' } });
+    expect(notice.mock.calls[0][0].dedupeKey).toMatch(/^models:key-1:uni-1:b1:/);
   });
 
   it('judges a bot with no model of its own by the check model the key has now, not the one read before the list', async () => {
