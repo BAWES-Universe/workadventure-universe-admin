@@ -119,3 +119,29 @@ export const keepTextSchema = z
     failed: z.boolean().optional(),
   })
   .strict();
+
+const day = z.string().max(40).nullish();
+
+export const findSchema = z
+  .object({
+    ...botCall,
+    words: z.string().max(500).nullish(),
+    kinds: z.array(z.enum([...FILE_KINDS, 'artifact'] as [string, ...string[]])).max(6).nullish(),
+    source: z.enum(FILE_SOURCES).nullish(),
+    since: day,
+    until: day,
+    page: z.number().int().min(1).max(100_000).nullish(),
+    // The "Files found in one search" setting's range
+    limit: z.number().int().min(1).max(100),
+  })
+  .strict();
+
+export const readSchema = z
+  .object({
+    ...botCall,
+    ref: shortId,
+    at: z.number().int().min(0).max(2147483647).nullish(),
+    // The "Reads from a kept file" setting's range
+    chars: z.number().int().min(1).max(5_000_000),
+  })
+  .strict();
