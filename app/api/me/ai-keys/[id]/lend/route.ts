@@ -4,7 +4,7 @@ import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { meOriginAllowed, meRespond } from '@/lib/me-route';
 import { lendAccess, moveBotsToAllowedModel, parseLendModels } from '@/lib/ai-key-lend';
-import { allowedModels, firstForBots, keyModels, lendModels } from '@/lib/ai-key-model-list';
+import { allowedModels, canCallTools, firstForBots, keyModels, lendModels, modelFactsOf, noToolsWords } from '@/lib/ai-key-model-list';
 
 export const runtime = 'nodejs';
 
@@ -51,13 +51,16 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     if (!(await lendAccess(user.id, universeId))) {
       return respond(request, { error: 'You need Manage bots in that universe to lend a key to it.' }, 403);
     }
-    // Only models the key has now can be allowed; they are kept in the provider's order
+    // Only models the key has now that can call tools can be allowed; they are kept in the provider's order
     let models = parsed.models;
     if (models) {
       const list = await keyModels(key, { fresh: true });
       if (!list.ok) return respond(request, { error: list.message }, 400);
       const missing = models.find((model) => !list.models.includes(model));
       if (missing) return respond(request, { error: `${missing} isn’t on this key’s list. Load its models again and pick from them.` }, 400);
+      // Bots always offer tools, so a model the provider says calls none is never allowed (#706)
+      const noTools = models.find((model) => !canCallTools(modelFactsOf(key, model)));
+      if (noTools) return respond(request, { error: noToolsWords(noTools) }, 400);
       models = allowedModels(list.models, models);
     }
     const where = { providerId_universeId: { providerId: id, universeId } };

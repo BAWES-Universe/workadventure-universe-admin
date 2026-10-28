@@ -77,6 +77,12 @@ describe('GET /api/me/bot-ai', () => {
     expect(db.botsAiProvider.findMany.mock.calls[0][0].where).toEqual({ ownerId: 'mishari', lends: { some: { universeId: 'sandbox' } } });
   });
 
+  it('leaves out of a key’s models the ones its provider says call no tools: bots on them never reply (#706)', async () => {
+    db.botsAiProvider.findMany.mockResolvedValueOnce([{ ...myKey, settings: { kind: 'deepseek', modelFacts: { 'deepseek-v4-pro': { tools: false } } } }]);
+    const body = await (await get('roomId=11111111-1111-1111-1111-111111111111')).json();
+    expect(body.keys[0].models.map((model: { id: string }) => model.id)).toEqual(['deepseek-v4-flash', 'deepseek-v4-flash-vision-exp']);
+  });
+
   it('resolves a play address to the room', async () => {
     (resolveRoomIdFromPlayUri as jest.Mock).mockResolvedValue('room-9');
     await get(`roomId=${encodeURIComponent('http://play.example.com/@/u/w/r')}`);

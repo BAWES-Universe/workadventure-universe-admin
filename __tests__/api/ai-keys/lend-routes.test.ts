@@ -148,6 +148,14 @@ describe('POST /api/me/ai-keys/:id/lend', () => {
       expect(lends.upsert).not.toHaveBeenCalled();
     });
 
+    it('refuses a model the provider says calls no tools, saving nothing (#706)', async () => {
+      key.findFirst.mockResolvedValue({ providerId: 'key-1', model: 'claude-sonnet-5-5', settings: { kind: 'lmstudio', modelFacts: { 'claude-opus-5-5': { tools: false } } } });
+      const response = await post({ universeId: 'uni-1', models: ['claude-haiku-5-5', 'claude-opus-5-5'] });
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toBe('claude-opus-5-5 can’t use tools, which bots need.');
+      expect(lends.upsert).not.toHaveBeenCalled();
+    });
+
     it('says why when the key’s models can’t be loaded, and saves nothing', async () => {
       (keyModels as jest.Mock).mockResolvedValue({ ok: false, message: 'Claude didn’t accept this key.' });
       const response = await post({ universeId: 'uni-1', models: ['claude-haiku-5-5'] });
