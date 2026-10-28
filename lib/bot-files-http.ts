@@ -3,7 +3,7 @@ import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
 import { validateServiceToken } from '@/lib/service-tokens';
 import { CHAT_KINDS } from '@/lib/artifacts';
-import { BotFileError, FILE_KINDS, FILE_LIMITS_RECOMMENDED, FILE_SOURCES, MAX_FILE_NAME_LENGTH } from '@/lib/bot-files';
+import { BotFileError, FILE_KINDS, FILE_SOURCES, MAX_FILE_NAME_LENGTH, TEXT_PIECE_CHARS } from '@/lib/bot-files';
 
 /**
  * The routes of files in bot chats (game #1508) are called only by the bot server (BOT_SERVICE_TOKEN, or the admin token
@@ -15,8 +15,11 @@ function hasAdminToken(request: NextRequest): boolean {
   return !!token && !!expected && token === expected;
 }
 
-/** A file's whole text in JSON: up to four bytes a character, with room for escapes and the rest of the body. */
-const bodyRoom = () => FILE_LIMITS_RECOMMENDED.text * 6 + 64 * 1024;
+/**
+ * One piece of a file's text in JSON (text comes in pieces, so this is the same whatever is kept): up to four bytes a
+ * character, with room for escapes and the rest of the body. About 6 MB.
+ */
+const bodyRoom = () => TEXT_PIECE_CHARS * 6 + 64 * 1024;
 
 async function readBody(request: NextRequest): Promise<unknown> {
   const room = bodyRoom();
@@ -94,7 +97,8 @@ export const addSchema = z
     store: storeSchema,
     line: z.string().max(2000).nullish(),
     madeWith: z.string().max(400).nullish(),
-    madePrompt: z.string().max(FILE_LIMITS_RECOMMENDED.text * 2).nullish(),
+    // Kept up to "Text kept from a file"; one request carries up to a piece of it
+    madePrompt: z.string().max(TEXT_PIECE_CHARS).nullish(),
     lengthSeconds: z.number().int().min(0).max(2147483647).nullish(),
     pages: z.number().int().min(0).max(2147483647).nullish(),
   })
@@ -108,7 +112,10 @@ export const keepTextSchema = z
   .object({
     ...botCall,
     ref: shortId,
-    text: z.string().max(FILE_LIMITS_RECOMMENDED.text * 2).nullish(),
+    // A piece over the size is answered 413 by keepFileText, so the bot server is told what to send
+    text: z.string().max(TEXT_PIECE_CHARS * 2).nullish(),
+    from: z.number().int().min(0).max(2147483647).nullish(),
+    last: z.boolean().nullish(),
     failed: z.boolean().optional(),
   })
   .strict();

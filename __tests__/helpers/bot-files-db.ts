@@ -79,6 +79,7 @@ const client: Row = {
     deleteMany: async ({ where }: Row) => ({ count: removeFiles(where) }),
   },
   botFilePart: {
+    count: async ({ where }: Row) => db.parts.filter((part) => matches(part, where)).length,
     deleteMany: async ({ where }: Row) => {
       const before = db.parts.length;
       db.parts = db.parts.filter((part) => !matches(part, where)) as typeof db.parts;
