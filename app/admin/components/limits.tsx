@@ -429,6 +429,20 @@ export function artifactLimits(values: ArtifactLimits): Limit[] {
         { value: 60, label: '60 seconds', meaning: 'Files up to 10 MB.' },
       ],
     },
+    {
+      id: 'media',
+      label: 'Media added in one save',
+      hint: 'The most songs, images and videos a bot can add to a page in one save. Files already on the page don’t count. If a bot goes over, nothing is saved and it is told the file doesn’t fit.',
+      unit: 'MB',
+      value: values.media,
+      recommended: recommended.media,
+      options: [
+        { value: 0, label: 'None', meaning: 'Pages can’t play songs or show images from the chat.' },
+        { value: 10, label: '10 MB', meaning: 'A few images, or one short song.' },
+        { value: 50, label: '50 MB', meaning: 'A few songs, or a short video.' },
+        { value: 200, label: '200 MB', meaning: 'Longer videos.' },
+      ],
+    },
   ], LIMIT_RANGES.artifacts);
 }
 

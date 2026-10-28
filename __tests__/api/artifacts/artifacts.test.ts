@@ -325,6 +325,13 @@ describe('artifacts', () => {
       expect(ownerElsewhere.status).toBe(200);
     });
 
+    it('lets the owner change what they made in a direct message from the nearby chat', async () => {
+      const made = await makeApp(person('owner'), DM, { title: 'Direct' });
+      const res = await call(change, { botId: 'bot1', person: person('owner'), chat: NEARBY, content: '<p>x</p>' }, { id: made.artifact.id });
+      expect(res.status).toBe(200);
+      expect(db.versions.filter((v) => v.artifactId === made.artifact.id)).toHaveLength(2);
+    });
+
     it('answers 404 to someone who may not even open it', async () => {
       const made = await makeApp();
       const res = await call(change, { botId: 'bot1', person: person('stranger'), chat: { kind: 'nearby', ref: 'other-bubble' }, content: '<p>x</p>' }, { id: made.artifact.id });
@@ -416,6 +423,26 @@ describe('artifacts', () => {
       await makeApp(guest);
       db.artifacts[0].expiresAt = new Date(Date.now() - 1000);
       expect((await call(inChat, { botId: 'bot1', person: guest, chat: NEARBY })).body.artifacts).toEqual([]);
+    });
+
+    it("keeps this chat's live artifacts in the list when a guest's expired ones are newer and not yet pruned", async () => {
+      const live = await makeApp(guest, NEARBY, { title: 'Live' });
+      const liveRow = db.artifacts.find((a) => a.id === live.artifact.id)!;
+      liveRow.updatedAt = new Date(Date.now() - 60000);
+      // The first call prunes; the expired ones below arrive after it, so they are still there for the next call
+      await call(inChat, { botId: 'bot1', person: guest, chat: NEARBY });
+      for (let i = 0; i < 25; i++) db.artifacts.push({ ...liveRow, id: `gone-${i}`, title: `Gone ${i}`, updatedAt: new Date(), expiresAt: new Date(Date.now() - 1000) });
+      const res = await call(inChat, { botId: 'bot1', person: guest, chat: NEARBY });
+      expect(res.body.artifacts.map((a: { title: string }) => a.title)).toEqual(['Live']);
+    });
+
+    it("keeps the person's artifacts from other chats in the list when their newer copies, which are in no chat, would fill it", async () => {
+      const elsewhere = await makeApp(person('owner'), DM, { title: 'Elsewhere' });
+      const row = db.artifacts.find((a) => a.id === elsewhere.artifact.id)!;
+      row.updatedAt = new Date(Date.now() - 60000);
+      for (let i = 0; i < 25; i++) db.artifacts.push({ ...row, id: `copy-${i}`, title: `Copy ${i}`, chatKind: null, chatRef: null, updatedAt: new Date() });
+      const res = await call(inChat, { botId: 'bot1', person: person('owner'), chat: NEARBY });
+      expect(res.body.artifacts.map((a: { title: string }) => a.title)).toEqual(['Elsewhere']);
     });
 
     it('goes through the same bot access check as the other bot calls', async () => {

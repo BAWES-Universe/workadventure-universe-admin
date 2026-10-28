@@ -2,8 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import * as Sentry from '@sentry/nextjs';
 import { z } from 'zod';
 import { validateServiceToken } from '@/lib/service-tokens';
-import { ARTIFACT_KINDS, ArtifactError, CHAT_KINDS, LARGEST_ARTIFACT_BYTES, tooLarge, type ArtifactKind } from '@/lib/artifacts';
-import { artifactBytes } from '@/lib/bot-limit-values';
+import { ARTIFACT_KINDS, ArtifactError, CHAT_KINDS, LARGEST_ARTIFACT_BYTES, tooLarge, tooMuchMedia, type ArtifactKind, type MediaUpload } from '@/lib/artifacts';
+import { artifactBytes, artifactMediaBytes } from '@/lib/bot-limit-values';
 import { getServerLimits } from '@/lib/bot-limits';
 
 /**
@@ -33,12 +33,31 @@ type Params = Promise<Record<string, string>>;
  */
 const BODY_ROOM = 4;
 
-/** The JSON body, read only up to the room above; null when it is not JSON. */
-async function readBody(request: NextRequest): Promise<unknown> {
-  const maxBytes = artifactBytes((await getServerLimits()).artifacts);
-  const room = maxBytes * BODY_ROOM;
-  if (Number(request.headers.get('content-length')) > room) throw tooLarge(maxBytes);
-  if (!request.body) return null;
+/** The room a form's boundaries and part headers take beside the media themselves. */
+const FORM_ROOM = 1024 * 1024;
+
+/** What a route reads: the JSON body, and the media sent with it (#1510). */
+interface Body {
+  json: unknown;
+  media: MediaUpload[];
+}
+
+/**
+ * The body, read only up to the room above; `json` is null when it is not JSON. A make or a change that carries songs,
+ * images or videos comes as multipart/form-data instead: the same JSON in a `request` part, and one `media` part per
+ * file, named as the page uses it (`song.mp3`). Only routes that take media accept the form.
+ */
+async function readBody(request: NextRequest, takesMedia: boolean): Promise<Body> {
+  const limits = (await getServerLimits()).artifacts;
+  const maxBytes = artifactBytes(limits);
+  const maxMediaBytes = artifactMediaBytes(limits);
+  const contentType = request.headers.get('content-type') ?? '';
+  const isForm = takesMedia && /^multipart\/form-data/i.test(contentType);
+  const room = maxBytes * BODY_ROOM + (isForm ? maxMediaBytes + FORM_ROOM : 0);
+  // A form that is too big may be over on its page or on its media: the answer names both limits
+  const over = () => (isForm && maxMediaBytes > 0 ? new ArtifactError('too_large', 413, `${tooLarge(maxBytes).message} ${tooMuchMedia(maxMediaBytes).message}`) : tooLarge(maxBytes));
+  if (Number(request.headers.get('content-length')) > room) throw over();
+  if (!request.body) return { json: null, media: [] };
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
   let read = 0;
@@ -48,30 +67,53 @@ async function readBody(request: NextRequest): Promise<unknown> {
     read += value.byteLength;
     if (read > room) {
       await reader.cancel();
-      throw tooLarge(maxBytes);
+      throw over();
     }
     chunks.push(value);
   }
+  const raw = Buffer.concat(chunks);
+  if (!isForm) return { json: parseJson(raw.toString('utf8')), media: [] };
+  let form: FormData;
   try {
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    form = await new Response(raw, { headers: { 'content-type': contentType } }).formData();
+  } catch {
+    return { json: null, media: [] };
+  }
+  const part = form.get('request');
+  const media: MediaUpload[] = [];
+  for (const file of form.getAll('media')) {
+    if (typeof file === 'string') return { json: null, media: [] };
+    media.push({ name: file.name, contentType: file.type, body: new Uint8Array(await file.arrayBuffer()) });
+  }
+  return { json: typeof part === 'string' ? parseJson(part) : null, media };
+}
+
+function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
   } catch {
     return null;
   }
 }
 
-/** Wraps one artifact route: the caller's token, the JSON body, and the answer for each way it can end. */
+/**
+ * Wraps one artifact route: the caller's token, the JSON body, and the answer for each way it can end. A route that
+ * passes `{ media: true }` also takes songs, images and videos as a form (see readBody); its handler gets them third.
+ */
 export function artifactRoute<B extends z.ZodType>(
   name: string,
   caller: ArtifactCaller,
   bodySchema: B,
-  handler: (body: z.infer<B>, params: Record<string, string>) => Promise<unknown>,
+  handler: (body: z.infer<B>, params: Record<string, string>, media: MediaUpload[]) => Promise<unknown>,
+  options: { media?: boolean } = {},
 ) {
   return async (request: NextRequest, context?: { params: Params }) => {
     try {
       if (!authorised(request, caller)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-      const parsed = bodySchema.safeParse(await readBody(request));
+      const body = await readBody(request, options.media === true);
+      const parsed = bodySchema.safeParse(body.json);
       if (!parsed.success) return NextResponse.json({ error: 'Invalid request data', details: parsed.error.issues.map((issue) => ({ path: issue.path, message: issue.message })) }, { status: 400 });
-      const answer = await handler(parsed.data, context ? await context.params : {});
+      const answer = await handler(parsed.data, context ? await context.params : {}, body.media);
       return NextResponse.json(answer, { headers: { 'Cache-Control': 'no-store' } });
     } catch (error) {
       if (error instanceof ArtifactError) {
@@ -132,6 +174,8 @@ export const changeSchema = z
     content: text(LARGEST_ARTIFACT_BYTES * 2).nullish(),
     summary: text(1000).nullish(),
     title: text(500).nullish(),
+    // Names of media the new version leaves out (#1510); new media come as form parts
+    dropMedia: z.array(text(200)).nullish(),
   })
   .strict();
 

@@ -19,8 +19,17 @@ game (open, versions, code, share, restore, copy, delete).
 - **Bot access and telemetry:** make, change and read first ask the same rules as `/api/bots/:id/access` (nearby chat for
   a `nearby` chat, direct message for a `dm` chat). The answer carries `hidden`, the Bot chat telemetry switch for that
   bot: when `true` the bot server keeps the artifact's text out of PostHog and Sentry. Orbit logs no content.
-- **Files:** one file per version in the artifacts bucket (below), under a name with a random part. Orbit is the only
-  writer. The bot server sends text; it needs no bucket keys.
+- **Files:** one folder per version in the artifacts bucket (below), under a name with a random part:
+  `artifacts/<id>/v<n>-<random>/index.html`. Orbit is the only writer. The bot server sends text; it needs no bucket
+  keys. Versions saved before game #1510 keep their old key (`v<n>-<random>.html`, no folder).
+- **Media (game #1510):** a page or mini app can carry songs, images and videos from the chat. They sit beside the page
+  in its folder, so the page names them as is (`<audio src="song.mp3" controls>`), and a shared link plays them too.
+  Only audio, raster image and video types, under a plain name (letters, digits, `.`, `-`, `_`) whose ending matches the
+  type. The files one save adds fit together in the super admin's "Media added in one save" limit (`artifacts.media`,
+  in MB, recommended 50; 0 lets none in). It keeps one upload from filling the bot server's or Orbit's memory; media a
+  version keeps from the one before doesn't count, since it is copied inside the bucket. A change keeps the media it had unless `dropMedia` names them; restore and copy
+  bring the media of that version; delete and the guest clean-up remove them. The bot hears each version's
+  `media: [{ name, contentType, sizeBytes }]`, never where they are stored.
 
 ## Bot server routes (`BOT_SERVICE_TOKEN`; the admin token also works)
 
@@ -31,9 +40,16 @@ both use for that chat; a viewer is "in the chat" when the game says so for the 
 | Route | Body | Answer |
 | --- | --- | --- |
 | `POST /api/artifacts` | `title`, `kind` (`app`, `page`, `markdown`, `svg`), `content`, `summary?` | `{ artifact, version, hidden }` |
-| `POST /api/artifacts/:id/change` | `edits: [{ old, new, all? }]` **or** `content`; `summary?`, `title?`, `baseVersion?` | `{ artifact, version, hidden }` |
+| `POST /api/artifacts/:id/change` | `edits: [{ old, new, all? }]` **or** `content`; `summary?`, `title?`, `baseVersion?`, `dropMedia?` | `{ artifact, version, hidden }` |
 | `POST /api/artifacts/:id/read` | `version?` (the latest by default) | `{ artifact, version, content, hidden }` |
-| `POST /api/artifacts/in-chat` | none beyond the three above | `{ artifacts, hidden }`: what was made in this chat that the person may open, plus the person's own artifacts from their other chats, newest change first (up to 20) |
+| `POST /api/artifacts/in-chat` | none beyond the three above | `{ artifacts, hidden }`: what was made in this chat that the person may open, plus the person's own artifacts from their other chats; this chat's come first, then the others, each group newest change first (up to 20 in all) |
+
+**With media:** send `multipart/form-data` to `POST /api/artifacts` or `POST /api/artifacts/:id/change`: the same JSON
+as a `request` part, and one `media` part per file, its file name being the name the page uses. A change may send only
+media (or only `dropMedia`) and no edits; the page stays as it was. Too much answers `413 media_too_large` (`media_off`
+when the limit is 0); a wrong name or type answers `422` (`invalid_media_name`, `media_type_not_allowed`,
+`media_type_mismatch`, `media_not_allowed` for a document or drawing, `duplicate_media`, `empty_media`,
+`media_not_found` for a dropped name that is not there).
 
 Edits are applied in order, each on the result of the one before. An edit whose `old` is not in the file (`422
 edit_not_found`) or appears more than once without `all` (`422 edit_ambiguous`) changes nothing; the message names the

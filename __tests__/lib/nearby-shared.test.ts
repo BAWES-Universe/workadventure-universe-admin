@@ -100,6 +100,15 @@ describe('an item shared in a nearby chat', () => {
     expect(parseNearbySharedItem({ ...file, mine: 'yes' }, now)).toBeNull();
   });
 
+  it('keeps an uploader file with a long extension', () => {
+    const fileId = 'user-refs/0b5c1a6e-3f2d-4c8b-9a71-2e4f6d8c0a1b.webmanifest';
+    expect(parseNearbySharedItem({ ...file, fileId }, now)?.fileId).toBe(fileId);
+    const longest = `user-refs/0b5c1a6e-3f2d-4c8b-9a71-2e4f6d8c0a1b.${'a'.repeat(16)}`;
+    expect(parseNearbySharedItem({ ...file, fileId: longest }, now)?.fileId).toBe(longest);
+    const tooLong = `user-refs/0b5c1a6e-3f2d-4c8b-9a71-2e4f6d8c0a1b.${'a'.repeat(17)}`;
+    expect(parseNearbySharedItem({ ...file, fileId: tooLong }, now)).toBeNull();
+  });
+
   it('turns down a file id that is not an uploader id, and a link that is not a web link', () => {
     expect(parseNearbySharedItem({ ...file, fileId: '../../etc/passwd' }, now)).toBeNull();
     expect(parseNearbySharedItem({ ...file, fileId: '0b5c1a6e-3f2d-4c8b-9a71-2e4f6d8c0a1b.pdf' }, now)).toBeNull();

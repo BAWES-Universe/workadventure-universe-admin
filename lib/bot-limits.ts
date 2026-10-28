@@ -4,6 +4,7 @@ import { prisma } from '@/lib/db';
 import {
   FAIR_USAGE_WINDOW_HOURS,
   artifactBytes,
+  artifactMediaBytes,
   limitsForBot,
   readReplyLimits,
   readServerLimits,
@@ -99,6 +100,8 @@ export interface ServedLimits {
   /** 0 keeps every version. */
   artifactVersions: number;
   artifactSaveSeconds: number;
+  /** Songs, images and videos one version may carry (#1510); 0 lets none in. */
+  artifactMediaBytes: number;
   /** "Say when nothing was saved". */
   guard: boolean;
   /** Files in bot chats (#1508): this person's newest files named before each reply (0 = none). */
@@ -125,6 +128,7 @@ export function servedLimits(reply: ReplyLimits, server: ServerLimits, bot: { ma
     artifactBytes: artifactBytes(server.artifacts),
     artifactVersions: server.artifacts.versions,
     artifactSaveSeconds: server.artifacts.save,
+    artifactMediaBytes: artifactMediaBytes(server.artifacts),
     guard: server.guard,
     recentFiles: own.recentFiles,
     findResults: own.results,

@@ -6,7 +6,7 @@ import { loadBotPrivacy } from '@/lib/bot-privacy';
 import { findUserByIdentifier } from '@/lib/user-identifier';
 import { artifactFiles, type ArtifactFiles } from '@/lib/artifact-storage';
 import { getServerLimits } from '@/lib/bot-limits';
-import { artifactBytes, type ArtifactLimits } from '@/lib/bot-limit-values';
+import { artifactBytes, artifactMediaBytes, type ArtifactLimits } from '@/lib/bot-limit-values';
 import {
   ARTIFACT_KINDS,
   ArtifactError,
@@ -28,12 +28,17 @@ import {
   hasExpired,
   isOneOf,
   isOwner,
+  mediaKeyFor,
+  mediaOf,
+  mergeMedia,
   newFileKey,
   type ArtifactEdit,
   type ArtifactKind,
   type Asker,
   type ChangeScope,
   type ChatKind,
+  type MediaFile,
+  type MediaUpload,
   type OpenScope,
 } from '@/lib/artifacts';
 
@@ -63,10 +68,10 @@ export interface Context {
   limits?: ArtifactLimits;
 }
 
-/** The size and version limits a super admin set (#666). */
-async function limitsOf(ctx: Context): Promise<{ maxBytes: number; maxVersions: number }> {
+/** The size, version and media limits a super admin set (#666, #1510). */
+async function limitsOf(ctx: Context): Promise<{ maxBytes: number; maxVersions: number; maxMediaBytes: number }> {
   const limits = ctx.limits ?? (await getServerLimits()).artifacts;
-  return { maxBytes: artifactBytes(limits), maxVersions: limits.versions };
+  return { maxBytes: artifactBytes(limits), maxVersions: limits.versions, maxMediaBytes: artifactMediaBytes(limits) };
 }
 
 /** Most artifacts a bot is told about at once. */
@@ -134,17 +139,25 @@ function viewOf(artifact: ArtifactRow): ArtifactView {
   };
 }
 
+/** A song, image or video a version carries (#1510): the page names it as is ("song.mp3"), it sits beside the page. */
+export interface MediaView {
+  name: string;
+  contentType: string;
+  sizeBytes: number;
+}
+
 export interface VersionView {
   number: number;
   summary: string | null;
   askedByName: string | null;
   sizeBytes: number;
   createdAt: string;
+  media: MediaView[];
   /** Where the file is served from, for the locked box. */
   url: string;
 }
 
-type VersionRow = { number: number; summary: string | null; askedByName: string | null; sizeBytes: number; createdAt: Date; fileKey: string };
+type VersionRow = { number: number; summary: string | null; askedByName: string | null; sizeBytes: number; createdAt: Date; fileKey: string; media?: unknown };
 
 /** What a bot is told about a version: the same, without the file's address (only the game opens the file). */
 export type BotVersionView = Omit<VersionView, 'url'>;
@@ -156,6 +169,7 @@ function botVersionView(row: VersionRow): BotVersionView {
     askedByName: row.askedByName,
     sizeBytes: row.sizeBytes,
     createdAt: row.createdAt.toISOString(),
+    media: mediaOf(row).map(({ name, contentType, sizeBytes }) => ({ name, contentType, sizeBytes })),
   };
 }
 
@@ -230,6 +244,8 @@ export interface MakeInput extends BotCall {
   kind: ArtifactKind;
   content: string;
   summary?: string | null;
+  /** Songs, images and videos from the chat for the page to play or show (#1510). */
+  media?: MediaUpload[];
 }
 
 export interface Made {
@@ -238,34 +254,63 @@ export interface Made {
   hidden: boolean;
 }
 
+/** The media of a new version, in its own folder: what it keeps from an older version (copied) and what was sent (written). */
+interface PlacedMedia {
+  files: MediaFile[];
+  copies: { from: string; to: string }[];
+  uploads: { key: string; body: Uint8Array; contentType: string }[];
+}
+
+function placeMedia(fileKey: string, merged: { keep: MediaFile[]; add: MediaUpload[] }): PlacedMedia {
+  const copies = merged.keep.map((file) => ({ from: file.key, to: mediaKeyFor(fileKey, file.name) }));
+  const uploads = merged.add.map((upload) => ({ key: mediaKeyFor(fileKey, upload.name), body: upload.body, contentType: upload.contentType }));
+  const files = [
+    ...merged.keep.map((file) => ({ ...file, key: mediaKeyFor(fileKey, file.name) })),
+    ...merged.add.map((upload) => ({ name: upload.name, contentType: upload.contentType, sizeBytes: upload.body.byteLength, key: mediaKeyFor(fileKey, upload.name) })),
+  ].sort((a, b) => a.name.localeCompare(b.name));
+  return { files, copies, uploads };
+}
+
 /**
- * Stores the file, then runs the database write; the file goes again only if that write fails. Anything after the write
- * (reading it back, clearing old artifacts) must stay outside, or an error there would delete the file of a version
- * that is already committed.
+ * Stores the file and its media, then runs the database write; the files go again only if storing or that write fails.
+ * Anything after the write (reading it back, clearing old artifacts) must stay outside, or an error there would delete
+ * the files of a version that is already committed.
  */
-async function storing<T>(files: ArtifactFiles, fileKey: string, kind: ArtifactKind, content: string, write: () => Promise<T>): Promise<T> {
-  await files.put(fileKey, content, fileTypeOf(kind).contentType);
+async function storing<T>(files: ArtifactFiles, fileKey: string, kind: ArtifactKind, content: string, media: PlacedMedia, write: () => Promise<T>): Promise<T> {
   try {
+    // Every write settles before anything is cleared: one that lands after the clean-up would stay in the bucket for good
+    const stored = await Promise.allSettled([
+      files.put(fileKey, content, fileTypeOf(kind).contentType),
+      ...media.copies.map((copy) => files.copy(copy.from, copy.to)),
+      ...media.uploads.map((upload) => files.put(upload.key, upload.body, upload.contentType)),
+    ]);
+    const failed = stored.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+    if (failed) throw failed.reason;
     return await write();
   } catch (error) {
-    await files.remove([fileKey]).catch(() => undefined);
+    await files.remove([fileKey, ...media.files.map((file) => file.key)]).catch(() => undefined);
     throw error;
   }
 }
+
+/** Every file of these versions in the bucket: the page and the media beside it. */
+const keysOf = (versions: { fileKey: string; media?: unknown }[]): string[] => versions.flatMap((version) => [version.fileKey, ...mediaOf(version).map((file) => file.key)]);
 
 export async function makeArtifact(input: MakeInput, ctx: Context = defaultContext()): Promise<Made> {
   const { files, now } = ctx;
   const title = cleanLine(input.title, MAX_TITLE_LENGTH);
   if (!title) throw new ArtifactError('title_required', 422, 'An artifact needs a title.');
   if (!isOneOf(ARTIFACT_KINDS, input.kind)) throw new ArtifactError('invalid_kind', 422, 'Unknown kind of artifact.');
-  const { maxBytes } = await limitsOf(ctx);
+  const { maxBytes, maxMediaBytes } = await limitsOf(ctx);
   checkContent(input.content, maxBytes);
+  const merged = mergeMedia([], input.media ?? [], [], input.kind, maxMediaBytes);
   const { botName, hidden } = await passBotGate(input);
   const who = await resolvePerson(input.person, true);
 
   const id = randomUUID();
   const fileKey = newFileKey(id, 1, input.kind);
-  const artifact = await storing(files, fileKey, input.kind, input.content, () =>
+  const media = placeMedia(fileKey, merged);
+  const artifact = await storing(files, fileKey, input.kind, input.content, media, () =>
     prisma.artifact.create({
       data: {
         id,
@@ -287,6 +332,7 @@ export async function makeArtifact(input: MakeInput, ctx: Context = defaultConte
             askedByName: who.name,
             fileKey,
             sizeBytes: byteLength(input.content),
+            media: media.files as unknown as Prisma.InputJsonValue,
           },
         },
       },
@@ -301,18 +347,24 @@ export interface ChangeInput extends BotCall {
   artifactId: string;
   /** The version the bot read before it changed anything; a newer one in between stops the change. */
   baseVersion?: number | null;
-  /** Small edits to the latest version, or the whole new file; exactly one of them. */
+  /** Small edits to the latest version, or the whole new file; at most one of them, and one unless the media change. */
   edits?: ArtifactEdit[] | null;
   content?: string | null;
   summary?: string | null;
   title?: string | null;
+  /** New songs, images and videos (#1510); one with the name of a kept one takes its place. The rest are kept. */
+  media?: MediaUpload[];
+  /** Names of media the new version leaves out. */
+  dropMedia?: string[] | null;
 }
 
 export async function changeArtifact(input: ChangeInput, ctx: Context = defaultContext()): Promise<Made> {
   const { files, now } = ctx;
   const hasEdits = Array.isArray(input.edits) && input.edits.length > 0;
   const hasContent = typeof input.content === 'string';
-  if (hasEdits === hasContent) throw new ArtifactError('edits_or_content', 422, 'Send small edits or the whole new file, not both and not neither.');
+  const changesMedia = (input.media?.length ?? 0) > 0 || (input.dropMedia?.length ?? 0) > 0;
+  if (hasEdits && hasContent) throw new ArtifactError('edits_or_content', 422, 'Send small edits or the whole new file, not both.');
+  if (!hasEdits && !hasContent && !changesMedia) throw new ArtifactError('edits_or_content', 422, 'Send small edits, the whole new file, or media to add or drop.');
   const { hidden } = await passBotGate(input);
   const who = await resolvePerson(input.person, true);
   const artifact = await loadArtifact(input.artifactId, now);
@@ -321,7 +373,7 @@ export async function changeArtifact(input: ChangeInput, ctx: Context = defaultC
     if (!canOpen(artifact, { ...who, inChat: inThisChat(artifact, input.chat) }, now)) throw new ArtifactError('not_found', 404, 'No such artifact.');
     throw new ArtifactError('change_not_allowed', 403, 'The owner has not allowed changes from this person.');
   }
-  const { maxBytes, maxVersions } = await limitsOf(ctx);
+  const { maxBytes, maxVersions, maxMediaBytes } = await limitsOf(ctx);
   checkVersionRoom(artifact.latestVersion, maxVersions);
   if (input.baseVersion != null && input.baseVersion !== artifact.latestVersion) {
     throw new ArtifactError('stale_version', 409, `It is on version ${artifact.latestVersion} now; read it again and send the change on that.`);
@@ -330,13 +382,15 @@ export async function changeArtifact(input: ChangeInput, ctx: Context = defaultC
   const kind = artifact.kind as ArtifactKind;
   const latest = await prisma.artifactVersion.findUnique({ where: { artifactId_number: { artifactId: artifact.id, number: artifact.latestVersion } } });
   if (!latest) throw new ArtifactError('file_missing', 502, 'The latest version could not be found.');
-  const content = hasEdits ? applyEdits(await files.get(latest.fileKey), input.edits as ArtifactEdit[], maxBytes) : (input.content as string);
+  const content = hasContent ? (input.content as string) : hasEdits ? applyEdits(await files.get(latest.fileKey), input.edits as ArtifactEdit[], maxBytes) : await files.get(latest.fileKey);
   checkContent(content, maxBytes);
+  const merged = mergeMedia(mediaOf(latest), input.media ?? [], input.dropMedia ?? [], kind, maxMediaBytes);
 
   const next = artifact.latestVersion + 1;
   const fileKey = newFileKey(artifact.id, next, kind);
+  const media = placeMedia(fileKey, merged);
   const title = cleanLine(input.title, MAX_TITLE_LENGTH);
-  const row = await storing(files, fileKey, kind, content, () =>
+  const row = await storing(files, fileKey, kind, content, media, () =>
     prisma.$transaction(async (tx) => {
       // The one who gets here first moves the version on; anyone who read the same version before fails here
       const moved = await tx.artifact.updateMany({
@@ -357,6 +411,7 @@ export async function changeArtifact(input: ChangeInput, ctx: Context = defaultC
           askedByName: who.name,
           fileKey,
           sizeBytes: byteLength(content),
+          media: media.files as unknown as Prisma.InputJsonValue,
         },
       });
     }),
@@ -401,8 +456,11 @@ export async function listArtifactsInChat(input: BotCall, ctx: Context = default
   const include = ARTIFACT_INCLUDE;
   const orderBy = { updatedAt: 'desc' } as const;
   const take = LIST_IN_CHAT_LIMIT;
-  const inChat = await prisma.artifact.findMany({ where: { chatKind: input.chat.kind, chatRef: input.chat.ref }, include, orderBy, take });
-  const own = who.userId ? await prisma.artifact.findMany({ where: { ownerId: who.userId }, include, orderBy, take }) : [];
+  // Expired guest artifacts and copies (which are in no chat) are left out here, not after the limit, so they never crowd out
+  // the ones that are still there
+  const notExpired = { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] };
+  const inChat = await prisma.artifact.findMany({ where: { chatKind: input.chat.kind, chatRef: input.chat.ref, ...notExpired }, include, orderBy, take });
+  const own = who.userId ? await prisma.artifact.findMany({ where: { ownerId: who.userId, chatRef: { not: null }, ...notExpired }, include, orderBy, take }) : [];
   const seen = new Set(inChat.map((row) => row.id));
   const rows = [...inChat, ...own.filter((row) => !seen.has(row.id))];
   return { artifacts: rows.filter((row) => canOpen(row, who, now)).slice(0, LIST_IN_CHAT_LIMIT).map(viewOf), hidden };
@@ -503,7 +561,7 @@ export async function restoreVersion(id: string, number: number, viewer: Viewer,
   const who = await whoIsLooking(artifact, viewer);
   requireOpen(artifact, who, now);
   requireOwner(artifact, who);
-  const { maxBytes, maxVersions } = await limitsOf(ctx);
+  const { maxBytes, maxVersions, maxMediaBytes } = await limitsOf(ctx);
   checkVersionRoom(artifact.latestVersion, maxVersions);
   const source = await findVersion(artifact, number);
   if (source.number === artifact.latestVersion) throw new ArtifactError('already_latest', 409, 'That is the latest version already.');
@@ -513,12 +571,22 @@ export async function restoreVersion(id: string, number: number, viewer: Viewer,
   checkContent(content, maxBytes);
   const next = artifact.latestVersion + 1;
   const fileKey = newFileKey(artifact.id, next, kind);
-  const row = await storing(files, fileKey, kind, content, () =>
+  const media = placeMedia(fileKey, mergeMedia(mediaOf(source), [], [], kind, maxMediaBytes));
+  const row = await storing(files, fileKey, kind, content, media, () =>
     prisma.$transaction(async (tx) => {
       const moved = await tx.artifact.updateMany({ where: { id: artifact.id, latestVersion: artifact.latestVersion }, data: { latestVersion: next } });
       if (moved.count !== 1) throw new ArtifactError('stale_version', 409, 'It changed at the same moment; try again.');
       return tx.artifactVersion.create({
-        data: { artifactId: artifact.id, number: next, summary: `Restored version ${source.number}`, askedById: who.userId, askedByName: who.name, fileKey, sizeBytes: source.sizeBytes },
+        data: {
+          artifactId: artifact.id,
+          number: next,
+          summary: `Restored version ${source.number}`,
+          askedById: who.userId,
+          askedByName: who.name,
+          fileKey,
+          sizeBytes: source.sizeBytes,
+          media: media.files as unknown as Prisma.InputJsonValue,
+        },
       });
     }),
   );
@@ -540,7 +608,7 @@ export async function deleteArtifact(id: string, viewer: Viewer, ctx: Context = 
     const versions = await prisma.artifactVersion.findMany({ where: { artifactId: artifact.id } });
     const { count } = await prisma.artifact.deleteMany({ where: { id: artifact.id, latestVersion: artifact.latestVersion } });
     if (count === 1) {
-      await removeFiles(ctx, versions.map((version) => version.fileKey));
+      await removeFiles(ctx, keysOf(versions));
       return { deleted: true };
     }
   }
@@ -558,11 +626,13 @@ export async function copyArtifact(id: string, viewer: Viewer, version?: number 
   const row = await findVersion(source, version);
   const kind = source.kind as ArtifactKind;
   const content = await files.get(row.fileKey);
-  checkContent(content, (await limitsOf(ctx)).maxBytes);
+  const { maxBytes, maxMediaBytes } = await limitsOf(ctx);
+  checkContent(content, maxBytes);
 
   const copyId = randomUUID();
   const fileKey = newFileKey(copyId, 1, kind);
-  const created = await storing(files, fileKey, kind, content, () =>
+  const media = placeMedia(fileKey, mergeMedia(mediaOf(row), [], [], kind, maxMediaBytes));
+  const created = await storing(files, fileKey, kind, content, media, () =>
     prisma.artifact.create({
       data: {
         id: copyId,
@@ -573,7 +643,15 @@ export async function copyArtifact(id: string, viewer: Viewer, version?: number 
         kind,
         copiedFromId: source.id,
         versions: {
-          create: { number: 1, summary: `Copy of version ${row.number}`, askedById: who.userId, askedByName: who.name, fileKey, sizeBytes: row.sizeBytes },
+          create: {
+            number: 1,
+            summary: `Copy of version ${row.number}`,
+            askedById: who.userId,
+            askedByName: who.name,
+            fileKey,
+            sizeBytes: row.sizeBytes,
+            media: media.files as unknown as Prisma.InputJsonValue,
+          },
         },
       },
       include: { ...ARTIFACT_INCLUDE, versions: true },
@@ -658,7 +736,7 @@ export async function pruneExpired(ctx: Context = defaultContext()): Promise<num
     const expired = await prisma.artifact.findMany({
       where: { expiresAt: { lte: ctx.now } },
       take: PRUNE_BATCH,
-      select: { id: true, versions: { select: { fileKey: true } } },
+      select: { id: true, versions: { select: { fileKey: true, media: true } } },
     });
     if (expired.length === 0) break;
     const ids = expired.map((artifact) => artifact.id);
@@ -666,7 +744,7 @@ export async function pruneExpired(ctx: Context = defaultContext()): Promise<num
     // the end further, and that artifact stays with all of its files
     const { count } = await prisma.artifact.deleteMany({ where: { id: { in: ids }, expiresAt: { lte: ctx.now } } });
     const kept = new Set(count === ids.length ? [] : (await prisma.artifact.findMany({ where: { id: { in: ids } }, select: { id: true } })).map((row) => row.id));
-    const keys = expired.filter((artifact) => !kept.has(artifact.id)).flatMap((artifact) => artifact.versions.map((version) => version.fileKey));
+    const keys = expired.filter((artifact) => !kept.has(artifact.id)).flatMap((artifact) => keysOf(artifact.versions));
     await removeFiles(ctx, keys);
     cleared += count;
     if (expired.length < PRUNE_BATCH) break;

@@ -11,6 +11,15 @@ hands Orbit a session through a `postMessage` handshake (`orbit-auth-ready-v2` /
   handshake within 10 seconds: the page shows one line, "Orbit runs inside
   Universe", with a link to `NEXT_PUBLIC_PLAY_URL`. Nothing is fetched and no
   stored session is reused.
+- **The game is still getting a token** (renewing an expired one on a slow or
+  dropped connection): it answers `orbit-auth-wait-v2` at once and again each
+  time it waits to try again, and Orbit keeps waiting while it hears that (45
+  seconds between words at most). After 4 seconds the loader says "Still signing
+  you in…", and while the browser is offline "Waiting for your connection…".
+- **The game can't get a token** (`orbit-auth-failed-v2`), or Orbit refuses the
+  renewed one: the page shows "Couldn't sign you in" with Try again. Nothing
+  could say who is signed in, so the session and caches stored in the tab are
+  dropped first, the same as when no game answers.
 - **Every open performs the handshake.** A session already stored in the tab is
   never reused on its own: the game may now be signed in as someone else. The
   handshake's token is exchanged for a fresh session, the old one is revoked, and
