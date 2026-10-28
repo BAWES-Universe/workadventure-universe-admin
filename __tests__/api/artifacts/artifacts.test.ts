@@ -436,6 +436,15 @@ describe('artifacts', () => {
       expect(res.body.artifacts.map((a: { title: string }) => a.title)).toEqual(['Live']);
     });
 
+    it("keeps the person's artifacts from other chats in the list when their newer copies, which are in no chat, would fill it", async () => {
+      const elsewhere = await makeApp(person('owner'), DM, { title: 'Elsewhere' });
+      const row = db.artifacts.find((a) => a.id === elsewhere.artifact.id)!;
+      row.updatedAt = new Date(Date.now() - 60000);
+      for (let i = 0; i < 25; i++) db.artifacts.push({ ...row, id: `copy-${i}`, title: `Copy ${i}`, chatKind: null, chatRef: null, updatedAt: new Date() });
+      const res = await call(inChat, { botId: 'bot1', person: person('owner'), chat: NEARBY });
+      expect(res.body.artifacts.map((a: { title: string }) => a.title)).toEqual(['Elsewhere']);
+    });
+
     it('goes through the same bot access check as the other bot calls', async () => {
       (checkBotAccess as jest.Mock).mockResolvedValue({ allowed: false, code: 'not_allowed', reason: 'No.' });
       expect((await call(inChat, { botId: 'bot1', person: person('friend'), chat: NEARBY })).status).toBe(403);
