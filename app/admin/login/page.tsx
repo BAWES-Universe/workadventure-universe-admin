@@ -140,6 +140,8 @@ export default function LoginPage() {
       if (message.type === 'orbit-auth-failed-v2') {
         activeNonce.current = null;
         if (handshakeTimer.current) clearTimeout(handshakeTimer.current);
+        // The game could not say who is signed in, so a session stored in this tab must not stay usable.
+        purgeAccountState();
         setCannotSignIn(true);
         setLoading(false);
         return;
@@ -167,8 +169,10 @@ export default function LoginPage() {
           beginIframeHandshake(true);
           return;
         }
-        if (renewalTried.current && /expired/i.test(reason)) setCannotSignIn(true);
-        else setError(reason);
+        if (renewalTried.current && /expired/i.test(reason)) {
+          purgeAccountState();
+          setCannotSignIn(true);
+        } else setError(reason);
         setLoading(false);
       });
     };
