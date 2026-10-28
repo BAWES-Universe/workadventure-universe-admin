@@ -77,7 +77,7 @@ describe('finding files in bot chats (game #1508)', () => {
 
   describe('the words of a search', () => {
     it('works out a file\'s own words with the migration\'s index expression, so the index is used', () => {
-      const migration = readFileSync(path.join(__dirname, '../../../prisma/migrations/20261028000000_bot_files/migration.sql'), 'utf8');
+      const migration = readFileSync(path.join(__dirname, '../../../prisma/migrations/20261028100000_bot_files/migration.sql'), 'utf8');
       const fileWords = wordsOfSql(`"name" || ' ' || coalesce("line", '') || ' ' || left(coalesce("made_prompt", ''), 20000)`);
       expect(migration).toContain(`USING GIN (${fileWords})`);
       expect(migration).toContain(wordsOfSql('text').replace("to_tsvector('simple',", "to_tsvector('simple'::regconfig,"));
