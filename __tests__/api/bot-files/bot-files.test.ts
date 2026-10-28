@@ -5,7 +5,7 @@ import { POST as get } from '@/app/api/bot-files/get/route';
 import { POST as keepText } from '@/app/api/bot-files/text/route';
 import { checkBotAccess } from '@/lib/bot-access';
 import { loadBotPrivacy, takeForgets } from '@/lib/bot-privacy';
-import { TEXT_PART_CHARS, addFile, forgetFilesWhere, getFile, pruneGoneFiles, resetFilePruneClock, splitText } from '@/lib/bot-files';
+import { TEXT_PART_CHARS, TEXT_PIECE_CHARS, addFile, forgetFilesWhere, getFile, pruneGoneFiles, resetFilePruneClock, splitText } from '@/lib/bot-files';
 import { addUser, db, fakePrisma } from '../../helpers/bot-files-db';
 
 jest.mock('@/lib/db', () => ({ prisma: jest.requireActual('../../helpers/bot-files-db').fakePrisma }));
@@ -328,15 +328,70 @@ describe('files in bot chats (game #1508)', () => {
       expect((await keep(ref, {})).status).toBe(422);
     });
 
-    it('keeps no more than the super admin\'s limit, and never the null character', async () => {
+    it('refuses more than the super admin\'s limit, so nothing is cut without the bot server knowing, and never keeps the null character', async () => {
       const made = await addFile(song() as Parameters<typeof addFile>[0], { now: new Date() });
       const { keepFileText } = await import('@/lib/bot-files');
-      const kept = await keepFileText(
-        { botId: 'bot1', person: person('owner'), chat: BUBBLE as never, ref: made.file.ref, text: 'ab\u0000c'.repeat(100) },
-        { now: new Date(), limits: { text: 50, findable: 0 } },
-      );
-      expect(kept.file.text.chars).toBe(50);
+      const ctx = { now: new Date(), limits: { text: 50, findable: 0 } };
+      const input = { botId: 'bot1', person: person('owner'), chat: BUBBLE as never, ref: made.file.ref };
+      await expect(keepFileText({ ...input, text: 'x'.repeat(51) }, ctx)).rejects.toMatchObject({ code: 'too_much_text', status: 413 });
+      expect(db.parts).toHaveLength(0);
+      const kept = await keepFileText({ ...input, text: 'ab\u0000c'.repeat(12) }, ctx);
+      expect(kept.file.text.chars).toBe(36);
       expect(db.parts.map((part) => part.text).join('')).not.toContain('\u0000');
+    });
+
+    describe('in pieces, so one request stays a few MB whatever the limit is', () => {
+      it('keeps a 3,000,000 character text sent in 3 pieces whole, numbered on from each piece', async () => {
+        const made = await addFile(song() as Parameters<typeof addFile>[0], { now: new Date() });
+        const { keepFileText } = await import('@/lib/bot-files');
+        const ctx = { now: new Date(), limits: { text: 5_000_000, findable: 0 } };
+        const input = { botId: 'bot1', person: person('owner'), chat: BUBBLE as never, ref: made.file.ref };
+        const pieces = ['a', 'b', 'c'].map((letter) => letter.repeat(TEXT_PIECE_CHARS));
+        const first = await keepFileText({ ...input, text: pieces[0], from: 0, last: false }, ctx);
+        expect(first.file.text).toEqual({ state: 'reading', chars: TEXT_PIECE_CHARS });
+        await keepFileText({ ...input, text: pieces[1], from: TEXT_PIECE_CHARS, last: false }, ctx);
+        const done = await keepFileText({ ...input, text: pieces[2], from: TEXT_PIECE_CHARS * 2, last: true }, ctx);
+        expect(done.file.text).toEqual({ state: 'kept', chars: 3_000_000 });
+        const parts = [...db.parts].sort((a, b) => a.number - b.number);
+        expect(parts.map((part) => part.text).join('')).toBe(pieces.join(''));
+        expect(parts.map((part) => part.number)).toEqual(parts.map((_, i) => i + 1));
+        parts.forEach((part, i) => expect(part.start).toBe(i * TEXT_PART_CHARS));
+      });
+
+      it('answers 413 for a piece over the size, and for pieces that add up to more than the limit', async () => {
+        const ref = await addSong(person('owner'), BUBBLE, { kind: 'document' });
+        const big = await keep(ref, { text: 'a'.repeat(TEXT_PIECE_CHARS + 1) });
+        expect(big.status).toBe(413);
+        expect(big.body.error).toBe('piece_too_large');
+        // The recommended limit is 2,000,000
+        expect((await keep(ref, { text: 'a'.repeat(TEXT_PIECE_CHARS), from: 0, last: false })).status).toBe(200);
+        expect((await keep(ref, { text: 'b'.repeat(TEXT_PIECE_CHARS), from: TEXT_PIECE_CHARS, last: false })).status).toBe(200);
+        const over = await keep(ref, { text: 'c', from: TEXT_PIECE_CHARS * 2, last: true });
+        expect(over.status).toBe(413);
+        expect(over.body.error).toBe('too_much_text');
+        expect(db.parts.map((part) => part.text).join('')).toHaveLength(TEXT_PIECE_CHARS * 2);
+      });
+
+      it('answers 409 for a piece out of order, and a piece from 0 starts again', async () => {
+        const ref = await addSong(person('owner'), BUBBLE, { kind: 'document' });
+        expect((await keep(ref, { text: 'late', from: 10, last: true })).status).toBe(409);
+        await keep(ref, { text: 'one ', from: 0, last: false });
+        const skipped = await keep(ref, { text: 'three', from: 9, last: true });
+        expect(skipped.status).toBe(409);
+        expect(skipped.body.message).toContain('starts at 4');
+        await keep(ref, { text: 'two', from: 4, last: true });
+        expect((await keep(ref, { text: 'more', from: 7, last: true })).status).toBe(409);
+        const again = await keep(ref, { text: 'new', from: 0, last: true });
+        expect(again.body.file.text).toEqual({ state: 'kept', chars: 3 });
+        expect(db.parts.map((part) => part.text)).toEqual(['new']);
+      });
+
+      it('turns down a piece that ends in half an emoji, since each piece is kept as text of its own', async () => {
+        const ref = await addSong(person('owner'), BUBBLE, { kind: 'document' });
+        const res = await keep(ref, { text: 'ab\uD83D', from: 0, last: false });
+        expect(res.status).toBe(422);
+        expect(res.body.error).toBe('split_emoji');
+      });
     });
 
     it('only for a file this person may use', async () => {
