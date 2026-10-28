@@ -44,6 +44,16 @@ function fakeSql(rows: ReturnType<typeof fileRow>[], hits: { bot_file_id: string
   const asked: { sql: string; values: unknown[] }[] = [];
   const run = (async (sql: string, values: unknown[]) => {
     asked.push({ sql, values });
+    // Titles, as Postgres matches them: in reach, each pattern anywhere, case and Arabic marks left out
+    if (sql.includes('FROM artifacts')) {
+      const [chatKind, chatRef, userId, patterns] = values as [string, string, string | null, string[]];
+      const bare = (title: string) => title.replace(/[\u0610-\u061A\u0640\u064B-\u065F\u0670\u06D6-\u06ED]/g, '').toLowerCase();
+      const has = (title: string) => patterns.map((pattern) => bare(title).includes(pattern.slice(1, -1)));
+      return db.artifacts
+        .filter((row) => (row.chatKind === chatKind && row.chatRef === chatRef) || (userId !== null && row.ownerId === userId))
+        .filter((row) => (sql.includes('ALL') ? has(row.title as string).every(Boolean) : has(row.title as string).some(Boolean)))
+        .map((row) => ({ id: row.id }));
+    }
     const query = values[7] as string | null;
     if (sql.includes('DISTINCT ON')) return hits.filter((hit) => (values[0] as string[]).includes(hit.bot_file_id));
     const total = options.totalFor ? options.totalFor(query) : rows.length;
@@ -154,7 +164,15 @@ describe('finding files in bot chats (game #1508)', () => {
       const sql = fakeSql([fileRow(1, '2026-10-20T10:00:00Z')]);
       const found = await findFiles({ botId: 'bot1', person: owner, chat: OTHER_BUBBLE, words: 'quests', kinds: ['artifact'], limit: 10 }, { now: NOW, sql: sql.run });
       expect(found.items.map((item) => (item as FoundArtifact).id)).toEqual(['quests']);
-      expect(sql.asked).toHaveLength(0);
+      // Only the titles were asked, never the files
+      expect(sql.asked.map((ask) => ask.sql.includes('FROM artifacts'))).toEqual([true]);
+    });
+
+    it('finds an artifact whose title has Arabic short vowels by the word without them', async () => {
+      artifact('marked', '2026-10-26T10:00:00Z', { title: 'لوحة \u0645\u064e\u0631\u0652\u062d\u064e\u0628\u064b\u0627' });
+      const sql = fakeSql([]);
+      const found = await findFiles({ botId: 'bot1', person: owner, chat: OTHER_BUBBLE, words: 'مرحبا', kinds: ['artifact'], limit: 10 }, { now: NOW, sql: sql.run });
+      expect(found.items.map((item) => (item as FoundArtifact).id)).toEqual(['marked']);
     });
 
     it('leaves artifacts out for files the person sent, or for a kind of file', async () => {
@@ -230,6 +248,20 @@ describe('finding files in bot chats (game #1508)', () => {
       expect(last).toMatchObject({ text: text.slice(20_000), end: 25_000, next: null });
       const past = await readFileText({ botId: 'bot1', person: owner, chat: DM, ref, at: 99_999, chars: 8_000 }, { now: NOW });
       expect(past).toMatchObject({ text: '', at: 25_000, next: null });
+    });
+
+    it('never cuts an emoji in half at either end of a read', async () => {
+      const text = `ab😀cd😀`;
+      const ref = await keptFile(text);
+      // Asked to end inside the first emoji: it stops before it, and the next read starts at it
+      const before = await readFileText({ botId: 'bot1', person: owner, chat: DM, ref, chars: 3 }, { now: NOW });
+      expect(before).toMatchObject({ text: 'ab', end: 2, next: 2 });
+      // Asked to start inside it: it starts after it
+      const after = await readFileText({ botId: 'bot1', person: owner, chat: DM, ref, at: 3, chars: 2 }, { now: NOW });
+      expect(after).toMatchObject({ text: 'c', at: 4, end: 5, next: 5 });
+      // One character at a time still moves on, taking the emoji whole
+      const one = await readFileText({ botId: 'bot1', person: owner, chat: DM, ref, at: 6, chars: 1 }, { now: NOW });
+      expect(one).toMatchObject({ text: '😀', end: 8, next: null });
     });
 
     it('only for a file the person may use here', async () => {

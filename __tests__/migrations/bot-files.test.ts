@@ -36,7 +36,7 @@ describe('bot files migration', () => {
   });
 
   it('finds words with Postgres\'s own index, a made-up name and Arabic as they are, with no extension added', () => {
-    expect(result.words).toEqual({ marksInTextNotQuery: ['f1', 'f2'], name: ['f1'], arabic: ['f1'], twoWords: ['f1'], none: [], byLine: ['f1'], byPrompt: ['f3'], longPromptSaves: true });
+    expect(result.words).toEqual({ marksInTextNotQuery: ['f1', 'f2'], name: ['f1'], arabic: ['f1'], twoWords: ['f1'], none: [], byLine: ['f1'], byPrompt: ['f3'], punctuation: { pdf: ['f2'], month: ['f2'] }, longPromptSaves: true });
     // A word without short vowels finds it in text without them (f1) and with them (f2); the text itself keeps them
     expect(result.marksKeptInText).toBe(true);
     expect(result.indexes.map((index: { indexname: string }) => index.indexname)).toEqual(['bot_file_parts_words_idx', 'bot_files_words_idx']);

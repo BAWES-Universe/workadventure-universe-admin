@@ -18,7 +18,7 @@ import {
   type FileSource,
   type Who,
 } from '@/lib/bot-files';
-import { fileHitsSql, fileSearchSql, hitOf, searchWords, wordQuery, type FileHitRow, type FileSearchRow } from '@/lib/bot-file-search-sql';
+import { artifactTitleSql, fileHitsSql, fileSearchSql, hitOf, searchWords, wordQuery, type FileHitRow, type FileSearchRow } from '@/lib/bot-file-search-sql';
 
 /**
  * Finding and reading files in bot chats (game #1508). One search looks through the person's files with this bot and
@@ -157,17 +157,19 @@ export function mergePage(files: FoundFile[], artifacts: FoundArtifact[], offset
   return [...files, ...artifacts].sort((a, b) => (when(a) < when(b) ? 1 : when(a) > when(b) ? -1 : 0)).slice(offset, offset + limit);
 }
 
-/** The artifacts this person may find from here, by #655's rule, with the same filters as files. */
-function artifactWhere(input: FindInput, who: Who, words: string[], mode: 'all' | 'any', now: Date) {
+/**
+ * The artifacts this person may find from here, by #655's rule, with the same filters as files. `titled` is the ones whose
+ * title has the words (artifactTitleSql), or null with no words.
+ */
+function artifactWhere(input: FindInput, who: Who, titled: string[] | null, now: Date) {
   const since = dateOf(input.since);
   const until = dateOf(input.until);
-  const titleHas = words.map((word) => ({ title: { contains: word, mode: 'insensitive' as const } }));
   return {
     AND: [
       { OR: [{ chatKind: input.chat.kind, chatRef: input.chat.ref }, ...(who.userId ? [{ ownerId: who.userId }] : [])] },
       // A guest's artifact past its day is gone for everyone
       { OR: [{ expiresAt: null }, { expiresAt: { gt: now } }] },
-      ...(titleHas.length === 0 ? [] : mode === 'all' ? titleHas : [{ OR: titleHas }]),
+      ...(titled === null ? [] : [{ id: { in: titled } }]),
       ...(since ? [{ updatedAt: { gte: since } }] : []),
       ...(until ? [{ updatedAt: { lt: until } }] : []),
     ],
@@ -199,10 +201,15 @@ export async function findFiles(input: FindInput, ctx: SearchContext = defaultCo
         now: ctx.now,
         findableSince: findable > 0 ? new Date(ctx.now.getTime() - findable * DAY_MS) : null,
       },
-      { query, kinds: fileKinds, source: input.source ?? null, since: dateOf(input.since), until: dateOf(input.until) },
+      { query, every: mode === 'all' && words.length > 1 ? words : null, kinds: fileKinds, source: input.source ?? null, since: dateOf(input.since), until: dateOf(input.until) },
       { offset: 0, limit: offset + limit },
     );
-    const artifactsWhere = artifactWhere(input, who, words, mode, ctx.now);
+    let titled: string[] | null = null;
+    if (wantsArtifacts(input) && words.length > 0) {
+      const byTitle = artifactTitleSql({ userId: who.userId, chatKind: input.chat.kind, chatRef: input.chat.ref }, words, mode);
+      titled = (await sql<{ id: string }>(byTitle.sql, byTitle.values)).map((row) => row.id);
+    }
+    const artifactsWhere = artifactWhere(input, who, titled, ctx.now);
     const [fileTotal, fileRows, artifactTotal, artifactRows] = await Promise.all([
       onlyArtifacts ? Promise.resolve(0) : sql<{ total: number }>(built.count, built.values).then((rows) => Number(rows[0]?.total ?? 0)),
       onlyArtifacts ? Promise.resolve([] as FileSearchRow[]) : sql<FileSearchRow>(built.page, built.values),
@@ -238,7 +245,7 @@ export async function findFiles(input: FindInput, ctx: SearchContext = defaultCo
   const pageFiles = items.filter((item): item is FoundFile => item.type === 'file');
   if (result.query && pageFiles.length > 0) {
     const ids = new Map(result.fileRows.map((row) => [shortIdOf(row.number), row.id]));
-    const hits = fileHitsSql(pageFiles.map((item) => ids.get(item.ref) as string), result.query);
+    const hits = fileHitsSql(pageFiles.map((item) => ids.get(item.ref) as string), result.query, wordQuery(words, 'any') ?? result.query);
     const byId = new Map((await sql<FileHitRow>(hits.sql, hits.values)).map((row) => [row.bot_file_id, row]));
     for (const item of pageFiles) {
       const hit = byId.get(ids.get(item.ref) as string);
@@ -284,16 +291,29 @@ export async function readFileText(input: ReadInput, ctx: Context = defaultConte
   const end = Math.min(total, at + Math.max(1, Math.floor(input.chars)));
   let text = '';
   if (end > at) {
+    // One character more than asked, to finish an emoji the read would end in
+    const until = Math.min(total, end + 1);
     // Parts are about TEXT_PART_CHARS long, so the one holding `at` starts no earlier than this
     const parts = await prisma.botFilePart.findMany({
-      where: { botFileId: row.id, start: { gte: Math.max(0, at - TEXT_PART_CHARS), lt: end } },
+      where: { botFileId: row.id, start: { gte: Math.max(0, at - TEXT_PART_CHARS), lt: until } },
       orderBy: { number: 'asc' },
       select: { start: true, text: true },
     });
     text = parts
       .filter((part) => part.start + part.text.length > at)
-      .map((part) => part.text.slice(Math.max(0, at - part.start), Math.max(0, end - part.start)))
+      .map((part) => part.text.slice(Math.max(0, at - part.start), Math.max(0, until - part.start)))
       .join('');
   }
-  return { file: viewOf(row, who, input.chat), text, at, end: at + text.length, next: at + text.length < total ? at + text.length : null, hidden };
+  // Never half an emoji: a read from its second half starts after it, and one ending in its first half stops before it
+  // (or, read one character at a time, takes it whole)
+  let from = at;
+  if (/^[\uDC00-\uDFFF]/.test(text)) {
+    text = text.slice(1);
+    from += 1;
+  }
+  let size = Math.max(0, end - from);
+  if (size > 0 && /[\uD800-\uDBFF]/.test(text[size - 1] ?? '')) size = size > 1 ? size - 1 : Math.min(text.length, 2);
+  text = text.slice(0, size);
+  const stop = from + text.length;
+  return { file: viewOf(row, who, input.chat), text, at: from, end: stop, next: stop < total ? stop : null, hidden };
 }

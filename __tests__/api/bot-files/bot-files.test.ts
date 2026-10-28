@@ -175,6 +175,10 @@ describe('files in bot chats (game #1508)', () => {
         expect((await call(add, song(person('owner'), BUBBLE, { store }))).status).toBe(422);
       }
       expect((await call(add, song(person('owner'), BUBBLE, { store: { bucket: 'b', fileId: FILE_ID, url: 'https://x' } }))).status).toBe(400);
+      // Under 2,048 as sent, over it once its letters are written out for the link column
+      const long = await call(add, song(person('owner'), BUBBLE, { store: { url: `https://x.example/${'é'.repeat(1000)}` } }));
+      expect(long.status).toBe(422);
+      expect(long.body.error).toBe('invalid_link');
       expect(db.files).toHaveLength(0);
     });
 
@@ -353,9 +357,18 @@ describe('files in bot chats (game #1508)', () => {
       const input = { botId: 'bot1', person: person('owner'), chat: BUBBLE as never, ref: made.file.ref };
       await expect(keepFileText({ ...input, text: 'x'.repeat(51) }, ctx)).rejects.toMatchObject({ code: 'too_much_text', status: 413 });
       expect(db.parts).toHaveLength(0);
-      const kept = await keepFileText({ ...input, text: 'ab\u0000c'.repeat(12) }, ctx);
-      expect(kept.file.text.chars).toBe(36);
+      const kept = await keepFileText({ ...input, text: 'ab\u0000c'.repeat(10) }, ctx);
+      expect(kept.file.text.chars).toBe(40);
       expect(db.parts.map((part) => part.text).join('')).not.toContain('\u0000');
+    });
+
+    it('keeps where the next piece starts when a piece had the null character in it', async () => {
+      const ref = await addSong(person('owner'), BUBBLE, { kind: 'document' });
+      // The bot server counts the text as it read it, with the null character
+      expect((await keep(ref, { text: 'ab\u0000c', from: 0, last: false })).status).toBe(200);
+      const next = await keep(ref, { text: 'def', from: 4, last: true });
+      expect(next.status).toBe(200);
+      expect(next.body.file.text).toEqual({ state: 'kept', chars: 7 });
     });
 
     describe('in pieces, so one request stays a few MB whatever the limit is', () => {

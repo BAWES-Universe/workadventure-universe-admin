@@ -17,6 +17,15 @@ const MAX_WORD_LENGTH = 64;
  * class is in the migration's SQL; keep them the same.
  */
 export const ARABIC_MARKS_CLASS = '[\\u0610-\\u061A\\u0640\\u064B-\\u065F\\u0670\\u06D6-\\u06ED]';
+
+/**
+ * The words Postgres keeps of some text: without Arabic marks, and split at punctuation as a search is ("plan.pdf" is
+ * found by "pdf", "2024-05-01" by "05"; Postgres alone keeps "plan.pdf" whole and "-05" signed). The same expression as
+ * the migration's, for a part's words and the index on a file's own words; keep them the same.
+ */
+export function wordsOfSql(text: string): string {
+  return `to_tsvector('simple', regexp_replace(regexp_replace(${text}, '${ARABIC_MARKS_CLASS}', '', 'g'), '[[:punct:]]', ' ', 'g'))`;
+}
 const ARABIC_MARKS = /[\u0610-\u061A\u0640\u064B-\u065F\u0670\u06D6-\u06ED]/g;
 
 /** The words of a search, lowercased, letters and digits only, so they are safe inside a word query. */
@@ -50,6 +59,11 @@ export interface SearchScope {
 export interface SearchFilters {
   /** From wordQuery. */
   query: string | null;
+  /**
+   * For every word (`all`): the words, each to be found somewhere in the file, in its name, line or prompt or in any part
+   * of its text ("plan thursday" finds plan.pdf that says Thursday). Null to match `query` as it is.
+   */
+  every?: string[] | null;
   kinds: string[] | null;
   source: string | null;
   since: Date | null;
@@ -83,12 +97,22 @@ export function fileSearchSql(scope: SearchScope, filters: SearchFilters, page: 
     filters.source,
     utc(filters.since),
     utc(filters.until),
+    filters.every && filters.every.length > 0 ? filters.every.map((word) => `${word}:*`) : null,
   ];
   const at = (n: number) => `($${n}::timestamptz AT TIME ZONE 'UTC')`;
   const matches = `
-    WITH q AS (SELECT CASE WHEN $8::text IS NULL THEN NULL ELSE to_tsquery('simple', $8::text) END AS query),
+    WITH q AS (
+      SELECT
+        CASE WHEN $8::text IS NULL THEN NULL ELSE to_tsquery('simple', $8::text) END AS query,
+        (SELECT array_agg(to_tsquery('simple', word)) FROM unnest($12::text[]) AS word) AS each_word
+    ),
     matches AS (
       SELECT f.* FROM bot_files f CROSS JOIN q
+      -- The file's own words, once per file: the start of a made file's prompt only (PROMPT_SEARCH_CHARS), the same
+      -- expression as the migration's index
+      CROSS JOIN LATERAL (
+        SELECT CASE WHEN q.query IS NULL THEN NULL ELSE ${wordsOfSql(`f.name || ' ' || coalesce(f.line, '') || ' ' || left(coalesce(f.made_prompt, ''), 20000)`)} END AS words
+      ) own
       WHERE f.bot_id = $1
         AND ((f.owner_id IS NOT NULL AND f.owner_id = $2::text) OR (f.chat_kind = $3 AND f.chat_ref = $4))
         AND (f.expires_at IS NULL OR f.expires_at > ${at(5)})
@@ -99,9 +123,15 @@ export function fileSearchSql(scope: SearchScope, filters: SearchFilters, page: 
         AND ($11::text IS NULL OR f.created_at < ${at(11)})
         AND (
           q.query IS NULL
-          -- The start of a made file's prompt only (PROMPT_SEARCH_CHARS): the same expression as the migration's index
-          OR to_tsvector('simple', regexp_replace(f.name || ' ' || coalesce(f.line, '') || ' ' || left(coalesce(f.made_prompt, ''), 20000), '${ARABIC_MARKS_CLASS}', '', 'g')) @@ q.query
-          OR EXISTS (SELECT 1 FROM bot_file_parts p WHERE p.bot_file_id = f.id AND p.words @@ q.query)
+          OR (q.each_word IS NULL AND (own.words @@ q.query OR EXISTS (SELECT 1 FROM bot_file_parts p WHERE p.bot_file_id = f.id AND p.words @@ q.query)))
+          -- Every word somewhere in the file: no word missing from both its own words and every part
+          OR (
+            q.each_word IS NOT NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM unnest(q.each_word) AS word
+              WHERE NOT (own.words @@ word OR EXISTS (SELECT 1 FROM bot_file_parts p WHERE p.bot_file_id = f.id AND p.words @@ word))
+            )
+          )
         )
     )`;
   return {
@@ -111,15 +141,32 @@ export function fileSearchSql(scope: SearchScope, filters: SearchFilters, page: 
   };
 }
 
-/** The first part of each of these files that has the words, to show where they are. Only for the page being sent. */
-export function fileHitsSql(fileIds: string[], query: string): { sql: string; values: unknown[] } {
+/**
+ * Where the words are in each of these files, to show them: the first part with all of `query`, else the first with any
+ * of `anyQuery` (the words can be in the name and the text, or across parts). Only for the page being sent.
+ */
+export function fileHitsSql(fileIds: string[], query: string, anyQuery: string = query): { sql: string; values: unknown[] } {
   return {
-    values: [fileIds, query],
+    values: [fileIds, query, anyQuery],
     sql: `
       SELECT DISTINCT ON (p.bot_file_id) p.bot_file_id, p.start, p.text
       FROM bot_file_parts p
-      WHERE p.bot_file_id = ANY($1::text[]) AND p.words @@ to_tsquery('simple', $2::text)
-      ORDER BY p.bot_file_id, p.number`,
+      WHERE p.bot_file_id = ANY($1::text[]) AND p.words @@ to_tsquery('simple', $3::text)
+      ORDER BY p.bot_file_id, (p.words @@ to_tsquery('simple', $2::text)) DESC, p.number`,
+  };
+}
+
+/**
+ * The artifacts in reach (this chat's, and the person's own) whose title has the words, each anywhere in it, with Arabic
+ * marks left out of the title as they are of the words ("مرحبا" finds "مَرْحَبًا"). The words are letters and digits only.
+ */
+export function artifactTitleSql(scope: { userId: string | null; chatKind: string; chatRef: string }, words: string[], mode: 'all' | 'any'): { sql: string; values: unknown[] } {
+  return {
+    values: [scope.chatKind, scope.chatRef, scope.userId, words.map((word) => `%${word}%`)],
+    sql: `
+      SELECT id FROM artifacts
+      WHERE ((chat_kind = $1 AND chat_ref = $2) OR ($3::text IS NOT NULL AND owner_id = $3::text))
+        AND regexp_replace(title, '${ARABIC_MARKS_CLASS}', '', 'g') ILIKE ${mode === 'all' ? 'ALL' : 'ANY'} ($4::text[])`,
   };
 }
 

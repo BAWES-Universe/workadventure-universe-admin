@@ -159,7 +159,10 @@ export function checkStore(store: FileStore): FileStore {
     if (params.some((key) => SIGNED_LINK_PARAMS.includes(key))) {
       throw new BotFileError('signed_link', 422, 'A signed link expires. Send the bucket and the file id instead.');
     }
-    return { url: link.toString() };
+    // Written out, a link can be longer than it was sent (its letters percent-encoded), and its column takes 2,048
+    const url = link.toString();
+    if (url.length > 2048) throw new BotFileError('invalid_link', 422, 'A link may be up to 2,048 characters.');
+    return { url };
   }
   if (!BUCKET_NAME.test(store.bucket) || !UPLOADER_FILE_ID.test(store.fileId)) {
     throw new BotFileError('invalid_store', 422, 'Not an uploader file.');
@@ -387,8 +390,8 @@ export async function keepFileText(input: KeepTextInput, ctx: Context = defaultC
   if (hasText === (input.failed === true)) throw new BotFileError('text_or_failed', 422, 'Send the text, or that it failed, not both and not neither.');
   const from = input.from ?? 0;
   const last = input.last ?? true;
-  // The null character can't be kept as text in Postgres
-  const piece = hasText ? (input.text as string).replace(/\u0000/g, '') : '';
+  // The null character can't be kept as text in Postgres: a space in its place keeps where the next piece starts
+  const piece = hasText ? (input.text as string).replace(/\u0000/g, ' ') : '';
   if (piece.length > TEXT_PIECE_CHARS) throw new BotFileError('piece_too_large', 413, `Send the text in pieces of up to ${TEXT_PIECE_CHARS.toLocaleString('en')} characters.`);
   // Each piece is kept as text of its own, and half an emoji can't be
   if (!last && HIGH_HALF.test(piece)) throw new BotFileError('split_emoji', 422, 'A piece may not end in the middle of an emoji.');

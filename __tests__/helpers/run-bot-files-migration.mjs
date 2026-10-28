@@ -86,8 +86,15 @@ const words = {
   // How a made file was made (#1508 D1) is searched with its name and line
   byPrompt: await (async () => {
     await db.exec(`UPDATE bot_files SET made_with = 'generate_music', made_prompt = 'A slow oud ballad', length_seconds = 150 WHERE id = 'f3'`);
-    const expression = `to_tsvector('simple', regexp_replace(name || ' ' || coalesce(line, '') || ' ' || left(coalesce(made_prompt, ''), 20000), '[\\u0610-\\u061A\\u0640\\u064B-\\u065F\\u0670\\u06D6-\\u06ED]', '', 'g'))`;
+    const expression = `to_tsvector('simple', regexp_replace(regexp_replace(name || ' ' || coalesce(line, '') || ' ' || left(coalesce(made_prompt, ''), 20000), '[\\u0610-\\u061A\\u0640\\u064B-\\u065F\\u0670\\u06D6-\\u06ED]', '', 'g'), '[[:punct:]]', ' ', 'g'))`;
     return (await db.query(`SELECT id FROM bot_files WHERE ${expression} @@ plainto_tsquery('simple', 'oud')`)).rows.map((row) => row.id);
+  })(),
+  // Punctuation splits words, as in a search: an extension, and each number of a date
+  punctuation: await (async () => {
+    await db.exec(`INSERT INTO bot_file_parts (bot_file_id, number, start, text) VALUES ('f2', 9, 900, 'See plan.pdf, due 2024-05-01.')`);
+    const found = { pdf: await search('pdf'), month: await search('05') };
+    await db.exec(`DELETE FROM bot_file_parts WHERE bot_file_id = 'f2' AND number = 9`);
+    return found;
   })(),
   // A prompt kept up to "Text kept from a file" (2,000,000 characters of words) still saves: the index reads its start
   longPromptSaves: await (async () => {
