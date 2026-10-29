@@ -38,11 +38,11 @@ function Frame({ children, footer }: { children: React.ReactNode; footer: React.
   );
 }
 
-/** What anyone with the link sees: the artifact in the same locked box as the game, view only. */
-export function PublicArtifact({ view, universeUrl }: { view: PublicView; universeUrl: string }) {
+/** The artifact's header and its locked box, the same as the game's window: view only. */
+export function ArtifactBox({ view }: { view: PublicView }) {
   const kind = artifactKindLabel(view.kind);
   return (
-    <Frame footer={<MadeWithUniverse href={universeUrl} />}>
+    <>
       <header className="flex items-center gap-3" data-testid="publicArtifactHeader">
         <span aria-hidden="true" style={{ background: kind.color }} className="grid size-10 shrink-0 place-items-center rounded-lg text-[10px] font-bold tracking-wide text-white">
           {kind.badge}
@@ -73,6 +73,15 @@ export function PublicArtifact({ view, universeUrl }: { view: PublicView; univer
           />
         )}
       </div>
+    </>
+  );
+}
+
+/** What anyone with the link sees: the artifact in the same locked box as the game, view only. */
+export function PublicArtifact({ view, universeUrl }: { view: PublicView; universeUrl: string }) {
+  return (
+    <Frame footer={<MadeWithUniverse href={universeUrl} />}>
+      <ArtifactBox view={view} />
     </Frame>
   );
 }
