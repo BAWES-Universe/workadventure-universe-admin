@@ -43,7 +43,7 @@ export const ARTIFACT_EXAMPLES = [
   'Build me a simple calculator',
   'Make me a short presentation about the solar system',
   'Make me a packing list for a weekend trip',
-  'Draw me a simple logo for my project',
+  'Make me a quiz about world capitals',
 ] as const;
 
 // One pick per visit; the server's page shows the first, so both agree until the browser takes over
