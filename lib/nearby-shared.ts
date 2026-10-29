@@ -9,6 +9,8 @@ export type NearbySharedKind = (typeof NEARBY_SHARED_KINDS)[number];
 /** Items one request may add, and items one page of the list holds at most. */
 export const NEARBY_SHARED_MAX_PER_REQUEST = 50;
 export const NEARBY_SHARED_PAGE_MAX = 100;
+/** Others in the chat one item can name (game #1615): a nearby chat is a bubble of a few people, a meeting a few dozen. */
+export const NEARBY_SHARED_MAX_WITH = 50;
 
 export interface NearbySharedItemInput {
   itemKey: string;
@@ -20,7 +22,11 @@ export interface NearbySharedItemInput {
   size: number | null;
   isVideo: boolean;
   senderName: string;
+  /** The sender's chat account (game #1615), when the game knew it. */
+  senderChatId: string | null;
   mine: boolean;
+  /** The chat accounts of the others in the chat when it was shared (game #1615). */
+  withChatIds: string[];
   sentAt: Date;
 }
 
@@ -30,6 +36,9 @@ const FUTURE_SLACK_MS = 5 * 60 * 1000;
 // up to 16 characters of it, so "x.webmanifest" is one of its files too).
 const FILE_ID =
   /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(\.[a-z0-9]{1,16})?$/i;
+
+// A chat account as Matrix names it: "@name:server", with no control character (Postgres can't keep a NUL).
+const CHAT_ID = /^@[^\s:\u0000-\u001f\u007f]{1,200}:[^\s\u0000-\u001f\u007f]{1,200}$/;
 
 // Half of an emoji's pair with no other half next to it.
 const LONE_HALF = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
@@ -70,6 +79,34 @@ function httpLink(value: unknown): string | null | undefined {
   }
 }
 
+/** Whether a value is a chat account Orbit keeps, as the list asks for one by `with`. */
+export function isChatId(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= 255 && CHAT_ID.test(value);
+}
+
+/** A sender's name as an item keeps it, so the list can find it by `name`; null when there is none. */
+export function senderNameOf(value: unknown): string | null {
+  return clippedText(value, 100);
+}
+
+function chatId(value: unknown): string | null | undefined {
+  if (isBlank(value)) return null;
+  return isChatId(value) ? value : undefined;
+}
+
+/** The others' chat accounts, once each and never the sender's; undefined when the list isn't one. */
+function chatIds(value: unknown, sender: string | null): string[] | undefined {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.length > NEARBY_SHARED_MAX_WITH) return undefined;
+  const ids = new Set<string>();
+  for (const entry of value) {
+    const id = chatId(entry);
+    if (id === undefined) return undefined;
+    if (id !== null && id !== sender) ids.add(id);
+  }
+  return [...ids];
+}
+
 /** One item from the game, checked: null when anything about it is wrong. */
 export function parseNearbySharedItem(value: unknown, now: Date = new Date()): NearbySharedItemInput | null {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
@@ -78,11 +115,23 @@ export function parseNearbySharedItem(value: unknown, now: Date = new Date()): N
   const itemKey = clippedText(item.itemKey, 300);
   const kind = NEARBY_SHARED_KINDS.find((known) => known === item.kind);
   const name = clippedText(item.name, 300);
-  const senderName = clippedText(item.senderName, 100);
+  const senderName = senderNameOf(item.senderName);
   const link = httpLink(item.link);
   const fileId = optionalText(item.fileId, 200);
   const mimeType = optionalText(item.mimeType, 150);
-  if (!itemKey || !kind || !name || !senderName || link === undefined || fileId === undefined || mimeType === undefined) {
+  const senderChatId = chatId(item.senderChatId);
+  const withChatIds = chatIds(item.withChatIds, senderChatId ?? null);
+  if (
+    !itemKey ||
+    !kind ||
+    !name ||
+    !senderName ||
+    link === undefined ||
+    fileId === undefined ||
+    mimeType === undefined ||
+    senderChatId === undefined ||
+    withChatIds === undefined
+  ) {
     return null;
   }
   if (fileId !== null && !FILE_ID.test(fileId)) return null;
@@ -113,7 +162,9 @@ export function parseNearbySharedItem(value: unknown, now: Date = new Date()): N
     size,
     isVideo: kind === 'media' && item.isVideo === true,
     senderName,
+    senderChatId,
     mine: item.mine === true,
+    withChatIds,
     sentAt,
   };
 }

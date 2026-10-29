@@ -97,8 +97,12 @@ model NearbySharedItem {
   size       Int?
   isVideo    Boolean  @default(false) @map("is_video")
   senderName String   @map("sender_name") @db.VarChar(100)
+  // The sender's chat account, so the item shows in their profile (game #1615); null for items kept before it was sent
+  senderChatId String? @map("sender_chat_id") @db.VarChar(255)
   // Sent by this person
   mine       Boolean  @default(false)
+  // The chat accounts of the others in the chat when it was shared, so what this person sent shows in their profiles
+  withChatIds String[] @default([]) @map("with_chat_ids")
   sentAt     DateTime @map("sent_at")
   createdAt  DateTime @default(now()) @map("created_at")
 
@@ -106,6 +110,8 @@ model NearbySharedItem {
 
   @@unique([userId, itemKey])
   @@index([userId, sentAt])
+  @@index([userId, senderChatId, sentAt])
+  @@index([withChatIds], type: Gin)
   @@map("nearby_shared_items")
 }
 
