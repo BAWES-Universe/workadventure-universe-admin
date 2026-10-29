@@ -66,6 +66,7 @@ export const fakeFiles: ArtifactFiles = {
 function matches(row: Row, where: Row): boolean {
   return Object.entries(where).every(([key, expected]) => {
     if (key === 'OR') return (expected as Row[]).some((cond) => matches(row, cond));
+    if (key === 'AND') return (expected as Row[]).every((cond) => matches(row, cond));
     if (expected !== null && typeof expected === 'object' && !(expected instanceof Date)) {
       if ('lte' in expected) return row[key] !== null && row[key] <= expected.lte;
       if ('gt' in expected) return row[key] !== null && row[key] > expected.gt;
@@ -111,15 +112,20 @@ const client: Row = {
       const row = db.artifacts.find((a) => a.id === where.id);
       return row ? withOwner(row, include) : null;
     },
-    findMany: async ({ where = {}, include, orderBy, take, select }: Row) => {
+    findMany: async ({ where = {}, include, orderBy, skip, take, select }: Row) => {
       let rows = db.artifacts.filter((a) => matches(a, where));
-      if (orderBy?.updatedAt === 'desc') rows = [...rows].sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime());
+      const order: Row[] = Array.isArray(orderBy) ? orderBy : orderBy ? [orderBy] : [];
+      if (order.some((one) => one.updatedAt === 'desc')) {
+        rows = [...rows].sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime() || (order.some((one) => one.id === 'desc') ? String(b.id).localeCompare(String(a.id)) : 0));
+      }
+      if (skip) rows = rows.slice(skip);
       if (take) rows = rows.slice(0, take);
       return rows.map((row) => {
         if (select) return { id: row.id, versions: db.versions.filter((v) => v.artifactId === row.id).map((v) => ({ fileKey: v.fileKey, media: v.media })) };
         return withOwner(row, include);
       });
     },
+    count: async ({ where = {} }: Row) => db.artifacts.filter((a) => matches(a, where)).length,
     updateMany: async ({ where, data }: Row) => {
       const rows = db.artifacts.filter((a) => matches(a, where));
       rows.forEach((row) => Object.assign(row, data, { updatedAt: new Date() }));

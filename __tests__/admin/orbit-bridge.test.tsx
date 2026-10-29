@@ -19,7 +19,7 @@ jest.mock('@/lib/client-auth', () => ({
   authenticatedFetch: (url: string, options?: RequestInit) => mockFetch(url, options),
 }));
 
-import OrbitBridge, { inviteInGame, messageInGame, useGameCapability } from '@/app/admin/components/orbit-bridge';
+import OrbitBridge, { inviteInGame, messageInGame, openArtifactInGame, useGameCapability } from '@/app/admin/components/orbit-bridge';
 import { ProfileLinks } from '@/app/admin/components/profile-card';
 
 const revision = 'rev-aaaaaaaaaaaaaaaa';
@@ -162,6 +162,34 @@ describe('OrbitBridge', () => {
       expect(getByTestId('can-invite').textContent).toBe('false');
       fromGame({ type: 'orbit-bridge-init', version: 1, roomRevision: revision, capabilities: ['invite'] });
       expect(getByTestId('can-invite').textContent).toBe('true');
+    });
+  });
+
+  describe('opening one of your artifacts in the game (#1474)', () => {
+    const artifact = { id: '11111111-1111-4111-8111-111111111111', title: 'HF Radar', kind: 'page', version: 3, makerName: 'HuggingFace' };
+
+    it('sends nothing to a game that did not say it can open artifacts', () => {
+      render(<OrbitBridge onRefresh={jest.fn()} />);
+      expect(openArtifactInGame(artifact)).toBe(false);
+      init();
+      expect(openArtifactInGame(artifact)).toBe(false);
+      expect(posted.filter((message) => (message as { type: string }).type === 'orbit-open-artifact')).toHaveLength(0);
+    });
+
+    it("asks a game that can, with the visit's revision", () => {
+      render(<OrbitBridge onRefresh={jest.fn()} />);
+      fromGame({ type: 'orbit-bridge-init', version: 1, roomRevision: revision, capabilities: ['open-artifact'] });
+      expect(openArtifactInGame(artifact)).toBe(true);
+      expect(posted).toContainEqual({
+        type: 'orbit-open-artifact',
+        version: 1,
+        roomRevision: revision,
+        id: artifact.id,
+        title: 'HF Radar',
+        kind: 'page',
+        artifactVersion: 3,
+        maker: 'HuggingFace',
+      });
     });
   });
 
