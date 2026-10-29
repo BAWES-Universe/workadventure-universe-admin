@@ -9,6 +9,6 @@ export const runtime = 'nodejs';
  * the Artifacts group on a chat's profile or details, and its full list.
  *
  * Auth: ADMIN_API_TOKEN (the game's server). Body: { viewer: { person, inChat, chat }, offset? }
- * Response: { artifacts, total, next } — `next` is the offset of the following page, null at the end.
+ * Response: { artifacts: [{ ...artifact, yours }], total, next }
  */
 export const POST = artifactRoute('POST /api/artifacts/chat', 'game', chatListSchema, (body) => listChatArtifacts(body.viewer, body.offset ?? 0));

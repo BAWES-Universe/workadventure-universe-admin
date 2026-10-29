@@ -94,11 +94,16 @@ describe('artifact lists for people (#1474)', () => {
       await makeOne(person('friend'), NEARBY, "Friend's");
       await makeOne(guest, NEARBY, "Guest's");
       expect((await call(share, { viewer: { person: person('owner'), inChat: false }, openScope: 'link' }, ADMIN_TOKEN, shared.id, 'PUT')).status).toBe(200);
-      expect(titles(await listFor(person('friend'), NEARBY, true)).sort()).toEqual(["Friend's", "Guest's", "Owner's", 'Shared']);
+      const inBubble = await listFor(person('friend'), NEARBY, true);
+      expect(titles(inBubble).sort()).toEqual(["Friend's", "Guest's", "Owner's", 'Shared']);
+      // Each row says whether it is theirs, so the game names the owner of the others
+      const yours = inBubble.body.artifacts.filter((a: { yours: boolean }) => a.yours).map((a: { title: string }) => a.title);
+      expect(yours).toEqual(["Friend's"]);
       expect(titles(await listFor(guest, NEARBY, true))).toHaveLength(4);
       // Out of the bubble: their own, and what anyone may open by link
       expect(titles(await listFor(person('friend'), NEARBY, false)).sort()).toEqual(["Friend's", 'Shared']);
       expect(titles(await listFor(guest, NEARBY, false))).toEqual(['Shared']);
+      expect((await listFor(guest, NEARBY, true)).body.artifacts.some((a: { yours: boolean }) => a.yours)).toBe(false);
     });
 
     it('never lists an artifact from another chat, not even the asking person\'s own', async () => {
