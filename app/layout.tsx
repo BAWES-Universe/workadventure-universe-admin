@@ -22,8 +22,6 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Universe",
   description: "Welcome to our continuously evolving universe blending work, play, and learning.",
-  // Set here rather than as app/favicon.ico, which Next adds to every page, so a page can show its own (the shared artifact page)
-  icons: { icon: "/favicon.ico" },
 };
 
 export default function RootLayout({
