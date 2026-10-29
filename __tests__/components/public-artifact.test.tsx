@@ -26,6 +26,8 @@ describe('the public artifact page', () => {
     // View only: nothing to ask, change, restore or share
     expect(html).not.toMatch(/<button/i);
     expect(html).not.toContain('Ask');
+    // Marks the page so the body behind the frame is ink too (globals.css): no light strip on phones
+    expect(html).toContain('data-shared-page');
   });
 
   it('keeps the header and the locked box for the owner in Orbit', () => {

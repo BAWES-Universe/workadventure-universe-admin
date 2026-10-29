@@ -40,7 +40,7 @@ function MadeWithUniverse({ href, floating = false }: { href: string; floating?:
 
 function Frame({ children, footer }: { children: React.ReactNode; footer: React.ReactNode }) {
   return (
-    <main className="flex min-h-dvh flex-col gap-4 bg-[#0A0814] px-4 py-5 text-[#f3f1fa] [font-family:var(--font-inter),system-ui,sans-serif] pb-[max(1.25rem,env(safe-area-inset-bottom))] pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))]">
+    <main data-shared-page className="flex min-h-dvh flex-col gap-4 bg-[#0A0814] px-4 py-5 text-[#f3f1fa] [font-family:var(--font-inter),system-ui,sans-serif] pb-[max(1.25rem,env(safe-area-inset-bottom))] pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))]">
       {children}
       <footer className="flex justify-end">{footer}</footer>
     </main>
@@ -91,7 +91,7 @@ export function ArtifactBox({ view }: { view: PublicView }) {
  */
 export function PublicArtifact({ view, universeUrl }: { view: PublicView; universeUrl: string }) {
   return (
-    <main className="fixed inset-0 bg-[#0A0814]" data-testid="publicArtifact">
+    <main data-shared-page className="fixed inset-0 bg-[#0A0814]" data-testid="publicArtifact">
       <ArtifactFrame view={view} className="block size-full border-0" />
       <MadeWithUniverse href={universeUrl} floating />
     </main>
