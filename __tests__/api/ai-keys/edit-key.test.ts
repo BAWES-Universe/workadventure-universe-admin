@@ -106,12 +106,55 @@ describe('editSavedKey', () => {
 
   it('saves what the provider says about the new model, keeping the key’s kind and region', async () => {
     db.botsAiProvider.findFirst.mockResolvedValue({ ...openai, endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1', settings: { kind: 'qwen', region: 'china', caps: { tools: true } } });
-    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4o-mini', 'qwen-vl'], facts: { 'qwen-vl': { vision: true, tools: false, context: 8192 } } });
+    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4o-mini', 'qwen-vl'], facts: { 'qwen-vl': { vision: true, tools: true, context: 8192 } } });
     await editSavedKey('maker', 'key-2', { model: 'qwen-vl' });
     expect(db.botsAiProvider.updateMany.mock.calls[0][0].data).toMatchObject({
       supportsVision: true,
-      settings: { kind: 'qwen', region: 'china', caps: { vision: true, tools: false, context: 8192 } },
+      settings: { kind: 'qwen', region: 'china', caps: { vision: true, tools: true, context: 8192 } },
     });
+  });
+
+  it('asks a model just picked with a tool, as a bot asks, and the saved one on a new address as before (#706)', async () => {
+    db.botsAiProvider.findFirst.mockResolvedValue(openai);
+    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4o-mini', 'gpt-4.1'], facts: {} });
+    await editSavedKey('maker', 'key-2', { model: 'gpt-4.1' });
+    expect((probeChat as jest.Mock).mock.calls[0][0]).toMatchObject({ model: 'gpt-4.1', withTool: true });
+    (probeChat as jest.Mock).mockClear();
+    db.botsAiProvider.findFirst.mockResolvedValue(lmStudio);
+    await editSavedKey('maker', 'key-1', { address: 'https://new.trycloudflare.com' });
+    expect((probeChat as jest.Mock).mock.calls[0][0]).not.toHaveProperty('withTool');
+  });
+
+  it('refuses a picked model the provider says calls no tools, without asking it (#706)', async () => {
+    db.botsAiProvider.findFirst.mockResolvedValue(openai);
+    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4o-mini', 'tiny-chat'], facts: { 'tiny-chat': { tools: false } } });
+    expect(await editSavedKey('maker', 'key-2', { model: 'tiny-chat' })).toEqual({ ok: false, status: 400, message: 'tiny-chat can’t use tools, which bots need.' });
+    expect(probeChat).not.toHaveBeenCalled();
+    expect(db.botsAiProvider.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('refuses a picked model that answers only without the tool (#706)', async () => {
+    db.botsAiProvider.findFirst.mockResolvedValue(openai);
+    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4o-mini', 'llama-no-tools'], facts: {} });
+    (probeChat as jest.Mock).mockResolvedValueOnce({ ok: false, reason: 'request', message: 'does not support tools (400).' }).mockResolvedValueOnce({ ok: true });
+    expect(await editSavedKey('maker', 'key-2', { model: 'llama-no-tools' })).toEqual({ ok: false, status: 400, message: 'llama-no-tools can’t use tools, which bots need.' });
+    expect((probeChat as jest.Mock).mock.calls[1][0]).not.toHaveProperty('withTool');
+    expect(db.botsAiProvider.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('answers with the plain request failure when it fails for its own reason after a tool refusal', async () => {
+    db.botsAiProvider.findFirst.mockResolvedValue(openai);
+    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4o-mini', 'o4-mini'], facts: {} });
+    (probeChat as jest.Mock).mockResolvedValueOnce({ ok: false, reason: 'request', message: 'max_tokens is too small (400).' }).mockResolvedValueOnce({ ok: false, reason: 'rejected', message: 'The key was refused (401).' });
+    expect(await editSavedKey('maker', 'key-2', { model: 'o4-mini' })).toEqual({ ok: false, status: 400, message: 'The key was refused (401).' });
+    expect(db.botsAiProvider.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('still saves a picked listed model that refuses only the tiny request, with the tool and without it', async () => {
+    db.botsAiProvider.findFirst.mockResolvedValue(openai);
+    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4o-mini', 'o4-mini'], facts: {} });
+    (probeChat as jest.Mock).mockResolvedValue({ ok: false, reason: 'request', message: 'max_tokens is too small (400).' });
+    expect(await editSavedKey('maker', 'key-2', { model: 'o4-mini' })).toMatchObject({ ok: true, model: 'o4-mini' });
   });
 
   it('drops the old facts when the provider says nothing about the new model', async () => {
@@ -396,6 +439,19 @@ describe('POST /api/me/ai-keys/:id/models', () => {
     (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4.1', 'gpt-5-mini'], facts: {} });
     await models('key-9', {});
     expect(db.botsAiProvider.updateMany).toHaveBeenCalledWith({ where: { providerId: 'key-9', ownerId: { not: null }, endpoint: older.endpoint }, data: { settings: { kind: 'openai', modelFacts: {}, modelCount: 2 } } });
+  });
+
+  it('lists only the models that can call tools, at the saved address and a new one (#706)', async () => {
+    db.botsAiProvider.findFirst.mockResolvedValue(openai);
+    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['gpt-4.1', 'tiny-chat'], facts: { 'gpt-4.1': { tools: true }, 'tiny-chat': { tools: false } } });
+    expect(await (await models('key-2', {})).json()).toEqual({ ok: true, models: ['gpt-4.1'], facts: { 'gpt-4.1': { tools: true } } });
+    db.botsAiProvider.findFirst.mockResolvedValue(lmStudio);
+    expect(await (await models('key-1', { address: 'https://new.trycloudflare.com' })).json()).toEqual({ ok: true, models: ['gpt-4.1'], facts: { 'gpt-4.1': { tools: true } } });
+  });
+
+  it('says why when none of the models can call tools (#706)', async () => {
+    (probeModels as jest.Mock).mockResolvedValue({ ok: true, models: ['tiny-chat'], facts: { 'tiny-chat': { tools: false } } });
+    expect(await (await models('key-1', { address: 'https://new.trycloudflare.com' })).json()).toEqual({ ok: false, message: 'None of LM Studio’s models here can use tools, which bots need.' });
   });
 
   it('tries a new address when one is given', async () => {

@@ -719,7 +719,7 @@ describe('Models that cannot use bot tools', () => {
     await screen.findByText('My DeepSeek', { selector: 'h2' });
     const warnings = screen.getAllByTestId('ai-key-no-tools');
     expect(warnings).toHaveLength(1);
-    expect(warnings[0].textContent).toBe('This model has no Tools. Bots on it can still chat.');
+    expect(warnings[0].textContent).toBe('This model can’t use tools, so bots on it don’t reply.');
   });
 
   it('says nothing about the check model on a key with a list of models: each bot has its own (#575)', async () => {
@@ -741,22 +741,5 @@ describe('Models that cannot use bot tools', () => {
     render(<AiKeysPage />);
     await screen.findByText('My LM Studio', { selector: 'h2' });
     expect(screen.queryByTestId('ai-key-no-tools')).toBeNull();
-  });
-
-  it('warns when the model picked for a new address is one the provider said cannot use tools', async () => {
-    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
-      if (url.endsWith('/models')) return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: true, models: ['qwen3-8b', 'tiny-chat'], facts: { 'tiny-chat': { tools: false } } }) });
-      if (init?.method === 'PATCH') return Promise.resolve({ ok: false, status: 400, json: () => Promise.resolve({ error: 'That address doesn’t have qwen3-8b. Pick a model it has.', code: 'model-missing' }) });
-      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ keys: [lmStudio] }) });
-    });
-    render(<AiKeysPage />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Change address' }));
-    const dialog = await screen.findByRole('dialog');
-    fireEvent.change(within(dialog).getByLabelText('New address'), { target: { value: 'https://new.trycloudflare.com' } });
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
-    fireEvent.click(await within(dialog).findByRole('radio', { name: /qwen3-8b/ }));
-    expect(within(dialog).queryByTestId('no-tools-warning')).toBeNull();
-    fireEvent.click(within(dialog).getByRole('radio', { name: /tiny-chat/ }));
-    expect(within(dialog).getByTestId('no-tools-warning').textContent).toMatch(/has no Tools/);
   });
 });

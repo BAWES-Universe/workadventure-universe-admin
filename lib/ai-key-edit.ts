@@ -3,7 +3,7 @@ import { decryptApiKey } from '@/lib/encryption';
 import { kindInfo } from '@/lib/ai-key-kinds';
 import { cleanModelId, keyTarget, modelCaps, probeChat, probeModels, type ModelFactsById } from '@/lib/ai-key-models';
 import { markWorking } from '@/lib/ai-key-health';
-import { forgetKeyModels, keyModels, lendModels, slimFacts } from '@/lib/ai-key-model-list';
+import { canCallTools, forgetKeyModels, keyModels, lendModels, noToolsWords, slimFacts, toolModels } from '@/lib/ai-key-model-list';
 
 /**
  * Changing where a saved key points, or which model it uses (#374). The row stays the same row, so its lends and the
@@ -59,7 +59,11 @@ function savedApiKey(key: OwnKey): string | undefined {
   return key.apiKeyEncrypted ? decryptApiKey(key.apiKeyEncrypted) : undefined;
 }
 
-/** The models a saved key's provider lists, with the saved key, at the saved address or a new one the person is trying. */
+/**
+ * The models a saved key's provider lists, with the saved key, at the saved address or a new one the person is trying. Only
+ * the ones that can call tools are offered: every bot reply offers them, so a model the provider says calls none never
+ * replies (#706).
+ */
 export async function listModelsForSavedKey(
   ownerId: string,
   id: string,
@@ -77,10 +81,16 @@ export async function listModelsForSavedKey(
     const kept = await keyModels(key, { fresh: true });
     if (!kept.ok) return { ok: false, status: 400, message: kept.message };
     if (!kept.listed) return { ok: false, status: 400, message: `${info.label} doesn’t share a list of its models. Type the model name.`, noList: true };
-    return { ok: true, models: kept.models, facts: kept.facts };
+    return withTools(kept, info.label);
   }
   const result = await probeModels({ kind: info.kind, address: addressToTry(input.address, key.endpoint), apiKey: savedApiKey(key) });
-  return result.ok ? { ok: true, models: result.models, facts: result.facts } : { ok: false, status: 400, message: result.message, ...(result.noList ? { noList: true as const } : {}) };
+  return result.ok ? withTools(result, info.label) : { ok: false, status: 400, message: result.message, ...(result.noList ? { noList: true as const } : {}) };
+}
+
+function withTools(list: { models: string[]; facts: ModelFactsById }, label: string): { ok: true; models: string[]; facts: ModelFactsById } | { ok: false; status: 400; message: string } {
+  const kept = toolModels(list.models, list.facts);
+  if (kept.models.length === 0 && list.models.length > 0) return { ok: false, status: 400, message: `None of ${label}’s models here can use tools, which bots need.` };
+  return { ok: true, ...kept };
 }
 
 export async function editSavedKey(ownerId: string, id: string, input: KeyEditInput): Promise<KeyEditResult> {
@@ -110,7 +120,18 @@ export async function editSavedKey(ownerId: string, id: string, input: KeyEditIn
   if (probed.ok && typedModel !== null && !models.models.includes(model)) {
     return { ok: false, status: 400, message: 'That model isn’t on the list. Load models again and pick one.' };
   }
-  const chat = await probeChat({ kind: info.kind, address, apiKey, model, ...(probed.ok ? {} : { noList: true }) });
+  // A model just picked becomes the model of bots on the key, and bots always offer tools (#706): one the provider says
+  // calls none is refused, and it is asked with a tool, as a bot asks
+  const picked = typedModel !== null;
+  if (picked && !canCallTools(models.facts[model])) return { ok: false, status: 400, message: noToolsWords(model) };
+  const chat = await probeChat({ kind: info.kind, address, apiKey, model, ...(probed.ok ? {} : { noList: true }), ...(picked ? { withTool: true } : {}) });
+  // Refused with the tool: the same tiny request without it tells a model that calls no tools from one that wants a bigger cap
+  if (picked && !chat.ok && chat.reason === 'request') {
+    const plain = await probeChat({ kind: info.kind, address, apiKey, model, ...(probed.ok ? {} : { noList: true }) });
+    if (plain.ok) return { ok: false, status: 400, message: noToolsWords(model) };
+    // The plain request fails for a reason of its own (a bad key, a model that is gone): that is the answer, not a refused tiny request
+    if (plain.reason !== 'request') return { ok: false, status: 400, message: plain.message };
+  }
   if (!chat.ok) {
     // The new address can't give the saved model (not on its list, or it says it has none): the person picks one it has
     // in the same step, instead of being stuck with a model that was only on the old address.

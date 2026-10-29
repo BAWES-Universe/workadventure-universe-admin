@@ -125,6 +125,18 @@ describe('POST /api/me/ai-keys/models', () => {
     expect(await response.json()).toEqual({ ok: false, message: 'That address points to a private network, so Universe can’t reach it.' });
   });
 
+  it('lists only the models that can call tools, with their facts (#706)', async () => {
+    models.mockResolvedValue({ ok: true, models: ['qwen3-8b', 'tiny-chat', 'gemma-3-12b'], facts: { 'qwen3-8b': { tools: true }, 'tiny-chat': { tools: false, vision: true } } });
+    const response = await post({ kind: 'lmstudio', address: 'https://lm.example.com' }, loadModelsRoute);
+    expect(await response.json()).toEqual({ ok: true, models: ['qwen3-8b', 'gemma-3-12b'], facts: { 'qwen3-8b': { tools: true } } });
+  });
+
+  it('says why when none of the models can call tools (#706)', async () => {
+    models.mockResolvedValue({ ok: true, models: ['tiny-chat'], facts: { 'tiny-chat': { tools: false } } });
+    const response = await post({ kind: 'lmstudio', address: 'https://lm.example.com' }, loadModelsRoute);
+    expect(await response.json()).toEqual({ ok: false, message: 'None of LM Studio’s models can use tools, which bots need.' });
+  });
+
   it('refuses a body that is not an object', async () => {
     expect((await post('[1]', loadModelsRoute)).status).toBe(400);
     expect((await post('nope', loadModelsRoute)).status).toBe(400);
@@ -143,13 +155,13 @@ describe('POST /api/me/ai-keys with no model picked (#575)', () => {
     expect(provider.create.mock.calls[0][0].data.settings.modelCount).toBe(3);
   });
 
-  it('asks a model picked from the list with a tool, as a bot asks, and a typed model as before', async () => {
+  it('asks a model picked from the list with a tool, as a bot asks, and a typed model too (#706)', async () => {
     models.mockResolvedValue({ ok: true, models: ['deepseek-chat', 'deepseek-v4-flash'], facts: {} });
     await post({ kind: 'deepseek', apiKey: 'sk-abcdef4f2a' });
     expect(chat.mock.calls[0][0]).toMatchObject({ model: 'deepseek-v4-flash', withTool: true });
     chat.mockClear();
     await post({ kind: 'deepseek', apiKey: 'sk-abcdef4f2a', model: 'deepseek-chat' });
-    expect(chat.mock.calls[0][0]).not.toHaveProperty('withTool');
+    expect(chat.mock.calls[0][0]).toMatchObject({ model: 'deepseek-chat', withTool: true });
   });
 
   it('keeps the first listed model that answers when the provider suggests none', async () => {
@@ -295,6 +307,39 @@ describe('POST /api/me/ai-keys with no model picked (#575)', () => {
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: 'LM Studio answered, but llama-no-tools can’t use tools, which bots need.' });
     expect(provider.create).not.toHaveBeenCalled();
+  });
+
+  it('never saves a typed model the provider says calls no tools, and never asks it (#706)', async () => {
+    models.mockResolvedValue({ ok: true, models: ['qwen3-8b', 'tiny-chat'], facts: { 'tiny-chat': { tools: false } } });
+    const response = await post({ kind: 'lmstudio', address: 'https://lm.example.com', model: 'tiny-chat' });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: 'tiny-chat can’t use tools, which bots need.' });
+    expect(chat).not.toHaveBeenCalled();
+    expect(provider.create).not.toHaveBeenCalled();
+  });
+
+  it('saves no key whose provider says none of its models call tools (#706)', async () => {
+    models.mockResolvedValue({ ok: true, models: ['tiny-chat', 'tiny-chat-2'], facts: { 'tiny-chat': { tools: false }, 'tiny-chat-2': { tools: false } } });
+    const response = await post({ kind: 'lmstudio', address: 'https://lm.example.com' });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: 'None of LM Studio’s models can use tools, which bots need.' });
+    expect(chat).not.toHaveBeenCalled();
+  });
+
+  it('never saves a typed model that answers without the tool but refuses it, and says why (#706)', async () => {
+    models.mockResolvedValue({ ok: true, models: ['llama-no-tools', 'qwen-tools'], facts: {} });
+    chat.mockResolvedValueOnce({ ok: false, reason: 'request', message: 'llama-no-tools does not support tools (400).' }).mockResolvedValueOnce({ ok: true });
+    const response = await post({ kind: 'lmstudio', address: 'https://lm.example.com', model: 'llama-no-tools' });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: 'LM Studio answered, but llama-no-tools can’t use tools, which bots need.' });
+    expect(provider.create).not.toHaveBeenCalled();
+  });
+
+  it('still keeps a typed model on the list that refuses only the tiny request, with the tool and without it', async () => {
+    models.mockResolvedValue({ ok: true, models: ['o-reasoner', 'qwen-tools'], facts: {} });
+    chat.mockResolvedValue({ ok: false, reason: 'request', message: 'max_tokens is too small (400).' });
+    expect((await post({ kind: 'lmstudio', address: 'https://lm.example.com', model: 'o-reasoner' })).status).toBe(201);
+    expect(provider.create.mock.calls[0][0].data.model).toBe('o-reasoner');
   });
 
   it('keeps no model that only refused the tiny request once another answered without the tool, and says it can’t use tools', async () => {
@@ -491,9 +536,9 @@ describe('POST /api/me/ai-keys: the key must really answer, and regions', () => 
 
 describe('POST /api/me/ai-keys: what the provider said about the model is saved on the key', () => {
   it('saves the facts of the model picked, and the provider’s word on images', async () => {
-    models.mockResolvedValue({ ok: true, models: ['qwen3-8b', 'gemma-3-12b'], facts: { 'qwen3-8b': { tools: false, vision: true, context: 32768 }, 'gemma-3-12b': { tools: true } } });
+    models.mockResolvedValue({ ok: true, models: ['qwen3-8b', 'gemma-3-12b'], facts: { 'qwen3-8b': { tools: true, vision: true, context: 32768 }, 'gemma-3-12b': { tools: false } } });
     await post({ kind: 'lmstudio', address: 'https://lm.example.com', model: 'qwen3-8b' });
-    expect(provider.create.mock.calls[0][0].data).toMatchObject({ supportsVision: true, settings: { kind: 'lmstudio', caps: { tools: false, vision: true, context: 32768 } } });
+    expect(provider.create.mock.calls[0][0].data).toMatchObject({ supportsVision: true, settings: { kind: 'lmstudio', caps: { tools: true, vision: true, context: 32768 } } });
   });
 
   it('says false on images when the provider said the model takes none, and null when it said nothing', async () => {
@@ -549,6 +594,16 @@ describe('POST /api/me/ai-keys: Claude (#975)', () => {
       expect((await post({ kind: 'groq', apiKey: 'gsk-abcdef4f2a', model: 'nope' })).status).toBe(400);
       chat.mockResolvedValue({ ok: false, reason: 'rejected', message: 'Groq didn’t accept this key.' });
       expect((await post({ kind: 'groq', apiKey: 'gsk-abcdef4f2a', model: 'llama-3.3-70b' })).status).toBe(400);
+      expect(provider.create).not.toHaveBeenCalled();
+    });
+
+    it('asks the typed model with a tool, and saves nothing when it answers only without it (#706)', async () => {
+      chat.mockResolvedValueOnce({ ok: false, reason: 'request', message: 'Groq says tools are not supported for this model (400).' }).mockResolvedValueOnce({ ok: true });
+      const response = await post({ kind: 'groq', apiKey: 'gsk-abcdef4f2a', model: 'plain-model' });
+      expect(chat.mock.calls[0][0]).toMatchObject({ model: 'plain-model', withTool: true, noList: true });
+      expect(chat.mock.calls[1][0]).not.toHaveProperty('withTool');
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: 'Groq answered, but plain-model can’t use tools, which bots need.' });
       expect(provider.create).not.toHaveBeenCalled();
     });
 

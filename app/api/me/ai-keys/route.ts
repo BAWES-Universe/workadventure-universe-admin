@@ -5,6 +5,7 @@ import { getSessionUser } from '@/lib/auth-session';
 import { listAiKeys } from '@/lib/ai-keys';
 import { MAX_AI_KEYS } from '@/lib/ai-key-kinds';
 import { KEY_CHARACTERS, KEY_LOOKS_WRONG, allowKeyAttempt, keyTarget, loadModels, modelCaps, probeChat, type ProbeFailure } from '@/lib/ai-key-models';
+import { canCallTools, noToolsWords, toolModels } from '@/lib/ai-key-model-list';
 import { encryptApiKey } from '@/lib/encryption';
 import { meOriginAllowed, meRespond } from '@/lib/me-route';
 
@@ -89,6 +90,11 @@ export async function POST(request: NextRequest) {
     if (checked.ok && typedModel && !checked.models.includes(typedModel)) {
       return respond(request, { error: 'That model isn’t on the list. Load models again and pick one.' }, 400);
     }
+    // Every bot reply offers tools, so a model the provider says calls none would never reply: it is never kept (#706)
+    if (checked.ok && typedModel && !canCallTools(checked.facts[typedModel])) return respond(request, { error: noToolsWords(typedModel) }, 400);
+    if (checked.ok && !typedModel && toolModels(checked.models, checked.facts).models.length === 0) {
+      return respond(request, { error: `None of ${info.label}’s models can use tools, which bots need.` }, 400);
+    }
     const candidates = !checked.ok
       ? [typedModel]
       : typedModel
@@ -98,13 +104,13 @@ export async function POST(request: NextRequest) {
     let refused: string | null = null;
     let refusedForCredit = false;
     let sawBusy = false;
-    // A listed model that refuses only this tiny request (a reasoning model that wants a bigger cap, say) is not a wrong key
-    // or model, the same as the health check lets it pass. A typed model has no list behind it, so only a real reply keeps it.
-    // A model picked from the list is kept only when none of the others gives a real reply: a model that doesn't chat at all
-    // (an embedding model whose name says nothing) can answer the same way. On a key out of credit for another model, or
+    // A model that refuses only this tiny request (a reasoning model that wants a bigger cap, say) is not a wrong key or
+    // model, the same as the health check lets it pass. A model with no list behind it (the provider has none) is kept only
+    // on a real reply. A model picked from the list is kept only when none of the others gives a real reply: a model that
+    // doesn't chat at all (an embedding model whose name says nothing) can answer the same way. On a key out of credit for another model, or
     // when another said busy, it proves nothing, so the person is told about the credit or to try again instead.
     let refusedRequest: string | null = null;
-    // A listed model that answers without the tool but refuses it takes no tools, so bots could never reply with it
+    // A model that answers without the tool but refuses it takes no tools, so bots could never reply with it
     let noTools: string | null = null;
     const started = Date.now();
     for (const [index, candidate] of candidates.entries()) {
@@ -112,10 +118,10 @@ export async function POST(request: NextRequest) {
       // what is left of the time budget, so the page always gets an answer
       const left = CHECK_BUDGET_MS - (Date.now() - started);
       if (index > 0 && left <= 0) break;
-      // A model picked from the list becomes the model of every bot with none of its own, and bots always offer tools, so it
-      // is asked with a tool, as a bot asks (#575); a typed model is the person's own pick, asked as before
+      // The model becomes the model of every bot with none of its own, and bots always offer tools, so it is asked with a
+      // tool, as a bot asks (#575); a typed model too, since a bot on it would offer them the same (#706)
       const target = { kind: info.kind, address: input.address, region, apiKey, model: candidate, ...(noList ? { noList } : {}) };
-      const chat = await probeChat({ ...target, ...(typedModel ? {} : { withTool: true }), ...(index > 0 ? { timeoutMs: left } : {}) });
+      const chat = await probeChat({ ...target, withTool: true, ...(index > 0 ? { timeoutMs: left } : {}) });
       if (chat.ok) {
         model = candidate;
         break;
@@ -124,11 +130,7 @@ export async function POST(request: NextRequest) {
       // the key, so the search just ends there, keeping a model that only refused the tiny request and the reason given before
       if (index > 0 && chat.reason === 'unreachable' && Date.now() - started >= CHECK_BUDGET_MS) break;
       let failure = chat;
-      if (!noList && chat.reason === 'request') {
-        if (typedModel) {
-          model = candidate;
-          break;
-        }
+      if (chat.reason === 'request') {
         // The refusal can be about the tool (Ollama says a model "does not support tools"): the same tiny request without it
         // tells the two apart, and only a model that refuses both ways is the one that wants a bigger cap
         const plainLeft = CHECK_BUDGET_MS - (Date.now() - started);
@@ -140,8 +142,8 @@ export async function POST(request: NextRequest) {
         // No time left to ask again: nothing says whether it refused the tool or the tiny request, so it is not kept, and
         // the search ends there as it does for any try cut off by the time budget
         if (!plain || (plain.reason === 'unreachable' && Date.now() - started >= CHECK_BUDGET_MS)) break;
-        // Refused both ways: the model that wants a bigger cap
-        if (plain.reason === 'request') {
+        // Refused both ways: the model that wants a bigger cap. With no list behind it, nothing says the model is there.
+        if (plain.reason === 'request' && !noList) {
           refusedRequest ??= candidate;
           continue;
         }
@@ -208,11 +210,10 @@ export async function POST(request: NextRequest) {
  * call tools (a model that calls tools chats; a list sorted by name can start with ones that don't), then the rest, the first
  * few of those, and a free model when the list has one (OpenRouter's ":free" models answer a key with no credit). Bots with no
  * model of their own reply with the check model and always offer tools, so a model the provider says calls none is left
- * out, unless the provider lists nothing else.
+ * out (#706).
  */
 function checkCandidates(all: string[], facts: Record<string, { tools?: boolean }>, suggested: string | undefined): string[] {
-  const withTools = all.filter((id) => facts[id]?.tools !== false);
-  const listed = withTools.length > 0 ? withTools : all;
+  const listed = toolModels(all, facts).models;
   const first = suggested && listed.includes(suggested) ? [suggested] : [];
   const rest = listed.filter((id) => id !== suggested);
   const chats = rest.filter((id) => facts[id]?.tools === true);

@@ -167,6 +167,20 @@ export function allowedModels(list: string[], lend: string[] | null): string[] {
   return lend ? list.filter((model) => lend.includes(model)) : list;
 }
 
+/** Whether bots may use this model: every bot reply offers tools, so a model the provider says calls none never replies (#706). */
+export const canCallTools = (facts: { tools?: boolean } | undefined): boolean => facts?.tools !== false;
+
+/** The words for a model that can't be used because it calls no tools. */
+export const noToolsWords = (model: string) => `${model} can’t use tools, which bots need.`;
+
+/** A list of models with the ones the provider says call no tools left out, and their facts kept to the ones left. */
+export function toolModels<T extends { tools?: boolean }>(models: string[], facts: Record<string, T>): { models: string[]; facts: Record<string, T> } {
+  const kept = models.filter((model) => canCallTools(facts[model]));
+  const keptFacts: Record<string, T> = {};
+  for (const model of kept) if (facts[model]) keptFacts[model] = facts[model];
+  return { models: kept, facts: keptFacts };
+}
+
 /**
  * The model of a list a bot is put on when it has to take one: the first the provider doesn't say calls no tools, since a
  * bot's replies always offer tools, else the first.

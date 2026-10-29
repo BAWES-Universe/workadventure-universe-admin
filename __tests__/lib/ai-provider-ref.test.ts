@@ -60,14 +60,14 @@ describe('checkAiProviderRef', () => {
   });
 
   describe('a personal key on a bot (#374)', () => {
-    const ctx = { actorId: 'maker', makerId: 'maker', roomId: 'room-1' };
+    const ctx = { actorId: 'maker', makerId: 'maker', roomId: 'room-1', botId: 'bot-1' };
     const key = { providerId: 'key-1', ownerId: 'maker' };
 
     it('is accepted for its owner, who made the bot, when it is lent to the bot’s universe', async () => {
       findUnique.mockResolvedValueOnce(key);
       (checkKeyForBot as jest.Mock).mockResolvedValue({ ok: true });
       await expect(checkAiProviderRef('key-1', null, ctx)).resolves.toBeNull();
-      expect(checkKeyForBot).toHaveBeenCalledWith({ keyId: 'key-1', keyOwnerId: 'maker', makerId: 'maker', roomId: 'room-1' });
+      expect(checkKeyForBot).toHaveBeenCalledWith({ keyId: 'key-1', keyOwnerId: 'maker', bot: { id: 'bot-1', createdById: 'maker', roomId: 'room-1' } });
     });
 
     it('tells the owner why when it is not lent there', async () => {
@@ -76,11 +76,22 @@ describe('checkAiProviderRef', () => {
       await expect(checkAiProviderRef('key-1', null, ctx)).resolves.toBe('That key isn’t lent to this bot’s universe. Lend it from AI keys first.');
     });
 
-    it('refuses the owner putting someone else’s bot on their own key', async () => {
+    it('lets anyone who manages someone else’s bot put it on their own key (#709): the maker stays the maker', async () => {
       findUnique.mockResolvedValueOnce(key);
-      await expect(checkAiProviderRef('key-1', null, { ...ctx, makerId: 'someone-else' })).resolves.toBe(
-        'Only the person who made a bot can put it on their own key.',
-      );
+      (checkKeyForBot as jest.Mock).mockResolvedValue({ ok: true });
+      await expect(checkAiProviderRef('key-1', 'sara-key', { ...ctx, makerId: 'sara' })).resolves.toBeNull();
+      expect(checkKeyForBot).toHaveBeenCalledWith({ keyId: 'key-1', keyOwnerId: 'maker', bot: { id: 'bot-1', createdById: 'sara', roomId: 'room-1' } });
+    });
+
+    it('refuses their own key when they can’t manage the bot', async () => {
+      findUnique.mockResolvedValueOnce(key);
+      (checkKeyForBot as jest.Mock).mockResolvedValue({ ok: false, reason: 'no-access' });
+      await expect(checkAiProviderRef('key-1', null, { ...ctx, makerId: 'sara' })).resolves.toBe('You need Manage bots here to run this bot on your key.');
+    });
+
+    it('never puts a bot on someone else’s key, not even for its maker', async () => {
+      findUnique.mockResolvedValueOnce({ providerId: 'sara-key', ownerId: 'sara' });
+      await expect(checkAiProviderRef('sara-key', 'key-1', ctx)).resolves.toBe('AI provider "sara-key" does not exist');
       expect(checkKeyForBot).not.toHaveBeenCalled();
     });
 
@@ -101,7 +112,7 @@ describe('checkAiProviderRef', () => {
 
 describe('checkBotModel (#575)', () => {
   const key = { providerId: 'key-1', ownerId: 'maker', endpoint: 'https://api.anthropic.com/v1', apiKeyEncrypted: 'enc', settings: { kind: 'claude' }, model: 'claude-sonnet-5-5' };
-  const context = { ref: 'key-1', currentRef: 'key-1', currentModel: 'claude-sonnet-5-5', actorId: 'maker', makerId: 'maker', roomId: 'room-1' };
+  const context = { ref: 'key-1', currentRef: 'key-1', currentModel: 'claude-sonnet-5-5', actorId: 'maker', makerId: 'maker', roomId: 'room-1', botId: 'bot-1' };
   beforeEach(() => {
     jest.clearAllMocks();
     findUnique.mockResolvedValue(key);
@@ -116,9 +127,10 @@ describe('checkBotModel (#575)', () => {
     expect(findUnique).not.toHaveBeenCalled();
   });
 
-  it('accepts a model the key lists, picked by the key’s owner who made the bot', async () => {
+  it('accepts a model the key lists, picked by the key’s owner, whoever made the bot', async () => {
     await expect(checkBotModel('claude-haiku-5-5', context)).resolves.toBeNull();
-    expect(checkKeyForBot).toHaveBeenCalledWith({ keyId: 'key-1', keyOwnerId: 'maker', makerId: 'maker', roomId: 'room-1' });
+    expect(checkKeyForBot).toHaveBeenCalledWith({ keyId: 'key-1', keyOwnerId: 'maker', bot: { id: 'bot-1', createdById: 'maker', roomId: 'room-1' } });
+    await expect(checkBotModel('claude-haiku-5-5', { ...context, makerId: 'someone-else' })).resolves.toBeNull();
   });
 
   it('refuses a model the key doesn’t list, or the lend leaves out', async () => {
@@ -127,10 +139,15 @@ describe('checkBotModel (#575)', () => {
     await expect(checkBotModel('claude-haiku-5-5', context)).resolves.toBe('That model isn’t allowed in this universe. Pick one the key allows here.');
   });
 
-  it('refuses anyone but the key’s owner who made the bot, and the bot server’s token', async () => {
-    await expect(checkBotModel('claude-haiku-5-5', { ...context, actorId: 'manager' })).resolves.toBe('Only the person who made a bot can put it on their own key.');
-    await expect(checkBotModel('claude-haiku-5-5', { ...context, actorId: null })).resolves.toBe('Only the person who made a bot can put it on their own key.');
-    await expect(checkBotModel('claude-haiku-5-5', { ...context, makerId: 'someone-else' })).resolves.toBe('Only the person who made a bot can put it on their own key.');
+  it('refuses a model the provider says calls no tools: every bot reply offers them (#706)', async () => {
+    findUnique.mockResolvedValue({ ...key, settings: { kind: 'claude', modelFacts: { 'claude-haiku-5-5': { tools: false } } } });
+    await expect(checkBotModel('claude-haiku-5-5', context)).resolves.toBe('claude-haiku-5-5 can’t use tools, which bots need.');
+    await expect(checkBotModel('claude-opus-5-5', context)).resolves.toBeNull();
+  });
+
+  it('refuses anyone but the key’s owner, and the bot server’s token', async () => {
+    await expect(checkBotModel('claude-haiku-5-5', { ...context, actorId: 'manager' })).resolves.toBe('Only the key’s owner can pick its model.');
+    await expect(checkBotModel('claude-haiku-5-5', { ...context, actorId: null })).resolves.toBe('Only the key’s owner can pick its model.');
   });
 
   it('refuses a model for a bot on Universe AI or a server provider', async () => {

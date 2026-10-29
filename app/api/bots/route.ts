@@ -472,7 +472,7 @@ export async function POST(request: NextRequest) {
     }
 
     // The provider ref must name an existing provider
-    const providerError = await checkAiProviderRef(validatedData.aiProviderRef, undefined, { actorId: userId ?? null, makerId: userId ?? null, roomId });
+    const providerError = await checkAiProviderRef(validatedData.aiProviderRef, undefined, { actorId: userId ?? null, makerId: userId ?? null, roomId, botId: null });
     if (providerError) {
       const response = NextResponse.json(
         { error: providerError },
@@ -492,6 +492,7 @@ export async function POST(request: NextRequest) {
       actorId: userId ?? null,
       makerId: userId ?? null,
       roomId,
+      botId: null,
     });
     if (modelError) {
       const response = NextResponse.json({ error: modelError }, { status: 400 });
@@ -502,7 +503,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Where the bot's images go (the Vision row) is checked like its provider
-    const visionError = await checkConfigVision(validatedData.behaviorConfig, { storedConfig: null, actorId: userId ?? null, makerId: userId ?? null, roomId });
+    const visionError = await checkConfigVision(validatedData.behaviorConfig, { storedConfig: null, actorId: userId ?? null, makerId: userId ?? null, roomId, botId: null, mainRef: validatedData.aiProviderRef ?? null });
     if (visionError) {
       const response = NextResponse.json(
         { error: visionError },
