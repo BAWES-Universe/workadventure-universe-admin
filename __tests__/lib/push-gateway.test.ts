@@ -201,6 +201,9 @@ describe('a direct message notification', () => {
     expect(messageLine(notification, true, 'Sara')).toBe('are you coming to standup?');
     expect(messageLine(notification, false, 'Sara')).toBe('New message from Sara');
     expect(messageLine({ ...notification, content: { msgtype: 'm.image', body: 'cat.png' } }, true, 'Sara')).toBe('sent an image');
+    expect(messageLine({ ...notification, content: { msgtype: 'm.audio', body: 'Voice message.m4a', 'org.matrix.msc3245.voice': {} } }, true, 'Sara')).toBe('sent a voice message');
+    expect(messageLine({ ...notification, content: { msgtype: 'm.audio', body: 'Voice message.ogg', 'm.voice': {} } }, true, 'Sara')).toBe('sent a voice message');
+    expect(messageLine({ ...notification, content: { msgtype: 'm.audio', body: 'signal.mp3' } }, true, 'Sara')).toBe('sent an audio file');
     expect(messageLine({ ...notification, type: 'm.room.encrypted', content: { ciphertext: 'x' } }, true, 'Sara')).toBe('New message from Sara');
     const long = messageLine({ ...notification, content: { msgtype: 'm.text', body: 'a'.repeat(300) } }, true, 'Sara');
     expect(long).toHaveLength(120);

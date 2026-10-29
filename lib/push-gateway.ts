@@ -92,7 +92,11 @@ export function messageLine(notification: GatewayNotification, previews: boolean
     case 'm.video':
       return 'sent a video';
     case 'm.audio':
-      return 'sent a voice message';
+      // Only a recorded voice note is a voice message: Element's flag (MSC3245), `m.voice` once stable. A song or any
+      // other audio file a person or bot sends has no flag.
+      return content['org.matrix.msc3245.voice'] !== undefined || content['m.voice'] !== undefined
+        ? 'sent a voice message'
+        : 'sent an audio file';
     case 'm.file':
       return 'sent a file';
     default: {
