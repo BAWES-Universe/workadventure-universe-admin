@@ -8,11 +8,12 @@ import { parsePlayUri } from '@/lib/utils';
 import { validateAccessToken } from '@/lib/oidc';
 import { resolveRoomIdFromPlayUri, transformBotToServerFormat } from '@/lib/bot-config-helpers';
 import { checkAiProviderRef } from '@/lib/ai-provider-ref';
-import { checkConfigVision } from '@/lib/bot-vision';
+import { checkConfigVision, dropOthersVisionKey } from '@/lib/bot-vision';
 import { toolTimeoutSecondsSchema } from '@/lib/bot-tool-timeout';
 import { maxReplyTokensSchema, maxStepsSchema } from '@/lib/bot-limits';
 import { mustStayPrivateAfterMove } from '@/lib/bot-privacy';
 import { clearBotRunsOnNotices } from '@/lib/notices';
+import { tellKeyOwnerMovedOff } from '@/lib/ai-key-moved-off';
 import { z } from 'zod';
 import { corsHeaders } from '@/lib/cors';
 
@@ -407,7 +408,7 @@ export async function POST(request: NextRequest) {
         validatedData.aiProviderRef,
         currentProvider?.aiProviderRef,
         // A bot's maker is whoever created it; a new bot's maker is the person saving it
-        { actorId: userId ?? null, makerId: validatedData.botId ? currentProvider?.createdById ?? null : userId ?? null, roomId }
+        { actorId: userId ?? null, makerId: validatedData.botId ? currentProvider?.createdById ?? null : userId ?? null, roomId, botId: validatedData.botId ?? null }
       );
       if (providerError) {
       const response = NextResponse.json(
@@ -421,16 +422,18 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Where the bot's images go (the Vision row) is checked like its provider: only the person who made the bot may pick a key
+    // Where the bot's images go (the Vision row) is checked like its provider: only a key's owner may pick it (#709)
     if (validatedData.behaviorConfig && 'vision' in validatedData.behaviorConfig) {
       const stored = validatedData.botId
-        ? await prisma.bot.findUnique({ where: { id: validatedData.botId }, select: { behaviorConfig: true, createdById: true } })
+        ? await prisma.bot.findUnique({ where: { id: validatedData.botId }, select: { behaviorConfig: true, createdById: true, aiProviderRef: true } })
         : null;
       const visionError = await checkConfigVision(validatedData.behaviorConfig, {
         storedConfig: stored?.behaviorConfig ?? null,
         actorId: userId ?? null,
         makerId: validatedData.botId ? stored?.createdById ?? null : userId ?? null,
         roomId,
+        botId: validatedData.botId ?? null,
+        mainRef: 'aiProviderRef' in body ? validatedData.aiProviderRef ?? null : stored?.aiProviderRef ?? null,
       });
       if (visionError) {
         const response = NextResponse.json({ error: visionError }, { status: 400 });
@@ -508,6 +511,7 @@ export async function POST(request: NextRequest) {
       // assignedSpace is preserved unless the request explicitly supplies it.
       let keepPrivate = false;
       let moveOffModel = false;
+      let fromRef: string | null = null;
       {
         const existing = await prisma.bot.findUnique({
           where: { id: validatedData.botId },
@@ -527,6 +531,12 @@ export async function POST(request: NextRequest) {
             provided.assignedSpace ??
             existingConfig.assignedSpace ?? { center: { x: 0, y: 0 }, radius: 0 },
         };
+        // Moving a bot off a key also moves its images off another person's key (#709)
+        if (moveOffModel) {
+          const withoutVision = await dropOthersVisionKey(updateData.behaviorConfig, userId ?? null);
+          if (withoutVision) updateData.behaviorConfig = withoutVision as typeof updateData.behaviorConfig;
+        }
+        fromRef = existing?.aiProviderRef ?? null;
       }
       bot = await prisma.bot.update({
         where: { id: validatedData.botId },
@@ -552,6 +562,10 @@ export async function POST(request: NextRequest) {
       statusCode = 200;
       // What the bot runs on changed: the notices that said where it was are out of date
       if (moveOffModel) await clearBotRunsOnNotices(validatedData.botId);
+      // The person whose key it left is told (#709)
+      if (moveOffModel) {
+        await tellKeyOwnerMovedOff({ bot: { id: bot.id, name: bot.name }, fromRef, toRef: updateData.aiProviderRef ?? null, actorId: userId ?? null });
+      }
     } else {
       // Create new bot
       bot = await prisma.bot.create({

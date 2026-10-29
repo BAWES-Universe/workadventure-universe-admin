@@ -91,20 +91,29 @@ describe('GET /api/me/bot-ai', () => {
     expect((await get(`roomId=${encodeURIComponent('http://play.example.com/@/u/x/y')}`)).status).toBe(404);
   });
 
-  it('shows someone else’s bot on its maker’s key as it is, with none of the viewer’s keys, only Universe AI to switch to', async () => {
+  it('shows someone else’s bot on its maker’s key by whose key it is, and offers the viewer their own keys to move it to (#709)', async () => {
     db.bot.findUnique.mockResolvedValue({ id: 'sam', roomId: 'room-1', aiProviderRef: 'key-m', createdBy: { id: 'maker', name: 'Mishari' } });
     (getSessionUser as jest.Mock).mockResolvedValue({ ...mishari, id: 'a-manager', name: 'Nora' });
     db.user.findUnique.mockResolvedValue({ id: 'a-manager', name: 'Nora' });
-    db.botsAiProvider.findUnique.mockResolvedValue({ providerId: 'key-m', name: 'Mishari’s Claude', ownerId: 'maker', lends: [] });
+    db.botsAiProvider.findUnique.mockResolvedValue({ providerId: 'key-m', name: 'Work Claude', ownerId: 'maker', owner: { name: 'Mishari' }, settings: { kind: 'claude' }, lends: [] });
+    db.botsAiProvider.findMany.mockResolvedValueOnce([{ ...myKey, name: 'Nora’s own' }]);
     const body = await (await get('botId=sam')).json();
     expect(body).toMatchObject({
-      current: 'key-m', viewerIsMaker: false, keys: [],
+      current: 'key-m', viewerIsMaker: false,
+      keys: [{ id: 'key-1', name: 'Nora’s own' }],
       maker: { id: 'maker', name: 'Mishari' },
+      // Never the key's own name, which is its owner's: whose it is and what it runs on
       currentKey: { id: 'key-m', name: 'Mishari’s Claude', ownerName: 'Mishari', mine: false },
       universeAi: { available: true, model: 'deepseek-v4-flash', supportsVision: null },
     });
-    // The manager's own keys were never even looked up
-    expect(db.botsAiProvider.findMany).not.toHaveBeenCalled();
+    expect(db.botsAiProvider.findMany.mock.calls[0][0].where).toEqual({ ownerId: 'a-manager', lends: { some: { universeId: 'sandbox' } } });
+  });
+
+  it('names a key whose owner is gone plainly', async () => {
+    db.bot.findUnique.mockResolvedValue({ id: 'sam', roomId: 'room-1', aiProviderRef: 'key-m', createdBy: null });
+    db.botsAiProvider.findUnique.mockResolvedValue({ providerId: 'key-m', name: 'Work key', ownerId: 'left', owner: null, settings: { kind: 'unknown-kind' }, lends: [] });
+    const body = await (await get('botId=sam')).json();
+    expect(body.currentKey).toMatchObject({ name: 'Someone’s AI', ownerName: null, mine: false });
   });
 
   it('says which logo the key the bot is on gets: its provider’s, a plug for any server, a chip for a kind it does not know', async () => {
@@ -131,7 +140,7 @@ describe('GET /api/me/bot-ai', () => {
 
   it('says the key is the viewer’s when it is, for the maker’s own bot', async () => {
     db.bot.findUnique.mockResolvedValue({ id: 'guide', roomId: 'room-1', aiProviderRef: 'key-1', createdBy: { id: 'mishari', name: 'Mishari' } });
-    db.botsAiProvider.findUnique.mockResolvedValue({ providerId: 'key-1', name: 'My DeepSeek', ownerId: 'mishari', settings: { kind: 'deepseek' }, model: 'deepseek-v4-flash', supportsVision: false, lends: [] });
+    db.botsAiProvider.findUnique.mockResolvedValue({ providerId: 'key-1', name: 'My DeepSeek', ownerId: 'mishari', owner: { name: 'Mishari' }, settings: { kind: 'deepseek' }, model: 'deepseek-v4-flash', supportsVision: false, lends: [] });
     db.botsAiProvider.findMany.mockResolvedValueOnce([myKey]);
     const body = await (await get('botId=guide')).json();
     expect(body.currentKey).toEqual({ id: 'key-1', name: 'My DeepSeek', ownerName: 'Mishari', mine: true, status: 'working', ifDown: 'universe-ai', logo: 'deepseek', plainIcon: null, group: 'hosted', model: 'deepseek-v4-flash', output: null, supportsVision: false, visionModels: ['deepseek-v4-flash-vision-exp'], limits: { reply: 32000, steps: 30 } });
@@ -223,6 +232,17 @@ describe('GET /api/me/bot-ai: where the bot’s images go', () => {
     (checkKeyForBot as jest.Mock).mockResolvedValue({ ok: true });
     const body = await (await get('botId=guide')).json();
     expect(body.vision).toEqual({ saved: { choice: 'another', keyId: 'key-1', model: 'deepseek-v4-flash-vision-exp' }, savedKey: { name: 'My DeepSeek', problem: null } });
+  });
+
+  it('names someone else’s key picked for images by whose it is, never by its own name (#709)', async () => {
+    db.bot.findUnique.mockResolvedValue(botWith({ vision: { choice: 'another', keyId: 'key-1', model: 'deepseek-v4-flash-vision-exp' } }));
+    (getSessionUser as jest.Mock).mockResolvedValue({ ...mishari, id: 'a-manager', name: 'Nora' });
+    db.botsAiProvider.findUnique.mockResolvedValue({ ...myKey, name: 'Secret project', ownerId: 'mishari', downSince: null, ifDown: 'universe-ai' });
+    db.user.findUnique.mockImplementation(async ({ where }: { where: { id: string } }) => (where.id === 'mishari' ? { name: 'Mishari' } : { id: 'a-manager', name: 'Nora' }));
+    (checkKeyForBot as jest.Mock).mockResolvedValue({ ok: true });
+    const body = await (await get('botId=guide')).json();
+    expect(body.vision.savedKey).toEqual({ name: 'Mishari’s DeepSeek', problem: null });
+    expect(JSON.stringify(body)).not.toContain('Secret project');
   });
 
   it('says why the key picked for images can’t be used: Down, or taken away', async () => {

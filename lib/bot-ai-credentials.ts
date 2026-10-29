@@ -16,7 +16,7 @@ import { getServerLimits, keyReplyLimits, servedLimits, type ServedLimits } from
  *   - a server provider's id: that provider, as always;
  *   - "universe-ai": whichever provider is the Default now;
  *   - a personal key: that key with the bot's own model (#575: `aiModel`, else the key's check model, never one its lend
- *     leaves out), but only while it may run this bot (see lib/ai-key-pay.ts). When it may not (the maker lost
+ *     leaves out), but only while it may run this bot (see lib/ai-key-pay.ts). When it may not (its owner lost
  *     access, the key was unlent some other way), the bot is moved to Universe AI right here, the universe's owner is told
  *     once, and Universe AI's provider is what comes back. Nobody is ever served a key that may not run the bot.
  * `source` says which of the three it was, so the bot server knows when it is talking through someone's own key.
@@ -26,7 +26,7 @@ import { getServerLimits, keyReplyLimits, servedLimits, type ServedLimits } from
  *
  * A bot served from Universe AI or a person's own key also carries `vision` when its images are not left to its own model
  * (see lib/bot-vision.ts): "this" (its own model, or only the link when that can't see), "universe-ai", or "another" with the
- * credentials of the Vision model on the maker's key to describe them. No `vision` means: as it always was.
+ * credentials of the Vision model on that person's key to describe them. No `vision` means: as it always was.
  *
  * Every answer with a provider also carries `limits` (#666): the reply limits of the key it runs on (Universe AI's for a
  * bot on Universe AI, or standing in for a key that is down), lowered by the bot's own, and the artifact limits. The
@@ -62,9 +62,9 @@ export interface OwnKeyFacts {
 
 /** Why a bot was moved off a key when nobody asked, for the universe owner's notice. */
 const MOVED_BECAUSE: Record<Exclude<KeyForBot, { ok: true }>['reason'] | 'gone', string> = {
-  'not-maker': 'The key it ran on isn’t its maker’s.',
+  'no-owner': 'The key it ran on isn’t anyone’s.',
   'not-lent': 'The key it ran on is no longer lent to this universe.',
-  'no-access': 'Its maker can no longer manage bots here, so it can’t run on their key.',
+  'no-access': 'Its key’s owner can no longer manage it here, so it can’t run on their key.',
   'no-room': 'Its room could not be found.',
   gone: 'The key it ran on was removed.',
 };
@@ -144,7 +144,7 @@ async function visionPlan(bot: BotForCredentials, main: ServedProvider): Promise
       : null);
   if (!choice || (!picked && choice.choice === 'this')) return undefined;
   if (choice.choice !== 'another') return choice;
-  const usable = await usableVisionKey(choice, { createdById: bot.createdById, roomId: bot.roomId }, { recheck: true });
+  const usable = await usableVisionKey(choice, { id: bot.id, createdById: bot.createdById, roomId: bot.roomId }, { recheck: true, mainKeyOwnerId: own ? main.keyOwnerId ?? null : null });
   if (!usable.ok) return { choice: 'this', problem: 'key' };
   const info = kindInfo((usable.key.settings as { kind?: unknown } | null)?.kind);
   return {
@@ -182,7 +182,7 @@ async function mainCredentials(bot: BotForCredentials): Promise<BotAiCredentials
     return { status: 200, body: { ...providerPayload(provider), source: 'provider' } };
   }
 
-  const verdict = await checkKeyForBot({ keyId: ref, keyOwnerId: provider.ownerId, makerId: bot.createdById, roomId: bot.roomId });
+  const verdict = await checkKeyForBot({ keyId: ref, keyOwnerId: provider.ownerId, bot: { id: bot.id, createdById: bot.createdById, roomId: bot.roomId } });
   if (verdict.ok) {
     const health = await recheckIfDue(provider);
     if (health.downSince) {
@@ -214,7 +214,17 @@ async function mainCredentials(bot: BotForCredentials): Promise<BotAiCredentials
     };
   }
 
-  return moveToUniverseAi(bot, ref, verdict.reason);
+  return moveToUniverseAi(bot, ref, verdict.reason, verdict.reason === 'no-access' ? await ownerName(provider.ownerId) : null);
+}
+
+/** The key owner's name for the notice: extra, so the bot is moved and served either way. */
+async function ownerName(userId: string): Promise<string | null> {
+  try {
+    const user = await prisma.user.findUnique({ where: { id: userId }, select: { name: true } });
+    return user?.name ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /** The key's `caps` describe its check model: a bot on another model is told that model's facts instead. */
@@ -236,6 +246,7 @@ async function moveToUniverseAi(
   bot: { id: string; name: string; room: { world: { universe: { id: string; ownerId: string } } } },
   ref: string,
   reason: keyof typeof MOVED_BECAUSE,
+  keyOwner: string | null = null,
 ): Promise<BotAiCredentials> {
   const moved = await prisma.bot.updateMany({ where: { id: bot.id, aiProviderRef: ref }, data: { aiProviderRef: UNIVERSE_AI_REF, aiModel: null } });
   if (moved.count > 0) {
@@ -246,7 +257,8 @@ async function moveToUniverseAi(
         kind: 'ai-key-moved',
         dedupeKey: `moved:${ref}:${bot.id}:${new Date().toISOString()}`,
         title: `${bot.name} moved to Universe AI`,
-        body: `${MOVED_BECAUSE[reason]} It now replies on Universe AI.`,
+        // Whose key it was, by name, when that person lost Manage for the bot (#709: anyone who manages a bot may put it on their key)
+        body: `${keyOwner ? `${keyOwner} can no longer manage ${bot.name}, so it can’t run on ${keyOwner}’s key.` : MOVED_BECAUSE[reason]} It now replies on Universe AI.`,
         href: `/admin/universes/${universe.id}`,
       });
     } catch (error) {
