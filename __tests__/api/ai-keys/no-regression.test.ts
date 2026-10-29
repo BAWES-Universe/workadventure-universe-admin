@@ -118,29 +118,29 @@ describe('the New provider form of the super admin is unchanged', () => {
   });
 });
 
-describe('the Test button is unchanged for server providers and refuses a personal key', () => {
+describe('the Test button checks server providers where bots call them (#703) and refuses a personal key', () => {
   const originalFetch = global.fetch;
   afterEach(() => {
     global.fetch = originalFetch;
   });
 
-  it('DeepSeek on the openai type: the same request goes out and the result is saved', async () => {
+  it('DeepSeek on the openai type: a chat goes to the address bots call, with the key, and the result is saved', async () => {
     provider.findUnique.mockResolvedValue(deepseek);
-    global.fetch = jest.fn(async () => ({ ok: true })) as unknown as typeof fetch;
+    global.fetch = jest.fn(async () => ({ ok: true, status: 200 })) as unknown as typeof fetch;
     const response = await adminTest(req('/api/admin/ai-providers/deepseek-flash/test', { method: 'POST' }), params({ id: 'deepseek-flash' }));
     expect(await response.json()).toEqual({ success: true });
-    expect(global.fetch).toHaveBeenCalledWith('https://api.deepseek.com/v1/models', expect.objectContaining({
-      method: 'GET', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer sk-secret' },
+    expect(global.fetch).toHaveBeenCalledWith('https://api.deepseek.com/chat/completions', expect.objectContaining({
+      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer sk-secret' },
     }));
     expect(provider.update).toHaveBeenCalledWith(expect.objectContaining({ where: { providerId: 'deepseek-flash' }, data: expect.objectContaining({ tested: true }) }));
   });
 
-  it('LM Studio on local: the same request goes out, with no key', async () => {
+  it('LM Studio on local: a chat goes to the address bots call, with no key', async () => {
     provider.findUnique.mockResolvedValue(lmstudio);
-    global.fetch = jest.fn(async () => ({ ok: true })) as unknown as typeof fetch;
+    global.fetch = jest.fn(async () => ({ ok: true, status: 200 })) as unknown as typeof fetch;
     const response = await adminTest(req('/api/admin/ai-providers/lmstudio-local/test', { method: 'POST' }), params({ id: 'lmstudio-local' }));
     expect(await response.json()).toEqual({ success: true });
-    expect(global.fetch).toHaveBeenCalledWith('http://localhost:1234/v1/models', expect.objectContaining({ headers: { 'Content-Type': 'application/json' } }));
+    expect(global.fetch).toHaveBeenCalledWith('http://localhost:1234/v1/chat/completions', expect.objectContaining({ method: 'POST', headers: { 'Content-Type': 'application/json' } }));
   });
 
   it('never sends anything to the address of a personal key', async () => {

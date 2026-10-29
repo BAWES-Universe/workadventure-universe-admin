@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { getSessionUser } from '@/lib/auth-session';
 import { isSuperAdmin } from '@/lib/super-admin';
 import { decryptApiKey } from '@/lib/encryption';
+import { chatProbeBody } from '@/lib/ai-key-kinds';
 
 /**
  * POST /api/admin/ai-providers/:id/test
@@ -82,6 +83,17 @@ export async function POST(
 }
 
 /**
+ * The chat address the bot server calls for a server provider, built exactly as it builds it (#703): the openai type
+ * adds `/chat/completions` to the address as typed, less one trailing slash (OpenAI's own address when there is none);
+ * LM Studio adds `/v1/chat/completions`, less any trailing slashes.
+ */
+function botChatUrl(type: string, endpoint: string | null | undefined): string | null {
+  if (type === 'lmstudio') return endpoint ? `${endpoint.replace(/\/+$/, '')}/v1/chat/completions` : null;
+  if (type === 'deepseek' && !endpoint) return null;
+  return `${(endpoint || 'https://api.openai.com/v1').replace(/\/$/, '')}/chat/completions`;
+}
+
+/**
  * Test provider connection based on type
  */
 async function testProviderConnection(
@@ -92,35 +104,52 @@ async function testProviderConnection(
 
   try {
     switch (type) {
-      // OpenAI-compatible providers: lmstudio, openai, deepseek
-      // All use GET /v1/models with optional Bearer auth.
-      // Store endpoint WITHOUT trailing /v1 (e.g. https://api.deepseek.com)
+      // OpenAI-compatible providers: one tiny chat with the provider's model, at the address bots call (#703).
+      // A model list proves neither: OpenRouter lists models for any key, and the list sits at another path.
       case 'lmstudio':
       case 'openai':
       case 'deepseek': {
-        // Fall back to OpenAI default only for the openai type
-        let baseUrl = endpoint || (type === 'openai' ? 'https://api.openai.com' : null);
-
-        if (!baseUrl) {
+        const url = botChatUrl(type, endpoint);
+        if (!url) {
           return { success: false, error: 'Endpoint not configured' };
         }
-
-        // Normalize baseUrl: remove trailing slashes and /v1 suffix
-        baseUrl = baseUrl.replace(/\/+$/, ''); // Remove trailing slashes
-        baseUrl = baseUrl.replace(/\/v1$/, ''); // Remove trailing /v1
+        if (!provider.model) {
+          return { success: false, error: 'Model not configured' };
+        }
 
         const headers: Record<string, string> = {
           'Content-Type': 'application/json',
         };
-        if (apiKey) {
+        // The bot server sends no key to the server's own LM Studio
+        if (apiKey && type !== 'lmstudio') {
           headers['Authorization'] = `Bearer ${apiKey}`;
         }
+        // A server on another computer may load its model on the first call, which can take well over 30 seconds
+        const timeoutMs = type === 'lmstudio' ? 120_000 : 30_000;
+        const ask = (body: Record<string, unknown>) =>
+          fetch(url, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(body),
+            signal: AbortSignal.timeout(timeoutMs),
+          });
 
-        const response = await fetch(`${baseUrl}/v1/models`, {
-          method: 'GET',
-          headers,
-          signal: AbortSignal.timeout(10000),
-        });
+        // Bots always offer tools, so the check does too: a model that can't take them fails here as it would for bots
+        let body = chatProbeBody({ protocol: 'openai' }, provider.model, { withTool: true });
+        let response = await ask(body);
+        // Asked again for the two refusals the bot server also asks again for: OpenAI's reasoning models take only max_completion_tokens,
+        // and Alibaba's thinking models answer a non-streaming call only with thinking off
+        if (response.status === 400) {
+          const errorText = await response.clone().text();
+          if (/max_completion_tokens/.test(errorText) && body.max_tokens !== undefined) {
+            const { max_tokens: limit, ...rest } = body;
+            body = { ...rest, max_completion_tokens: limit };
+            response = await ask(body);
+          } else if (/enable_thinking/i.test(errorText)) {
+            body = { ...body, enable_thinking: false };
+            response = await ask(body);
+          }
+        }
 
         if (response.ok) {
           return { success: true };
@@ -130,7 +159,7 @@ async function testProviderConnection(
         return {
           success: false,
           error: `Connection failed: ${response.status}`,
-          details: errorData.error?.message || response.statusText,
+          details: `${errorData.error?.message || response.statusText || 'Request failed'} (POST ${url})`,
         };
       }
 
