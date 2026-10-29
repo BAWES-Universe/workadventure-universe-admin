@@ -5,7 +5,9 @@ import { meOriginAllowed, meRespond } from '@/lib/me-route';
 import {
   NEARBY_SHARED_MAX_PER_REQUEST,
   NEARBY_SHARED_PAGE_MAX,
+  isChatId,
   parseNearbySharedItem,
+  senderNameOf,
   type NearbySharedItemInput,
 } from '@/lib/nearby-shared';
 
@@ -50,13 +52,12 @@ export async function GET(request: NextRequest) {
 
   const withParam = request.nextUrl.searchParams.get('with');
   const nameParam = request.nextUrl.searchParams.get('name');
-  if (withParam !== null && (withParam.length === 0 || withParam.length > 255)) {
-    return respond(request, { error: 'Invalid with' }, 400);
-  }
-  if (nameParam !== null && (withParam === null || nameParam.trim() === '' || nameParam.length > 100)) {
+  if (withParam !== null && !isChatId(withParam)) return respond(request, { error: 'Invalid with' }, 400);
+  // Cleaned as a kept item's sender is, so the same name finds it.
+  const name = nameParam === null ? null : senderNameOf(nameParam);
+  if (nameParam !== null && (withParam === null || name === null || nameParam.length > 100)) {
     return respond(request, { error: 'Invalid name' }, 400);
   }
-  const name = nameParam?.trim();
 
   try {
     const rows = await prisma.nearbySharedItem.findMany({

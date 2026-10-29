@@ -178,6 +178,9 @@ describe('/api/me/nearby-shared', () => {
       expect((await get('?with=')).status).toBe(400);
       expect((await get('?name=Sara')).status).toBe(400);
       expect((await get(`?with=${encodeURIComponent(SARA)}&name=%20`)).status).toBe(400);
+      expect((await get('?with=sara')).status).toBe(400);
+      expect((await get(`?with=${encodeURIComponent('@sara\u0000:chat.bawes.net')}`)).status).toBe(400);
+      expect((await get(`?with=${encodeURIComponent(SARA)}&name=${encodeURIComponent('\u0000')}`)).status).toBe(400);
     });
   });
 });

@@ -148,6 +148,8 @@ describe('an item shared in a nearby chat', () => {
 
   it('turns down a chat account that is not one, or too many people', () => {
     expect(parseNearbySharedItem({ ...file, senderChatId: 'sara' }, now)).toBeNull();
+    expect(parseNearbySharedItem({ ...file, senderChatId: '@sara\u0000:chat.bawes.net' }, now)).toBeNull();
+    expect(parseNearbySharedItem({ ...file, withChatIds: ['@sara:chat.bawes.net\u0007'] }, now)).toBeNull();
     expect(parseNearbySharedItem({ ...file, withChatIds: '@sara:chat.bawes.net' }, now)).toBeNull();
     expect(parseNearbySharedItem({ ...file, withChatIds: ['@sara:chat.bawes.net', 42] }, now)).toBeNull();
     const crowd = Array.from({ length: 51 }, (_, index) => `@p${index}:chat.bawes.net`);

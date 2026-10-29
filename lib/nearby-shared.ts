@@ -37,8 +37,8 @@ const FUTURE_SLACK_MS = 5 * 60 * 1000;
 const FILE_ID =
   /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(\.[a-z0-9]{1,16})?$/i;
 
-// A chat account as Matrix names it: "@name:server".
-const CHAT_ID = /^@[^\s:]{1,200}:[^\s]{1,200}$/;
+// A chat account as Matrix names it: "@name:server", with no control character (Postgres can't keep a NUL).
+const CHAT_ID = /^@[^\s:\u0000-\u001f\u007f]{1,200}:[^\s\u0000-\u001f\u007f]{1,200}$/;
 
 // Half of an emoji's pair with no other half next to it.
 const LONE_HALF = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
@@ -79,9 +79,19 @@ function httpLink(value: unknown): string | null | undefined {
   }
 }
 
+/** Whether a value is a chat account Orbit keeps, as the list asks for one by `with`. */
+export function isChatId(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= 255 && CHAT_ID.test(value);
+}
+
+/** A sender's name as an item keeps it, so the list can find it by `name`; null when there is none. */
+export function senderNameOf(value: unknown): string | null {
+  return clippedText(value, 100);
+}
+
 function chatId(value: unknown): string | null | undefined {
   if (isBlank(value)) return null;
-  return typeof value === 'string' && value.length <= 255 && CHAT_ID.test(value) ? value : undefined;
+  return isChatId(value) ? value : undefined;
 }
 
 /** The others' chat accounts, once each and never the sender's; undefined when the list isn't one. */
@@ -105,7 +115,7 @@ export function parseNearbySharedItem(value: unknown, now: Date = new Date()): N
   const itemKey = clippedText(item.itemKey, 300);
   const kind = NEARBY_SHARED_KINDS.find((known) => known === item.kind);
   const name = clippedText(item.name, 300);
-  const senderName = clippedText(item.senderName, 100);
+  const senderName = senderNameOf(item.senderName);
   const link = httpLink(item.link);
   const fileId = optionalText(item.fileId, 200);
   const mimeType = optionalText(item.mimeType, 150);
