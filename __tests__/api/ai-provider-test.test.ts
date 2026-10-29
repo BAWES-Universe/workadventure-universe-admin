@@ -132,81 +132,109 @@ describe('Anthropic credential test', () => {
   });
 });
 
-describe.each([
-  {
-    type: 'openai',
-    endpoint: 'https://api.deepseek.com/v1///',
-    model: 'deepseek-v4-flash',
-    url: 'https://api.deepseek.com/v1/models',
-    key: 'test-key',
-  },
-  {
-    type: 'deepseek',
-    endpoint: 'https://api.deepseek.com/',
-    model: 'deepseek-v4-flash',
-    url: 'https://api.deepseek.com/v1/models',
-    key: 'test-key',
-  },
-  {
-    type: 'lmstudio',
-    endpoint: 'http://localhost:1234/v1/',
-    model: 'local-model',
-    url: 'http://localhost:1234/v1/models',
-    key: null,
-  },
-])('unchanged $type connection test', ({ type, endpoint, model, url, key }) => {
-  beforeEach(() => {
-    db.findUnique.mockResolvedValue({
-      providerId,
-      type,
-      endpoint,
-      model,
-      apiKeyEncrypted: key ? 'encrypted-key' : null,
-    });
-  });
+/** What the chat check sent: its address, headers and body. */
+function sent(call = 0) {
+  const [url, init] = fetchMock.mock.calls[call];
+  return { url, headers: init.headers, body: JSON.parse(init.body), method: init.method };
+}
 
-  it('keeps the same normalized URL, optional Bearer auth, and success result', async () => {
-    fetchMock.mockResolvedValue(new Response('{}', { status: 200 }));
+const ok = () => new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }), { status: 200 });
+
+describe('OpenAI-compatible providers are checked at the address bots call (#703)', () => {
+  it('DeepSeek on the openai type: one tiny chat with its model and one tool, with its key', async () => {
+    db.findUnique.mockResolvedValue({ providerId, type: 'openai', endpoint: 'https://api.deepseek.com', model: 'deepseek-v4-flash', apiKeyEncrypted: 'encrypted-key' });
+    fetchMock.mockResolvedValue(ok());
     expect(await testConnection()).toEqual({ success: true });
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock).toHaveBeenCalledWith(url, {
-      method: 'GET',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(key ? { Authorization: `Bearer ${key}` } : {}),
-      },
-      signal: expect.any(AbortSignal),
+    const call = sent();
+    expect(call.url).toBe('https://api.deepseek.com/chat/completions');
+    expect(call.method).toBe('POST');
+    expect(call.headers).toEqual({ 'Content-Type': 'application/json', Authorization: 'Bearer test-key' });
+    expect(call.body).toMatchObject({ model: 'deepseek-v4-flash', stream: false, max_tokens: 16 });
+    expect(call.body.tools).toHaveLength(1);
+  });
+
+  it('LM Studio as set up today: the bots\' /v1/chat/completions, with no key, as the bot server sends none', async () => {
+    db.findUnique.mockResolvedValue({ providerId, type: 'lmstudio', endpoint: 'http://localhost:1234', model: 'qwen3-8b', apiKeyEncrypted: 'encrypted-key' });
+    fetchMock.mockResolvedValue(ok());
+    expect(await testConnection()).toEqual({ success: true });
+    expect(sent().url).toBe('http://localhost:1234/v1/chat/completions');
+    expect(sent().headers).toEqual({ 'Content-Type': 'application/json' });
+  });
+
+  it.each([
+    ['openai', 'https://api.openai.com', 'https://api.openai.com/chat/completions'],
+    ['openai', 'https://generativelanguage.googleapis.com/v1beta/openai', 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions'],
+    ['openai', 'https://openrouter.ai/api/v1/', 'https://openrouter.ai/api/v1/chat/completions'],
+    ['openai', null, 'https://api.openai.com/v1/chat/completions'],
+    ['lmstudio', 'http://host:1234/v1', 'http://host:1234/v1/v1/chat/completions'],
+    ['lmstudio', 'http://host:1234///', 'http://host:1234/v1/chat/completions'],
+  ])('%s at %s is called at %s', async (type, endpoint, url) => {
+    db.findUnique.mockResolvedValue({ providerId, type, endpoint, model: 'some-model', apiKeyEncrypted: 'encrypted-key' });
+    fetchMock.mockResolvedValue(ok());
+    await testConnection();
+    expect(sent().url).toBe(url);
+  });
+
+  it('fails where bots fail: an address without its /v1 answers 404, and the address called is named', async () => {
+    db.findUnique.mockResolvedValue({ providerId, type: 'openai', endpoint: 'https://api.openai.com', model: 'gpt-4o-mini', apiKeyEncrypted: 'encrypted-key' });
+    fetchMock.mockResolvedValue(new Response('not found', { status: 404, statusText: 'Not Found' }));
+    expect(await testConnection()).toEqual({
+      success: false,
+      error: 'Connection failed: 404',
+      details: 'Not Found (POST https://api.openai.com/chat/completions)',
     });
   });
 
-  it('still accepts any successful HTTP status', async () => {
-    fetchMock.mockResolvedValue(new Response(null, { status: 204 }));
-    expect(await testConnection()).toEqual({ success: true });
-  });
-
-  it('preserves provider error messages, including for 401', async () => {
-    fetchMock.mockResolvedValue(
-      new Response(JSON.stringify({ error: { message: 'Invalid API key' } }), { status: 401 }),
-    );
+  it('fails a wrong key even where the model list is public (OpenRouter)', async () => {
+    db.findUnique.mockResolvedValue({ providerId, type: 'openai', endpoint: 'https://openrouter.ai/api/v1', model: 'deepseek/deepseek-v4-flash', apiKeyEncrypted: 'encrypted-key' });
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ error: { message: 'No auth credentials found' } }), { status: 401 }));
     expect(await testConnection()).toEqual({
       success: false,
       error: 'Connection failed: 401',
-      details: 'Invalid API key',
+      details: 'No auth credentials found (POST https://openrouter.ai/api/v1/chat/completions)',
     });
   });
 
-  it('preserves the status text fallback for non-JSON errors', async () => {
-    fetchMock.mockResolvedValue(
-      new Response('unavailable', { status: 503, statusText: 'Service Unavailable' }),
-    );
+  it('asks again with max_completion_tokens when a reasoning model refuses max_tokens, as bots do', async () => {
+    db.findUnique.mockResolvedValue({ providerId, type: 'openai', endpoint: null, model: 'o4-mini', apiKeyEncrypted: 'encrypted-key' });
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { code: 'unsupported_parameter', param: 'max_tokens', message: "Unsupported parameter: 'max_tokens'. Use 'max_completion_tokens' instead." } }), { status: 400 }))
+      .mockResolvedValueOnce(ok());
+    expect(await testConnection()).toEqual({ success: true });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(sent(1).body.max_tokens).toBeUndefined();
+    expect(sent(1).body.max_completion_tokens).toBe(16);
+  });
+
+  it('asks again with thinking off when a thinking model refuses a non-streaming call', async () => {
+    db.findUnique.mockResolvedValue({ providerId, type: 'openai', endpoint: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1', model: 'qwen3-8b', apiKeyEncrypted: 'encrypted-key' });
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: 'parameter.enable_thinking only support stream call' } }), { status: 400 }))
+      .mockResolvedValueOnce(ok());
+    expect(await testConnection()).toEqual({ success: true });
+    expect(sent(1).body.enable_thinking).toBe(false);
+  });
+
+  it('does not ask again for any other refusal', async () => {
+    db.findUnique.mockResolvedValue({ providerId, type: 'openai', endpoint: 'https://api.deepseek.com', model: 'deepseek-v4-flash', apiKeyEncrypted: 'encrypted-key' });
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ error: { message: 'Model Not Exist' } }), { status: 400 }));
     expect(await testConnection()).toEqual({
       success: false,
-      error: 'Connection failed: 503',
-      details: 'Service Unavailable',
+      error: 'Connection failed: 400',
+      details: 'Model Not Exist (POST https://api.deepseek.com/chat/completions)',
     });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it('preserves connection failures', async () => {
+  it('says so, and calls nothing, when no model is set', async () => {
+    db.findUnique.mockResolvedValue({ providerId, type: 'openai', endpoint: 'https://api.deepseek.com', model: null, apiKeyEncrypted: 'encrypted-key' });
+    expect(await testConnection()).toEqual({ success: false, error: 'Model not configured' });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps connection failures unsuccessful', async () => {
+    db.findUnique.mockResolvedValue({ providerId, type: 'lmstudio', endpoint: 'http://localhost:1234', model: 'qwen3-8b', apiKeyEncrypted: null });
     fetchMock.mockRejectedValue(new Error('Connection refused'));
     expect(await testConnection()).toEqual({
       success: false,
@@ -217,14 +245,7 @@ describe.each([
 });
 
 it.each(['lmstudio', 'deepseek'])('still requires an endpoint for %s', async (type) => {
-  db.findUnique.mockResolvedValue({ providerId, type, endpoint: null });
+  db.findUnique.mockResolvedValue({ providerId, type, endpoint: null, model: 'some-model' });
   expect(await testConnection()).toEqual({ success: false, error: 'Endpoint not configured' });
   expect(fetchMock).not.toHaveBeenCalled();
-});
-
-it('still defaults only openai to the OpenAI endpoint', async () => {
-  db.findUnique.mockResolvedValue({ providerId, type: 'openai', endpoint: null });
-  fetchMock.mockResolvedValue(new Response('{}', { status: 200 }));
-  expect(await testConnection()).toEqual({ success: true });
-  expect(fetchMock).toHaveBeenCalledWith('https://api.openai.com/v1/models', expect.any(Object));
 });

@@ -3,6 +3,7 @@ import { POST as make } from '@/app/api/artifacts/route';
 import { POST as chatList } from '@/app/api/artifacts/chat/route';
 import { PUT as share } from '@/app/api/artifacts/[id]/share/route';
 import { GET as mine } from '@/app/api/me/artifacts/route';
+import { GET as mineOne } from '@/app/api/me/artifacts/[id]/route';
 import { checkBotAccess } from '@/lib/bot-access';
 import { loadBotPrivacy } from '@/lib/bot-privacy';
 import { getSessionUser } from '@/lib/auth-session';
@@ -52,6 +53,12 @@ const titles = (res: { body: { artifacts: { title: string }[] } }) => res.body.a
 async function mineFor(id: string | null, offset?: string) {
   (getSessionUser as jest.Mock).mockResolvedValue(id ? { id, uuid: `uuid-${id}`, email: `${id}@example.com`, name: id } : null);
   const response = await mine(new NextRequest(`http://localhost:3333/api/me/artifacts${offset === undefined ? '' : `?offset=${offset}`}`));
+  return { status: response.status, body: await response.json() };
+}
+
+async function openMine(id: string | null, artifactId: string) {
+  (getSessionUser as jest.Mock).mockResolvedValue(id ? { id, uuid: `uuid-${id}`, email: `${id}@example.com`, name: id } : null);
+  const response = await mineOne(new NextRequest(`http://localhost:3333/api/me/artifacts/${artifactId}`), { params: Promise.resolve({ id: artifactId }) });
   return { status: response.status, body: await response.json() };
 }
 
@@ -159,6 +166,17 @@ describe('artifact lists for people (#1474)', () => {
       const last = await mineFor('owner', String(first.body.next));
       expect(last.body.artifacts).toHaveLength(1);
       expect(last.body.next).toBeNull();
+    });
+
+    it('opens every one of yours, however it is shared, and nobody else\'s', async () => {
+      const direct = await makeOne(person('owner'), DM, 'Direct');
+      const res = await openMine('owner', direct.id);
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ title: 'Direct', kind: 'page', makerName: 'Scout', version: 1 });
+      expect(typeof res.body.url).toBe('string');
+      expect((await openMine('friend', direct.id)).status).toBe(404);
+      expect((await openMine('owner', '00000000-0000-4000-8000-000000000000')).status).toBe(404);
+      expect((await openMine(null, direct.id)).status).toBe(401);
     });
 
     it('wants someone signed in and a sensible offset', async () => {

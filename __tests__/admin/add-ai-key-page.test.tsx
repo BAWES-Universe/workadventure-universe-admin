@@ -10,6 +10,12 @@ const push = jest.fn();
 jest.mock('@/lib/client-auth', () => ({ authenticatedFetch: (...args: unknown[]) => fetchMock(...args) }));
 jest.mock('@/components/ui/toast', () => ({ useToast: () => ({ addToast: jest.fn() }) }));
 jest.mock('next/navigation', () => ({ useRouter: () => ({ push, back: jest.fn() }) }));
+let inGame = false;
+const openLinkInGame = jest.fn();
+jest.mock('@/app/admin/components/orbit-bridge', () => ({
+  useLinksOpeningInGame: (urls: string[]) => new Set(inGame ? urls : []),
+  openLinkInGame: (url: string) => openLinkInGame(url),
+}));
 
 import AddAiKeyPage from '@/app/admin/you/ai-keys/new/page';
 
@@ -24,6 +30,8 @@ const change = () => fireEvent.click(screen.getByRole('button', { name: 'Change'
 beforeEach(() => {
   fetchMock.mockReset();
   push.mockReset();
+  inGame = false;
+  openLinkInGame.mockReset().mockReturnValue(true);
 });
 
 describe('Add a key', () => {
@@ -396,6 +404,32 @@ describe('Add a key: More providers', () => {
     // The link sits in step 2's setup card, never in the picked provider's row
     expect(screen.getByTestId('setup-card').contains(docs)).toBe(true);
     expect(screen.getByTestId('picked-provider').contains(docs)).toBe(false);
+  });
+
+  it('opens "Read about" in the game window on a plain click when the game can show it, and drops the new-tab icon (#571)', () => {
+    inGame = true;
+    render(<AddAiKeyPage />);
+    fireEvent.click(screen.getByRole('radio', { name: /^Claude/ }));
+    const docs = screen.getByTestId('read-about');
+    expect(docs.querySelector('svg')).toBeNull();
+    fireEvent.click(docs);
+    expect(openLinkInGame).toHaveBeenCalledWith(docs.getAttribute('href'));
+    // a Ctrl, Cmd, Shift or middle click still gets its own tab
+    fireEvent.click(docs, { ctrlKey: true });
+    fireEvent.click(docs, { metaKey: true });
+    fireEvent.click(docs, { shiftKey: true });
+    fireEvent.click(docs, { button: 1 });
+    expect(openLinkInGame).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps "Read about" as a new tab, with its icon, outside the game', () => {
+    render(<AddAiKeyPage />);
+    fireEvent.click(screen.getByRole('radio', { name: /^Claude/ }));
+    const docs = screen.getByTestId('read-about');
+    expect(docs.querySelector('svg')).not.toBeNull();
+    expect(docs.getAttribute('target')).toBe('_blank');
+    fireEvent.click(docs);
+    expect(openLinkInGame).not.toHaveBeenCalled();
   });
 
   it('searches the line under a long-tail provider as well as its name', () => {

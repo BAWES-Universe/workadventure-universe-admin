@@ -15,6 +15,7 @@ import { authenticatedFetch } from '@/lib/client-auth';
 import { AI_KEY_KINDS, kindInfo, type AiKeyKind, type AiKeyKindInfo } from '@/lib/ai-key-kinds';
 import { PageHeader } from '../../../components/ds';
 import { AiKeyFailure, aiKeyError, aiKeyFailureText } from '../../../hooks/use-ai-keys';
+import { openLinkInGame, useLinksOpeningInGame } from '../../../components/orbit-bridge';
 
 type Models = { status: 'none' } | { status: 'loading' } | { status: 'ready'; models: string[]; facts: Record<string, { tools?: boolean; vision?: boolean }> } | { status: 'failed'; message: string } | { status: 'typed' };
 
@@ -51,8 +52,14 @@ function Part({ n, title, children }: { n: number; title: string; children: Reac
   );
 }
 
-/** How to get a key (or start a server), with "Read about" inside the same card. */
+/**
+ * How to get a key (or start a server), with "Read about" inside the same card. Inside the game, a plain click opens the
+ * page in the game's window when the game says it can show it (#571), and that link has no new-tab icon. Every other
+ * page, and a Ctrl, Cmd, Shift or middle click, opens a new tab.
+ */
 function SetupCard({ info }: { info: AiKeyKindInfo }) {
+  const opensHere = useLinksOpeningInGame(info.docs ? [info.docs] : []);
+  const here = info.docs ? opensHere.has(info.docs) : false;
   return (
     <div className="grid gap-1 rounded-2xl border border-foreground/[.08] bg-foreground/[.04] px-3.5 pt-3 text-[13px]" data-testid="setup-card">
       {info.steps.length === 1 ? (
@@ -67,9 +74,19 @@ function SetupCard({ info }: { info: AiKeyKindInfo }) {
         </ol>
       )}
       {info.docs ? (
-        <a href={info.docs} target="_blank" rel="noreferrer noopener" className="-mx-3.5 flex min-h-11 items-center gap-2 border-t border-foreground/10 px-3.5 font-semibold" data-testid="read-about">
+        <a
+          href={info.docs}
+          target="_blank"
+          rel="noreferrer noopener"
+          className="-mx-3.5 flex min-h-11 items-center gap-2 border-t border-foreground/10 px-3.5 font-semibold"
+          data-testid="read-about"
+          onClick={(event) => {
+            if (!here || event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+            if (openLinkInGame(info.docs!)) event.preventDefault();
+          }}
+        >
           Read about {info.label}
-          <ExternalLink size={15} aria-hidden="true" className="text-muted-foreground" />
+          {!here && <ExternalLink size={15} aria-hidden="true" className="text-muted-foreground" />}
         </a>
       ) : (
         <span className="pb-2" />
